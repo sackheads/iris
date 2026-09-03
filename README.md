@@ -128,9 +128,12 @@ swift run iris --bench scenarios/live.json --real    # hit a real provider (need
 The binary runs the scenario headlessly and prints a per-category timing breakdown (primary
 LLM, tool execution, injection guard, context assembly, …), then exits. Fake scenarios script
 the model's responses (with optional simulated latency) and need no network or API keys;
-`--real` drives a configured provider for true wall-clock measurement. Scenario files are JSON
-— see [`scenarios/echo-latency.json`](scenarios/echo-latency.json) for the format. The same
-`ScenarioRunner` powers the profiling tests under `Tests/irisTests/ProfilingHarnessTests.swift`.
+`--real` drives a configured provider for true wall-clock measurement.
+
+Scenario files are JSON. For the full scenario schema, how to read the output, and how to
+author new scenarios, see **[docs/headless_profiling.md](docs/headless_profiling.md)**. The
+same `ScenarioRunner` powers the profiling tests under
+`Tests/irisTests/ProfilingHarnessTests.swift`.
 
 ### Updates & Releases
 
