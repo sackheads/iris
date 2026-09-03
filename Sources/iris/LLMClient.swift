@@ -143,14 +143,14 @@ struct LLMClient {
             }
             
             let durationMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000.0
+            // primaryLLM profiling now happens at the engine's call seam (measure(.primaryLLM))
+            // so it covers every client uniformly; here we only track provider latency metrics.
             await MetricsManager.shared.trackLatency(operation: metricOp, modelName: modelName, durationMs: durationMs, success: true)
-            PerformanceProfiler.shared.record(turnID: PerformanceProfiler.currentTurnID, category: .primaryLLM, durationMs: durationMs)
             return response
 
         } catch {
             let durationMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000.0
             await MetricsManager.shared.trackLatency(operation: metricOp, modelName: modelName, durationMs: durationMs, success: false)
-            PerformanceProfiler.shared.record(turnID: PerformanceProfiler.currentTurnID, category: .primaryLLM, durationMs: durationMs)
             throw error
         }
     }

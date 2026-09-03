@@ -27,7 +27,7 @@ struct SubmitEvaluationHandlerTests {
             args: ["evaluations": .array([.object(["criterion_id": .string(UUID().uuidString), "verdict": .string("met"), "evidence": .string("ok")])])],
             id: nil, thought_signature: nil, thoughtSignature: nil)
         // Response 1: submit_evaluation. Response 2: text (loop should already be ending).
-        let mock = ScriptedLLMClient(responses: [response(submit), response(nil)])
+        let mock = FakeLLMClient(responses: [response(submit), response(nil)])
         let engine = IrisEngine(state: app, tier: .medium, principal: .evaluator, client: mock)
         await engine.processInput("grade", source: "System", conversationId: evalId)
 

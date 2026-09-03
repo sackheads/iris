@@ -82,6 +82,12 @@ public final class PerformanceProfiler: ObservableObject, @unchecked Sendable {
     private let lock = NSLock()
     private var active: [UUID: CommandProfile] = [:]
 
+    /// Task-local sink for finished turn profiles, fired inline in `endTurn`. Nil in the shipping
+    /// app (which observes `recentCommands`). A headless driver binds it around its own turns so it
+    /// collects ONLY the profiles produced within that task tree — turns run by other concurrent
+    /// work (e.g. parallel tests) inherit a nil sink and are never captured.
+    @TaskLocal public static var runSink: (@Sendable (CommandProfile) -> Void)?
+
     public init() {}
 
     public func beginTurn(label: String, source: String) -> UUID {
@@ -110,6 +116,9 @@ public final class PerformanceProfiler: ObservableObject, @unchecked Sendable {
         guard profile != nil else { return }
         profile!.totalMs = totalMs
         let finished = profile!
+        // Fire the task-local sink first so a headless driver sees this run's result without a
+        // runloop tick, and without capturing turns from other concurrent work.
+        Self.runSink?(finished)
         // @Published mutation must happen on the main thread.
         if Thread.isMainThread {
             appendRecent(finished)

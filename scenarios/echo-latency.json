@@ -1,0 +1,15 @@
+{
+  "name": "echo-latency",
+  "clientMode": "fake",
+  "tier": "medium",
+  "toggles": { "guards": false, "hooks": false, "sandbox": false },
+  "latencyMs": { "minMs": 150, "maxMs": 400 },
+  "turns": [
+    { "prompt": "Run two commands, then finish.", "source": "User" }
+  ],
+  "scriptedResponses": [
+    { "kind": "toolCalls", "calls": [ { "name": "run_command", "args": { "command": "echo first" } } ] },
+    { "kind": "toolCalls", "calls": [ { "name": "run_command", "args": { "command": "echo second" } } ] },
+    { "kind": "text", "text": "Both commands ran. Done." }
+  ]
+}

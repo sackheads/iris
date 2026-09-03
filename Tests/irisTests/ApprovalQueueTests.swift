@@ -5,6 +5,18 @@ import Foundation
 @MainActor
 @Suite("Approval queue")
 struct ApprovalQueueTests {
+    @Test("autoApproveTools short-circuits requestApproval without enqueuing")
+    func autoApproveShortCircuits() async {
+        let app = AppState()
+        app.autoApproveTools = true
+        let cid = UUID()
+        // Would otherwise consult permissions/Vibecop and then block on the interactive queue.
+        let approved = await app.requestApproval(toolName: "run_command", details: "echo hi",
+                                                 workspace: nil, conversationId: cid)
+        #expect(approved == true)
+        #expect(app.pendingApprovals.isEmpty)
+    }
+
     @Test("resolveApproval resolves the FIFO head; deny then approve")
     func fifoResolve() async {
         let app = AppState()

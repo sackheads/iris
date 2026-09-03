@@ -87,6 +87,36 @@ struct PerformanceProfilerLifecycleTests {
         #expect(profiler.activeCountForTesting == 0)
     }
 
+    /// Reference collector so the @Sendable sink can capture and mutate under Swift 6 concurrency.
+    final class ProfileCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [CommandProfile] = []
+        func append(_ p: CommandProfile) { lock.lock(); items.append(p); lock.unlock() }
+        var all: [CommandProfile] { lock.lock(); defer { lock.unlock() }; return items }
+    }
+
+    @Test("runSink captures only turns ended within its task-local scope")
+    func runSinkScoped() async {
+        let profiler = PerformanceProfiler()
+        let collector = ProfileCollector()
+
+        // A turn ended INSIDE the binding is captured...
+        await PerformanceProfiler.$runSink.withValue({ collector.append($0) }) {
+            let id = profiler.beginTurn(label: "inside", source: "System")
+            profiler.record(turnID: id, category: .toolExecution, durationMs: 25)
+            profiler.endTurn(id, totalMs: 200)
+        }
+        // ...a turn ended OUTSIDE the binding (as a parallel test would) is not.
+        let outsideId = profiler.beginTurn(label: "outside", source: "System")
+        profiler.endTurn(outsideId, totalMs: 5)
+
+        let captured = collector.all
+        #expect(captured.count == 1)
+        #expect(captured.first?.label == "inside")
+        #expect(captured.first?.totalMs == 200)
+        #expect(captured.first?.categories[.toolExecution]?.ms == 25)
+    }
+
     @Test("ring buffer keeps only the most recent maxRecent profiles")
     func ringBufferEvicts() async {
         let profiler = PerformanceProfiler()

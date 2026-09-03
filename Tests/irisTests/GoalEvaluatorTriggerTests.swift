@@ -26,7 +26,7 @@ struct GoalEvaluatorTriggerTests {
         let submit = FunctionCall(name: "submit_evaluation",
             args: ["evaluations": .array([.object(["criterion_id": .string(contract.criteria[0].id.uuidString), "verdict": .string("met"), "evidence": .string("ok")])])],
             id: nil, thought_signature: nil, thoughtSignature: nil)
-        let mock = ScriptedLLMClient(responses: [response(done), response(submit), response(nil)])
+        let mock = FakeLLMClient(responses: [response(done), response(submit), response(nil)])
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: mock)
         await engine.processInput("go", source: "System", conversationId: id)
 

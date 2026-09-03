@@ -39,6 +39,13 @@ public struct InjectionGuard {
             return wrap(clean, source: source)
         }
 
+        // Headless runs (see KeychainManager) skip the model-backed tiers: the aux models aren't
+        // provisioned and would only add nondeterministic latency to a benchmark. Tier 1
+        // structural sanitization still applies.
+        if ProcessInfo.processInfo.environment["IRIS_HEADLESS"] == "1" {
+            return wrap(clean, source: source)
+        }
+
         // Tier 2: Local Token-Classification (CoreML/ONNX) — evaluates the unwrapped content.
         let isTier2Safe = await executeTier2CoreML(clean)
         if !isTier2Safe {

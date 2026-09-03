@@ -6,7 +6,7 @@ final class GoalEvaluator: Sendable {
 
     /// Runs a fresh-context grader against `contract` and writes a `GoalEvaluation` onto
     /// `originatingConversationId`. Non-blocking for the caller: dispatch this in a detached Task.
-    /// `client` is injectable so tests can drive the grader with a `ScriptedLLMClient` instead of
+    /// `client` is injectable so tests can drive the grader with a `FakeLLMClient` instead of
     /// hitting the network.
     func evaluate(contract: GoalContract, workspace: String?, originatingConversationId originId: UUID,
                   app: AppState, client: any LLMClientProtocol = LLMClient()) async {

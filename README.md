@@ -114,6 +114,24 @@ To build:
 swift build
 ```
 
+### Headless Profiling (`--bench`)
+
+The core agent loop runs without the UI, so you can profile end-to-end turn performance
+without clicking through the app. Run a benchmark scenario:
+
+```bash
+swift run iris --bench                          # built-in default scenario
+swift run iris --bench scenarios/echo-latency.json   # a scenario file
+swift run iris --bench scenarios/live.json --real    # hit a real provider (needs keys)
+```
+
+The binary runs the scenario headlessly and prints a per-category timing breakdown (primary
+LLM, tool execution, injection guard, context assembly, …), then exits. Fake scenarios script
+the model's responses (with optional simulated latency) and need no network or API keys;
+`--real` drives a configured provider for true wall-clock measurement. Scenario files are JSON
+— see [`scenarios/echo-latency.json`](scenarios/echo-latency.json) for the format. The same
+`ScenarioRunner` powers the profiling tests under `Tests/irisTests/ProfilingHarnessTests.swift`.
+
 ### Updates & Releases
 
 - **Auto-Updates**: Iris automatically checks GitHub Releases for new updates. You can also manually check for updates and view release notes at any time via the **Updates** tab in Settings.

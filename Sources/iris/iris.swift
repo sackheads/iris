@@ -590,7 +590,11 @@ actor IrisEngine {
                 await MainActor.run {
                     localState?.updateSubagentStatus(id: conversationId, status: "Thinking...")
                 }
-                let response = try await client.generateContent(request: activeRequest, tier: modelTier)
+                // Measure at the seam so every client (real, fake, future) is attributed
+                // uniformly, and the span includes engine-side call overhead.
+                let response = try await measure(.primaryLLM) {
+                    try await client.generateContent(request: activeRequest, tier: modelTier)
+                }
                 await MainActor.run {
                     localState?.updateSubagentStatus(id: conversationId, status: "Executing...")
                 }
@@ -1109,7 +1113,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-@main
 struct IrisApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     init() {

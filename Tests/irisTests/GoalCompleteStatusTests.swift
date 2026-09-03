@@ -36,7 +36,7 @@ struct GoalCompleteStatusTests {
                 "evidence": .string("Build succeeded with exit 0")
             ])
         ])
-        let mock = ScriptedLLMClient(responses: [
+        let mock = FakeLLMClient(responses: [
             goalCompleteResponse(summary: "Done", criteriaStatus: statusPayload)
         ])
         // Use .subagent principal to skip the principal == .main reflection re-entry that would
@@ -61,7 +61,7 @@ struct GoalCompleteStatusTests {
         appState.createNewConversation(id: convId)
         appState.setGoal(for: convId, goal: "Do something")
 
-        let mock = ScriptedLLMClient(responses: [
+        let mock = FakeLLMClient(responses: [
             goalCompleteResponse(summary: "All done, no criteria")
         ])
         let engine = IrisEngine(state: appState, tier: .medium, principal: .subagent, client: mock)

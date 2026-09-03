@@ -50,7 +50,7 @@ struct ReachCheckpointHandlerTests {
     func pausesAndGrades() async {
         let app = AppState(); let id = UUID(); lockLadder(on: app, id)
         // First the working agent calls reach_checkpoint; then the grader (fresh convo) submits.
-        let mock = ScriptedLLMClient(responses: [
+        let mock = FakeLLMClient(responses: [
             reachCheckpointResponse(summary: "milestone one done"),
             submitEvaluationResponse(),
         ])
@@ -67,7 +67,7 @@ struct ReachCheckpointHandlerTests {
     @Test("goal_complete at a non-final checkpoint is redirected, not terminated")
     func goalCompleteGatedBeforeFinal() async {
         let app = AppState(); let id = UUID(); lockLadder(on: app, id)  // 2 milestones, currentMilestone 0
-        let mock = ScriptedLLMClient(responses: [
+        let mock = FakeLLMClient(responses: [
             goalCompleteResponse(summary: "I think I'm done"),
         ])
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: mock)

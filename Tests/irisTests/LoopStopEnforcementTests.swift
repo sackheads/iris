@@ -2,24 +2,6 @@ import Testing
 import Foundation
 @testable import iris
 
-/// A scripted LLM client: returns queued responses in order without any network call,
-/// and records how many times it was asked (to prove single-round behavior).
-final class ScriptedLLMClient: LLMClientProtocol, @unchecked Sendable {
-    private var index = 0
-    private(set) var callCount = 0
-    private let responses: [GeminiResponse]
-
-    init(responses: [GeminiResponse]) { self.responses = responses }
-
-    // The engine awaits each turn before the next, so calls are serialized — no lock needed.
-    func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
-        callCount += 1
-        let response = responses[min(index, responses.count - 1)]
-        index += 1
-        return response
-    }
-}
-
 private func runCommandResponse(_ command: String) -> GeminiResponse {
     let call = FunctionCall(name: "run_command", args: ["command": .string(command)],
                             id: nil, thought_signature: nil, thoughtSignature: nil)
@@ -46,7 +28,7 @@ struct LoopStopEnforcementTests {
 
         // Two identical run_command responses queued. If the engine honored the second one, the
         // turn spun; a correct single-round turn only asks the model once.
-        let mock = ScriptedLLMClient(responses: [
+        let mock = FakeLLMClient(responses: [
             runCommandResponse("echo stuck"),
             runCommandResponse("echo stuck"),
         ])

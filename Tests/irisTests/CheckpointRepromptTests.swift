@@ -28,7 +28,7 @@ struct CheckpointRepromptTests {
         let submitResp = GeminiResponse(candidates: [Candidate(content: Content(role: "model",
                           parts: [Part(text: nil, functionCall: submit, functionResponse: nil,
                                        thought_signature: nil, thoughtSignature: nil)]))], usageMetadata: nil)
-        let mock = ScriptedLLMClient(responses: [reachResp, submitResp])
+        let mock = FakeLLMClient(responses: [reachResp, submitResp])
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: mock)
         await engine.processInput("work", source: "User", conversationId: id)
 
