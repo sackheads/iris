@@ -1,6 +1,6 @@
 # Bounded-Unit Contract for the Inner Loop (slice B3) — Design
 
-* **Issues**: [#13](https://github.com/bnaylor/iris/issues/13) (inner/outer loop semantics) — the **in-envelope half**. Builds on merged **slice B2** ([2026-08-02-subagent-structured-result.md](2026-08-02-subagent-structured-result.md)), **B1** ([2026-08-01-goal-checkpoint-ladder.md](2026-08-01-goal-checkpoint-ladder.md)), **A** ([2026-07-28-goal-contract.md](2026-07-28-goal-contract.md)), and **C** ([2026-07-29-goal-drift-evaluator.md](2026-07-29-goal-drift-evaluator.md)).
+* **Issues**: [#13](https://github.com/sackheads/iris/issues/13) (inner/outer loop semantics) — the **in-envelope half**. Builds on merged **slice B2** ([2026-08-02-subagent-structured-result.md](2026-08-02-subagent-structured-result.md)), **B1** ([2026-08-01-goal-checkpoint-ladder.md](2026-08-01-goal-checkpoint-ladder.md)), **A** ([2026-07-28-goal-contract.md](2026-07-28-goal-contract.md)), and **C** ([2026-07-29-goal-drift-evaluator.md](2026-07-29-goal-drift-evaluator.md)).
 * **Date**: 2026-08-25
 * **Status**: Approved (design)
 
