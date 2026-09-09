@@ -1,6 +1,6 @@
 import Foundation
 
-final class GoalEvaluator: @unchecked Sendable {
+final class GoalEvaluator: Sendable {
     static let shared = GoalEvaluator()
     private init() {}
 
@@ -48,40 +48,42 @@ final class GoalEvaluator: @unchecked Sendable {
         }
 
         // Kick the grader loop; its activeGoal makes it auto-reprompt until it calls submit_evaluation.
-        await MainActor.run { app.setGoal(for: evalId, goal: "Evaluate the completed work against the contract above, then call submit_evaluation.") }
-        await engine.processInput("Begin your evaluation. The completed work is in `\(workspaceDir)` (your commands already run there). Start with `ls` to see what's present, inspect within that directory, run the checks, then call submit_evaluation. Do not search the wider filesystem — if an expected artifact isn't in the workspace, that criterion is not_met or cannot_verify.",
-                                  source: "System", conversationId: evalId)
+        let evaluationPrompt = """
+        The goal contract below is LOCKED. Your job is to independently grade every criterion —
+        whether the finished work (in `\(workspaceDir)`) satisfies it — using read_file and
+        run_command to gather your own evidence. The main agent claims it is done; you are the
+        independent appraisal. When you have graded every criterion, call submit_evaluation.
+        """
 
-        // Safety net: if the loop ended without submit_evaluation, mark the evaluation failed.
-        // Gate on the callback slot: submit_evaluation nils it synchronously on the MainActor at
-        // submit time, so a non-nil slot here means the grader never submitted.
+        // Lock the contract so the evaluator can't amend it, then fire the goal loop.
         await MainActor.run {
-            guard app.onEvaluationComplete[evalId] != nil else { return }
-            // Grader did not submit — record a failed evaluation.
-            let originalStartedAt = app.conversations.first { $0.id == originId }?.lastGoalEvaluation?.startedAt ?? Date()
-            let failed = GoalEvaluation(
-                status: .failed,
-                criteria: contract.criteria.map {
-                    CriterionVerdict(criterionId: $0.id, criterionText: $0.text, kind: $0.kind,
-                                     verdict: $0.kind == .humanJudged ? .humanPending : .cannotVerify,
-                                     evidence: "Evaluator ended without submitting a verdict.",
-                                     method: $0.kind == .executable ? .check : ($0.kind == .qualitative ? .judge : .human))
-                },
-                startedAt: originalStartedAt, completedAt: Date())
-            app.recordEvaluation(for: originId, failed)
-            app.onEvaluationComplete[evalId] = nil
-            app.deleteConversation(evalId)
+            app.updateConversationTitle(id: evalId, title: "Evaluator — \(contract.objective)")
+            app.setGoalContract(for: evalId, contract)
+            app.appendMessage(role: .system, content: evaluationPrompt, to: evalId)
+        }
+        await engine.processInput(evaluationPrompt, source: "GoalEvaluator", conversationId: evalId)
+
+        // Safety net: if the grader loop exits without calling submit_evaluation (crash, timeout,
+        // infinite loop detected, etc.), write a `.failed` evaluation so the UI doesn't hang in
+        // `.verifying` forever. The onEvaluationComplete callback is nil'd by submit_evaluation
+        // synchronously on MainActor; if it's still non-nil here, the grader didn't submit.
+        let didSubmit = await MainActor.run { app.onEvaluationComplete[evalId] == nil }
+        if !didSubmit {
+            let fallback = GoalEvaluationParsing.verdicts(from: [:], criteria: contract.criteria)
+            await MainActor.run {
+                app.recordEvaluation(for: originId, GoalEvaluation(status: .failed, criteria: fallback, startedAt: Date(), completedAt: Date()))
+                app.onEvaluationComplete[evalId] = nil
+                app.deleteConversation(evalId)
+            }
         }
     }
 
     private static func systemPrompt(for contract: GoalContract, workspaceDir: String) -> String {
-        let base: String
-        if let url = Bundle.module.url(forResource: "EVALUATOR", withExtension: "md"),
-           let contents = try? String(contentsOf: url, encoding: .utf8),
-           !contents.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            base = contents
-        } else {
-            base = fallbackPrompt
+        guard let url = Bundle.module.url(forResource: "EVALUATOR", withExtension: "md"),
+              let base = try? String(contentsOf: url, encoding: .utf8),
+              !base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            fatalError("EVALUATOR.md resource missing from bundle — the evaluator cannot run without its system prompt.")
         }
         var s = base
         s += "\n\n## Workspace\nThe completed work is in this directory:\n`\(workspaceDir)`\n"
@@ -95,6 +97,4 @@ final class GoalEvaluator: @unchecked Sendable {
         if !contract.outOfScope.isEmpty { s += "\nOut of scope (do not reward or penalize): \(contract.outOfScope.joined(separator: "; "))\n" }
         return s
     }
-
-    private static let fallbackPrompt = "You are an impartial evaluator. You did not do the work and have no stake in it passing. Independently determine, for each contract criterion, whether the finished work satisfies it, using only read_file and run_command to gather your own evidence. Return cannot_verify when you genuinely cannot determine a criterion; never fabricate a pass. Then call submit_evaluation with one entry per criterion you graded (omit human-judged criteria)."
 }

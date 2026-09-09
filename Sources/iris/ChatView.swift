@@ -27,7 +27,7 @@ struct ChatView: View {
             VStack {
                 List(selection: $state.selectedConversationId) {
                     Section(header: Text("Conversations").font(.caption.weight(.bold)).foregroundColor(.secondary).padding(.bottom, 4)) {
-                        ForEach(state.conversations) { conv in
+                        ForEach(state.conversations.filter { !$0.isSubagent }) { conv in
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(conv.title)
@@ -116,12 +116,12 @@ struct ChatView: View {
                                 HStack(spacing: 8) {
                                     TypingIndicator()
                                     Text("Iris is thinking...")
-                                        .font(.caption)
+                                        .font(.callout)
                                         .foregroundColor(.secondary)
 
                                     Button(action: { state.interruptActiveConversation() }) {
                                         Label("Stop", systemImage: "stop.circle.fill")
-                                            .font(.caption)
+                                            .font(.callout)
                                     }
                                     .buttonStyle(.plain)
                                     .foregroundColor(.secondary)
@@ -769,7 +769,7 @@ struct SystemGroupView: View {
                     Image(systemName: "gearshape.fill")
                     Text(headerText)
                 }
-                .font(.caption.bold())
+                .font(.callout.weight(.bold))
                 .foregroundColor(.secondary)
 
                 if isExpanded || messages.count == 1 {
@@ -786,7 +786,7 @@ struct SystemGroupView: View {
                     .padding(.leading, 22)
                 } else if let status = collapsedStatus {
                     Text(status)
-                        .font(.caption)
+                        .font(.callout)
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)

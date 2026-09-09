@@ -105,6 +105,55 @@ actor IrisEngine {
                 }
             }
         }
+
+        // Resume an in-flight goal that was interrupted by an app restart/crash.
+        // The goal state (activeGoal, goalContract, history) persists; we re-kick
+        // the reprompt loop so the agent picks up where it left off.
+        let localState = state
+        let localConversationId = await MainActor.run { localState?.selectedConversationId }
+        if let convId = localConversationId {
+            let shouldResume = await MainActor.run { () -> Bool in
+                guard let conv = localState?.conversations.first(where: { $0.id == convId }),
+                      conv.activeGoal != nil,
+                      conv.goalContract?.isLocked == true,
+                      conv.goalContract?.checkpointStatus != .pausedForReview,
+                      conv.goalIterationCount < ConfigManager.shared.maxGoalIterations
+                else { return false }
+                return true
+            }
+            if shouldResume {
+                let objective = await MainActor.run {
+                    localState?.conversations.first(where: { $0.id == convId })?.goalContract?.objective
+                        ?? localState?.conversations.first(where: { $0.id == convId })?.activeGoal
+                        ?? "your goal"
+                }
+                await pushToUI(role: .system, text: "Goal was interrupted by restart. Resuming: \(objective)", conversationId: convId)
+
+                // Brief delay to let the UI render the message, then re-kick the loop.
+                repromptTasks[convId] = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    guard !Task.isCancelled, let self else { return }
+                    let stillActive = await MainActor.run {
+                        localState?.conversations.first(where: { $0.id == convId })?.activeGoal != nil
+                    }
+                    guard stillActive else { return }
+                    let contract = await MainActor.run {
+                        localState?.conversations.first(where: { $0.id == convId })?.goalContract
+                    }
+                    let oracle = contract?.oracleText() ?? ""
+                    let closing: String
+                    if let c = contract, c.hasLadder, !c.isFinalMilestone {
+                        closing = "When the current checkpoint's criteria are satisfied, call `reach_checkpoint` (NOT goal_complete)."
+                    } else {
+                        closing = "If every criterion is satisfied, call goal_complete."
+                    }
+                    let reprompt = oracle.isEmpty
+                        ? "Continue working on your goal. What is your next step? \(closing)"
+                        : "\(oracle)\n\nContinue working toward the objective above. What is your next step? \(closing)"
+                    await self.processInput(reprompt, source: "System", conversationId: convId)
+                }
+            }
+        }
     }
     
     /// Tracks the pending auto-reprompt task per conversation so the goal loop can be cancelled.
