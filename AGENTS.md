@@ -12,7 +12,7 @@ The primary provider abstraction supports Anthropic, Gemini, and OpenAI. Local i
 
 ```sh
 swift build                          # compile
-swift test                           # full suite (239 tests)
+swift test                           # full suite
 swift test --filter MyTestSuite      # focused run
 ```
 
