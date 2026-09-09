@@ -96,7 +96,7 @@ struct ChatView: View {
                                     case .single(let message):
                                         MessageView(message: message)
                                     case .systemGroup(_, let messages):
-                                        SystemGroupView(messages: messages)
+                                        SystemGroupView(messages: messages, appState: state)
                                     }
                                 }
                                 .tag(item.id)
@@ -728,6 +728,7 @@ struct MessageView: View {
 
 struct SystemGroupView: View {
     let messages: [ChatMessage]
+    let appState: AppState
     @State private var isExpanded = false
 
     private var toolCalls: [ToolCallDisplay] {
@@ -774,8 +775,12 @@ struct SystemGroupView: View {
                 if isExpanded || messages.count == 1 {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(messages) { msg in
-                            SystemMessageContent(text: msg.content)
-                                .textSelection(.enabled)
+                            SystemMessageContent(
+                                text: msg.content,
+                                commandStartTime: appState.commandStartTimes[msg.id],
+                                commandDuration: appState.commandDurations[msg.id]
+                            )
+                            .textSelection(.enabled)
                         }
                     }
                     .padding(.leading, 22)
@@ -795,22 +800,28 @@ struct SystemGroupView: View {
 
 struct SystemMessageContent: View {
     let text: String
+    var commandStartTime: Date? = nil
+    var commandDuration: TimeInterval? = nil
 
     var body: some View {
         if let call = ToolCallParser.parse(text) {
-            toolCallRow(call)
+            toolCallRow(call, startTime: commandStartTime, duration: commandDuration)
         } else {
             fallbackView
         }
     }
 
     @ViewBuilder
-    private func toolCallRow(_ call: ToolCallDisplay) -> some View {
+    private func toolCallRow(_ call: ToolCallDisplay, startTime: Date? = nil, duration: TimeInterval? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             if let command = call.command {
                 HStack(spacing: 6) {
-                    Text("$").foregroundColor(.secondary)
-                    Text(command).foregroundColor(.primary)
+                    HStack(spacing: 6) {
+                        Text("$").foregroundColor(.secondary)
+                        Text(command).foregroundColor(.primary)
+                    }
+                    Spacer()
+                    timerLabel(startTime: startTime, duration: duration)
                 }
                 .font(.caption.monospaced())
             } else {
@@ -833,6 +844,21 @@ struct SystemMessageContent: View {
         .background(Color(NSColor.windowBackgroundColor).opacity(0.8))
         .cornerRadius(8)
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.15), lineWidth: 1))
+    }
+
+    @ViewBuilder
+    private func timerLabel(startTime: Date?, duration: TimeInterval?) -> some View {
+        if let duration {
+            Text(formatDuration(duration))
+                .font(.caption2)
+                .foregroundColor(.secondary.opacity(0.55))
+        } else if let startTime {
+            TimelineView(.periodic(from: startTime, by: 1)) { context in
+                Text(formatDuration(context.date.timeIntervalSince(startTime)))
+                    .font(.caption2)
+                    .foregroundColor(.secondary.opacity(0.55))
+            }
+        }
     }
     
     private var fallbackView: some View {
@@ -1081,4 +1107,9 @@ struct SlashCommandAutoCompleteView: View {
     }
 }
 
-
+func formatDuration(_ t: TimeInterval) -> String {
+    let s = Int(t)
+    if s < 60   { return "\(s)s" }
+    if s < 3600 { return "\(s / 60)m \(s % 60)s" }
+    return "\(s / 3600)h \(s % 3600 / 60)m"
+}

@@ -146,6 +146,8 @@ class AppState {
     /// drivers (ScenarioRunner) on their own throwaway AppState — never by the shipping app —
     /// so scenario runs are deterministic and never block on a human. Not persisted.
     var autoApproveTools = false
+    var commandStartTimes: [UUID: Date] = [:]
+    var commandDurations: [UUID: TimeInterval] = [:]
     var activeSubagents: [ActiveSubagent] = []
     var subagentWriteLedger: [UUID: [String]] = [:]
     var pendingApprovals: [ToolApprovalRequest] = []
@@ -586,9 +588,9 @@ class AppState {
         appendMessage(role: role, content: text, to: conversationId)
     }
 
-    func appendMessage(role: ChatRole, content: String, attachments: [FileAttachment] = [], to conversationId: UUID) {
+    func appendMessage(role: ChatRole, content: String, attachments: [FileAttachment] = [], id: UUID = UUID(), to conversationId: UUID) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
-            conversations[idx].messages.append(ChatMessage(role: role, content: content, attachments: attachments))
+            conversations[idx].messages.append(ChatMessage(id: id, role: role, content: content, attachments: attachments))
             
             // Auto-title generation based on first message
             if role == .user && conversations[idx].messages.filter({ $0.role == .user }).count == 1 {

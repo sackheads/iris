@@ -670,14 +670,25 @@ actor IrisEngine {
                                         "name": call.name,
                                         "args": call.args.mapValues { $0.anyValue }
                                     ]
+                                    // For run_command, supply a stable UUID so the UI can key
+                                    // elapsed-time display against this exact message.
+                                    let timingId: UUID? = call.name == "run_command" ? UUID() : nil
                                     if let jsonData = try? JSONSerialization.data(withJSONObject: toolCallDict, options: .prettyPrinted),
                                        let jsonString = String(data: jsonData, encoding: .utf8) {
-                                        await self.pushToUI(role: .system, text: "[TOOL_CALL]\n\(jsonString)", conversationId: conversationId)
+                                        await self.pushToUI(role: .system, text: "[TOOL_CALL]\n\(jsonString)", conversationId: conversationId, id: timingId)
                                     } else {
-                                        await self.pushToUI(role: .system, text: "Running tool: \(call.name)", conversationId: conversationId)
+                                        await self.pushToUI(role: .system, text: "Running tool: \(call.name)", conversationId: conversationId, id: timingId)
+                                    }
+                                    if let id = timingId {
+                                        await self.recordCommandStart(id: id)
                                     }
 
+                                    let cmdStart = Date()
                                     let result = await self.executeFunctionCall(call, conversationId: conversationId, workspacePath: workspacePath, restrictToGoalComplete: restrictToGoalComplete)
+                                    if let id = timingId {
+                                        let elapsed = Date().timeIntervalSince(cmdStart)
+                                        await self.recordCommandDuration(id: id, elapsed: elapsed)
+                                    }
                                     return (index, result)
                                 }
                             }
@@ -1094,11 +1105,25 @@ actor IrisEngine {
         return sanitizedResult
     }
     
-    func pushToUI(role: ChatRole, text: String, conversationId: UUID) async {
+    func pushToUI(role: ChatRole, text: String, conversationId: UUID, id: UUID? = nil) async {
         let localState = state
         await MainActor.run {
-            localState?.appendMessage(role: role, content: text, to: conversationId)
+            if let id {
+                localState?.appendMessage(role: role, content: text, id: id, to: conversationId)
+            } else {
+                localState?.appendMessage(role: role, content: text, to: conversationId)
+            }
         }
+    }
+
+    func recordCommandStart(id: UUID) async {
+        let localState = state
+        await MainActor.run { localState?.commandStartTimes[id] = Date() }
+    }
+
+    func recordCommandDuration(id: UUID, elapsed: TimeInterval) async {
+        let localState = state
+        await MainActor.run { localState?.commandDurations[id] = elapsed }
     }
 }
 
