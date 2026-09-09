@@ -12,11 +12,10 @@ public final class KeychainManager: @unchecked Sendable {
     /// signature (cdhash) on every rebuild, so the Keychain's "Always Allow" ACL grant never
     /// persists — macOS re-prompts for the login password on every SecItem call, which blocks
     /// headless test runs. XCTest is only linked into the test bundle, never the shipping app,
-    /// so its presence is a reliable "running under tests" signal. The `IRIS_HEADLESS` env var
-    /// extends the same in-memory behavior to the `--bench` CLI, which is an identically
-    /// ad-hoc-signed `swift run` binary that would otherwise block on a Keychain prompt.
-    let usesInMemoryStore = NSClassFromString("XCTestCase") != nil
-        || ProcessInfo.processInfo.environment["IRIS_HEADLESS"] == "1"
+    /// so its presence is a reliable "running under tests" signal. `HeadlessMode` extends the
+    /// same in-memory behavior to the `--bench` CLI, which is an identically ad-hoc-signed
+    /// `swift run` binary that would otherwise block on a Keychain prompt.
+    let usesInMemoryStore = NSClassFromString("XCTestCase") != nil || HeadlessMode.isEnabled
     private var inMemorySecrets: [String: String] = [:]
     private let inMemoryLock = NSLock()
 

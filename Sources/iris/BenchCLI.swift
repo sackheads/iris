@@ -62,7 +62,7 @@ enum BenchCLI {
         // binary doesn't block on an access prompt. Must be set before ConfigManager.shared is
         // first touched (inside ScenarioRunner.run). Real runs keep Keychain access for auth.
         if scenario.clientMode == .fake {
-            setenv("IRIS_HEADLESS", "1", 1)
+            HeadlessMode.enable()
         }
         let result = await ScenarioRunner.run(scenario)
         print(BenchSummary.render(scenarioName: scenario.name, result: result))

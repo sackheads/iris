@@ -20,10 +20,17 @@ swift run iris --bench scenarios/live.json --real     # hit a real provider (nee
   says (`clientMode` is overridden to `real`). This needs configured provider
   keys/auth and makes network calls, so it never runs in CI.
 
-A `swift run` binary is ad-hoc-signed. For **fake** runs the harness sets
-`IRIS_HEADLESS=1`, which routes the Keychain to an in-memory store (no access
-prompt) and skips the model-backed injection-guard tiers (2/3). `--real` runs keep
-Keychain access so provider auth resolves.
+A `swift run` binary is ad-hoc-signed. For **fake** runs the harness flips the
+in-process `HeadlessMode` switch, which routes the Keychain to an in-memory store
+(no access prompt) and skips the model-backed injection-guard tiers (2/3).
+`--real` runs keep Keychain access so provider auth resolves.
+
+`HeadlessMode` is deliberately not an environment variable: it disables an
+injection defense, so it must not be settable from outside the process.
+
+> **Scenario files are executable input.** A run sets `autoApproveTools`, so every
+> tool call in a scenario — including `run_command` — executes with no approval
+> prompt and no Vibecop check. Only run scenario files you wrote or reviewed.
 
 ## Reading the output
 
@@ -119,7 +126,7 @@ Tool approval is auto-granted in the harness (`AppState.autoApproveTools`), so
 
 > **`toggles` caveat:** the three toggles are carried in the schema but are **not
 > wired up** — per-run mutation of the global guard config raced with parallel
-> tests, so guards/hooks are governed process-wide by `IRIS_HEADLESS` instead.
+> tests, so guards/hooks are governed process-wide by `HeadlessMode` instead.
 > Leaving them at `false` is correct; setting them `true` has no effect today.
 
 ## Adding a scenario

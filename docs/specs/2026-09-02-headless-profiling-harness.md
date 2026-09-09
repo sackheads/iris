@@ -152,12 +152,15 @@ non-persisted `AppState.autoApproveTools` flag makes `requestApproval` return `t
 immediately. It is instance-scoped (only the runner's throwaway `AppState` sets it; the
 shipping app never does) so it cannot leak into other work.
 
-**Guards/Keychain in headless processes (`IRIS_HEADLESS`).** A `swift run` binary is
+**Guards/Keychain in headless processes (`HeadlessMode`).** A `swift run` binary is
 ad-hoc-signed, so `KeychainManager` blocks on an access prompt and the aux guard models
 aren't provisioned. `KeychainManager` already switches to an in-memory store under XCTest;
-that seam is extended to honor `IRIS_HEADLESS`, and `InjectionGuard.sanitize` skips its
-model-backed tiers (tier 2/3) under the same flag. `--bench` sets `IRIS_HEADLESS` for fake
-runs; it is never set in tests. `Scenario.Toggles` remains in the schema as advisory metadata.
+that seam is extended to honor `HeadlessMode`, and `InjectionGuard.sanitize` skips its
+model-backed tiers (tier 2/3) under the same flag. `--bench` enables `HeadlessMode` for fake
+runs; it is never enabled in tests. The switch is an in-process static, **not** an
+environment variable: it turns off a prompt-injection defense, and an env var would let
+anything able to set the app's environment — including a shell command the agent was talked
+into running — disable that defense for subsequent launches. `Scenario.Toggles` remains in the schema as advisory metadata.
 
 ### 3. `PerformanceProfiler` task-local sink
 
@@ -255,12 +258,12 @@ Scenario (JSON or code)
 ## Resolved during implementation
 
 - **Toggles mechanism.** Rather than mutate global `ConfigManager` per run (which raced
-  with parallel tests), guards are governed process-wide by `IRIS_HEADLESS`; the approval/
+  with parallel tests), guards are governed process-wide by `HeadlessMode`; the approval/
   Vibecop path is bypassed by the instance-scoped `AppState.autoApproveTools`. `Toggles`
   stays in the schema as advisory metadata.
 - **Example scenarios** live at repo root under `scenarios/` (e.g. `scenarios/echo-latency.json`).
 - **Keychain block.** A `swift run` bench binary is ad-hoc-signed and would block on a
-  Keychain prompt; `IRIS_HEADLESS` routes `KeychainManager` to its in-memory store.
+  Keychain prompt; `HeadlessMode` routes `KeychainManager` to its in-memory store.
 - **Async entry.** `@main` was removed from `IrisApp`; a `main.swift` uses top-level `await`
   to run the bench on the main actor, then `exit(0)` — `dispatchMain()` deadlocked the
   MainActor task and was abandoned.

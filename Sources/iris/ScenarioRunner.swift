@@ -15,7 +15,7 @@ struct ScenarioResult: Sendable {
 /// Runs are self-contained and safe to run concurrently: each uses its own throwaway `AppState`
 /// and binds a task-local profiler sink so it collects only its own turns. It deliberately does
 /// NOT mutate shared singletons (e.g. `ConfigManager`) — doing so would race with parallel work.
-/// Heavy guard tiers are governed process-wide by `IRIS_HEADLESS` (set by `--bench`), not per run.
+/// Heavy guard tiers are governed process-wide by `HeadlessMode` (set by `--bench`), not per run.
 @MainActor
 enum ScenarioRunner {
     static func run(_ scenario: Scenario) async -> ScenarioResult {
