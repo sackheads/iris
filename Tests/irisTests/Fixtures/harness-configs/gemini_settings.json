@@ -1,0 +1,5 @@
+{
+  "theme": "dark",
+  "mcpServers": { "sqlite": { "command": "sqlite-mcp", "args": [] } },
+  "otherSetting": true
+}

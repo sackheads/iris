@@ -1186,6 +1186,9 @@ class AppState {
         Task { [weak self] in
             guard let self = self else { return }
             if arg == "reload" {
+                await PluginManager.shared.loadAll()
+                let pluginConfigs = await PluginManager.shared.mcpConfigs()
+                await MCPManager.shared.setPluginConfigs(pluginConfigs)
                 await MCPManager.shared.reloadServers()
                 let servers = await MCPManager.shared.getServerNames()
                 self.emitCommandOutput("MCP servers reloaded (\(servers.count) connected: \(servers.joined(separator: ", "))).", format: .markdown, to: convId)

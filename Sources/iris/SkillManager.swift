@@ -19,24 +19,42 @@ struct SkillManager {
 
     /// Auto-loads any custom, user-defined rules from `~/.iris/rules/` and returns them
     /// as a combined Markdown block to be appended directly to the system prompt.
-    func loadCustomRules(paths: IrisPaths = .default) async -> String {
+    /// `extraRuleFiles: nil` pulls enabled plugins' rule files from PluginManager; tests
+    /// pass explicit rule file URLs.
+    func loadCustomRules(paths: IrisPaths = .default, extraRuleFiles: [URL]? = nil) async -> String {
         let rulesDir = paths.rulesDir.path
         let fileManager = FileManager.default
 
-        guard let items = try? fileManager.contentsOfDirectory(atPath: rulesDir) else {
-            return ""
+        var rulesContent = ""
+        if let items = try? fileManager.contentsOfDirectory(atPath: rulesDir) {
+            for item in items.sorted() {
+                guard !item.hasPrefix(".") else { continue }
+                let fileURL = paths.rulesDir.appendingPathComponent(item)
+                var isDir: ObjCBool = false
+                if fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDir), !isDir.boolValue {
+                    if let content = try? String(contentsOfFile: fileURL.path, encoding: .utf8),
+                       !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        rulesContent += "\n\n# Rule: \(item)\n\(content)\n"
+                    }
+                }
+            }
         }
 
-        var rulesContent = ""
-        for item in items.sorted() {
-            guard !item.hasPrefix(".") else { continue }
-            let fileURL = paths.rulesDir.appendingPathComponent(item)
-            var isDir: ObjCBool = false
-            if fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDir), !isDir.boolValue {
-                if let content = try? String(contentsOfFile: fileURL.path, encoding: .utf8),
-                   !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    rulesContent += "\n\n# Rule: \(item)\n\(content)\n"
-                }
+        let pluginRules: [URL]
+        if let extraRuleFiles {
+            pluginRules = extraRuleFiles
+        } else {
+            pluginRules = await PluginManager.shared.ruleFiles()
+        }
+        // Plugin rules are third-party content. Unlike the user's own ~/.iris/rules, they pass
+        // the same InjectionGuard path as workspace AGENTS.md before reaching the system prompt.
+        for fileURL in pluginRules {
+            if let content = try? String(contentsOf: fileURL, encoding: .utf8),
+               !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let structuralSafe = PromptInjectionGuard.sanitizeUntrustedInput(content)
+                let safe = await InjectionGuard.sanitize(
+                    structuralSafe, contextTag: "plugin_rule_\(fileURL.lastPathComponent)", maxTier: .tier3_canary)
+                rulesContent += "\n\n# Rule (plugin): \(fileURL.lastPathComponent)\n\(safe)\n"
             }
         }
         return rulesContent
@@ -47,34 +65,40 @@ struct SkillManager {
         let name: String
         let description: String
         let folderName: String
+        let skillFilePath: String
     }
 
-    /// Deterministic list of registered skills (sorted by display name). Shared by the system
-    /// prompt (`discoverSkills`) and the `/skills` command so both see the same source of truth.
-    func listSkills(paths: IrisPaths = .default) async -> [SkillInfo] {
-        let skillsDir = paths.skillsDir.path
+    /// Deterministic list of registered skills across the built-in skills dir and any plugin
+    /// skill roots. `extraRoots: nil` pulls enabled plugins' roots from PluginManager; tests
+    /// pass explicit roots. Sorted by display name.
+    func listSkills(paths: IrisPaths = .default, extraRoots: [URL]? = nil) async -> [SkillInfo] {
+        let pluginRoots: [URL]
+        if let extraRoots {
+            pluginRoots = extraRoots
+        } else {
+            pluginRoots = await PluginManager.shared.skillRoots()
+        }
+        let roots = [paths.skillsDir] + pluginRoots
         let fileManager = FileManager.default
 
-        guard let items = try? fileManager.contentsOfDirectory(atPath: skillsDir) else {
-            return []
-        }
-
         var skills: [SkillInfo] = []
-        for item in items {
-            let skillPath = "\(skillsDir)/\(item)/SKILL.md"
-            guard fileManager.fileExists(atPath: skillPath),
-                  let content = try? String(contentsOfFile: skillPath, encoding: .utf8) else {
-                continue
+        for root in roots {
+            guard let items = try? fileManager.contentsOfDirectory(atPath: root.path) else { continue }
+            for item in items where !item.hasPrefix(".") {
+                let skillPath = root.appendingPathComponent(item).appendingPathComponent("SKILL.md").path
+                guard fileManager.fileExists(atPath: skillPath),
+                      let content = try? String(contentsOfFile: skillPath, encoding: .utf8) else {
+                    continue
+                }
+                // Only the frontmatter (name/description) is surfaced here — never the skill body.
+                skills.append(parseFrontmatter(from: content, folderName: item, skillFilePath: skillPath))
             }
-            // Only the frontmatter (name/description) is surfaced here — never the skill body.
-            skills.append(parseFrontmatter(from: content, folderName: item))
         }
-
         return skills.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    func discoverSkills(paths: IrisPaths = .default, activeBundle: SkillBundle? = nil) async -> String {
-        let allSkills = await listSkills(paths: paths)
+    func discoverSkills(paths: IrisPaths = .default, activeBundle: SkillBundle? = nil, extraRoots: [URL]? = nil) async -> String {
+        let allSkills = await listSkills(paths: paths, extraRoots: extraRoots)
         let skills: [SkillInfo]
         if let bundle = activeBundle {
             let bundleNames = Set(bundle.skillNames.map { $0.lowercased() })
@@ -95,12 +119,12 @@ struct SkillManager {
         var skillsSummary = "# Available Skills" + (activeBundle != nil ? " (Active Bundle: \(activeBundle!.name))\n\n" : "\n\n")
         for skill in skills {
             skillsSummary += "## Skill: \(skill.name)\n**Description:** \(skill.description)\n"
-            skillsSummary += "**Path:** ~/.iris/memory/skills/\(skill.folderName)/SKILL.md\n\n"
+            skillsSummary += "**Path:** \(skill.skillFilePath)\n\n"
         }
         return skillsSummary
     }
 
-    private func parseFrontmatter(from content: String, folderName: String) -> SkillInfo {
+    private func parseFrontmatter(from content: String, folderName: String, skillFilePath: String) -> SkillInfo {
         let lines = content.components(separatedBy: .newlines)
         var isFrontmatter = false
         // Display-name precedence: explicit `name:` > OKF `title:` > folder name.
@@ -130,19 +154,18 @@ struct SkillManager {
         }
 
         let name = explicitName ?? title ?? folderName
-        return SkillInfo(name: name, description: description, folderName: folderName)
+        return SkillInfo(name: name, description: description, folderName: folderName, skillFilePath: skillFilePath)
     }
 
     /// Reads and returns the full `SKILL.md` content for a skill by name or folder name.
-    func readSkillBody(name: String, paths: IrisPaths = .default) async -> String? {
-        let skills = await listSkills(paths: paths)
+    func readSkillBody(name: String, paths: IrisPaths = .default, extraRoots: [URL]? = nil) async -> String? {
+        let skills = await listSkills(paths: paths, extraRoots: extraRoots)
         let normalized = name.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard let skill = skills.first(where: {
             $0.name.lowercased() == normalized || $0.folderName.lowercased() == normalized
         }) else {
             return nil
         }
-        let skillPath = "\(paths.skillsDir.path)/\(skill.folderName)/SKILL.md"
-        return try? String(contentsOfFile: skillPath, encoding: .utf8)
+        return try? String(contentsOfFile: skill.skillFilePath, encoding: .utf8)
     }
 }

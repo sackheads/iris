@@ -75,6 +75,9 @@ actor IrisEngine {
         }
         ScheduleManager.shared.start()
         
+        await PluginManager.shared.loadAll()
+        let pluginConfigs = await PluginManager.shared.mcpConfigs()
+        await MCPManager.shared.setPluginConfigs(pluginConfigs)
         await MCPManager.shared.startServers()
         await WatcherManager.shared.setCallback { [weak self] message, source in
             guard let self = self else { return }

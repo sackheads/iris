@@ -760,7 +760,13 @@ struct SettingsView: View {
             .tabItem {
                 Label("Advanced", systemImage: "lock.shield")
             }
-            
+
+            // MARK: - Plugins Tab
+            PluginsSettingsView()
+            .tabItem {
+                Label("Plugins", systemImage: "puzzlepiece.extension")
+            }
+
             // MARK: - Updates Tab
             Form {
                 Section(header: Text("Application Updates").font(.headline)) {

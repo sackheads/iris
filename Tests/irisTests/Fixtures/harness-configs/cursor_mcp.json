@@ -1,0 +1,1 @@
+{ "mcpServers": { "postgres": { "command": "postgres-mcp", "args": ["--readonly"] } } }

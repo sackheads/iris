@@ -42,6 +42,36 @@ Instead of trapping your workflows inside a proprietary database or cloud servic
 *   **JIT Prompt Injection:** Iris uses `FactStoreManager` to perform full-text searches against an embedded SQLite fact store (FTS5 with time decay and trust scoring) that sits in between the working context and the static library of markdown "memories" and skills.
 *   **Always-On Custom Rules:** Iris automatically loads any user-defined instruction or rule files inside `~/.iris/rules/` on startup and appends them directly to the base system prompt. This allows you to bootstrap custom behavior rules, environment notes, or stylistic constraints permanently.
 
+### Plugins
+
+Iris supports installable plugins via the **Iris Plugin Format (IPF)**, an
+open, versioned bundle format that lives alongside OKF. A plugin is one
+directory that bundles an MCP server (`mcp.json`), Agent Skills
+(`skills/`), and always-on rules (`rules/`) behind a single `plugin.md`
+manifest.
+
+*   **Settings → Plugins tab:** Lists installed plugins with a status LED
+    (green = running, orange = needs configuration or sign-in, red =
+    failed, gray = disabled), plus a detail pane for configuration,
+    servers/tools, and skills/rules.
+*   **Three install flows:** *From Folder* (a local or symlinked plugin
+    directory, with a dev-mode Reload button), *From MCP Snippet* (paste a
+    standard `mcpServers` JSON block and Iris generates the plugin), and
+    *Import from Another Harness* (pull server configs from Claude
+    Desktop, Claude Code, Cursor, Windsurf, Gemini CLI, or VS Code
+    Copilot).
+*   **Secrets in Keychain:** Any secret a plugin declares is collected by
+    the install wizard and stored in the macOS Keychain under its own
+    service (`iris.plugin.<id>`) — never on disk, never in the plugin
+    directory. Uninstalling a plugin removes its Keychain entry too.
+*   The hand-edited `mcp_servers.json` file keeps working unchanged
+    alongside plugins; a **Convert to plugin** action wraps any of its
+    entries into a plugin on demand.
+
+See [docs/ipf/spec.md](docs/ipf/spec.md) for the normative manifest format
+and [docs/ipf/authoring.md](docs/ipf/authoring.md) for a plugin-author
+guide with worked examples.
+
 ### Core Native Tools
 Iris provides some native primitives to the LLM:
 1.  `run_command`: Sandboxed execution of shell commands (runs in a lightweight Linux VM via `apple/container` if sandboxing is enabled).

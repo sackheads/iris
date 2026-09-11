@@ -36,6 +36,10 @@ struct IrisPaths: Sendable {
     // rules/
     var rulesDir: URL { root.appendingPathComponent("rules") }
 
+    // plugins/
+    var pluginsDir: URL { root.appendingPathComponent("plugins") }
+    var pluginsJSON: URL { configDir.appendingPathComponent("plugins.json") }
+
     // models/ (resolved path unchanged from the old layout)
     var modelsDir: URL { root.appendingPathComponent("models") }
 
@@ -63,7 +67,7 @@ struct IrisPaths: Sendable {
     /// Create the bucket directories if absent. Called by the migrator and by managers that
     /// need their directory to exist before writing.
     func ensureDirectories() throws {
-        for dir in [memoryDir, skillsDir, artifactsDir, libraryDir, configDir, modelsDir, rulesDir] {
+        for dir in [memoryDir, skillsDir, artifactsDir, libraryDir, configDir, modelsDir, rulesDir, pluginsDir] {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
     }

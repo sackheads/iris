@@ -1,0 +1,12 @@
+{
+  "sqlite": {
+    "command": "/usr/bin/sqlite-mcp",
+    "args": ["--db", "main.db"]
+  },
+  "notebook": {
+    "command": "notebooklm-mcp",
+    "args": [],
+    "env": { "NLM_COOKIES": "cookie-blob" }
+  },
+  "comment": "not a server; no command object"
+}
