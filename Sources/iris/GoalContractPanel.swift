@@ -529,11 +529,32 @@ private struct IdentifiedChange: Identifiable {
 }
 
 /// Model for a parsed completion-report line, giving ForEach a stable identity.
-private struct CompletionReportItem: Identifiable {
+struct CompletionReportItem: Identifiable {
     let id: String   // criterion text — unique within a single report
     let criterion: String
     let status: String
     let evidence: String
+}
+
+/// Pairs a contract criterion with the agent's self-report entry for it.
+///
+/// The self-report carries criterion TEXT, not ids (unlike `submit_evaluation`, which the grader
+/// answers by id), and the model rarely echoes the text verbatim — so this has to be a text match.
+/// The rule: exact wins; otherwise a partial match is used ONLY when exactly one candidate matches.
+/// An ambiguous match reports nothing. Attributing one criterion's status to another is worse than
+/// showing "not reported" in a panel whose whole job is separating claims from verified facts (#54).
+enum CompletionSelfReportMatching {
+    static func status(for criterionText: String, in items: [CompletionReportItem]) -> String {
+        let needle = criterionText.lowercased().trimmingCharacters(in: .whitespaces)
+        func normalized(_ item: CompletionReportItem) -> String {
+            item.criterion.lowercased().trimmingCharacters(in: .whitespaces)
+        }
+        if let exact = items.first(where: { normalized($0) == needle }) {
+            return exact.status
+        }
+        let partial = items.filter { needle.contains(normalized($0)) || normalized($0).contains(needle) }
+        return partial.count == 1 ? partial[0].status : ""
+    }
 }
 
 /// Renders the model's per-criterion completion self-report as a standalone chip, shown
@@ -604,21 +625,8 @@ struct CompletionReportSection: View {
         }
     }
 
-    /// Best-effort lookup of the self-report status for a given criterion text.
-    /// Matches by lowercased text prefix (the self-report text may not be verbatim).
     private func selfReportStatus(for criterionText: String) -> String {
-        let needle = criterionText.lowercased()
-        // Exact match first, then prefix/contains.
-        if let exact = items.first(where: { $0.criterion.lowercased() == needle }) {
-            return exact.status
-        }
-        if let partial = items.first(where: {
-            needle.contains($0.criterion.lowercased()) ||
-            $0.criterion.lowercased().contains(needle)
-        }) {
-            return partial.status
-        }
-        return ""
+        CompletionSelfReportMatching.status(for: criterionText, in: items)
     }
 
     var body: some View {
@@ -709,9 +717,10 @@ private struct DriftCriterionRow: View {
     /// When false and selfReportStatus is empty, the left column shows a "not reported" placeholder.
     var reportPresent: Bool = true
 
-    /// True when the self-report says the criterion is met but the grader disagrees.
+    /// True when the self-report says the criterion is met but the grader disagrees. Requires a
+    /// real grade: a `.failed` grader produced placeholders, not a disagreement (#54).
     private var hasDrift: Bool {
-        verdict.verdict == .notMet && selfReportStatus == "met"
+        evaluationStatus == .graded && verdict.verdict == .notMet && selfReportStatus == "met"
     }
 
     /// Whether to show the "not reported" placeholder: report was absent AND no status was matched.
@@ -817,7 +826,20 @@ private struct DriftCriterionRow: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-        case .graded, .failed:
+        case .failed:
+            // The grader never delivered a verdict (crashed, hit its cap, stopped early). Its
+            // per-criterion values are placeholders, so rendering them in the same colored form as
+            // a real grade would present a non-result as a finding.
+            HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("Grader failed to produce a verdict")
+                Text("grader failed")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+        case .graded:
             HStack(spacing: 4) {
                 switch verdict.verdict {
                 case .met:
