@@ -102,4 +102,49 @@ struct EvaluatorTurnLoopTests {
         #expect(returned.criteria.first?.verdict == .cannotVerify)
         #expect(recorded?.status == .failed)
     }
+
+    /// Repeats one identical tool call forever, which trips loop detection (threshold 5) inside a
+    /// single turn. Records whether it was ever asked to summarize and call `goal_complete`.
+    private final class StuckGrader: LLMClientProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+        private var sawSoftStopPrompt = false
+        var wasAskedToGoalComplete: Bool { lock.withLock { sawSoftStopPrompt } }
+
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            let text = request.contents.flatMap { $0.parts }.compactMap(\.text).joined()
+            if text.contains("You have reached a stopping condition") {
+                lock.withLock { sawSoftStopPrompt = true }
+            }
+            let fc = FunctionCall(name: "read_file", args: ["path": .string("Package.swift")],
+                                  id: nil, thought_signature: nil, thoughtSignature: nil)
+            let part = Part(text: nil, functionCall: fc, functionResponse: nil,
+                            thought_signature: nil, thoughtSignature: nil)
+            return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [part]))],
+                                  usageMetadata: nil)
+        }
+    }
+
+    @Test("a stuck evaluator is not asked to call goal_complete, which it does not have")
+    func stuckEvaluatorIsNotAskedForGoalComplete() async {
+        // The evaluator's toolset is read_file / run_command / submit_evaluation — no
+        // `goal_complete`, and no onSubagentComplete entry. Asking it to call one wastes a model
+        // turn on an impossible instruction and reads like a graceful stop in the transcript (#104).
+        let app = AppState()
+        app.autoApproveTools = true
+        let originId = UUID()
+        app.createNewConversation(id: originId)
+        let c = Criterion(text: "the thing exists", kind: .qualitative, check: nil)
+        let client = StuckGrader()
+
+        let verdict = await GoalEvaluator.shared.evaluate(
+            contract: GoalContract(objective: "obj", criteria: [c]),
+            workspace: FileManager.default.currentDirectoryPath,
+            originatingConversationId: originId, app: app, client: client)
+
+        #expect(client.wasAskedToGoalComplete == false,
+                "the evaluator was asked for a tool it cannot call")
+        // The outcome was already honest via the safety net; that must not regress.
+        #expect(verdict.status == .failed)
+        #expect(app.conversations.first { $0.id == originId }?.lastGoalEvaluation?.status == .failed)
+    }
 }
