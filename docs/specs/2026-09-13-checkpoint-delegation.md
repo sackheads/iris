@@ -2,7 +2,7 @@
 
 * **Issues**: [#13](https://github.com/sackheads/iris/issues/13) (inner/outer loop semantics) — the **B-arc capstone**. Builds on **B3** ([2026-08-25-subagent-unit-contract.md](2026-08-25-subagent-unit-contract.md)), **B2** ([2026-08-02-subagent-structured-result.md](2026-08-02-subagent-structured-result.md)), **B1** ([2026-08-01-goal-checkpoint-ladder.md](2026-08-01-goal-checkpoint-ladder.md)), **A** ([2026-07-28-goal-contract.md](2026-07-28-goal-contract.md)), and **C** ([2026-07-29-goal-drift-evaluator.md](2026-07-29-goal-drift-evaluator.md)).
 * **Date**: 2026-09-13
-* **Status**: Approved (design)
+* **Status**: Implemented (2026-09-14). The design below is as-built; deviations are noted in §11.
 
 ## 1. Overview
 
@@ -144,3 +144,12 @@ Remaining, all independent of this arc:
 - **D — deterministic done-gates:** the retry cap and `n/a — <reason>` escape hatch that make it safe to *act* on a verdict instead of only presenting it. The natural consumer of everything above.
 - **E — the ratchet.**
 - **F — ground-truth progress view.**
+
+## 11. As-built notes
+
+- **`runSubagent` returns `(rendered:status:)`.** The handler needs the terminal status to decide whether to checkpoint, and B2's prose alone cannot carry it unambiguously. Call sites that only render take `.rendered`.
+- **`DelegatedUnit` carries `grade`** (§4.1) and defaults to `true`, so `invoke_subagent`'s graded B3 path reads unchanged at the call site.
+- **`performCheckpoint` takes a `via:` string** naming the delegate. It defaults to `""`, which keeps `reach_checkpoint`'s chat message byte-identical — the regression its existing tests check.
+- **No `criteria_status` self-report on a delegated checkpoint.** `reach_checkpoint` records the agent's per-criterion self-report; a delegated milestone has no equivalent, since the subagent's `SubagentResult` prose *is* the self-report and it is surfaced in the pause message. `performCheckpoint` is passed `statusReport: nil`.
+- **Unplanned fix: `runSubagent` no longer stalls on a subagent that stops without terminating.** Its poll loop previously exited only on `goal_complete` or the iteration cap, so a subagent whose engine loop ended without calling it — soft-stopped on its own cap, a plain text reply, a thrown turn — held the awaiting parent for 3000 × 100ms, five minutes. It now observes the engine task finishing and terminates `.failed` after a short grace for an in-flight `goal_complete`. This slice's failure path made it visible (an 83-second test), and B4's "return to the loop" behaviour would have been unusable without it.
+- **`--no-parallel` is required to verify this work**, per [#109](https://github.com/sackheads/iris/issues/109) — unrelated to delegation, discovered while executing this plan.
