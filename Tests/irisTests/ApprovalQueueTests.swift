@@ -21,15 +21,24 @@ struct ApprovalQueueTests {
     func fifoResolve() async {
         let app = AppState()
         let cid = UUID()
-        async let r1 = app.enqueueUserApproval(toolName: "run_command", details: "a", workspace: nil, conversationId: cid, origin: "Main agent")
-        async let r2 = app.enqueueUserApproval(toolName: "run_command", details: "b", workspace: nil, conversationId: cid, origin: "Main agent")
-        // Let both enqueue.
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        // Enqueue in a DETERMINISTIC order. Two `async let`s start concurrently and can reach the
+        // queue in either order; when "b" won, deny/approve landed on the wrong entries and the
+        // assertions inverted. Wait for each to actually be queued before starting the next.
+        func waitForQueue(_ count: Int) async {
+            for _ in 0..<200 where app.pendingApprovals.count < count {
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+        }
+        let t1 = Task { await app.enqueueUserApproval(toolName: "run_command", details: "a", workspace: nil, conversationId: cid, origin: "Main agent") }
+        await waitForQueue(1)
+        let t2 = Task { await app.enqueueUserApproval(toolName: "run_command", details: "b", workspace: nil, conversationId: cid, origin: "Main agent") }
+        await waitForQueue(2)
         #expect(app.pendingApprovals.count == 2)
+        #expect(app.pendingApprovals.first?.details == "a", "the head must be the first one queued")
         app.resolveApproval(.deny)     // head (a) denied
         app.resolveApproval(.approve)  // next (b) approved
-        let v1 = await r1
-        let v2 = await r2
+        let v1 = await t1.value
+        let v2 = await t2.value
         #expect(v1 == false)
         #expect(v2 == true)
         #expect(app.pendingApprovals.isEmpty)
