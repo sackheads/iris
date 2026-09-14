@@ -169,6 +169,23 @@ struct DelegateMilestoneTests {
         #expect(eval?.criteria.count == 2, "milestones 0...1 — the delegated one AND the one before it")
     }
 
+    @Test("a subagent that never completes does not pause the human")
+    func failedSubagentDoesNotCheckpoint() async {
+        let app = AppState(); let id = UUID(); ladder(on: app, id)
+        // subagentTerminal nil ⇒ the subagent never calls goal_complete and hits its iteration cap.
+        let client = RoutingClient(main: [Self.delegateCall(), Self.response(nil)],
+                                   subagentTerminal: nil)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        await engine.processInput("work", source: "User", conversationId: id)
+
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.goalContract?.checkpointStatus == .running,
+                "a milestone nobody claimed done must not pause a human")
+        #expect(conv?.lastGoalEvaluation == nil, "nothing claimed done, so nothing to grade")
+        #expect(client.graderCalls == 0)
+        #expect(conv?.goalContract?.currentMilestone == 0)
+    }
+
     @Test("with no ladder there is no milestone to delegate")
     func noLadderIsRefused() async {
         let app = AppState(); let id = UUID()

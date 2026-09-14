@@ -132,7 +132,7 @@ struct SubagentGradingTests {
         let rendered = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "build a widget", effort: "easy",
             parentConversationId: parentId, unit: gradedUnit("the widget exists"),
-            client: client)
+            client: client).rendered
 
         #expect(client.graderCalls > 0, "the evaluator should have been invoked")
         #expect(rendered.contains("Independent grader verdict (fresh context): 1/1 met"))
@@ -149,7 +149,7 @@ struct SubagentGradingTests {
         let rendered = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "build a widget", effort: "easy",
             parentConversationId: parentId, unit: gradedUnit("the widget exists"),
-            maxIterations: 2, client: client)
+            maxIterations: 2, client: client).rendered
 
         // A run that never claimed done is never graded, even though it carried a contract.
         #expect(client.graderCalls == 0)
@@ -205,7 +205,7 @@ struct SubagentGradingTests {
 
         let rendered = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "build a widget", effort: "easy",
-            parentConversationId: parentId, client: client)
+            parentConversationId: parentId, client: client).rendered
 
         #expect(client.graderCalls == 0, "no contract means no grade")
         #expect(!rendered.contains("Independent grader verdict"))
@@ -227,7 +227,7 @@ struct SubagentGradingTests {
         _ = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "build a widget", effort: "easy",
             parentConversationId: parentId, unit: gradedUnit("the widget exists"),
-            client: client)
+            client: client).rendered
 
         #expect(client.graderCalls > 0)
         #expect(client.graderPrompt.contains(workspace),
@@ -246,7 +246,7 @@ struct SubagentGradingTests {
             role: "engineer", task: "build a widget", effort: "easy",
             parentConversationId: parentId,
             unit: DelegatedUnit(contract: contract, grade: false),
-            client: client)
+            client: client).rendered
 
         // The unit was bound (the parent is told what it was held to) but nothing graded it.
         #expect(client.graderCalls == 0, "grade: false must not spin up an evaluator")
