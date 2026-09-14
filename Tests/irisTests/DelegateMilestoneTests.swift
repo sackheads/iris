@@ -125,6 +125,50 @@ struct DelegateMilestoneTests {
         #expect(client.subagentCalls > 0, "a subagent should have run the milestone")
     }
 
+    @Test("a completed subagent reaches the checkpoint, graded cumulatively and paused")
+    func completedSubagentReachesCheckpoint() async {
+        let app = AppState(); let id = UUID(); ladder(on: app, id)
+        let client = RoutingClient(main: [Self.delegateCall(), Self.response(nil)],
+                                   subagentTerminal: Self.subagentDone)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        await engine.processInput("work", source: "User", conversationId: id)
+
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.goalContract?.checkpointStatus == .pausedForReview)
+        #expect(conv?.activeGoal != nil, "the goal stays active at a checkpoint pause")
+        #expect(conv?.goalContract?.currentMilestone == 0, "advancing is the human's click, not the loop's")
+        #expect(conv?.lastGoalEvaluation != nil, "the checkpoint grade must have landed")
+        #expect(client.graderCalls > 0)
+    }
+
+    @Test("the checkpoint grade covers earlier milestones, not just the delegated one")
+    func checkpointGradeIsCumulative() async {
+        // Delegating the MIDDLE rung of a three-rung ladder: the projection spans milestones 0...1,
+        // so the grade covers the delegated milestone AND the one before it. This is what catches a
+        // delegated milestone's work breaking an earlier milestone's criterion — the reason a
+        // checkpoint is a gate rather than a status print (B1 §6.3).
+        let app = AppState(); let id = UUID()
+        app.createNewConversation(id: id)
+        let a = Criterion(text: "one", kind: .qualitative, check: nil)
+        let b = Criterion(text: "two", kind: .qualitative, check: nil)
+        let c = Criterion(text: "three", kind: .qualitative, check: nil)
+        var contract = GoalContract(objective: "Ship", criteria: [a, b, c])
+        contract.milestones = [Milestone(title: "One", criterionIds: [a.id]),
+                               Milestone(title: "Two", criterionIds: [b.id]),
+                               Milestone(title: "Three", criterionIds: [c.id])]
+        contract.currentMilestone = 1
+        app.setGoalContract(for: id, contract)
+        SubagentManager.shared.setGlobalState(app)
+
+        let client = RoutingClient(main: [Self.delegateCall(), Self.response(nil)],
+                                   subagentTerminal: Self.subagentDone)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        await engine.processInput("work", source: "User", conversationId: id)
+
+        let eval = app.conversations.first { $0.id == id }?.lastGoalEvaluation
+        #expect(eval?.criteria.count == 2, "milestones 0...1 — the delegated one AND the one before it")
+    }
+
     @Test("with no ladder there is no milestone to delegate")
     func noLadderIsRefused() async {
         let app = AppState(); let id = UUID()
