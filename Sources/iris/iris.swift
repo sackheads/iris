@@ -442,6 +442,15 @@ actor IrisEngine {
             )
         ))
         
+        // `goal_complete` terminates a goal loop, so offer it only when there IS one. In a plain
+        // chat it has nothing to complete, and the model reaching for it anyway used to raise the
+        // goal-completion panel over an ordinary conversation and fire an unrequested reflection
+        // turn (#84). The soft-stop turn is the exception: it clears the goal first and then needs
+        // this tool as its only way out (see the `restrictToGoalComplete` filter below).
+        let hasActiveGoal = await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId })?.activeGoal != nil
+        }
+        if hasActiveGoal || restrictToGoalComplete {
         toolsList.append(FunctionDeclaration(
             name: "goal_complete",
             description: "Mark the active goal as completely finished and exit the autonomous loop. Always provide a summary of your findings and conclusions in the 'summary' argument so it is presented to the user.",
@@ -458,6 +467,7 @@ actor IrisEngine {
                 required: ["summary"]
             )
         ))
+        }
         toolsList.append(FunctionDeclaration(
             name: "search_memory",
             description: "Actively probe the holographic memory store for past context. Use this if the automatic JIT injection wasn't sufficient.",
@@ -967,6 +977,18 @@ actor IrisEngine {
                 result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient).rendered
             }
         } else if functionCall.name == "goal_complete", let summary = functionCall.args["summary"]?.stringValue {
+            // No goal to complete. The tool is not offered in this state, but a model can still
+            // reach for it from stale context — and every effect below is goal machinery: the
+            // completion self-report is exactly what raises the panel in ChatView, and the
+            // skill-check reflection spends an extra autonomous turn the user never asked for.
+            // Surface what the model said and stop there (#84).
+            let hasGoalToComplete = await MainActor.run {
+                localState?.conversations.first(where: { $0.id == conversationId })?.activeGoal != nil
+            }
+            if principal == .main, !hasGoalToComplete, !restrictToGoalComplete {
+                await pushToUI(role: .agent, text: summary, conversationId: conversationId)
+                return "No goal is active, so there was nothing to complete — your summary was shown to the user. In an ordinary conversation, just reply normally instead of calling goal_complete."
+            }
             // Ladder gate: with an active checkpoint ladder, `goal_complete` is valid ONLY at the
             // final checkpoint — before then the model must advance through checkpoints via
             // `reach_checkpoint`, so the terminal tool can't silently skip the ladder. Bypassed under
