@@ -478,6 +478,11 @@ actor IrisEngine {
                 required: ["objective", "criteria"]
             )
         ))
+        // Main-agent only. A subagent runs against a unit contract the PARENT authored (slice B3);
+        // letting it amend its own definition of done is the self-authored-target problem the
+        // evaluator exists to distrust. It matters concretely because B3 puts `oracleText()` in
+        // front of a subagent for the first time, and that text names this tool by name.
+        if principal == .main {
         toolsList.append(FunctionDeclaration(
             name: "amend_goal_contract",
             description: "Change the LOCKED goal contract's criteria when the work reveals they were wrong. A `rationale` is mandatory — criteria never change silently. The change is logged and shown to the user.",
@@ -489,6 +494,7 @@ actor IrisEngine {
                 "rationale": Schema(type: "STRING", description: "One line: why the criteria must change.")
             ], required: ["action", "criterion", "rationale"])
         ))
+        }
 
         let ladderContract = await MainActor.run {
             localState?.conversations.first(where: { $0.id == conversationId })?.goalContract
@@ -997,7 +1003,7 @@ actor IrisEngine {
                 localState?.clearGoal(for: conversationId)   // end the evaluator's own loop (mirrors goal_complete)
             }
             result = "Evaluation submitted."
-        } else if functionCall.name == "amend_goal_contract" {
+        } else if functionCall.name == "amend_goal_contract", principal == .main {
             let action = functionCall.args["action"]?.stringValue ?? "add"
             let text = functionCall.args["criterion"]?.stringValue ?? ""
             let kind = functionCall.args["kind"]?.stringValue ?? "qualitative"

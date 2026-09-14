@@ -130,8 +130,8 @@ struct SubagentGradingTests {
         #expect(rendered.contains("Summary (UNVERIFIED self-report): unit is done"))
     }
 
-    @Test("the unit contract is bound to the subagent conversation as a locked contract")
-    func contractIsBoundLocked() async {
+    @Test("a contracted run that times out carries its contract but is never graded")
+    func timedOutContractedRunIsNotGraded() async {
         let (_, parentId) = freshState()
         // Never terminates, so the contract is still observable on the conversation at the cap.
         let client = RoutingLLMClient(subagent: [response(nil)])
@@ -145,6 +145,9 @@ struct SubagentGradingTests {
         #expect(client.graderCalls == 0)
         #expect(rendered.contains("status: timed out"))
         #expect(!rendered.contains("Independent grader verdict"))
+        // The contract still reached the result: the parent is told what the run was held to.
+        #expect(rendered.contains("Held to 1 criterion"))
+        #expect(rendered.contains("Summary (UNVERIFIED self-report)"))
     }
 
     // MARK: - Tool surface

@@ -132,6 +132,31 @@ struct SubagentUnitContractTests {
         #expect(contract.criteria[1].kind == .qualitative)
     }
 
+    @Test("the unit contract is locked, so its criteria are not freely editable")
+    func unitContractIsLocked() throws {
+        // The subagent is handed a definition of done it cannot renegotiate. A `.draft` contract
+        // would be silently editable and would also persist into SubagentResult mislabeled.
+        let criteria = JSONValue.array([
+            .object(["text": .string("builds"), "kind": .string("executable"), "check": .string("swift build")])
+        ])
+        let contract = try #require(GoalContractParsing.unitContract(task: "add a widget", criteriaJSON: criteria))
+        #expect(contract.isLocked)
+        #expect(contract.state == .locked)
+    }
+
+    @Test("a contracted run that was never graded still shows what it was held to")
+    func ungradedContractedRunShowsContract() {
+        // A .timedOut run carries its unit contract but no verdict. The parent should still see
+        // that the run was contracted, and the summary is still an unverified self-report.
+        let c = criterion("the widget exists")
+        let contract = GoalContract(objective: "build a widget", criteria: [c])
+        let s = result(unitContract: contract, verdict: nil, status: .timedOut, files: []).renderedForParent()
+
+        #expect(s.contains("Summary (UNVERIFIED self-report): did the thing"))
+        #expect(s.contains("Held to 1 criterion"))
+        #expect(!s.contains("Independent grader verdict"))
+    }
+
     @Test("absent or empty criteria yield no contract, preserving the B2 path")
     func noCriteriaYieldsNoContract() {
         #expect(GoalContractParsing.unitContract(task: "add a widget", criteriaJSON: nil) == nil)

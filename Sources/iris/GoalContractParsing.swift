@@ -71,6 +71,10 @@ extension GoalContractParsing {
         var unit = parsed
         unit.milestones = []
         unit.currentMilestone = 0
+        // Locked, not draft: this is a definition of done the subagent is held to, not one it may
+        // edit. It is also what persists into `SubagentResult.unitContract`, where `.draft` would
+        // misrepresent what the run was measured against.
+        unit.lock()
         return unit
     }
 }
