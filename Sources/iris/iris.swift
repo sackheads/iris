@@ -765,9 +765,14 @@ actor IrisEngine {
                     // return control to the parent/user (or end the evaluator), so the turn
                     // is over. Ending here also prevents an unbounded turn loop if the model
                     // keeps re-issuing the same tool call.
+                    // `delegate_milestone` is included unconditionally. On its success path the
+                    // turn MUST end (the run is now paused). On its failure path ending the turn is
+                    // also correct: the auto-reprompt re-arms the loop, so the main agent continues
+                    // on the same milestone at the cost of one extra model call.
                     if toolCalls.contains(where: {
                         $0.name == "goal_complete" ||
                         $0.name == "reach_checkpoint" ||
+                        $0.name == "delegate_milestone" ||
                         $0.name == "submit_evaluation"
                     }) {
                         turnFinished = true
@@ -942,12 +947,12 @@ actor IrisEngine {
 
             if isBackground {
                 Task {
-                    let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient)
+                    let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient).rendered
                     await self.handleSystemEvent("Background subagent result:\n\(rendered)", source: "SubagentManager", conversationId: conversationId)
                 }
                 result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes."
             } else {
-                result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient)
+                result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient).rendered
             }
         } else if functionCall.name == "goal_complete", let summary = functionCall.args["summary"]?.stringValue {
             // Ladder gate: with an active checkpoint ladder, `goal_complete` is valid ONLY at the
@@ -1041,15 +1046,22 @@ actor IrisEngine {
                 ?? unitContract.objective
             // grade: false — the CHECKPOINT grades these criteria cumulatively (spec §6); grading
             // the subagent too would re-grade the same criteria in a second evaluator loop.
-            let rendered = await SubagentManager.shared.runSubagent(
+            let outcome = await SubagentManager.shared.runSubagent(
                 role: role, task: task, effort: effort, parentConversationId: conversationId,
                 unit: DelegatedUnit(contract: unitContract, grade: false), client: self.client)
-            // The subagent finished the milestone, so the checkpoint is reached: grade cumulatively,
-            // pause, and surface the subagent's result beside the verdict. Task 6 adds the status
-            // check that keeps a subagent which did NOT complete from getting here.
+
+            // Only a `.completed` subagent reaches the checkpoint — it is the run that claimed the
+            // milestone is done. Anything else claimed nothing: hand the outcome back to the loop
+            // and let the main agent decide whether to delegate again, work the milestone itself,
+            // or reach the checkpoint on its own. A milestone nobody claimed done must not
+            // interrupt a human.
+            guard outcome.status == .completed else {
+                result = "\(outcome.rendered)\n\nThe milestone is NOT complete — no checkpoint was reached. Work it yourself, or delegate again."
+                return result
+            }
             result = await performCheckpoint(
                 conversationId: conversationId, contract: contract,
-                summary: rendered, statusReport: nil,
+                summary: outcome.rendered, statusReport: nil,
                 workspacePath: workspacePath, via: " via subagent '\(role)'")
         } else if functionCall.name == "submit_evaluation" {
             let payload = functionCall.args["evaluations"]

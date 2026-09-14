@@ -93,7 +93,7 @@ final class SubagentManagerTests: XCTestCase {
             task: "Find vulnerabilities",
             effort: "easy",
             parentConversationId: parentConversationId
-        )
+        ).rendered
         
         XCTAssertTrue(summary.contains("I have audited the code securely."))
         XCTAssertTrue(summary.contains("status: completed"))
@@ -167,7 +167,7 @@ final class SubagentManagerTests: XCTestCase {
                         task: "Task \(i)",
                         effort: "medium",
                         parentConversationId: parentConversationId
-                    )
+                    ).rendered
                 }
             }
             
@@ -191,7 +191,7 @@ final class SubagentManagerTests: XCTestCase {
             task: "Find vulnerabilities",
             effort: "easy",
             parentConversationId: UUID()
-        )
+        ).rendered
         
         XCTAssertEqual(summary, "Error: AppState not available for subagent execution.")
     }
@@ -260,7 +260,7 @@ final class SubagentManagerTests: XCTestCase {
             task: "Find vulnerabilities",
             effort: "invalid_effort_string",
             parentConversationId: parentConversationId
-        )
+        ).rendered
         
         XCTAssertTrue(summary.contains("Finished with unknown effort."))
         XCTAssertEqual(usedModel, "claude-3-5-sonnet")
@@ -288,7 +288,7 @@ final class SubagentManagerTests: XCTestCase {
 
         let summary = await SubagentManager.shared.runSubagent(
             role: "worker", task: "loop forever", effort: "easy",
-            parentConversationId: parentId, maxIterations: 3)   // ~300ms cap
+            parentConversationId: parentId, maxIterations: 3).rendered   // ~300ms cap
 
         XCTAssertTrue(summary.contains("status: timed out"))
     }
@@ -329,7 +329,7 @@ final class SubagentManagerTests: XCTestCase {
         let parentId = UUID()
         await MainActor.run { state.createNewConversation(id: parentId) }
         let summary = await SubagentManager.shared.runSubagent(
-            role: "engineer", task: "write a file", effort: "easy", parentConversationId: parentId)
+            role: "engineer", task: "write a file", effort: "easy", parentConversationId: parentId).rendered
 
         XCTAssertTrue(summary.contains("Files written (1)"))
         XCTAssertTrue(summary.contains("ledger_probe.txt"))

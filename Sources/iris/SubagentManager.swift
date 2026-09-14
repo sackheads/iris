@@ -29,7 +29,9 @@ final class SubagentManager: @unchecked Sendable {
         self.state = state
     }
     
-    /// Runs a delegated unit to termination and returns the prose the parent sees.
+    /// Runs a delegated unit to termination, returning the prose the parent sees and how the run
+    /// ended. Callers that only render take `.rendered`; slice B4 branches on `.status`, because
+    /// only a `.completed` run may reach a checkpoint.
     ///
     /// Slice B3: when the parent supplies a `unit`, its contract is bound LOCKED to this run — the
     /// subagent works against slice A's oracle — and on a `.completed` termination the slice-C
@@ -39,9 +41,9 @@ final class SubagentManager: @unchecked Sendable {
     /// drive both the subagent and its grader without touching the network.
     func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID,
                      unit: DelegatedUnit? = nil, maxIterations: Int = 3000,
-                     client: (any LLMClientProtocol)? = nil) async -> String {
+                     client: (any LLMClientProtocol)? = nil) async -> (rendered: String, status: SubagentTerminalStatus) {
         guard let appState = self.state else {
-            return "Error: AppState not available for subagent execution."
+            return ("Error: AppState not available for subagent execution.", .failed)
         }
 
         let startedAt = Date()
@@ -104,14 +106,42 @@ final class SubagentManager: @unchecked Sendable {
             }
         }
 
+        // Tracks the engine loop ending. A subagent that stops WITHOUT calling goal_complete — its
+        // own goal loop soft-stopped on the iteration cap, the model just replied with text, the
+        // turn threw — never fires `onSubagentComplete`. Without this the poll below would spin to
+        // `maxIterations` (3000 × 100ms = five minutes) waiting for a termination that can no
+        // longer arrive, stalling the parent that is awaiting the result.
+        actor EngineDone {
+            var finished = false
+            func set() { finished = true }
+            func get() -> Bool { finished }
+        }
+        let engineDone = EngineDone()
+
         let engineTask = Task {
             // Kick off the first turn. Since activeGoal is set, the engine will autonomously reprompt itself
             // in a loop until goal_complete is called.
             await engine.processInput(task, source: "System", conversationId: subagentId)
+            await engineDone.set()
         }
 
         var iterations = 0
+        var gracePolls = 0
         while await holder.get() == nil {
+            // The engine loop is over. `goal_complete` resolves the holder from a detached Task, so
+            // allow a few polls for that to land before concluding nothing is coming.
+            if await engineDone.get() {
+                gracePolls += 1
+                if gracePolls > 3 {
+                    await engine.cancelReprompt(for: subagentId)
+                    await SandboxSessionManager.shared.endSession(subagentId)
+                    await MainActor.run { appState.clearGoal(for: subagentId) }
+                    await holder.set(SubagentTermination(status: .failed,
+                        summary: "Subagent stopped without calling goal_complete — the unit was not completed.",
+                        calledGoalComplete: false))
+                    break
+                }
+            }
             if iterations >= maxIterations {
                 // Hard stop: cancel the engine task, unstick any pending approval, stop the
                 // reprompt loop, free the sandbox container, and clear the goal.
@@ -157,7 +187,7 @@ final class SubagentManager: @unchecked Sendable {
             appState.setSubagentResult(for: subagentId, result)
             appState.removeSubagent(id: subagentId)
         }
-        return result.renderedForParent()
+        return (result.renderedForParent(), termination.status)
     }
     
     /// The `invoke_subagent` tool schema. Declared beside the manager it drives so the contract
