@@ -215,3 +215,26 @@ enum MilestoneLadderEditing {
         return assign(m, criterionId: criterionId, toTitle: title)
     }
 }
+
+extension GoalContract {
+    /// The bounded unit contract for the CURRENT milestone (slice B4).
+    ///
+    /// Everything comes from the locked ladder: criteria are the milestone's own, and the goal's
+    /// scope boundaries are inherited so a delegated unit cannot be used to launder a restriction
+    /// the parent is under. No caller supplies criteria, so delegation cannot reshape the gate the
+    /// work is about to be measured by. Returns nil when there is no ladder to delegate from.
+    func currentMilestoneUnitContract() -> GoalContract? {
+        guard hasLadder, milestones.indices.contains(currentMilestone) else { return nil }
+        let milestone = milestones[currentMilestone]
+        let position = "checkpoint \(currentMilestone + 1)/\(milestones.count)"
+        var unit = GoalContract(objective: "\(objective) — \(position): \(milestone.title)",
+                                criteria: currentMilestoneCriteria(),
+                                outOfScope: outOfScope,
+                                stopBefore: stopBefore)
+        // Flat and locked: a subagent cannot call `reach_checkpoint` (main-principal only), so a
+        // ladder here would loop it to its iteration cap.
+        unit.milestones = []
+        unit.lock()
+        return unit
+    }
+}
