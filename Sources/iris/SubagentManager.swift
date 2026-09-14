@@ -39,6 +39,14 @@ final class SubagentManager: @unchecked Sendable {
             appState.createNewConversation(id: subagentId, isSubagent: true)
             appState.updateConversationTitle(id: subagentId, title: "Subagent: \(role)")
             appState.registerSubagent(id: subagentId, role: role)
+            // Delegation must not drop the workspace the parent is bound to. Without this the
+            // subagent's run_command inherits the process cwd (the Iris repo) while the parent
+            // works somewhere else — and a unit contract's executable `check` would then be graded
+            // against the wrong tree, reporting `met` on evidence unrelated to the delegated work.
+            // With no bound parent workspace this is a no-op and both sides stay on the cwd (#68).
+            if let parentWorkspace = appState.conversations.first(where: { $0.id == parentConversationId })?.workspacePath {
+                appState.setWorkspace(for: subagentId, path: parentWorkspace)
+            }
         }
 
         let tier: ModelTier
@@ -122,12 +130,9 @@ final class SubagentManager: @unchecked Sendable {
             let workspace = await MainActor.run {
                 appState.conversations.first { $0.id == subagentId }?.workspacePath
             } ?? FileManager.default.currentDirectoryPath
-            await GoalEvaluator.shared.evaluate(contract: unitContract, workspace: workspace,
-                                                originatingConversationId: subagentId,
-                                                app: appState, client: client ?? LLMClient())
-            verdict = await MainActor.run {
-                appState.conversations.first { $0.id == subagentId }?.lastGoalEvaluation
-            }
+            verdict = await GoalEvaluator.shared.evaluate(contract: unitContract, workspace: workspace,
+                                                          originatingConversationId: subagentId,
+                                                          app: appState, client: client ?? LLMClient())
         }
 
         let result = SubagentResult(role: role, status: termination.status,

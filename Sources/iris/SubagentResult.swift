@@ -68,15 +68,23 @@ struct SubagentResult: Codable, Sendable, Equatable {
         case .cancelled: statusText = "cancelled"
         }
         let gc = calledGoalComplete ? "goal_complete called" : "goal_complete not called"
-        // With a trusted verdict beside it, the self-report is labeled as such so the parent can
-        // never read the subagent's own words as a passed gate. With no verdict there is nothing
-        // to contrast it against, and the line stays exactly as slice B2 wrote it.
-        let summaryLabel = verdict == nil ? "Summary" : "Summary (UNVERIFIED self-report)"
+        // Any contracted run's summary is labeled unverified — a run held to criteria invites the
+        // parent to read the summary as evidence against them, whether or not a grade landed. An
+        // UNcontracted run has no contract to contrast it with, so the line stays exactly as slice
+        // B2 wrote it (the byte-for-byte B2 guarantee is about contract-less delegation).
+        let summaryLabel = unitContract == nil ? "Summary" : "Summary (UNVERIFIED self-report)"
         var s = "Subagent '\(role)' finished — status: \(statusText) (\(gc)).\n\(summaryLabel): \(summary)"
         if !filesWritten.isEmpty {
             s += "\nFiles written (\(filesWritten.count)): \(filesWritten.joined(separator: ", "))"
         }
-        if let verdict { s += "\n" + verdictBlock(verdict) }
+        if let verdict {
+            s += "\n" + verdictBlock(verdict)
+        } else if let unitContract {
+            // Contracted but never graded (the run did not complete). Say what it was held to, so
+            // the parent is not left assuming an ungraded run was an unconstrained one.
+            let n = unitContract.criteria.count
+            s += "\nHeld to \(n) criter\(n == 1 ? "ion" : "ia") — not graded (the run did not reach completion)."
+        }
         return s
     }
 }
