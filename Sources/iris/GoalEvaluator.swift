@@ -46,9 +46,9 @@ final class GoalEvaluator: Sendable {
         let prompt = Self.systemPrompt(for: contract, workspaceDir: workspaceDir)
         await engine.setSystemPrompt(text: prompt)
 
-        // Captured synchronously by the completion callback, before the MainActor hop that writes
-        // the evaluation to the conversation — so the returned verdict does not depend on how that
-        // hop is scheduled, and neither does the did-it-submit check below (#103).
+        // Filled in by the completion callback. The did-it-submit check below reads this rather
+        // than probing whether `onEvaluationComplete` was cleared, so it cannot mistake a run that
+        // succeeded for one that never submitted.
         let graded = EvaluationBox()
 
         // Resolve on submit_evaluation: reconcile against the contract's criteria and write graded.
@@ -62,11 +62,12 @@ final class GoalEvaluator: Sendable {
                 }
                 let eval = GoalEvaluation(status: .graded, criteria: verdicts, startedAt: Date(), completedAt: Date())
                 graded.set(eval)
-                Task { @MainActor in
-                    app.recordEvaluation(for: originId, eval)
-                    app.onEvaluationComplete[evalId] = nil
-                    app.deleteConversation(evalId)
-                }
+                // Directly, not through a detached Task: the callback is already MainActor-isolated,
+                // and deferring meant a caller could observe half-finished bookkeeping right after
+                // awaiting `evaluate` (#103).
+                app.recordEvaluation(for: originId, eval)
+                app.onEvaluationComplete[evalId] = nil
+                app.deleteConversation(evalId)
             }
         }
 
