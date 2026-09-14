@@ -130,12 +130,9 @@ final class SubagentManager: @unchecked Sendable {
             let workspace = await MainActor.run {
                 appState.conversations.first { $0.id == subagentId }?.workspacePath
             } ?? FileManager.default.currentDirectoryPath
-            await GoalEvaluator.shared.evaluate(contract: unitContract, workspace: workspace,
-                                                originatingConversationId: subagentId,
-                                                app: appState, client: client ?? LLMClient())
-            verdict = await MainActor.run {
-                appState.conversations.first { $0.id == subagentId }?.lastGoalEvaluation
-            }
+            verdict = await GoalEvaluator.shared.evaluate(contract: unitContract, workspace: workspace,
+                                                          originatingConversationId: subagentId,
+                                                          app: appState, client: client ?? LLMClient())
         }
 
         let result = SubagentResult(role: role, status: termination.status,
