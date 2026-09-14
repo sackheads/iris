@@ -26,6 +26,7 @@ struct SubagentGradingTests {
         private let lock = NSLock()
         private var index: [String: Int] = [:]
         private var graderCallCount = 0
+        private var graderSystemText = ""
         private let scripts: [String: [GeminiResponse]]
         private let graderVerdict: (value: String, evidence: String)?
 
@@ -37,6 +38,8 @@ struct SubagentGradingTests {
         }
 
         var graderCalls: Int { lock.withLock { graderCallCount } }
+        /// The evaluator's system prompt names the directory it grades in (GoalEvaluator §Workspace).
+        var graderPrompt: String { lock.withLock { graderSystemText } }
 
         private static func text(_ s: String) -> GeminiResponse {
             GeminiResponse(candidates: [Candidate(content: Content(role: "model",
@@ -55,6 +58,7 @@ struct SubagentGradingTests {
             return lock.withLock {
                 if lane == "grader" {
                     graderCallCount += 1
+                    if graderSystemText.isEmpty { graderSystemText = systemText }
                     // Submit once, then fall silent so the grader loop can end.
                     guard graderCallCount == 1, let graderVerdict else { return Self.text("done") }
                     let ids = systemText.matches(of: Self.uuidPattern).map { String($0.output) }
@@ -200,6 +204,28 @@ struct SubagentGradingTests {
         #expect(client.graderCalls == 0, "no contract means no grade")
         #expect(!rendered.contains("Independent grader verdict"))
         #expect(rendered.contains("Summary: unit is done"))
+    }
+
+    @Test("a delegated unit is graded in the parent's workspace, not the process cwd")
+    func inheritsParentWorkspace() async {
+        let (state, parentId) = freshState()
+        // A bound workspace on the parent is the case that matters: without inheritance the
+        // subagent works in one tree and the grader grades another (the Iris repo).
+        let workspace = NSTemporaryDirectory() + "iris-b3-ws-\(UUID().uuidString)"
+        try? FileManager.default.createDirectory(atPath: workspace, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: workspace) }
+        state.setWorkspace(for: parentId, path: workspace)
+
+        let client = RoutingLLMClient(subagent: [goalComplete, response(nil)],
+                                      graderVerdict: ("met", "saw the widget"))
+        _ = await SubagentManager.shared.runSubagent(
+            role: "engineer", task: "build a widget", effort: "easy",
+            parentConversationId: parentId, criteria: criteriaJSON("the widget exists"),
+            client: client)
+
+        #expect(client.graderCalls > 0)
+        #expect(client.graderPrompt.contains(workspace),
+                "the grader should inspect the parent's workspace, not the process cwd")
     }
 
     // MARK: - Persistence
