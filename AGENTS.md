@@ -12,9 +12,16 @@ The primary provider abstraction supports Anthropic, Gemini, and OpenAI. Local i
 
 ```sh
 swift build                          # compile
-swift test                           # full suite
-swift test --filter MyTestSuite      # focused run
+swift test --no-parallel             # full suite — the flag is REQUIRED, see below
+swift test --no-parallel --filter MyTestSuite   # focused run
 ```
+
+**`--no-parallel` is not optional.** Several suites mutate the `ConfigManager` singleton, whose
+setters persist through `didSet` to `UserDefaults`. Run in parallel they race — and because the
+save/mutate/restore idiom can't be correct under concurrency, a bad restore gets written to disk and
+poisons the *next* run. Plain `swift test` fails most runs on a clean checkout; `--no-parallel`
+passes. Tracked in [#109](https://github.com/sackheads/iris/issues/109), which has the real fix
+(stop persisting config under test, inject the guard flag); drop the flag once that lands.
 
 No Makefile. No lint config beyond the Swift compiler's own checks. Keep it that way unless asked.
 
@@ -73,7 +80,7 @@ docs/                     # design specs, plans, reviews, roadmaps
 
 ## Pre-commit checklist
 
-- [ ] `swift test` is green
+- [ ] `swift test --no-parallel` is green
 - [ ] If you added a field to a persisted `Codable` type: it uses `decodeIfPresent`
 - [ ] If you added or changed a tool parameter: `getTools()` schema and `execute()` handler are both updated
 - [ ] If you changed user-facing behaviour: `README.md` is updated in the same commit
