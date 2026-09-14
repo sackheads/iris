@@ -159,6 +159,38 @@ actor IrisEngine {
         }
     }
     
+    /// The checkpoint transition, shared by `reach_checkpoint` (the agent did the milestone itself)
+    /// and `delegate_milestone` (a subagent did it).
+    ///
+    /// Grades the ladder CUMULATIVELY — `projectedContract` across milestones `0...current`, not
+    /// just the current one — because that is what catches this milestone's work breaking an
+    /// earlier milestone's criterion, which is the reason a checkpoint is a gate and not a status
+    /// print. Awaited, not detached: the run is pausing anyway and the human should see the verdict
+    /// before re-engaging. `currentMilestone` is deliberately NOT advanced — that is the human's
+    /// click (B1 §7). `via` names the delegate when the work was handed off, and is empty otherwise.
+    private func performCheckpoint(conversationId: UUID, contract: GoalContract,
+                                   summary: String, statusReport: JSONValue?,
+                                   workspacePath: String?, via: String = "") async -> String {
+        let localState = state
+        let projected = contract.projectedContract(throughMilestone: contract.currentMilestone)
+        let gradeWorkspace = workspacePath ?? FileManager.default.currentDirectoryPath
+        await MainActor.run {
+            localState?.recordCompletionSelfReport(for: conversationId, statusJSON: statusReport)
+            localState?.beginGoalEvaluation(for: conversationId, contract: projected)
+            localState?.setCheckpointPaused(for: conversationId)   // leaves activeGoal set
+        }
+        if let graderApp = localState {
+            await GoalEvaluator.shared.evaluate(contract: projected, workspace: gradeWorkspace,
+                                                originatingConversationId: conversationId,
+                                                app: graderApp, client: self.client)
+        }
+        let ladderPos = "\(contract.currentMilestone + 1) of \(contract.milestones.count)"
+        await pushToUI(role: .agent,
+                       text: "Reached checkpoint \(ladderPos)\(via): \(summary)\nPaused for your review — approve to continue or send me back.",
+                       conversationId: conversationId)
+        return "Checkpoint \(ladderPos) reached and graded. Paused for user review."
+    }
+
     /// Tracks the pending auto-reprompt task per conversation so the goal loop can be cancelled.
     private var repromptTasks: [UUID: Task<Void, Never>] = [:]
 
@@ -979,24 +1011,9 @@ actor IrisEngine {
                 result = "This is the final checkpoint — call `goal_complete` to finish, not `reach_checkpoint`."
                 return result
             }
-            let projected = contract.projectedContract(throughMilestone: contract.currentMilestone)
-            let gradeWorkspace = workspacePath ?? FileManager.default.currentDirectoryPath
-            await MainActor.run {
-                localState?.recordCompletionSelfReport(for: conversationId, statusJSON: statusReport)
-                localState?.beginGoalEvaluation(for: conversationId, contract: projected)
-                localState?.setCheckpointPaused(for: conversationId)   // leaves activeGoal set
-            }
-            // Await the grade (unlike goal_complete's detached grade) — the human should see the
-            // verdict before re-engaging. The reprompt guard (Task 6) keeps the loop quiet meanwhile.
-            let graderClient = self.client
-            if let graderApp = localState {
-                await GoalEvaluator.shared.evaluate(contract: projected, workspace: gradeWorkspace,
-                                                    originatingConversationId: conversationId,
-                                                    app: graderApp, client: graderClient)
-            }
-            let ladderPos = "\(contract.currentMilestone + 1) of \(contract.milestones.count)"
-            await pushToUI(role: .agent, text: "Reached checkpoint \(ladderPos): \(summary)\nPaused for your review — approve to continue or send me back.", conversationId: conversationId)
-            result = "Checkpoint \(ladderPos) reached and graded. Paused for user review."
+            result = await performCheckpoint(conversationId: conversationId, contract: contract,
+                                             summary: summary, statusReport: statusReport,
+                                             workspacePath: workspacePath)
         } else if functionCall.name == "submit_evaluation" {
             let payload = functionCall.args["evaluations"]
             await MainActor.run {
