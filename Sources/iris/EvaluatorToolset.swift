@@ -1,9 +1,11 @@
-import Foundation
-
 /// The evaluator's world is read-only + running the contract's checks + reporting a verdict.
 /// This restricts an assembled tool list to exactly that surface (spec §4.1) and guarantees the
 /// terminal `submit_evaluation` tool is present.
 enum EvaluatorToolset {
+    /// The evaluator's complete surface. Note `restrict(_:)` does NOT use this as its sole filter:
+    /// it excludes `submit_evaluation` from the caller's list and re-appends the canonical
+    /// declaration below, so the tool is present exactly once regardless of what came in. The name
+    /// stays in the set because this is the honest description of the surface.
     static let allowedNames: Set<String> = ["read_file", "run_command", "submit_evaluation"]
 
     static let submitEvaluation = FunctionDeclaration(
