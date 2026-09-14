@@ -94,6 +94,28 @@ struct EvaluatorTurnLoopTests {
         #expect(returned.criteria.count == 1)
     }
 
+    @Test("by the time evaluate returns, its bookkeeping is done — nothing is left pending")
+    func bookkeepingIsCompleteOnReturn() async {
+        // The completion callback records the evaluation and deletes the evaluator's throwaway
+        // conversation. Deferring that to a later runloop turn leaves callers observing a
+        // half-finished state right after the await (#103).
+        let app = AppState()
+        app.autoApproveTools = true
+        let originId = UUID()
+        app.createNewConversation(id: originId)
+        let c = Criterion(text: "the thing exists", kind: .qualitative, check: nil)
+        let client = InspectThenSubmitGrader(criterionId: c.id, inspectionRounds: 1)
+
+        let before = app.conversations.count
+        _ = await GoalEvaluator.shared.evaluate(
+            contract: GoalContract(objective: "obj", criteria: [c]),
+            workspace: FileManager.default.currentDirectoryPath,
+            originatingConversationId: originId, app: app, client: client)
+
+        #expect(app.conversations.first { $0.id == originId }?.lastGoalEvaluation?.status == .graded)
+        #expect(app.conversations.count == before, "the evaluator conversation should already be gone")
+    }
+
     @Test("a grader that never submits is recorded as failed, not left verifying forever")
     func neverSubmits() async {
         // 500 inspection rounds: it never reaches submit_evaluation. The safety net must fire.

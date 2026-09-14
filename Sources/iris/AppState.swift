@@ -159,7 +159,11 @@ class AppState {
     /// Fired by the `submit_evaluation` handler in the EVALUATOR's own conversation; the closure
     /// (registered by GoalEvaluator) reconciles the verdict and writes it to the ORIGINATING
     /// conversation. Keyed by the evaluator conversation id. Mirrors `onSubagentComplete`.
-    var onEvaluationComplete: [UUID: @Sendable (JSONValue?) -> Void] = [:]
+    /// `@MainActor`-isolated so the handler can do its bookkeeping directly. It is only ever
+    /// invoked from MainActor context (`submit_evaluation`), and typing it that way is what lets
+    /// `GoalEvaluator` record the evaluation inline instead of hopping through a detached Task —
+    /// which used to defer the write to a later runloop turn (#103).
+    var onEvaluationComplete: [UUID: @MainActor @Sendable (JSONValue?) -> Void] = [:]
 
     /// Reference count of in-flight "thinking" work. `isThinking` is derived from this.
     private var thinkingCount = 0
