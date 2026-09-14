@@ -900,19 +900,21 @@ actor IrisEngine {
             let effort = functionCall.args["effort"]?.stringValue ?? "medium"
             let isBackground = (functionCall.args["background"]?.stringValue.lowercased() == "true")
             // Slice B3: optional parent-authored definition-of-done for the delegated unit. Absent
-            // ⇒ the unchanged B2 path (no contract, no grade). Pass this engine's client through so
-            // the subagent and its grader are driven by the same client the parent is.
-            let criteria = functionCall.args["criteria"]
+            // ⇒ the unchanged B2 path (no contract, no grade). Always graded when present — B4's
+            // ungraded units are built by `delegate_milestone`, not by this tool. Pass this engine's
+            // client through so the subagent and its grader are driven by the same client the parent is.
+            let unit = GoalContractParsing.unitContract(task: task, criteriaJSON: functionCall.args["criteria"])
+                .map { DelegatedUnit(contract: $0, grade: true) }
             let subagentClient = self.client
 
             if isBackground {
                 Task {
-                    let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, criteria: criteria, client: subagentClient)
+                    let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient)
                     await self.handleSystemEvent("Background subagent result:\n\(rendered)", source: "SubagentManager", conversationId: conversationId)
                 }
                 result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes."
             } else {
-                result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, criteria: criteria, client: subagentClient)
+                result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient)
             }
         } else if functionCall.name == "goal_complete", let summary = functionCall.args["summary"]?.stringValue {
             // Ladder gate: with an active checkpoint ladder, `goal_complete` is valid ONLY at the
