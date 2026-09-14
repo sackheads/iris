@@ -41,7 +41,8 @@ struct EvaluatorTurnLoopTests {
         }
     }
 
-    private func grade(inspectionRounds: Int) async -> (GoalEvaluation?, Int) {
+    /// Returns (what `evaluate` returned, what it recorded on the conversation, grader call count).
+    private func grade(inspectionRounds: Int) async -> (GoalEvaluation, GoalEvaluation?, Int) {
         let app = AppState()
         app.autoApproveTools = true
         let originId = UUID()
@@ -49,35 +50,56 @@ struct EvaluatorTurnLoopTests {
         let c = Criterion(text: "the thing exists", kind: .qualitative, check: nil)
         let client = InspectThenSubmitGrader(criterionId: c.id, inspectionRounds: inspectionRounds)
 
-        await GoalEvaluator.shared.evaluate(
+        let returned = await GoalEvaluator.shared.evaluate(
             contract: GoalContract(objective: "obj", criteria: [c]),
             workspace: FileManager.default.currentDirectoryPath,
             originatingConversationId: originId, app: app, client: client)
 
-        return (app.conversations.first { $0.id == originId }?.lastGoalEvaluation, client.callCount)
+        return (returned, app.conversations.first { $0.id == originId }?.lastGoalEvaluation, client.callCount)
     }
 
     @Test("a grader that inspects before submitting is graded, not written off as failed")
     func inspectsThenSubmits() async {
-        let (eval, calls) = await grade(inspectionRounds: 1)
+        let (returned, recorded, calls) = await grade(inspectionRounds: 1)
         #expect(calls == 2)
-        #expect(eval?.status == .graded)
-        #expect(eval?.criteria.first?.verdict == .met)
+        #expect(returned.status == .graded)
+        #expect(returned.criteria.first?.verdict == .met)
+        #expect(recorded?.status == .graded)
     }
 
     @Test("several rounds of inspection still land a graded verdict")
     func multipleInspectionRounds() async {
-        let (eval, calls) = await grade(inspectionRounds: 3)
+        let (returned, _, calls) = await grade(inspectionRounds: 3)
         #expect(calls == 4)
-        #expect(eval?.status == .graded)
-        #expect(eval?.criteria.first?.verdict == .met)
+        #expect(returned.status == .graded)
+        #expect(returned.criteria.first?.verdict == .met)
+    }
+
+    @Test("evaluate returns the same verdict it records, so callers need no read-back")
+    func returnsWhatItRecords() async {
+        let (returned, recorded, _) = await grade(inspectionRounds: 1)
+        // The returned value IS the verdict — a caller should never have to go looking for it on
+        // the conversation, where it is only correct while that conversation still exists and
+        // nothing else has overwritten it.
+        #expect(returned == recorded)
+    }
+
+    @Test("the returned verdict does not depend on the deferred recording task having run")
+    func returnedVerdictIsIndependentOfRecordingHop() async {
+        // The graded evaluation is captured synchronously inside the completion callback, before
+        // the MainActor hop that writes it to the conversation (#103). The return value is
+        // therefore correct regardless of how that hop is scheduled.
+        let (returned, _, _) = await grade(inspectionRounds: 2)
+        #expect(returned.status == .graded)
+        #expect(returned.criteria.count == 1)
     }
 
     @Test("a grader that never submits is recorded as failed, not left verifying forever")
     func neverSubmits() async {
         // 500 inspection rounds: it never reaches submit_evaluation. The safety net must fire.
-        let (eval, _) = await grade(inspectionRounds: 500)
-        #expect(eval?.status == .failed)
-        #expect(eval?.criteria.first?.verdict == .cannotVerify)
+        let (returned, recorded, _) = await grade(inspectionRounds: 500)
+        #expect(returned.status == .failed)
+        #expect(returned.criteria.first?.verdict == .cannotVerify)
+        #expect(recorded?.status == .failed)
     }
 }

@@ -1,15 +1,32 @@
 import Foundation
 
+/// Lock-guarded slot for the graded evaluation. The completion callback is synchronous and
+/// non-isolated, so it cannot `await` an actor; a lock is the available primitive.
+private final class EvaluationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: GoalEvaluation?
+    func set(_ v: GoalEvaluation) { lock.withLock { if value == nil { value = v } } }
+    func get() -> GoalEvaluation? { lock.withLock { value } }
+}
+
 final class GoalEvaluator: Sendable {
     static let shared = GoalEvaluator()
     private init() {}
 
-    /// Runs a fresh-context grader against `contract` and writes a `GoalEvaluation` onto
-    /// `originatingConversationId`. Non-blocking for the caller: dispatch this in a detached Task.
+    /// Runs a fresh-context grader against `contract`, writes the `GoalEvaluation` onto
+    /// `originatingConversationId` for the UI to observe, and **returns it**.
+    ///
+    /// Fire-and-forget callers (the main agent's `goal_complete` grade) can discard the result and
+    /// let the UI pick it up from the conversation. Programmatic callers — `SubagentManager`, and
+    /// the checkpoint grade — use the return value instead of reading `lastGoalEvaluation` back
+    /// out, which is only correct while that conversation still exists and nothing else has
+    /// overwritten it (#102).
+    ///
     /// `client` is injectable so tests can drive the grader with a `FakeLLMClient` instead of
     /// hitting the network.
+    @discardableResult
     func evaluate(contract: GoalContract, workspace: String?, originatingConversationId originId: UUID,
-                  app: AppState, client: any LLMClientProtocol = LLMClient()) async {
+                  app: AppState, client: any LLMClientProtocol = LLMClient()) async -> GoalEvaluation {
 
         // The directory the grader inspects. Callers resolve this to the main agent's effective
         // working directory (its bound workspace, or the process cwd it actually ran in), so the
@@ -29,6 +46,11 @@ final class GoalEvaluator: Sendable {
         let prompt = Self.systemPrompt(for: contract, workspaceDir: workspaceDir)
         await engine.setSystemPrompt(text: prompt)
 
+        // Captured synchronously by the completion callback, before the MainActor hop that writes
+        // the evaluation to the conversation — so the returned verdict does not depend on how that
+        // hop is scheduled, and neither does the did-it-submit check below (#103).
+        let graded = EvaluationBox()
+
         // Resolve on submit_evaluation: reconcile against the contract's criteria and write graded.
         await MainActor.run {
             app.onEvaluationComplete[evalId] = { payload in
@@ -39,6 +61,7 @@ final class GoalEvaluator: Sendable {
                     verdicts = GoalEvaluationParsing.verdicts(from: [:], criteria: contract.criteria)
                 }
                 let eval = GoalEvaluation(status: .graded, criteria: verdicts, startedAt: Date(), completedAt: Date())
+                graded.set(eval)
                 Task { @MainActor in
                     app.recordEvaluation(for: originId, eval)
                     app.onEvaluationComplete[evalId] = nil
@@ -63,19 +86,20 @@ final class GoalEvaluator: Sendable {
         }
         await engine.processInput(evaluationPrompt, source: "GoalEvaluator", conversationId: evalId)
 
-        // Safety net: if the grader loop exits without calling submit_evaluation (crash, timeout,
-        // infinite loop detected, etc.), write a `.failed` evaluation so the UI doesn't hang in
-        // `.verifying` forever. The onEvaluationComplete callback is nil'd by submit_evaluation
-        // synchronously on MainActor; if it's still non-nil here, the grader didn't submit.
-        let didSubmit = await MainActor.run { app.onEvaluationComplete[evalId] == nil }
-        if !didSubmit {
-            let fallback = GoalEvaluationParsing.verdicts(from: [:], criteria: contract.criteria)
-            await MainActor.run {
-                app.recordEvaluation(for: originId, GoalEvaluation(status: .failed, criteria: fallback, startedAt: Date(), completedAt: Date()))
-                app.onEvaluationComplete[evalId] = nil
-                app.deleteConversation(evalId)
-            }
+        // The grader submitted iff the callback ran and filled the box.
+        if let eval = graded.get() { return eval }
+
+        // Safety net: the grader loop exited without calling submit_evaluation (crash, timeout,
+        // infinite loop detected, etc.). Write a `.failed` evaluation so the UI doesn't hang in
+        // `.verifying` forever, and hand the same verdict back to the caller.
+        let fallback = GoalEvaluationParsing.verdicts(from: [:], criteria: contract.criteria)
+        let failed = GoalEvaluation(status: .failed, criteria: fallback, startedAt: Date(), completedAt: Date())
+        await MainActor.run {
+            app.recordEvaluation(for: originId, failed)
+            app.onEvaluationComplete[evalId] = nil
+            app.deleteConversation(evalId)
         }
+        return failed
     }
 
     private static func systemPrompt(for contract: GoalContract, workspaceDir: String) -> String {
