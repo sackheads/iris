@@ -4,8 +4,15 @@ import XCTest
 @MainActor
 final class ModelLEDBarTests: XCTestCase {
 
+    /// ConfigManager writes every setter straight through to UserDefaults, so values set here
+    /// outlive the test process and leak into later runs on the same machine. Captured in setUp
+    /// and put back in tearDown — without this, leaving prompt-injection protection off here makes
+    /// InjectionGuardTests' Tier 2 cases fail on the NEXT run, which is baffling to debug.
+    private var savedInjectionProtection: Bool = true
+
     override func setUp() {
         super.setUp()
+        savedInjectionProtection = ConfigManager.shared.enableAdvancedPromptInjectionProtection
         // Reset ConfigManager to known defaults so each test starts clean.
         ConfigManager.shared.primaryProvider = "Gemini"
         ConfigManager.shared.geminiAPIKey = "test-key"
@@ -18,6 +25,11 @@ final class ModelLEDBarTests: XCTestCase {
         ConfigManager.shared.promptGuardCoreMLModel = ""
         ConfigManager.shared.promptGuardEngine = "llama_cpp"
         ConfigManager.shared.promptGuardModel = ""
+    }
+
+    override func tearDown() {
+        ConfigManager.shared.enableAdvancedPromptInjectionProtection = savedInjectionProtection
+        super.tearDown()
     }
 
     // MARK: - Primary LED
