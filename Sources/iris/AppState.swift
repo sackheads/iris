@@ -383,9 +383,24 @@ class AppState {
         emitCommandOutput(body, format: .markdown, to: convId)
     }
 
+    /// Drops the pill-timer entries for a set of messages.
+    ///
+    /// `commandStartTimes` / `commandDurations` are keyed by message id and are transient (never
+    /// persisted), but nothing removed from them — so every `run_command` in a session left an entry
+    /// behind that outlived the message it described. Bounded by a single session, and small, but it
+    /// grows fastest exactly where sessions run longest: an autonomous goal loop (#100).
+    private func purgeCommandTimings(forMessagesIn conversationId: UUID) {
+        guard let conv = conversations.first(where: { $0.id == conversationId }) else { return }
+        for message in conv.messages {
+            commandStartTimes.removeValue(forKey: message.id)
+            commandDurations.removeValue(forKey: message.id)
+        }
+    }
+
     func deleteConversation(_ id: UUID) {
         cancelTasks(for: id)
         Task { await SandboxSessionManager.shared.endSession(id) }
+        purgeCommandTimings(forMessagesIn: id)   // before the messages go — they are the keys
         conversations.removeAll { $0.id == id }
         if selectedConversationId == id {
             selectedConversationId = conversations.last?.id
@@ -1245,6 +1260,7 @@ class AppState {
 
     private func handleClearCommand(convId: UUID) {
         if let idx = conversations.firstIndex(where: { $0.id == convId }) {
+            purgeCommandTimings(forMessagesIn: convId)   // before the messages go — they are the keys
             conversations[idx].messages.removeAll()
             saveConversations()
             emitCommandOutput("Conversation cleared.", format: .markdown, to: convId)
