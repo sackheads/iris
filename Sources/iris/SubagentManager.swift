@@ -184,6 +184,25 @@ final class SubagentManager: @unchecked Sendable {
         )
     }
 
+    /// The `delegate_milestone` tool schema (slice B4). Note the absence of a `criteria` parameter:
+    /// a delegated milestone's definition of done comes from the locked ladder, so the model cannot
+    /// restate the gate it is about to be measured by.
+    static func milestoneDelegationDeclaration() -> FunctionDeclaration {
+        FunctionDeclaration(
+            name: "delegate_milestone",
+            description: "Hand the CURRENT checkpoint's milestone to a bounded subagent that works it in its own context. Its definition of done is taken from the locked ladder — you do not restate it. When the subagent finishes the milestone, the checkpoint is reached and graded automatically and the run pauses for the user. Use reach_checkpoint instead when you did the work yourself.",
+            parameters: Schema(
+                type: "OBJECT",
+                properties: [
+                    "role": Schema(type: "STRING", description: "The persona (e.g. engineer, researcher, code_reviewer)."),
+                    "effort": Schema(type: "STRING", description: "The reasoning effort required: easy | medium | hard."),
+                    "brief": Schema(type: "STRING", description: "Optional. How to approach the work — context, starting points, gotchas. NEVER criteria: those come from the ladder.")
+                ],
+                required: ["role", "effort"]
+            )
+        )
+    }
+
     func generateRolePrompt(role: String) -> String {
         let base = "You are Iris, operating in a specialized subagent role: **\(role.uppercased())**.\n" +
                    "You are executing within a fully configurable sandboxed micro-VM. You have full root permissions inside this VM environment to install packages, configure tools, and run commands needed to complete your objective.\n\n"

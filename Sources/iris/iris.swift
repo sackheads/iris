@@ -548,6 +548,7 @@ actor IrisEngine {
                     required: ["milestone_summary"]
                 )
             ))
+            toolsList.append(SubagentManager.milestoneDelegationDeclaration())
         }
 
         // Offer an optional `intent` on every tool so the model can attach a one-line
@@ -1014,6 +1015,36 @@ actor IrisEngine {
             result = await performCheckpoint(conversationId: conversationId, contract: contract,
                                              summary: summary, statusReport: statusReport,
                                              workspacePath: workspacePath)
+        } else if functionCall.name == "delegate_milestone", principal == .main {
+            let contract = await MainActor.run {
+                localState?.conversations.first(where: { $0.id == conversationId })?.goalContract
+            }
+            guard let contract, contract.hasLadder else {
+                result = "No checkpoint ladder is active, so there is no milestone to delegate. Use `invoke_subagent` for ad-hoc delegation, or `goal_complete` when the goal is finished."
+                return result
+            }
+            if contract.isFinalMilestone {
+                result = "The final checkpoint is not delegable — terminal completion stays a single path. Use `invoke_subagent` with criteria to hand out the work, then call `goal_complete` yourself."
+                return result
+            }
+            guard let unitContract = contract.currentMilestoneUnitContract() else {
+                result = "The current checkpoint has no criteria, so there is nothing to delegate."
+                return result
+            }
+            let role = functionCall.args["role"]?.stringValue ?? "engineer"
+            let effort = functionCall.args["effort"]?.stringValue ?? "medium"
+            let brief = functionCall.args["brief"]?.stringValue
+            // The subagent's prompt is the milestone objective plus any approach notes. Its
+            // definition of done rides in the contract, not here — nothing the model wrote can
+            // change what the work is measured against.
+            let task = brief.map { "\(unitContract.objective)\n\nApproach notes from the parent: \($0)" }
+                ?? unitContract.objective
+            // grade: false — the CHECKPOINT grades these criteria cumulatively (spec §6); grading
+            // the subagent too would re-grade the same criteria in a second evaluator loop.
+            let rendered = await SubagentManager.shared.runSubagent(
+                role: role, task: task, effort: effort, parentConversationId: conversationId,
+                unit: DelegatedUnit(contract: unitContract, grade: false), client: self.client)
+            result = rendered
         } else if functionCall.name == "submit_evaluation" {
             let payload = functionCall.args["evaluations"]
             await MainActor.run {
