@@ -159,6 +159,38 @@ actor IrisEngine {
         }
     }
     
+    /// The checkpoint transition, shared by `reach_checkpoint` (the agent did the milestone itself)
+    /// and `delegate_milestone` (a subagent did it).
+    ///
+    /// Grades the ladder CUMULATIVELY — `projectedContract` across milestones `0...current`, not
+    /// just the current one — because that is what catches this milestone's work breaking an
+    /// earlier milestone's criterion, which is the reason a checkpoint is a gate and not a status
+    /// print. Awaited, not detached: the run is pausing anyway and the human should see the verdict
+    /// before re-engaging. `currentMilestone` is deliberately NOT advanced — that is the human's
+    /// click (B1 §7). `via` names the delegate when the work was handed off, and is empty otherwise.
+    private func performCheckpoint(conversationId: UUID, contract: GoalContract,
+                                   summary: String, statusReport: JSONValue?,
+                                   workspacePath: String?, via: String = "") async -> String {
+        let localState = state
+        let projected = contract.projectedContract(throughMilestone: contract.currentMilestone)
+        let gradeWorkspace = workspacePath ?? FileManager.default.currentDirectoryPath
+        await MainActor.run {
+            localState?.recordCompletionSelfReport(for: conversationId, statusJSON: statusReport)
+            localState?.beginGoalEvaluation(for: conversationId, contract: projected)
+            localState?.setCheckpointPaused(for: conversationId)   // leaves activeGoal set
+        }
+        if let graderApp = localState {
+            await GoalEvaluator.shared.evaluate(contract: projected, workspace: gradeWorkspace,
+                                                originatingConversationId: conversationId,
+                                                app: graderApp, client: self.client)
+        }
+        let ladderPos = "\(contract.currentMilestone + 1) of \(contract.milestones.count)"
+        await pushToUI(role: .agent,
+                       text: "Reached checkpoint \(ladderPos)\(via): \(summary)\nPaused for your review — approve to continue or send me back.",
+                       conversationId: conversationId)
+        return "Checkpoint \(ladderPos) reached and graded. Paused for user review."
+    }
+
     /// Tracks the pending auto-reprompt task per conversation so the goal loop can be cancelled.
     private var repromptTasks: [UUID: Task<Void, Never>] = [:]
 
@@ -516,6 +548,7 @@ actor IrisEngine {
                     required: ["milestone_summary"]
                 )
             ))
+            toolsList.append(SubagentManager.milestoneDelegationDeclaration())
         }
 
         // Offer an optional `intent` on every tool so the model can attach a one-line
@@ -732,9 +765,14 @@ actor IrisEngine {
                     // return control to the parent/user (or end the evaluator), so the turn
                     // is over. Ending here also prevents an unbounded turn loop if the model
                     // keeps re-issuing the same tool call.
+                    // `delegate_milestone` is included unconditionally. On its success path the
+                    // turn MUST end (the run is now paused). On its failure path ending the turn is
+                    // also correct: the auto-reprompt re-arms the loop, so the main agent continues
+                    // on the same milestone at the cost of one extra model call.
                     if toolCalls.contains(where: {
                         $0.name == "goal_complete" ||
                         $0.name == "reach_checkpoint" ||
+                        $0.name == "delegate_milestone" ||
                         $0.name == "submit_evaluation"
                     }) {
                         turnFinished = true
@@ -900,19 +938,21 @@ actor IrisEngine {
             let effort = functionCall.args["effort"]?.stringValue ?? "medium"
             let isBackground = (functionCall.args["background"]?.stringValue.lowercased() == "true")
             // Slice B3: optional parent-authored definition-of-done for the delegated unit. Absent
-            // ⇒ the unchanged B2 path (no contract, no grade). Pass this engine's client through so
-            // the subagent and its grader are driven by the same client the parent is.
-            let criteria = functionCall.args["criteria"]
+            // ⇒ the unchanged B2 path (no contract, no grade). Always graded when present — B4's
+            // ungraded units are built by `delegate_milestone`, not by this tool. Pass this engine's
+            // client through so the subagent and its grader are driven by the same client the parent is.
+            let unit = GoalContractParsing.unitContract(task: task, criteriaJSON: functionCall.args["criteria"])
+                .map { DelegatedUnit(contract: $0, grade: true) }
             let subagentClient = self.client
 
             if isBackground {
                 Task {
-                    let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, criteria: criteria, client: subagentClient)
+                    let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient).rendered
                     await self.handleSystemEvent("Background subagent result:\n\(rendered)", source: "SubagentManager", conversationId: conversationId)
                 }
                 result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes."
             } else {
-                result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, criteria: criteria, client: subagentClient)
+                result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient).rendered
             }
         } else if functionCall.name == "goal_complete", let summary = functionCall.args["summary"]?.stringValue {
             // Ladder gate: with an active checkpoint ladder, `goal_complete` is valid ONLY at the
@@ -977,24 +1017,52 @@ actor IrisEngine {
                 result = "This is the final checkpoint — call `goal_complete` to finish, not `reach_checkpoint`."
                 return result
             }
-            let projected = contract.projectedContract(throughMilestone: contract.currentMilestone)
-            let gradeWorkspace = workspacePath ?? FileManager.default.currentDirectoryPath
-            await MainActor.run {
-                localState?.recordCompletionSelfReport(for: conversationId, statusJSON: statusReport)
-                localState?.beginGoalEvaluation(for: conversationId, contract: projected)
-                localState?.setCheckpointPaused(for: conversationId)   // leaves activeGoal set
+            result = await performCheckpoint(conversationId: conversationId, contract: contract,
+                                             summary: summary, statusReport: statusReport,
+                                             workspacePath: workspacePath)
+        } else if functionCall.name == "delegate_milestone", principal == .main {
+            let contract = await MainActor.run {
+                localState?.conversations.first(where: { $0.id == conversationId })?.goalContract
             }
-            // Await the grade (unlike goal_complete's detached grade) — the human should see the
-            // verdict before re-engaging. The reprompt guard (Task 6) keeps the loop quiet meanwhile.
-            let graderClient = self.client
-            if let graderApp = localState {
-                await GoalEvaluator.shared.evaluate(contract: projected, workspace: gradeWorkspace,
-                                                    originatingConversationId: conversationId,
-                                                    app: graderApp, client: graderClient)
+            guard let contract, contract.hasLadder else {
+                result = "No checkpoint ladder is active, so there is no milestone to delegate. Use `invoke_subagent` for ad-hoc delegation, or `goal_complete` when the goal is finished."
+                return result
             }
-            let ladderPos = "\(contract.currentMilestone + 1) of \(contract.milestones.count)"
-            await pushToUI(role: .agent, text: "Reached checkpoint \(ladderPos): \(summary)\nPaused for your review — approve to continue or send me back.", conversationId: conversationId)
-            result = "Checkpoint \(ladderPos) reached and graded. Paused for user review."
+            if contract.isFinalMilestone {
+                result = "The final checkpoint is not delegable — terminal completion stays a single path. Use `invoke_subagent` with criteria to hand out the work, then call `goal_complete` yourself."
+                return result
+            }
+            guard let unitContract = contract.currentMilestoneUnitContract() else {
+                result = "The current checkpoint has no criteria, so there is nothing to delegate."
+                return result
+            }
+            let role = functionCall.args["role"]?.stringValue ?? "engineer"
+            let effort = functionCall.args["effort"]?.stringValue ?? "medium"
+            let brief = functionCall.args["brief"]?.stringValue
+            // The subagent's prompt is the milestone objective plus any approach notes. Its
+            // definition of done rides in the contract, not here — nothing the model wrote can
+            // change what the work is measured against.
+            let task = brief.map { "\(unitContract.objective)\n\nApproach notes from the parent: \($0)" }
+                ?? unitContract.objective
+            // grade: false — the CHECKPOINT grades these criteria cumulatively (spec §6); grading
+            // the subagent too would re-grade the same criteria in a second evaluator loop.
+            let outcome = await SubagentManager.shared.runSubagent(
+                role: role, task: task, effort: effort, parentConversationId: conversationId,
+                unit: DelegatedUnit(contract: unitContract, grade: false), client: self.client)
+
+            // Only a `.completed` subagent reaches the checkpoint — it is the run that claimed the
+            // milestone is done. Anything else claimed nothing: hand the outcome back to the loop
+            // and let the main agent decide whether to delegate again, work the milestone itself,
+            // or reach the checkpoint on its own. A milestone nobody claimed done must not
+            // interrupt a human.
+            guard outcome.status == .completed else {
+                result = "\(outcome.rendered)\n\nThe milestone is NOT complete — no checkpoint was reached. Work it yourself, or delegate again."
+                return result
+            }
+            result = await performCheckpoint(
+                conversationId: conversationId, contract: contract,
+                summary: outcome.rendered, statusReport: nil,
+                workspacePath: workspacePath, via: " via subagent '\(role)'")
         } else if functionCall.name == "submit_evaluation" {
             let payload = functionCall.args["evaluations"]
             await MainActor.run {
