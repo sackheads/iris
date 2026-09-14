@@ -212,6 +212,18 @@ actor IrisEngine {
         // Clear the goal FIRST so the summary turn cannot re-enter the cap/loop-detection paths
         // (both gated on activeGoal != nil) and recurse into softStopWithSummary.
         await MainActor.run { localState?.clearGoal(for: conversationId) }
+
+        // The evaluator cannot comply with the summary turn below: `EvaluatorToolset.restrict`
+        // leaves it read_file / run_command / submit_evaluation, so it has no `goal_complete`, and
+        // it has no `onSubagentComplete` entry either. Asking anyway spends a model call on an
+        // impossible instruction and writes a transcript that reads like a graceful termination
+        // while doing nothing. Ending the loop here is sufficient — `GoalEvaluator`'s safety net
+        // records a `.failed` evaluation for any run that ends without `submit_evaluation` (#104).
+        if principal == .evaluator {
+            await pushToUI(role: .system, text: "[\(approvalOrigin)] \(reason) Stopping without a verdict.", conversationId: conversationId)
+            return
+        }
+
         await pushToUI(role: .system, text: "[\(approvalOrigin)] \(reason) Summarizing and stopping.", conversationId: conversationId)
         await processInput(
             "You have reached a stopping condition (\(reason)). Summarize what you accomplished and what is blocking you, then call `goal_complete` with that summary. Do not take any other action.",
