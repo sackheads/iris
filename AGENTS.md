@@ -12,16 +12,16 @@ The primary provider abstraction supports Anthropic, Gemini, and OpenAI. Local i
 
 ```sh
 swift build                          # compile
-swift test --no-parallel             # full suite — the flag is REQUIRED, see below
-swift test --no-parallel --filter MyTestSuite   # focused run
+swift test                           # full suite
+swift test --filter MyTestSuite      # focused run
 ```
 
-**`--no-parallel` is not optional.** Several suites mutate the `ConfigManager` singleton, whose
-setters persist through `didSet` to `UserDefaults`. Run in parallel they race — and because the
-save/mutate/restore idiom can't be correct under concurrency, a bad restore gets written to disk and
-poisons the *next* run. Plain `swift test` fails most runs on a clean checkout; `--no-parallel`
-passes. Tracked in [#109](https://github.com/sackheads/iris/issues/109), which has the real fix
-(stop persisting config under test, inject the guard flag); drop the flag once that lands.
+**Never mutate `ConfigManager.shared` in a test.** It is process-global and suites run in
+parallel, so mutating it races — and its setters persist, so a bad value used to outlive the process
+and poison the *next* run (#109). Two seams exist so you don't have to: construct your own
+`ConfigManager()` and inject it (`ModelLEDBar(config:)`), or pass `protectionEnabled:` to
+`InjectionGuard.sanitize` / `SkillManager.loadCustomRules`. Under test `ConfigManager` reads and
+writes a volatile per-process store, so nothing you set can escape the run.
 
 No Makefile. No lint config beyond the Swift compiler's own checks. Keep it that way unless asked.
 
@@ -80,7 +80,7 @@ docs/                     # design specs, plans, reviews, roadmaps
 
 ## Pre-commit checklist
 
-- [ ] `swift test --no-parallel` is green
+- [ ] `swift test` is green
 - [ ] If you added a field to a persisted `Codable` type: it uses `decodeIfPresent`
 - [ ] If you added or changed a tool parameter: `getTools()` schema and `execute()` handler are both updated
 - [ ] If you changed user-facing behaviour: `README.md` is updated in the same commit

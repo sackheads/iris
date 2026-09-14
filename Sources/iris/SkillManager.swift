@@ -21,7 +21,10 @@ struct SkillManager {
     /// as a combined Markdown block to be appended directly to the system prompt.
     /// `extraRuleFiles: nil` pulls enabled plugins' rule files from PluginManager; tests
     /// pass explicit rule file URLs.
-    func loadCustomRules(paths: IrisPaths = .default, extraRuleFiles: [URL]? = nil) async -> String {
+    /// `protectionEnabled` is injectable so tests can pin guard gating without mutating the shared
+    /// config singleton (#109); production leaves it nil and the config decides.
+    func loadCustomRules(paths: IrisPaths = .default, extraRuleFiles: [URL]? = nil,
+                         protectionEnabled: Bool? = nil) async -> String {
         let rulesDir = paths.rulesDir.path
         let fileManager = FileManager.default
 
@@ -53,7 +56,8 @@ struct SkillManager {
                !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let structuralSafe = PromptInjectionGuard.sanitizeUntrustedInput(content)
                 let safe = await InjectionGuard.sanitize(
-                    structuralSafe, contextTag: "plugin_rule_\(fileURL.lastPathComponent)", maxTier: .tier3_canary)
+                    structuralSafe, contextTag: "plugin_rule_\(fileURL.lastPathComponent)",
+                    maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
                 rulesContent += "\n\n# Rule (plugin): \(fileURL.lastPathComponent)\n\(safe)\n"
             }
         }

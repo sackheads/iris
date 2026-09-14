@@ -23,7 +23,13 @@ public struct InjectionGuard {
     /// injection classifier flag the scaffolding itself (~0.9999) and block all benign tool
     /// output; wrapping happens only after classification. See the "Guardrail Diagnostics"
     /// regression in docs/prompt_guard_coreml.md.
-    public static func sanitize(_ rawInput: String, contextTag: String = "", maxTier: SanitizationTier = .tier1_structural) async -> String {
+    /// `protectionEnabled` overrides the tier-2/3 gate. Injectable so a test can pin the gating it
+    /// depends on instead of mutating `ConfigManager.shared` — that singleton is process-global, and
+    /// parallel suites racing on it is the in-run half of #109. nil means "consult the config",
+    /// which is what production always does.
+    public static func sanitize(_ rawInput: String, contextTag: String = "",
+                                maxTier: SanitizationTier = .tier1_structural,
+                                protectionEnabled: Bool? = nil) async -> String {
         let __turnID = PerformanceProfiler.currentTurnID
         let __start = CFAbsoluteTimeGetCurrent()
         defer {
@@ -47,7 +53,7 @@ public struct InjectionGuard {
         }
 
         // Tier 2: Local Token-Classification (CoreML/ONNX) — evaluates the unwrapped content.
-        let isTier2Safe = await executeTier2CoreML(clean)
+        let isTier2Safe = await executeTier2CoreML(clean, protectionEnabled: protectionEnabled)
         if !isTier2Safe {
             return wrapBlocked("[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]", source: source)
         }
@@ -57,7 +63,7 @@ public struct InjectionGuard {
         }
 
         // Tier 3: Behavioral Canary Probe — also evaluates the unwrapped content.
-        let isTier3Safe = await executeTier3Canary(clean)
+        let isTier3Safe = await executeTier3Canary(clean, protectionEnabled: protectionEnabled)
         if !isTier3Safe {
             return wrapBlocked("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]", source: source)
         }
@@ -101,8 +107,8 @@ public struct InjectionGuard {
         String(raw.filter { $0 != "\"" && $0 != "<" && $0 != ">" && !$0.isNewline })
     }
     
-    private static func executeTier2CoreML(_ input: String) async -> Bool {
-        guard ConfigManager.shared.enableAdvancedPromptInjectionProtection else {
+    private static func executeTier2CoreML(_ input: String, protectionEnabled: Bool? = nil) async -> Bool {
+        guard protectionEnabled ?? ConfigManager.shared.enableAdvancedPromptInjectionProtection else {
             return true
         }
         try? await CoreMLEvaluator.shared.loadModelIfNeeded()
@@ -131,8 +137,8 @@ public struct InjectionGuard {
         }
     }
     
-    private static func executeTier3Canary(_ input: String) async -> Bool {
-        guard ConfigManager.shared.enableAdvancedPromptInjectionProtection else {
+    private static func executeTier3Canary(_ input: String, protectionEnabled: Bool? = nil) async -> Bool {
+        guard protectionEnabled ?? ConfigManager.shared.enableAdvancedPromptInjectionProtection else {
             return true
         }
         
