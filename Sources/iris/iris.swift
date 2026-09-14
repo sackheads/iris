@@ -1044,7 +1044,13 @@ actor IrisEngine {
             let rendered = await SubagentManager.shared.runSubagent(
                 role: role, task: task, effort: effort, parentConversationId: conversationId,
                 unit: DelegatedUnit(contract: unitContract, grade: false), client: self.client)
-            result = rendered
+            // The subagent finished the milestone, so the checkpoint is reached: grade cumulatively,
+            // pause, and surface the subagent's result beside the verdict. Task 6 adds the status
+            // check that keeps a subagent which did NOT complete from getting here.
+            result = await performCheckpoint(
+                conversationId: conversationId, contract: contract,
+                summary: rendered, statusReport: nil,
+                workspacePath: workspacePath, via: " via subagent '\(role)'")
         } else if functionCall.name == "submit_evaluation" {
             let payload = functionCall.args["evaluations"]
             await MainActor.run {
