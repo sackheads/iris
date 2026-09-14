@@ -50,3 +50,27 @@ enum GoalContractParsing {
                             state: .draft)
     }
 }
+
+extension GoalContractParsing {
+    /// Slice B3 — builds the bounded unit contract a parent hands a delegated subagent. The
+    /// parent's `task` becomes the objective and `criteria` are parsed by the very same code path
+    /// as `propose_goal_contract`, so invalid/empty entries are skipped identically.
+    ///
+    /// Returns nil when no usable criterion survives parsing: no contract means no grade, which is
+    /// the unchanged B2 delegation path rather than an error.
+    static func unitContract(task: String, criteriaJSON: JSONValue?) -> GoalContract? {
+        guard let criteriaJSON,
+              let parsed = contract(from: ["objective": .string(task), "criteria": criteriaJSON]),
+              !parsed.criteria.isEmpty
+        else { return nil }
+
+        // Strip any milestone grouping the parent supplied. B3 deliberately does not wire the B1
+        // ladder to delegation, and a ladder here would actively strand the run: the oracle would
+        // tell the subagent to call `reach_checkpoint`, which is gated to the main principal, so
+        // it would loop to its iteration cap instead of finishing.
+        var unit = parsed
+        unit.milestones = []
+        unit.currentMilestone = 0
+        return unit
+    }
+}

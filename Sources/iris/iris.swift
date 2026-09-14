@@ -355,20 +355,7 @@ actor IrisEngine {
             )
         ))
         
-        toolsList.append(FunctionDeclaration(
-            name: "invoke_subagent",
-            description: "Spawn an isolated subagent with a constrained persona to execute a task. By default, this blocks until the subagent completes. Set 'background' to true to run it asynchronously and receive a notification when it finishes.",
-            parameters: Schema(
-                type: "OBJECT",
-                properties: [
-                    "role": Schema(type: "STRING", description: "The persona (e.g., code_reviewer, security_auditor, researcher, engineer)"),
-                    "task": Schema(type: "STRING", description: "The exact task prompt for the subagent"),
-                    "effort": Schema(type: "STRING", description: "The reasoning effort required. 'easy' for simple/repetitive lookups, 'medium' for standard tasks, 'hard' for complex problem solving."),
-                    "background": Schema(type: "BOOLEAN", description: "Optional. If true, returns immediately while the subagent runs in the background. The system will notify you with the results when done.")
-                ],
-                required: ["role", "task", "effort"]
-            )
-        ))
+        toolsList.append(SubagentManager.toolDeclaration())
         
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
@@ -906,15 +893,20 @@ actor IrisEngine {
             // the model omits it.
             let effort = functionCall.args["effort"]?.stringValue ?? "medium"
             let isBackground = (functionCall.args["background"]?.stringValue.lowercased() == "true")
-            
+            // Slice B3: optional parent-authored definition-of-done for the delegated unit. Absent
+            // ⇒ the unchanged B2 path (no contract, no grade). Pass this engine's client through so
+            // the subagent and its grader are driven by the same client the parent is.
+            let criteria = functionCall.args["criteria"]
+            let subagentClient = self.client
+
             if isBackground {
                 Task {
-                    let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId)
+                    let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, criteria: criteria, client: subagentClient)
                     await self.handleSystemEvent("Background subagent result:\n\(rendered)", source: "SubagentManager", conversationId: conversationId)
                 }
                 result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes."
             } else {
-                result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId)
+                result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, criteria: criteria, client: subagentClient)
             }
         } else if functionCall.name == "goal_complete", let summary = functionCall.args["summary"]?.stringValue {
             // Ladder gate: with an active checkpoint ladder, `goal_complete` is valid ONLY at the

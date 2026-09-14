@@ -2,7 +2,7 @@
 
 * **Issues**: [#13](https://github.com/sackheads/iris/issues/13) (inner/outer loop semantics) — the **in-envelope half**. Builds on merged **slice B2** ([2026-08-02-subagent-structured-result.md](2026-08-02-subagent-structured-result.md)), **B1** ([2026-08-01-goal-checkpoint-ladder.md](2026-08-01-goal-checkpoint-ladder.md)), **A** ([2026-07-28-goal-contract.md](2026-07-28-goal-contract.md)), and **C** ([2026-07-29-goal-drift-evaluator.md](2026-07-29-goal-drift-evaluator.md)).
 * **Date**: 2026-08-25
-* **Status**: Approved (design)
+* **Status**: Implemented (2026-09-13). The design below is as-built; deviations are noted inline.
 
 ## 1. Overview
 
@@ -75,6 +75,8 @@ The unverified self-report and the trusted verdict sit side by side, labeled. Th
 
 The subagent is graded **exactly the way the main agent is graded today**: `GoalEvaluator.evaluate` spins up a fresh `.evaluator`-principal conversation, sets *its* workspace to the target directory, and re-runs the executable checks in its own sandbox container mounting that workspace. B3 changes nothing in the evaluator — it only points `workspace:` at the subagent's effective workspace and `originatingConversationId:` at the subagent.
 
+**Workspace caveat (sharpened by this slice — [#68](https://github.com/sackheads/iris/issues/68)).** A subagent conversation is never given a bound workspace, so its effective workspace — and therefore the directory the grader inspects and re-runs `check` commands in — is the process cwd, which today is the Iris source repo. A `check` like `swift test` will happily pass against the Iris tree regardless of what the subagent did. The verdict is only as trustworthy as the workspace it grades, and until #68 gives goals a dedicated workspace, an `executable` criterion in a unit contract can report `met` on evidence that has nothing to do with the delegated unit. Qualitative criteria are unaffected.
+
 **Inherited caveat (stated, not introduced):** both `.subagent` and `.evaluator` principals always intend `.sandboxed`, and each conversation gets its own container. `write_file` output lands on the host workspace (visible to the grader's mounted workspace); a `check` that depends on tools the subagent installed only inside *its own* container may read `not_met` in the fresh grader container. This is a pre-existing property of how the main agent is graded, accepted here for consistency, not a new B3 behavior.
 
 ## 7. Error handling & edge cases
@@ -111,3 +113,13 @@ The subagent is graded **exactly the way the main agent is graded today**: `Goal
 Remaining B-arc:
 - **B4 — checkpoint delegation (capstone):** a B1 checkpoint may hand its milestone to a bounded subagent — the milestone's criteria become the unit contract (§3), the run produces a graded `SubagentResult` (this slice), and the checkpoint's verdict is the subagent's verdict. Depends on B1 + B2 + B3.
 - **D — deterministic done-gates**, **E — the ratchet**, **F — ground-truth progress view** — independent, per the slice-A roadmap.
+
+## 11. As-built notes (2026-09-13)
+
+Deviations from and clarifications to the design above, recorded at implementation:
+
+- **Milestone labels in `criteria` are stripped.** `GoalContractParsing` groups criteria into milestones when they carry a `milestone` label. B3 does not wire the ladder to delegation (§2), and a ladder here would actively strand the run: the oracle would instruct the subagent to call `reach_checkpoint`, which is gated to the `.main` principal, so the subagent would loop to its iteration cap instead of finishing. `unitContract(task:criteriaJSON:)` therefore drops any milestone grouping.
+- **`unitContract` is carried for every contracted run, not only graded ones.** §4 describes it as "nil ⇒ B2-style ungraded run". As built, it is present whenever a contract was bound — including a `.timedOut`/`.failed` run — because the subagent did run against it and the parent benefits from seeing what it was held to. Only `verdict` is gated on `.completed`.
+- **The self-report line is relabeled only when a verdict is present.** With a trusted grade beside it the summary renders as `Summary (UNVERIFIED self-report): …`; with no verdict there is nothing to contrast it against and the line stays byte-for-byte as slice B2 wrote it, preserving the regression guarantee in §2.
+- **The grader's client is the parent engine's client**, threaded through `runSubagent(client:)` — the same pattern `goal_complete` already uses for the main agent's grade, and what makes the loop tests network-free.
+- **`invoke_subagent`'s schema moved to `SubagentManager.toolDeclaration()`** so the contract-input shape is unit-testable without standing up an engine. Behaviour is unchanged; the `criteria` ARRAY declares `items` (Gemini rejects arrays without it).

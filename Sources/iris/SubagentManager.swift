@@ -17,7 +17,16 @@ final class SubagentManager: @unchecked Sendable {
         self.state = state
     }
     
-    func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID, maxIterations: Int = 3000) async -> String {
+    /// Runs a delegated unit to termination and returns the prose the parent sees.
+    ///
+    /// Slice B3: when the parent supplies `criteria`, they become a LOCKED `GoalContract` scoped to
+    /// this unit — the subagent runs against slice A's oracle, and on a `.completed` termination the
+    /// slice-C evaluator grades it from fresh context. With no criteria this is the unchanged B2
+    /// path: a plain goal, no contract, no grade. `client` is injectable so tests can drive both the
+    /// subagent and its grader without touching the network.
+    func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID,
+                     criteria: JSONValue? = nil, maxIterations: Int = 3000,
+                     client: (any LLMClientProtocol)? = nil) async -> String {
         guard let appState = self.state else {
             return "Error: AppState not available for subagent execution."
         }
@@ -40,15 +49,23 @@ final class SubagentManager: @unchecked Sendable {
         }
 
         // 2. Instantiate a fresh IrisEngine linked to this conversation
-        let engine = IrisEngine(state: appState, tier: tier, principal: .subagent, roleLabel: role)
+        let engine = IrisEngine(state: appState, tier: tier, principal: .subagent, roleLabel: role,
+                                client: client ?? LLMClient())
 
         // 3. Craft the role-specific prompt
         let customPromptText = generateRolePrompt(role: role)
         await engine.setSystemPrompt(text: customPromptText)
 
-        // 4. Inject the initial task and set the goal so the engine auto-loops
+        // 4. Inject the initial task and set the goal so the engine auto-loops.
+        // With a unit contract the objective IS the task, so the loop gate (activeGoal != nil) is
+        // satisfied either way; the contract additionally injects slice A's oracle each iteration.
+        let unitContract = GoalContractParsing.unitContract(task: task, criteriaJSON: criteria)
         await MainActor.run {
-            appState.setGoal(for: subagentId, goal: task)
+            if let unitContract {
+                appState.setGoalContract(for: subagentId, unitContract)
+            } else {
+                appState.setGoal(for: subagentId, goal: task)
+            }
             appState.appendMessage(role: .system, content: "Starting subagent with role '\(role)' to execute task:\n\(task)", to: subagentId)
         }
 
@@ -92,10 +109,32 @@ final class SubagentManager: @unchecked Sendable {
         }
         let termination = await holder.get() ?? SubagentTermination(status: .failed, summary: "Subagent completed with no summary.", calledGoalComplete: false)
         let files = await MainActor.run { appState.drainSubagentWrites(for: subagentId) }
+
+        // Grade the unit. ONLY a `.completed` run is graded: it is the one that claimed the unit is
+        // done. A failed/timed-out/cancelled subagent claimed nothing, so its status carries the
+        // story and `verdict` stays nil rather than reporting a grade against unfinished work.
+        // Awaited, not detached (unlike the main agent's goal_complete): the parent must receive the
+        // verdict IN the result it branches on.
+        var verdict: GoalEvaluation? = nil
+        if termination.status == .completed, let unitContract {
+            // The directory the subagent actually worked in. With no bound workspace its
+            // run_command inherits the process cwd, so the grader is pointed at the same place.
+            let workspace = await MainActor.run {
+                appState.conversations.first { $0.id == subagentId }?.workspacePath
+            } ?? FileManager.default.currentDirectoryPath
+            await GoalEvaluator.shared.evaluate(contract: unitContract, workspace: workspace,
+                                                originatingConversationId: subagentId,
+                                                app: appState, client: client ?? LLMClient())
+            verdict = await MainActor.run {
+                appState.conversations.first { $0.id == subagentId }?.lastGoalEvaluation
+            }
+        }
+
         let result = SubagentResult(role: role, status: termination.status,
                                     calledGoalComplete: termination.calledGoalComplete,
                                     summary: termination.summary, filesWritten: files,
-                                    startedAt: startedAt, endedAt: Date())
+                                    startedAt: startedAt, endedAt: Date(),
+                                    unitContract: unitContract, verdict: verdict)
         await MainActor.run {
             appState.setSubagentResult(for: subagentId, result)
             appState.removeSubagent(id: subagentId)
@@ -103,6 +142,30 @@ final class SubagentManager: @unchecked Sendable {
         return result.renderedForParent()
     }
     
+    /// The `invoke_subagent` tool schema. Declared beside the manager it drives so the contract
+    /// input (slice B3) is unit-testable without standing up an engine.
+    static func toolDeclaration() -> FunctionDeclaration {
+        FunctionDeclaration(
+            name: "invoke_subagent",
+            description: "Spawn an isolated subagent with a constrained persona to execute a task. By default, this blocks until the subagent completes. Set 'background' to true to run it asynchronously and receive a notification when it finishes. Criteria are optional; when you provide them, the run is graded by an independent evaluator and the verdict is returned to you alongside the subagent's own (unverified) summary.",
+            parameters: Schema(
+                type: "OBJECT",
+                properties: [
+                    "role": Schema(type: "STRING", description: "The persona (e.g., code_reviewer, security_auditor, researcher, engineer)"),
+                    "task": Schema(type: "STRING", description: "The exact task prompt for the subagent"),
+                    "effort": Schema(type: "STRING", description: "The reasoning effort required. 'easy' for simple/repetitive lookups, 'medium' for standard tasks, 'hard' for complex problem solving."),
+                    "background": Schema(type: "BOOLEAN", description: "Optional. If true, returns immediately while the subagent runs in the background. The system will notify you with the results when done."),
+                    "criteria": Schema(type: "ARRAY", description: "Optional definition of done for this delegated unit. When present, the subagent runs against these criteria and an independent grader verifies them, returning a trusted verdict. You author them — the subagent does not negotiate them.", items: Schema(type: "OBJECT", properties: [
+                        "text": Schema(type: "STRING", description: "The criterion — what 'done' looks like for this unit."),
+                        "kind": Schema(type: "STRING", description: "executable | qualitative | humanJudged"),
+                        "check": Schema(type: "STRING", description: "A runnable command/test the grader re-runs. ONLY for executable criteria.")
+                    ], required: ["text"]))
+                ],
+                required: ["role", "task", "effort"]
+            )
+        )
+    }
+
     func generateRolePrompt(role: String) -> String {
         let base = "You are Iris, operating in a specialized subagent role: **\(role.uppercased())**.\n" +
                    "You are executing within a fully configurable sandboxed micro-VM. You have full root permissions inside this VM environment to install packages, configure tools, and run commands needed to complete your objective.\n\n"
