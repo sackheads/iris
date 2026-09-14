@@ -1,5 +1,17 @@
 import Foundation
 
+/// A bounded unit of work handed to a subagent: the contract it runs against, and whether that
+/// contract is independently graded when the run completes.
+///
+/// `grade: false` binds the contract as an oracle only — the subagent knows its definition of done
+/// while working, and `SubagentResult.verdict` stays nil. Slice B4 delegates a ladder milestone
+/// this way, because the CHECKPOINT grades it cumulatively and a second grade of the same criteria
+/// would be redundant work.
+struct DelegatedUnit: Sendable {
+    var contract: GoalContract
+    var grade: Bool = true
+}
+
 final class SubagentManager: @unchecked Sendable {
     static let shared = SubagentManager()
     
@@ -19,13 +31,14 @@ final class SubagentManager: @unchecked Sendable {
     
     /// Runs a delegated unit to termination and returns the prose the parent sees.
     ///
-    /// Slice B3: when the parent supplies `criteria`, they become a LOCKED `GoalContract` scoped to
-    /// this unit — the subagent runs against slice A's oracle, and on a `.completed` termination the
-    /// slice-C evaluator grades it from fresh context. With no criteria this is the unchanged B2
-    /// path: a plain goal, no contract, no grade. `client` is injectable so tests can drive both the
-    /// subagent and its grader without touching the network.
+    /// Slice B3: when the parent supplies a `unit`, its contract is bound LOCKED to this run — the
+    /// subagent works against slice A's oracle — and on a `.completed` termination the slice-C
+    /// evaluator grades it from fresh context, unless the unit asked not to be graded (slice B4,
+    /// where the checkpoint grades the same criteria cumulatively). With no unit this is the
+    /// unchanged B2 path: a plain goal, no contract, no grade. `client` is injectable so tests can
+    /// drive both the subagent and its grader without touching the network.
     func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID,
-                     criteria: JSONValue? = nil, maxIterations: Int = 3000,
+                     unit: DelegatedUnit? = nil, maxIterations: Int = 3000,
                      client: (any LLMClientProtocol)? = nil) async -> String {
         guard let appState = self.state else {
             return "Error: AppState not available for subagent execution."
@@ -67,7 +80,7 @@ final class SubagentManager: @unchecked Sendable {
         // 4. Inject the initial task and set the goal so the engine auto-loops.
         // With a unit contract the objective IS the task, so the loop gate (activeGoal != nil) is
         // satisfied either way; the contract additionally injects slice A's oracle each iteration.
-        let unitContract = GoalContractParsing.unitContract(task: task, criteriaJSON: criteria)
+        let unitContract = unit?.contract
         await MainActor.run {
             if let unitContract {
                 appState.setGoalContract(for: subagentId, unitContract)
@@ -124,13 +137,13 @@ final class SubagentManager: @unchecked Sendable {
         // Awaited, not detached (unlike the main agent's goal_complete): the parent must receive the
         // verdict IN the result it branches on.
         var verdict: GoalEvaluation? = nil
-        if termination.status == .completed, let unitContract {
+        if termination.status == .completed, let unit, unit.grade {
             // The directory the subagent actually worked in. With no bound workspace its
             // run_command inherits the process cwd, so the grader is pointed at the same place.
             let workspace = await MainActor.run {
                 appState.conversations.first { $0.id == subagentId }?.workspacePath
             } ?? FileManager.default.currentDirectoryPath
-            verdict = await GoalEvaluator.shared.evaluate(contract: unitContract, workspace: workspace,
+            verdict = await GoalEvaluator.shared.evaluate(contract: unit.contract, workspace: workspace,
                                                           originatingConversationId: subagentId,
                                                           app: appState, client: client ?? LLMClient())
         }

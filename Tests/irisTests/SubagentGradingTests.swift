@@ -104,6 +104,12 @@ struct SubagentGradingTests {
         .array([.object(["text": .string(text), "kind": .string("qualitative")])])
     }
 
+    /// A graded unit, built the way `invoke_subagent` builds one.
+    private func gradedUnit(_ text: String, task: String = "build a widget") -> DelegatedUnit {
+        DelegatedUnit(contract: GoalContractParsing.unitContract(
+            task: task, criteriaJSON: criteriaJSON(text))!, grade: true)
+    }
+
     // NOTE: assertions below read the returned prose and this suite's own client, never
     // `state.conversations`. `SubagentManager.shared` holds its AppState in a global, so a suite
     // running in parallel can swap it mid-run — the rendered result and the injected client are
@@ -125,7 +131,7 @@ struct SubagentGradingTests {
 
         let rendered = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "build a widget", effort: "easy",
-            parentConversationId: parentId, criteria: criteriaJSON("the widget exists"),
+            parentConversationId: parentId, unit: gradedUnit("the widget exists"),
             client: client)
 
         #expect(client.graderCalls > 0, "the evaluator should have been invoked")
@@ -142,7 +148,7 @@ struct SubagentGradingTests {
 
         let rendered = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "build a widget", effort: "easy",
-            parentConversationId: parentId, criteria: criteriaJSON("the widget exists"),
+            parentConversationId: parentId, unit: gradedUnit("the widget exists"),
             maxIterations: 2, client: client)
 
         // A run that never claimed done is never graded, even though it carried a contract.
@@ -220,12 +226,32 @@ struct SubagentGradingTests {
                                       graderVerdict: ("met", "saw the widget"))
         _ = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "build a widget", effort: "easy",
-            parentConversationId: parentId, criteria: criteriaJSON("the widget exists"),
+            parentConversationId: parentId, unit: gradedUnit("the widget exists"),
             client: client)
 
         #expect(client.graderCalls > 0)
         #expect(client.graderPrompt.contains(workspace),
                 "the grader should inspect the parent's workspace, not the process cwd")
+    }
+
+    @Test("an ungraded unit binds the contract as an oracle but runs no grader")
+    func ungradedUnitIsNotGraded() async throws {
+        let (_, parentId) = freshState()
+        let client = RoutingLLMClient(subagent: [goalComplete, response(nil)],
+                                      graderVerdict: ("met", "should never be asked for"))
+        let contract = try #require(GoalContractParsing.unitContract(
+            task: "build a widget", criteriaJSON: criteriaJSON("the widget exists")))
+
+        let rendered = await SubagentManager.shared.runSubagent(
+            role: "engineer", task: "build a widget", effort: "easy",
+            parentConversationId: parentId,
+            unit: DelegatedUnit(contract: contract, grade: false),
+            client: client)
+
+        // The unit was bound (the parent is told what it was held to) but nothing graded it.
+        #expect(client.graderCalls == 0, "grade: false must not spin up an evaluator")
+        #expect(!rendered.contains("Independent grader verdict"))
+        #expect(rendered.contains("Held to 1 criterion"))
     }
 
     // MARK: - Persistence
