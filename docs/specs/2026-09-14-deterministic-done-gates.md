@@ -2,7 +2,7 @@
 
 * **Issues**: [#9](https://github.com/sackheads/iris/issues/9) (deterministic gates) — the **gate loop**. Consumes **C** ([2026-07-29-goal-drift-evaluator.md](2026-07-29-goal-drift-evaluator.md)) and **A** ([2026-07-28-goal-contract.md](2026-07-28-goal-contract.md)).
 * **Date**: 2026-09-14
-* **Status**: Approved (design)
+* **Status**: Implemented (2026-09-14). The design below is as-built; deviations are noted in §11.
 
 ## 1. Overview
 
@@ -151,3 +151,13 @@ With D1, a verdict finally *does* something. Remaining:
 - **D2 — interactive `humanJudged` verdicts:** a human accept/reject feeding the gate, which lets `human_pending` become blocking.
 - **D3 — checkpoint gating:** auto-advance a checkpoint on an all-met verdict; deferred here by B1 §2 and B4 §2.
 - **E — the ratchet**, **F — ground-truth progress view** — independent, per the slice-A roadmap.
+
+## 11. As-built notes
+
+The design was implemented as written. Three things worth recording:
+
+- **`GoalEvaluation` needed an explicit memberwise `init` as well as the custom `init(from:)`.** The plan predicted the custom decoder might suppress the synthesized memberwise initializer and said to add one if the compiler complained. It does suppress it — the plan's stated reasoning for *why* was wrong, but the instruction was right. Verified by removing the explicit init and confirming the exact compile failures at the three existing construction sites, then restoring.
+- **A refused `goal_complete` reaches the agent through `Conversation.history`, not `messages`.** The tool result becomes a `functionResponse` part in the model-facing history; `messages` is the human-facing transcript. The plan's evidence test asserted against `messages` and had to be corrected. Behaviour was always right; the test's assumption was not.
+- **`waive_criterion` is gated separately from the ladder tools.** It is offered on `principal == .main && contract.isLocked && gateAttempts > 0` — deliberately *not* inside the `hasLadder && !isFinalMilestone` block, since a waiver has nothing to do with checkpoints and must be available to a flat contract.
+
+Scope guards for §2 and §8 live in `DoneGateScopeTests`: a contract-less goal, a subagent, a soft-stop, and a non-final checkpoint each behave exactly as before.
