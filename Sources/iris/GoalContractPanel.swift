@@ -656,6 +656,17 @@ struct CompletionReportSection: View {
             .padding(.horizontal, 12)
             .padding(.top, 10)
 
+            // Slice D1 — an ungated completion says so. A goal that ran out of retries with work
+            // still unmet must never look like one that passed.
+            if let outcome = evaluation?.gateOutcome,
+               let banner = outcome.bannerText(unmetCount: evaluation?.criteria.filter { $0.verdict == .notMet }.count ?? 0) {
+                Label(banner, systemImage: "exclamationmark.shield")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 12)
+            }
+
             if let evaluation {
                 // Two-column drift view — spine is the grader's criteria list.
                 if evaluation.criteria.isEmpty {
@@ -670,7 +681,8 @@ struct CompletionReportSection: View {
                                 verdict: verdict,
                                 selfReportStatus: selfReportStatus(for: verdict.criterionText),
                                 evaluationStatus: evaluation.status,
-                                reportPresent: report != nil
+                                reportPresent: report != nil,
+                                waiverReason: evaluation.waivers[verdict.criterionId]
                             )
                         }
                     }
@@ -716,6 +728,9 @@ private struct DriftCriterionRow: View {
     /// False when the self-report JSON was entirely absent (model omitted `criteria_status`).
     /// When false and selfReportStatus is empty, the left column shows a "not reported" placeholder.
     var reportPresent: Bool = true
+    /// Slice D1 — the agent's stated reason for waiving this criterion, when it waived one. Shown
+    /// BESIDE the grader's verdict, never in place of it: a waiver does not erase evidence.
+    var waiverReason: String? = nil
 
     /// True when the self-report says the criterion is met but the grader disagrees. Requires a
     /// real grade: a `.failed` grader produced placeholders, not a disagreement (#54).
@@ -806,6 +821,13 @@ private struct DriftCriterionRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.top, 1)
+            }
+
+            if let waiverReason {
+                Label("WAIVED by the agent: \"\(waiverReason)\"", systemImage: "hand.raised")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(6)

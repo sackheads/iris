@@ -573,6 +573,23 @@ actor IrisEngine {
             toolsList.append(SubagentManager.milestoneDelegationDeclaration())
         }
 
+        // Slice D1's escape hatch, offered only once a grade has actually failed — the agent must
+        // try before declaring a criterion inapplicable.
+        if principal == .main, let gc = ladderContract, gc.isLocked, gc.gateAttempts > 0 {
+            toolsList.append(FunctionDeclaration(
+                name: "waive_criterion",
+                description: "Declare that one criterion of the locked goal contract genuinely does not apply, with a reason. Use this ONLY when a criterion cannot be satisfied because it was mistaken or is not applicable — not to skip work. The criterion is still graded and its verdict still shown; your reason is shown to the user beside it.",
+                parameters: Schema(
+                    type: "OBJECT",
+                    properties: [
+                        "criterion_id": Schema(type: "STRING", description: "The id of the criterion, copied from the contract."),
+                        "reason": Schema(type: "STRING", description: "Why this criterion does not apply. Shown to the user.")
+                    ],
+                    required: ["criterion_id", "reason"]
+                )
+            ))
+        }
+
         // Offer an optional `intent` on every tool so the model can attach a one-line
         // rationale the UI shows next to each call (#31). Central + idempotent, so any
         // future tool is covered automatically.
@@ -1012,24 +1029,48 @@ actor IrisEngine {
             // (it never sets currentDirectoryURL), so fall back to that same path — otherwise the
             // grader is dropped context-free and roams the filesystem looking for the artifacts.
             let gradeWorkspace = workspacePath ?? FileManager.default.currentDirectoryPath
+            // Snapshot the pending evaluation and the self-report BEFORE grading; the gate decides
+            // whether the goal is cleared at all.
             await MainActor.run {
                 localState?.recordCompletionSelfReport(for: conversationId, statusJSON: statusReport)
                 if let c = contractToGrade { localState?.beginGoalEvaluation(for: conversationId, contract: c) }
+            }
+
+            // Slice D1 — the gate. Only a main-principal goal with a locked contract is gated, and
+            // a soft-stop bypasses it entirely: that is an emergency termination and must be able to
+            // end a goal regardless of any verdict.
+            if let c = contractToGrade, !restrictToGoalComplete, let graderApp = localState {
+                let evaluation = await GoalEvaluator.shared.evaluate(
+                    contract: c, workspace: gradeWorkspace,
+                    originatingConversationId: conversationId, app: graderApp, client: self.client)
+                let blocking = c.blockingCriteria(from: evaluation)
+                let cap = ConfigManager.shared.maxDoneGateRetries
+
+                if !blocking.isEmpty, c.gateAttempts < cap {
+                    await MainActor.run { localState?.recordGateRefusal(for: conversationId) }
+                    // The goal is NOT cleared: activeGoal stays set and the auto-reprompt brings the
+                    // agent back to work. This is the whole retry loop.
+                    let lines = blocking.map { "- \($0.criterionText) — \($0.evidence)" }.joined(separator: "\n")
+                    return """
+                    Not done yet. An independent grader found \(blocking.count) criteri\(blocking.count == 1 ? "on" : "a") not met:
+                    \(lines)
+
+                    Keep working and call goal_complete again when they hold. If one genuinely does \
+                    not apply, call `waive_criterion` with the reason — it will be shown to the user.
+                    """
+                }
+
+                let outcome: GateOutcome = evaluation.status != .graded ? .ungatedGraderFailed
+                                         : (blocking.isEmpty ? .passed : .ungatedAtCap)
+                await MainActor.run {
+                    localState?.finishGatedGoal(for: conversationId, outcome: outcome, waivers: c.waivers)
+                }
+            }
+
+            await MainActor.run {
                 localState?.clearGoal(for: conversationId)
                 localState?.onSubagentComplete[conversationId]?(SubagentTermination(status: .completed, summary: summary, calledGoalComplete: true))
                 localState?.onSubagentComplete[conversationId] = nil
-            }
-            if let c = contractToGrade {
-                // Non-blocking: grade in the background; the verdict fills in the chip when ready.
-                // Pass the engine's own client so tests drive the grader with a scripted client
-                // (in production this is the real LLMClient). `client` here is this IrisEngine's
-                // stored client property (from init(...client:)) — capture it into a local first
-                // since the detached task can't touch actor-isolated state.
-                let graderClient = self.client
-                let graderApp = localState
-                if let graderApp {
-                    Task.detached { await GoalEvaluator.shared.evaluate(contract: c, workspace: gradeWorkspace, originatingConversationId: conversationId, app: graderApp, client: graderClient) }
-                }
             }
             await pushToUI(role: .agent, text: summary, conversationId: conversationId)
             if principal == .main {
@@ -1116,6 +1157,19 @@ actor IrisEngine {
             }
             result = ok ? "Goal contract amended (\(action): \(text)). Logged with rationale."
                         : "Amend rejected — a non-empty rationale is required to change locked criteria."
+        } else if functionCall.name == "waive_criterion", principal == .main {
+            let idString = functionCall.args["criterion_id"]?.stringValue ?? ""
+            let reason = functionCall.args["reason"]?.stringValue ?? ""
+            guard let criterionId = UUID(uuidString: idString) else {
+                result = "That is not a valid criterion id. Copy the id exactly as it appears in the contract."
+                return result
+            }
+            let ok = await MainActor.run {
+                localState?.waiveCriterion(for: conversationId, criterionId: criterionId, reason: reason) ?? false
+            }
+            result = ok
+                ? "Criterion waived with your stated reason. It will still be graded and shown to the user, but it will no longer block completion."
+                : "Waiver rejected. A waiver needs a locked contract, a non-empty reason, a criterion id that exists in the contract, and at least one failed grade — work the criterion first and let the grader judge it."
         } else {
             var needsApproval = false
             var details = ""
