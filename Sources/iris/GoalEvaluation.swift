@@ -73,3 +73,19 @@ struct GoalEvaluation: Codable, Equatable, Sendable {
         waivers = try c.decodeIfPresent([UUID: String].self, forKey: .waivers) ?? [:]
     }
 }
+
+extension GateOutcome {
+    /// One line for the completion chip, or nil when there is nothing to warn about. Kept out of
+    /// the view so it can be tested without a SwiftUI harness.
+    func bannerText(unmetCount: Int) -> String? {
+        switch self {
+        case .passed:
+            return nil
+        case .ungatedAtCap:
+            let plural = unmetCount == 1 ? "criterion" : "criteria"
+            return "Completed without passing the gate — \(unmetCount) \(plural) still not met after the retry limit."
+        case .ungatedGraderFailed:
+            return "Completed ungated — the grader did not finish, so nothing was verified."
+        }
+    }
+}
