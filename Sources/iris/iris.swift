@@ -573,6 +573,23 @@ actor IrisEngine {
             toolsList.append(SubagentManager.milestoneDelegationDeclaration())
         }
 
+        // Slice D1's escape hatch, offered only once a grade has actually failed — the agent must
+        // try before declaring a criterion inapplicable.
+        if principal == .main, let gc = ladderContract, gc.isLocked, gc.gateAttempts > 0 {
+            toolsList.append(FunctionDeclaration(
+                name: "waive_criterion",
+                description: "Declare that one criterion of the locked goal contract genuinely does not apply, with a reason. Use this ONLY when a criterion cannot be satisfied because it was mistaken or is not applicable — not to skip work. The criterion is still graded and its verdict still shown; your reason is shown to the user beside it.",
+                parameters: Schema(
+                    type: "OBJECT",
+                    properties: [
+                        "criterion_id": Schema(type: "STRING", description: "The id of the criterion, copied from the contract."),
+                        "reason": Schema(type: "STRING", description: "Why this criterion does not apply. Shown to the user.")
+                    ],
+                    required: ["criterion_id", "reason"]
+                )
+            ))
+        }
+
         // Offer an optional `intent` on every tool so the model can attach a one-line
         // rationale the UI shows next to each call (#31). Central + idempotent, so any
         // future tool is covered automatically.
@@ -1140,6 +1157,19 @@ actor IrisEngine {
             }
             result = ok ? "Goal contract amended (\(action): \(text)). Logged with rationale."
                         : "Amend rejected — a non-empty rationale is required to change locked criteria."
+        } else if functionCall.name == "waive_criterion", principal == .main {
+            let idString = functionCall.args["criterion_id"]?.stringValue ?? ""
+            let reason = functionCall.args["reason"]?.stringValue ?? ""
+            guard let criterionId = UUID(uuidString: idString) else {
+                result = "That is not a valid criterion id. Copy the id exactly as it appears in the contract."
+                return result
+            }
+            let ok = await MainActor.run {
+                localState?.waiveCriterion(for: conversationId, criterionId: criterionId, reason: reason) ?? false
+            }
+            result = ok
+                ? "Criterion waived with your stated reason. It will still be graded and shown to the user, but it will no longer block completion."
+                : "Waiver rejected. A waiver needs a locked contract, a non-empty reason, a criterion id that exists in the contract, and at least one failed grade — work the criterion first and let the grader judge it."
         } else {
             var needsApproval = false
             var details = ""

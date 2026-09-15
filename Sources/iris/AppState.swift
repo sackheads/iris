@@ -735,6 +735,25 @@ class AppState {
         saveConversations()
     }
 
+    /// Record the agent's `n/a — <reason>` waiver for one criterion. Returns false when the waiver
+    /// is not allowed: no locked contract, no failed grade yet (the agent must try before declaring
+    /// something inapplicable), an unknown criterion, or a blank reason — the stated reason is the
+    /// entire point, since it is what the user sees.
+    @discardableResult
+    func waiveCriterion(for conversationId: UUID, criterionId: UUID, reason: String) -> Bool {
+        let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              var c = conversations[idx].goalContract,
+              c.gateAttempts > 0,
+              c.criteria.contains(where: { $0.id == criterionId })
+        else { return false }
+        c.waivers[criterionId] = trimmed
+        conversations[idx].goalContract = c
+        saveConversations()
+        return true
+    }
+
     /// Stamp the gate's verdict onto the recorded evaluation before the goal is cleared.
     /// `clearGoal` nils `goalContract`, so the waiver map has to be copied here or it disappears
     /// exactly when the completion report needs it (spec §5.1).

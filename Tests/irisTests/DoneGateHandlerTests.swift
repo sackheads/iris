@@ -195,4 +195,33 @@ struct DoneGateHandlerTests {
         #expect(conv?.activeGoal == nil)
         #expect(conv?.lastGoalEvaluation?.gateOutcome == .ungatedGraderFailed)
     }
+
+    @Test("refuse, waive, then complete — with the verdict and the waiver both on record")
+    func waiveThenComplete() async {
+        let app = AppState()
+        app.autoApproveTools = true
+        let id = UUID()
+        let (_, b) = lockContract(on: app, id)
+        // Attempt 1 fails on "tested"; the agent waives it; attempt 2 completes.
+        let client = GateClient(
+            main: [Self.goalComplete(),
+                   Self.response(FunctionCall(name: "waive_criterion",
+                                              args: ["criterion_id": .string(b.id.uuidString),
+                                                     "reason": .string("no test harness in this repo")],
+                                              id: nil, thought_signature: nil, thoughtSignature: nil)),
+                   Self.goalComplete(),
+                   Self.response(nil)],
+            graderVerdicts: ["tested": "not_met"])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        await engine.processInput("go", source: "User", conversationId: id)
+        // The refusal ends the turn; drive the follow-up turns the auto-reprompt would.
+        await engine.processInput("continue", source: "System", conversationId: id)
+
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.activeGoal == nil, "the waived criterion no longer blocks")
+        #expect(conv?.lastGoalEvaluation?.waivers[b.id] == "no test harness in this repo",
+                "the waiver must survive clearGoal destroying the contract")
+        #expect(conv?.lastGoalEvaluation?.criteria.first { $0.criterionId == b.id }?.verdict == .notMet,
+                "and the grader's verdict must still be on record beside it")
+    }
 }
