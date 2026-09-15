@@ -109,4 +109,90 @@ struct DoneGateHandlerTests {
         #expect(client.graderRunCount == 1)
         #expect(conv?.activeGoal == nil, "an all-met goal still completes")
     }
+
+    @Test("a not_met criterion refuses completion and keeps the goal alive")
+    func notMetRefuses() async {
+        let app = AppState()
+        app.autoApproveTools = true
+        let id = UUID()
+        lockContract(on: app, id)
+        let client = GateClient(main: [Self.goalComplete(), Self.response(nil)],
+                                graderVerdicts: ["tested": "not_met"])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        await engine.processInput("go", source: "User", conversationId: id)
+
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.activeGoal != nil, "the goal must stay alive so the agent can keep working")
+        #expect(conv?.goalContract != nil)
+        #expect(conv?.goalContract?.gateAttempts == 1)
+    }
+
+    @Test("the refusal tells the agent which criterion failed and why")
+    func refusalCarriesEvidence() async {
+        let app = AppState()
+        app.autoApproveTools = true
+        let id = UUID()
+        lockContract(on: app, id)
+        let client = GateClient(main: [Self.goalComplete(), Self.response(nil)],
+                                graderVerdicts: ["tested": "not_met"])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        await engine.processInput("go", source: "User", conversationId: id)
+
+        // The refusal reaches the agent as the tool RESULT, which lands in `history` as a
+        // functionResponse — not in `messages`, which is the human-facing transcript.
+        let conv = app.conversations.first { $0.id == id }
+        let toolResults = (conv?.history ?? []).flatMap { $0.parts }.compactMap { part -> String? in
+            guard case .string(let s)? = part.functionResponse?.response["result"] else { return nil }
+            return s
+        }.joined(separator: "\n")
+        #expect(toolResults.contains("tested"), "the agent must be told which criterion blocked")
+        #expect(toolResults.contains("grader saw: tested"), "and the grader's evidence for it")
+    }
+
+    @Test("all met completes on the first attempt, gated")
+    func allMetCompletes() async {
+        let app = AppState()
+        app.autoApproveTools = true
+        let id = UUID()
+        lockContract(on: app, id)
+        let client = GateClient(main: [Self.goalComplete(), Self.response(nil)], graderVerdicts: [:])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        await engine.processInput("go", source: "User", conversationId: id)
+
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.activeGoal == nil)
+        #expect(conv?.lastGoalEvaluation?.gateOutcome == .passed)
+    }
+
+    @Test("cannot_verify completes without burning a retry")
+    func cannotVerifyCompletes() async {
+        let app = AppState()
+        app.autoApproveTools = true
+        let id = UUID()
+        lockContract(on: app, id)
+        let client = GateClient(main: [Self.goalComplete(), Self.response(nil)],
+                                graderVerdicts: ["tested": "cannot_verify"])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        await engine.processInput("go", source: "User", conversationId: id)
+
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.activeGoal == nil, "an unverifiable criterion must not block")
+        #expect(client.graderRunCount == 1, "and must not trigger a retry")
+    }
+
+    @Test("a failed grader completes, recorded as ungated rather than blocking on a non-result")
+    func failedGraderCompletes() async {
+        let app = AppState()
+        app.autoApproveTools = true
+        let id = UUID()
+        lockContract(on: app, id)
+        let client = GateClient(main: [Self.goalComplete(), Self.response(nil)],
+                                graderVerdicts: [:], graderStatus: .failed)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        await engine.processInput("go", source: "User", conversationId: id)
+
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.activeGoal == nil)
+        #expect(conv?.lastGoalEvaluation?.gateOutcome == .ungatedGraderFailed)
+    }
 }

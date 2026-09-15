@@ -1012,20 +1012,48 @@ actor IrisEngine {
             // (it never sets currentDirectoryURL), so fall back to that same path — otherwise the
             // grader is dropped context-free and roams the filesystem looking for the artifacts.
             let gradeWorkspace = workspacePath ?? FileManager.default.currentDirectoryPath
+            // Snapshot the pending evaluation and the self-report BEFORE grading; the gate decides
+            // whether the goal is cleared at all.
             await MainActor.run {
                 localState?.recordCompletionSelfReport(for: conversationId, statusJSON: statusReport)
                 if let c = contractToGrade { localState?.beginGoalEvaluation(for: conversationId, contract: c) }
+            }
+
+            // Slice D1 — the gate. Only a main-principal goal with a locked contract is gated, and
+            // a soft-stop bypasses it entirely: that is an emergency termination and must be able to
+            // end a goal regardless of any verdict.
+            if let c = contractToGrade, !restrictToGoalComplete, let graderApp = localState {
+                let evaluation = await GoalEvaluator.shared.evaluate(
+                    contract: c, workspace: gradeWorkspace,
+                    originatingConversationId: conversationId, app: graderApp, client: self.client)
+                let blocking = c.blockingCriteria(from: evaluation)
+                let cap = ConfigManager.shared.maxDoneGateRetries
+
+                if !blocking.isEmpty, c.gateAttempts < cap {
+                    await MainActor.run { localState?.recordGateRefusal(for: conversationId) }
+                    // The goal is NOT cleared: activeGoal stays set and the auto-reprompt brings the
+                    // agent back to work. This is the whole retry loop.
+                    let lines = blocking.map { "- \($0.criterionText) — \($0.evidence)" }.joined(separator: "\n")
+                    return """
+                    Not done yet. An independent grader found \(blocking.count) criteri\(blocking.count == 1 ? "on" : "a") not met:
+                    \(lines)
+
+                    Keep working and call goal_complete again when they hold. If one genuinely does \
+                    not apply, call `waive_criterion` with the reason — it will be shown to the user.
+                    """
+                }
+
+                let outcome: GateOutcome = evaluation.status != .graded ? .ungatedGraderFailed
+                                         : (blocking.isEmpty ? .passed : .ungatedAtCap)
+                await MainActor.run {
+                    localState?.finishGatedGoal(for: conversationId, outcome: outcome, waivers: c.waivers)
+                }
+            }
+
+            await MainActor.run {
                 localState?.clearGoal(for: conversationId)
                 localState?.onSubagentComplete[conversationId]?(SubagentTermination(status: .completed, summary: summary, calledGoalComplete: true))
                 localState?.onSubagentComplete[conversationId] = nil
-            }
-            // Slice D1: AWAITED, not detached. A gate cannot be built on a verdict that arrives
-            // after the decision to complete. The `.verifying` snapshot above renders a spinner
-            // while this runs, so the wait is visible rather than a hang.
-            if let c = contractToGrade, let graderApp = localState {
-                _ = await GoalEvaluator.shared.evaluate(contract: c, workspace: gradeWorkspace,
-                                                        originatingConversationId: conversationId,
-                                                        app: graderApp, client: self.client)
             }
             await pushToUI(role: .agent, text: summary, conversationId: conversationId)
             if principal == .main {
