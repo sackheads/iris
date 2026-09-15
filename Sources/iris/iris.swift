@@ -1019,17 +1019,13 @@ actor IrisEngine {
                 localState?.onSubagentComplete[conversationId]?(SubagentTermination(status: .completed, summary: summary, calledGoalComplete: true))
                 localState?.onSubagentComplete[conversationId] = nil
             }
-            if let c = contractToGrade {
-                // Non-blocking: grade in the background; the verdict fills in the chip when ready.
-                // Pass the engine's own client so tests drive the grader with a scripted client
-                // (in production this is the real LLMClient). `client` here is this IrisEngine's
-                // stored client property (from init(...client:)) — capture it into a local first
-                // since the detached task can't touch actor-isolated state.
-                let graderClient = self.client
-                let graderApp = localState
-                if let graderApp {
-                    Task.detached { await GoalEvaluator.shared.evaluate(contract: c, workspace: gradeWorkspace, originatingConversationId: conversationId, app: graderApp, client: graderClient) }
-                }
+            // Slice D1: AWAITED, not detached. A gate cannot be built on a verdict that arrives
+            // after the decision to complete. The `.verifying` snapshot above renders a spinner
+            // while this runs, so the wait is visible rather than a hang.
+            if let c = contractToGrade, let graderApp = localState {
+                _ = await GoalEvaluator.shared.evaluate(contract: c, workspace: gradeWorkspace,
+                                                        originatingConversationId: conversationId,
+                                                        app: graderApp, client: self.client)
             }
             await pushToUI(role: .agent, text: summary, conversationId: conversationId)
             if principal == .main {
