@@ -249,3 +249,22 @@ extension GoalContract {
         return unit
     }
 }
+
+extension GoalContract {
+    /// The criteria standing between this contract and completion (slice D1 §4).
+    ///
+    /// Only `not_met` blocks — positive evidence the work is not done. `cannot_verify` is a GRADER
+    /// capability problem the agent cannot fix by retrying, and `human_pending` can never be
+    /// auto-graded, so blocking on either would burn the retry cap or trap the goal outright. A
+    /// waived criterion is excluded: the grader still graded it and the evidence is still shown,
+    /// but the agent has stated why it does not apply.
+    ///
+    /// A `.failed` evaluation blocks nothing: the grader never delivered a verdict, so its values
+    /// are placeholders rather than findings, and gating on a grader bug would trap the goal.
+    func blockingCriteria(from evaluation: GoalEvaluation) -> [CriterionVerdict] {
+        guard evaluation.status == .graded else { return [] }
+        return evaluation.criteria.filter {
+            $0.verdict == .notMet && waivers[$0.criterionId] == nil
+        }
+    }
+}
