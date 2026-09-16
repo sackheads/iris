@@ -45,15 +45,24 @@ struct GoalContract: Codable, Equatable, Sendable {
     var currentMilestone: Int = 0             // index of the milestone being worked
     var checkpointStatus: CheckpointStatus = .running
     var state: ContractState = .draft
+    /// Slice D1 — criteria the agent declared not-applicable, with its stated reason. The grader
+    /// still grades a waived criterion; only the GATE ignores its `not_met`, so a waiver never
+    /// erases evidence.
+    var waivers: [UUID: String] = [:]
+    /// Slice D1 — how many times the gate has refused completion for this contract. Reset when a
+    /// contract is locked.
+    var gateAttempts: Int = 0
 
     init(id: UUID = UUID(), objective: String, criteria: [Criterion], outOfScope: [String] = [],
          stopBefore: [String] = [], assumptions: [String] = [], changeLog: [ContractChange] = [],
          milestones: [Milestone] = [], currentMilestone: Int = 0,
-         checkpointStatus: CheckpointStatus = .running, state: ContractState = .draft) {
+         checkpointStatus: CheckpointStatus = .running, state: ContractState = .draft,
+         waivers: [UUID: String] = [:], gateAttempts: Int = 0) {
         self.id = id; self.objective = objective; self.criteria = criteria
         self.outOfScope = outOfScope; self.stopBefore = stopBefore; self.assumptions = assumptions
         self.changeLog = changeLog; self.milestones = milestones; self.currentMilestone = currentMilestone
         self.checkpointStatus = checkpointStatus; self.state = state
+        self.waivers = waivers; self.gateAttempts = gateAttempts
     }
 
     /// Custom decoder so the ladder fields (added in slice B1) are `decodeIfPresent`-defaulted:
@@ -74,6 +83,8 @@ struct GoalContract: Codable, Equatable, Sendable {
         currentMilestone = try c.decodeIfPresent(Int.self, forKey: .currentMilestone) ?? 0
         checkpointStatus = try c.decodeIfPresent(CheckpointStatus.self, forKey: .checkpointStatus) ?? .running
         state = try c.decodeIfPresent(ContractState.self, forKey: .state) ?? .draft
+        waivers = try c.decodeIfPresent([UUID: String].self, forKey: .waivers) ?? [:]
+        gateAttempts = try c.decodeIfPresent(Int.self, forKey: .gateAttempts) ?? 0
     }
 
     var isLocked: Bool { state == .locked }
@@ -236,5 +247,24 @@ extension GoalContract {
         unit.milestones = []
         unit.lock()
         return unit
+    }
+}
+
+extension GoalContract {
+    /// The criteria standing between this contract and completion (slice D1 §4).
+    ///
+    /// Only `not_met` blocks — positive evidence the work is not done. `cannot_verify` is a GRADER
+    /// capability problem the agent cannot fix by retrying, and `human_pending` can never be
+    /// auto-graded, so blocking on either would burn the retry cap or trap the goal outright. A
+    /// waived criterion is excluded: the grader still graded it and the evidence is still shown,
+    /// but the agent has stated why it does not apply.
+    ///
+    /// A `.failed` evaluation blocks nothing: the grader never delivered a verdict, so its values
+    /// are placeholders rather than findings, and gating on a grader bug would trap the goal.
+    func blockingCriteria(from evaluation: GoalEvaluation) -> [CriterionVerdict] {
+        guard evaluation.status == .graded else { return [] }
+        return evaluation.criteria.filter {
+            $0.verdict == .notMet && waivers[$0.criterionId] == nil
+        }
     }
 }

@@ -106,14 +106,18 @@ struct EvaluatorTurnLoopTests {
         let c = Criterion(text: "the thing exists", kind: .qualitative, check: nil)
         let client = InspectThenSubmitGrader(criterionId: c.id, inspectionRounds: 1)
 
-        let before = app.conversations.count
         _ = await GoalEvaluator.shared.evaluate(
             contract: GoalContract(objective: "obj", criteria: [c]),
             workspace: FileManager.default.currentDirectoryPath,
             originatingConversationId: originId, app: app, client: client)
 
         #expect(app.conversations.first { $0.id == originId }?.lastGoalEvaluation?.status == .graded)
-        #expect(app.conversations.count == before, "the evaluator conversation should already be gone")
+        // Assert the evaluator's own throwaway conversation is gone, by identity rather than by
+        // total count: AppState persists conversations to UserDefaults.standard even under test, so
+        // a fresh AppState() loads every conversation any previous run left behind and the count is
+        // not a stable baseline.
+        #expect(app.conversations.contains { $0.title.hasPrefix("Evaluator") } == false,
+                "the evaluator conversation should already be gone")
     }
 
     @Test("a grader that never submits is recorded as failed, not left verifying forever")

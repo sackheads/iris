@@ -188,6 +188,9 @@ class ConfigManager: @unchecked Sendable {
     var maxGoalIterations: Int {
         didSet { ConfigManager.store.set(maxGoalIterations, forKey: "MAX_GOAL_ITERATIONS") }
     }
+    var maxDoneGateRetries: Int {
+        didSet { ConfigManager.store.set(maxDoneGateRetries, forKey: "MAX_DONE_GATE_RETRIES") }
+    }
     var loopDetectionThreshold: Int {
         didSet { ConfigManager.store.set(loopDetectionThreshold, forKey: "LOOP_DETECTION_THRESHOLD") }
     }
@@ -341,6 +344,8 @@ class ConfigManager: @unchecked Sendable {
         let savedMaxIters = ConfigManager.store.integer(forKey: "MAX_GOAL_ITERATIONS")
         self.maxGoalIterations = savedMaxIters == 0 ? 50 : savedMaxIters
         let savedLoop = ConfigManager.store.integer(forKey: "LOOP_DETECTION_THRESHOLD")
+        let savedGateRetries = ConfigManager.store.integer(forKey: "MAX_DONE_GATE_RETRIES")
+        self.maxDoneGateRetries = savedGateRetries == 0 ? 3 : savedGateRetries
         self.loopDetectionThreshold = savedLoop == 0 ? 5 : savedLoop
         let savedVibecopTO = ConfigManager.store.integer(forKey: "VIBECOP_TIMEOUT_SECONDS")
         self.vibecopTimeoutSeconds = savedVibecopTO == 0 ? 5 : savedVibecopTO
