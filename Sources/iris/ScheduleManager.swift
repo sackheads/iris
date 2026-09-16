@@ -132,7 +132,7 @@ class ScheduleManager: @unchecked Sendable {
     }
     
     private func loadJobs() {
-        if let data = UserDefaults.standard.data(forKey: "iris_scheduled_jobs"),
+        if let data = IrisDefaults.store.data(forKey: "iris_scheduled_jobs"),
            let decoded = try? JSONDecoder().decode([ScheduledJob].self, from: data) {
             lock.withLock { self.jobs = decoded }
         }
@@ -140,7 +140,7 @@ class ScheduleManager: @unchecked Sendable {
     
     private func saveJobs() {
         if let data = try? JSONEncoder().encode(jobs) {
-            UserDefaults.standard.set(data, forKey: "iris_scheduled_jobs")
+            IrisDefaults.store.set(data, forKey: "iris_scheduled_jobs")
         }
     }
 }

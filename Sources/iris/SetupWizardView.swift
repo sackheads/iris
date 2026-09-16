@@ -87,7 +87,7 @@ struct SetupWizardView: View {
         _ = MemoryManager.shared
         _ = FactStoreManager.shared
         
-        UserDefaults.standard.set(true, forKey: "HAS_COMPLETED_SETUP")
+        IrisDefaults.store.set(true, forKey: "HAS_COMPLETED_SETUP")
         dismiss()
     }
 }

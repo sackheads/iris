@@ -53,7 +53,7 @@ final class OAuthManager: @unchecked Sendable {
                         guard let port = listener.port?.rawValue else { return }
                         let redirectUri = "http://localhost:\(port)/callback"
                         
-                        UserDefaults.standard.set(redirectUri, forKey: "OAUTH_REDIRECT_URI")
+                        IrisDefaults.store.set(redirectUri, forKey: "OAUTH_REDIRECT_URI")
                         
                         var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
                         components.queryItems = [
@@ -141,7 +141,7 @@ final class OAuthManager: @unchecked Sendable {
     private func exchangeCode(_ code: String) async throws {
         let clientId = ConfigManager.shared.googleClientID
         let clientSecret = ConfigManager.shared.googleClientSecret
-        let redirectUri = UserDefaults.standard.string(forKey: "OAUTH_REDIRECT_URI") ?? "http://localhost"
+        let redirectUri = IrisDefaults.store.string(forKey: "OAUTH_REDIRECT_URI") ?? "http://localhost"
         
         let url = URL(string: "https://oauth2.googleapis.com/token")!
         var request = URLRequest(url: url)

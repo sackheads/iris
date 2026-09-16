@@ -382,7 +382,7 @@ struct ChatView: View {
                 }
         }
         .onAppear {
-            let hasCompletedSetup = UserDefaults.standard.bool(forKey: "HAS_COMPLETED_SETUP")
+            let hasCompletedSetup = IrisDefaults.store.bool(forKey: "HAS_COMPLETED_SETUP")
             if !hasCompletedSetup || !ConfigManager.shared.isConfigured {
                 showSetupWizard = true
             } else {
