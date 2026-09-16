@@ -20,25 +20,8 @@ public enum GeminiAuthMode: String, CaseIterable, Identifiable, Sendable {
 class ConfigManager: @unchecked Sendable {
     @ObservationIgnored static let shared = ConfigManager()
 
-    /// The backing store for every setting.
-    ///
-    /// Under `swift test` this is a volatile, per-process suite rather than the user's real
-    /// defaults. ConfigManager persists every setter through `didSet`, so a test that flips a flag
-    /// would otherwise write it to disk and change the STARTING STATE of the next run — and because
-    /// the save/mutate/restore idiom cannot be correct under parallel execution, the value written
-    /// back is not always the right one. That is the cross-run half of #109: a suite that passes or
-    /// fails depending on what the previous run happened to leave behind.
-    ///
-    /// XCTest is only linked into the test bundle, never the shipping app, so its presence is a
-    /// reliable "running under tests" signal — the same test `KeychainManager` uses to switch to an
-    /// in-memory secret store.
-    @ObservationIgnored nonisolated(unsafe) static let store: UserDefaults = {
-        guard NSClassFromString("XCTestCase") != nil else { return .standard }
-        let suiteName = "iris-tests-\(ProcessInfo.processInfo.processIdentifier)"
-        guard let suite = UserDefaults(suiteName: suiteName) else { return .standard }
-        suite.removePersistentDomain(forName: suiteName)   // every test process starts from defaults
-        return suite
-    }()
+    /// The backing store for every setting — see `IrisDefaults` for why it is volatile under test.
+    @ObservationIgnored nonisolated(unsafe) static let store: UserDefaults = IrisDefaults.store
     
     var appearanceTheme: String {
         didSet { ConfigManager.store.set(appearanceTheme, forKey: "APPEARANCE_THEME") }

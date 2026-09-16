@@ -1043,7 +1043,7 @@ class AppState {
             // are persisted; the main goal's state rides along on those and survives restart.
             let durable = Self.durableConversations(conversations)
             if let data = try? JSONEncoder().encode(durable) {
-                UserDefaults.standard.set(data, forKey: "iris_conversations")
+                IrisDefaults.store.set(data, forKey: "iris_conversations")
             }
         }
     }
@@ -1056,7 +1056,7 @@ class AppState {
     }
     
     private func loadConversations() {
-        if let data = UserDefaults.standard.data(forKey: "iris_conversations") {
+        if let data = IrisDefaults.store.data(forKey: "iris_conversations") {
             do {
                 let decoded = try JSONDecoder().decode([Conversation].self, from: data)
                 let loaded = Self.sanitizeLoaded(decoded)
@@ -1064,7 +1064,7 @@ class AppState {
                 self.selectedConversationId = loaded.last?.id
             } catch {
                 print("Failed to decode conversations: \(error)")
-                UserDefaults.standard.set(data, forKey: "iris_conversations_backup_\(Date().timeIntervalSince1970)")
+                IrisDefaults.store.set(data, forKey: "iris_conversations_backup_\(Date().timeIntervalSince1970)")
             }
         }
     }

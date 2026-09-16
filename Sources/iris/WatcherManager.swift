@@ -14,7 +14,7 @@ actor WatcherManager {
     private var onEventCallback: ((String, String) async -> Void)?
     
     init() {
-        if let data = UserDefaults.standard.data(forKey: "WATCHER_RULES"),
+        if let data = IrisDefaults.store.data(forKey: "WATCHER_RULES"),
            let decoded = try? JSONDecoder().decode([WatcherRule].self, from: data) {
             self.rules = decoded
         }
@@ -51,7 +51,7 @@ actor WatcherManager {
 
     private func saveRules() {
         if let data = try? JSONEncoder().encode(rules) {
-            UserDefaults.standard.set(data, forKey: "WATCHER_RULES")
+            IrisDefaults.store.set(data, forKey: "WATCHER_RULES")
         }
     }
     
