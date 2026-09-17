@@ -64,6 +64,8 @@ struct PerfEnvironment: Codable {
     var promptGuardEngine: String
     var sandboxEnabled: Bool
     var headless: Bool
+    /// From the last scenario's captured request in the run; per-run because MCP configuration
+    /// is per-process, not per scenario.
     var toolDeclarationCount: Int?
 }
 

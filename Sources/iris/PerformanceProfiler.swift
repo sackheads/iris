@@ -46,6 +46,7 @@ public struct CategoryStat: Codable, Sendable, Equatable {
 public struct ModelCallRecord: Codable, Sendable, Equatable {
     public let round: Int
     public let model: String
+    /// Wall time of the whole call including any retry backoff; the `primaryLLM` bucket excludes backoff.
     public let latencyMs: Double
     public let promptTokens: Int?
     public let outputTokens: Int?
