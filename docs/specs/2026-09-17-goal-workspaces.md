@@ -2,7 +2,7 @@
 
 * **Issues**: [#68](https://github.com/sackheads/iris/issues/68) (goals should not run in the process cwd). Unblocks the trust story for **D1** ([2026-09-14-deterministic-done-gates.md](2026-09-14-deterministic-done-gates.md)) and gives [#61](https://github.com/sackheads/iris/issues/61) (resume) a stable home.
 * **Date**: 2026-09-17
-* **Status**: Approved (design)
+* **Status**: Implemented (2026-09-17). The design below is as-built; deviations are noted in §11.
 
 ## 1. Overview
 
@@ -134,3 +134,12 @@ It still binds if the user approves. Working on Iris itself is legitimate, and s
 - **D1's gate becomes trustworthy** for `executable` criteria — the headline reason to do this now rather than later.
 - **#61 (resume)** gets a stable home to resume into.
 - **#13's** inner/outer loop work inherits a real workspace boundary rather than an accident of the process's working directory.
+
+## 11. As-built notes
+
+The design was implemented as written. Two small things worth recording:
+
+- **`JSONValue.stringValue` is non-optional**, so parsing the proposal is `args["workspace"]?.stringValue` followed by a direct `.trimmingCharacters(...)` — not the optional chain the plan showed. Caught at compile time, no behavioural consequence.
+- **The draft panel resolves on every keystroke**, which is safe precisely because `GoalWorkspace.resolve` is pure: it stats candidate paths and never creates one. If that function ever grows a write, the panel becomes a directory factory for abandoned drafts — the reason §4.1 exists.
+
+Scope guards for §2 and §7 live in `GoalWorkspaceScopeTests`: a contract-less goal binds nothing, `set_workspace` wins over a proposal, a creation failure leaves the goal running and says so, and a proposal naming a non-existent path never causes that path to appear.
