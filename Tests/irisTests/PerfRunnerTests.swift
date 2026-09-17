@@ -30,7 +30,9 @@ struct PerfRunnerTests {
     func ladderWithInjectedClient() async throws {
         let usage = UsageMetadata(promptTokenCount: 10, candidatesTokenCount: 2, totalTokenCount: 12)
         let text = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "Canberra.", functionCall: nil, functionResponse: nil, thought_signature: nil, thoughtSignature: nil)]))], usageMetadata: usage)
-        let client = FakeLLMClient(responses: [text])
+        // A zero-latency call can measure exactly 0.0 ms at CFAbsoluteTime resolution, which
+        // PerfSummarizer maps to nil ratios by design; force a non-zero rung-1 median instead.
+        let client = FakeLLMClient(responses: [text], latency: .init(minMs: 1, maxMs: 1))
         let suite = PerfSuite(name: "ladder-test", lane: .real, repetitions: 1, rungs: [1, 2, 3, 4, 5],
                               scenarios: ["perf/prompts/fake/text-only.json"])
         let record = try await PerfRunner.run(suite: suite, repoRoot: root, client: client, headless: false)
