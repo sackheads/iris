@@ -1,6 +1,6 @@
 import Foundation
 
-enum ModelTier: String, Codable {
+enum ModelTier: String, Codable, CaseIterable {
     case easy
     case medium
     case hard
