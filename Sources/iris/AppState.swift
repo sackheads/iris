@@ -1026,6 +1026,7 @@ class AppState {
         for i in loaded.indices {
             loaded[i].lastGoalCompletionReport = nil
             loaded[i].lastGoalEvaluation = nil
+            loaded[i].messages = loaded[i].messages.map(LLMErrorMessage.migrateLegacy)
         }
         return loaded
     }

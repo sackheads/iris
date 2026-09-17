@@ -12,6 +12,8 @@ actor IrisEngine {
     let principal: Principal
     let roleLabel: String?
     let evaluatorChecks: [String]
+    /// Backoff schedule for transient provider errors (429/503/529); one wait per retry.
+    let retryDelays: [TimeInterval]
 
     /// Conversations already shown the "no sandbox runtime" fallback notice (deduped).
     private var warnedNoRuntime: Set<UUID> = []
@@ -20,18 +22,23 @@ actor IrisEngine {
     // Since AppState owns IrisEngine, we can pass it when we start or process.
     private weak var state: AppState?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = []) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8]) {
         self.state = state
         self.modelTier = tier
         self.principal = principal
         self.roleLabel = roleLabel
         self.client = client
         self.evaluatorChecks = evaluatorChecks
+        self.retryDelays = retryDelays
         systemPrompt = nil
     }
 
     func invalidateSystemPrompt() {
         systemPrompt = nil
+    }
+
+    nonisolated static func formatDelay(_ seconds: TimeInterval) -> String {
+        seconds == seconds.rounded() ? "\(Int(seconds))s" : String(format: "%.1fs", seconds)
     }
     
     @discardableResult
@@ -666,10 +673,18 @@ actor IrisEngine {
                     localState?.updateSubagentStatus(id: conversationId, status: "Thinking...")
                 }
                 // Measure at the seam so every client (real, fake, future) is attributed
-                // uniformly, and the span includes engine-side call overhead.
+                // uniformly, and the span includes engine-side call overhead. Each attempt is
+                // its own span so retry backoff sleeps are not counted as model time.
+                let requestToSend = activeRequest
                 let modelCallStart = CFAbsoluteTimeGetCurrent()
-                let response = try await measure(.primaryLLM) {
-                    try await client.generateContent(request: activeRequest, tier: modelTier)
+                let response = try await LLMRetry.run(delays: retryDelays, onRetry: { error, attempt, delay in
+                    await self.pushToUI(role: .system,
+                                        text: "[retry] \(error.message); retrying in \(Self.formatDelay(delay)) (attempt \(attempt) of \(self.retryDelays.count))",
+                                        conversationId: conversationId)
+                }) {
+                    try await measure(.primaryLLM) {
+                        try await self.client.generateContent(request: requestToSend, tier: modelTier)
+                    }
                 }
                 PerformanceProfiler.shared.recordModelCall(
                     turnID: PerformanceProfiler.currentTurnID,
@@ -851,12 +866,25 @@ actor IrisEngine {
                     turnFinished = true
                 }
             } catch {
-                await HookManager.shared.fireNotification(title: "LLM Error", body: error.localizedDescription, useSandbox: hooksSandbox)
-                await pushToUI(role: .agent, text: "Error calling LLM: \(error.localizedDescription)", conversationId: conversationId)
+                // A Stop press (or conversation deletion) lands here too, most likely from the
+                // retry backoff sleep. That is not an LLM error, so nothing is shown for it.
+                // URLSession also reports `.cancelled` for transfers nobody asked to stop
+                // (session invalidation, system cancellation), so that only counts as a stop
+                // when this task really was cancelled; otherwise it is shown like any failure.
+                let cancelled = error is CancellationError
+                    || ((error as? URLError)?.code == .cancelled && Task.isCancelled)
+                // Headline only: provider bodies can be huge, and the full body is already on
+                // the console. The pill carries a capped copy behind a disclosure.
+                let display = LLMErrorMessage.display(for: error)
+                if !cancelled {
+                    await HookManager.shared.fireNotification(title: "LLM Error", body: display.headline, useSandbox: hooksSandbox)
+                    await pushToUI(role: .system, text: LLMErrorMessage.encode(display), conversationId: conversationId)
+                }
                 turnFinished = true
                 await MainActor.run {
                     localState?.clearGoal(for: conversationId)
-                    localState?.onSubagentComplete[conversationId]?(SubagentTermination(status: .failed, summary: "Subagent failed due to LLM Error: \(error.localizedDescription)", calledGoalComplete: false))
+                    let summary = cancelled ? "Subagent stopped." : "Subagent failed due to LLM Error: \(display.headline)"
+                    localState?.onSubagentComplete[conversationId]?(SubagentTermination(status: .failed, summary: summary, calledGoalComplete: false))
                     localState?.onSubagentComplete[conversationId] = nil
                 }
             }
