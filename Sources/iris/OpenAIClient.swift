@@ -185,8 +185,8 @@ struct OpenAIClient {
         }
         
         if httpResponse.statusCode != 200 {
-            let errorString = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw APIError(message: "OpenAI HTTP \(httpResponse.statusCode): \(errorString)")
+            print("API Error (\(httpResponse.statusCode)): \(String(data: data, encoding: .utf8) ?? "<non-utf8 body>")")
+            throw APIError.http(provider: "OpenAI", statusCode: httpResponse.statusCode, body: data)
         }
         
         // Parse OpenAI response back to GeminiResponse

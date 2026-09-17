@@ -1,10 +1,5 @@
 import Foundation
 
-struct APIError: LocalizedError {
-    let message: String
-    var errorDescription: String? { return message }
-}
-
 /// Seam for injecting a scripted client in tests. The production `LLMClient` conforms;
 /// tests supply a mock to drive `IrisEngine` deterministically without network calls.
 protocol LLMClientProtocol: Sendable {
@@ -132,9 +127,9 @@ struct LLMClient {
                 }
                 
                 if httpResponse.statusCode != 200 {
-                    let errorString = String(data: data, encoding: .utf8) ?? "Unknown error"
-                    print("API Error (\(httpResponse.statusCode)): \(errorString)")
-                    throw APIError(message: "HTTP \(httpResponse.statusCode): \(errorString)")
+                    // Full body goes to the console; the chat only ever sees the capped form.
+                    print("API Error (\(httpResponse.statusCode)): \(String(data: data, encoding: .utf8) ?? "<non-utf8 body>")")
+                    throw APIError.http(provider: "Gemini", statusCode: httpResponse.statusCode, body: data)
                 }
                 
                 let decoder = JSONDecoder()
