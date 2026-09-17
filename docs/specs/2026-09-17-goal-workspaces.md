@@ -64,6 +64,8 @@ In order:
 
 **Why creation has exactly one permitted parent.** The model is proposing a path the agent will then write to and run commands in. A denylist of dangerous roots is the obvious guard and the wrong one — denylists leak, and the interesting paths are the ones nobody thought of. Making *creation* structurally impossible outside `~/.iris/workspaces` means a bad proposal can, at worst, name a directory that already exists and is therefore already the user's. It cannot conjure one anywhere.
 
+**This confines creation, not access — it is not a sandbox.** A proposal naming an existing `/etc` or `/` binds with no warning, because neither is home, the cwd, or a dotfile directory. That is deliberate and not a gap: `run_command` can already `cd` anywhere, so the workspace is a *default about where work lands*, not a permission boundary. The guard that matters is that nothing is ever **created** outside `~/.iris/workspaces`; anything bound was already the user's. Sandboxing is a separate mechanism (`SandboxPolicy`) and is unaffected by this slice (§8).
+
 A missing proposed path is **not an error**. It resolves to a fresh workspace and the panel shows the resolved path before approval, so the fallback is visible rather than silent.
 
 ### 4.1 Computed at draft, created at lock
@@ -141,5 +143,10 @@ The design was implemented as written. Two small things worth recording:
 
 - **`JSONValue.stringValue` is non-optional**, so parsing the proposal is `args["workspace"]?.stringValue` followed by a direct `.trimmingCharacters(...)` — not the optional chain the plan showed. Caught at compile time, no behavioural consequence.
 - **The draft panel resolves on every keystroke**, which is safe precisely because `GoalWorkspace.resolve` is pure: it stats candidate paths and never creates one. If that function ever grows a write, the panel becomes a directory factory for abandoned drafts — the reason §4.1 exists.
+
+Two nits from review, both taken:
+
+- **`isSensitive` now resolves symlinks** on both sides of every comparison. `standardizingPath` collapses `.`/`..` but follows no links, so a symlink whose target was the source tree would have slipped past the one warning that exists to stop a silent re-run of #68. It also still checks the *unresolved* last component, so a link named `.secrets` is flagged even when its target is not.
+- **The collision scan is bounded** (99 tries, then a short random suffix). Review rated this low stakes; it is worse than that, because the draft panel calls `resolve` on every keystroke on the main thread. The test that pins it — `directoryExists: { _ in true }` — did not fail against the old code, it **hung the whole suite**, which is what an unbounded main-thread scan does to the UI.
 
 Scope guards for §2 and §7 live in `GoalWorkspaceScopeTests`: a contract-less goal binds nothing, `set_workspace` wins over a proposal, a creation failure leaves the goal running and says so, and a proposal naming a non-existent path never causes that path to appear.

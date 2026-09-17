@@ -33,10 +33,15 @@ enum GoalWorkspace {
         }
         let base = slug(for: objective)
         var candidate = "\(workspacesRoot)/\(base)"
-        var n = 2
-        while directoryExists(candidate) {
+        // Bounded: the draft panel calls this on every keystroke, on the main thread, so an
+        // unbounded scan would hang the UI rather than merely be slow. After a sane number of
+        // tries, fall back to a name that cannot collide.
+        for n in 2...99 {
+            if !directoryExists(candidate) { return .created(candidate) }
             candidate = "\(workspacesRoot)/\(base)-\(n)"
-            n += 1
+        }
+        if directoryExists(candidate) {
+            candidate = "\(workspacesRoot)/\(base)-\(UUID().uuidString.prefix(8).lowercased())"
         }
         return .created(candidate)
     }
@@ -62,12 +67,21 @@ enum GoalWorkspace {
     /// True for workspaces worth warning about before the user approves: the Iris source tree
     /// itself (the literal complaint in #68), the home directory, and dotfile directories. This
     /// never blocks — working on Iris is legitimate; doing it silently is the bug (spec §5).
+    /// Symlinks are resolved on BOTH sides: `standardizingPath` collapses `.`/`..` but follows no
+    /// links, so a symlink whose target is the source tree would otherwise slip past the one
+    /// warning that exists to stop a silent re-run of #68.
     static func isSensitive(_ path: String, homeDirectory: String, processCwd: String) -> Bool {
-        let p = (path as NSString).standardizingPath
-        if p == (processCwd as NSString).standardizingPath { return true }
-        if p == (homeDirectory as NSString).standardizingPath { return true }
-        let name = (p as NSString).lastPathComponent
-        return name.hasPrefix(".")
+        func canonical(_ s: String) -> String {
+            ((s as NSString).standardizingPath as NSString).resolvingSymlinksInPath
+        }
+        let p = canonical(path)
+        if p == canonical(processCwd) { return true }
+        if p == canonical(homeDirectory) { return true }
+        // Checked on the ORIGINAL path too: a link named `.secrets` is worth flagging even when
+        // its target is not.
+        let names = [(p as NSString).lastPathComponent,
+                     ((path as NSString).standardizingPath as NSString).lastPathComponent]
+        return names.contains { $0.hasPrefix(".") }
     }
 }
 

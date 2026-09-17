@@ -114,6 +114,39 @@ struct GoalWorkspaceResolverTests {
         #expect(GoalWorkspace.isSensitive("\(home)/.ssh", homeDirectory: home, processCwd: cwd))
     }
 
+    @Test("a symlink pointing at the Iris tree is still flagged")
+    func symlinkToIrisTreeIsFlagged() throws {
+        // `standardizingPath` resolves ./.. but not symlinks, so a lexical compare misses this —
+        // and the warning exists precisely to stop a silent re-run of #68.
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+        let target = tmp.appendingPathComponent("iris-symlink-target-\(UUID().uuidString)")
+        let link = tmp.appendingPathComponent("iris-symlink-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        defer {
+            try? FileManager.default.removeItem(at: link)
+            try? FileManager.default.removeItem(at: target)
+        }
+
+        #expect(GoalWorkspace.isSensitive(link.path, homeDirectory: "/Users/someone",
+                                          processCwd: target.path),
+                "a symlink whose target is the source tree must still warn")
+    }
+
+    @Test("resolution terminates even when every candidate name is taken")
+    func collisionLoopIsBounded() {
+        // The draft panel calls resolve on every keystroke, on the main thread — an unbounded
+        // scan here would spin the UI, not just a background loop.
+        let r = GoalWorkspace.resolve(proposed: nil, objective: "ship", existingBinding: nil,
+                                      workspacesRoot: root, directoryExists: { _ in true })
+        guard case .created(let path) = r else {
+            Issue.record("expected a created workspace, got \(r)")
+            return
+        }
+        #expect(path.hasPrefix("\(root)/ship-"))
+        #expect(path.count > "\(root)/ship-".count, "the fallback must produce a distinct name")
+    }
+
     @Test("an ordinary project directory is not flagged")
     func ordinaryPathIsNotFlagged() {
         let home = "/Users/someone"
