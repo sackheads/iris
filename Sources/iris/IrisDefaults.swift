@@ -57,7 +57,9 @@ enum IrisDefaults {
         let copy = makeVolatileCopy(of: seed, suiteName: name)
         lock.withLock { override = copy; volatileSuiteName = name }
         atexit {
-            if let n = IrisDefaults.volatileSuiteName {
+            // Read under the same lock useVolatileCopyOfStandard() writes with — atexit runs on
+            // whatever thread calls exit(), so this is a genuine cross-thread read.
+            if let n = IrisDefaults.lock.withLock({ IrisDefaults.volatileSuiteName }) {
                 UserDefaults(suiteName: n)?.removePersistentDomain(forName: n)
             }
         }
