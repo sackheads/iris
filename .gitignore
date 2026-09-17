@@ -26,3 +26,6 @@ Tests/irisTests/Fixtures/deberta-v3-tokenizer/tokenizer.json
 *.swp
 
 __pycache__/
+
+# Perf run records are local until promoted to perf/baselines/
+perf/runs/
