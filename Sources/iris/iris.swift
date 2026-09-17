@@ -45,15 +45,17 @@ actor IrisEngine {
     private func ensureSystemPrompt() async -> Content {
         if let existing = systemPrompt { return existing }
         return await measure(.contextAssembly) {
-            let soul = await manager.loadSOUL()
-            let activeBundle = SkillBundleManager.shared.activeBundle
-            let skills = await manager.discoverSkills(activeBundle: activeBundle)
-            let steering = SystemSteering.shipped()
-            let customRules = await manager.loadCustomRules()
-            let combined = "\(soul)\n\n\(skills)\n\n\(steering)\(customRules)"
-            let prompt = Content(role: "system", parts: [Part(text: combined, functionCall: nil, functionResponse: nil)])
-            systemPrompt = prompt
-            return prompt
+            await measureSpan("assembly.systemPrompt") {
+                let soul = await manager.loadSOUL()
+                let activeBundle = SkillBundleManager.shared.activeBundle
+                let skills = await manager.discoverSkills(activeBundle: activeBundle)
+                let steering = SystemSteering.shipped()
+                let customRules = await manager.loadCustomRules()
+                let combined = "\(soul)\n\n\(skills)\n\n\(steering)\(customRules)"
+                let prompt = Content(role: "system", parts: [Part(text: combined, functionCall: nil, functionResponse: nil)])
+                systemPrompt = prompt
+                return prompt
+            }
         }
     }
     

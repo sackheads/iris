@@ -41,6 +41,7 @@ struct EngineInstrumentationTests {
         let profile = try #require(result.turnProfiles.first)
         #expect(profile.spans["assembly.factSearch"] != nil)
         #expect(profile.spans["assembly.userProfile"] != nil)
+        #expect(profile.spans["assembly.systemPrompt"] != nil)
         #expect((profile.spans["guard.tier1"]?.count ?? 0) >= 1)
     }
 }
