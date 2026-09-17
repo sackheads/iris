@@ -1,0 +1,1282 @@
+{
+  "environment" : {
+    "buildConfiguration" : "release",
+    "cpuCount" : 14,
+    "gitDirty" : true,
+    "gitSha" : "dcd8855",
+    "headless" : false,
+    "injectionGuardEnabled" : true,
+    "machineModel" : "Mac16,7",
+    "models" : {
+      "easy" : "gemini-3.5-flash-lite",
+      "hard" : "gemini-3.1-pro-preview",
+      "medium" : "gemini-3.8-flash"
+    },
+    "osVersion" : "Version 26.6.2 (Build 25G83)",
+    "promptGuardEngine" : "cloud",
+    "provider" : "Gemini",
+    "sandboxEnabled" : true,
+    "toolDeclarationCount" : 30,
+    "vibecopEnabled" : true,
+    "vibecopEngine" : "cloud"
+  },
+  "finishedAt" : "2026-09-17T20:33:50Z",
+  "scenarios" : [
+    {
+      "category" : "model-only",
+      "lane" : "real",
+      "name" : "capital-city",
+      "path" : "perf\/prompts\/model-only\/capital-city.json",
+      "rungs" : [
+        {
+          "medianMs" : 3808.830976486206,
+          "p90Ms" : 3808.830976486206,
+          "repetitions" : [
+            {
+              "coldStart" : true,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.5339851379394531
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 1368.4948682785034
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 2432.9659938812256
+                    }
+                  },
+                  "finalTextLength" : 191,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 2432.9819679260254,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 41,
+                      "promptTokens" : 5140,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 2.514958381652832
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 1368.5020208358765
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.0029802322387695312
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 569.2020654678345
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 799.239993095398
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 3808.440923690796
+                }
+              ],
+              "wallClockMs" : 3808.830976486206
+            },
+            {
+              "coldStart" : false,
+              "error" : "The request timed out.",
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 2.937912940979004
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 527.2500514984131
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 61003.37100028992
+                    }
+                  },
+                  "finalTextLength" : 0,
+                  "modelCalls" : [
+
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.3579130172729492
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 527.2600650787354
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.007987022399902344
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 12.137889862060547
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 515.0209665298462
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 61539.430975914
+                }
+              ],
+              "wallClockMs" : 61539.80505466461
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 3808.830976486206,
+        "p90Ms" : 3808.830976486206,
+        "toolCallRate" : 0,
+        "toolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "model-only",
+      "lane" : "real",
+      "name" : "explain-concept",
+      "path" : "perf\/prompts\/model-only\/explain-concept.json",
+      "rungs" : [
+        {
+          "medianMs" : 10623.683512210846,
+          "p90Ms" : 16408.748030662537,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.1290311813354492
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 640.8939361572266
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 4193.462014198303
+                    }
+                  },
+                  "finalTextLength" : 428,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 4193.477034568787,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 70,
+                      "promptTokens" : 5133,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.8679628372192383
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 640.8998966217041
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.0069141387939453125
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 9.826898574829102
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 631.0020685195923
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 4838.517069816589
+                }
+              ],
+              "wallClockMs" : 4838.618993759155
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 2.3620128631591797
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 754.5630931854248
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 13661.369919776917
+                    }
+                  },
+                  "finalTextLength" : 413,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 15646.468043327332,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 72,
+                      "promptTokens" : 5133,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.0849237442016602
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 754.5710802078247
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.008940696716308594
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 17.23003387451172
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 737.2100353240967
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 16408.59806537628
+                }
+              ],
+              "wallClockMs" : 16408.748030662537
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 10623.683512210846,
+        "p90Ms" : 16408.748030662537,
+        "toolCallRate" : 0,
+        "toolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "model-only",
+      "lane" : "real",
+      "name" : "advice",
+      "path" : "perf\/prompts\/model-only\/advice.json",
+      "rungs" : [
+        {
+          "medianMs" : 0,
+          "p90Ms" : 0,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "error" : "The request timed out.",
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 2.110004425048828
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 744.0849542617798
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 69229.4830083847
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 0.3039836883544922
+                    }
+                  },
+                  "finalTextLength" : 0,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 8228.145003318787,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 29,
+                      "promptTokens" : 5155,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.7180442810058594
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 744.094967842102
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.009059906005859375
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 16.996026039123535
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 726.9870042800903
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "ms" : 0.10097026824951172,
+                      "name" : "rename_conversation",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 69983.5000038147
+                }
+              ],
+              "wallClockMs" : 69983.62994194031
+            },
+            {
+              "coldStart" : false,
+              "error" : "The request timed out.",
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.702977180480957
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 712.6630544662476
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 61001.30105018616
+                    }
+                  },
+                  "finalTextLength" : 0,
+                  "modelCalls" : [
+
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.5459785461425781
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 712.6690149307251
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.0029802322387695312
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 8.96298885345459
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 703.6350965499878
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 61717.98002719879
+                }
+              ],
+              "wallClockMs" : 61718.10793876648
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 0,
+        "p90Ms" : 0,
+        "toolCallRate" : 0.5,
+        "toolCallsByName" : {
+          "rename_conversation" : 1
+        }
+      }
+    },
+    {
+      "category" : "model-only",
+      "lane" : "real",
+      "name" : "short-writing",
+      "path" : "perf\/prompts\/model-only\/short-writing.json",
+      "rungs" : [
+        {
+          "medianMs" : 21231.17744922638,
+          "p90Ms" : 38165.95196723938,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.665949821472168
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 730.1038503646851
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 3558.60698223114
+                    }
+                  },
+                  "finalTextLength" : 155,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 3558.6249828338623,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 28,
+                      "promptTokens" : 5144,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.6100406646728516
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 730.1099300384521
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.007033348083496094
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 18.39601993560791
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 711.6290330886841
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 4296.14794254303
+                }
+              ],
+              "wallClockMs" : 4296.402931213379
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.5050172805786133
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 703.7639617919922
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 37458.391070365906
+                    }
+                  },
+                  "finalTextLength" : 183,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 37458.40096473694,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 32,
+                      "promptTokens" : 5144,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.0160207748413086
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 703.7678956985474
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.007033348083496094
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 9.328961372375488
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 694.3659782409668
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 38165.884017944336
+                }
+              ],
+              "wallClockMs" : 38165.95196723938
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 21231.17744922638,
+        "p90Ms" : 38165.95196723938,
+        "toolCallRate" : 0,
+        "toolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "model-only",
+      "lane" : "real",
+      "name" : "conversation-meta",
+      "path" : "perf\/prompts\/model-only\/conversation-meta.json",
+      "rungs" : [
+        {
+          "medianMs" : 7354.372441768646,
+          "p90Ms" : 8254.180908203125,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.212000846862793
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 623.6660480499268
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 7624.704957008362
+                    }
+                  },
+                  "finalTextLength" : 779,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 7624.7299909591675,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 135,
+                      "promptTokens" : 5142,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.8120536804199219
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 623.6729621887207
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.003933906555175781
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 10.553956031799316
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 613.057017326355
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 8253.899097442627
+                }
+              ],
+              "wallClockMs" : 8254.180908203125
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.7339715957641602
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 718.8740968704224
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 5732.393026351929
+                    }
+                  },
+                  "finalTextLength" : 635,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 5732.410907745361,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 115,
+                      "promptTokens" : 5142,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.5239248275756836
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 718.8780307769775
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.0029802322387695312
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 7.299065589904785
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 711.5329504013062
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 6454.432010650635
+                }
+              ],
+              "wallClockMs" : 6454.5639753341675
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 7354.372441768646,
+        "p90Ms" : 8254.180908203125,
+        "toolCallRate" : 0,
+        "toolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "model-only",
+      "lane" : "real",
+      "name" : "quick-reasoning",
+      "path" : "perf\/prompts\/model-only\/quick-reasoning.json",
+      "rungs" : [
+        {
+          "medianMs" : 4686.473965644836,
+          "p90Ms" : 5794.681906700134,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.6901025772094727
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 819.6609020233154
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 4970.273017883301
+                    }
+                  },
+                  "finalTextLength" : 91,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 4970.2829122543335,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 56,
+                      "promptTokens" : 5155,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.6110668182373047
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 819.6699619293213
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.003933906555175781
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 7.874011993408203
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 811.7020130157471
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 5794.579029083252
+                }
+              ],
+              "wallClockMs" : 5794.681906700134
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.6530284881591797
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 812.9329681396484
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 2762.2870206832886
+                    }
+                  },
+                  "finalTextLength" : 54,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 2762.3050212860107,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 35,
+                      "promptTokens" : 5155,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.5390644073486328
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 812.9359483718872
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.0029802322387695312
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 6.5479278564453125
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 806.3290119171143
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 3578.1599283218384
+                }
+              ],
+              "wallClockMs" : 3578.2660245895386
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 4686.473965644836,
+        "p90Ms" : 5794.681906700134,
+        "toolCallRate" : 0,
+        "toolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "tool-use",
+      "lane" : "real",
+      "name" : "run-uname",
+      "path" : "perf\/prompts\/tool-use\/run-uname.json",
+      "rungs" : [
+        {
+          "medianMs" : 5446.489989757538,
+          "p90Ms" : 5536.641001701355,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.5559196472167969
+                    },
+                    "injectionGuard" : {
+                      "count" : 4,
+                      "ms" : 1341.7248725891113
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 3963.5000228881836
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 615.494966506958
+                    }
+                  },
+                  "finalTextLength" : 43,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 2067.4060583114624,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 33,
+                      "promptTokens" : 5134,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "latencyMs" : 1896.1199522018433,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 20,
+                      "promptTokens" : 5253,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.1800527572631836
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 769.2849636077881
+                    },
+                    "guard.tier1" : {
+                      "count" : 2,
+                      "ms" : 0.010013580322265625
+                    },
+                    "guard.tier2" : {
+                      "count" : 2,
+                      "ms" : 19.132018089294434
+                    },
+                    "guard.tier3" : {
+                      "count" : 2,
+                      "ms" : 1322.4570751190186
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "ms" : 615.2290105819702,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 5356.185078620911
+                }
+              ],
+              "wallClockMs" : 5356.338977813721
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.271963119506836
+                    },
+                    "injectionGuard" : {
+                      "count" : 4,
+                      "ms" : 1140.0021314620972
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 4327.862977981567
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 651.9089937210083
+                    }
+                  },
+                  "finalTextLength" : 43,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 2079.5830488204956,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 33,
+                      "promptTokens" : 5134,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "latencyMs" : 2248.3060359954834,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 20,
+                      "promptTokens" : 5284,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.7829666137695312
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 550.0410795211792
+                    },
+                    "guard.tier1" : {
+                      "count" : 2,
+                      "ms" : 0.008940696716308594
+                    },
+                    "guard.tier2" : {
+                      "count" : 2,
+                      "ms" : 16.047954559326172
+                    },
+                    "guard.tier3" : {
+                      "count" : 2,
+                      "ms" : 1123.8319873809814
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "ms" : 651.7560482025146,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 5536.482930183411
+                }
+              ],
+              "wallClockMs" : 5536.641001701355
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 5446.489989757538,
+        "p90Ms" : 5536.641001701355,
+        "toolCallRate" : 1,
+        "toolCallsByName" : {
+          "run_command" : 2
+        }
+      }
+    },
+    {
+      "category" : "tool-use",
+      "lane" : "real",
+      "name" : "count-files",
+      "path" : "perf\/prompts\/tool-use\/count-files.json",
+      "rungs" : [
+        {
+          "medianMs" : 21960.928976535797,
+          "p90Ms" : 26273.25201034546,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.6340742111206055
+                    },
+                    "injectionGuard" : {
+                      "count" : 4,
+                      "ms" : 1176.0849952697754
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 25041.718006134033
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 632.8150033950806
+                    }
+                  },
+                  "finalTextLength" : 60,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 2344.388008117676,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 49,
+                      "promptTokens" : 5149,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "latencyMs" : 22697.34799861908,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 17,
+                      "promptTokens" : 5396,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.5350112915039062
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 595.7130193710327
+                    },
+                    "guard.tier1" : {
+                      "count" : 2,
+                      "ms" : 0.0059604644775390625
+                    },
+                    "guard.tier2" : {
+                      "count" : 2,
+                      "ms" : 12.889862060546875
+                    },
+                    "guard.tier3" : {
+                      "count" : 2,
+                      "ms" : 1163.1100177764893
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "ms" : 632.722020149231,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 26273.174047470093
+                }
+              ],
+              "wallClockMs" : 26273.25201034546
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.3409852981567383
+                    },
+                    "injectionGuard" : {
+                      "count" : 4,
+                      "ms" : 1116.7529821395874
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 16473.419904708862
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 640.3260231018066
+                    }
+                  },
+                  "finalTextLength" : 60,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 1931.2620162963867,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 47,
+                      "promptTokens" : 5149,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "latencyMs" : 14542.176961898804,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 17,
+                      "promptTokens" : 5283,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.028895378112793
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 529.8130512237549
+                    },
+                    "guard.tier1" : {
+                      "count" : 2,
+                      "ms" : 0.009894371032714844
+                    },
+                    "guard.tier2" : {
+                      "count" : 2,
+                      "ms" : 17.007946968078613
+                    },
+                    "guard.tier3" : {
+                      "count" : 2,
+                      "ms" : 1099.6280908584595
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "ms" : 640.2579545974731,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 17648.533940315247
+                }
+              ],
+              "wallClockMs" : 17648.605942726135
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 21960.928976535797,
+        "p90Ms" : 26273.25201034546,
+        "toolCallRate" : 1,
+        "toolCallsByName" : {
+          "run_command" : 2
+        }
+      }
+    }
+  ],
+  "schemaVersion" : 1,
+  "startedAt" : "2026-09-17T20:27:45Z",
+  "suite" : "tool-eagerness"
+}

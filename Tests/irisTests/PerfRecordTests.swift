@@ -1,0 +1,78 @@
+import Testing
+import Foundation
+@testable import iris
+
+@Suite("PerfRunRecord")
+struct PerfRecordTests {
+    static func sampleRecord() -> PerfRunRecord {
+        let env = PerfEnvironment(gitSha: "abc1234", gitDirty: false, machineModel: "Mac16,7", osVersion: "26.0",
+                                  cpuCount: 12, buildConfiguration: "release", provider: "Gemini",
+                                  models: ["medium": "gemini-3.8-flash"], vibecopEnabled: true, vibecopEngine: "cloud",
+                                  injectionGuardEnabled: true, promptGuardEngine: "cloud", sandboxEnabled: true,
+                                  headless: false, toolDeclarationCount: 14)
+        let call = ModelCallRecord(round: 0, model: "gemini-3.8-flash", latencyMs: 800, promptTokens: 3000, outputTokens: 40, returnedToolCalls: false)
+        let turn = PerfTurn(totalMs: 850, categories: ["primaryLLM": CategoryStat(ms: 800, count: 1)], spans: ["guard.tier1": CategoryStat(ms: 1, count: 2)],
+                            modelCalls: [call], toolCalls: [], finalTextLength: 120)
+        let rep = PerfRepetition(index: 0, coldStart: true, wallClockMs: 860, turns: [turn], modelCalls: [], error: nil)
+        let rung = PerfRungResult(rung: 5, repetitions: [rep], medianMs: 860, p90Ms: 860)
+        let summary = PerfScenarioSummary(medianMs: 860, p90Ms: 860, overheadRatio: nil, harnessRatio: nil, toolCallRate: 0, toolCallsByName: [:])
+        let scenario = PerfScenarioResult(name: "capital-city", path: "perf/prompts/model-only/capital-city.json", category: "model-only",
+                                          lane: "real", rungs: [rung], summary: summary)
+        return PerfRunRecord(schemaVersion: 1, suite: "ladder", startedAt: Date(timeIntervalSince1970: 1_000), finishedAt: Date(timeIntervalSince1970: 1_060),
+                             environment: env, scenarios: [scenario])
+    }
+
+    @Test("round-trips through JSON")
+    func roundTrip() throws {
+        let record = Self.sampleRecord()
+        let decoded = try PerfRunRecord.decode(from: record.encoded())
+        #expect(decoded.suite == "ladder")
+        #expect(decoded.scenarios.first?.rungs.first?.repetitions.first?.turns.first?.modelCalls.first?.promptTokens == 3000)
+        #expect(decoded.environment.toolDeclarationCount == 14)
+        #expect(decoded.startedAt == record.startedAt)
+    }
+
+    @Test("a record missing optional fields still decodes")
+    func tolerantDecode() throws {
+        let json = """
+        {"schemaVersion":1,"suite":"s","startedAt":"2026-09-17T10:00:00Z","finishedAt":"2026-09-17T10:01:00Z",
+         "environment":{"gitSha":"x","gitDirty":false,"machineModel":"m","osVersion":"o","cpuCount":1,"buildConfiguration":"debug",
+           "provider":"Gemini","models":{},"vibecopEnabled":false,"vibecopEngine":"cloud","injectionGuardEnabled":false,
+           "promptGuardEngine":"cloud","sandboxEnabled":false,"headless":true},
+         "scenarios":[{"name":"n","path":"p","category":"c","lane":"fake","rungs":[],
+           "summary":{"medianMs":0,"p90Ms":0,"toolCallRate":0,"toolCallsByName":{}}}]}
+        """
+        let record = try PerfRunRecord.decode(from: Data(json.utf8))
+        #expect(record.environment.toolDeclarationCount == nil)
+        #expect(record.scenarios.first?.summary.overheadRatio == nil)
+    }
+
+    @Test("file name is timestamp, suite and sha")
+    func fileName() {
+        #expect(Self.sampleRecord().fileName == "19700101T001640Z-ladder-abc1234.json")
+    }
+
+    @Test("write creates the directory and the file")
+    func writeCreatesFile() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("perf-\(UUID().uuidString)/runs")
+        defer { try? FileManager.default.removeItem(at: dir.deletingLastPathComponent()) }
+        let url = try Self.sampleRecord().write(toDirectory: dir)
+        #expect(FileManager.default.fileExists(atPath: url.path))
+        #expect(try PerfRunRecord.load(at: url.path).suite == "ladder")
+    }
+
+    @Test("PerfTurn is built from a CommandProfile")
+    func fromProfile() {
+        var profile = CommandProfile(id: UUID(), label: "l", source: "s", startedAt: Date())
+        profile.totalMs = 12
+        profile.add(.primaryLLM, durationMs: 10)
+        profile.addSpan("guard.tier1", durationMs: 1)
+        profile.toolCalls.append(ToolCallRecord(name: "read_file", ms: 2, ok: true))
+        let turn = PerfTurn(profile, finalTextLength: 5)
+        #expect(turn.totalMs == 12)
+        #expect(turn.categories["primaryLLM"]?.ms == 10)
+        #expect(turn.spans["guard.tier1"]?.count == 1)
+        #expect(turn.toolCalls.first?.name == "read_file")
+        #expect(turn.finalTextLength == 5)
+    }
+}

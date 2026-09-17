@@ -112,6 +112,7 @@ final class VibecopService: @unchecked Sendable {
                let decision = try? JSONDecoder().decode(VibecopDecision.self, from: data) {
                 await MetricsManager.shared.trackLatency(operation: .vibecop, modelName: config.modelPathOrName, durationMs: durationMs, success: true)
                 PerformanceProfiler.shared.record(turnID: PerformanceProfiler.currentTurnID, category: .vibecop, durationMs: durationMs)
+                PerformanceProfiler.shared.recordSpan(turnID: PerformanceProfiler.currentTurnID, name: "vibecop", durationMs: durationMs)
                 return decision
             }
 
@@ -119,11 +120,13 @@ final class VibecopService: @unchecked Sendable {
             print("Vibecop failed to parse JSON: \(responseJson)")
             await MetricsManager.shared.trackLatency(operation: .vibecop, modelName: config.modelPathOrName, durationMs: durationMs, success: false)
             PerformanceProfiler.shared.record(turnID: PerformanceProfiler.currentTurnID, category: .vibecop, durationMs: durationMs)
+            PerformanceProfiler.shared.recordSpan(turnID: PerformanceProfiler.currentTurnID, name: "vibecop", durationMs: durationMs)
             return VibecopDecision(decision: "ESCALATE", reason: "Failed to parse Vibecop response. Defaulting to escalate.")
         } catch {
             let durationMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000.0
             await MetricsManager.shared.trackLatency(operation: .vibecop, modelName: config.modelPathOrName, durationMs: durationMs, success: false)
             PerformanceProfiler.shared.record(turnID: PerformanceProfiler.currentTurnID, category: .vibecop, durationMs: durationMs)
+            PerformanceProfiler.shared.recordSpan(turnID: PerformanceProfiler.currentTurnID, name: "vibecop", durationMs: durationMs)
             throw error
         }
     }

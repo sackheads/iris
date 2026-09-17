@@ -45,15 +45,17 @@ actor IrisEngine {
     private func ensureSystemPrompt() async -> Content {
         if let existing = systemPrompt { return existing }
         return await measure(.contextAssembly) {
-            let soul = await manager.loadSOUL()
-            let activeBundle = SkillBundleManager.shared.activeBundle
-            let skills = await manager.discoverSkills(activeBundle: activeBundle)
-            let steering = SystemSteering.shipped()
-            let customRules = await manager.loadCustomRules()
-            let combined = "\(soul)\n\n\(skills)\n\n\(steering)\(customRules)"
-            let prompt = Content(role: "system", parts: [Part(text: combined, functionCall: nil, functionResponse: nil)])
-            systemPrompt = prompt
-            return prompt
+            await measureSpan("assembly.systemPrompt") {
+                let soul = await manager.loadSOUL()
+                let activeBundle = SkillBundleManager.shared.activeBundle
+                let skills = await manager.discoverSkills(activeBundle: activeBundle)
+                let steering = SystemSteering.shipped()
+                let customRules = await manager.loadCustomRules()
+                let combined = "\(soul)\n\n\(skills)\n\n\(steering)\(customRules)"
+                let prompt = Content(role: "system", parts: [Part(text: combined, functionCall: nil, functionResponse: nil)])
+                systemPrompt = prompt
+                return prompt
+            }
         }
     }
     
@@ -348,7 +350,9 @@ actor IrisEngine {
         
         let userProfile = MemoryManager.shared.getUserProfile()
         
-        let facts = (try? FactStoreManager.shared.search(query: input, limit: 5)) ?? []
+        let facts = measureSpanSync("assembly.factSearch") {
+            (try? FactStoreManager.shared.search(query: input, limit: 5)) ?? []
+        }
         
         if !facts.isEmpty {
             try? FactStoreManager.shared.reinforceFacts(ids: facts.map { $0.id })
@@ -356,8 +360,10 @@ actor IrisEngine {
         
     if let textPart = currentSystemPrompt.parts.first?.text {
         // Append USER.md first (mostly static)
-        let structuralSafeUserProfile = PromptInjectionGuard.sanitizeUntrustedInput(userProfile)
-        let safeUserProfile = await InjectionGuard.sanitize(structuralSafeUserProfile, contextTag: "user_profile", maxTier: .tier3_canary)
+        let safeUserProfile = await measureSpan("assembly.userProfile") {
+            let structural = PromptInjectionGuard.sanitizeUntrustedInput(userProfile)
+            return await InjectionGuard.sanitize(structural, contextTag: "user_profile", maxTier: .tier3_canary)
+        }
         currentSystemPrompt.parts[0].text = textPart + "\n\n# User Profile (USER.md)\n" + safeUserProfile
     }
         
@@ -367,8 +373,10 @@ actor IrisEngine {
             if let agentsMdContent = try? String(contentsOfFile: fullPath, encoding: .utf8) {
                 if let textPart = currentSystemPrompt.parts.first?.text {
                     // Append AGENTS.md next (static per workspace)
-                    let structuralSafeAgentsMd = PromptInjectionGuard.sanitizeUntrustedInput(agentsMdContent)
-                    let safeAgentsMd = await InjectionGuard.sanitize(structuralSafeAgentsMd, contextTag: "workspace_rules", maxTier: .tier3_canary)
+                    let safeAgentsMd = await measureSpan("assembly.agentsMd") {
+                        let structural = PromptInjectionGuard.sanitizeUntrustedInput(agentsMdContent)
+                        return await InjectionGuard.sanitize(structural, contextTag: "workspace_rules", maxTier: .tier3_canary)
+                    }
                     currentSystemPrompt.parts[0].text = textPart + "\n\n# Project Workspace Rules (AGENTS.md)\n" + safeAgentsMd
                 }
             }
@@ -643,6 +651,7 @@ actor IrisEngine {
         }
         var request = GeminiRequest(contents: history, systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
         
+        var modelRound = 0
         var turnFinished = false
         while !turnFinished {
             await Task.yield()
@@ -670,6 +679,7 @@ actor IrisEngine {
                 // uniformly, and the span includes engine-side call overhead. Each attempt is
                 // its own span so retry backoff sleeps are not counted as model time.
                 let requestToSend = activeRequest
+                let modelCallStart = CFAbsoluteTimeGetCurrent()
                 let response = try await LLMRetry.run(delays: retryDelays, onRetry: { error, attempt, delay in
                     await self.pushToUI(role: .system,
                                         text: "[retry] \(error.message); retrying in \(Self.formatDelay(delay)) (attempt \(attempt) of \(self.retryDelays.count))",
@@ -679,6 +689,16 @@ actor IrisEngine {
                         try await self.client.generateContent(request: requestToSend, tier: modelTier)
                     }
                 }
+                PerformanceProfiler.shared.recordModelCall(
+                    turnID: PerformanceProfiler.currentTurnID,
+                    ModelCallRecord(
+                        round: modelRound,
+                        model: ConfigManager.shared.getModel(for: modelTier),
+                        latencyMs: (CFAbsoluteTimeGetCurrent() - modelCallStart) * 1000.0,
+                        promptTokens: response.usageMetadata?.promptTokenCount,
+                        outputTokens: response.usageMetadata?.candidatesTokenCount,
+                        returnedToolCalls: response.candidates?.first?.content?.parts.contains { $0.functionCall != nil } ?? false))
+                modelRound += 1
                 await MainActor.run {
                     localState?.updateSubagentStatus(id: conversationId, status: "Executing...")
                 }
@@ -769,10 +789,14 @@ actor IrisEngine {
 
                                     let cmdStart = Date()
                                     let result = await self.executeFunctionCall(call, conversationId: conversationId, workspacePath: workspacePath, restrictToGoalComplete: restrictToGoalComplete)
+                                    let elapsed = Date().timeIntervalSince(cmdStart)
                                     if let id = timingId {
-                                        let elapsed = Date().timeIntervalSince(cmdStart)
                                         await self.recordCommandDuration(id: id, elapsed: elapsed)
                                     }
+                                    // Task-local turn id is inherited by this child task.
+                                    PerformanceProfiler.shared.recordToolCall(
+                                        turnID: PerformanceProfiler.currentTurnID,
+                                        ToolCallRecord(name: call.name, ms: elapsed * 1000.0, ok: !result.hasPrefix("Error")))
                                     return (index, result)
                                 }
                             }

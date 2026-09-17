@@ -1,0 +1,17 @@
+{
+  "name": "tool-eagerness",
+  "lane": "real",
+  "repetitions": 2,
+  "pauseMs": 1500,
+  "rungs": [5],
+  "scenarios": [
+    "perf/prompts/model-only/capital-city.json",
+    "perf/prompts/model-only/explain-concept.json",
+    "perf/prompts/model-only/advice.json",
+    "perf/prompts/model-only/short-writing.json",
+    "perf/prompts/model-only/conversation-meta.json",
+    "perf/prompts/model-only/quick-reasoning.json",
+    "perf/prompts/tool-use/run-uname.json",
+    "perf/prompts/tool-use/count-files.json"
+  ]
+}

@@ -39,7 +39,7 @@ public struct InjectionGuard {
         let source = sanitizeSourceLabel(contextTag)
 
         // Tier 1: Strict Structural Isolation & Text Normalization
-        let clean = executeTier1(rawInput)
+        let clean = measureSpanSync("guard.tier1") { executeTier1(rawInput) }
 
         if maxTier == .tier1_structural {
             return wrap(clean, source: source)
@@ -53,7 +53,7 @@ public struct InjectionGuard {
         }
 
         // Tier 2: Local Token-Classification (CoreML/ONNX) — evaluates the unwrapped content.
-        let isTier2Safe = await executeTier2CoreML(clean, protectionEnabled: protectionEnabled)
+        let isTier2Safe = await measureSpan("guard.tier2") { await executeTier2CoreML(clean, protectionEnabled: protectionEnabled) }
         if !isTier2Safe {
             return wrapBlocked("[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]", source: source)
         }
@@ -63,7 +63,7 @@ public struct InjectionGuard {
         }
 
         // Tier 3: Behavioral Canary Probe — also evaluates the unwrapped content.
-        let isTier3Safe = await executeTier3Canary(clean, protectionEnabled: protectionEnabled)
+        let isTier3Safe = await measureSpan("guard.tier3") { await executeTier3Canary(clean, protectionEnabled: protectionEnabled) }
         if !isTier3Safe {
             return wrapBlocked("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]", source: source)
         }

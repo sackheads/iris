@@ -1,0 +1,11 @@
+{
+  "name": "smoke",
+  "lane": "fake",
+  "repetitions": 3,
+  "rungs": [5],
+  "scenarios": [
+    "perf/prompts/fake/text-only.json",
+    "perf/prompts/fake/one-command.json",
+    "scenarios/echo-latency.json"
+  ]
+}

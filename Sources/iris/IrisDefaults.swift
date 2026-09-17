@@ -13,7 +13,24 @@ import Foundation
 /// reliable "running under tests" signal — the same test `KeychainManager` uses for its in-memory
 /// secret store.
 enum IrisDefaults {
-    nonisolated(unsafe) static let store: UserDefaults = {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var override: UserDefaults?
+    nonisolated(unsafe) private static var volatileSuiteName: String?
+
+    /// The store everything persists through. A volatile override (set by --bench/--perf before
+    /// anything touches `ConfigManager.shared`) wins over the per-process default.
+    static var store: UserDefaults {
+        lock.withLock { override } ?? processStore
+    }
+
+    /// True only under --bench/--perf. Gates every code path that mutates ConfigManager for a run.
+    static var isVolatileCopy: Bool { lock.withLock { override != nil } }
+
+    /// The domain the shipping app persists to: the bundle id in a .app, the process name under
+    /// `swift run` (which is why the dev plist is `iris.plist`).
+    static var appDomain: String { Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName }
+
+    nonisolated(unsafe) private static let processStore: UserDefaults = {
         guard NSClassFromString("XCTestCase") != nil else { return .standard }
         let suiteName = "iris-tests-\(ProcessInfo.processInfo.processIdentifier)"
         guard let suite = UserDefaults(suiteName: suiteName) else { return .standard }
@@ -31,14 +48,64 @@ enum IrisDefaults {
         return suite
     }()
 
-    /// `iris-tests-<pid>.plist` files in `directory` whose process is gone. The current process's
-    /// own file is never included.
+    /// Seed a throwaway suite from the user's real domain and route the store to it. Call it before
+    /// `ConfigManager.shared` is first touched so the run's initial values come from the copy; even
+    /// if that ordering slips, `ConfigManager.store` is computed, so every later write still lands
+    /// in the copy and never in the real domain.
+    static func useVolatileCopyOfStandard() {
+        // Also clears plists left by earlier bench/perf/test processes that crashed or were
+        // killed before their own atexit handler ran; live pids and this process are skipped.
+        sweepStaleTestSuites()
+        let seed = perfSeed(from: UserDefaults.standard.persistentDomain(forName: appDomain) ?? [:])
+        let name = "iris-bench-\(ProcessInfo.processInfo.processIdentifier)"
+        let copy = makeVolatileCopy(of: seed, suiteName: name)
+        lock.withLock { override = copy; volatileSuiteName = name }
+        atexit {
+            // Read under the same lock useVolatileCopyOfStandard() writes with — atexit runs on
+            // whatever thread calls exit(), so this is a genuine cross-thread read.
+            if let n = IrisDefaults.lock.withLock({ IrisDefaults.volatileSuiteName }) {
+                UserDefaults(suiteName: n)?.removePersistentDomain(forName: n)
+                // removePersistentDomain does not delete the backing plist on current macOS.
+                IrisDefaults.removeSuiteFile(named: n, in: IrisDefaults.preferencesDirectory)
+            }
+        }
+    }
+
+    /// Drop the persisted conversation history from a domain before it seeds a volatile copy.
+    /// `AppState()` is constructed per repetition and decodes this blob on init; on the author's
+    /// machine it is 472 KB and its debounced re-save can land inside the next repetition's
+    /// measured window.
+    static func perfSeed(from domain: [String: Any]) -> [String: Any] {
+        domain.filter { key, _ in
+            key != "iris_conversations" && !key.hasPrefix("iris_conversations_backup_")
+        }
+    }
+
+    static func makeVolatileCopy(of seed: [String: Any], suiteName: String) -> UserDefaults {
+        guard let suite = UserDefaults(suiteName: suiteName) else { return .standard }
+        suite.removePersistentDomain(forName: suiteName)
+        suite.setPersistentDomain(seed, forName: suiteName)
+        return suite
+    }
+
+    /// Where `UserDefaults(suiteName:)` plists actually live on disk.
+    static let preferencesDirectory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Preferences")
+
+    /// Delete `<name>.plist` from `directory` directly, since `removePersistentDomain` won't.
+    /// A missing file is not an error.
+    static func removeSuiteFile(named name: String, in directory: URL) {
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent("\(name).plist"))
+    }
+
+    /// `iris-tests-<pid>.plist` / `iris-bench-<pid>.plist` files in `directory` whose process is
+    /// gone. The current process's own file is never included.
     static func staleTestSuiteFiles(in directory: URL, isAlive: (pid_t) -> Bool) -> [URL] {
         let me = ProcessInfo.processInfo.processIdentifier
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         return names.sorted().compactMap { name in
-            guard name.hasPrefix("iris-tests-"), name.hasSuffix(".plist"),
-                  let pid = pid_t(name.dropFirst("iris-tests-".count).dropLast(".plist".count)),
+            guard let prefix = ["iris-tests-", "iris-bench-"].first(where: name.hasPrefix), name.hasSuffix(".plist"),
+                  let pid = pid_t(name.dropFirst(prefix.count).dropLast(".plist".count)),
                   pid != me, !isAlive(pid) else { return nil }
             return directory.appendingPathComponent(name)
         }
@@ -53,7 +120,6 @@ enum IrisDefaults {
     /// Sweep the real preferences folder. A concurrent test process (XCTest and swift-testing
     /// run as separate processes) is still alive, so its suite is left alone.
     private static func sweepStaleTestSuites() {
-        let prefs = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Preferences")
-        sweepStaleTestSuites(in: prefs, isAlive: { pid in kill(pid, 0) == 0 || errno == EPERM })
+        sweepStaleTestSuites(in: preferencesDirectory, isAlive: { pid in kill(pid, 0) == 0 || errno == EPERM })
     }
 }

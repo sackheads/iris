@@ -173,6 +173,11 @@ author new scenarios, see **[docs/headless_profiling.md](docs/headless_profiling
 same `ScenarioRunner` powers the profiling tests under
 `Tests/irisTests/ProfilingHarnessTests.swift`.
 
+For repeatable performance tracking over time, run `perf/run.sh`: it executes the suites under
+`perf/suites/` at a release build, records where each turn's time goes (including a five-rung
+comparison against a bare provider call), and compares against promoted baselines. See
+[perf/README.md](perf/README.md).
+
 ### Updates & Releases
 
 - **Auto-Updates**: Iris automatically checks GitHub Releases for new updates. You can also manually check for updates and view release notes at any time via the **Updates** tab in Settings.

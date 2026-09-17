@@ -1,0 +1,2 @@
+{ "name": "capital-city", "clientMode": "real", "tier": "medium",
+  "turns": [ { "prompt": "What is the capital of Australia, and why isn't it Sydney? Two or three sentences." } ] }

@@ -1,0 +1,2 @@
+{ "name": "short-writing", "clientMode": "real", "tier": "medium",
+  "turns": [ { "prompt": "Write a two-sentence release note for a fix that stops the app crashing on launch when the settings file is empty." } ] }

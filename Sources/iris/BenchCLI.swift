@@ -61,6 +61,8 @@ enum BenchCLI {
         // A fake run needs no provider secrets; skip the Keychain so this ad-hoc-signed CLI
         // binary doesn't block on an access prompt. Must be set before ConfigManager.shared is
         // first touched (inside ScenarioRunner.run). Real runs keep Keychain access for auth.
+        // Bench runs never write to the user's real preferences.
+        IrisDefaults.useVolatileCopyOfStandard()
         if scenario.clientMode == .fake {
             HeadlessMode.enable()
         }

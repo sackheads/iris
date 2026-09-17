@@ -29,13 +29,43 @@ public enum PerfCategory: String, CaseIterable, Sendable {
     }
 }
 
-public struct CategoryStat: Sendable {
+public struct CategoryStat: Codable, Sendable, Equatable {
     public var ms: Double = 0
     public var count: Int = 0
+
+    public init(ms: Double = 0, count: Int = 0) { self.ms = ms; self.count = count }
 
     public mutating func add(_ durationMs: Double) {
         ms += durationMs
         count += 1
+    }
+}
+
+/// One model round within a turn. Token counts come from the provider's usage metadata and
+/// are nil for the fake client.
+public struct ModelCallRecord: Codable, Sendable, Equatable {
+    public let round: Int
+    public let model: String
+    /// Wall time of the whole call including any retry backoff; the `primaryLLM` bucket excludes backoff.
+    public let latencyMs: Double
+    public let promptTokens: Int?
+    public let outputTokens: Int?
+    public let returnedToolCalls: Bool
+
+    public init(round: Int, model: String, latencyMs: Double, promptTokens: Int?, outputTokens: Int?, returnedToolCalls: Bool) {
+        self.round = round; self.model = model; self.latencyMs = latencyMs
+        self.promptTokens = promptTokens; self.outputTokens = outputTokens; self.returnedToolCalls = returnedToolCalls
+    }
+}
+
+/// One dispatched tool call. `ok` is false when the executor returned an error string.
+public struct ToolCallRecord: Codable, Sendable, Equatable {
+    public let name: String
+    public let ms: Double
+    public let ok: Bool
+
+    public init(name: String, ms: Double, ok: Bool) {
+        self.name = name; self.ms = ms; self.ok = ok
     }
 }
 
@@ -46,6 +76,10 @@ public struct CommandProfile: Identifiable, Sendable {
     public let startedAt: Date
     public var totalMs: Double = 0
     public var categories: [PerfCategory: CategoryStat] = [:]
+    /// Named sub-spans finer than the six buckets, e.g. "guard.tier2", "assembly.userProfile".
+    public var spans: [String: CategoryStat] = [:]
+    public var modelCalls: [ModelCallRecord] = []
+    public var toolCalls: [ToolCallRecord] = []
 
     public init(id: UUID, label: String, source: String, startedAt: Date) {
         self.id = id
@@ -56,6 +90,10 @@ public struct CommandProfile: Identifiable, Sendable {
 
     public mutating func add(_ category: PerfCategory, durationMs: Double) {
         categories[category, default: CategoryStat()].add(durationMs)
+    }
+
+    public mutating func addSpan(_ name: String, durationMs: Double) {
+        spans[name, default: CategoryStat()].add(durationMs)
     }
 
     /// Unattributed remainder: turn wall-clock minus the sequential top-level phases.
@@ -106,6 +144,27 @@ public final class PerformanceProfiler: ObservableObject, @unchecked Sendable {
         guard let turnID else { return }
         lock.lock()
         active[turnID]?.add(category, durationMs: durationMs)
+        lock.unlock()
+    }
+
+    public func recordSpan(turnID: UUID?, name: String, durationMs: Double) {
+        guard let turnID else { return }
+        lock.lock()
+        active[turnID]?.addSpan(name, durationMs: durationMs)
+        lock.unlock()
+    }
+
+    public func recordModelCall(turnID: UUID?, _ call: ModelCallRecord) {
+        guard let turnID else { return }
+        lock.lock()
+        active[turnID]?.modelCalls.append(call)
+        lock.unlock()
+    }
+
+    public func recordToolCall(turnID: UUID?, _ call: ToolCallRecord) {
+        guard let turnID else { return }
+        lock.lock()
+        active[turnID]?.toolCalls.append(call)
         lock.unlock()
     }
 
@@ -176,6 +235,32 @@ public func measureSync<T>(_ category: PerfCategory, _ work: () throws -> T) ret
     defer {
         PerformanceProfiler.shared.record(turnID: turnID, category: category,
                                           durationMs: (CFAbsoluteTimeGetCurrent() - start) * 1000.0)
+    }
+    return try work()
+}
+
+/// Time an async span under a free-form name and attribute it to the current turn.
+@discardableResult
+public func measureSpan<T>(_ name: String,
+                           isolation: isolated (any Actor)? = #isolation,
+                           _ work: () async throws -> T) async rethrows -> T {
+    let turnID = PerformanceProfiler.currentTurnID
+    let start = CFAbsoluteTimeGetCurrent()
+    defer {
+        PerformanceProfiler.shared.recordSpan(turnID: turnID, name: name,
+                                              durationMs: (CFAbsoluteTimeGetCurrent() - start) * 1000.0)
+    }
+    return try await work()
+}
+
+/// Synchronous sibling of `measureSpan`.
+@discardableResult
+public func measureSpanSync<T>(_ name: String, _ work: () throws -> T) rethrows -> T {
+    let turnID = PerformanceProfiler.currentTurnID
+    let start = CFAbsoluteTimeGetCurrent()
+    defer {
+        PerformanceProfiler.shared.recordSpan(turnID: turnID, name: name,
+                                              durationMs: (CFAbsoluteTimeGetCurrent() - start) * 1000.0)
     }
     return try work()
 }

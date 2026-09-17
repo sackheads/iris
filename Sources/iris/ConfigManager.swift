@@ -20,8 +20,10 @@ public enum GeminiAuthMode: String, CaseIterable, Identifiable, Sendable {
 class ConfigManager: @unchecked Sendable {
     @ObservationIgnored static let shared = ConfigManager()
 
-    /// The backing store for every setting — see `IrisDefaults` for why it is volatile under test.
-    @ObservationIgnored nonisolated(unsafe) static let store: UserDefaults = IrisDefaults.store
+    /// The backing store for every setting — see `IrisDefaults` for why it is volatile under test
+    /// and under `--bench`/`--perf`. Computed, not captured: a headless run's volatile override
+    /// must apply to every later write even if `shared` was initialised before the override was set.
+    static var store: UserDefaults { IrisDefaults.store }
     
     var appearanceTheme: String {
         didSet { ConfigManager.store.set(appearanceTheme, forKey: "APPEARANCE_THEME") }
