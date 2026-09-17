@@ -51,6 +51,8 @@ struct GeminiResponseDecodingTests {
         #expect(blocked.emptyReason == "blockReason: OTHER")
         let bare = try JSONDecoder().decode(GeminiResponse.self, from: Data(#"{}"#.utf8))
         #expect(bare.emptyReason == "no candidates")
+        let hollow = try JSONDecoder().decode(GeminiResponse.self, from: Data(#"{"candidates":[{"content":{"role":"model"}}]}"#.utf8))
+        #expect(hollow.emptyReason == "empty candidate")
         let normal = try JSONDecoder().decode(GeminiResponse.self, from: Data(#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}]}"#.utf8))
         #expect(normal.emptyReason == nil)
     }

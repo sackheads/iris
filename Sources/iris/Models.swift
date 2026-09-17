@@ -164,7 +164,7 @@ struct GeminiResponse: Codable {
         if let content = candidates?.first?.content, !content.parts.isEmpty { return nil }
         if let finish = candidates?.first?.finishReason { return "finishReason: \(finish)" }
         if let block = promptFeedback?.blockReason { return "blockReason: \(block)" }
-        return "no candidates"
+        return (candidates?.isEmpty == false) ? "empty candidate" : "no candidates"
     }
 }
 
