@@ -47,4 +47,15 @@ struct PerfReportTests {
         r.scenarios[0].rungs[0].repetitions[0].error = "Gemini HTTP 429"
         #expect(PerfReport.render(r).contains("1 failed"))
     }
+
+    @Test("prompt tokens from ladder-shaped repetitions appear in the rung row")
+    func ladderPromptTokens() {
+        var r = PerfRecordTests.sampleRecord()
+        let call = ModelCallRecord(round: 0, model: "m", latencyMs: 100, promptTokens: 42, outputTokens: 3, returnedToolCalls: false)
+        let rep = PerfRepetition(index: 0, coldStart: true, wallClockMs: 100, turns: [], modelCalls: [call], error: nil)
+        let rung = PerfRungResult(rung: 1, repetitions: [rep], medianMs: 100, p90Ms: 100)
+        r.scenarios[0].rungs.append(rung)
+        let text = PerfReport.render(r)
+        #expect(text.contains("| 1 | 1 | 100.0 | 100.0 | 42 | - |"))
+    }
 }

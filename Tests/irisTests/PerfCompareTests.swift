@@ -65,4 +65,27 @@ struct PerfCompareTests {
         #expect(text.contains("REGRESSION"))
         #expect(text.contains("threshold 20%"))
     }
+
+    @Test("prompt tokens are compared for ladder-shaped rungs")
+    func ladderPromptTokens() {
+        let call100 = ModelCallRecord(round: 0, model: "m", latencyMs: 100, promptTokens: 100, outputTokens: 3, returnedToolCalls: false)
+        let rep100 = PerfRepetition(index: 0, coldStart: true, wallClockMs: 100, turns: [], modelCalls: [call100], error: nil)
+        let rung100 = PerfRungResult(rung: 1, repetitions: [rep100], medianMs: 100, p90Ms: 100)
+        var base = record(medianMs: 100)
+        base.scenarios[0].rungs.removeAll()
+        base.scenarios[0].rungs.append(rung100)
+
+        let call130 = ModelCallRecord(round: 0, model: "m", latencyMs: 100, promptTokens: 130, outputTokens: 3, returnedToolCalls: false)
+        let rep130 = PerfRepetition(index: 0, coldStart: true, wallClockMs: 100, turns: [], modelCalls: [call130], error: nil)
+        let rung130 = PerfRungResult(rung: 1, repetitions: [rep130], medianMs: 100, p90Ms: 100)
+        var curr = record(medianMs: 100)
+        curr.scenarios[0].rungs.removeAll()
+        curr.scenarios[0].rungs.append(rung130)
+
+        let c = PerfCompare.compare(baseline: base, current: curr, threshold: 0.2)
+        #expect(c.flagged.count == 1)
+        #expect(c.flagged.first?.metric == "prompt tokens")
+        #expect(c.flagged.first?.rung == 1)
+        #expect(c.flagged.first?.change == 0.3)
+    }
 }
