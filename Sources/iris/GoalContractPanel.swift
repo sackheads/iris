@@ -236,8 +236,11 @@ struct GoalContractPanel: View {
             outOfScope: outOfScope,
             stopBefore: stopBefore,
             assumptions: assumptions,
-            milestones: milestones
+            milestones: milestones,
+            workspace: draftedContract.workspace
         )
+        // Bind BEFORE locking so the kickoff turn already runs in the right directory (#68).
+        state.bindGoalWorkspace(for: conversation.id, contract: edited)
         state.setGoalContract(for: conversation.id, edited)
         state.sendGoalKickoff(for: conversation.id)
     }
