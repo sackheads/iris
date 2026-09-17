@@ -532,6 +532,7 @@ actor IrisEngine {
                         "check": Schema(type: "STRING", description: "A runnable command/test. ONLY for executable criteria."),
                         "milestone": Schema(type: "STRING", description: "Optional. A short checkpoint name; criteria sharing a name form one ordered checkpoint. Omit for a goal with no checkpoints.")
                     ], required: ["text", "kind"])),
+                    "workspace": Schema(type: "STRING", description: "Optional. The directory this goal should run in. If the goal works on existing code, give that directory's path — it must already exist. If the goal creates something new, omit this and Iris will make a dedicated workspace for it. Never propose the Iris source tree unless the goal is about Iris itself."),
                     "out_of_scope": Schema(type: "ARRAY", description: "Explicit non-goals.", items: Schema(type: "STRING")),
                     "stop_before": Schema(type: "ARRAY", description: "Irreversible / authorization boundaries to stop and ask before (e.g. force-push, merge, delete, spend).", items: Schema(type: "STRING")),
                     "assumptions": Schema(type: "ARRAY", description: "Anything you inferred that the user should confirm.", items: Schema(type: "STRING"))

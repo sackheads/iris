@@ -307,6 +307,49 @@ class AppState {
         }
     }
 
+    /// Bind a contracted goal's workspace at lock (#68), creating it when it does not exist.
+    ///
+    /// Returns the bound path, or nil when nothing could be bound — creation failing is not fatal:
+    /// the goal proceeds unbound, which is exactly today's behaviour and therefore not worse.
+    /// `paths` is injected so tests run against a temp root rather than the real ~/.iris.
+    @discardableResult
+    func bindGoalWorkspace(for conversationId: UUID, contract: GoalContract,
+                           paths: IrisPaths = .default) -> String? {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return nil }
+        let fm = FileManager.default
+        let workspacesRoot = paths.root.appendingPathComponent("workspaces").path
+
+        let resolution = GoalWorkspace.resolve(
+            proposed: contract.workspace,
+            objective: contract.objective,
+            existingBinding: conversations[idx].workspacePath,
+            workspacesRoot: workspacesRoot,
+            directoryExists: { path in
+                var isDir: ObjCBool = false
+                return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+            })
+
+        switch resolution {
+        case .keptExisting(let path):
+            return path
+        case .existing(let path):
+            setWorkspace(for: conversationId, path: path)
+            return path
+        case .created(let path):
+            do {
+                try fm.createDirectory(atPath: path, withIntermediateDirectories: true)
+            } catch {
+                appendMessage(role: .system,
+                              content: "Could not create a workspace at \(path) (\(error.localizedDescription)). The goal will run in the current directory.",
+                              to: conversationId)
+                return nil
+            }
+            setWorkspace(for: conversationId, path: path)
+            appendMessage(role: .system, content: "Goal workspace: \(path)", to: conversationId)
+            return path
+        }
+    }
+
     func setMainAgentSandbox(for conversationId: UUID, pref: SandboxPref?) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].mainAgentSandbox = pref

@@ -14,6 +14,8 @@ struct GoalContractPanel: View {
     @State private var assumptions: [String]
     /// Milestone ladder being authored. Empty means no checkpoints (single-terminal behavior).
     @State private var milestones: [Milestone]
+    /// Where the goal will run (#68). Empty means "let Iris pick a fresh workspace".
+    @State private var workspace: String
 
     init(state: AppState, conversation: Conversation) {
         self.state = state
@@ -29,6 +31,7 @@ struct GoalContractPanel: View {
         //     no risk of a re-render clobbering in-progress edits.
         _objective = State(initialValue: contract.objective)
         _criteria = State(initialValue: contract.criteria)
+        _workspace = State(initialValue: contract.workspace ?? "")
         _outOfScope = State(initialValue: contract.outOfScope)
         _stopBefore = State(initialValue: contract.stopBefore)
         _assumptions = State(initialValue: contract.assumptions)
@@ -95,6 +98,30 @@ struct GoalContractPanel: View {
                 .padding(6)
                 .background(Color.primary.opacity(0.05))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            // Where the goal will run (#68). Shown here so the choice passes through the approval
+            // gate that already exists, rather than surprising the user after the fact.
+            Label("Workspace", systemImage: "folder")
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+                .padding(.top, 4)
+            TextField("A fresh workspace will be created", text: $workspace)
+                .textFieldStyle(.plain)
+                .font(.caption.monospaced())
+                .padding(6)
+                .background(Color.primary.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            Text(resolvedWorkspaceDisplay)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(2)
+                .truncationMode(.head)
+            if let warning = resolvedWorkspaceWarning {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -217,6 +244,35 @@ struct GoalContractPanel: View {
 
     // MARK: - Actions
 
+    /// The workspace this draft would run in. Calls the PURE resolver, so this is safe to
+    /// evaluate on every keystroke: it stats paths, it never creates one (spec §4.1).
+    private var resolvedWorkspacePath: String {
+        let fm = FileManager.default
+        switch GoalWorkspace.resolve(
+            proposed: workspace.isEmpty ? nil : workspace,
+            objective: objective,
+            existingBinding: conversation.workspacePath,
+            workspacesRoot: IrisPaths.default.root.appendingPathComponent("workspaces").path,
+            directoryExists: { path in
+                var isDir: ObjCBool = false
+                return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+            }) {
+        case .existing(let p), .created(let p), .keptExisting(let p): return p
+        }
+    }
+
+    private var resolvedWorkspaceDisplay: String {
+        conversation.workspacePath != nil
+            ? "Already bound to this conversation: \(resolvedWorkspacePath)"
+            : "Will run in: \(resolvedWorkspacePath)"
+    }
+
+    private var resolvedWorkspaceWarning: String? {
+        GoalWorkspace.warningText(for: resolvedWorkspacePath,
+                                  homeDirectory: NSHomeDirectory(),
+                                  processCwd: FileManager.default.currentDirectoryPath)
+    }
+
     private func approveAndLock() {
         // Normalize: a criterion's `check` is only valid for `.executable` kind.
         // If the user switched the picker away from `.executable` after typing a command,
@@ -236,8 +292,11 @@ struct GoalContractPanel: View {
             outOfScope: outOfScope,
             stopBefore: stopBefore,
             assumptions: assumptions,
-            milestones: milestones
+            milestones: milestones,
+            workspace: workspace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : workspace
         )
+        // Bind BEFORE locking so the kickoff turn already runs in the right directory (#68).
+        state.bindGoalWorkspace(for: conversation.id, contract: edited)
         state.setGoalContract(for: conversation.id, edited)
         state.sendGoalKickoff(for: conversation.id)
     }
@@ -261,6 +320,14 @@ struct LockedContractChip: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
                         lockedObjective(contract.objective)
+                        // Where artifacts are landing, visible mid-run (#68).
+                        if let ws = conversation.workspacePath {
+                            Label(ws, systemImage: "folder")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.head)
+                        }
                         if contract.hasLadder {
                             // The ladder nests each checkpoint's criteria, so it replaces the flat list.
                             ladderSection(contract: contract)

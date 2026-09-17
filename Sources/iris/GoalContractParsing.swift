@@ -41,13 +41,19 @@ enum GoalContractParsing {
         }
         let milestones = order.map { Milestone(title: $0, criterionIds: groups[$0] ?? []) }
 
+        // Trimmed, and empty means absent — an empty string would resolve differently from nil.
+        let workspace = args["workspace"]?.stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+
         return GoalContract(objective: objective,
                             criteria: criteria,
                             outOfScope: strings("out_of_scope"),
                             stopBefore: strings("stop_before"),
                             assumptions: strings("assumptions"),
                             milestones: milestones,
-                            state: .draft)
+                            state: .draft,
+                            workspace: workspace)
     }
 }
 
@@ -77,4 +83,9 @@ extension GoalContractParsing {
         unit.lock()
         return unit
     }
+}
+
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
