@@ -48,9 +48,10 @@ enum IrisDefaults {
         return suite
     }()
 
-    /// Seed a throwaway suite from the user's real domain and route the store to it. Must be
-    /// called before `ConfigManager.shared` is first touched: `ConfigManager.store` captures
-    /// `IrisDefaults.store` once.
+    /// Seed a throwaway suite from the user's real domain and route the store to it. Call it before
+    /// `ConfigManager.shared` is first touched so the run's initial values come from the copy; even
+    /// if that ordering slips, `ConfigManager.store` is computed, so every later write still lands
+    /// in the copy and never in the real domain.
     static func useVolatileCopyOfStandard() {
         // Also clears plists left by earlier bench/perf/test processes that crashed or were
         // killed before their own atexit handler ran; live pids and this process are skipped.
