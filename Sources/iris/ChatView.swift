@@ -728,14 +728,13 @@ struct SystemGroupView: View {
     }
 
     /// Live "current intent": the most recent tool call's intent (or command / name).
-    /// If the last message is a non-tool system line, show that line instead.
+    /// If the last message is a non-tool system line, show that line instead. (An LLM error
+    /// never reaches here: `MessageItem.group` always gives it a group of its own, and
+    /// single-message groups render expanded.)
     private var collapsedStatus: String? {
         guard let last = messages.last else { return nil }
         if let call = ToolCallParser.parse(last.content) {
             return call.intent ?? call.command ?? call.name
-        }
-        if let error = LLMErrorMessage.parse(last.content) {
-            return error.headline
         }
         return last.content
     }

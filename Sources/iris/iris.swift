@@ -666,14 +666,15 @@ actor IrisEngine {
                     localState?.updateSubagentStatus(id: conversationId, status: "Thinking...")
                 }
                 // Measure at the seam so every client (real, fake, future) is attributed
-                // uniformly, and the span includes engine-side call overhead.
+                // uniformly, and the span includes engine-side call overhead. Each attempt is
+                // its own span so retry backoff sleeps are not counted as model time.
                 let requestToSend = activeRequest
-                let response = try await measure(.primaryLLM) {
-                    try await LLMRetry.run(delays: retryDelays, onRetry: { error, attempt, delay in
-                        await self.pushToUI(role: .system,
-                                            text: "[retry] \(error.message); retrying in \(Self.formatDelay(delay)) (attempt \(attempt) of \(self.retryDelays.count))",
-                                            conversationId: conversationId)
-                    }) {
+                let response = try await LLMRetry.run(delays: retryDelays, onRetry: { error, attempt, delay in
+                    await self.pushToUI(role: .system,
+                                        text: "[retry] \(error.message); retrying in \(Self.formatDelay(delay)) (attempt \(attempt) of \(self.retryDelays.count))",
+                                        conversationId: conversationId)
+                }) {
+                    try await measure(.primaryLLM) {
                         try await self.client.generateContent(request: requestToSend, tier: modelTier)
                     }
                 }
@@ -845,7 +846,11 @@ actor IrisEngine {
             } catch {
                 // A Stop press (or conversation deletion) lands here too, most likely from the
                 // retry backoff sleep. That is not an LLM error, so nothing is shown for it.
-                let cancelled = error is CancellationError || (error as? URLError)?.code == .cancelled
+                // URLSession also reports `.cancelled` for transfers nobody asked to stop
+                // (session invalidation, system cancellation), so that only counts as a stop
+                // when this task really was cancelled; otherwise it is shown like any failure.
+                let cancelled = error is CancellationError
+                    || ((error as? URLError)?.code == .cancelled && Task.isCancelled)
                 // Headline only: provider bodies can be huge, and the full body is already on
                 // the console. The pill carries a capped copy behind a disclosure.
                 let display = LLMErrorMessage.display(for: error)

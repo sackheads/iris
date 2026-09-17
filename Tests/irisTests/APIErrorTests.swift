@@ -93,11 +93,79 @@ struct APIErrorTests {
         #expect(!APIError(message: "no status").isRetryable)
     }
 
+    @Test("an array-wrapped error body still yields a real headline")
+    func arrayShapedBody() {
+        let raw = """
+        [
+          {
+            "error": {
+              "code": 429,
+              "message": "Quota exceeded for aiplatform.googleapis.com.",
+              "status": "RESOURCE_EXHAUSTED"
+            }
+          }
+        ]
+        """
+        let err = APIError.http(provider: "Gemini", statusCode: 429, body: body(raw))
+        #expect(err.message == "Gemini HTTP 429 RESOURCE_EXHAUSTED: Quota exceeded for aiplatform.googleapis.com.")
+        #expect(err.isRetryable)
+    }
+
+    @Test("Retry-After in seconds is carried on the error, matched case-insensitively")
+    func retryAfterSeconds() {
+        let err = APIError.http(provider: "Anthropic", statusCode: 429, body: Data(), headers: ["retry-after": "7"])
+        #expect(err.retryAfter == 7)
+        #expect(APIError.http(provider: "Anthropic", statusCode: 429, body: Data()).retryAfter == nil)
+        #expect(APIError.http(provider: "Anthropic", statusCode: 429, body: Data(), headers: ["Retry-After": "soon"]).retryAfter == nil)
+    }
+
+    @Test("Retry-After as an HTTP-date becomes a wait relative to now, never negative")
+    func retryAfterDate() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000) // Tue, 14 Nov 2023 22:13:20 GMT
+        let future = APIError.retryAfter(from: ["Retry-After": "Tue, 14 Nov 2023 22:13:50 GMT"], now: now)
+        #expect(future == 30)
+        let past = APIError.retryAfter(from: ["Retry-After": "Tue, 14 Nov 2023 22:13:00 GMT"], now: now)
+        #expect(past == 0)
+    }
+
     @Test("the legacy message-only initializer still works and is not retryable")
     func legacyInit() {
         let err = APIError(message: "GEMINI_FALLBACK_AUTH_ERROR_1013")
         #expect(err.localizedDescription == "GEMINI_FALLBACK_AUTH_ERROR_1013")
         #expect(err.statusCode == nil)
         #expect(err.detail == nil)
+    }
+}
+
+/// Backoff timing: a scheduled delay is jittered ±25% so agents that fail together do not
+/// retry in lockstep; a provider's `Retry-After` wins, is capped, and is only ever stretched.
+@Suite("LLMRetry.wait")
+struct LLMRetryWaitTests {
+    @Test("a scheduled delay is spread across ±25%")
+    func scheduledJitter() {
+        #expect(LLMRetry.wait(scheduled: 8, retryAfter: nil, unitRandom: 0) == 6)
+        #expect(LLMRetry.wait(scheduled: 8, retryAfter: nil, unitRandom: 0.5) == 8)
+        #expect(LLMRetry.wait(scheduled: 8, retryAfter: nil, unitRandom: 1) == 10)
+        for _ in 0..<200 {
+            let w = LLMRetry.wait(scheduled: 4, retryAfter: nil)
+            #expect(w >= 3 && w <= 5)
+        }
+    }
+
+    @Test("Retry-After overrides the schedule and is never shortened")
+    func retryAfterWins() {
+        #expect(LLMRetry.wait(scheduled: 2, retryAfter: 20, unitRandom: 0) == 20)
+        #expect(LLMRetry.wait(scheduled: 2, retryAfter: 20, unitRandom: 1) == 25)
+        #expect(LLMRetry.wait(scheduled: 2, retryAfter: 0, unitRandom: 1) == 0)
+    }
+
+    @Test("a huge Retry-After is capped")
+    func retryAfterCap() {
+        #expect(LLMRetry.wait(scheduled: 2, retryAfter: 3600, unitRandom: 0) == LLMRetry.retryAfterCap)
+    }
+
+    @Test("a zero schedule stays zero (tests rely on this)")
+    func zeroStaysZero() {
+        #expect(LLMRetry.wait(scheduled: 0, retryAfter: nil) == 0)
     }
 }

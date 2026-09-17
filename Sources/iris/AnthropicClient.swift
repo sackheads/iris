@@ -175,7 +175,8 @@ struct AnthropicClient {
         
         if httpResponse.statusCode != 200 {
             print("API Error (\(httpResponse.statusCode)): \(String(data: data, encoding: .utf8) ?? "<non-utf8 body>")")
-            throw APIError.http(provider: "Anthropic", statusCode: httpResponse.statusCode, body: data)
+            throw APIError.http(provider: "Anthropic", statusCode: httpResponse.statusCode, body: data,
+                                headers: httpResponse.allHeaderFields)
         }
         
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]

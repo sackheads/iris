@@ -129,7 +129,8 @@ struct LLMClient {
                 if httpResponse.statusCode != 200 {
                     // Full body goes to the console; the chat only ever sees the capped form.
                     print("API Error (\(httpResponse.statusCode)): \(String(data: data, encoding: .utf8) ?? "<non-utf8 body>")")
-                    throw APIError.http(provider: "Gemini", statusCode: httpResponse.statusCode, body: data)
+                    throw APIError.http(provider: "Gemini", statusCode: httpResponse.statusCode, body: data,
+                                headers: httpResponse.allHeaderFields)
                 }
                 
                 let decoder = JSONDecoder()

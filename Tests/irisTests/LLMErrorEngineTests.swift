@@ -118,6 +118,23 @@ struct LLMErrorEngineTests {
                 "a user-initiated stop is not an LLM error")
     }
 
+    @Test("a URLSession .cancelled that nobody asked for is shown, not swallowed")
+    func spuriousURLCancellationIsShown() async throws {
+        let client = FlakyClient(errors: [URLError(.cancelled)], then: ok)
+        let conv = try #require(await run(client, retryDelays: []))
+        #expect(conv.messages.contains { LLMErrorMessage.parse($0.content) != nil },
+                "only a cancelled task counts as a user stop")
+    }
+
+    @Test("the retry wait honors a provider Retry-After")
+    func retryAfterIsHonored() async throws {
+        let err = APIError.http(provider: "Gemini", statusCode: 429, body: Data(), headers: ["Retry-After": "0"])
+        let client = FlakyClient(errors: [err], then: ok)
+        let conv = try #require(await run(client, retryDelays: [30]))
+        #expect(client.callCount == 2, "a 0 s Retry-After should beat the 30 s schedule")
+        #expect(conv.messages.contains { $0.role == .agent && $0.content == "Recovered." })
+    }
+
     @Test("no retries are configured means a 429 is shown immediately")
     func zeroRetries() async throws {
         let client = FlakyClient(errors: [rateLimited], then: ok)

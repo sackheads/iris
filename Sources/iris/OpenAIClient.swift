@@ -186,7 +186,8 @@ struct OpenAIClient {
         
         if httpResponse.statusCode != 200 {
             print("API Error (\(httpResponse.statusCode)): \(String(data: data, encoding: .utf8) ?? "<non-utf8 body>")")
-            throw APIError.http(provider: "OpenAI", statusCode: httpResponse.statusCode, body: data)
+            throw APIError.http(provider: "OpenAI", statusCode: httpResponse.statusCode, body: data,
+                                headers: httpResponse.allHeaderFields)
         }
         
         // Parse OpenAI response back to GeminiResponse
