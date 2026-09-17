@@ -70,3 +70,18 @@ enum GoalWorkspace {
         return name.hasPrefix(".")
     }
 }
+
+extension GoalWorkspace {
+    /// A one-line warning for a workspace worth a second look, or nil. Never blocks (spec §5).
+    static func warningText(for path: String, homeDirectory: String, processCwd: String) -> String? {
+        guard isSensitive(path, homeDirectory: homeDirectory, processCwd: processCwd) else { return nil }
+        let p = (path as NSString).standardizingPath
+        if p == (processCwd as NSString).standardizingPath {
+            return "This is the Iris source tree. The goal's files will land in Iris's own repository, and checks will run against it."
+        }
+        if p == (homeDirectory as NSString).standardizingPath {
+            return "This is your home directory. The goal will be able to read and write anything in it."
+        }
+        return "This is a hidden configuration directory. Make sure the goal is meant to change it."
+    }
+}
