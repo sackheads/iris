@@ -1,0 +1,6 @@
+{
+  "name": "fake-text-only",
+  "clientMode": "fake",
+  "turns": [ { "prompt": "What is the capital of Australia?" } ],
+  "scriptedResponses": [ { "kind": "text", "text": "Canberra." } ]
+}

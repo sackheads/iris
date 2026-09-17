@@ -1,0 +1,9 @@
+{
+  "name": "fake-one-command",
+  "clientMode": "fake",
+  "turns": [ { "prompt": "Run uname and tell me the OS." } ],
+  "scriptedResponses": [
+    { "kind": "toolCalls", "calls": [ { "name": "run_command", "args": { "command": "uname -s" } } ] },
+    { "kind": "text", "text": "Darwin." }
+  ]
+}
