@@ -48,6 +48,10 @@ struct GoalContract: Codable, Equatable, Sendable {
     /// Slice D1 — criteria the agent declared not-applicable, with its stated reason. The grader
     /// still grades a waived criterion; only the GATE ignores its `not_met`, so a waiver never
     /// erases evidence.
+    /// Where this goal runs (#68). Proposed by the model in the draft, editable by the user, and
+    /// resolved to an absolute path at lock. Nil on a contract from before #68, and on one whose
+    /// conversation was already bound by `set_workspace`.
+    var workspace: String?
     var waivers: [UUID: String] = [:]
     /// Slice D1 — how many times the gate has refused completion for this contract. Reset when a
     /// contract is locked.
@@ -57,11 +61,12 @@ struct GoalContract: Codable, Equatable, Sendable {
          stopBefore: [String] = [], assumptions: [String] = [], changeLog: [ContractChange] = [],
          milestones: [Milestone] = [], currentMilestone: Int = 0,
          checkpointStatus: CheckpointStatus = .running, state: ContractState = .draft,
-         waivers: [UUID: String] = [:], gateAttempts: Int = 0) {
+         workspace: String? = nil, waivers: [UUID: String] = [:], gateAttempts: Int = 0) {
         self.id = id; self.objective = objective; self.criteria = criteria
         self.outOfScope = outOfScope; self.stopBefore = stopBefore; self.assumptions = assumptions
         self.changeLog = changeLog; self.milestones = milestones; self.currentMilestone = currentMilestone
         self.checkpointStatus = checkpointStatus; self.state = state
+        self.workspace = workspace
         self.waivers = waivers; self.gateAttempts = gateAttempts
     }
 
@@ -83,6 +88,7 @@ struct GoalContract: Codable, Equatable, Sendable {
         currentMilestone = try c.decodeIfPresent(Int.self, forKey: .currentMilestone) ?? 0
         checkpointStatus = try c.decodeIfPresent(CheckpointStatus.self, forKey: .checkpointStatus) ?? .running
         state = try c.decodeIfPresent(ContractState.self, forKey: .state) ?? .draft
+        workspace = try c.decodeIfPresent(String.self, forKey: .workspace)
         waivers = try c.decodeIfPresent([UUID: String].self, forKey: .waivers) ?? [:]
         gateAttempts = try c.decodeIfPresent(Int.self, forKey: .gateAttempts) ?? 0
     }
