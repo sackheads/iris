@@ -11,7 +11,9 @@ extension PerfEnvironment {
         #endif
         return PerfEnvironment(
             gitSha: git(["rev-parse", "--short", "HEAD"], in: repoRoot) ?? "unknown",
-            gitDirty: !(git(["status", "--porcelain"], in: repoRoot) ?? "").isEmpty,
+            // Exclude perf/baselines: --promote writes an untracked baseline file earlier in the
+            // same run, and that alone must not flag later suites in the run as dirty.
+            gitDirty: !(git(["status", "--porcelain", "--", ".", ":(exclude)perf/baselines"], in: repoRoot) ?? "").isEmpty,
             machineModel: machineModel(),
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             cpuCount: ProcessInfo.processInfo.activeProcessorCount,
