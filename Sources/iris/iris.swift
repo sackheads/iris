@@ -716,10 +716,14 @@ actor IrisEngine {
                     }
                 }
                 
-                guard let candidate = activeResponse.candidates?.first, let responseContent = candidate.content else {
-                    await pushToUI(role: .agent, text: "Error: No candidate returned.", conversationId: conversationId)
+                // No content is an error pill with the provider's stated reason, not something
+                // Iris "said" and not a decode failure (#136).
+                if let reason = activeResponse.emptyReason {
+                    let headline = "\(ConfigManager.shared.primaryProvider) returned no content (\(reason))"
+                    await pushToUI(role: .system, text: LLMErrorMessage.encode(LLMErrorDisplay(headline: headline, detail: nil)), conversationId: conversationId)
                     break
                 }
+                guard let responseContent = activeResponse.candidates?.first?.content else { break }
                 
                 let modelContent = Content(role: "model", parts: responseContent.parts)
                 await MainActor.run { 
