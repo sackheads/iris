@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public struct InjectionGuard {
     
@@ -6,6 +7,49 @@ public struct InjectionGuard {
         case tier1_structural
         case tier2_coreML
         case tier3_canary
+    }
+
+    /// Outcome of a model-backed tier. `error` is fail-closed at the call site but is never
+    /// cached, so a transient model outage does not pin content as blocked for the process.
+    enum TierVerdict { case safe, malicious, error }
+
+    /// Tier-2/3 verdicts are memoized per content for the process lifetime (#130): the static
+    /// `USER.md` / `AGENTS.md` were paying a tier-3 cloud round trip on every turn. Bounded LRU;
+    /// keyed on the content and everything that decides the verdict (see `cacheKey`).
+    public static let sanitizationCacheCapacity = 128
+    private static let cache = SanitizationCache(capacity: sanitizationCacheCapacity)
+
+    private final class SanitizationCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var entries: [String: String] = [:]
+        private var order: [String] = []   // least recently used first
+        private let capacity: Int
+        init(capacity: Int) { self.capacity = capacity }
+
+        func get(_ key: String) -> String? {
+            lock.lock(); defer { lock.unlock() }
+            guard let value = entries[key] else { return nil }
+            if let i = order.firstIndex(of: key) { order.remove(at: i); order.append(key) }
+            return value
+        }
+
+        func set(_ key: String, _ value: String) {
+            lock.lock(); defer { lock.unlock() }
+            if entries.updateValue(value, forKey: key) == nil {
+                order.append(key)
+                if order.count > capacity { entries.removeValue(forKey: order.removeFirst()) }
+            } else if let i = order.firstIndex(of: key) {
+                order.remove(at: i); order.append(key)
+            }
+        }
+    }
+
+    private static func cacheKey(clean: String, source: String, maxTier: SanitizationTier, protectionEnabled: Bool?) -> String {
+        let config = ConfigManager.shared
+        let enabled = protectionEnabled ?? config.enableAdvancedPromptInjectionProtection
+        let parts = [clean, source, String(describing: maxTier), String(enabled), config.promptGuardEngine, config.promptGuardModel]
+        let digest = SHA256.hash(data: Data(parts.joined(separator: "\u{0}").utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
     
     /// Sanitizes untrusted input through a multi-tier defense pipeline.
@@ -52,23 +96,44 @@ public struct InjectionGuard {
             return wrap(clean, source: source)
         }
 
+        let key = cacheKey(clean: clean, source: source, maxTier: maxTier, protectionEnabled: protectionEnabled)
+        if let cached = cache.get(key) {
+            return cached
+        }
+
         // Tier 2: Local Token-Classification (CoreML/ONNX) — evaluates the unwrapped content.
-        let isTier2Safe = await measureSpan("guard.tier2") { await executeTier2CoreML(clean, protectionEnabled: protectionEnabled) }
-        if !isTier2Safe {
+        let tier2 = await measureSpan("guard.tier2") { await executeTier2CoreML(clean, protectionEnabled: protectionEnabled) }
+        switch tier2 {
+        case .error:
             return wrapBlocked("[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]", source: source)
+        case .malicious:
+            let blocked = wrapBlocked("[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]", source: source)
+            cache.set(key, blocked)
+            return blocked
+        case .safe:
+            break
         }
 
         if maxTier == .tier2_coreML {
-            return wrap(clean, source: source)
+            let wrapped = wrap(clean, source: source)
+            cache.set(key, wrapped)
+            return wrapped
         }
 
         // Tier 3: Behavioral Canary Probe — also evaluates the unwrapped content.
-        let isTier3Safe = await measureSpan("guard.tier3") { await executeTier3Canary(clean, protectionEnabled: protectionEnabled) }
-        if !isTier3Safe {
+        let tier3 = await measureSpan("guard.tier3") { await executeTier3Canary(clean, protectionEnabled: protectionEnabled) }
+        switch tier3 {
+        case .error:
             return wrapBlocked("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]", source: source)
+        case .malicious:
+            let blocked = wrapBlocked("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]", source: source)
+            cache.set(key, blocked)
+            return blocked
+        case .safe:
+            let wrapped = wrap(clean, source: source)
+            cache.set(key, wrapped)
+            return wrapped
         }
-
-        return wrap(clean, source: source)
     }
 
     private static func executeTier1(_ input: String) -> String {
@@ -107,9 +172,9 @@ public struct InjectionGuard {
         String(raw.filter { $0 != "\"" && $0 != "<" && $0 != ">" && !$0.isNewline })
     }
     
-    private static func executeTier2CoreML(_ input: String, protectionEnabled: Bool? = nil) async -> Bool {
+    private static func executeTier2CoreML(_ input: String, protectionEnabled: Bool? = nil) async -> TierVerdict {
         guard protectionEnabled ?? ConfigManager.shared.enableAdvancedPromptInjectionProtection else {
-            return true
+            return .safe
         }
         try? await CoreMLEvaluator.shared.loadModelIfNeeded()
         let startTime = Date()
@@ -124,22 +189,22 @@ public struct InjectionGuard {
             
             if probability > 0.9 {
                 print("[InjectionGuard] Tier 2 CoreML flagged injection with probability: \(probability)")
-                return false
+                return .malicious
             }
-            return true
+            return .safe
         } catch {
             if hasModelLoaded {
                 let durationMs = Date().timeIntervalSince(startTime) * 1000
                 await MetricsManager.shared.trackLatency(operation: .promptGuardTier2, modelName: "CoreML", durationMs: durationMs, success: false)
             }
             print("[InjectionGuard] Tier 2 CoreML error: \(error). Failing closed.")
-            return false
+            return .error
         }
     }
     
-    private static func executeTier3Canary(_ input: String, protectionEnabled: Bool? = nil) async -> Bool {
+    private static func executeTier3Canary(_ input: String, protectionEnabled: Bool? = nil) async -> TierVerdict {
         guard protectionEnabled ?? ConfigManager.shared.enableAdvancedPromptInjectionProtection else {
-            return true
+            return .safe
         }
         
         let engineTypeString = ConfigManager.shared.promptGuardEngine
@@ -177,12 +242,12 @@ public struct InjectionGuard {
             let response = try await engine.generate(prompt: prompt, jsonSchema: nil)
             let durationMs = Date().timeIntervalSince(startTime) * 1000
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier3, modelName: modelName, durationMs: durationMs, success: true)
-            return response.contains("SAFE") && !response.contains("MALICIOUS")
+            return (response.contains("SAFE") && !response.contains("MALICIOUS")) ? .safe : .malicious
         } catch {
             let durationMs = Date().timeIntervalSince(startTime) * 1000
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier3, modelName: modelName, durationMs: durationMs, success: false)
             print("[InjectionGuard] Canary execution failed: \(error). Failing closed for canary.")
-            return false
+            return .error
         }
     }
 }

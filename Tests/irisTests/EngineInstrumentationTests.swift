@@ -44,4 +44,20 @@ struct EngineInstrumentationTests {
         #expect(profile.spans["assembly.systemPrompt"] != nil)
         #expect((profile.spans["guard.tier1"]?.count ?? 0) >= 1)
     }
+
+    @Test("the static user profile is sanitized through the model tiers once, not on every turn")
+    func staticContextSanitizedOnce() async throws {
+        let scenario = Scenario(name: "two-turns", clientMode: .fake,
+                                turns: [Scenario.Turn(prompt: "one"), Scenario.Turn(prompt: "two")],
+                                scriptedResponses: [
+                                    Scenario.ScriptedResponse(kind: .text, text: "ack one", calls: nil),
+                                    Scenario.ScriptedResponse(kind: .text, text: "ack two", calls: nil)
+                                ])
+        let result = await ScenarioRunner.run(scenario)
+        #expect(result.turnProfiles.count == 2)
+        let second = try #require(result.turnProfiles.last)
+        // USER.md did not change between the turns, so the cached verdict is served (#130).
+        #expect(second.spans["guard.tier3"] == nil)
+        #expect(second.spans["assembly.userProfile"] != nil)
+    }
 }

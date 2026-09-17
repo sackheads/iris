@@ -60,14 +60,14 @@ struct InjectionGuardTests {
     func testTier2StubPassThrough() async {
         // Reset model
         CoreMLEvaluator.shared.setModel(MockCoreMLModel(probability: 0.0))
-        let payload = "Harmless data"
+        let payload = "Harmless data \(UUID().uuidString)"   // unique: verdicts are cached per content
         let sanitized = await InjectionGuard.sanitize(payload, maxTier: .tier2_coreML, protectionEnabled: true)
         #expect(sanitized.contains("Harmless data"))
     }
     
     @Test("Tier 3: Safe Payload")
     func testTier3Safe() async {
-        let payload = "Harmless data"
+        let payload = "Harmless data \(UUID().uuidString)"   // unique: verdicts are cached per content
         let protection = true
         
         // Setup mock engine to return the secret token
@@ -93,7 +93,7 @@ struct InjectionGuardTests {
     
     @Test("Tier 3: Error Fails Closed")
     func testTier3ErrorFailsClosed() async {
-        let payload = "Harmless data"
+        let payload = "Harmless data \(UUID().uuidString)"   // unique: verdicts are cached per content
         let protection = true
         
         // Setup mock engine to throw an error
@@ -168,6 +168,21 @@ struct InjectionGuardTests {
         #expect(sanitizedAttack.contains("[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]"), "injection should still block")
     }
 #endif
+
+    @Test("Cache: a fail-closed error verdict is not cached (#130)")
+    func testErrorVerdictNotCached() async {
+        let payload = "Transient failure \(UUID().uuidString)"
+        CoreMLEvaluator.shared.setModel(MockCoreMLModel(probability: 0.0))
+        AuxiliaryModelManager.shared.setMockEngine(MockInferenceEngine(shouldHijack: false, shouldThrow: true), for: "canary")
+        let blocked = await InjectionGuard.sanitize(payload, maxTier: .tier3_canary, protectionEnabled: true)
+        #expect(blocked.contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
+
+        // The model is back: the same content must be re-evaluated, not served from the cache.
+        AuxiliaryModelManager.shared.setMockEngine(MockInferenceEngine(shouldHijack: false), for: "canary")
+        let retried = await InjectionGuard.sanitize(payload, maxTier: .tier3_canary, protectionEnabled: true)
+        #expect(retried.contains("Transient failure"))
+    }
+
 }
 
 final class MockInferenceEngine: AuxiliaryInferenceEngine, @unchecked Sendable {

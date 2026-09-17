@@ -68,6 +68,18 @@ The most robust defense against zero-day injections is to have a small, restrict
 *   **Outcome:** The content passes only if the response contains `SAFE` and not `MALICIOUS`; otherwise it is quarantined (`[CONTENT BLOCKED BY TIER 3 CANARY GUARD]`).
 *   **Fail-closed:** if the canary engine fails to load or generate, the tier treats the content as unsafe and blocks it.
 
+### Verdict cache (Tier 2/3)
+
+The Tier 2 and Tier 3 verdict for a given piece of content is memoized for the process lifetime
+(`InjectionGuard.SanitizationCache`, bounded LRU of 128 entries). The key covers the normalized
+content, the provenance tag, the requested tier, and the settings that decide the verdict
+(protection enabled, `promptGuardEngine`, `promptGuardModel`), so changing the guard configuration
+invalidates naturally. Genuine verdicts are cached in both directions (safe and blocked); a
+fail-closed *error* (model unavailable) is not, so a transient outage never pins content as
+blocked. Tier 1 still runs on every call. Motivation: the first perf ladder run measured the
+Tier 3 cloud canary re-sanitizing the static 32-byte `USER.md` on every turn, 0.7-0.9 s each
+(#130, `docs/reviews/2026-09-17-tool-eagerness-analysis.md`).
+
 > **Historical note:** an earlier design used a "SECRET_UUID summarization trap" (the canary had to
 > echo a secret token; a hijacked model would omit it). That was replaced by the direct
 > `SAFE`/`MALICIOUS` classifier prompt described above.
