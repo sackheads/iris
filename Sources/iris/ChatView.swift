@@ -421,24 +421,7 @@ struct ChatView: View {
     }
     
     private func groupedMessages(for conv: Conversation) -> [MessageItem] {
-        var result: [MessageItem] = []
-        var currentSystemGroup: [ChatMessage] = []
-        
-        for msg in conv.messages {
-            if msg.role == .system {
-                currentSystemGroup.append(msg)
-            } else {
-                if !currentSystemGroup.isEmpty {
-                    result.append(.systemGroup(id: currentSystemGroup.first!.id, messages: currentSystemGroup))
-                    currentSystemGroup = []
-                }
-                result.append(.single(msg))
-            }
-        }
-        if !currentSystemGroup.isEmpty {
-            result.append(.systemGroup(id: currentSystemGroup.first!.id, messages: currentSystemGroup))
-        }
-        return result
+        MessageItem.group(conv.messages)
     }
     
     private func exportConversation(id: UUID) {
@@ -449,7 +432,8 @@ struct ChatView: View {
             let roleName = msg.role == .user ? "You" : (msg.role == .system ? "System" : "Iris")
             markdown += "### \(roleName)\n"
             if msg.role == .system {
-                markdown += "`\(msg.content)`\n\n"
+                let line = LLMErrorMessage.parse(msg.content)?.headline ?? msg.content
+                markdown += "`\(line)`\n\n"
             } else {
                 markdown += "\(msg.content)\n\n"
             }
@@ -744,7 +728,9 @@ struct SystemGroupView: View {
     }
 
     /// Live "current intent": the most recent tool call's intent (or command / name).
-    /// If the last message is a non-tool system line, show that line instead.
+    /// If the last message is a non-tool system line, show that line instead. (An LLM error
+    /// never reaches here: `MessageItem.group` always gives it a group of its own, and
+    /// single-message groups render expanded.)
     private var collapsedStatus: String? {
         guard let last = messages.last else { return nil }
         if let call = ToolCallParser.parse(last.content) {
@@ -802,13 +788,55 @@ struct SystemMessageContent: View {
     let text: String
     var commandStartTime: Date? = nil
     var commandDuration: TimeInterval? = nil
+    @State private var isDetailExpanded = false
 
     var body: some View {
         if let call = ToolCallParser.parse(text) {
             toolCallRow(call, startTime: commandStartTime, duration: commandDuration)
+        } else if let error = LLMErrorMessage.parse(text) {
+            llmErrorRow(error)
         } else {
             fallbackView
         }
+    }
+
+    /// One-line headline; the provider's (capped) raw body is behind a chevron.
+    @ViewBuilder
+    private func llmErrorRow(_ error: LLMErrorDisplay) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(.red)
+                Text(error.headline)
+                    .foregroundColor(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                if error.detail != nil {
+                    Button(action: { withAnimation { isDetailExpanded.toggle() } }) {
+                        Image(systemName: isDetailExpanded ? "chevron.down" : "chevron.right")
+                            .foregroundColor(.secondary).frame(width: 14)
+                    }
+                    .buttonStyle(.plain)
+                    .help(isDetailExpanded ? "Hide provider response" : "Show provider response")
+                }
+            }
+            .font(.caption.monospaced())
+            if isDetailExpanded, let detail = error.detail {
+                Text(detail)
+                    .font(.caption2.monospaced())
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(NSColor.textBackgroundColor).opacity(0.5))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.red.opacity(0.06))
+        .cornerRadius(8)
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.25), lineWidth: 1))
     }
 
     @ViewBuilder
