@@ -34,6 +34,10 @@ Each real-lane prompt is timed at up to five rungs; each delta isolates one laye
 
 **Overhead ratio** = median rung 5 / median rung 1. **Harness ratio** = rung 4 / rung 1.
 
+There is no unit-test seam to assert guards are switched off under a volatile copy; the evidence
+is in every ladder record, where rung 4 turns carry zero `guard.*` and `assembly.userProfile`
+spans while rung 5 turns do not.
+
 ## Reading a record
 
 `iris --perf report <run.json>` renders the Markdown summary. Per scenario: a row per rung with
@@ -49,3 +53,8 @@ the records are not comparable (different provider or model names).
 A baseline is a record you trust as the reference. `perf/run.sh --promote` copies the run's
 records into `perf/baselines/`; commit them. Later runs compare against the newest baseline for
 the same suite.
+
+**v0 baselines.** The first ladder and eagerness baselines (2026-09-17) are flagged dirty only
+because `--promote` wrote the smoke baseline mid-run, and the ladder's rung 2 tool-use rows have
+no successful repetitions (a Gemini candidate without `parts` fails to decode; tracked as a
+follow-up); compare skips those rungs.
