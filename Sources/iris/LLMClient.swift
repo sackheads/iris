@@ -120,6 +120,7 @@ struct LLMClient {
                 let requestData = try encoder.encode(cleanRequest)
                 urlRequest.httpBody = requestData
                 
+                LLMRequestPolicy.apply(to: &urlRequest)
                 let (data, urlResponse) = try await URLSession.shared.data(for: urlRequest)
                 
                 guard let httpResponse = urlResponse as? HTTPURLResponse else {
