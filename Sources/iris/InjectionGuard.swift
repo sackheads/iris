@@ -47,7 +47,10 @@ public struct InjectionGuard {
     private static func cacheKey(clean: String, source: String, maxTier: SanitizationTier, protectionEnabled: Bool?) -> String {
         let config = ConfigManager.shared
         let enabled = protectionEnabled ?? config.enableAdvancedPromptInjectionProtection
-        let parts = [clean, source, String(describing: maxTier), String(enabled), config.promptGuardEngine, config.promptGuardModel]
+        // The tier-2 model path is in the key too, so correctness does not lean on CoreMLEvaluator
+        // being load-once: a hot-swapped guard model can never be served a stale verdict.
+        let parts = [clean, source, String(describing: maxTier), String(enabled),
+                     config.promptGuardEngine, config.promptGuardModel, config.promptGuardCoreMLModel]
         let digest = SHA256.hash(data: Data(parts.joined(separator: "\u{0}").utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }

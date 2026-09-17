@@ -73,8 +73,8 @@ The most robust defense against zero-day injections is to have a small, restrict
 The Tier 2 and Tier 3 verdict for a given piece of content is memoized for the process lifetime
 (`InjectionGuard.SanitizationCache`, bounded LRU of 128 entries). The key covers the normalized
 content, the provenance tag, the requested tier, and the settings that decide the verdict
-(protection enabled, `promptGuardEngine`, `promptGuardModel`), so changing the guard configuration
-invalidates naturally. Genuine verdicts are cached in both directions (safe and blocked); a
+(protection enabled, `promptGuardEngine`, `promptGuardModel`, `promptGuardCoreMLModel`), so changing
+the guard configuration invalidates naturally. Genuine verdicts are cached in both directions (safe and blocked); a
 fail-closed *error* (model unavailable) is not, so a transient outage never pins content as
 blocked. Tier 1 still runs on every call. Motivation: the first perf ladder run measured the
 Tier 3 cloud canary re-sanitizing the static 32-byte `USER.md` on every turn, 0.7-0.9 s each
