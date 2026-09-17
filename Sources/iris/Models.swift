@@ -155,10 +155,38 @@ extension Array where Element == FunctionDeclaration {
 struct GeminiResponse: Codable {
     var candidates: [Candidate]?
     var usageMetadata: UsageMetadata?
+    var promptFeedback: PromptFeedback? = nil
+
+    /// Why the reply carries no content, or nil when the first candidate has parts. Gemini
+    /// omits `parts` on an early stop (safety, recitation, empty answer) and reports the cause
+    /// on the candidate or, for a blocked prompt, on `promptFeedback` (#136).
+    var emptyReason: String? {
+        if let content = candidates?.first?.content, !content.parts.isEmpty { return nil }
+        if let finish = candidates?.first?.finishReason { return "finishReason: \(finish)" }
+        if let block = promptFeedback?.blockReason { return "blockReason: \(block)" }
+        return (candidates?.isEmpty == false) ? "empty candidate" : "no candidates"
+    }
 }
 
 struct Candidate: Codable {
     var content: Content?
+    var finishReason: String? = nil
+}
+
+struct PromptFeedback: Codable, Sendable {
+    var blockReason: String?
+}
+
+extension Content {
+    private enum CodingKeys: String, CodingKey { case role, parts }
+
+    /// `parts` is absent on a candidate Gemini stopped early. This type is also the persisted
+    /// conversation history, so absence must decode, never throw (#136).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        role = try c.decodeIfPresent(String.self, forKey: .role)
+        parts = try c.decodeIfPresent([Part].self, forKey: .parts) ?? []
+    }
 }
 
 struct UsageMetadata: Codable, Sendable {
