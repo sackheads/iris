@@ -33,6 +33,8 @@ public struct CategoryStat: Codable, Sendable, Equatable {
     public var ms: Double = 0
     public var count: Int = 0
 
+    public init(ms: Double = 0, count: Int = 0) { self.ms = ms; self.count = count }
+
     public mutating func add(_ durationMs: Double) {
         ms += durationMs
         count += 1
