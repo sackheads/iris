@@ -40,4 +40,12 @@ struct IrisDefaultsSweepTests {
         let left = try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted()
         #expect(left == ["iris.plist"])
     }
+
+    @Test("bench suites are swept too")
+    func benchSuitesAreSwept() throws {
+        let dir = try makeDir(["iris-bench-99999.plist", "iris-tests-99998.plist", "iris.plist"])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let stale = IrisDefaults.staleTestSuiteFiles(in: dir, isAlive: { _ in false })
+        #expect(stale.map(\.lastPathComponent) == ["iris-bench-99999.plist", "iris-tests-99998.plist"])
+    }
 }
