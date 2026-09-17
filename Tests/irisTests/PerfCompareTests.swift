@@ -88,4 +88,52 @@ struct PerfCompareTests {
         #expect(c.flagged.first?.rung == 1)
         #expect(c.flagged.first?.change == 0.3)
     }
+
+    @Test("a rung whose current repetitions all failed is flagged instead of scored")
+    func currentAllFailed() {
+        var baseline = PerfRecordTests.sampleRecord()
+        let okRep = baseline.scenarios[0].rungs[0].repetitions[0]
+        baseline.scenarios[0].rungs[0].repetitions = (0..<3).map { i in
+            var r = okRep; r.index = i; return r
+        }
+
+        var failedRep = baseline.scenarios[0].rungs[0].repetitions[0]
+        failedRep.error = "Gemini HTTP 429"
+        var current = PerfRecordTests.sampleRecord()
+        current.scenarios[0].rungs[0].repetitions = (0..<3).map { i in
+            var r = failedRep; r.index = i; return r
+        }
+        current.scenarios[0].rungs[0].medianMs = 0
+
+        let c = PerfCompare.compare(baseline: baseline, current: current, threshold: 0.2)
+        let rungRows = c.rows.filter { $0.rung == 5 }
+        #expect(rungRows.count == 1)
+        #expect(rungRows.first?.metric == "successful repetitions")
+        #expect(rungRows.first?.before == 3)
+        #expect(rungRows.first?.after == 0)
+        #expect(rungRows.first?.flagged == true)
+        #expect(!c.rows.contains { $0.metric == "median ms" })
+        #expect(PerfCompare.exitCode(c) == 1)
+    }
+
+    @Test("a rung that failed on both sides is flagged but does not fail the gate")
+    func bothSidesAllFailed() {
+        var failedRep = PerfRecordTests.sampleRecord().scenarios[0].rungs[0].repetitions[0]
+        failedRep.error = "Gemini HTTP 429"
+
+        var baseline = PerfRecordTests.sampleRecord()
+        baseline.scenarios[0].rungs[0].repetitions = [failedRep]
+        baseline.scenarios[0].rungs[0].medianMs = 0
+
+        var current = PerfRecordTests.sampleRecord()
+        current.scenarios[0].rungs[0].repetitions = [failedRep]
+        current.scenarios[0].rungs[0].medianMs = 0
+
+        let c = PerfCompare.compare(baseline: baseline, current: current, threshold: 0.2)
+        let rungRows = c.rows.filter { $0.rung == 5 }
+        #expect(rungRows.count == 1)
+        #expect(rungRows.first?.metric == "successful repetitions")
+        #expect(rungRows.first?.flagged == false)
+        #expect(PerfCompare.exitCode(c) == 0)
+    }
 }

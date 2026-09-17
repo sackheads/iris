@@ -35,6 +35,19 @@ enum PerfCompare {
             guard let base = baseline.scenarios.first(where: { $0.name == cur.name }) else { continue }
             for r in cur.rungs {
                 guard let br = base.rungs.first(where: { $0.rung == r.rung }) else { continue }
+                let okBefore = br.repetitions.filter { $0.error == nil }.count
+                let okAfter = r.repetitions.filter { $0.error == nil }.count
+                // A rung with zero successful repetitions has medianMs == 0, which reads as a
+                // -100% change and never trips the threshold. Flag the loss of coverage directly
+                // instead, and skip the median/token rows since they would be meaningless.
+                if okAfter == 0 {
+                    rows.append(.init(scenario: cur.name, rung: r.rung, metric: "successful repetitions",
+                                      before: Double(okBefore), after: 0, change: -1.0,
+                                      // A rung that was already broken in the baseline must not
+                                      // fail every future gate.
+                                      flagged: okBefore > 0))
+                    continue
+                }
                 row(cur.name, r.rung, "median ms", br.medianMs, r.medianMs)
                 if let bt = medianPromptTokens(br), let ct = medianPromptTokens(r) {
                     row(cur.name, r.rung, "prompt tokens", bt, ct)
