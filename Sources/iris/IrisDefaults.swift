@@ -52,6 +52,9 @@ enum IrisDefaults {
     /// called before `ConfigManager.shared` is first touched: `ConfigManager.store` captures
     /// `IrisDefaults.store` once.
     static func useVolatileCopyOfStandard() {
+        // Also clears plists left by earlier bench/perf/test processes that crashed or were
+        // killed before their own atexit handler ran; live pids and this process are skipped.
+        sweepStaleTestSuites()
         let seed = UserDefaults.standard.persistentDomain(forName: appDomain) ?? [:]
         let name = "iris-bench-\(ProcessInfo.processInfo.processIdentifier)"
         let copy = makeVolatileCopy(of: seed, suiteName: name)
@@ -61,6 +64,8 @@ enum IrisDefaults {
             // whatever thread calls exit(), so this is a genuine cross-thread read.
             if let n = IrisDefaults.lock.withLock({ IrisDefaults.volatileSuiteName }) {
                 UserDefaults(suiteName: n)?.removePersistentDomain(forName: n)
+                // removePersistentDomain does not delete the backing plist on current macOS.
+                IrisDefaults.removeSuiteFile(named: n, in: IrisDefaults.preferencesDirectory)
             }
         }
     }
@@ -70,6 +75,16 @@ enum IrisDefaults {
         suite.removePersistentDomain(forName: suiteName)
         suite.setPersistentDomain(seed, forName: suiteName)
         return suite
+    }
+
+    /// Where `UserDefaults(suiteName:)` plists actually live on disk.
+    static let preferencesDirectory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Preferences")
+
+    /// Delete `<name>.plist` from `directory` directly, since `removePersistentDomain` won't.
+    /// A missing file is not an error.
+    static func removeSuiteFile(named name: String, in directory: URL) {
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent("\(name).plist"))
     }
 
     /// `iris-tests-<pid>.plist` / `iris-bench-<pid>.plist` files in `directory` whose process is
@@ -94,7 +109,6 @@ enum IrisDefaults {
     /// Sweep the real preferences folder. A concurrent test process (XCTest and swift-testing
     /// run as separate processes) is still alive, so its suite is left alone.
     private static func sweepStaleTestSuites() {
-        let prefs = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Preferences")
-        sweepStaleTestSuites(in: prefs, isAlive: { pid in kill(pid, 0) == 0 || errno == EPERM })
+        sweepStaleTestSuites(in: preferencesDirectory, isAlive: { pid in kill(pid, 0) == 0 || errno == EPERM })
     }
 }
