@@ -39,4 +39,28 @@ struct ScenarioRunnerOptionsTests {
         #expect(request.systemInstruction?.parts.first?.text?.isEmpty == false)
         #expect((request.tools?.first?.functionDeclarations.count ?? 0) > 10)
     }
+
+    /// The engine catches provider failures and posts a `[LLM_ERROR]`-tagged system message
+    /// instead of throwing, so a failed turn still yields a `CommandProfile`. 401 is not retried
+    /// (unlike 429/503/529), so the pill lands immediately instead of after the engine's backoff.
+    private struct AlwaysFails: LLMClientProtocol {
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            throw APIError.http(provider: "Gemini", statusCode: 401,
+                                body: Data(#"{"error":{"code":401,"message":"Bad credentials.","status":"UNAUTHENTICATED"}}"#.utf8))
+        }
+    }
+
+    private var singleTurn: Scenario {
+        Scenario(name: "single", clientMode: .fake, turns: [Scenario.Turn(prompt: "hi")],
+                 scriptedResponses: [Scenario.ScriptedResponse(kind: .text, text: "ack", calls: nil)])
+    }
+
+    @Test("an engine-level LLM failure is surfaced per turn")
+    func engineLevelFailureSurfaced() async {
+        let result = await ScenarioRunner.run(singleTurn, clientOverride: AlwaysFails())
+        #expect(result.turnErrors == ["Gemini HTTP 401 UNAUTHENTICATED: Bad credentials."])
+
+        let happy = await ScenarioRunner.run(textOnly)
+        #expect(happy.turnErrors == [nil, nil])
+    }
 }

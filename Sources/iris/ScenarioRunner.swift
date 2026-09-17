@@ -14,6 +14,11 @@ struct ScenarioResult: Sendable {
     var finalTexts: [String]
     /// True when guards were actually switched off for this run.
     var guardsWereOff: Bool
+    /// The first `[LLM_ERROR]` headline posted during each turn, in turn order (nil when the
+    /// turn had none). The engine catches provider failures and posts a tagged system message
+    /// instead of throwing, so a failed turn still produces a `CommandProfile` — this is how a
+    /// caller (e.g. `PerfRunner`) tells a failed rung-4/5 repetition from a successful one.
+    var turnErrors: [String?]
 }
 
 /// Drives the iris core end-to-end without any UI: stands up a fresh `AppState`, builds an
@@ -75,19 +80,26 @@ enum ScenarioRunner {
         // Collect this run's finished turn profiles via a task-local sink scoped to the turn loop.
         let collector = TurnCollector()
         var finalTexts: [String] = []
+        var turnErrors: [String?] = []
         let start = CFAbsoluteTimeGetCurrent()
         await PerformanceProfiler.$runSink.withValue({ collector.append($0) }) {
             for turn in scenario.turns {
+                let before = state.conversations.first { $0.id == conversationId }?.messages.count ?? 0
                 await engine.processInput(turn.prompt, source: turn.source, conversationId: conversationId)
-                let last = state.conversations.first { $0.id == conversationId }?
-                    .messages.last { $0.role == .agent }?.content ?? ""
+                let messages = state.conversations.first { $0.id == conversationId }?.messages ?? []
+                let last = messages.last { $0.role == .agent }?.content ?? ""
                 finalTexts.append(last)
+                // Only the messages this turn appended: an engine-level LLM failure is posted as
+                // a tagged system message rather than thrown, so it never reaches this loop's
+                // `catch` — scanning the turn's own slice is the only way to see it.
+                let error = messages.dropFirst(before).compactMap { LLMErrorMessage.parse($0.content)?.headline }.first
+                turnErrors.append(error)
             }
         }
         let wallClockMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
 
         return ScenarioResult(turnProfiles: collector.all, wallClockMs: wallClockMs,
-                              finalTexts: finalTexts, guardsWereOff: guardsOff)
+                              finalTexts: finalTexts, guardsWereOff: guardsOff, turnErrors: turnErrors)
     }
 }
 

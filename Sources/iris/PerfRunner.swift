@@ -44,7 +44,11 @@ enum PerfRunner {
                         let result = await ScenarioRunner.run(effective, guards: guards, clientOverride: client)
                         let turns = zip(result.turnProfiles, result.finalTexts + Array(repeating: "", count: max(0, result.turnProfiles.count - result.finalTexts.count)))
                             .map { PerfTurn($0, finalTextLength: $1.count) }
-                        let failed = result.turnProfiles.isEmpty ? "turn produced no profile" : nil
+                        // An engine-level LLM failure is caught and posted as a tagged system
+                        // message rather than thrown, so `turnProfiles` is never empty for it;
+                        // `turnErrors` is how ScenarioRunner surfaces it back to us.
+                        let failed = result.turnErrors.compactMap { $0 }.first
+                            ?? (result.turnProfiles.isEmpty ? "turn produced no profile" : nil)
                         rep = PerfRepetition(index: i, coldStart: cold, wallClockMs: result.wallClockMs, turns: turns,
                                              modelCalls: [], error: failed)
                     }

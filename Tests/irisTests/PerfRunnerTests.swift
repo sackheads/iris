@@ -55,6 +55,28 @@ struct PerfRunnerTests {
         let suite = PerfSuite(name: "m", scenarios: ["perf/prompts/fake/does-not-exist.json"])
         await #expect(throws: (any Error).self) { try await PerfRunner.run(suite: suite, repoRoot: root, headless: true) }
     }
+
+    /// The engine catches provider failures and posts a tagged system message instead of
+    /// throwing, so `ScenarioResult.turnProfiles` is never empty for one. `PerfRunner` must read
+    /// `turnErrors` (not emptiness of `turnProfiles`) to mark the repetition failed.
+    private struct AlwaysFails: LLMClientProtocol {
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            throw APIError.http(provider: "Gemini", statusCode: 401,
+                                body: Data(#"{"error":{"code":401,"message":"Bad credentials.","status":"UNAUTHENTICATED"}}"#.utf8))
+        }
+    }
+
+    @Test("an engine-level failure marks the repetition failed and drops it from the medians")
+    func engineLevelFailureFailsRepetition() async throws {
+        let suite = PerfSuite(name: "fails", lane: .real, repetitions: 1, rungs: [5],
+                              scenarios: ["perf/prompts/fake/text-only.json"])
+        let record = try await PerfRunner.run(suite: suite, repoRoot: root, client: AlwaysFails(), headless: true)
+        let s = try #require(record.scenarios.first)
+        let error = try #require(s.rungs.first?.repetitions.first?.error)
+        #expect(error.contains("401"))
+        #expect(s.rungs.first?.medianMs == 0)
+        #expect(s.summary.medianMs == 0)
+    }
 }
 
 @Suite("PerfSummarizer")
