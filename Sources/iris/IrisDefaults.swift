@@ -55,7 +55,7 @@ enum IrisDefaults {
         // Also clears plists left by earlier bench/perf/test processes that crashed or were
         // killed before their own atexit handler ran; live pids and this process are skipped.
         sweepStaleTestSuites()
-        let seed = UserDefaults.standard.persistentDomain(forName: appDomain) ?? [:]
+        let seed = perfSeed(from: UserDefaults.standard.persistentDomain(forName: appDomain) ?? [:])
         let name = "iris-bench-\(ProcessInfo.processInfo.processIdentifier)"
         let copy = makeVolatileCopy(of: seed, suiteName: name)
         lock.withLock { override = copy; volatileSuiteName = name }
@@ -67,6 +67,16 @@ enum IrisDefaults {
                 // removePersistentDomain does not delete the backing plist on current macOS.
                 IrisDefaults.removeSuiteFile(named: n, in: IrisDefaults.preferencesDirectory)
             }
+        }
+    }
+
+    /// Drop the persisted conversation history from a domain before it seeds a volatile copy.
+    /// `AppState()` is constructed per repetition and decodes this blob on init; on the author's
+    /// machine it is 472 KB and its debounced re-save can land inside the next repetition's
+    /// measured window.
+    static func perfSeed(from domain: [String: Any]) -> [String: Any] {
+        domain.filter { key, _ in
+            key != "iris_conversations" && !key.hasPrefix("iris_conversations_backup_")
         }
     }
 

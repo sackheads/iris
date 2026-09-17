@@ -65,4 +65,16 @@ struct VolatileDefaultsTests {
     func preferencesDirectoryIsLibraryPreferences() {
         #expect(IrisDefaults.preferencesDirectory.path.hasSuffix("/Library/Preferences"))
     }
+
+    @Test("perfSeed drops conversation blobs and keeps configuration")
+    func perfSeedDropsConversationBlobs() {
+        let domain: [String: Any] = [
+            "iris_conversations": "x",
+            "iris_conversations_backup_1.5": "y",
+            "ENABLE_VIBECOP": true,
+            "PRIMARY_PROVIDER": "Gemini",
+        ]
+        let seed = IrisDefaults.perfSeed(from: domain)
+        #expect(Set(seed.keys) == Set(["ENABLE_VIBECOP", "PRIMARY_PROVIDER"]))
+    }
 }
