@@ -26,9 +26,11 @@ struct ScenarioResult: Sendable {
 /// `PerformanceProfiler` breakdown. Consumed by both the profiling tests and `--bench`.
 ///
 /// Runs are self-contained and safe to run concurrently: each uses its own throwaway `AppState`
-/// and binds a task-local profiler sink so it collects only its own turns. It deliberately does
-/// NOT mutate shared singletons (e.g. `ConfigManager`) — doing so would race with parallel work.
-/// Heavy guard tiers are governed process-wide by `HeadlessMode` (set by `--bench`), not per run.
+/// and binds a task-local profiler sink so it collects only its own turns. The one exception is
+/// `guards: .off`, which mutates process-global `ConfigManager` state (only ever inside a
+/// volatile copy) with a non-reentrant save/restore, so two `.off` runs must not overlap;
+/// `PerfRunner` runs them sequentially. Heavy guard tiers are governed process-wide by
+/// `HeadlessMode` (set by `--bench`), not per run.
 @MainActor
 enum ScenarioRunner {
     static func run(_ scenario: Scenario,
@@ -87,12 +89,16 @@ enum ScenarioRunner {
                 let before = state.conversations.first { $0.id == conversationId }?.messages.count ?? 0
                 await engine.processInput(turn.prompt, source: turn.source, conversationId: conversationId)
                 let messages = state.conversations.first { $0.id == conversationId }?.messages ?? []
-                let last = messages.last { $0.role == .agent }?.content ?? ""
+                // Only the messages this turn appended: scanning the whole conversation would let
+                // a turn with no agent message (e.g. an engine-level failure) inherit the previous
+                // turn's text instead of reporting none.
+                let turnMessages = messages.dropFirst(before)
+                let last = turnMessages.last { $0.role == .agent }?.content ?? ""
                 finalTexts.append(last)
-                // Only the messages this turn appended: an engine-level LLM failure is posted as
-                // a tagged system message rather than thrown, so it never reaches this loop's
-                // `catch` — scanning the turn's own slice is the only way to see it.
-                let error = messages.dropFirst(before).compactMap { LLMErrorMessage.parse($0.content)?.headline }.first
+                // An engine-level LLM failure is posted as a tagged system message rather than
+                // thrown, so it never reaches this loop's `catch` — scanning the turn's own slice
+                // is the only way to see it.
+                let error = turnMessages.compactMap { LLMErrorMessage.parse($0.content)?.headline }.first
                 turnErrors.append(error)
             }
         }

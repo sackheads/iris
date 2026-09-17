@@ -59,6 +59,8 @@ struct ScenarioRunnerOptionsTests {
     func engineLevelFailureSurfaced() async {
         let result = await ScenarioRunner.run(singleTurn, clientOverride: AlwaysFails())
         #expect(result.turnErrors == ["Gemini HTTP 401 UNAUTHENTICATED: Bad credentials."])
+        // The failing turn posts only a system pill, no agent text.
+        #expect(result.finalTexts == [""])
 
         let happy = await ScenarioRunner.run(textOnly)
         #expect(happy.turnErrors == [nil, nil])
