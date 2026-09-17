@@ -14,11 +14,18 @@ struct VolatileDefaultsTests {
         let seedSuite = try #require(UserDefaults(suiteName: seedName))
         seedSuite.set(true, forKey: "ENABLE_VIBECOP")
         seedSuite.set("Gemini", forKey: "PRIMARY_PROVIDER")
-        defer { seedSuite.removePersistentDomain(forName: seedName) }
+        defer {
+            seedSuite.removePersistentDomain(forName: seedName)
+            // removePersistentDomain does not delete the backing plist on current macOS.
+            IrisDefaults.removeSuiteFile(named: seedName, in: IrisDefaults.preferencesDirectory)
+        }
 
         let seed = try #require(UserDefaults.standard.persistentDomain(forName: seedName))
         let copy = IrisDefaults.makeVolatileCopy(of: seed, suiteName: copyName)
-        defer { copy.removePersistentDomain(forName: copyName) }
+        defer {
+            copy.removePersistentDomain(forName: copyName)
+            IrisDefaults.removeSuiteFile(named: copyName, in: IrisDefaults.preferencesDirectory)
+        }
         #expect(copy.bool(forKey: "ENABLE_VIBECOP") == true)
         #expect(copy.string(forKey: "PRIMARY_PROVIDER") == "Gemini")
 
