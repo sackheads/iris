@@ -78,10 +78,10 @@ public struct InjectionGuard {
                                 maxTier: SanitizationTier = .tier1_structural,
                                 protectionEnabled: Bool? = nil) async -> String {
         let __turnID = PerformanceProfiler.currentTurnID
-        let __start = CFAbsoluteTimeGetCurrent()
+        let __start = MonotonicClock.nowMs()
         defer {
             PerformanceProfiler.shared.record(turnID: __turnID, category: .injectionGuard,
-                                              durationMs: (CFAbsoluteTimeGetCurrent() - __start) * 1000.0)
+                                              durationMs: (MonotonicClock.nowMs() - __start))
         }
         let source = sanitizeSourceLabel(contextTag)
 

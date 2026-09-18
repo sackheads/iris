@@ -43,17 +43,17 @@ enum PerfLadder {
                        client: any LLMClientProtocol) async -> LadderSample {
         let req = request(rung: rung, prompt: prompt, capture: capture)
         let model = await MainActor.run { ConfigManager.shared.getModel(for: tier) }
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = MonotonicClock.nowMs()
         do {
             let response = try await client.generateContent(request: req, tier: tier)
-            let ms = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
+            let ms = (MonotonicClock.nowMs() - start)
             let call = ModelCallRecord(round: 0, model: model, latencyMs: ms,
                                        promptTokens: response.usageMetadata?.promptTokenCount,
                                        outputTokens: response.usageMetadata?.candidatesTokenCount,
                                        returnedToolCalls: response.candidates?.first?.content?.parts.contains { $0.functionCall != nil } ?? false)
             return LadderSample(wallClockMs: ms, modelCall: call, error: nil)
         } catch {
-            let ms = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
+            let ms = (MonotonicClock.nowMs() - start)
             return LadderSample(wallClockMs: ms, modelCall: nil, error: LLMErrorMessage.display(for: error).headline)
         }
     }
