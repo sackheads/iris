@@ -178,6 +178,7 @@ struct OpenAIClient {
         urlRequest.addValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
         
+        LLMRequestPolicy.apply(to: &urlRequest)
         let (data, response) = try await URLSession.shared.data(for: urlRequest)
         
         guard let httpResponse = response as? HTTPURLResponse else {

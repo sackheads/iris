@@ -82,6 +82,31 @@ struct APIError: LocalizedError, Equatable {
 /// Retry transient provider failures (see `APIError.isRetryable`) with a backoff schedule.
 /// `delays` is one wait per retry, so `[2, 4, 8]` means up to four attempts. Non-retryable
 /// errors and task cancellation propagate immediately.
+/// Per-request settings every provider client applies before hitting the network.
+enum LLMRequestPolicy {
+    /// URLSession's default is 60 s; the first perf ladder saw legitimate 38 s rounds and four
+    /// 60 s timeouts in ~90 calls. 180 s covers the observed tail while still bounding a hung
+    /// connection. Streaming (#131) will make this less load-bearing.
+    static let timeoutSeconds: TimeInterval = 180
+
+    static func apply(to request: inout URLRequest) {
+        request.timeoutInterval = timeoutSeconds
+    }
+
+    /// Transport failures worth one more try on the same schedule as a 429: the request never
+    /// got an answer. Cancellation and everything else propagate immediately.
+    static let retryableTransportErrors: Set<URLError.Code> = [.timedOut, .networkConnectionLost]
+
+    /// Plain wording for the `[retry]` line; a bare URLError only names its numeric code.
+    static func describe(_ code: URLError.Code) -> String {
+        switch code {
+        case .timedOut: return "request timed out after \(Int(timeoutSeconds)) s"
+        case .networkConnectionLost: return "network connection lost"
+        default: return URLError(code).localizedDescription
+        }
+    }
+}
+
 enum LLMRetry {
     /// Waits are spread by up to this fraction so agents that fail together do not re-fire
     /// together against an already-exhausted quota.
@@ -113,6 +138,12 @@ enum LLMRetry {
                 let delay = wait(scheduled: delays[attempt], retryAfter: error.retryAfter)
                 attempt += 1
                 await onRetry(error, attempt, delay)
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch let error as URLError where LLMRequestPolicy.retryableTransportErrors.contains(error.code) && attempt < delays.count {
+                let delay = wait(scheduled: delays[attempt], retryAfter: nil)
+                attempt += 1
+                // Synthesized so the existing `[retry]` notice renders the transport failure.
+                await onRetry(APIError(message: LLMRequestPolicy.describe(error.code)), attempt, delay)
                 try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }

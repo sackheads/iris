@@ -113,7 +113,7 @@ See [docs/slash_commands.md](docs/slash_commands.md) for the full command refere
 
 ### Provider Errors & Retries
 
-When a model call fails, Iris shows a compact red system pill with a one-line headline (provider, HTTP status, and the provider's message). The provider's raw response is available behind a chevron, capped at 2 KB; the full body goes to the console log. Rate limits and overloads (HTTP 429, 503, 529) are retried automatically before the error is shown, with a 2 s / 4 s / 8 s backoff (±25% jitter) or the provider's `Retry-After` when it sends one, and each retry is announced as a `[retry]` system line.
+When a model call fails, Iris shows a compact red system pill with a one-line headline (provider, HTTP status, and the provider's message). The provider's raw response is available behind a chevron, capped at 2 KB; the full body goes to the console log. Rate limits and overloads (HTTP 429, 503, 529), request timeouts, and lost connections are retried automatically before the error is shown, with a 2 s / 4 s / 8 s backoff (±25% jitter) or the provider's `Retry-After` when it sends one, and each retry is announced as a `[retry]` system line. Each provider request is allowed 180 s before it counts as timed out.
 
 ### Google Workspace Integration 🔐
 In the settings window, you can enter your Google OAuth Client ID and Secret, and click **Connect to Google**. Iris will spin up a local listener, redirect you to Google for consent, and seamlessly exchange your authorization code for valid access and refresh tokens.
