@@ -1,0 +1,2 @@
+{ "name": "describe-process", "clientMode": "real", "tier": "medium",
+  "turns": [ { "prompt": "What's your process for reviewing a pull request? Just describe it." } ] }

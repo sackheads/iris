@@ -1,0 +1,20 @@
+{
+  "name": "tool-eagerness-2",
+  "lane": "real",
+  "repetitions": 2,
+  "pauseMs": 1500,
+  "rungs": [
+    5
+  ],
+  "scenarios": [
+    "perf/prompts/model-only-2/mentions-directory.json",
+    "perf/prompts/model-only-2/personal-fact.json",
+    "perf/prompts/model-only-2/hypothetical-schedule.json",
+    "perf/prompts/model-only-2/remember-instruction.json",
+    "perf/prompts/model-only-2/describe-process.json",
+    "perf/prompts/model-only-2/watch-out.json",
+    "perf/prompts/tool-use/remember-editor.json",
+    "perf/prompts/tool-use/schedule-reminder.json",
+    "perf/prompts/tool-use/bind-workspace.json"
+  ]
+}
