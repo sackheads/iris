@@ -58,4 +58,16 @@ struct PerfReportTests {
         let text = PerfReport.render(r)
         #expect(text.contains("| 1 | 1 | 100.0 | 100.0 | 42 | - |"))
     }
+
+    @Test("top spans come from the highest rung number even when rungs are unsorted")
+    func topSpansUseHighestRung() {
+        var r = PerfRecordTests.sampleRecord()
+        var low = r.scenarios[0].rungs[0]
+        low.rung = 1
+        low.repetitions[0].turns[0].spans = ["ladder.only": CategoryStat(ms: 999, count: 1)]
+        r.scenarios[0].rungs = [r.scenarios[0].rungs[0], low]   // rung 5 first, rung 1 last
+        let text = PerfReport.render(r)
+        #expect(text.contains("top spans (rung 5"))
+        #expect(!text.contains("ladder.only"))
+    }
 }
