@@ -20,6 +20,8 @@ dirty=""
 git diff --quiet && git diff --cached --quiet || dirty=" (dirty tree: results will be flagged)"
 echo "perf: building release at ${sha}${dirty}"
 swift build -c release 2>&1 | tail -1
+# A stable signature keeps the Keychain from re-prompting this rebuilt binary (see scripts/sign.sh).
+scripts/sign.sh .build/release/iris
 BIN=.build/release/iris
 
 suites=(perf/suites/smoke.json)

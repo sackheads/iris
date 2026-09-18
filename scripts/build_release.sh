@@ -62,7 +62,13 @@ cat <<EOF > "${APP_BUNDLE}/Contents/Info.plist"
 EOF
 
 # 3. Code Signing
-SIGNING_IDENTITY="${CODESIGN_IDENTITY:--}"
+# CODESIGN_IDENTITY wins; otherwise the first Developer ID Application identity in the keychain;
+# otherwise ad-hoc ("-"), which works but re-prompts for Keychain access after every rebuild.
+SIGNING_IDENTITY="${CODESIGN_IDENTITY:-}"
+if [ -z "${SIGNING_IDENTITY}" ]; then
+    SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)
+fi
+SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
 echo "Signing app bundle with identity '${SIGNING_IDENTITY}'..."
 codesign --force --deep --options runtime -s "${SIGNING_IDENTITY}" "${APP_BUNDLE}"
 
