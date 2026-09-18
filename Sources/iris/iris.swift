@@ -428,7 +428,7 @@ actor IrisEngine {
         
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Use this whenever the user asks to be reminded of something or to have something done on a schedule, for example every weekday at 9 or every hour; the prompt is what Iris should do when it fires. Never use shell cron for this. The job persists across app restarts and catches up if the computer wakes from sleep. You MUST provide EITHER intervalSeconds OR one or more cron fields (minute, hour, day, month, weekday), but not both.",
+            description: "Use this whenever the user asks to be reminded of something or to have something done on a schedule, for example every weekday at 9 or every hour; the prompt is what Iris should do when it fires. Never use shell cron for this; no setup, files, or commands are needed, calling this tool is the whole job. The job persists across app restarts and catches up if the computer wakes from sleep. You MUST provide EITHER intervalSeconds OR one or more cron fields (minute, hour, day, month, weekday), but not both.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [

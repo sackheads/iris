@@ -105,4 +105,11 @@ struct ToolSurfaceTrimTests {
         #expect(mem.contains("not present in the current context"))
         #expect(!mem.contains("JIT injection"))
     }
+
+    @Test("the shipped steering says an explicit request to remember is stored now, not at reflection")
+    func steeringStoresOnRequest() {
+        let steering = SystemSteering.shipped()
+        #expect(steering.contains("asks you to remember"))
+        #expect(steering.contains("store it now"))
+    }
 }
