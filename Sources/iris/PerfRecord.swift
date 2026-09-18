@@ -155,4 +155,7 @@ struct PerfScenarioSummary: Codable {
     /// `expectedTools`; nil when the scenario declares no expectation.
     var unexpectedToolCallRate: Double? = nil
     var unexpectedToolCallsByName: [String: Int]? = nil
+    /// Fraction of successful rung-5 turns that called none of a non-empty `expectedTools`
+    /// (a control that missed the tool it exists to exercise); nil for bait or unscored.
+    var missedExpectedToolRate: Double? = nil
 }

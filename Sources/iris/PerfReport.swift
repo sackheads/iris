@@ -42,6 +42,9 @@ enum PerfReport {
                 let names = (s.summary.unexpectedToolCallsByName ?? [:]).sorted { $0.value > $1.value }.map { "\($0.key): \($0.value)" }.joined(separator: ", ")
                 out.append("- unexpected tool-call rate \(Int((rate * 100).rounded()))%: \(names.isEmpty ? "none" : names)")
             }
+            if let missed = s.summary.missedExpectedToolRate, missed > 0 {
+                out.append("- missed expected tool in \(Int((missed * 100).rounded()))% of turns")
+            }
             out.append("")
         }
         return out.joined(separator: "\n")

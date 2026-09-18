@@ -118,22 +118,27 @@ enum PerfSummarizer {
         // declare their tool, so extras count; unscored scenarios get nil.
         var unexpectedRate: Double?
         var unexpectedByName: [String: Int]?
+        var missedRate: Double?
         if let expected = expectedTools {
             let allowed = Set(expected)
             var counts: [String: Int] = [:]
             var turnsWithUnexpected = 0
+            var turnsMissing = 0
             for turn in fullTurns {
                 let extras = turn.toolCalls.filter { !allowed.contains($0.name) }
                 if !extras.isEmpty { turnsWithUnexpected += 1 }
                 for call in extras { counts[call.name, default: 0] += 1 }
+                if !allowed.isEmpty, !turn.toolCalls.contains(where: { allowed.contains($0.name) }) { turnsMissing += 1 }
             }
             unexpectedRate = fullTurns.isEmpty ? 0 : Double(turnsWithUnexpected) / Double(fullTurns.count)
             unexpectedByName = counts
+            if !allowed.isEmpty { missedRate = fullTurns.isEmpty ? 0 : Double(turnsMissing) / Double(fullTurns.count) }
         }
         return PerfScenarioSummary(medianMs: PerfStats.median(topOk) ?? 0, p90Ms: PerfStats.p90(topOk) ?? 0,
                                    overheadRatio: ratio(5), harnessRatio: ratio(4),
                                    toolCallRate: fullTurns.isEmpty ? 0 : Double(withTools) / Double(fullTurns.count),
                                    toolCallsByName: byName,
-                                   unexpectedToolCallRate: unexpectedRate, unexpectedToolCallsByName: unexpectedByName)
+                                   unexpectedToolCallRate: unexpectedRate, unexpectedToolCallsByName: unexpectedByName,
+                                   missedExpectedToolRate: missedRate)
     }
 }

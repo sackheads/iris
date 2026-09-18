@@ -147,9 +147,14 @@ struct PerfSummarizerTests {
         #expect(extras.unexpectedToolCallRate == 0.5)
         #expect(extras.unexpectedToolCallsByName == ["read_file": 1])
         #expect(extras.toolCallRate == 1.0, "the plain rate is unchanged")
+        // Controls can also miss the tool they exist to exercise: 1 of 2 turns called nothing relevant.
+        let missed = PerfSummarizer.summarize([rung(5, [1, 2], tools: [["schedule_job"], ["run_command"]])], expectedTools: ["schedule_job"])
+        #expect(missed.missedExpectedToolRate == 0.5)
+        #expect(bait.missedExpectedToolRate == nil, "a bait prompt expects nothing, so nothing can be missed")
         // Unscored scenario: no expectation, no score.
         let unscored = PerfSummarizer.summarize([rung(5, [1], tools: [["run_command"]])])
         #expect(unscored.unexpectedToolCallRate == nil)
         #expect(unscored.unexpectedToolCallsByName == nil)
+        #expect(unscored.missedExpectedToolRate == nil)
     }
 }

@@ -79,5 +79,7 @@ struct PerfReportTests {
         let text = PerfReport.render(r)
         #expect(text.contains("unexpected tool-call rate 50%: read_file: 1"))
         #expect(!PerfReport.render(PerfRecordTests.sampleRecord()).contains("unexpected tool-call rate"))
+        r.scenarios[0].summary.missedExpectedToolRate = 1.0
+        #expect(PerfReport.render(r).contains("missed expected tool in 100% of turns"))
     }
 }
