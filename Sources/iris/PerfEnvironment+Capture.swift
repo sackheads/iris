@@ -2,7 +2,7 @@ import Foundation
 
 extension PerfEnvironment {
     @MainActor
-    static func capture(headless: Bool, toolDeclarationCount: Int?, repoRoot: URL) -> PerfEnvironment {
+    static func capture(headless: Bool, toolDeclarationCount: Int?, repoRoot: URL, toolSandbox: String? = nil) -> PerfEnvironment {
         let config = ConfigManager.shared
         #if DEBUG
         let build = "debug"
@@ -26,7 +26,8 @@ extension PerfEnvironment {
             promptGuardEngine: config.promptGuardEngine,
             sandboxEnabled: config.enableSandboxing,
             headless: headless,
-            toolDeclarationCount: toolDeclarationCount)
+            toolDeclarationCount: toolDeclarationCount,
+            toolSandbox: toolSandbox)
     }
 
     /// Run git in `root` and return trimmed stdout; nil if git is missing or exits non-zero.

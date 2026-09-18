@@ -38,6 +38,13 @@ enum PerfReport {
             if !s.summary.toolCallsByName.isEmpty || s.summary.toolCallRate > 0 {
                 out.append("- tool-call rate \(Int((s.summary.toolCallRate * 100).rounded()))%: " + s.summary.toolCallsByName.sorted { $0.value > $1.value }.map { "\($0.key): \($0.value)" }.joined(separator: ", "))
             }
+            if let rate = s.summary.unexpectedToolCallRate {
+                let names = (s.summary.unexpectedToolCallsByName ?? [:]).sorted { $0.value > $1.value }.map { "\($0.key): \($0.value)" }.joined(separator: ", ")
+                out.append("- unexpected tool-call rate \(Int((rate * 100).rounded()))%: \(names.isEmpty ? "none" : names)")
+            }
+            if let missed = s.summary.missedExpectedToolRate, missed > 0 {
+                out.append("- missed expected tool in \(Int((missed * 100).rounded()))% of turns")
+            }
             out.append("")
         }
         return out.joined(separator: "\n")

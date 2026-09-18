@@ -1,2 +1,2 @@
-{ "name": "explain-concept", "clientMode": "real", "tier": "medium",
+{ "name": "explain-concept", "clientMode": "real", "tier": "medium", "expectedTools": [],
   "turns": [ { "prompt": "Explain the difference between a mutex and a semaphore in three sentences." } ] }

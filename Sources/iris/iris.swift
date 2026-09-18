@@ -815,7 +815,8 @@ actor IrisEngine {
                                     // Task-local turn id is inherited by this child task.
                                     PerformanceProfiler.shared.recordToolCall(
                                         turnID: PerformanceProfiler.currentTurnID,
-                                        ToolCallRecord(name: call.name, ms: elapsed * 1000.0, ok: !result.hasPrefix("Error")))
+                                        ToolCallRecord(name: call.name, ms: elapsed * 1000.0, ok: !result.hasPrefix("Error"),
+                                                       args: ToolCallRecord.compactArgs(call.args)))
                                     return (index, result)
                                 }
                             }

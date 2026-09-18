@@ -1,2 +1,2 @@
-{ "name": "quick-reasoning", "clientMode": "real", "tier": "medium",
+{ "name": "quick-reasoning", "clientMode": "real", "tier": "medium", "expectedTools": [],
   "turns": [ { "prompt": "A train leaves at 9:40 and the trip takes 2 hours 35 minutes. When does it arrive? Just the time and one line of working." } ] }

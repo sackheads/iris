@@ -1,2 +1,2 @@
-{ "name": "personal-fact", "clientMode": "real", "tier": "medium",
+{ "name": "personal-fact", "clientMode": "real", "tier": "medium", "expectedTools": [],
   "turns": [ { "prompt": "My sister's birthday is in March and she's into pottery. Suggest three gift ideas." } ] }

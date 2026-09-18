@@ -47,6 +47,11 @@ struct EngineInstrumentationTests {
 
     @Test("the static user profile is sanitized through the model tiers once, not on every turn")
     func staticContextSanitizedOnce() async throws {
+        // A fail-closed tier-3 error is deliberately never cached, and a bare test process has
+        // no canary engine, so give the guard working mocks (the same ones InjectionGuardTests
+        // installs) or every turn re-evaluates USER.md regardless of the cache.
+        AuxiliaryModelManager.shared.setMockEngine(MockInferenceEngine(shouldHijack: false), for: "canary")
+        CoreMLEvaluator.shared.setModel(MockCoreMLModel(probability: 0.0))
         let scenario = Scenario(name: "two-turns", clientMode: .fake,
                                 turns: [Scenario.Turn(prompt: "one"), Scenario.Turn(prompt: "two")],
                                 scriptedResponses: [
@@ -59,5 +64,12 @@ struct EngineInstrumentationTests {
         // USER.md did not change between the turns, so the cached verdict is served (#130).
         #expect(second.spans["guard.tier3"] == nil)
         #expect(second.spans["assembly.userProfile"] != nil)
+    }
+
+    @Test("each tool call records its arguments")
+    func toolArgsRecorded() async throws {
+        let result = await ScenarioRunner.run(oneCommandThenText)
+        let profile = try #require(result.turnProfiles.first)
+        #expect(profile.toolCalls.first?.args?.contains("echo instrumented") == true)
     }
 }

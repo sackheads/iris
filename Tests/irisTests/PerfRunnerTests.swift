@@ -24,6 +24,7 @@ struct PerfRunnerTests {
         #expect(cmd.summary.toolCallRate == 1.0)
         #expect(cmd.rungs.first?.repetitions.first?.turns.first?.modelCalls.allSatisfy { $0.promptTokens == nil } == true)
         #expect(record.environment.headless == true)
+        #expect(record.environment.toolSandbox == "host", "the fake lane never sandboxes")
     }
 
     @Test("a real-lane suite with an injected client runs the ladder rungs and computes ratios")
@@ -133,5 +134,27 @@ struct PerfSummarizerTests {
         let s = PerfSummarizer.summarize([r])
         #expect(s.toolCallRate == 1.0)
         #expect(s.toolCallsByName == ["run_command": 1])
+    }
+
+    @Test("unexpected tool-call rate scores calls outside expectedTools")
+    func unexpectedToolCalls() {
+        // Bait: nothing expected, one turn called something -> 1/2.
+        let bait = PerfSummarizer.summarize([rung(5, [1, 2], tools: [["set_workspace"], []])], expectedTools: [])
+        #expect(bait.unexpectedToolCallRate == 0.5)
+        #expect(bait.unexpectedToolCallsByName == ["set_workspace": 1])
+        // Control with extras: the expected tool plus a read_file -> unexpected.
+        let extras = PerfSummarizer.summarize([rung(5, [1, 2], tools: [["set_workspace", "read_file"], ["set_workspace"]])], expectedTools: ["set_workspace"])
+        #expect(extras.unexpectedToolCallRate == 0.5)
+        #expect(extras.unexpectedToolCallsByName == ["read_file": 1])
+        #expect(extras.toolCallRate == 1.0, "the plain rate is unchanged")
+        // Controls can also miss the tool they exist to exercise: 1 of 2 turns called nothing relevant.
+        let missed = PerfSummarizer.summarize([rung(5, [1, 2], tools: [["schedule_job"], ["run_command"]])], expectedTools: ["schedule_job"])
+        #expect(missed.missedExpectedToolRate == 0.5)
+        #expect(bait.missedExpectedToolRate == nil, "a bait prompt expects nothing, so nothing can be missed")
+        // Unscored scenario: no expectation, no score.
+        let unscored = PerfSummarizer.summarize([rung(5, [1], tools: [["run_command"]])])
+        #expect(unscored.unexpectedToolCallRate == nil)
+        #expect(unscored.unexpectedToolCallsByName == nil)
+        #expect(unscored.missedExpectedToolRate == nil)
     }
 }

@@ -26,6 +26,9 @@ enum PerfCompare {
         if baseline.environment.provider != current.environment.provider {
             return PerfComparison(refusal: "provider differs: \(baseline.environment.provider) vs \(current.environment.provider)", rows: [])
         }
+        if baseline.environment.toolSandbox != current.environment.toolSandbox {
+            return PerfComparison(refusal: "tool sandbox mode differs: \(baseline.environment.toolSandbox ?? "unrecorded") vs \(current.environment.toolSandbox ?? "unrecorded")", rows: [])
+        }
         if baseline.environment.models != current.environment.models {
             return PerfComparison(refusal: "model names differ: \(baseline.environment.models) vs \(current.environment.models)", rows: [])
         }

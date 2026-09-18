@@ -16,6 +16,7 @@ enum PerfRunner {
         let startedAt = Date()
         var results: [PerfScenarioResult] = []
         var toolCount: Int?
+        var anySandboxed = false
 
         for url in suite.scenarioURLs(relativeTo: repoRoot) {
             let scenario = try Scenario.load(at: url.path)
@@ -41,7 +42,10 @@ enum PerfRunner {
                         let guards: GuardMode = (rung == 4 || suite.lane == .fake) ? .off : .asConfigured
                         var effective = scenario
                         if suite.lane == .fake { effective.clientMode = .fake }
-                        let result = await ScenarioRunner.run(effective, guards: guards, clientOverride: client)
+                        // Real-lane tool prompts run unattended with auto-approve: keep them in the VM.
+                        let toolExecution: ToolExecutionMode = suite.lane == .real ? .sandboxed : .asConfigured
+                        let result = await ScenarioRunner.run(effective, guards: guards, toolExecution: toolExecution, clientOverride: client)
+                        if result.toolsSandboxed { anySandboxed = true }
                         let turns = zip(result.turnProfiles, result.finalTexts + Array(repeating: "", count: max(0, result.turnProfiles.count - result.finalTexts.count)))
                             .map { PerfTurn($0, finalTextLength: $1.count) }
                         // An engine-level LLM failure is caught and posted as a tagged system
@@ -69,12 +73,13 @@ enum PerfRunner {
             }
             results.append(PerfScenarioResult(name: scenario.name, path: relativePath(url, root: repoRoot),
                                               category: category(forScenarioAt: url), lane: suite.lane.rawValue,
-                                              rungs: rungResults, summary: PerfSummarizer.summarize(rungResults)))
+                                              rungs: rungResults, summary: PerfSummarizer.summarize(rungResults, expectedTools: scenario.expectedTools)))
         }
 
         return PerfRunRecord(schemaVersion: PerfRunRecord.currentSchemaVersion, suite: suite.name,
                              startedAt: startedAt, finishedAt: Date(),
-                             environment: PerfEnvironment.capture(headless: headless, toolDeclarationCount: toolCount, repoRoot: repoRoot),
+                             environment: PerfEnvironment.capture(headless: headless, toolDeclarationCount: toolCount, repoRoot: repoRoot,
+                                                                  toolSandbox: anySandboxed ? "sandboxed" : "host"),
                              scenarios: results)
     }
 
@@ -91,7 +96,7 @@ enum PerfRunner {
 }
 
 enum PerfSummarizer {
-    static func summarize(_ rungs: [PerfRungResult]) -> PerfScenarioSummary {
+    static func summarize(_ rungs: [PerfRungResult], expectedTools: [String]? = nil) -> PerfScenarioSummary {
         func median(of rung: Int) -> Double? {
             guard let r = rungs.first(where: { $0.rung == rung }) else { return nil }
             return PerfStats.median(r.repetitions.filter { $0.error == nil }.map(\.wallClockMs))
@@ -109,9 +114,31 @@ enum PerfSummarizer {
         let withTools = fullTurns.filter { !$0.toolCalls.isEmpty }.count
         var byName: [String: Int] = [:]
         for call in fullTurns.flatMap(\.toolCalls) { byName[call.name, default: 0] += 1 }
+        // Calls outside expectedTools: bait prompts declare [], so any call counts; controls
+        // declare their tool, so extras count; unscored scenarios get nil.
+        var unexpectedRate: Double?
+        var unexpectedByName: [String: Int]?
+        var missedRate: Double?
+        if let expected = expectedTools {
+            let allowed = Set(expected)
+            var counts: [String: Int] = [:]
+            var turnsWithUnexpected = 0
+            var turnsMissing = 0
+            for turn in fullTurns {
+                let extras = turn.toolCalls.filter { !allowed.contains($0.name) }
+                if !extras.isEmpty { turnsWithUnexpected += 1 }
+                for call in extras { counts[call.name, default: 0] += 1 }
+                if !allowed.isEmpty, !turn.toolCalls.contains(where: { allowed.contains($0.name) }) { turnsMissing += 1 }
+            }
+            unexpectedRate = fullTurns.isEmpty ? 0 : Double(turnsWithUnexpected) / Double(fullTurns.count)
+            unexpectedByName = counts
+            if !allowed.isEmpty { missedRate = fullTurns.isEmpty ? 0 : Double(turnsMissing) / Double(fullTurns.count) }
+        }
         return PerfScenarioSummary(medianMs: PerfStats.median(topOk) ?? 0, p90Ms: PerfStats.p90(topOk) ?? 0,
                                    overheadRatio: ratio(5), harnessRatio: ratio(4),
                                    toolCallRate: fullTurns.isEmpty ? 0 : Double(withTools) / Double(fullTurns.count),
-                                   toolCallsByName: byName)
+                                   toolCallsByName: byName,
+                                   unexpectedToolCallRate: unexpectedRate, unexpectedToolCallsByName: unexpectedByName,
+                                   missedExpectedToolRate: missedRate)
     }
 }

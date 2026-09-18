@@ -148,4 +148,15 @@ struct PerfCompareTests {
         let real = PerfCompare.compare(baseline: record(medianMs: 200), current: record(medianMs: 260), threshold: 0.2)
         #expect(real.flagged.count == 1)
     }
+
+    @Test("records with different tool sandbox modes are not comparable")
+    func sandboxModeMismatch() {
+        var host = record(medianMs: 1000); host.environment.toolSandbox = "host"
+        var boxed = record(medianMs: 1000); boxed.environment.toolSandbox = "sandboxed"
+        let c = PerfCompare.compare(baseline: host, current: boxed, threshold: 0.2)
+        #expect(c.refusal?.contains("sandbox") == true)
+        #expect(PerfCompare.exitCode(c) == 2)
+        let legacy = PerfCompare.compare(baseline: record(medianMs: 1000), current: record(medianMs: 1000), threshold: 0.2)
+        #expect(legacy.refusal == nil, "records that predate the field still compare")
+    }
 }

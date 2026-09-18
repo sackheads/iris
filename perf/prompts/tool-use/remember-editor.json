@@ -1,2 +1,2 @@
-{ "name": "remember-editor", "clientMode": "real", "tier": "medium",
+{ "name": "remember-editor", "clientMode": "real", "tier": "medium", "expectedTools": ["update_user_profile", "save_fact"],
   "turns": [ { "prompt": "Remember that my preferred editor is Neovim." } ] }

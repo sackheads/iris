@@ -4,6 +4,10 @@ import Foundation
 /// store is a volatile copy (see `IrisDefaults.isVolatileCopy`); otherwise ignored and logged.
 enum GuardMode: Sendable { case asConfigured, off }
 
+/// Where a run's `run_command` executes. `.sandboxed` is honoured only under a volatile settings
+/// copy (it writes the main-agent sandbox default for the run); otherwise ignored and logged.
+enum ToolExecutionMode: Sendable { case asConfigured, sandboxed }
+
 /// The timing captured for a headless scenario run.
 struct ScenarioResult: Sendable {
     /// One `CommandProfile` per profiler turn (one per `processInput`), newest last.
@@ -16,6 +20,10 @@ struct ScenarioResult: Sendable {
     var guardsWereOff: Bool
     /// True when Vibecop was consulted (and its span recorded) before each auto-approval (#135).
     var vibecopMeasured: Bool
+    /// True when the run forced `run_command` through the sandbox.
+    var toolsSandboxed: Bool
+    /// The throwaway conversation the run used.
+    var conversationId: UUID
     /// The first `[LLM_ERROR]` headline posted during each turn, in turn order (nil when the
     /// turn had none). The engine catches provider failures and posts a tagged system message
     /// instead of throwing, so a failed turn still produces a `CommandProfile` — this is how a
@@ -41,6 +49,7 @@ enum ScenarioRunner {
 
     static func run(_ scenario: Scenario,
                     guards: GuardMode = .asConfigured,
+                    toolExecution: ToolExecutionMode = .asConfigured,
                     clientOverride: (any LLMClientProtocol)? = nil) async -> ScenarioResult {
         let state = AppState()
         state.autoApproveTools = true // non-interactive: never block on an approval prompt
@@ -79,12 +88,30 @@ enum ScenarioRunner {
                 print("[ScenarioRunner] guards=off ignored: settings store is not a volatile copy")
             }
         }
+        // Same gate as the guards: only a volatile copy may be written. Unattended real-lane
+        // tool prompts otherwise execute on the host with auto-approve (a 32-command storm did).
+        let savedSandbox = config.mainAgentSandboxDefault
+        var sandboxed = false
+        if toolExecution == .sandboxed {
+            if IrisDefaults.isVolatileCopy {
+                config.mainAgentSandboxDefault = .sandboxed
+                sandboxed = true
+            } else if !warnedGuardsIgnored {
+                warnedGuardsIgnored = true
+                print("[ScenarioRunner] toolExecution=sandboxed ignored: settings store is not a volatile copy")
+            }
+        }
         defer {
             if guardsOff {
                 config.enableVibecop = savedVibecop
                 config.enableAdvancedPromptInjectionProtection = savedGuard
             }
+            if sandboxed { config.mainAgentSandboxDefault = savedSandbox }
         }
+
+        // Safety net for exit paths that skip the awaited teardown below (`defer` cannot await,
+        // so this detaches; endSession is idempotent).
+        defer { Task { await SandboxSessionManager.shared.endSession(conversationId) } }
 
         let engine = IrisEngine(state: state, tier: scenario.tier, client: client)
 
@@ -113,8 +140,15 @@ enum ScenarioRunner {
         }
         let wallClockMs = (MonotonicClock.nowMs() - start)
 
+        // Every run is a fresh conversation, so a sandboxed run leaves a VM per repetition behind
+        // unless it is ended here; the CLI process has no idle reaper. No-op without a session.
+        // Awaited here so callers (and tests) observe the teardown; the defer above is the net
+        // for any exit path a future change adds, since a defer body cannot await.
+        await SandboxSessionManager.shared.endSession(conversationId)
+
         return ScenarioResult(turnProfiles: collector.all, wallClockMs: wallClockMs,
-                              finalTexts: finalTexts, guardsWereOff: guardsOff, vibecopMeasured: state.vibecopUnderAutoApprove, turnErrors: turnErrors)
+                              finalTexts: finalTexts, guardsWereOff: guardsOff, vibecopMeasured: state.vibecopUnderAutoApprove,
+                              toolsSandboxed: sandboxed, conversationId: conversationId, turnErrors: turnErrors)
     }
 }
 

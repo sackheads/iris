@@ -1,0 +1,1901 @@
+{
+  "environment" : {
+    "buildConfiguration" : "release",
+    "cpuCount" : 14,
+    "gitDirty" : true,
+    "gitSha" : "a89145e",
+    "headless" : false,
+    "injectionGuardEnabled" : true,
+    "machineModel" : "Mac16,7",
+    "models" : {
+      "easy" : "gemini-3.5-flash-lite",
+      "hard" : "gemini-3.1-pro-preview",
+      "medium" : "gemini-3.8-flash"
+    },
+    "osVersion" : "Version 26.6.2 (Build 25G83)",
+    "promptGuardEngine" : "cloud",
+    "provider" : "Gemini",
+    "sandboxEnabled" : true,
+    "toolDeclarationCount" : 17,
+    "toolSandbox" : "sandboxed",
+    "vibecopEnabled" : true,
+    "vibecopEngine" : "cloud"
+  },
+  "finishedAt" : "2026-09-18T03:03:02Z",
+  "scenarios" : [
+    {
+      "category" : "model-only",
+      "lane" : "real",
+      "name" : "capital-city",
+      "path" : "perf\/prompts\/model-only\/capital-city.json",
+      "rungs" : [
+        {
+          "medianMs" : 3832.0876874923706,
+          "p90Ms" : 4421.802875041962,
+          "repetitions" : [
+            {
+              "coldStart" : true,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.86033296585083
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 1280.9609580039978
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 3133.557457923889
+                    }
+                  },
+                  "finalTextLength" : 278,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 3133.5829496383667,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 51,
+                      "promptTokens" : 3962,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 3.748208999633789
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.8547910451889038
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 1280.970332980156
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.006916046142578125
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 607.3850419521332
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 673.2960830926895
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 4421.56994342804
+                }
+              ],
+              "wallClockMs" : 4421.802875041962
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.9071669578552246
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.1952500343322754
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 3235.8319590091705
+                    }
+                  },
+                  "finalTextLength" : 346,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 3235.8720302581787,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 65,
+                      "promptTokens" : 3962,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.557542085647583
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.8995000123977661
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.2017500400543213
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.016541004180908203
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 3242.161989212036
+                }
+              ],
+              "wallClockMs" : 3242.3724999427795
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 3832.0876874923706,
+        "p90Ms" : 4421.802875041962,
+        "toolCallRate" : 0,
+        "toolCallsByName" : {
+
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "model-only",
+      "lane" : "real",
+      "name" : "explain-concept",
+      "path" : "perf\/prompts\/model-only\/explain-concept.json",
+      "rungs" : [
+        {
+          "medianMs" : 4227.14770847559,
+          "p90Ms" : 4378.051874995232,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.562250018119812
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.06679105758666992
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 4375.2899169921875
+                    }
+                  },
+                  "finalTextLength" : 399,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 4375.3310441970825,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 76,
+                      "promptTokens" : 3943,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.564458966255188
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 0.5601669549942017
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.06962502002716064
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.006167054176330566
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 4377.9590129852295
+                }
+              ],
+              "wallClockMs" : 4378.051874995232
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.7698750495910645
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.08633315563201904
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 4073.2637079954147
+                    }
+                  },
+                  "finalTextLength" : 488,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 4073.3050107955933,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 79,
+                      "promptTokens" : 3943,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.639167070388794
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 0.7667080163955688
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.08962500095367432
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.007250070571899414
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 4076.1630535125732
+                }
+              ],
+              "wallClockMs" : 4076.243541955948
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 4227.14770847559,
+        "p90Ms" : 4378.051874995232,
+        "toolCallRate" : 0,
+        "toolCallsByName" : {
+
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "model-only",
+      "lane" : "real",
+      "name" : "advice",
+      "path" : "perf\/prompts\/model-only\/advice.json",
+      "rungs" : [
+        {
+          "medianMs" : 5094.435708522797,
+          "p90Ms" : 5486.979333043098,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.690416932106018
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.18045902252197266
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 4695.715417027473
+                    }
+                  },
+                  "finalTextLength" : 812,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 4695.76096534729,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 191,
+                      "promptTokens" : 3947,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.696666955947876
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.6839580535888672
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.18712496757507324
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.01641702651977539
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 4701.776027679443
+                }
+              ],
+              "wallClockMs" : 4701.892084002495
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.540666937828064
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.06941699981689453
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 5484.110458016396
+                    }
+                  },
+                  "finalTextLength" : 887,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 5484.161019325256,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 200,
+                      "promptTokens" : 3947,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.5256669521331787
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 0.5376659631729126
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.07200002670288086
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.006207942962646484
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 5486.9019985198975
+                }
+              ],
+              "wallClockMs" : 5486.979333043098
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 5094.435708522797,
+        "p90Ms" : 5486.979333043098,
+        "toolCallRate" : 0,
+        "toolCallsByName" : {
+
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "model-only",
+      "lane" : "real",
+      "name" : "short-writing",
+      "path" : "perf\/prompts\/model-only\/short-writing.json",
+      "rungs" : [
+        {
+          "medianMs" : 1873.6763545274734,
+          "p90Ms" : 1983.2124590873718,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.636165976524353
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.18149995803833008
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 1977.9102920293808
+                    }
+                  },
+                  "finalTextLength" : 180,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 1977.93710231781,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 31,
+                      "promptTokens" : 3966,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.277042031288147
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.6284170150756836
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.18775010108947754
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.016499996185302734
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 1983.0960035324097
+                }
+              ],
+              "wallClockMs" : 1983.2124590873718
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.9048330783843994
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.11304199695587158
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 1760.5449579954147
+                    }
+                  },
+                  "finalTextLength" : 187,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 1760.571002960205,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 31,
+                      "promptTokens" : 3966,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.8202090263366699
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 0.9006249904632568
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.11683297157287598
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.010457992553710938
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 1764.0210390090942
+                }
+              ],
+              "wallClockMs" : 1764.140249967575
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 1873.6763545274734,
+        "p90Ms" : 1983.2124590873718,
+        "toolCallRate" : 0,
+        "toolCallsByName" : {
+
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "model-only",
+      "lane" : "real",
+      "name" : "conversation-meta",
+      "path" : "perf\/prompts\/model-only\/conversation-meta.json",
+      "rungs" : [
+        {
+          "medianMs" : 3911.7268750071526,
+          "p90Ms" : 4102.311500072479,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.9960000514984131
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.13266587257385254
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 3717.1433329582214
+                    }
+                  },
+                  "finalTextLength" : 516,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 3717.1831130981445,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 93,
+                      "promptTokens" : 3952,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.9961670637130737
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 0.9907499551773071
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.13708388805389404
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.0140000581741333
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 3721.042037010193
+                }
+              ],
+              "wallClockMs" : 3721.142249941826
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.6697920560836792
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.08020889759063721
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 4099.569666981697
+                    }
+                  },
+                  "finalTextLength" : 449,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 4099.609971046448,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 84,
+                      "promptTokens" : 3952,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.5957499742507935
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 0.6662499904632568
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.0830000638961792
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.006833076477050781
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 4102.231025695801
+                }
+              ],
+              "wallClockMs" : 4102.311500072479
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 3911.7268750071526,
+        "p90Ms" : 4102.311500072479,
+        "toolCallRate" : 0,
+        "toolCallsByName" : {
+
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "model-only",
+      "lane" : "real",
+      "name" : "quick-reasoning",
+      "path" : "perf\/prompts\/model-only\/quick-reasoning.json",
+      "rungs" : [
+        {
+          "medianMs" : 2519.7126874923706,
+          "p90Ms" : 2994.989874958992,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.7013329267501831
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.08316707611083984
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 2992.51641702652
+                    }
+                  },
+                  "finalTextLength" : 52,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 2992.540955543518,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 35,
+                      "promptTokens" : 3947,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.6406660079956055
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 0.6982500553131104
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.08654201030731201
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.007250070571899414
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 2994.940996170044
+                }
+              ],
+              "wallClockMs" : 2994.989874958992
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.3779999017715454
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.1760420799255371
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 2038.9442499876022
+                    }
+                  },
+                  "finalTextLength" : 58,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 2038.9779806137085,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 41,
+                      "promptTokens" : 3947,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.3362919092178345
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.3715410232543945
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.1819169521331787
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.015833020210266113
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 2044.2390441894531
+                }
+              ],
+              "wallClockMs" : 2044.4355000257492
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 2519.7126874923706,
+        "p90Ms" : 2994.989874958992,
+        "toolCallRate" : 0,
+        "toolCallsByName" : {
+
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "tool-use",
+      "lane" : "real",
+      "name" : "run-uname",
+      "path" : "perf\/prompts\/tool-use\/run-uname.json",
+      "rungs" : [
+        {
+          "medianMs" : 6337.972770988941,
+          "p90Ms" : 6616.462167024612,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 2.144832968711853
+                    },
+                    "injectionGuard" : {
+                      "count" : 4,
+                      "ms" : 656.9890830516815
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 4467.76279091835
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 2140.167874932289
+                    },
+                    "vibecop" : {
+                      "count" : 1,
+                      "ms" : 777.4900197982788
+                    }
+                  },
+                  "finalTextLength" : 15,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 2636.5309953689575,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 33,
+                      "promptTokens" : 3890,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "latencyMs" : 1831.2910795211792,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 11,
+                      "promptTokens" : 4117,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 2.153749942779541
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 2.1330000162124634
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.2550410032272339
+                    },
+                    "guard.tier1" : {
+                      "count" : 2,
+                      "ms" : 0.01887500286102295
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 9.193542003631592
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 647.4565409421921
+                    },
+                    "vibecop" : {
+                      "count" : 1,
+                      "ms" : 777.4900197982788
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"command\":\"uname -sr\",\"intent\":\"Run uname -sr to determine OS and kernel release\"}",
+                      "ms" : 2139.59002494812,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 6616.328001022339
+                }
+              ],
+              "wallClockMs" : 6616.462167024612
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.6637089252471924
+                    },
+                    "injectionGuard" : {
+                      "count" : 4,
+                      "ms" : 0.15837597846984863
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 4657.141541957855
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 1399.5229580402374
+                    },
+                    "vibecop" : {
+                      "count" : 1,
+                      "ms" : 698.8439559936523
+                    }
+                  },
+                  "finalTextLength" : 34,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 2580.609083175659,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 33,
+                      "promptTokens" : 3890,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "latencyMs" : 2076.5799283981323,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 17,
+                      "promptTokens" : 4097,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.5534160137176514
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 0.660709023475647
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.08000004291534424
+                    },
+                    "guard.tier1" : {
+                      "count" : 2,
+                      "ms" : 0.009707927703857422
+                    },
+                    "vibecop" : {
+                      "count" : 1,
+                      "ms" : 698.8439559936523
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"command\":\"uname -sr\",\"intent\":\"Run uname -sr to get OS and release information\"}",
+                      "ms" : 1399.4150161743164,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 6059.44299697876
+                }
+              ],
+              "wallClockMs" : 6059.48337495327
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 6337.972770988941,
+        "p90Ms" : 6616.462167024612,
+        "toolCallRate" : 1,
+        "toolCallsByName" : {
+          "run_command" : 2
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "tool-use",
+      "lane" : "real",
+      "name" : "count-files",
+      "path" : "perf\/prompts\/tool-use\/count-files.json",
+      "rungs" : [
+        {
+          "medianMs" : 148299.0974789858,
+          "p90Ms" : 243074.005499959,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.1830419301986694
+                    },
+                    "injectionGuard" : {
+                      "count" : 24,
+                      "ms" : 4460.459794998169
+                    },
+                    "primaryLLM" : {
+                      "count" : 12,
+                      "ms" : 39562.93458259106
+                    },
+                    "toolExecution" : {
+                      "count" : 11,
+                      "ms" : 13942.101082086563
+                    },
+                    "vibecop" : {
+                      "count" : 11,
+                      "ms" : 7964.563727378845
+                    }
+                  },
+                  "finalTextLength" : 239,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 2268.4370279312134,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 49,
+                      "promptTokens" : 3941,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "latencyMs" : 1876.4370679855347,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 30,
+                      "promptTokens" : 4119,
+                      "returnedToolCalls" : true,
+                      "round" : 1
+                    },
+                    {
+                      "latencyMs" : 2121.600031852722,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 24,
+                      "promptTokens" : 4208,
+                      "returnedToolCalls" : true,
+                      "round" : 2
+                    },
+                    {
+                      "latencyMs" : 2409.1720581054688,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 50,
+                      "promptTokens" : 4299,
+                      "returnedToolCalls" : true,
+                      "round" : 3
+                    },
+                    {
+                      "latencyMs" : 2080.104947090149,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 55,
+                      "promptTokens" : 4436,
+                      "returnedToolCalls" : true,
+                      "round" : 4
+                    },
+                    {
+                      "latencyMs" : 2608.2299947738647,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 50,
+                      "promptTokens" : 4542,
+                      "returnedToolCalls" : true,
+                      "round" : 5
+                    },
+                    {
+                      "latencyMs" : 5354.844927787781,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 45,
+                      "promptTokens" : 4726,
+                      "returnedToolCalls" : true,
+                      "round" : 6
+                    },
+                    {
+                      "latencyMs" : 11077.31008529663,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 30,
+                      "promptTokens" : 4855,
+                      "returnedToolCalls" : true,
+                      "round" : 7
+                    },
+                    {
+                      "latencyMs" : 2167.233943939209,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 29,
+                      "promptTokens" : 5027,
+                      "returnedToolCalls" : true,
+                      "round" : 8
+                    },
+                    {
+                      "latencyMs" : 2410.5019569396973,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 39,
+                      "promptTokens" : 5409,
+                      "returnedToolCalls" : true,
+                      "round" : 9
+                    },
+                    {
+                      "latencyMs" : 2037.6830101013184,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 25,
+                      "promptTokens" : 5511,
+                      "returnedToolCalls" : true,
+                      "round" : 10
+                    },
+                    {
+                      "latencyMs" : 3151.800036430359,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 70,
+                      "promptTokens" : 5644,
+                      "returnedToolCalls" : false,
+                      "round" : 11
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.265125036239624
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.1780000925064087
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.12737500667572021
+                    },
+                    "guard.tier1" : {
+                      "count" : 12,
+                      "ms" : 0.1180419921875
+                    },
+                    "guard.tier2" : {
+                      "count" : 8,
+                      "ms" : 219.69995784759521
+                    },
+                    "guard.tier3" : {
+                      "count" : 7,
+                      "ms" : 4239.122875094414
+                    },
+                    "vibecop" : {
+                      "count" : 11,
+                      "ms" : 7964.563727378845
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"command\":\"find Sources\/iris -maxdepth 1 -name \\\"*.swift\\\" -type f | wc -l\",\"intent\":\"Count Swift files directly in Sources\/iris\"}",
+                      "ms" : 1927.7570247650146,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"pwd && ls -la\",\"intent\":\"Check current directory and contents\"}",
+                      "ms" : 1010.193943977356,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"pwd\",\"intent\":\"Print working directory\"}",
+                      "ms" : 1379.925012588501,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"find \/Users\/bnaylor -maxdepth 3 -type d -name \\\"Sources\\\" 2>\/dev\/null\",\"intent\":\"Locate Sources directory\"}",
+                      "ms" : 1711.1940383911133,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"find \/Users\/bnaylor -maxdepth 3 -type d -path \\\"*\/iris\/Sources\/iris\\\" 2>\/dev\/null\",\"intent\":\"Find iris Sources directory\"}",
+                      "ms" : 793.9860820770264,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"test -d \\\"Sources\/iris\\\" && echo \\\"exists\\\" || echo \\\"does not exist\\\"\",\"intent\":\"Check if Sources\/iris exists in current working directory\"}",
+                      "ms" : 1141.6250467300415,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"find \/Users\/bnaylor -name \\\"Package.swift\\\" 2>\/dev\/null\",\"intent\":\"Search for Swift package manifests\"}",
+                      "ms" : 731.0259342193604,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"whoami && uname -a\",\"intent\":\"Check environment and OS\"}",
+                      "ms" : 1388.1551027297974,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"df -h && mount\",\"intent\":\"Check mounts in container\"}",
+                      "ms" : 1500.8859634399414,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"find \/ -name \\\"*.swift\\\" 2>\/dev\/null\",\"intent\":\"Find any swift files on filesystem\"}",
+                      "ms" : 846.7540740966797,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"ls \/\",\"intent\":\"List root directory\"}",
+                      "ms" : 1507.7160596847534,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 53524.31297302246
+                }
+              ],
+              "wallClockMs" : 53524.18945801258
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.587583065032959
+                    },
+                    "injectionGuard" : {
+                      "count" : 60,
+                      "ms" : 8726.15383374691
+                    },
+                    "primaryLLM" : {
+                      "count" : 33,
+                      "ms" : 208755.39287626743
+                    },
+                    "toolExecution" : {
+                      "count" : 32,
+                      "ms" : 34274.551746726036
+                    },
+                    "vibecop" : {
+                      "count" : 31,
+                      "ms" : 22919.363975524902
+                    }
+                  },
+                  "finalTextLength" : 85,
+                  "modelCalls" : [
+                    {
+                      "latencyMs" : 3345.986008644104,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 46,
+                      "promptTokens" : 3941,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "latencyMs" : 1885.6860399246216,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 39,
+                      "promptTokens" : 4145,
+                      "returnedToolCalls" : true,
+                      "round" : 1
+                    },
+                    {
+                      "latencyMs" : 4233.800053596497,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 50,
+                      "promptTokens" : 4237,
+                      "returnedToolCalls" : true,
+                      "round" : 2
+                    },
+                    {
+                      "latencyMs" : 2049.5110750198364,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 57,
+                      "promptTokens" : 4406,
+                      "returnedToolCalls" : true,
+                      "round" : 3
+                    },
+                    {
+                      "latencyMs" : 2121.0579872131348,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 35,
+                      "promptTokens" : 4522,
+                      "returnedToolCalls" : true,
+                      "round" : 4
+                    },
+                    {
+                      "latencyMs" : 2697.0959901809692,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 34,
+                      "promptTokens" : 4621,
+                      "returnedToolCalls" : true,
+                      "round" : 5
+                    },
+                    {
+                      "latencyMs" : 1931.156039237976,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 32,
+                      "promptTokens" : 5382,
+                      "returnedToolCalls" : true,
+                      "round" : 6
+                    },
+                    {
+                      "latencyMs" : 1842.3629999160767,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 29,
+                      "promptTokens" : 5457,
+                      "returnedToolCalls" : true,
+                      "round" : 7
+                    },
+                    {
+                      "latencyMs" : 1931.067943572998,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 29,
+                      "promptTokens" : 5549,
+                      "returnedToolCalls" : true,
+                      "round" : 8
+                    },
+                    {
+                      "latencyMs" : 1721.2079763412476,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 32,
+                      "promptTokens" : 5630,
+                      "returnedToolCalls" : true,
+                      "round" : 9
+                    },
+                    {
+                      "latencyMs" : 2284.450054168701,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 26,
+                      "promptTokens" : 5693,
+                      "returnedToolCalls" : true,
+                      "round" : 10
+                    },
+                    {
+                      "latencyMs" : 2961.013078689575,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 46,
+                      "promptTokens" : 5822,
+                      "returnedToolCalls" : true,
+                      "round" : 11
+                    },
+                    {
+                      "latencyMs" : 3434.7620010375977,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 32,
+                      "promptTokens" : 6409,
+                      "returnedToolCalls" : true,
+                      "round" : 12
+                    },
+                    {
+                      "latencyMs" : 1871.9960451126099,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 31,
+                      "promptTokens" : 6720,
+                      "returnedToolCalls" : true,
+                      "round" : 13
+                    },
+                    {
+                      "latencyMs" : 2158.1159830093384,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 31,
+                      "promptTokens" : 6848,
+                      "returnedToolCalls" : true,
+                      "round" : 14
+                    },
+                    {
+                      "latencyMs" : 2305.7109117507935,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 30,
+                      "promptTokens" : 7718,
+                      "returnedToolCalls" : true,
+                      "round" : 15
+                    },
+                    {
+                      "latencyMs" : 2395.084023475647,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 41,
+                      "promptTokens" : 7854,
+                      "returnedToolCalls" : true,
+                      "round" : 16
+                    },
+                    {
+                      "latencyMs" : 3581.3719034194946,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 44,
+                      "promptTokens" : 8003,
+                      "returnedToolCalls" : true,
+                      "round" : 17
+                    },
+                    {
+                      "latencyMs" : 12912.322998046875,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 49,
+                      "promptTokens" : 8353,
+                      "returnedToolCalls" : true,
+                      "round" : 18
+                    },
+                    {
+                      "latencyMs" : 3023.6960649490356,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 34,
+                      "promptTokens" : 8453,
+                      "returnedToolCalls" : true,
+                      "round" : 19
+                    },
+                    {
+                      "latencyMs" : 5052.186965942383,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 37,
+                      "promptTokens" : 8692,
+                      "returnedToolCalls" : true,
+                      "round" : 20
+                    },
+                    {
+                      "latencyMs" : 3747.146964073181,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 35,
+                      "promptTokens" : 9410,
+                      "returnedToolCalls" : true,
+                      "round" : 21
+                    },
+                    {
+                      "latencyMs" : 13518.411040306091,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 29,
+                      "promptTokens" : 9845,
+                      "returnedToolCalls" : true,
+                      "round" : 22
+                    },
+                    {
+                      "latencyMs" : 8471.845984458923,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 24,
+                      "promptTokens" : 9931,
+                      "returnedToolCalls" : true,
+                      "round" : 23
+                    },
+                    {
+                      "latencyMs" : 2063.180923461914,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 43,
+                      "promptTokens" : 10282,
+                      "returnedToolCalls" : true,
+                      "round" : 24
+                    },
+                    {
+                      "latencyMs" : 2078.969955444336,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 35,
+                      "promptTokens" : 10399,
+                      "returnedToolCalls" : true,
+                      "round" : 25
+                    },
+                    {
+                      "latencyMs" : 3294.0080165863037,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 34,
+                      "promptTokens" : 10488,
+                      "returnedToolCalls" : true,
+                      "round" : 26
+                    },
+                    {
+                      "latencyMs" : 1825.447916984558,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 43,
+                      "promptTokens" : 10769,
+                      "returnedToolCalls" : true,
+                      "round" : 27
+                    },
+                    {
+                      "latencyMs" : 3852.189064025879,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 45,
+                      "promptTokens" : 11657,
+                      "returnedToolCalls" : true,
+                      "round" : 28
+                    },
+                    {
+                      "latencyMs" : 17974.907994270325,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 40,
+                      "promptTokens" : 12075,
+                      "returnedToolCalls" : true,
+                      "round" : 29
+                    },
+                    {
+                      "latencyMs" : 2000.7950067520142,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 39,
+                      "promptTokens" : 12488,
+                      "returnedToolCalls" : true,
+                      "round" : 30
+                    },
+                    {
+                      "latencyMs" : 67462.81790733337,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 45,
+                      "promptTokens" : 12583,
+                      "returnedToolCalls" : true,
+                      "round" : 31
+                    },
+                    {
+                      "latencyMs" : 16727.54406929016,
+                      "model" : "gemini-3.8-flash",
+                      "outputTokens" : 19,
+                      "promptTokens" : 13094,
+                      "returnedToolCalls" : false,
+                      "round" : 32
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.1422499418258667
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.5810420513153076
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.09054100513458252
+                    },
+                    "guard.tier1" : {
+                      "count" : 30,
+                      "ms" : 0.4119149446487427
+                    },
+                    "guard.tier2" : {
+                      "count" : 20,
+                      "ms" : 623.9415402412415
+                    },
+                    "guard.tier3" : {
+                      "count" : 14,
+                      "ms" : 8098.081416010857
+                    },
+                    "vibecop" : {
+                      "count" : 31,
+                      "ms" : 22919.363975524902
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"command\":\"find Sources\/iris -maxdepth 1 -name \\\"*.swift\\\" | wc -l\",\"intent\":\"Count swift files directly in Sources\/iris\"}",
+                      "ms" : 1339.7390842437744,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"pwd && ls -d Sources\/* 2>\/dev\/null\",\"intent\":\"Check current directory and Sources contents\"}",
+                      "ms" : 833.4439992904663,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"find \/ -name \\\"iris\\\" -type d -path \\\"*\/Sources\/iris\\\" 2>\/dev\/null\",\"intent\":\"Search for Sources\/iris directory\"}",
+                      "ms" : 915.1990413665771,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"find \/Users\/bnaylor -maxdepth 4 -type d -path \\\"*\/Sources\/iris\\\" 2>\/dev\/null\",\"intent\":\"Search in home directory for Sources\/iris\"}",
+                      "ms" : 1025.2350568771362,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"ls -la \/Users\/bnaylor\",\"intent\":\"List files in user home directory\"}",
+                      "ms" : 1380.3659677505493,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"uname -a && pwd && ls -la\",\"intent\":\"Inspect environment and root directory\"}",
+                      "ms" : 1473.5020399093628,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"ls -la \/home \/root\",\"intent\":\"Check home and root folders\"}",
+                      "ms" : 908.7749719619751,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"ls -la \/home\",\"intent\":\"List \/home directory\"}",
+                      "ms" : 729.2120456695557,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"ls \/home\",\"intent\":\"List directory names in \/home\"}",
+                      "ms" : 1117.8810596466064,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"ls \/home\/ubuntu\",\"intent\":\"List files in \/home\/ubuntu\"}",
+                      "ms" : 761.6410255432129,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"df -h\",\"intent\":\"Check disk mounts\"}",
+                      "ms" : 1232.3631048202515,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"intent\":\"Read sandbox-usage skill\",\"path\":\"\/Users\/bnaylor\/.iris\/memory\/skills\/sandbox-usage\/SKILL.md\"}",
+                      "ms" : 895.6789970397949,
+                      "name" : "read_file",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"intent\":\"Search memory for workspace or iris paths\",\"query\":\"Sources\/iris workspace path\"}",
+                      "ms" : 0.5950927734375,
+                      "name" : "search_memory",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"intent\":\"Check if reading directory works\",\"path\":\"\/Users\/bnaylor\"}",
+                      "ms" : 1508.1380605697632,
+                      "name" : "read_file",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"intent\":\"Test workspace relative path for Package.swift\",\"path\":\"Package.swift\"}",
+                      "ms" : 1280.0599336624146,
+                      "name" : "read_file",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"cat \/proc\/mounts\",\"intent\":\"Check mounted filesystems\"}",
+                      "ms" : 938.6940002441406,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"find \/ -name \\\"Package.swift\\\" 2>\/dev\/null\",\"intent\":\"Find Package.swift in filesystem\"}",
+                      "ms" : 848.5339879989624,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"content\":\"marker\",\"intent\":\"Write marker to locate workspace mount\",\"path\":\"_iris_marker_12345.txt\"}",
+                      "ms" : 1313.349962234497,
+                      "name" : "write_file",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"find \/ -name \\\"_iris_marker_12345.txt\\\" 2>\/dev\/null\",\"intent\":\"Locate marker file in container\"}",
+                      "ms" : 862.5239133834839,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"awk '{print $2}' \/proc\/mounts\",\"intent\":\"List mount points\"}",
+                      "ms" : 1460.3440761566162,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"intent\":\"Check if Sources\/iris\/main.swift exists\",\"path\":\"Sources\/iris\/main.swift\"}",
+                      "ms" : 1158.499002456665,
+                      "name" : "read_file",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"ls -a \/home\/ubuntu\",\"intent\":\"Check hidden files in \/home\/ubuntu\"}",
+                      "ms" : 1299.2160320281982,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"cat \/etc\/passwd\",\"intent\":\"Check users in passwd\"}",
+                      "ms" : 978.9570569992065,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"env\",\"intent\":\"Check environment variables\"}",
+                      "ms" : 882.4880123138428,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo \\\"PWD=$PWD WORKSPACE=$WORKSPACE IRIS_WORKSPACE=$IRIS_WORKSPACE\\\"\",\"intent\":\"Check specific workspace env vars\"}",
+                      "ms" : 750.8889436721802,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo \\\"P=$PWD W=$WORKSPACE\\\"\",\"intent\":\"Echo PWD and WORKSPACE\"}",
+                      "ms" : 1261.8619203567505,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"intent\":\"Check error message on nonexistent path\",\"path\":\"nonexistent_directory_xyz\/foo\"}",
+                      "ms" : 1423.7470626831055,
+                      "name" : "read_file",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"intent\":\"Read librarian skill\",\"path\":\"\/Users\/bnaylor\/.iris\/memory\/skills\/librarian\/SKILL.md\"}",
+                      "ms" : 817.823052406311,
+                      "name" : "read_file",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"ls -d \/Users 2>\/dev\/null || echo \\\"No \/Users\\\"\",\"intent\":\"Check if \/Users exists in container\"}",
+                      "ms" : 1328.9049863815308,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"find . -name \\\"*.swift\\\" 2>\/dev\/null\",\"intent\":\"Find swift files from current working directory\"}",
+                      "ms" : 788.1850004196167,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"find \/ -name \\\"*.swift\\\" 2>\/dev\/null\",\"intent\":\"Find all swift files in container\"}",
+                      "ms" : 865.1139736175537,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"ls -1 Sources\/iris\/*.swift 2>\/dev\/null | wc -l\",\"intent\":\"Count swift files in Sources\/iris\"}",
+                      "ms" : 1888.0610466003418,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 243075.16598701477
+                }
+              ],
+              "wallClockMs" : 243074.005499959
+            }
+          ],
+          "rung" : 5
+        }
+      ],
+      "summary" : {
+        "medianMs" : 148299.0974789858,
+        "p90Ms" : 243074.005499959,
+        "toolCallRate" : 1,
+        "toolCallsByName" : {
+          "read_file" : 6,
+          "run_command" : 35,
+          "search_memory" : 1,
+          "write_file" : 1
+        },
+        "unexpectedToolCallRate" : 0.5,
+        "unexpectedToolCallsByName" : {
+          "read_file" : 6,
+          "search_memory" : 1,
+          "write_file" : 1
+        }
+      }
+    }
+  ],
+  "schemaVersion" : 1,
+  "startedAt" : "2026-09-18T02:56:45Z",
+  "suite" : "tool-eagerness"
+}

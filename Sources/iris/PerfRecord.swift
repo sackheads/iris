@@ -92,6 +92,9 @@ struct PerfEnvironment: Codable {
     /// From the last scenario's captured request in the run; per-run because MCP configuration
     /// is per-process, not per scenario.
     var toolDeclarationCount: Int?
+    /// "sandboxed" or "host": where run_command executed. Tool-turn timings through a VM are
+    /// not like-for-like with host timings, so compare refuses across a mismatch.
+    var toolSandbox: String? = nil
 }
 
 struct PerfScenarioResult: Codable {
@@ -148,4 +151,11 @@ struct PerfScenarioSummary: Codable {
     var harnessRatio: Double?
     var toolCallRate: Double
     var toolCallsByName: [String: Int]
+    /// Fraction of successful rung-5 turns that called a tool outside the scenario's
+    /// `expectedTools`; nil when the scenario declares no expectation.
+    var unexpectedToolCallRate: Double? = nil
+    var unexpectedToolCallsByName: [String: Int]? = nil
+    /// Fraction of successful rung-5 turns that called none of a non-empty `expectedTools`
+    /// (a control that missed the tool it exists to exercise); nil for bait or unscored.
+    var missedExpectedToolRate: Double? = nil
 }
