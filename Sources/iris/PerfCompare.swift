@@ -18,6 +18,10 @@ struct PerfComparison {
 /// Joins two records by scenario name and rung and flags regressions past a threshold.
 /// Only like-for-like is compared: a provider or model change is a refusal, not a regression.
 enum PerfCompare {
+    /// A median-ms change is flagged only when it is also at least this many ms in absolute
+    /// terms: fake-lane smoke turns take 2-3 ms, where +50% is scheduler noise, not a regression.
+    static let minFlaggedDeltaMs: Double = 50
+
     static func compare(baseline: PerfRunRecord, current: PerfRunRecord, threshold: Double) -> PerfComparison {
         if baseline.environment.provider != current.environment.provider {
             return PerfComparison(refusal: "provider differs: \(baseline.environment.provider) vs \(current.environment.provider)", rows: [])
@@ -28,8 +32,9 @@ enum PerfCompare {
         var rows: [PerfComparison.Row] = []
         func row(_ scenario: String, _ rung: Int?, _ metric: String, _ a: Double, _ b: Double) {
             let change = PerfStats.percentChange(from: a, to: b)
+            let pastFloor = metric != "median ms" || (b - a) >= minFlaggedDeltaMs
             rows.append(.init(scenario: scenario, rung: rung, metric: metric, before: a, after: b,
-                              change: change, flagged: (change ?? 0) > threshold))
+                              change: change, flagged: (change ?? 0) > threshold && pastFloor))
         }
         for cur in current.scenarios {
             guard let base = baseline.scenarios.first(where: { $0.name == cur.name }) else { continue }

@@ -18,12 +18,12 @@ struct PerfCompareTests {
 
     @Test("a 25% slower median is flagged at the default threshold; 10% is not")
     func flagging() {
-        let slow = PerfCompare.compare(baseline: record(medianMs: 100), current: record(medianMs: 125), threshold: 0.2)
+        let slow = PerfCompare.compare(baseline: record(medianMs: 1000), current: record(medianMs: 1250), threshold: 0.2)
         #expect(slow.flagged.count == 1)
         #expect(slow.flagged.first?.metric == "median ms")
         #expect(slow.flagged.first?.rung == 5)
         #expect(PerfCompare.exitCode(slow) == 1)
-        let fine = PerfCompare.compare(baseline: record(medianMs: 100), current: record(medianMs: 110), threshold: 0.2)
+        let fine = PerfCompare.compare(baseline: record(medianMs: 1000), current: record(medianMs: 1100), threshold: 0.2)
         #expect(fine.flagged.isEmpty)
         #expect(PerfCompare.exitCode(fine) == 0)
     }
@@ -59,7 +59,7 @@ struct PerfCompareTests {
 
     @Test("render shows percent change and marks flagged rows")
     func render() {
-        let c = PerfCompare.compare(baseline: record(medianMs: 100), current: record(medianMs: 125), threshold: 0.2)
+        let c = PerfCompare.compare(baseline: record(medianMs: 1000), current: record(medianMs: 1250), threshold: 0.2)
         let text = PerfCompare.render(c, threshold: 0.2)
         #expect(text.contains("+25.0%"))
         #expect(text.contains("REGRESSION"))
@@ -135,5 +135,17 @@ struct PerfCompareTests {
         #expect(rungRows.first?.metric == "successful repetitions")
         #expect(rungRows.first?.flagged == false)
         #expect(PerfCompare.exitCode(c) == 0)
+    }
+
+    @Test("a large relative change on a tiny absolute delta is not a regression")
+    func noiseFloor() {
+        // 2 ms -> 3 ms is +50% but below the absolute floor: fake-lane smoke runs live here.
+        let tiny = PerfCompare.compare(baseline: record(medianMs: 2), current: record(medianMs: 3), threshold: 0.2)
+        #expect(tiny.flagged.isEmpty)
+        #expect(tiny.rows.first?.change == 0.5, "the change is still reported, just not flagged")
+        #expect(PerfCompare.minFlaggedDeltaMs == 50)
+        // Just over the floor and over the threshold: flagged.
+        let real = PerfCompare.compare(baseline: record(medianMs: 200), current: record(medianMs: 260), threshold: 0.2)
+        #expect(real.flagged.count == 1)
     }
 }
