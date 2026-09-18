@@ -16,7 +16,7 @@ Run on a quiet machine; timings from a debug build or a dirty tree are flagged i
 ## Layout
 
     suites/      what to run: scenarios, lane (fake/real), repetitions, pause, ladder rungs
-    prompts/     scenario files grouped by category (model-only, tool-use, fake)
+    prompts/     scenario files grouped by category (model-only, model-only-2, tool-use, fake)
     runs/        one JSON record per suite run (gitignored)
     baselines/   promoted records that later runs compare against (committed)
 

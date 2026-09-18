@@ -24,7 +24,7 @@ BIN=.build/release/iris
 
 suites=(perf/suites/smoke.json)
 if (( ! FAKE_ONLY )); then
-  suites+=(perf/suites/ladder.json perf/suites/tool-eagerness.json)
+  suites+=(perf/suites/ladder.json perf/suites/tool-eagerness.json perf/suites/tool-eagerness-2.json)
 fi
 
 mkdir -p perf/runs perf/baselines

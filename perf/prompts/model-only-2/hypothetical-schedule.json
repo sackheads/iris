@@ -1,0 +1,2 @@
+{ "name": "hypothetical-schedule", "clientMode": "real", "tier": "medium",
+  "turns": [ { "prompt": "How would I set up a nightly backup of a folder with launchd? Explain; don't set anything up." } ] }

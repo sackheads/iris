@@ -1,0 +1,2 @@
+{ "name": "remember-instruction", "clientMode": "real", "tier": "medium",
+  "turns": [ { "prompt": "Remember to keep answers short. What is a mutex?" } ] }

@@ -9,7 +9,7 @@ struct PerfSuiteFilesTests {
     private let root = PerfPaths.repoRoot()
 
     @Test("every committed suite loads and every scenario it lists exists and decodes",
-          arguments: ["smoke", "ladder", "tool-eagerness"])
+          arguments: ["smoke", "ladder", "tool-eagerness", "tool-eagerness-2"])
     func suitesLoad(name: String) throws {
         let suite = try PerfSuite.load(at: root.appendingPathComponent("perf/suites/\(name).json").path)
         #expect(suite.name == name)
@@ -36,5 +36,15 @@ struct PerfSuiteFilesTests {
         let suite = try PerfSuite.load(at: root.appendingPathComponent("perf/suites/tool-eagerness.json").path)
         let categories = Set(suite.scenarioURLs(relativeTo: root).map(PerfRunner.category(forScenarioAt:)))
         #expect(categories == ["model-only", "tool-use"])
+    }
+
+    @Test("the second eagerness suite pairs bait prompts with tool-use controls (#138)")
+    func eagerness2Categories() throws {
+        let suite = try PerfSuite.load(at: root.appendingPathComponent("perf/suites/tool-eagerness-2.json").path)
+        let categories = suite.scenarioURLs(relativeTo: root).map(PerfRunner.category(forScenarioAt:))
+        #expect(Set(categories) == ["model-only-2", "tool-use"])
+        #expect(categories.filter { $0 == "model-only-2" }.count == 6)
+        #expect(categories.filter { $0 == "tool-use" }.count == 3)
+        #expect(suite.rungs == [5])
     }
 }

@@ -1,0 +1,2 @@
+{ "name": "mentions-directory", "clientMode": "real", "tier": "medium",
+  "turns": [ { "prompt": "I'm working in ~/src/iris. What's the difference between an actor and a class in Swift? Three sentences." } ] }

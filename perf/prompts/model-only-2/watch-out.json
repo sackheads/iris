@@ -1,0 +1,2 @@
+{ "name": "watch-out", "clientMode": "real", "tier": "medium",
+  "turns": [ { "prompt": "Watch out for off-by-one errors. Is this loop correct? `for i in 0...n { print(items[i]) }`" } ] }
