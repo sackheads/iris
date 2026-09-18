@@ -87,6 +87,13 @@ struct ScenarioRunnerOptionsTests {
         #expect(result.turnErrors[0] == nil && result.turnErrors[1] != nil)
     }
 
+    @Test("a run ends its conversation's sandbox session so headless runs do not leak VMs")
+    func sandboxSessionEnded() async {
+        let result = await ScenarioRunner.run(textOnly)
+        let live = await SandboxSessionManager.shared.hasSession(result.conversationId)
+        #expect(live == false)
+    }
+
     @Test("toolExecution: .sandboxed is ignored outside a volatile settings copy")
     func sandboxedToolsGatedOnVolatileCopy() async {
         let before = ConfigManager.shared.mainAgentSandboxDefault

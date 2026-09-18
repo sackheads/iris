@@ -22,6 +22,8 @@ struct ScenarioResult: Sendable {
     var vibecopMeasured: Bool
     /// True when the run forced `run_command` through the sandbox.
     var toolsSandboxed: Bool
+    /// The throwaway conversation the run used.
+    var conversationId: UUID
     /// The first `[LLM_ERROR]` headline posted during each turn, in turn order (nil when the
     /// turn had none). The engine catches provider failures and posts a tagged system message
     /// instead of throwing, so a failed turn still produces a `CommandProfile` — this is how a
@@ -134,9 +136,13 @@ enum ScenarioRunner {
         }
         let wallClockMs = (MonotonicClock.nowMs() - start)
 
+        // Every run is a fresh conversation, so a sandboxed run leaves a VM per repetition behind
+        // unless it is ended here; the CLI process has no idle reaper. No-op without a session.
+        await SandboxSessionManager.shared.endSession(conversationId)
+
         return ScenarioResult(turnProfiles: collector.all, wallClockMs: wallClockMs,
                               finalTexts: finalTexts, guardsWereOff: guardsOff, vibecopMeasured: state.vibecopUnderAutoApprove,
-                              toolsSandboxed: sandboxed, turnErrors: turnErrors)
+                              toolsSandboxed: sandboxed, conversationId: conversationId, turnErrors: turnErrors)
     }
 }
 

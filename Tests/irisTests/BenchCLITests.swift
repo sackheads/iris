@@ -46,7 +46,7 @@ struct BenchCLITests {
         profile.add(.primaryLLM, durationMs: 600)
         profile.add(.toolExecution, durationMs: 300)
         let result = ScenarioResult(turnProfiles: [profile], wallClockMs: 1234.5,
-                                    finalTexts: [], guardsWereOff: false, vibecopMeasured: false, toolsSandboxed: false, turnErrors: [])
+                                    finalTexts: [], guardsWereOff: false, vibecopMeasured: false, toolsSandboxed: false, conversationId: UUID(), turnErrors: [])
 
         let text = BenchSummary.render(scenarioName: "echo", result: result)
         #expect(text.contains("echo"))
