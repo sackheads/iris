@@ -1,5 +1,13 @@
 import Foundation
 
+enum PerfRecordError: Error, Equatable, LocalizedError {
+    case newerSchema(found: Int, supported: Int)
+    var errorDescription: String? {
+        if case .newerSchema(let f, let s) = self { return "record schemaVersion \(f) is newer than this build supports (\(s)); update iris to read it" }
+        return nil
+    }
+}
+
 /// One perf suite run, persisted as JSON under perf/runs/ (and perf/baselines/ when promoted).
 /// Every field added after schemaVersion 1 must be Optional so old records keep decoding.
 struct PerfRunRecord: Codable {
@@ -22,7 +30,12 @@ struct PerfRunRecord: Codable {
     }()
 
     static func decode(from data: Data) throws -> PerfRunRecord {
-        try coder.1.decode(PerfRunRecord.self, from: data)
+        // Peek the version first so a newer record fails with a reason instead of a field error.
+        struct Header: Decodable { var schemaVersion: Int? }
+        if let v = try? JSONDecoder().decode(Header.self, from: data).schemaVersion, v > currentSchemaVersion {
+            throw PerfRecordError.newerSchema(found: v, supported: currentSchemaVersion)
+        }
+        return try coder.1.decode(PerfRunRecord.self, from: data)
     }
 
     static func load(at path: String) throws -> PerfRunRecord {
@@ -37,13 +50,25 @@ struct PerfRunRecord: Codable {
         f.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
         f.timeZone = TimeZone(identifier: "UTC")
         f.locale = Locale(identifier: "en_US_POSIX")
-        return "\(f.string(from: startedAt))-\(suite)-\(environment.gitSha).json"
+        return "\(f.string(from: startedAt))-\(Self.fileSafe(suite))-\(Self.fileSafe(environment.gitSha)).json"
+    }
+
+    /// Suite names come from committed files, but the name is a path component: anything
+    /// outside `[A-Za-z0-9._-]` becomes `-` so it can never escape the runs directory.
+    static func fileSafe(_ s: String) -> String {
+        String(s.map { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "_" || $0 == "-") ? $0 : "-" })
     }
 
     @discardableResult
     func write(toDirectory dir: URL) throws -> URL {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent(fileName)
+        // Second resolution: a second run of the same suite in the same second gets -2, -3, ...
+        var url = dir.appendingPathComponent(fileName)
+        var n = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            url = dir.appendingPathComponent(fileName.replacingOccurrences(of: ".json", with: "-\(n).json"))
+            n += 1
+        }
         try encoded().write(to: url, options: .atomic)
         return url
     }

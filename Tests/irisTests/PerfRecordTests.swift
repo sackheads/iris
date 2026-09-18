@@ -75,4 +75,32 @@ struct PerfRecordTests {
         #expect(turn.toolCalls.first?.name == "read_file")
         #expect(turn.finalTextLength == 5)
     }
+
+    @Test("file name sanitizes the suite name so it cannot escape the runs directory")
+    func fileNameSanitized() {
+        var r = Self.sampleRecord()
+        r.suite = "../evil/suite name"
+        #expect(r.fileName == "19700101T001640Z-..-evil-suite-name-abc1234.json" || !r.fileName.contains("/"))
+        #expect(!r.fileName.contains("/"))
+        #expect(!r.fileName.contains(" "))
+    }
+
+    @Test("a second write in the same second gets a numbered suffix instead of overwriting")
+    func writeDoesNotOverwrite() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("perf-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let first = try Self.sampleRecord().write(toDirectory: dir)
+        let second = try Self.sampleRecord().write(toDirectory: dir)
+        #expect(first != second)
+        #expect(second.lastPathComponent == "19700101T001640Z-ladder-abc1234-2.json")
+        #expect(FileManager.default.fileExists(atPath: first.path) && FileManager.default.fileExists(atPath: second.path))
+    }
+
+    @Test("a record from a newer schema is rejected with a clear error")
+    func newerSchemaRejected() throws {
+        var r = Self.sampleRecord()
+        r.schemaVersion = PerfRunRecord.currentSchemaVersion + 1
+        let data = try r.encoded()
+        #expect(throws: PerfRecordError.self) { try PerfRunRecord.decode(from: data) }
+    }
 }
