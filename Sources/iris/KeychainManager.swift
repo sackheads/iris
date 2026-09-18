@@ -18,7 +18,16 @@ public final class KeychainManager: @unchecked Sendable {
     /// so its presence is a reliable "running under tests" signal. `HeadlessMode` extends the
     /// same in-memory behavior to the `--bench` CLI, which is an identically ad-hoc-signed
     /// `swift run` binary that would otherwise block on a Keychain prompt.
-    let usesInMemoryStore = NSClassFromString("XCTestCase") != nil || HeadlessMode.isEnabled
+    let usesInMemoryStore = NSClassFromString("XCTestCase") != nil || HeadlessMode.isEnabled || KeychainManager.headlessBypassRequested
+
+    /// Set by `--perf` for a real-lane run whose provider needs no Keychain secret (Gemini over
+    /// ADC gets its token from gcloud). The Keychain ACL is per binary identity, so every rebuilt
+    /// ad-hoc-signed binary re-prompts on its first secret read; an unattended run sat 50 minutes
+    /// on that dialog. Must be set before `KeychainManager.shared` is first touched.
+    private static let bypassLock = NSLock()
+    nonisolated(unsafe) private static var bypassFlag = false
+    static var headlessBypassRequested: Bool { bypassLock.withLock { bypassFlag } }
+    static func requestHeadlessBypass() { bypassLock.withLock { bypassFlag = true } }
     private var inMemorySecrets: [String: [String: String]] = [:]
     private let inMemoryLock = NSLock()
 

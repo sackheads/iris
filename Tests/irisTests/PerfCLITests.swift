@@ -39,4 +39,14 @@ struct PerfCLITests {
         #expect(PerfCLI.parse(["iris", "--perf", "report", "a.json", "b.json"]) == .failure(.usage("unexpected argument b.json")))
         #expect(PerfCLI.parse(["iris", "--perf", "run", "s.json", "extra"]) == .failure(.usage("unexpected argument extra")))
     }
+
+    @Test("a real-lane run bypasses the Keychain only when the provider needs no Keychain secret")
+    func keychainBypassDecision() {
+        // Gemini over ADC gets its token from gcloud; nothing in the Keychain is needed.
+        #expect(PerfCLI.shouldBypassKeychain(provider: "Gemini", geminiAuthMode: GeminiAuthMode.adc.rawValue))
+        // API-key configurations need the Keychain; a rebuilt binary will prompt once.
+        #expect(!PerfCLI.shouldBypassKeychain(provider: "Gemini", geminiAuthMode: GeminiAuthMode.apiKey.rawValue))
+        #expect(!PerfCLI.shouldBypassKeychain(provider: "Anthropic", geminiAuthMode: GeminiAuthMode.adc.rawValue))
+        #expect(!PerfCLI.shouldBypassKeychain(provider: nil, geminiAuthMode: nil))
+    }
 }

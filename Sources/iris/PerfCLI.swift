@@ -69,6 +69,12 @@ enum PerfCLI {
         }
     }
 
+    /// True when a real-lane run can skip the Keychain entirely: Gemini over ADC is the only
+    /// configuration whose credentials live outside it.
+    static func shouldBypassKeychain(provider: String?, geminiAuthMode: String?) -> Bool {
+        provider == "Gemini" && geminiAuthMode == GeminiAuthMode.adc.rawValue
+    }
+
     @MainActor
     static func execute(_ cmd: PerfCommand) async -> Int32 {
         do {
@@ -82,7 +88,19 @@ enum PerfCLI {
                 // Settings come from a volatile copy so guard toggles never persist. Must precede
                 // the first touch of ConfigManager.shared (inside the runner).
                 IrisDefaults.useVolatileCopyOfStandard()
-                if suite.lane == .fake { HeadlessMode.enable() }
+                if suite.lane == .fake {
+                    HeadlessMode.enable()
+                } else {
+                    // A rebuilt binary prompts for Keychain access on its first secret read, which
+                    // blocks an unattended run. Skip the Keychain when the provider never needs it.
+                    let provider = IrisDefaults.store.string(forKey: "PRIMARY_PROVIDER") ?? "Gemini"
+                    let authMode = IrisDefaults.store.string(forKey: "GEMINI_AUTH_MODE") ?? GeminiAuthMode.apiKey.rawValue
+                    if shouldBypassKeychain(provider: provider, geminiAuthMode: authMode) {
+                        KeychainManager.requestHeadlessBypass()
+                    } else {
+                        print("perf: provider secrets come from the Keychain; a rebuilt binary prompts once before the run can start")
+                    }
+                }
                 let root = PerfPaths.repoRoot()
                 let record = try await PerfRunner.run(suite: suite, repetitionsOverride: reps, repoRoot: root, headless: suite.lane == .fake)
                 print(PerfReport.render(record))

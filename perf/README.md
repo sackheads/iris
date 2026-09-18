@@ -42,6 +42,14 @@ There is no unit-test seam to assert guards are switched off under a volatile co
 is in every ladder record, where rung 4 turns carry zero `guard.*` and `assembly.userProfile`
 spans while rung 5 turns do not.
 
+## Keychain and unattended runs
+
+Every rebuild changes the binary's ad-hoc signature, and the Keychain re-prompts each new binary
+on its first secret read, which silently blocks an unattended run. Real-lane runs on Gemini over
+ADC never touch the Keychain (the token comes from gcloud), so they run unattended after a
+rebuild. Any API-key configuration prompts once per rebuild; run one quick command with the new
+binary and click "Always Allow" before starting a long suite.
+
 ## Real-lane tool execution
 
 Real-lane suites force `run_command` through the sandbox (the main-agent sandbox default is set
