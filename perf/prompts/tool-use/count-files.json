@@ -1,2 +1,2 @@
 { "name": "count-files", "clientMode": "real", "tier": "medium", "expectedTools": ["run_command"],
-  "turns": [ { "prompt": "How many .swift files are directly inside the Sources/iris directory of the current working directory? Use a shell command and give me the number." } ] }
+  "turns": [ { "prompt": "How many entries does `ls /usr/bin` list? Use a single shell command and give me just the number." } ] }
