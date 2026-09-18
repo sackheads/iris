@@ -14,6 +14,8 @@ struct ScenarioResult: Sendable {
     var finalTexts: [String]
     /// True when guards were actually switched off for this run.
     var guardsWereOff: Bool
+    /// True when Vibecop was consulted (and its span recorded) before each auto-approval (#135).
+    var vibecopMeasured: Bool
     /// The first `[LLM_ERROR]` headline posted during each turn, in turn order (nil when the
     /// turn had none). The engine catches provider failures and posts a tagged system message
     /// instead of throwing, so a failed turn still produces a `CommandProfile` — this is how a
@@ -42,6 +44,8 @@ enum ScenarioRunner {
                     clientOverride: (any LLMClientProtocol)? = nil) async -> ScenarioResult {
         let state = AppState()
         state.autoApproveTools = true // non-interactive: never block on an approval prompt
+        // Pay the Vibecop cost a real run_command pays, unless this run is measuring guards off.
+        state.vibecopUnderAutoApprove = guards != .off
         let conversationId = UUID()
         state.createNewConversation(id: conversationId)
 
@@ -110,7 +114,7 @@ enum ScenarioRunner {
         let wallClockMs = (MonotonicClock.nowMs() - start)
 
         return ScenarioResult(turnProfiles: collector.all, wallClockMs: wallClockMs,
-                              finalTexts: finalTexts, guardsWereOff: guardsOff, turnErrors: turnErrors)
+                              finalTexts: finalTexts, guardsWereOff: guardsOff, vibecopMeasured: state.vibecopUnderAutoApprove, turnErrors: turnErrors)
     }
 }
 

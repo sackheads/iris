@@ -34,6 +34,10 @@ Each real-lane prompt is timed at up to five rungs; each delta isolates one laye
 
 **Overhead ratio** = median rung 5 / median rung 1. **Harness ratio** = rung 4 / rung 1.
 
+Rung 5 includes Vibecop: headless runs auto-approve every tool, but they first run the Vibecop
+evaluation a real `run_command` would run and record its `vibecop` span (the verdict is not acted
+on). Rung 4 and the fake lane skip it along with the other guards.
+
 There is no unit-test seam to assert guards are switched off under a volatile copy; the evidence
 is in every ladder record, where rung 4 turns carry zero `guard.*` and `assembly.userProfile`
 spans while rung 5 turns do not.
