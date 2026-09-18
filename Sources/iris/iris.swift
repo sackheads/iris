@@ -39,6 +39,8 @@ actor IrisEngine {
 
     /// Prefix of the system event that asks the model to rename the conversation.
     nonisolated static let renameTriggerPrefix = "System Event [Rename Trigger]"
+    /// Prefix of the system event `/goal` sends to have the model draft a contract.
+    nonisolated static let goalDraftTriggerPrefix = "System Event [Goal Contract Draft]"
 
     nonisolated static func formatDelay(_ seconds: TimeInterval) -> String {
         seconds == seconds.rounded() ? "\(Int(seconds))s" : String(format: "%.1fs", seconds)
@@ -535,32 +537,40 @@ actor IrisEngine {
                 required: ["content"]
             )
         ))
-        toolsList.append(FunctionDeclaration(
-            name: "propose_goal_contract",
-            description: "Draft a structured contract for a goal the user is starting. Produce concrete criteria for 'done'. Honesty rules: never invent an `executable` check you cannot actually run; prefer a `qualitative` criterion over a fabricated number; flag taste/direction as `humanJudged`. Optionally group criteria into ordered checkpoints via a per-criterion 'milestone' label; the run pauses at each checkpoint for the user. This proposes a DRAFT for the user to edit and approve — it does not start the loop.",
-            parameters: Schema(
-                type: "OBJECT",
-                properties: [
-                    "objective": Schema(type: "STRING", description: "One-line restatement of the goal."),
-                    "criteria": Schema(type: "ARRAY", description: "Definition of done.", items: Schema(type: "OBJECT", properties: [
-                        "text": Schema(type: "STRING", description: "The criterion — what 'done' looks like."),
-                        "kind": Schema(type: "STRING", description: "executable | qualitative | humanJudged"),
-                        "check": Schema(type: "STRING", description: "A runnable command/test. ONLY for executable criteria."),
-                        "milestone": Schema(type: "STRING", description: "Optional. A short checkpoint name; criteria sharing a name form one ordered checkpoint. Omit for a goal with no checkpoints.")
-                    ], required: ["text", "kind"])),
-                    "workspace": Schema(type: "STRING", description: "Optional. The directory this goal should run in. If the goal works on existing code, give that directory's path — it must already exist. If the goal creates something new, omit this and Iris will make a dedicated workspace for it. Never propose the Iris source tree unless the goal is about Iris itself."),
-                    "out_of_scope": Schema(type: "ARRAY", description: "Explicit non-goals.", items: Schema(type: "STRING")),
-                    "stop_before": Schema(type: "ARRAY", description: "Irreversible / authorization boundaries to stop and ask before (e.g. force-push, merge, delete, spend).", items: Schema(type: "STRING")),
-                    "assumptions": Schema(type: "ARRAY", description: "Anything you inferred that the user should confirm.", items: Schema(type: "STRING"))
-                ],
-                required: ["objective", "criteria"]
-            )
-        ))
+        // Only the /goal command's draft turn wants a contract proposal; on plain turns the
+        // declaration was prompt weight and an invitation to start goals nobody asked for (#133).
+        if input.hasPrefix(Self.goalDraftTriggerPrefix) {
+            toolsList.append(FunctionDeclaration(
+                name: "propose_goal_contract",
+                description: "Draft a structured contract for a goal the user is starting. Produce concrete criteria for 'done'. Honesty rules: never invent an `executable` check you cannot actually run; prefer a `qualitative` criterion over a fabricated number; flag taste/direction as `humanJudged`. Optionally group criteria into ordered checkpoints via a per-criterion 'milestone' label; the run pauses at each checkpoint for the user. This proposes a DRAFT for the user to edit and approve — it does not start the loop.",
+                parameters: Schema(
+                    type: "OBJECT",
+                    properties: [
+                        "objective": Schema(type: "STRING", description: "One-line restatement of the goal."),
+                        "criteria": Schema(type: "ARRAY", description: "Definition of done.", items: Schema(type: "OBJECT", properties: [
+                            "text": Schema(type: "STRING", description: "The criterion — what 'done' looks like."),
+                            "kind": Schema(type: "STRING", description: "executable | qualitative | humanJudged"),
+                            "check": Schema(type: "STRING", description: "A runnable command/test. ONLY for executable criteria."),
+                            "milestone": Schema(type: "STRING", description: "Optional. A short checkpoint name; criteria sharing a name form one ordered checkpoint. Omit for a goal with no checkpoints.")
+                        ], required: ["text", "kind"])),
+                        "workspace": Schema(type: "STRING", description: "Optional. The directory this goal should run in. If the goal works on existing code, give that directory's path — it must already exist. If the goal creates something new, omit this and Iris will make a dedicated workspace for it. Never propose the Iris source tree unless the goal is about Iris itself."),
+                        "out_of_scope": Schema(type: "ARRAY", description: "Explicit non-goals.", items: Schema(type: "STRING")),
+                        "stop_before": Schema(type: "ARRAY", description: "Irreversible / authorization boundaries to stop and ask before (e.g. force-push, merge, delete, spend).", items: Schema(type: "STRING")),
+                        "assumptions": Schema(type: "ARRAY", description: "Anything you inferred that the user should confirm.", items: Schema(type: "STRING"))
+                    ],
+                    required: ["objective", "criteria"]
+                )
+            ))
+        }
         // Main-agent only. A subagent runs against a unit contract the PARENT authored (slice B3);
         // letting it amend its own definition of done is the self-authored-target problem the
         // evaluator exists to distrust. It matters concretely because B3 puts `oracleText()` in
         // front of a subagent for the first time, and that text names this tool by name.
-        if principal == .main {
+        let ladderContract = await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId })?.goalContract
+        }
+        // Amending criteria only means something once a contract is locked (#133).
+        if principal == .main, ladderContract?.isLocked == true {
         toolsList.append(FunctionDeclaration(
             name: "amend_goal_contract",
             description: "Change the LOCKED goal contract's criteria when the work reveals they were wrong. A `rationale` is mandatory — criteria never change silently. The change is logged and shown to the user.",
@@ -574,9 +584,6 @@ actor IrisEngine {
         ))
         }
 
-        let ladderContract = await MainActor.run {
-            localState?.conversations.first(where: { $0.id == conversationId })?.goalContract
-        }
         if principal == .main, let gc = ladderContract, gc.hasLadder, !gc.isFinalMilestone {
             toolsList.append(FunctionDeclaration(
                 name: "reach_checkpoint",

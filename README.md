@@ -120,7 +120,7 @@ In the settings window, you can enter your Google OAuth Client ID and Secret, an
 
 The **Integrations tab** now includes a collapsible **Setup Guide** that walks you through both the `gcloud` CLI path (recommended) and the Google Cloud Console web path. It auto-detects your gcloud installation, authenticated account, and GCP project, and provides a one-click checklist to enable the six required APIs (Calendar, Drive, Docs, Sheets, Gmail, Tasks). See [docs/google_workspace_oauth_setup.md](docs/google_workspace_oauth_setup.md) for the full walkthrough.
 
-Once connected, Iris has native API access to the following Workspace tools directly from Swift:
+Once connected, Iris has native API access to the following Workspace tools directly from Swift (they are offered to the model only while a Google account is connected, so an unconnected install does not spend prompt tokens on them):
 *   **Google Calendar**: `google_calendar_list_events`, `google_calendar_create_event`
 *   **Google Docs**: `google_docs_get`
 *   **Google Drive**: `google_drive_search`
