@@ -103,4 +103,24 @@ struct ScenarioRunnerOptionsTests {
         let plain = await ScenarioRunner.run(textOnly)
         #expect(plain.toolsSandboxed == false)
     }
+
+    @Test("a run can bind its throwaway conversation to a workspace (#151)")
+    func workspaceBinding() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-ws-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let marker = "WORKSPACE-RULE-\(UUID().uuidString)"
+        try "# Rules\n\(marker)\n".write(to: dir.appendingPathComponent("AGENTS.md"), atomically: true, encoding: .utf8)
+        let capture = CapturingLLMClient(reply: "ok")
+        _ = await ScenarioRunner.run(textOnly, clientOverride: capture, workspacePath: dir.path)
+        // The body is sanitized through tier 3, which a bare test process fails closed on, so
+        // assert the section the engine appends whenever the bound workspace has an AGENTS.md.
+        let header = "# Project Workspace Rules (AGENTS.md)"
+        let system = capture.requests.first?.systemInstruction?.parts.first?.text ?? ""
+        #expect(system.contains(header), "AGENTS.md from the bound workspace is part of the request")
+        _ = marker
+        let unbound = CapturingLLMClient(reply: "ok")
+        _ = await ScenarioRunner.run(textOnly, clientOverride: unbound)
+        #expect(unbound.requests.first?.systemInstruction?.parts.first?.text?.contains(header) == false)
+    }
 }

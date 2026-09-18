@@ -69,6 +69,15 @@ enum PerfCLI {
         }
     }
 
+    /// A fresh, empty directory for a real-lane run's cwd and workspace, so file tools the model
+    /// calls unattended (only run_command is sandboxed) land here and not in the repo (#151).
+    static func makeScratchWorkspace() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.standardizedFileURL
+            .appendingPathComponent("iris-perf-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
     /// True when a real-lane run can skip the Keychain entirely: Gemini over ADC is the only
     /// configuration whose credentials live outside it.
     static func shouldBypassKeychain(provider: String?, geminiAuthMode: String?) -> Bool {
@@ -101,8 +110,17 @@ enum PerfCLI {
                         print("perf: provider secrets come from the Keychain; a rebuilt binary prompts once before the run can start")
                     }
                 }
-                let root = PerfPaths.repoRoot()
-                let record = try await PerfRunner.run(suite: suite, repetitionsOverride: reps, repoRoot: root, headless: suite.lane == .fake)
+                let root = PerfPaths.repoRoot()   // before any cwd change
+                var scratch: URL?
+                if suite.lane == .real {
+                    let dir = try makeScratchWorkspace()
+                    FileManager.default.changeCurrentDirectoryPath(dir.path)
+                    print("perf: real-lane file tools and cwd confined to \(dir.path)")
+                    scratch = dir
+                }
+                defer { if let scratch { try? FileManager.default.removeItem(at: scratch) } }
+                let record = try await PerfRunner.run(suite: suite, repetitionsOverride: reps, repoRoot: root,
+                                                      headless: suite.lane == .fake, workspacePath: scratch?.path)
                 print(PerfReport.render(record))
                 let dir = out.hasPrefix("/") ? URL(fileURLWithPath: out) : root.appendingPathComponent(out)
                 let url = try record.write(toDirectory: dir)

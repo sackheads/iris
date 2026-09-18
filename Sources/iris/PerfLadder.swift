@@ -20,11 +20,11 @@ enum PerfLadder {
     /// Run one engine turn against a capturing client with guards off, and keep the request it
     /// built. This is exactly the system prompt and tool list a real turn sends.
     @MainActor
-    static func capture(for scenario: Scenario) async -> LadderCapture {
+    static func capture(for scenario: Scenario, workspacePath: String? = nil) async -> LadderCapture {
         let client = CapturingLLMClient(reply: "ok")
         var one = scenario
         one.turns = Array(scenario.turns.prefix(1))
-        _ = await ScenarioRunner.run(one, guards: .off, clientOverride: client)
+        _ = await ScenarioRunner.run(one, guards: .off, clientOverride: client, workspacePath: workspacePath)
         let request = client.requests.first
         let count = request?.tools?.reduce(0) { $0 + $1.functionDeclarations.count } ?? 0
         return LadderCapture(systemInstruction: request?.systemInstruction, tools: request?.tools, toolCount: count)
