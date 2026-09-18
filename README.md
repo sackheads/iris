@@ -95,6 +95,12 @@ All keys are saved securely to your local Keychain and `UserDefaults`. Gemini su
 swift run
 ```
 
+`swift run` re-signs the binary ad-hoc on every rebuild, and macOS keys Keychain access to the
+signature, so each rebuild asks for Keychain access again. With a Developer ID Application
+certificate in your keychain, `scripts/run-dev.sh` builds, signs with it, and launches, so one
+"Always Allow" sticks across rebuilds. `perf/run.sh` and `scripts/build_release.sh` sign the same
+way when the certificate is present (or `CODESIGN_IDENTITY` is set).
+
 ### Global Hotkey ⌨️
 Iris runs in the background and can be summoned instantly over any other app by pressing **`Cmd + Shift + Space`** (configurable in Settings).
 

@@ -3,6 +3,13 @@
 # release build, the suite files' own repetitions, records under perf/runs/, and a comparison
 # against the newest promoted baseline for each suite when one exists.
 set -euo pipefail
+
+# Print the whole build log only when the build fails; a bare `| tail -1` hides the error.
+build_or_die() {
+  local out
+  if ! out=$("$@" 2>&1); then echo "$out"; echo "build failed" >&2; exit 1; fi
+  echo "$out" | tail -1
+}
 cd "$(dirname "$0")/.."
 
 FAKE_ONLY=0
@@ -19,7 +26,9 @@ sha=$(git rev-parse --short HEAD)
 dirty=""
 git diff --quiet && git diff --cached --quiet || dirty=" (dirty tree: results will be flagged)"
 echo "perf: building release at ${sha}${dirty}"
-swift build -c release 2>&1 | tail -1
+build_or_die swift build -c release
+# A stable signature keeps the Keychain from re-prompting this rebuilt binary (see scripts/sign.sh).
+scripts/sign.sh .build/release/iris
 BIN=.build/release/iris
 
 suites=(perf/suites/smoke.json)

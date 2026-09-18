@@ -62,9 +62,9 @@ cat <<EOF > "${APP_BUNDLE}/Contents/Info.plist"
 EOF
 
 # 3. Code Signing
-SIGNING_IDENTITY="${CODESIGN_IDENTITY:--}"
-echo "Signing app bundle with identity '${SIGNING_IDENTITY}'..."
-codesign --force --deep --options runtime -s "${SIGNING_IDENTITY}" "${APP_BUNDLE}"
+# Identity selection lives in scripts/sign.sh (CODESIGN_IDENTITY, else the keychain's Developer ID
+# Application identity, else ad-hoc for a bundle). --hardened adds the hardened runtime + timestamp.
+scripts/sign.sh "${APP_BUNDLE}" --hardened
 
 # 4. Packaging ZIP & SHA256 Checksum
 echo "Packaging release zip..."
