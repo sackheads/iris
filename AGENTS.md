@@ -63,13 +63,13 @@ docs/                     # design specs, plans, reviews, roadmaps
 
 5. **`commandStartTimes` and `commandDurations` on `AppState` are transient.** They are not part of `Conversation`, not persisted, and must not be added to any `Codable` type. They exist only to drive the pill timer UI within a single app session.
 
-6. **Gate tool exposure; never broadcast dead-weight declarations on plain turns.** Every declared tool consumes prompt tokens on every call (the perf ladder in #129 showed 30 tools consuming ~3,100 of ~5,100 prompt tokens — 61% of the payload) and invites unprompted tool eagerness (e.g. #132's `rename_conversation` hallucinations on first messages). When adding or modifying a tool:
+6. **Gate tool exposure; never broadcast dead-weight declarations on plain turns.** Every declared tool consumes prompt tokens on every call (the perf ladder in #129 showed 30 tools consuming ~3,100 of ~5,100 prompt tokens — 61% of the payload) and invites unprompted tool eagerness (e.g. #132's `rename_conversation` unprompted calls on first messages). When adding or modifying a tool:
    - *Unconfigured prerequisites:* If a tool requires external authentication or credentials (e.g. Google refresh tokens in `ToolExecutor.getTools`), omit the declaration when unconfigured so an unconnected install does not spend prompt tokens (#133, #144). Make the prerequisite flag injectable (`workspaceToolsEnabled: Bool = ...`) so tests never touch global config.
    - *Workflow triggers:* If a tool belongs to a specific command flow (e.g. `propose_goal_contract` for `/goal`, `rename_conversation` for `/rename`), offer it **only** on the triggering turn using a dedicated system-event prefix (`IrisEngine.goalDraftTriggerPrefix`, `IrisEngine.renameTriggerPrefix`).
-   - *Lifecycle state:* If a tool is valid only during an active state (e.g. `amend_goal_contract`, `reach_checkpoint`), gate declaration on that state (`ladderContract?.isLocked == true`).
-   - *Reference:* See #144 for the canonical pattern (dropping 13 dead-weight tools slashed declaration tokens by 41% and whole-prompt size by 25%).
+   - *Lifecycle state:* If a tool is valid only during an active state (e.g. `amend_goal_contract` gated on `ladderContract?.isLocked == true`, `reach_checkpoint` gated on `hasLadder && !isFinalMilestone`), gate declaration on that state.
+   - *Reference:* See #144 for the canonical pattern (dropping 12 dead-weight tools slashed declaration tokens by 41% and whole-prompt size by 25%).
 
-7. **Never mutate `ConfigManager.shared` or persistent user defaults in a test.** `ConfigManager.shared` is process-global and suites run concurrently; mutating it races, and writes persist to disk, poisoning subsequent runs (#109, #121). Under test, use dependency injection (construct an isolated `ConfigManager()` or pass parameters), or route through `IrisDefaults.useVolatileCopyOfStandard()`.
+7. **Never mutate `ConfigManager.shared` in a test.** It is process-global and suites run concurrently, so mutating it races. Use the existing seams instead: construct an isolated `ConfigManager()` and inject it, or pass injectable parameters (`protectionEnabled:`, `workspaceToolsEnabled:`). See **Build and test** above.
 
 ## Patterns and conventions
 
@@ -85,16 +85,16 @@ docs/                     # design specs, plans, reviews, roadmaps
 - **`readDataToEndOfFile()` blocking on orphan processes.** When a shell command spawns a subprocess (e.g. `docker` → `docker-buildx`), the child inherits the stdout/stderr pipes. Killing the parent doesn't close the pipes. The `terminationHandler` must kill children first; see `ToolExecutor.runCommand`.
 - **`withCheckedContinuation` ignores task cancellation.** The Stop button cancels the Swift Task, but a bare `withCheckedContinuation` never wakes up. Wrap it with `withTaskCancellationHandler` so cancellation can terminate the subprocess and resume the continuation.
 - **AttributeGraph cycle from `.textSelection` on agent Markdown views.** A `.textSelection` modifier on the agent message `Markdown` view caused a heisenbug cycle (invisible under the debugger). Fixed in `0ed19c8`; don't re-add `.textSelection` to those views.
-- **Unconditional tool declarations bloating prompt tokens and causing tool eagerness.** Broadcasting 30 tool declarations cost 61% of turn tokens and caused the model to rename conversations unprompted on first messages (#132, #133, #144). Gating tools by credentials and workflow triggers cut declarations from 30 to 17 (-41% tokens) with zero loss of capability.
+- **Unconditional tool declarations bloating prompt tokens and causing tool eagerness.** Broadcasting 30 tool declarations cost 61% of turn tokens and caused the model to rename conversations unprompted on first messages (#132, #133, #144). Gating tools by credentials and workflow triggers cut declarations from 30 to 17 (-41% tokens) with no loss of capability for the flows that use them.
 - **Mutating global `ConfigManager.shared` in tests.** Leaked settings across parallel test suites, caused flaky runs, and persisted dirty state into user defaults (#109).
 
 ## Pre-commit checklist
 
 - [ ] `swift test` is green
 - [ ] If you added a field to a persisted `Codable` type: it uses `decodeIfPresent` (Invariant 1)
-- [ ] If you added or modified a tool: declaration is gated by state/credentials/trigger rather than exposed unconditionally on plain turns (Invariant 6; see #144)
+- [ ] If you added or modified a tool with a credential prerequisite, a triggering command, or a lifecycle state: its declaration is gated on it rather than exposed unconditionally on plain turns (Invariant 6; see #144)
 - [ ] If you added or changed a tool parameter: `getTools()` schema and `execute()` handler are both updated
-- [ ] If you added a test that configures settings: it does not mutate `ConfigManager.shared` directly; uses an injected instance or volatile copy (Invariant 7; see #109, #121)
+- [ ] If you added a test that configures settings: it does not mutate `ConfigManager.shared` directly; uses an injected instance or parameter (Invariant 7; see Build and test)
 - [ ] If you changed user-facing behaviour: `README.md` is updated in the same commit
 - [ ] No large build artefacts committed (`.build/`, `*.o`, `*.onnx` model weights, etc.)
 
