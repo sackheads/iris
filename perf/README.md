@@ -56,8 +56,9 @@ Real-lane suites force `run_command` through the sandbox (the main-agent sandbox
 to sandboxed inside the run's volatile settings copy, never in your preferences), because tool
 prompts run unattended with auto-approve. The record's `toolSandbox` field says which mode ran,
 and `compare` refuses to compare records whose modes differ. Records also keep each tool call's
-arguments (capped at 500 characters), promoted baselines included, so a tool storm can be read
-afterwards.
+arguments (capped at 500 characters; values under credential-looking keys and token-shaped
+substrings are replaced with `[redacted]`), promoted baselines included, so a tool storm can be
+read afterwards without committing a secret.
 
 ## Reading a record
 

@@ -109,6 +109,10 @@ enum ScenarioRunner {
             if sandboxed { config.mainAgentSandboxDefault = savedSandbox }
         }
 
+        // Safety net for exit paths that skip the awaited teardown below (`defer` cannot await,
+        // so this detaches; endSession is idempotent).
+        defer { Task { await SandboxSessionManager.shared.endSession(conversationId) } }
+
         let engine = IrisEngine(state: state, tier: scenario.tier, client: client)
 
         // Collect this run's finished turn profiles via a task-local sink scoped to the turn loop.
@@ -138,6 +142,8 @@ enum ScenarioRunner {
 
         // Every run is a fresh conversation, so a sandboxed run leaves a VM per repetition behind
         // unless it is ended here; the CLI process has no idle reaper. No-op without a session.
+        // Awaited here so callers (and tests) observe the teardown; the defer above is the net
+        // for any exit path a future change adds, since a defer body cannot await.
         await SandboxSessionManager.shared.endSession(conversationId)
 
         return ScenarioResult(turnProfiles: collector.all, wallClockMs: wallClockMs,

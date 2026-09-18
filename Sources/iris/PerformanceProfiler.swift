@@ -73,11 +73,45 @@ public struct ToolCallRecord: Codable, Sendable, Equatable {
         self.name = name; self.ms = ms; self.ok = ok; self.args = args
     }
 
+    /// Records (and promoted baselines) are committed, so credentials must never reach them:
+    /// values under credential-looking keys and token-shaped substrings anywhere are replaced.
     public static func compactArgs(_ args: [String: JSONValue]) -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let raw = (try? encoder.encode(args)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        let scrubbed = redactKeys(.object(args))
+        var raw = (try? encoder.encode(scrubbed)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        for pattern in secretPatterns {
+            raw = pattern.stringByReplacingMatches(in: raw, range: NSRange(raw.startIndex..., in: raw), withTemplate: "[redacted]")
+        }
         return APIError.truncated(raw, to: argsLimit)
+    }
+
+    private static let secretKey = try! NSRegularExpression(pattern: "(?i)(token|secret|passw(or)?d|api[_-]?key|authorization|cookie|credential)")
+    private static let secretPatterns: [NSRegularExpression] = [
+        "sk-[A-Za-z0-9_-]{16,}",                                   // OpenAI / Anthropic style keys
+        "gh[opusr]_[A-Za-z0-9]{20,}",                              // GitHub tokens
+        "xox[baprs]-[A-Za-z0-9-]{10,}",                            // Slack tokens
+        "AIza[0-9A-Za-z_-]{30,}",                                  // Google API keys
+        "ya29\\.[0-9A-Za-z_-]{20,}",                               // Google OAuth access tokens
+        "AKIA[0-9A-Z]{16}",                                        // AWS access key ids
+        "eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}", // JWTs
+        "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    ].map { try! NSRegularExpression(pattern: $0) }
+
+    private static func redactKeys(_ value: JSONValue) -> JSONValue {
+        switch value {
+        case .object(let dict):
+            var out: [String: JSONValue] = [:]
+            for (k, v) in dict {
+                let isSecret = secretKey.firstMatch(in: k, range: NSRange(k.startIndex..., in: k)) != nil
+                out[k] = isSecret ? .string("[redacted]") : redactKeys(v)
+            }
+            return .object(out)
+        case .array(let items):
+            return .array(items.map(redactKeys))
+        default:
+            return value
+        }
     }
 }
 

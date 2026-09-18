@@ -75,4 +75,22 @@ struct ProfilerRecordTests {
         let old = ToolCallRecord(name: "read_file", ms: 1, ok: true)
         #expect(old.args == nil, "the initializer without args keeps working")
     }
+
+    @Test("recorded tool arguments redact secret-looking values")
+    func toolArgsRedacted() {
+        // Key names that carry credentials are redacted whatever the value.
+        let byKey = ToolCallRecord.compactArgs(["api_key": .string("plain"), "Authorization": .string("Bearer x"), "command": .string("ls")])
+        #expect(byKey.contains(#""command":"ls""#))
+        #expect(!byKey.contains("plain") && !byKey.contains("Bearer x"))
+        #expect(byKey.contains("[redacted]"))
+        // Token shapes are redacted wherever they appear, including inside a shell command.
+        let inCommand = ToolCallRecord.compactArgs(["command": .string("curl -H 'X-Key: sk-abcdefghijklmnopqrstuvwxyz0123456789' https://api.example.com && echo ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd")])
+        #expect(!inCommand.contains("sk-abcdefghijklmnopqrstuvwxyz0123456789"))
+        #expect(!inCommand.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd"))
+        #expect(inCommand.contains("curl -H 'X-Key: [redacted]' https://api.example.com"))
+        let jwt = ToolCallRecord.compactArgs(["content": .string("token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123def456ghi789")])
+        #expect(!jwt.contains("eyJhbGciOiJIUzI1NiJ9"))
+        // Ordinary arguments are untouched.
+        #expect(ToolCallRecord.compactArgs(["path": .string("~/src/iris/README.md")]) == #"{"path":"~/src/iris/README.md"}"#)
+    }
 }
