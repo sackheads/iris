@@ -103,4 +103,19 @@ struct PerfRecordTests {
         let data = try r.encoded()
         #expect(throws: PerfRecordError.self) { try PerfRunRecord.decode(from: data) }
     }
+
+    @Test("PerfTurn keeps a capped, redacted copy of the final reply (#133 slice 2 diagnosis)")
+    func finalTextKept() {
+        var profile = CommandProfile(id: UUID(), label: "l", source: "s", startedAt: Date())
+        profile.totalMs = 1
+        let long = String(repeating: "x", count: 2000)
+        let turn = PerfTurn(profile, finalText: long)
+        #expect(turn.finalTextLength == 2000)
+        #expect((turn.finalText?.count ?? 0) <= PerfTurn.finalTextLimit + 40)
+        #expect(turn.finalText?.contains("truncated") == true)
+        let secret = PerfTurn(profile, finalText: "your key is sk-abcdefghijklmnopqrstuvwxyz0123456789 ok")
+        #expect(secret.finalText?.contains("sk-abc") == false)
+        #expect(secret.finalText?.contains("[redacted]") == true)
+        #expect(PerfTurn(profile, finalTextLength: 3).finalText == nil, "the older initializer still works")
+    }
 }
