@@ -111,6 +111,7 @@ enum PerfCLI {
                     }
                 }
                 let root = PerfPaths.repoRoot()   // before any cwd change
+                let previousCwd = FileManager.default.currentDirectoryPath
                 var scratch: URL?
                 if suite.lane == .real {
                     let dir = try makeScratchWorkspace()
@@ -118,7 +119,14 @@ enum PerfCLI {
                     print("perf: real-lane file tools and cwd confined to \(dir.path)")
                     scratch = dir
                 }
-                defer { if let scratch { try? FileManager.default.removeItem(at: scratch) } }
+                defer {
+                    // Restore the cwd before deleting the directory it pointed at, so nothing that
+                    // runs after this (today: exit) inherits a dangling working directory.
+                    if let scratch {
+                        FileManager.default.changeCurrentDirectoryPath(previousCwd)
+                        try? FileManager.default.removeItem(at: scratch)
+                    }
+                }
                 let record = try await PerfRunner.run(suite: suite, repetitionsOverride: reps, repoRoot: root,
                                                       headless: suite.lane == .fake, workspacePath: scratch?.path)
                 print(PerfReport.render(record))
