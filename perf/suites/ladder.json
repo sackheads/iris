@@ -1,9 +1,15 @@
 {
   "name": "ladder",
   "lane": "real",
-  "repetitions": 3,
+  "repetitions": 5,
   "pauseMs": 1500,
-  "rungs": [1, 2, 3, 4, 5],
+  "rungs": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
   "scenarios": [
     "perf/prompts/model-only/capital-city.json",
     "perf/prompts/model-only/explain-concept.json",
