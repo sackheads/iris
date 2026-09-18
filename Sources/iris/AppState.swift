@@ -146,6 +146,10 @@ class AppState {
     /// drivers (ScenarioRunner) on their own throwaway AppState — never by the shipping app —
     /// so scenario runs are deterministic and never block on a human. Not persisted.
     var autoApproveTools = false
+    /// With `autoApproveTools`, also run the Vibecop evaluation (recording its span) before
+    /// approving, so a headless run pays what a real `run_command` pays. The verdict is never
+    /// acted on: a benchmark measures the cost, it does not block on it (#135).
+    var vibecopUnderAutoApprove = false
     var commandStartTimes: [UUID: Date] = [:]
     var commandDurations: [UUID: TimeInterval] = [:]
     var activeSubagents: [ActiveSubagent] = []
@@ -936,16 +940,36 @@ class AppState {
     func requestApproval(toolName: String, details: String, workspace: String? = nil,
                          conversationId: UUID? = nil, origin: String = "Main agent",
                          inSandbox: Bool = false, callerRole: VibecopCallerRole = .agent,
-                         allowedCommands: [String] = []) async -> Bool {
+                         allowedCommands: [String] = [], vibecopEnabled: Bool? = nil) async -> Bool {
         // Headless drivers auto-approve so a scenario run never blocks on a human or a local model.
-        if autoApproveTools { return true }
+        if autoApproveTools {
+            if vibecopUnderAutoApprove {
+                _ = await consultVibecop(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
+                                         callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled)
+            }
+            return true
+        }
         // Fast path: deterministic permissions.
         if PermissionManager.shared.isAllowed(toolName: toolName, details: details, workspace: workspace) {
             return true
         }
 
-        // Vibecop, bounded by a timeout so a wedged local model can't hang the turn.
-        // Uses adaptive timeout: if the Ollama model is cold (unloaded), give it 30s to load.
+        if let decision = await consultVibecop(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
+                                               callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled) {
+            if decision.decision == "APPROVE" { return true }
+            if decision.decision == "DENY" { return false }
+            // ESCALATE → fall through to the user prompt.
+        }
+
+        return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
+                                         conversationId: conversationId, origin: origin)
+    }
+
+    /// Vibecop, bounded by a timeout so a wedged local model can't hang the turn. nil means the
+    /// evaluation failed or timed out (fail open to the user prompt).
+    /// Uses adaptive timeout: if the Ollama model is cold (unloaded), give it 30s to load.
+    private func consultVibecop(toolName: String, details: String, workspace: String?, inSandbox: Bool,
+                                callerRole: VibecopCallerRole, allowedCommands: [String], vibecopEnabled: Bool?) async -> VibecopDecision? {
         do {
             let configuredTimeout = Double(ConfigManager.shared.vibecopTimeoutSeconds)
             let engineType = AuxiliaryEngineType(rawValue: ConfigManager.shared.vibecopEngine) ?? .llamaCPP
@@ -965,19 +989,15 @@ class AppState {
                 }
             }
             
-            let decision = try await withTimeout(seconds: timeout) {
-                try await VibecopService.shared.evaluateAction(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox, callerRole: callerRole, allowedCommands: allowedCommands)
+            return try await withTimeout(seconds: timeout) {
+                try await VibecopService.shared.evaluateAction(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
+                                                               callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled)
             }
-            if decision.decision == "APPROVE" { return true }
-            if decision.decision == "DENY" { return false }
-            // ESCALATE → fall through to the user prompt.
         } catch {
             // Timeout or Vibecop error → fail open to the user prompt.
             print("Vibecop evaluation failed/timed out: \(error)")
+            return nil
         }
-
-        return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
-                                         conversationId: conversationId, origin: origin)
     }
 
     /// Appends an approval request and awaits the user's decision. The queue/continuation seam,
