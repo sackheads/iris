@@ -9,7 +9,7 @@
 
 Two measurement conditions changed on purpose, and `compare` refuses across both:
 
-- Real-lane tool prompts now execute in the sandbox VM (`toolSandbox: sandboxed`). A VM `run_command` is not like-for-like with a host one, and the earlier records predate the field.
+- Real-lane `run_command` calls now execute in the sandbox VM (`toolSandbox: sandboxed`; file tools stay on the host, confined to a scratch cwd/workspace since #151). A VM `run_command` is not like-for-like with a host one, and the earlier records predate the field.
 - Vibecop is now inside rung 5 (#135); before, it was bypassed by headless auto-approve.
 
 So the 2026-09-17 records stay as the "before" for the fixes above, and these are the reference for

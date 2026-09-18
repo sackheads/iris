@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 @testable import iris
 
 @Suite("PerfCLI parsing")
@@ -48,5 +49,18 @@ struct PerfCLITests {
         #expect(!PerfCLI.shouldBypassKeychain(provider: "Gemini", geminiAuthMode: GeminiAuthMode.apiKey.rawValue))
         #expect(!PerfCLI.shouldBypassKeychain(provider: "Anthropic", geminiAuthMode: GeminiAuthMode.adc.rawValue))
         #expect(!PerfCLI.shouldBypassKeychain(provider: nil, geminiAuthMode: nil))
+    }
+
+    @Test("a scratch workspace is a fresh empty directory under the temporary directory (#151)")
+    func scratchWorkspace() throws {
+        let a = try PerfCLI.makeScratchWorkspace()
+        let b = try PerfCLI.makeScratchWorkspace()
+        defer { try? FileManager.default.removeItem(at: a); try? FileManager.default.removeItem(at: b) }
+        #expect(a != b)
+        var isDir: ObjCBool = false
+        #expect(FileManager.default.fileExists(atPath: a.path, isDirectory: &isDir) && isDir.boolValue)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: a.path).isEmpty)
+        #expect(a.path.hasPrefix(FileManager.default.temporaryDirectory.standardizedFileURL.path))
+        #expect(a.lastPathComponent.hasPrefix("iris-perf-"))
     }
 }

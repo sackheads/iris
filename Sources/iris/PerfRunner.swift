@@ -10,7 +10,8 @@ enum PerfRunner {
     private static var repetitionsCompleted = 0
 
     static func run(suite: PerfSuite, repetitionsOverride: Int? = nil, repoRoot: URL,
-                    client: (any LLMClientProtocol)? = nil, headless: Bool) async throws -> PerfRunRecord {
+                    client: (any LLMClientProtocol)? = nil, headless: Bool,
+                    workspacePath: String? = nil) async throws -> PerfRunRecord {
         try suite.validate()
         let reps = repetitionsOverride ?? suite.repetitions
         let startedAt = Date()
@@ -31,7 +32,7 @@ enum PerfRunner {
                     let rep: PerfRepetition
                     if rung <= 3 {
                         if capture == nil {
-                            capture = await PerfLadder.capture(for: scenario)
+                            capture = await PerfLadder.capture(for: scenario, workspacePath: workspacePath)
                             toolCount = capture?.toolCount
                         }
                         let s = await PerfLadder.sample(rung: rung, prompt: prompt, tier: scenario.tier,
@@ -44,7 +45,8 @@ enum PerfRunner {
                         if suite.lane == .fake { effective.clientMode = .fake }
                         // Real-lane tool prompts run unattended with auto-approve: keep them in the VM.
                         let toolExecution: ToolExecutionMode = suite.lane == .real ? .sandboxed : .asConfigured
-                        let result = await ScenarioRunner.run(effective, guards: guards, toolExecution: toolExecution, clientOverride: client)
+                        let result = await ScenarioRunner.run(effective, guards: guards, toolExecution: toolExecution, clientOverride: client,
+                                                              workspacePath: workspacePath)
                         if result.toolsSandboxed { anySandboxed = true }
                         let turns = zip(result.turnProfiles, result.finalTexts + Array(repeating: "", count: max(0, result.turnProfiles.count - result.finalTexts.count)))
                             .map { PerfTurn($0, finalTextLength: $1.count) }
@@ -68,7 +70,7 @@ enum PerfRunner {
             }
             if capture == nil, toolCount == nil {
                 // No ladder rung ran; still record the tool surface a real turn would send.
-                let c = await PerfLadder.capture(for: scenario)
+                let c = await PerfLadder.capture(for: scenario, workspacePath: workspacePath)
                 toolCount = c.toolCount
             }
             results.append(PerfScenarioResult(name: scenario.name, path: relativePath(url, root: repoRoot),

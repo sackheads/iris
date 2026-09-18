@@ -50,13 +50,17 @@ enum ScenarioRunner {
     static func run(_ scenario: Scenario,
                     guards: GuardMode = .asConfigured,
                     toolExecution: ToolExecutionMode = .asConfigured,
-                    clientOverride: (any LLMClientProtocol)? = nil) async -> ScenarioResult {
+                    clientOverride: (any LLMClientProtocol)? = nil,
+                    workspacePath: String? = nil) async -> ScenarioResult {
         let state = AppState()
         state.autoApproveTools = true // non-interactive: never block on an approval prompt
         // Pay the Vibecop cost a real run_command pays, unless this run is measuring guards off.
         state.vibecopUnderAutoApprove = guards != .off
         let conversationId = UUID()
         state.createNewConversation(id: conversationId)
+        // Headless real-lane runs bind a scratch directory so workspace-relative file tools land
+        // there rather than in the process cwd (#151). Only run_command is sandboxed.
+        if let workspacePath { state.setWorkspace(for: conversationId, path: workspacePath) }
 
         let client: any LLMClientProtocol
         if let clientOverride {

@@ -54,7 +54,12 @@ binary and click "Always Allow" before starting a long suite.
 
 Real-lane suites force `run_command` through the sandbox (the main-agent sandbox default is set
 to sandboxed inside the run's volatile settings copy, never in your preferences), because tool
-prompts run unattended with auto-approve. The record's `toolSandbox` field says which mode ran,
+prompts run unattended with auto-approve. Only `run_command` is sandboxed: `read_file`,
+`write_file`, and the other file tools act on the host, so a real-lane run also changes its cwd
+to a fresh scratch directory under the temporary folder and binds each throwaway conversation's
+workspace to it; relative and workspace-relative paths land there and the directory is removed
+after the run. An absolute path would still reach the host, which is why prompt files are
+reviewed before they are committed. The record's `toolSandbox` field says which mode ran,
 and `compare` refuses to compare records whose modes differ. Records also keep each tool call's
 arguments (capped at 500 characters; values under credential-looking keys and token-shaped
 substrings are replaced with `[redacted]`), promoted baselines included, so a tool storm can be
