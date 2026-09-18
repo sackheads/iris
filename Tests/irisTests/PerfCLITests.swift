@@ -32,4 +32,11 @@ struct PerfCLITests {
         #expect(PerfCLI.parse(["iris", "--perf", "run", "s.json", "--reps", "x"]) == .failure(.usage("--reps needs an integer")))
         #expect(PerfCLI.parse(["iris", "--perf", "frobnicate"]) == .failure(.usage("unknown subcommand frobnicate")))
     }
+
+    @Test("extra positional arguments are usage errors")
+    func extraPositionals() {
+        #expect(PerfCLI.parse(["iris", "--perf", "compare", "a.json", "b.json", "c.json"]) == .failure(.usage("unexpected argument c.json")))
+        #expect(PerfCLI.parse(["iris", "--perf", "report", "a.json", "b.json"]) == .failure(.usage("unexpected argument b.json")))
+        #expect(PerfCLI.parse(["iris", "--perf", "run", "s.json", "extra"]) == .failure(.usage("unexpected argument extra")))
+    }
 }

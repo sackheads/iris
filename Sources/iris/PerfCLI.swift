@@ -49,9 +49,11 @@ enum PerfCLI {
                 out = s
             }
             guard let suite = rest.first, !suite.hasPrefix("--") else { return .failure(.usage("run needs a suite path")) }
+            if rest.count > 1 { return .failure(.usage("unexpected argument \(rest[1])")) }
             return .success(.run(suite: suite, reps: reps, out: out, fakeOnly: fakeOnly))
         case "report":
             guard let path = rest.first else { return .failure(.usage("report needs a run record path")) }
+            if rest.count > 1 { return .failure(.usage("unexpected argument \(rest[1])")) }
             return .success(.report(path: path))
         case "compare":
             var threshold = 0.2
@@ -60,6 +62,7 @@ enum PerfCLI {
                 threshold = t
             }
             guard rest.count >= 2 else { return .failure(.usage("compare needs a baseline and a current record")) }
+            if rest.count > 2 { return .failure(.usage("unexpected argument \(rest[2])")) }
             return .success(.compare(baseline: rest[0], current: rest[1], threshold: threshold))
         default:
             return .failure(.usage("unknown subcommand \(sub)"))
