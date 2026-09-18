@@ -3,7 +3,10 @@ import Foundation
 struct ToolExecutor {
     static let shared = ToolExecutor()
     
-    func getTools() async -> [FunctionDeclaration] {
+    /// `workspaceToolsEnabled` defaults to "a Google refresh token is configured". Without one every
+    /// Google Tasks / Workspace call fails, so the ten declarations were pure prompt weight (#133).
+    /// Injectable so tests never mutate `ConfigManager.shared`.
+    func getTools(workspaceToolsEnabled: Bool = !ConfigManager.shared.googleRefreshToken.isEmpty) async -> [FunctionDeclaration] {
         var tools = [
             FunctionDeclaration(
             name: "run_command",
@@ -102,11 +105,13 @@ struct ToolExecutor {
         )
         ]
         
-        let tasksTools = await GoogleTasksManager.shared.getTools()
-        tools.append(contentsOf: tasksTools)
-        
-        let workspaceTools = await GoogleWorkspaceManager.shared.getTools()
-        tools.append(contentsOf: workspaceTools)
+        if workspaceToolsEnabled {
+            let tasksTools = await GoogleTasksManager.shared.getTools()
+            tools.append(contentsOf: tasksTools)
+
+            let workspaceTools = await GoogleWorkspaceManager.shared.getTools()
+            tools.append(contentsOf: workspaceTools)
+        }
         
         let mcpTools = await MCPManager.shared.getGeminiTools()
         tools.append(contentsOf: mcpTools)
