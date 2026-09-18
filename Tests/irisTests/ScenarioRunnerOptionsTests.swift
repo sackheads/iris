@@ -65,4 +65,25 @@ struct ScenarioRunnerOptionsTests {
         let happy = await ScenarioRunner.run(textOnly)
         #expect(happy.turnErrors == [nil, nil])
     }
+
+    /// Text on turn one, a non-retryable failure on turn two.
+    private final class TextThenFail: LLMClientProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            let n: Int = lock.withLock { calls += 1; return calls }
+            if n > 1 {
+                throw APIError.http(provider: "Gemini", statusCode: 401, body: Data(#"{"error":{"code":401,"message":"Bad credentials.","status":"UNAUTHENTICATED"}}"#.utf8))
+            }
+            let part = Part(text: "first answer", functionCall: nil, functionResponse: nil, thought_signature: nil, thoughtSignature: nil)
+            return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [part]))], usageMetadata: nil)
+        }
+    }
+
+    @Test("a turn with no agent text does not inherit the previous turn's text")
+    func finalTextsDoNotBleedAcrossTurns() async {
+        let result = await ScenarioRunner.run(textOnly, clientOverride: TextThenFail())
+        #expect(result.finalTexts == ["first answer", ""])
+        #expect(result.turnErrors[0] == nil && result.turnErrors[1] != nil)
+    }
 }

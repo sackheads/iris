@@ -33,6 +33,10 @@ struct ScenarioResult: Sendable {
 /// `HeadlessMode` (set by `--bench`), not per run.
 @MainActor
 enum ScenarioRunner {
+    /// The guards=off notice is printed once per process; PerfRunner asks for .off on every
+    /// fake-lane repetition and the test process is never a volatile copy.
+    private static var warnedGuardsIgnored = false
+
     static func run(_ scenario: Scenario,
                     guards: GuardMode = .asConfigured,
                     clientOverride: (any LLMClientProtocol)? = nil) async -> ScenarioResult {
@@ -66,7 +70,8 @@ enum ScenarioRunner {
                 config.enableVibecop = false
                 config.enableAdvancedPromptInjectionProtection = false
                 guardsOff = true
-            } else {
+            } else if !warnedGuardsIgnored {
+                warnedGuardsIgnored = true
                 print("[ScenarioRunner] guards=off ignored: settings store is not a volatile copy")
             }
         }
@@ -83,7 +88,7 @@ enum ScenarioRunner {
         let collector = TurnCollector()
         var finalTexts: [String] = []
         var turnErrors: [String?] = []
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = MonotonicClock.nowMs()
         await PerformanceProfiler.$runSink.withValue({ collector.append($0) }) {
             for turn in scenario.turns {
                 let before = state.conversations.first { $0.id == conversationId }?.messages.count ?? 0
@@ -102,7 +107,7 @@ enum ScenarioRunner {
                 turnErrors.append(error)
             }
         }
-        let wallClockMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
+        let wallClockMs = (MonotonicClock.nowMs() - start)
 
         return ScenarioResult(turnProfiles: collector.all, wallClockMs: wallClockMs,
                               finalTexts: finalTexts, guardsWereOff: guardsOff, turnErrors: turnErrors)
