@@ -34,7 +34,7 @@ enum PerfReport {
             if let h = s.summary.harnessRatio { ratios.append("harness \(String(format: "%.2f", h))x") }
             if !ratios.isEmpty { out.append("- ratios vs bare call: " + ratios.joined(separator: ", ")) }
             let spans = topSpans(s)
-            if !spans.isEmpty { out.append("- top spans (rung \(s.rungs.last?.rung ?? 0), summed): " + spans.map { "\($0.0) \(fmt($0.1)) ms" }.joined(separator: ", ")) }
+            if !spans.isEmpty { out.append("- top spans (rung \(s.rungs.map { $0.rung }.max() ?? 0), summed): " + spans.map { "\($0.0) \(fmt($0.1)) ms" }.joined(separator: ", ")) }
             if !s.summary.toolCallsByName.isEmpty || s.summary.toolCallRate > 0 {
                 out.append("- tool-call rate \(Int((s.summary.toolCallRate * 100).rounded()))%: " + s.summary.toolCallsByName.sorted { $0.value > $1.value }.map { "\($0.key): \($0.value)" }.joined(separator: ", "))
             }
@@ -44,7 +44,7 @@ enum PerfReport {
     }
 
     private static func topSpans(_ s: PerfScenarioResult) -> [(String, Double)] {
-        guard let top = s.rungs.last else { return [] }
+        guard let top = s.rungs.max(by: { $0.rung < $1.rung }) else { return [] }
         var sum: [String: Double] = [:]
         for span in top.repetitions.flatMap(\.turns).flatMap({ $0.spans }) { sum[span.key, default: 0] += span.value.ms }
         return sum.sorted { $0.value > $1.value }.prefix(5).map { ($0.key, $0.value) }

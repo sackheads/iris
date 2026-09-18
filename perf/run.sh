@@ -34,13 +34,14 @@ for suite in "${suites[@]}"; do
   echo ""
   echo "perf: running suite ${name}"
   "$BIN" --perf run "$suite" --out perf/runs
-  latest=$(ls -t perf/runs/*-"${name}"-*.json | head -1)
+  # (om) sorts newest-first by mtime; [1] takes the head without an ls|head pipe under pipefail.
+  latest_candidates=(perf/runs/*-"${name}"-*.json(Nom))
+  latest=${latest_candidates[1]}
   # (N) makes an unmatched glob expand to nothing instead of zsh erroring with "no matches
   # found"; without the emptiness check, `ls -t` given zero file operands would fall back to
   # listing the current directory instead of reporting no baseline.
-  baseline_candidates=(perf/baselines/*-"${name}"-*.json(N))
-  baseline=""
-  (( ${#baseline_candidates} )) && baseline=$(ls -t "${baseline_candidates[@]}" | head -1)
+  baseline_candidates=(perf/baselines/*-"${name}"-*.json(Nom))
+  baseline=${baseline_candidates[1]:-}
   if [[ -n "$baseline" ]]; then
     echo "perf: comparing ${name} against $(basename "$baseline")"
     "$BIN" --perf compare "$baseline" "$latest" || run_status=$?

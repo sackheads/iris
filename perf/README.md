@@ -45,7 +45,8 @@ median and p90 wall-clock and median prompt tokens, the two ratios, the top five
 (`guard.tier3`, `vibecop`, `assembly.userProfile`, ...), and the tool-call rate with a histogram.
 
 `iris --perf compare <baseline.json> <run.json>` prints percent change per metric and flags any
-increase past 20% (`--threshold` to change). Exit 1 means a regression was flagged; exit 2 means
+increase past 20% (`--threshold` to change) that is also at least 50 ms in absolute terms, so
+fake-lane turns of a few milliseconds cannot trip the gate on scheduler noise. Exit 1 means a regression was flagged; exit 2 means
 the records are not comparable (different provider or model names).
 
 ## Promoting a baseline

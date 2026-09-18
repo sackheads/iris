@@ -125,4 +125,13 @@ struct PerfSummarizerTests {
         let s = PerfSummarizer.summarize([r])
         #expect(s.medianMs == 100)
     }
+
+    @Test("tool-call rate and histogram ignore failed repetitions (#137)")
+    func failedRepetitionsExcludedFromEagerness() {
+        var r = rung(5, [1, 2], tools: [["run_command"], ["run_command", "read_file"]])
+        r.repetitions[1].error = "request timed out after 180 s"
+        let s = PerfSummarizer.summarize([r])
+        #expect(s.toolCallRate == 1.0)
+        #expect(s.toolCallsByName == ["run_command": 1])
+    }
 }

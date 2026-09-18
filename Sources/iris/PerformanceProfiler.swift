@@ -206,6 +206,15 @@ public final class PerformanceProfiler: ObservableObject, @unchecked Sendable {
     #endif
 }
 
+/// Monotonic milliseconds for every harness measurement. `CFAbsoluteTimeGetCurrent` is wall
+/// time: adjustable, and coarse enough that two reads inside a fast call could be equal, which
+/// the perf summaries would read as a 0 ms sample.
+public enum MonotonicClock {
+    public static func nowMs() -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000.0
+    }
+}
+
 /// Time an async subsystem span and attribute it to the current turn.
 /// Inherits the caller's actor isolation (`#isolation`) so the work closure can safely touch
 /// actor-isolated state without crossing an isolation boundary.
@@ -214,15 +223,15 @@ public func measure<T>(_ category: PerfCategory,
                        isolation: isolated (any Actor)? = #isolation,
                        _ work: () async throws -> T) async rethrows -> T {
     let turnID = PerformanceProfiler.currentTurnID
-    let start = CFAbsoluteTimeGetCurrent()
+    let start = MonotonicClock.nowMs()
     do {
         let result = try await work()
         PerformanceProfiler.shared.record(turnID: turnID, category: category,
-                                          durationMs: (CFAbsoluteTimeGetCurrent() - start) * 1000.0)
+                                          durationMs: (MonotonicClock.nowMs() - start))
         return result
     } catch {
         PerformanceProfiler.shared.record(turnID: turnID, category: category,
-                                          durationMs: (CFAbsoluteTimeGetCurrent() - start) * 1000.0)
+                                          durationMs: (MonotonicClock.nowMs() - start))
         throw error
     }
 }
@@ -231,10 +240,10 @@ public func measure<T>(_ category: PerfCategory,
 @discardableResult
 public func measureSync<T>(_ category: PerfCategory, _ work: () throws -> T) rethrows -> T {
     let turnID = PerformanceProfiler.currentTurnID
-    let start = CFAbsoluteTimeGetCurrent()
+    let start = MonotonicClock.nowMs()
     defer {
         PerformanceProfiler.shared.record(turnID: turnID, category: category,
-                                          durationMs: (CFAbsoluteTimeGetCurrent() - start) * 1000.0)
+                                          durationMs: (MonotonicClock.nowMs() - start))
     }
     return try work()
 }
@@ -245,10 +254,10 @@ public func measureSpan<T>(_ name: String,
                            isolation: isolated (any Actor)? = #isolation,
                            _ work: () async throws -> T) async rethrows -> T {
     let turnID = PerformanceProfiler.currentTurnID
-    let start = CFAbsoluteTimeGetCurrent()
+    let start = MonotonicClock.nowMs()
     defer {
         PerformanceProfiler.shared.recordSpan(turnID: turnID, name: name,
-                                              durationMs: (CFAbsoluteTimeGetCurrent() - start) * 1000.0)
+                                              durationMs: (MonotonicClock.nowMs() - start))
     }
     return try await work()
 }
@@ -257,10 +266,10 @@ public func measureSpan<T>(_ name: String,
 @discardableResult
 public func measureSpanSync<T>(_ name: String, _ work: () throws -> T) rethrows -> T {
     let turnID = PerformanceProfiler.currentTurnID
-    let start = CFAbsoluteTimeGetCurrent()
+    let start = MonotonicClock.nowMs()
     defer {
         PerformanceProfiler.shared.recordSpan(turnID: turnID, name: name,
-                                              durationMs: (CFAbsoluteTimeGetCurrent() - start) * 1000.0)
+                                              durationMs: (MonotonicClock.nowMs() - start))
     }
     return try work()
 }
