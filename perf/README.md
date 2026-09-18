@@ -42,11 +42,22 @@ There is no unit-test seam to assert guards are switched off under a volatile co
 is in every ladder record, where rung 4 turns carry zero `guard.*` and `assembly.userProfile`
 spans while rung 5 turns do not.
 
+## Real-lane tool execution
+
+Real-lane suites force `run_command` through the sandbox (the main-agent sandbox default is set
+to sandboxed inside the run's volatile settings copy, never in your preferences), because tool
+prompts run unattended with auto-approve. The record's `toolSandbox` field says which mode ran,
+and `compare` refuses to compare records whose modes differ. Records also keep each tool call's
+arguments (capped at 500 characters), promoted baselines included, so a tool storm can be read
+afterwards.
+
 ## Reading a record
 
 `iris --perf report <run.json>` renders the Markdown summary. Per scenario: a row per rung with
 median and p90 wall-clock and median prompt tokens, the two ratios, the top five named spans
-(`guard.tier3`, `vibecop`, `assembly.userProfile`, ...), and the tool-call rate with a histogram.
+(`guard.tier3`, `vibecop`, `assembly.userProfile`, ...), and the tool-call rate with a histogram, and, for prompts that declare `expectedTools`, the
+**unexpected tool-call rate**: turns that called any tool outside that list (bait prompts declare
+`[]`, controls declare their one tool, so an extra `read_file` next to a `set_workspace` counts).
 
 `iris --perf compare <baseline.json> <run.json>` prints percent change per metric and flags any
 increase past 20% (`--threshold` to change) that is also at least 50 ms in absolute terms, so

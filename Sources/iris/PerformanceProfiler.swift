@@ -63,9 +63,21 @@ public struct ToolCallRecord: Codable, Sendable, Equatable {
     public let name: String
     public let ms: Double
     public let ok: Bool
+    /// Compact JSON of the call's arguments, capped at `argsLimit`, so a tool storm in a real
+    /// run can be read from the record afterwards. Optional: older records predate it.
+    public var args: String? = nil
 
-    public init(name: String, ms: Double, ok: Bool) {
-        self.name = name; self.ms = ms; self.ok = ok
+    public static let argsLimit = 500
+
+    public init(name: String, ms: Double, ok: Bool, args: String? = nil) {
+        self.name = name; self.ms = ms; self.ok = ok; self.args = args
+    }
+
+    public static func compactArgs(_ args: [String: JSONValue]) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let raw = (try? encoder.encode(args)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        return APIError.truncated(raw, to: argsLimit)
     }
 }
 

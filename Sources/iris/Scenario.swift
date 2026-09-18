@@ -78,13 +78,15 @@ struct Scenario: Codable, Sendable {
     var latencyMs: FakeLLMClient.Latency?
     var turns: [Turn]
     var scriptedResponses: [ScriptedResponse]
+    /// Tools this prompt warrants. `[]` means none (a bait prompt); nil means unscored.
+    var expectedTools: [String]?
 
     init(name: String, clientMode: ClientMode = .fake, tier: ModelTier = .medium,
          toggles: Toggles = Toggles(), latencyMs: FakeLLMClient.Latency? = nil,
-         turns: [Turn], scriptedResponses: [ScriptedResponse] = []) {
+         turns: [Turn], scriptedResponses: [ScriptedResponse] = [], expectedTools: [String]? = nil) {
         self.name = name; self.clientMode = clientMode; self.tier = tier
         self.toggles = toggles; self.latencyMs = latencyMs
-        self.turns = turns; self.scriptedResponses = scriptedResponses
+        self.turns = turns; self.scriptedResponses = scriptedResponses; self.expectedTools = expectedTools
     }
 
     init(from decoder: Decoder) throws {
@@ -96,6 +98,7 @@ struct Scenario: Codable, Sendable {
         latencyMs = try c.decodeIfPresent(FakeLLMClient.Latency.self, forKey: .latencyMs)
         turns = try c.decode([Turn].self, forKey: .turns)
         scriptedResponses = try c.decodeIfPresent([ScriptedResponse].self, forKey: .scriptedResponses) ?? []
+        expectedTools = try c.decodeIfPresent([String].self, forKey: .expectedTools)
     }
 
     static func decode(from data: Data) throws -> Scenario {

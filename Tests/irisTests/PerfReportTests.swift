@@ -70,4 +70,14 @@ struct PerfReportTests {
         #expect(text.contains("top spans (rung 5"))
         #expect(!text.contains("ladder.only"))
     }
+
+    @Test("the unexpected tool-call rate is shown when scored")
+    func unexpectedRateShown() {
+        var r = PerfRecordTests.sampleRecord()
+        r.scenarios[0].summary.unexpectedToolCallRate = 0.5
+        r.scenarios[0].summary.unexpectedToolCallsByName = ["read_file": 1]
+        let text = PerfReport.render(r)
+        #expect(text.contains("unexpected tool-call rate 50%: read_file: 1"))
+        #expect(!PerfReport.render(PerfRecordTests.sampleRecord()).contains("unexpected tool-call rate"))
+    }
 }

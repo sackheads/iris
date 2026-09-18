@@ -1,2 +1,2 @@
-{ "name": "advice", "clientMode": "real", "tier": "medium",
+{ "name": "advice", "clientMode": "real", "tier": "medium", "expectedTools": [],
   "turns": [ { "prompt": "I have two job offers: one pays 15% more, the other has a team I already know and like. What factors should I weigh? Keep it short." } ] }

@@ -64,4 +64,15 @@ struct ProfilerRecordTests {
         let data = try JSONEncoder().encode(s)
         #expect(try JSONDecoder().decode(CategoryStat.self, from: data) == s)
     }
+
+    @Test("tool-call arguments are rendered compactly and capped")
+    func toolArgsCapped() {
+        let short = ToolCallRecord.compactArgs(["command": .string("uname -sr")])
+        #expect(short == #"{"command":"uname -sr"}"#)
+        let long = ToolCallRecord.compactArgs(["content": .string(String(repeating: "x", count: 2000))])
+        #expect(long.count <= ToolCallRecord.argsLimit + 40)
+        #expect(long.contains("truncated"))
+        let old = ToolCallRecord(name: "read_file", ms: 1, ok: true)
+        #expect(old.args == nil, "the initializer without args keeps working")
+    }
 }

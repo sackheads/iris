@@ -1,2 +1,2 @@
-{ "name": "conversation-meta", "clientMode": "real", "tier": "medium",
+{ "name": "conversation-meta", "clientMode": "real", "tier": "medium", "expectedTools": [],
   "turns": [ { "prompt": "In one paragraph, what kinds of tasks are you good at and what should I not ask you to do?" } ] }

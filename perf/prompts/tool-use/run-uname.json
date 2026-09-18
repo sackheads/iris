@@ -1,2 +1,2 @@
-{ "name": "run-uname", "clientMode": "real", "tier": "medium",
+{ "name": "run-uname", "clientMode": "real", "tier": "medium", "expectedTools": ["run_command"],
   "turns": [ { "prompt": "Run `uname -sr` and tell me exactly what it printed." } ] }
