@@ -23,7 +23,7 @@ struct PerfSuiteFilesTests {
 
     @Test("the real suites are paced and keep repetitions small")
     func realSuitesArePaced() throws {
-        for name in ["ladder", "tool-eagerness"] {
+        for name in ["ladder", "tool-eagerness", "tool-eagerness-2"] {
             let suite = try PerfSuite.load(at: root.appendingPathComponent("perf/suites/\(name).json").path)
             #expect(suite.lane == .real)
             #expect(suite.pauseMs >= 1000)
