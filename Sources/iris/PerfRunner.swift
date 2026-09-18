@@ -103,7 +103,9 @@ enum PerfSummarizer {
             guard let d = r1, d > 0, let n = median(of: rung) else { return nil }
             return n / d
         }
-        let fullTurns = rungs.first { $0.rung == 5 }?.repetitions.flatMap(\.turns) ?? []
+        // Successful repetitions only, consistent with the medians: a turn that then timed out
+        // must not count toward the eagerness rate (#137).
+        let fullTurns = rungs.first { $0.rung == 5 }?.repetitions.filter { $0.error == nil }.flatMap(\.turns) ?? []
         let withTools = fullTurns.filter { !$0.toolCalls.isEmpty }.count
         var byName: [String: Int] = [:]
         for call in fullTurns.flatMap(\.toolCalls) { byName[call.name, default: 0] += 1 }
