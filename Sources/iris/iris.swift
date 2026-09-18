@@ -37,6 +37,9 @@ actor IrisEngine {
         systemPrompt = nil
     }
 
+    /// Prefix of the system event that asks the model to rename the conversation.
+    nonisolated static let renameTriggerPrefix = "System Event [Rename Trigger]"
+
     nonisolated static func formatDelay(_ seconds: TimeInterval) -> String {
         seconds == seconds.rounded() ? "\(Int(seconds))s" : String(format: "%.1fs", seconds)
     }
@@ -402,17 +405,22 @@ actor IrisEngine {
             )
         ))
         
-        toolsList.append(FunctionDeclaration(
-            name: "rename_conversation",
-            description: "Rename the current conversation to a short, descriptive title. Use this when instructed by a System Event or when the conversation topic has fundamentally changed.",
-            parameters: Schema(
-                type: "OBJECT",
-                properties: [
-                    "title": Schema(type: "STRING", description: "The new title for the conversation (1-4 words)")
-                ],
-                required: ["title"]
-            )
-        ))
+        // Offered only on the rename-trigger turn (`/rename` and the automatic third-message
+        // trigger both send this prefix). On plain turns the model renamed unprompted on first
+        // messages, the only tool eagerness the perf suite measured (#132).
+        if input.hasPrefix(Self.renameTriggerPrefix) {
+            toolsList.append(FunctionDeclaration(
+                name: "rename_conversation",
+                description: "Rename the current conversation to a short, descriptive title as instructed by the System Event.",
+                parameters: Schema(
+                    type: "OBJECT",
+                    properties: [
+                        "title": Schema(type: "STRING", description: "The new title for the conversation (1-4 words)")
+                    ],
+                    required: ["title"]
+                )
+            ))
+        }
         
         toolsList.append(SubagentManager.toolDeclaration())
         
