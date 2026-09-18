@@ -54,12 +54,14 @@ protocol LLMClientProtocol: Sendable {
     func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse
     /// Streams the same call. Default: one `generateContent` call replayed as events.
     func streamContent(request: GeminiRequest, tier: ModelTier) -> AsyncThrowingStream<LLMStreamEvent, Error>
+    /// True only when `streamContent` reads the provider's stream natively. Default false.
+    var supportsStreaming: Bool { get }
 }
 ```
 
-The default extension calls `generateContent` and emits `textDelta` per text part, `functionCall` per call part, one `usage`, then `done`. This means:
+The default extension calls `generateContent` and emits `textDelta` per text part, `functionCall` per call part, one `usage`, then `done`, and reports `supportsStreaming == false`. This means:
 
-- `CapturingLLMClient`, the fake engine in `HeadlessMode`, `MockLLMClient` in tests, and any future client all work unchanged.
+- `CapturingLLMClient`, `FakeLLMClient` (the headless fake lane), the ad-hoc clients in tests, and any future client all work unchanged, and the engine can tell that their events arrived all at once (Section 7 uses this to leave `firstTokenMs` nil).
 - The engine has a single code path (Section 4). "Streaming off" is not a second engine path; it is the engine choosing `generateContent` and feeding it through the same assembler (Section 4.3).
 
 Each real client implements `streamContent` natively. `generateContent` stays as it is; it is still the right call for the ladder's rungs 1–3, for the summariser, and for anything that wants one response object.
@@ -161,24 +163,24 @@ response = assembler.response()
 
 Then the existing code, unchanged in order: `recordModelCall` (now with `firstTokenMs`), `fireAfterModel(response:)`, `emptyReason` pill, `appendContentToHistory`, `updateTokenUsage`, the per-part loop that pushes text and fires `fireAfterAgent`, and the tool loop.
 
-One change in the per-part loop: the text part is no longer pushed with `pushToUI` (which appends a new message). Instead the streamer (Section 5) has already been creating and growing the agent message; the loop calls `streamer.finish(finalText:)`, which writes the assembled text as the message's final content. If `fireAfterModel` returned modified data (a hook rewrote the response), the final content is the hook's text, so the hook still has the last word; the user briefly saw the pre-hook text, which is the accepted cost of streaming and is noted in `docs/HOOKS.md` (or wherever hook semantics live; the plan will name the file).
+One change in the per-part loop: the text part is no longer pushed with `pushToUI` (which appends a new message). Instead the streamer (Section 5) has already been creating and growing the agent message; the loop calls `streamer.finish(finalText:)`, which writes the assembled text as the message's final content. If `fireAfterModel` returned modified data (a hook rewrote the response), the final content is the hook's text, so the hook still has the last word; the user briefly saw the pre-hook text, which is the accepted cost of streaming and is noted in `docs/tool_hooks.md`.
 
 If `fireAfterModel` blocks, or the response is empty, the streamer's message is removed if it never received text, or left as is (with the block pill appended after it) if it did.
 
 ### 4.3 Choosing the source
 
 ```swift
-let stream: AsyncThrowingStream<LLMStreamEvent, Error> =
-    (streamingEnabled && !HeadlessMode.isEnabled)
-        ? client.streamContent(request:tier:)
-        : LLMStreamEvent.replay { try await client.generateContent(request:tier:) }
+let streamed = streamingEnabled && client.supportsStreaming
+let stream: AsyncThrowingStream<LLMStreamEvent, Error> = streamed
+    ? client.streamContent(request: requestToSend, tier: modelTier)
+    : LLMStreamEvent.replay { try await self.client.generateContent(request: requestToSend, tier: modelTier) }
 ```
 
-`streamingEnabled` reads a new settings key (Section 7). The headless fake lane never streams because its client is the fake; the headless real lane follows the setting like the app does, so the perf suite measures what the user gets.
+`streamingEnabled` reads a new settings key (Section 7). The headless fake lane therefore never streams (its client replays); the headless real lane follows the setting like the app does, so the perf suite measures what the user gets. `streamed` is also what decides whether `firstTokenMs` is recorded.
 
 ### 4.4 Retries
 
-`LLMRetry.run` wraps the whole consume loop. A failure before the first `textDelta`/`functionCall` (429, 5xx, transport error, timeout) retries exactly as today: nothing has been shown, so a retry is invisible apart from the existing `[retry]` system line. A failure after the first delta is **not retried**: the assembler's `firstTokenAt` is set, the engine rethrows past `LLMRetry` (a new `LLMRetry.run(..., retryIf:)` predicate, or equivalently wrapping the error in a `nonRetryable` marker), and the partial message is kept with the standard error pill appended after it. Retrying would either duplicate the text or require deleting text the user has already read; neither is acceptable, and partial text plus a clear error is what other clients do.
+`LLMRetry.run` wraps the whole consume loop. A failure before the first `textDelta`/`functionCall` (429, 5xx, transport error, timeout) retries exactly as today: nothing has been shown, so a retry is invisible apart from the existing `[retry]` system line. A failure after the first delta is **not retried**: the consume loop catches the error, sees that the assembler's `firstTokenAt` is set, and rethrows it wrapped in a new `StreamInterruptedError(underlying:)` (in `LLMError.swift`). `LLMRetry.run` retries only `APIError` values whose `isRetryable` is true, so the wrapper passes straight through without any change to `LLMRetry`; the engine's existing error handling unwraps it to render the standard error pill, appended after the partial message. Retrying would either duplicate the text or require deleting text the user has already read; neither is acceptable, and partial text plus a clear error is what other clients do.
 
 The 180 s request timeout from #131 applies to the whole stream. A stalled stream (no bytes for the timeout) fails through the same `URLError.timedOut` path.
 
@@ -203,13 +205,13 @@ An actor-free helper owned by the engine turn (a small `final class` confined to
 - `append(delta)`: appends to a buffer. On the first delta it calls `pushToUI(role: .agent, text: "", id: messageId)` so the row exists, then schedules a flush.
 - Flushes run at most every **50 ms** (a `Task.sleep` gate, not a timer): each flush calls `updateMessageContent` on the main actor with the whole accumulated text. 50 ms is 20 renders per second, well under what MarkdownUI can parse for a few-kilobyte message and above the rate at which any provider produces visually distinct chunks. The constant lives in one place and the plan's test exercises it with an injected clock.
 - `finish(finalText)`: cancels any pending flush, writes `finalText` once, and calls `saveConversations()` once. Persistence during the stream is not performed; if the app quits mid-stream the partial message is lost, which matches today's behaviour (nothing was saved until the reply arrived).
-- The streamer's message id is the id the engine already uses for the agent message, so anything keyed on message ids (selection, copy, the command pill timers) is unaffected.
+- The streamer mints the message id once and passes it to `pushToUI(role:text:conversationId:id:)` on the first delta, then reuses it for every `updateMessageContent` call, so anything keyed on message ids (selection, copy, the command pill timers) sees one stable message.
 
 ### 5.3 Visuals
 
 - The row shows the growing text through the normal `Markdown(message.content)` view. No cursor, no typing indicator; the text arriving is the indicator.
 - The "Thinking..." subagent status set just before the call is cleared on the first delta rather than after the whole call, so the status line and the text do not contradict each other.
-- Auto-scroll: `ChatView` already scrolls to the last message on append; on in-place growth it should keep the bottom pinned only if the user was already at the bottom. If the current scroll logic cannot tell, the plan may leave auto-scroll as it is for the first cut and file a follow-up; it must not force-scroll on every flush.
+- Auto-scroll: `ChatView` already has an `onChange(of: conv.messages.last?.content)` that scrolls to the bottom anchor, so in-place growth pins the view to the bottom with no new code, at most once per flush. It also means a user who scrolls up during a long answer is pulled back down on the next flush, which is what happens today when a tool result lands. Keeping the pin only when the user is already at the bottom is a separate UX change and is filed as a follow-up, not built here.
 
 ## 6. Errors and cancellation
 
@@ -228,7 +230,7 @@ Partial text going into history on Stop or mid-stream error is a change from tod
 ## 7. Settings and perf instrumentation
 
 - **Setting**: `IrisDefaults` key `streamResponses`, `Bool`, default `true`, exposed in Settings as "Stream responses as they are generated". New persisted field, so it is read with a default and never assumed present (AGENTS.md rule on persisted fields).
-- **`ModelCallRecord.firstTokenMs: Double?`**: ms from request start to the first `textDelta`/`functionCall`, nil when the call did not stream or produced nothing. Optional and `decodeIfPresent`, so older perf records still load and `PerfCompare` still accepts them.
+- **`ModelCallRecord.firstTokenMs: Double?`**: ms from request start to the first `textDelta`/`functionCall`, recorded only when `streamed` was true (Section 4.3); nil for replayed calls, for calls that produced nothing, and for all pre-existing records. Optional and `decodeIfPresent`, so older perf records still load and `PerfCompare` still accepts them.
 - **`PerfEnvironment.streaming: Bool?`**: recorded so a report says whether rungs 4–5 streamed. `PerfCompare` does **not** refuse on a mismatch (total latency is comparable either way); it prints the flag in the header.
 - **`PerfScenarioSummary.medianFirstTokenMs: Double?`** and a `first token ms` column in the ladder report for rungs where it is non-nil. This is the number the second write-up said was "not measured here".
 
@@ -249,7 +251,7 @@ All Swift Testing, no XCTest, no mutation of `ConfigManager.shared`.
 - Builds the same `GeminiResponse` (parts, finishReason, usage) as the non-streaming decoder does for an equivalent fixture; `emptyReason` matches for the empty cases; `firstTokenAt` is set on the first text or call and not on usage.
 
 **Default `streamContent`**
-- A `MockLLMClient` returning a two-part response replays as `textDelta`, `functionCall`, `usage`, `done` in that order.
+- A `FakeLLMClient` returning a two-part response replays as `textDelta`, `functionCall`, `usage`, `done` in that order, and reports `supportsStreaming == false`.
 
 **`MessageStreamer`** (injected clock and a recording `AppState` stand-in through the existing test seams)
 - Creates the row on the first delta, flushes at most once per 50 ms window, final flush carries the full text, saves exactly once.
@@ -260,7 +262,7 @@ All Swift Testing, no XCTest, no mutation of `ConfigManager.shared`.
 - Error after the first delta: partial message kept, error pill after it, `LLMRetry` did not retry (attempt count 1), history has the partial text.
 - Error before the first delta: retried per `retryDelays`, no agent row created until success.
 - Cancellation mid-stream: partial message kept, no error pill, history has the partial text.
-- Streaming off (setting false): identical final state to streaming on for the same scripted events; `firstTokenMs` nil.
+- Streaming off (setting false), and streaming on with a client whose `supportsStreaming` is false: identical final state to native streaming for the same scripted events; `firstTokenMs` nil in both.
 
 **Perf records**
 - A record with `firstTokenMs` round-trips; a pre-streaming record without it still decodes; `PerfCompare` does not refuse on a `streaming` mismatch.
@@ -272,17 +274,17 @@ All Swift Testing, no XCTest, no mutation of `ConfigManager.shared`.
 
 | file | change |
 |---|---|
-| `Sources/iris/LLMStream.swift` (new) | `LLMStreamEvent`, `SSEReader`, `StreamAssembler`, `LLMStreamEvent.replay`, default `streamContent` extension |
+| `Sources/iris/LLMStream.swift` (new) | `LLMStreamEvent`, `SSEReader`, `StreamAssembler`, `LLMStreamEvent.replay`, default `streamContent` / `supportsStreaming` extension |
 | `Sources/iris/LLMClient.swift` | `streamGenerateContent?alt=sse` URL form; native `streamContent`; `LLMClientProtocol` requirement |
 | `Sources/iris/AnthropicClient.swift` | `stream: true`; event mapper |
 | `Sources/iris/OpenAIClient.swift` | `stream: true` + `stream_options`; chunk mapper |
-| `Sources/iris/LLMError.swift` | `LLMRetry.run` gains a `retryIf` predicate (or a non-retryable wrapper) |
+| `Sources/iris/LLMError.swift` | `StreamInterruptedError`; `LLMRetry` unchanged |
 | `Sources/iris/iris.swift` | seam rewritten around `StreamAssembler` + `MessageStreamer`; text part handling; status clearing |
 | `Sources/iris/MessageStreamer.swift` (new) | coalescing flusher |
 | `Sources/iris/AppState.swift` | `updateMessageContent(id:content:in:)` |
-| `Sources/iris/IrisDefaults.swift`, Settings view | `streamResponses` |
+| `Sources/iris/IrisDefaults.swift`, `Sources/iris/SettingsView.swift` | `streamResponses` |
 | `Sources/iris/PerformanceProfiler.swift`, `PerfRecord.swift`, `PerfSummarizer.swift`, `PerfCLI.swift` report | `firstTokenMs`, `streaming`, `medianFirstTokenMs`, ladder column |
-| `perf/README.md`, `docs/prompt_injection_guard_design.md` (no change), hooks doc | streaming semantics: what a hook sees, partial text on Stop |
+| `perf/README.md`, `docs/tool_hooks.md` | streaming semantics: the first-token column; what a hook sees; partial text on Stop |
 | Tests as in Section 8 | |
 
 ## 10. Risks
