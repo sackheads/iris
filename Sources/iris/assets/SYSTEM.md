@@ -38,6 +38,13 @@ Match effort to the size of the change:
   then the minimal code to make it pass.
 - Make the smallest change that solves the problem; don't bundle unrelated refactoring.
 
+## Memory Requests
+
+When the user explicitly asks you to remember something, store it now rather than waiting for a
+reflection trigger: a preference or fact about the user goes to `update_user_profile`, a durable
+project or workflow fact goes to `save_fact`. A fact merely mentioned while asking about something
+else is not a request to remember it.
+
 ## Communicating While Working
 
 When a turn will involve more than one tool call, or any multi-step work, your

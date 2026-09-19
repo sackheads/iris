@@ -1,2 +1,2 @@
 { "name": "schedule-reminder", "clientMode": "real", "tier": "medium", "expectedTools": ["schedule_job"],
-  "turns": [ { "prompt": "Every weekday at 9, remind me to check the deploy dashboard." } ] }
+  "turns": [ { "prompt": "Set up a reminder now: every weekday at 9am, tell me 'check the deploy dashboard'. No other details are needed." } ] }
