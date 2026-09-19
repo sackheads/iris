@@ -40,6 +40,9 @@ struct LLMStreamTests {
         var a = StreamAssembler()
         a.apply(.usage(UsageMetadata(promptTokenCount: 10, candidatesTokenCount: nil, totalTokenCount: nil)), now: 1)
         #expect(a.firstTokenAt == nil)
+        // An empty delta is appended but is not a token: it must not claim first-token time.
+        a.apply(.textDelta(""), now: 4)
+        #expect(a.firstTokenAt == nil)
         a.apply(.textDelta("Hel"), now: 5)
         a.apply(.textDelta("lo"), now: 6)
         a.apply(.functionCall(call("run_command")), now: 7)
@@ -58,7 +61,7 @@ struct LLMStreamTests {
         #expect(r.emptyReason == nil)
     }
 
-    @Test("a thought signature attaches to the text part; a call keeps its own")
+    @Test("a thought signature lands at part level under one spelling and never inside the call")
     func assemblerSignatures() {
         var a = StreamAssembler()
         a.apply(.textDelta("thinking done"), now: 1)
@@ -66,8 +69,49 @@ struct LLMStreamTests {
         var fc = call("t"); fc.thoughtSignature = "sig-call"
         a.apply(.functionCall(fc), now: 3)
         let parts = a.response().candidates!.first!.content!.parts
-        #expect(parts[0].thoughtSignature == "sig-text" && parts[0].thought_signature == "sig-text")
-        #expect(parts[1].thoughtSignature == "sig-call" && parts[1].thought_signature == nil)
+        #expect(parts[0].thoughtSignature == "sig-text")
+        #expect(parts[0].thought_signature == nil)
+        #expect(parts[1].thoughtSignature == "sig-call")
+        #expect(parts[1].thought_signature == nil)
+        #expect(parts[1].functionCall?.thoughtSignature == nil)
+        #expect(parts[1].functionCall?.thought_signature == nil)
+    }
+
+    @Test("a snake_case signature on the call also lands at part level as thoughtSignature")
+    func assemblerSnakeCaseCallSignature() {
+        var a = StreamAssembler()
+        var fc = call("t"); fc.thought_signature = "sig-snake"
+        a.apply(.functionCall(fc), now: 1)
+        let parts = a.response().candidates!.first!.content!.parts
+        #expect(parts[0].thoughtSignature == "sig-snake")
+        #expect(parts[0].thought_signature == nil)
+        #expect(parts[0].functionCall?.thought_signature == nil)
+    }
+
+    @Test("the assembled content re-encodes with one thoughtSignature per part and none inside functionCall")
+    func assembledContentEncodesGeminiShape() throws {
+        // What Gemini's own stream sends: the signature sits on the part, not on the call.
+        var a = StreamAssembler()
+        a.apply(.textDelta("thinking done"), now: 1)
+        a.apply(.thoughtSignature("sig-text"), now: 2)
+        let chunk = GeminiResponse(candidates: [Candidate(content: Content(role: "model",
+                                                                           parts: [Part(functionCall: call("t"), thoughtSignature: "sig-call")]),
+                                                          finishReason: "tool_use")],
+                                   usageMetadata: nil)
+        for event in LLMStreamEvent.events(from: chunk) { a.apply(event, now: 3) }
+        let content = try #require(a.response().candidates?.first?.content)
+
+        let data = try JSONEncoder().encode(content)
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let parts = try #require(json["parts"] as? [[String: Any]])
+        #expect(parts.count == 2)
+        #expect(parts[0]["thoughtSignature"] as? String == "sig-text")
+        #expect(parts[0]["thought_signature"] == nil)
+        #expect(parts[1]["thoughtSignature"] as? String == "sig-call")
+        #expect(parts[1]["thought_signature"] == nil)
+        let encodedCall = try #require(parts[1]["functionCall"] as? [String: Any])
+        #expect(encodedCall["thoughtSignature"] == nil)
+        #expect(encodedCall["thought_signature"] == nil)
     }
 
     @Test("no text and no call reproduces the #136 empty reasons exactly")

@@ -90,7 +90,8 @@ struct StreamAssembler: Sendable {
         switch event {
         case .textDelta(let delta):
             text += delta
-            if firstTokenAt == nil { firstTokenAt = now }
+            // An empty delta is not a token: providers emit them as keep-alives and openers.
+            if firstTokenAt == nil, !delta.isEmpty { firstTokenAt = now }
         case .thoughtSignature(let signature):
             textSignature = signature
         case .functionCall(let call):
@@ -111,13 +112,24 @@ struct StreamAssembler: Sendable {
     /// One candidate: the text (if any) as one part, then one part per call, in the shape the
     /// non-streaming decoders produce. With nothing assembled, `emptyReason` reports the finish
     /// or block reason exactly as #136 does.
+    ///
+    /// A thought signature lands at part level under exactly one spelling (`thoughtSignature`)
+    /// and never inside the `FunctionCall`: `FunctionCall` has synthesized Codable, so a signature
+    /// left on the call would be re-encoded into Gemini history as an unknown field, and writing
+    /// both spellings would collide the proto and JSON names of the same field. `OpenAIClient`
+    /// reads the part-level value via `thought_signature ?? thoughtSignature`, so reasoning the
+    /// OpenAI mapper parks on a call still round-trips.
     func response() -> GeminiResponse {
         var parts: [Part] = []
         if !text.isEmpty {
-            parts.append(Part(text: text, thought_signature: textSignature, thoughtSignature: textSignature))
+            parts.append(Part(text: text, thoughtSignature: textSignature))
         }
         for call in calls {
-            parts.append(Part(functionCall: call, thought_signature: call.thought_signature, thoughtSignature: call.thoughtSignature))
+            var bare = call
+            let signature = call.thoughtSignature ?? call.thought_signature
+            bare.thoughtSignature = nil
+            bare.thought_signature = nil
+            parts.append(Part(functionCall: bare, thoughtSignature: signature))
         }
         let content = parts.isEmpty ? nil : Content(role: "model", parts: parts)
         var response = GeminiResponse(candidates: [Candidate(content: content, finishReason: finishReason)], usageMetadata: usage)

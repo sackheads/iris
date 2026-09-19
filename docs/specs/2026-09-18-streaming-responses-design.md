@@ -32,7 +32,7 @@ enum LLMStreamEvent: Sendable, Equatable {
     /// A complete function call. Providers that stream arguments (Anthropic, OpenAI)
     /// accumulate inside the client and emit one event per call once its JSON is whole.
     case functionCall(FunctionCall)
-    /// Token counts, possibly emitted more than once; the last one wins.
+    /// Token counts, possibly emitted more than once; fields merge, max wins.
     case usage(UsageMetadata)
     /// The provider ended the turn. `finishReason` is the provider's own string
     /// ("STOP", "end_turn", "tool_calls", "MAX_TOKENS", ...), passed through for the
@@ -86,7 +86,9 @@ struct SSEParser {
 }
 ```
 
-`SSEParser` is synchronous and holds no I/O of its own; each client's streaming task feeds it one line at a time from `URLSession.shared.bytes(for:).lines`, so the multi-line-`data:`-joining and comment/field-skipping logic is written and tested once and shared across providers. Cancelling the consuming task cancels the URLSession task; that is the whole cancellation story at the transport layer (Section 6).
+`SSEParser` is synchronous and holds no I/O of its own; the shared pump (`LLMStreaming.stream`) feeds it one line at a time, so the multi-line-`data:`-joining and comment/field-skipping logic is written and tested once and shared across providers.
+
+The lines come from a byte-level splitter, `SSELineBuffer`, not from Foundation's `AsyncLineSequence` (`bytes.lines`): that sequence drops blank lines, and in SSE the blank line is exactly what terminates an event. `SSELineBuffer` takes one byte at a time off `URLSession.shared.bytes(for:)`, hands back each completed line (`\n`, with an optional preceding `\r`) including the empty ones, and flushes a trailing line the stream ended without terminating. Cancelling the consuming task cancels the URLSession task; that is the whole cancellation story at the transport layer (Section 6).
 
 HTTP status is checked once, on the `URLResponse` returned by `bytes(for:)`, before any line is read. A non-2xx response is read to completion into `Data` and thrown through the same per-provider error decoder that the non-streaming path uses today, so a 429 during streaming produces the identical `LLMError` (and identical retry-after handling) as a 429 during a plain call.
 
@@ -159,6 +161,10 @@ struct StreamAssembler {
 
 `response()` builds a `GeminiResponse` with a single candidate whose `content.parts` is `[text part] + call parts`, `finishReason` set, and `usageMetadata` merged field-wise (max of each count seen). If there was no text and no call, `emptyReason` on the built response reports `finishReason`, which keeps the #136 pill working unchanged.
 
+Because the assembler always builds one candidate, a stream that produced nothing *and* carried no finish or block reason (an immediately-closed connection, a transcript with only keep-alives) reports `emptyReason == "empty candidate"` rather than the no-candidates wording. That is the pill the user sees for a silent stream.
+
+A thought signature always lands at part level, under the `thoughtSignature` spelling only, and is stripped off the `FunctionCall` before the call goes into the part. `FunctionCall` has synthesized `Codable`, so a signature left on the call would be re-encoded into Gemini history as an unknown field inside `functionCall`, and writing both spellings on the part would collide the proto and JSON names of the same field — the Generative Language API rejects both. `OpenAIClient` reads the part-level value as `thought_signature ?? thoughtSignature`, so reasoning that the OpenAI mapper parks on a call still round-trips.
+
 ### 4.2 The turn
 
 ```
@@ -208,11 +214,11 @@ It finds the conversation and message by id and assigns `content`. Because `Chat
 
 ### 5.2 `MessageStreamer`
 
-An actor-free helper owned by the engine turn (a small `final class` confined to the engine actor is fine; it never escapes the turn):
+An `actor` owned by the engine turn (the flush task and the engine both touch its buffer, so it owns its own isolation rather than borrowing the engine's):
 
 - `append(delta)`: appends to a buffer. On the first delta it calls `pushToUI(role: .agent, text: "", id: messageId)` so the row exists, then schedules a flush.
 - Flushes run at most every **50 ms** (a `Task.sleep` gate, not a timer): each flush calls `updateMessageContent` on the main actor with the whole accumulated text. 50 ms is 20 renders per second, well under what MarkdownUI can parse for a few-kilobyte message and above the rate at which any provider produces visually distinct chunks. The constant lives in one place and the plan's test exercises it with an injected clock.
-- `finish(finalText)`: cancels any pending flush, writes `finalText` once, and calls `saveConversations()` once. Persistence during the stream is not performed; if the app quits mid-stream the partial message is lost, which matches today's behaviour (nothing was saved until the reply arrived).
+- `finish(finalText)`: cancels any pending flush, writes `finalText` once, and calls `saveConversations()` once. Opening the row goes through `appendMessage`, whose debounced save may serialize a partial message; the final write saves again, so the on-disk copy converges on the whole reply.
 - The streamer mints the message id once and passes it to `pushToUI(role:text:conversationId:id:)` on the first delta, then reuses it for every `updateMessageContent` call, so anything keyed on message ids (selection, copy, the command pill timers) sees one stable message.
 
 ### 5.3 Visuals
@@ -246,7 +252,7 @@ Partial text going into history on Stop or mid-stream error is a change from tod
 
 All Swift Testing, no XCTest, no mutation of `ConfigManager.shared`.
 
-**`SSEReader`**
+**`SSEParser`**
 - Splits `event:`/`data:` pairs, joins multi-line `data:`, skips comments and blank lines, handles a final event without a trailing blank line.
 - Propagates cancellation: cancelling the consumer ends the stream.
 
@@ -282,10 +288,13 @@ All Swift Testing, no XCTest, no mutation of `ConfigManager.shared`.
 
 | file | change |
 |---|---|
-| `Sources/iris/LLMStream.swift` (new) | `LLMStreamEvent`, `SSEReader`, `StreamAssembler`, `LLMStreamEvent.replay`, default `streamContent` / `supportsStreaming` extension |
+| `Sources/iris/LLMStream.swift` (new) | `LLMStreamEvent`, `SSEParser`, `SSELineBuffer`, `StreamMapper`, `LLMStreaming` (the shared URLSession → SSE → mapper pump), `StreamAssembler`, `LLMStreamEvent.events(from:)` / `replay`, default `streamContent` / `supportsStreaming` extension |
+| `Sources/iris/GeminiStreamMapper.swift` (new) | Gemini `streamGenerateContent?alt=sse` chunks to events |
+| `Sources/iris/AnthropicStreamMapper.swift` (new) | Anthropic message events to events; per-index tool-argument buffers |
+| `Sources/iris/OpenAIStreamMapper.swift` (new) | OpenAI chunk deltas to events; per-index tool-argument buffers |
 | `Sources/iris/LLMClient.swift` | `streamGenerateContent?alt=sse` URL form; native `streamContent`; `LLMClientProtocol` requirement |
-| `Sources/iris/AnthropicClient.swift` | `stream: true`; event mapper |
-| `Sources/iris/OpenAIClient.swift` | `stream: true` + `stream_options`; chunk mapper |
+| `Sources/iris/AnthropicClient.swift` | `stream: true`; streaming request + `LLMStreaming.stream` call |
+| `Sources/iris/OpenAIClient.swift` | `stream: true` + `stream_options`; streaming request + `LLMStreaming.stream` call |
 | `Sources/iris/LLMError.swift` | `StreamInterruptedError`; `LLMRetry` unchanged |
 | `Sources/iris/iris.swift` | seam rewritten around `StreamAssembler` + `MessageStreamer`; text part handling; status clearing |
 | `Sources/iris/MessageStreamer.swift` (new) | coalescing flusher |

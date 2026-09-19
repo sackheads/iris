@@ -15,8 +15,22 @@ final class ScriptedStreamClient: LLMClientProtocol, @unchecked Sendable {
     private(set) var calls = 0
     init(_ scripts: [[Step]]) { self.scripts = scripts }
     var supportsStreaming: Bool { true }
+    /// The same script, delivered as one finished response: what the provider would have returned
+    /// with streaming off. Lets one script drive both sides of the streaming-off comparison.
     func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
-        throw APIError(message: "ScriptedStreamClient only streams")
+        let script: [Step] = lock.withLock {
+            calls += 1
+            return scripts.isEmpty ? [] : scripts.removeFirst()
+        }
+        var assembler = StreamAssembler()
+        for step in script {
+            switch step {
+            case .event(let e): assembler.apply(e, now: 0)
+            case .fail(let error): throw error
+            case .hang: try await Task.sleep(nanoseconds: 60_000_000_000)
+            }
+        }
+        return assembler.response()
     }
     func streamContent(request: GeminiRequest, tier: ModelTier) -> AsyncThrowingStream<LLMStreamEvent, Error> {
         let script: [Step] = lock.withLock {
@@ -149,6 +163,35 @@ struct StreamingEngineTests {
         #expect(conv(app, id).history.last?.parts.first?.text == "part")
     }
 
+    @Test("streaming off produces the same text and history as streaming on, and records no first-token time")
+    func streamingOffMatchesOn() async throws {
+        let script: [ScriptedStreamClient.Step] = [.event(.textDelta("Hel")), .event(.textDelta("lo")),
+                                                   .event(.done(finishReason: "STOP"))]
+        func turn(streamResponses: Bool) async -> (texts: [String], historyText: String?, firstTokenMs: Double?) {
+            let app = AppState()
+            app.autoApproveTools = true
+            let id = UUID()
+            app.createNewConversation(id: id)
+            let engine = IrisEngine(state: app, tier: .medium, principal: .main,
+                                    client: ScriptedStreamClient([script]), retryDelays: [],
+                                    streamResponses: streamResponses)
+            let collector = ProfileCollector()
+            await PerformanceProfiler.$runSink.withValue({ collector.append($0) }) {
+                await engine.processInput("hi", source: "User", conversationId: id)
+            }
+            return (agentTexts(app, id), conv(app, id).history.last?.parts.first?.text,
+                    collector.all.first?.modelCalls.first?.firstTokenMs)
+        }
+        let on = await turn(streamResponses: true)
+        let off = await turn(streamResponses: false)
+        #expect(on.texts == ["Hello"])
+        #expect(off.texts == on.texts)
+        #expect(on.historyText == "Hello")
+        #expect(off.historyText == on.historyText)
+        #expect(on.firstTokenMs != nil)
+        #expect(off.firstTokenMs == nil)
+    }
+
     @Test("an empty stream produces the #136 pill and no agent row")
     func emptyStream() async {
         let client = ScriptedStreamClient([[.event(.done(finishReason: "SAFETY"))]])
@@ -157,4 +200,12 @@ struct StreamingEngineTests {
         #expect(agentTexts(app, id).isEmpty)
         #expect(errorPills(app, id).first?.headline.contains("finishReason: SAFETY") == true)
     }
+}
+
+/// Thread-safe sink for the turn profiles a test's own turns produce.
+private final class ProfileCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [CommandProfile] = []
+    func append(_ p: CommandProfile) { lock.lock(); items.append(p); lock.unlock() }
+    var all: [CommandProfile] { lock.lock(); defer { lock.unlock() }; return items }
 }

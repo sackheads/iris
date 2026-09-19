@@ -104,6 +104,10 @@ struct MessageStreamerTests {
         let lastUpdate = await recorder.updates.last
         #expect(lastUpdate?.1 == "ab" && lastUpdate?.2 == true)
         #expect(await s.text == "ab")
+        // Settling a finished round reports nothing, so a caller that commits the returned text
+        // to history cannot commit the same round twice.
+        #expect(await s.settle() == "")
+        #expect(await recorder.updates.count == 1)
 
         let recorder2 = Recorder(), gate2 = Gate()
         let s2 = make(recorder2, gate: gate2)

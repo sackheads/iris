@@ -136,10 +136,8 @@ struct LLMClient {
         } else if provider == LLMProvider.openai.rawValue {
             inner = OpenAIClient.streamContent(request: request, model: modelName, apiKey: config.openAIAPIKey, baseURL: config.openAIBaseURL)
         } else {
-            let isADC = config.geminiAuthMode == GeminiAuthMode.adc.rawValue
-            if !isADC && config.geminiAPIKey.isEmpty {
-                return AsyncThrowingStream { $0.finish(throwing: APIError(message: "GEMINI_FALLBACK_AUTH_ERROR_1013")) }
-            }
+            // The missing-key check lives in `makeGeminiURLRequest`, so it throws inside the
+            // metrics wrapper below and is recorded like any other failed call.
             inner = LLMStreaming.stream(provider: "Gemini", mapper: GeminiStreamMapper()) {
                 try await self.makeGeminiURLRequest(request: request, modelName: modelName, streaming: true)
             }

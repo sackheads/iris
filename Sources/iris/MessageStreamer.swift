@@ -72,12 +72,13 @@ actor MessageStreamer {
     }
 
     /// Ends the stream with whatever has been shown (error, hook block, Stop) and returns it.
-    /// Idempotent: once the round has been finished (or settled), the text is reported without a
-    /// second final write, so an error path that settles a round someone already finished cannot
-    /// write it twice.
+    /// Idempotent, and it reports text only once: a round that already finished (or settled) gets
+    /// no second final write and an empty string back, so a caller that commits the returned text
+    /// to history cannot commit the same round twice.
     func settle() async -> String {
+        guard !finished else { return "" }
         let shown = text
-        if opened, !finished {
+        if opened {
             await finish(shown)
         } else {
             finished = true

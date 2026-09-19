@@ -35,13 +35,22 @@ class MockURLProtocol: URLProtocol {
             // Handlers answer with one plain JSON message body. The engine streams by default, so
             // a request that asked for a stream is answered in the wire format it asked for:
             // the handler's message is synthesized into an SSE transcript. Only Anthropic's shape
-            // is synthesized today (the OpenAI and Gemini shapes pass through unchanged), and only
-            // for 2xx — an error body stays as it is so the non-2xx path still throws.
-            if Self.requestedAnthropicStream(request), (200..<300).contains(response.statusCode),
-               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-               let url = response.url,
-               let sseResponse = HTTPURLResponse(url: url, statusCode: response.statusCode, httpVersion: nil,
-                                                 headerFields: ["Content-Type": "text/event-stream"]) {
+            // is synthesized today, and only for 2xx — an error body stays as it is so the
+            // non-2xx path still throws, and a non-JSON body (a hand-written SSE transcript)
+            // passes through untouched. Any other provider asking for a stream fails loudly
+            // rather than getting a JSON body it cannot parse as SSE.
+            if Self.requestedStream(request), (200..<300).contains(response.statusCode),
+               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                guard request.url?.path.hasSuffix("/messages") == true, let url = response.url,
+                      let sseResponse = HTTPURLResponse(url: url, statusCode: response.statusCode, httpVersion: nil,
+                                                        headerFields: ["Content-Type": "text/event-stream"]) else {
+                    let message = "MockURLProtocol: SSE synthesis is implemented for Anthropic /messages only; "
+                        + "\(request.url?.absoluteString ?? "<no url>") asked for a stream. Answer it with a "
+                        + "hand-written SSE transcript, or turn streaming off for this test."
+                    client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL,
+                                                                         userInfo: [NSLocalizedDescriptionKey: message]))
+                    return
+                }
                 data = Self.anthropicSSE(fromMessage: json)
                 response = sseResponse
             }
@@ -55,10 +64,9 @@ class MockURLProtocol: URLProtocol {
 
     override func stopLoading() {}
 
-    /// True for an Anthropic `messages` request whose body asked for `"stream": true`.
-    private static func requestedAnthropicStream(_ request: URLRequest) -> Bool {
-        guard request.url?.path.hasSuffix("/messages") == true,
-              let body = request.bodyData,
+    /// True for a request whose body asked for `"stream": true`.
+    private static func requestedStream(_ request: URLRequest) -> Bool {
+        guard let body = request.bodyData,
               let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
         else { return false }
         return json["stream"] as? Bool == true

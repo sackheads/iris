@@ -14,6 +14,9 @@ actor IrisEngine {
     let evaluatorChecks: [String]
     /// Backoff schedule for transient provider errors (429/503/529); one wait per retry.
     let retryDelays: [TimeInterval]
+    /// Read once at construction so a turn never consults global config mid-flight, and so a
+    /// test can drive the streaming-off path without touching `ConfigManager.shared`.
+    let streamResponses: Bool
 
     /// Conversations already shown the "no sandbox runtime" fallback notice (deduped).
     private var warnedNoRuntime: Set<UUID> = []
@@ -22,7 +25,7 @@ actor IrisEngine {
     // Since AppState owns IrisEngine, we can pass it when we start or process.
     private weak var state: AppState?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8]) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool = ConfigManager.shared.streamResponses) {
         self.state = state
         self.modelTier = tier
         self.principal = principal
@@ -30,6 +33,7 @@ actor IrisEngine {
         self.client = client
         self.evaluatorChecks = evaluatorChecks
         self.retryDelays = retryDelays
+        self.streamResponses = streamResponses
         systemPrompt = nil
     }
 
@@ -697,7 +701,7 @@ actor IrisEngine {
                 // its own span so retry backoff sleeps are not counted as model time.
                 let requestToSend = activeRequest
                 let modelCallStart = CFAbsoluteTimeGetCurrent()
-                let streamed = ConfigManager.shared.streamResponses && client.supportsStreaming
+                let streamed = streamResponses && client.supportsStreaming
                 let outcome = try await LLMRetry.run(delays: retryDelays, onRetry: { error, attempt, delay in
                     await self.pushToUI(role: .system,
                                         text: "[retry] \(error.message); retrying in \(Self.formatDelay(delay)) (attempt \(attempt) of \(self.retryDelays.count))",
@@ -780,8 +784,9 @@ actor IrisEngine {
                         }
                     }
                 }
-                // Joined the way two parts used to read as two consecutive messages.
-                let roundText = responseTexts.joined(separator: "\n")
+                // A blank line between parts: Markdown needs one to start a new paragraph, which
+                // is how two parts used to read as two consecutive messages.
+                let roundText = responseTexts.joined(separator: "\n\n")
                 if !roundText.isEmpty {
                     await streamer.finish(roundText)
                 } else {
@@ -919,10 +924,9 @@ actor IrisEngine {
                 let cancelled = error is CancellationError
                     || ((error as? URLError)?.code == .cancelled && Task.isCancelled)
                 // Whatever streamed stays on screen and goes into history: the user saw it, so
-                // the model should know it said it (spec §6). The round's single final write
-                // happens after the last statement that can throw, so this only ever settles a
-                // round that never finished — a `streamerClosed` flag here is diagnosed by the
-                // compiler as always false. `settle` is idempotent regardless.
+                // the model should know it said it (spec §6). The invariant is one final write
+                // per round: the partial is appended to history only when the round never wrote,
+                // which `settle()` enforces by returning "" once the round has been finished.
                 let partial = await streamer.settle()
                 if !partial.isEmpty {
                     let content = Content(role: "model", parts: [Part(text: partial)])
