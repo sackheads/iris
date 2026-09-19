@@ -358,17 +358,22 @@ struct LockedContractChip: View {
     }
 
     private func chipHeader(contract: GoalContract) -> some View {
-        HStack {
-            Image(systemName: contract.checkpointStatus == .pausedForReview ? "pause.circle.fill" : "lock.fill")
-                .foregroundStyle(contract.checkpointStatus == .pausedForReview ? Color.orange : Color.irisIndigo)
+        // Three states, from one derivation on the contract: locked-and-running, paused at a
+        // checkpoint, and waiting on the user's judgement. The last used to render as plain
+        // "LOCKED / Read-only", so nothing outside the Accept/Reject buttons said the run was
+        // waiting on them.
+        let header = contract.lockedChipHeader
+        return HStack {
+            Image(systemName: header.symbolName)
+                .foregroundStyle(header.isPaused ? Color.orange : Color.irisIndigo)
                 .font(.caption)
                 .accessibilityHidden(true)
-            Text(contract.checkpointStatus == .pausedForReview ? "GOAL CONTRACT · PAUSED FOR REVIEW" : "GOAL CONTRACT · LOCKED")
+            Text(header.title)
                 .font(.caption2)
                 .bold()
                 .foregroundStyle(.secondary)
             Spacer()
-            Text(contract.checkpointStatus == .pausedForReview ? "Awaiting your decision" : "Read-only")
+            Text(header.trailing)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -642,9 +647,15 @@ struct CompletionReportChip: View {
         // VStack could collapse the surrounding layout — the window blanked the instant this chip
         // appeared at goal_complete (#62).
         ScrollView {
-            CompletionReportSection(report: report, onDismiss: {
-                state.dismissCompletionReport(for: conversation.id)
-            }, evaluation: evaluation, conversation: conversation, state: state)
+            CompletionReportSection(
+                report: report,
+                // No ✕ while the goal waits on judgement: dismissing drops the evaluation the
+                // Accept/Reject buttons act on, and `AppState.dismissCompletionReport` refuses in
+                // that state anyway — so the button would be visibly dead. Hide it instead.
+                onDismiss: conversation.goalContract?.awaitingHumanJudgement == true ? nil : {
+                    state.dismissCompletionReport(for: conversation.id)
+                },
+                evaluation: evaluation, conversation: conversation, state: state)
         }
         .frame(maxHeight: 320)
         .background(.thinMaterial)
@@ -912,12 +923,6 @@ private struct DriftCriterionRow: View {
                     .padding(.top, 1)
             }
 
-            if let label = verdict.humanJudgementLabel {
-                Text(label)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-
             if verdict.verdict == .humanPending, let onAccept, let onReject {
                 HStack(spacing: 8) {
                     Button("Accept", action: onAccept)
@@ -970,51 +975,20 @@ private struct DriftCriterionRow: View {
                     .foregroundStyle(.orange)
             }
         case .graded:
-            let glyph = verdict.graderColumnGlyph
+            // Glyph, spoken label, text and tint come from ONE derivation keyed on
+            // (method, verdict). Splitting them is how the icon ended up honest about a human
+            // accept while the text beside it still read a flat green "met" (spec §6).
+            let column = verdict.graderColumnPresentation
             HStack(spacing: 4) {
-                Image(systemName: glyph.symbolName)
+                Image(systemName: column.symbolName)
                     .font(.caption)
-                    .foregroundStyle(graderColumnTint)
-                    .accessibilityLabel(glyph.accessibilityLabel)
-                verdictLabel
+                    .foregroundStyle(column.tint)
+                    .accessibilityLabel(column.accessibilityLabel)
+                Text(column.text)
+                    .font(.caption2)
+                    .foregroundStyle(column.tint)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-        }
-    }
-
-    /// Colour for the graded-column glyph. A human's own verdict deliberately does NOT reuse the
-    /// grader's "verified" green — that would read as machine-verified evidence for a claim the
-    /// user asserted, not the grader (spec §6). `.blue` still communicates "met" without borrowing
-    /// the grader's colour, and stays legible in both light and dark mode.
-    private var graderColumnTint: Color {
-        switch (verdict.method, verdict.verdict) {
-        case (.human, .met):    return .blue
-        case (.human, .notMet): return .orange
-        case (_, .met):         return .green
-        case (_, .notMet):      return .red
-        case (_, .cannotVerify): return .secondary
-        case (_, .humanPending): return .secondary
-        }
-    }
-
-    @ViewBuilder
-    private var verdictLabel: some View {
-        switch verdict.verdict {
-        case .met:
-            Text("met")
-                .font(.caption2)
-                .foregroundStyle(.green)
-        case .notMet:
-            Text("not met")
-                .font(.caption2)
-                .foregroundStyle(.red)
-        case .cannotVerify:
-            Text("cannot verify")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        case .humanPending:
-            Text("your call")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
         }
     }
 }

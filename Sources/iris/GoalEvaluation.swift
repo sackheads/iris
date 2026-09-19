@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// The grader's verdict for one criterion. `met`/`notMet`/`cannotVerify` are gradable outcomes;
 /// `humanPending` marks a `humanJudged` criterion the grader must not auto-grade (spec §4.4).
@@ -74,36 +75,57 @@ struct GoalEvaluation: Codable, Equatable, Sendable {
     }
 }
 
-extension CriterionVerdict {
-    /// How to mark a verdict the USER gave, so it is never mistaken for grader-verified evidence
-    /// (spec §6). nil for anything the grader decided, and for one still awaiting judgement — the
-    /// buttons speak for that.
-    var humanJudgementLabel: String? {
-        guard method == .human else { return nil }
-        switch verdict {
-        case .met:    return "met — your judgement"
-        case .notMet: return "not met — your judgement"
-        default:      return nil
-        }
-    }
+/// Everything the completion report's graded column renders for one verdict: glyph, spoken label,
+/// visible text and tint, derived TOGETHER from `(method, verdict)`.
+///
+/// One derivation on purpose. These four were three separate switches, and they drifted: the glyph
+/// and tint learned that a human accept is not grader-verified evidence while the visible text —
+/// the most-read half of the pair — kept saying a flat green "met" under a column headed
+/// "SELF-REPORT vs GRADER" (spec §6). Anything keyed on provenance belongs here, so the next
+/// consumer cannot be fixed in one place and forgotten in another.
+struct GraderColumnPresentation: Equatable {
+    let symbolName: String
+    /// What VoiceOver announces for the glyph.
+    let accessibilityLabel: String
+    /// The visible text beside the glyph.
+    let text: String
+    let tint: Color
+    /// True when the user gave this verdict rather than the grader — the row must never present it
+    /// as verified evidence.
+    let isHumanJudgement: Bool
+}
 
-    /// The icon and accessibility label for the graded-column glyph. Keyed on BOTH `method` and
-    /// `verdict` — a verdict a human gave must never render, or announce, as grader-verified
-    /// evidence (spec §6). Extracted so this can be tested without a SwiftUI harness.
-    var graderColumnGlyph: (symbolName: String, accessibilityLabel: String) {
+extension CriterionVerdict {
+    /// The graded column's full rendering for this verdict. Kept out of the view so provenance can
+    /// be tested without a SwiftUI harness.
+    ///
+    /// A human's verdict deliberately does NOT reuse the grader's "verified" green: that would read
+    /// as machine-verified evidence for a claim the user asserted, not the grader. `.blue` still
+    /// communicates "met" without borrowing the grader's colour, and stays legible in both light
+    /// and dark mode.
+    var graderColumnPresentation: GraderColumnPresentation {
         switch (method, verdict) {
         case (.human, .met):
-            return ("person.fill.checkmark", "Your judgement: met")
+            return .init(symbolName: "person.fill.checkmark", accessibilityLabel: "Your judgement: met",
+                         text: "met — your judgement", tint: .blue, isHumanJudgement: true)
         case (.human, .notMet):
-            return ("person.fill.xmark", "Your judgement: not met")
+            return .init(symbolName: "person.fill.xmark", accessibilityLabel: "Your judgement: not met",
+                         text: "not met — your judgement", tint: .orange, isHumanJudgement: true)
         case (_, .met):
-            return ("checkmark.circle.fill", "Grader: met")
+            return .init(symbolName: "checkmark.circle.fill", accessibilityLabel: "Grader: met",
+                         text: "met", tint: .green, isHumanJudgement: false)
         case (_, .notMet):
-            return ("xmark.octagon.fill", "Grader: not met")
+            return .init(symbolName: "xmark.octagon.fill", accessibilityLabel: "Grader: not met",
+                         text: "not met", tint: .red, isHumanJudgement: false)
         case (_, .cannotVerify):
-            return ("questionmark.circle", "Grader: cannot verify")
+            return .init(symbolName: "questionmark.circle", accessibilityLabel: "Grader: cannot verify",
+                         text: "cannot verify", tint: .secondary, isHumanJudgement: false)
         case (_, .humanPending):
-            return ("person.crop.circle.badge.questionmark", "Awaiting human judgment")
+            // Still the user's to decide, so this is not yet a judgement of theirs — the
+            // Accept/Reject buttons speak for it.
+            return .init(symbolName: "person.crop.circle.badge.questionmark",
+                         accessibilityLabel: "Awaiting human judgment",
+                         text: "your call", tint: .secondary, isHumanJudgement: false)
         }
     }
 }
