@@ -181,3 +181,67 @@ extension LLMClientProtocol {
 
     var supportsStreaming: Bool { false }
 }
+
+/// Splits a byte stream into lines, keeping the empty ones. `AsyncLineSequence` (`bytes.lines`)
+/// drops blank lines, and in SSE the blank line is what terminates an event.
+struct SSELineBuffer {
+    private var pending: [UInt8] = []
+
+    /// The completed line when `byte` ends one (`\n`, with an optional preceding `\r`), else nil.
+    mutating func feed(_ byte: UInt8) -> String? {
+        guard byte == 0x0A else { pending.append(byte); return nil }
+        if pending.last == 0x0D { pending.removeLast() }
+        defer { pending.removeAll(keepingCapacity: true) }
+        return String(decoding: pending, as: UTF8.self)
+    }
+
+    /// A trailing line the stream ended without terminating.
+    mutating func finish() -> String? {
+        guard !pending.isEmpty else { return nil }
+        defer { pending.removeAll() }
+        return String(decoding: pending, as: UTF8.self)
+    }
+}
+
+/// The URLSession → SSE → mapper pump every provider client shares (spec §2.1). Non-2xx is
+/// read to completion and thrown through `APIError.http`, so a 429 mid-handshake is the same
+/// error, with the same `Retry-After`, as on a plain call. Cancelling the consumer cancels the
+/// task and with it the URLSession transfer.
+enum LLMStreaming {
+    static func stream<M: StreamMapper>(provider: String, mapper: M,
+                                        makeRequest: @escaping @Sendable () async throws -> URLRequest) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let urlRequest = try await makeRequest()
+                    let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
+                    guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+                    if http.statusCode != 200 {
+                        var body = Data()
+                        for try await byte in bytes { body.append(byte) }
+                        print("API Error (\(http.statusCode)): \(String(data: body, encoding: .utf8) ?? "<non-utf8 body>")")
+                        throw APIError.http(provider: provider, statusCode: http.statusCode, body: body, headers: http.allHeaderFields)
+                    }
+                    var mapper = mapper
+                    var parser = SSEParser()
+                    var lines = SSELineBuffer()
+                    for try await byte in bytes {
+                        guard let line = lines.feed(byte), let sse = parser.feed(line) else { continue }
+                        for event in try mapper.handle(sse) { continuation.yield(event) }
+                    }
+                    if let line = lines.finish(), let sse = parser.feed(line) {
+                        for event in try mapper.handle(sse) { continuation.yield(event) }
+                    }
+                    if let sse = parser.finish() {
+                        for event in try mapper.handle(sse) { continuation.yield(event) }
+                    }
+                    for event in try mapper.finish() { continuation.yield(event) }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
