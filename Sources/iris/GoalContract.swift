@@ -286,4 +286,13 @@ extension GoalContract {
             $0.verdict == .notMet && waivers[$0.criterionId] == nil
         }
     }
+
+    /// Criteria still awaiting the user's verdict (slice D2 §3).
+    ///
+    /// Only on a real grade: a `.failed` evaluation's values are placeholders, so a `human_pending`
+    /// among them is not a genuine request for judgement.
+    func pendingJudgement(from evaluation: GoalEvaluation) -> [CriterionVerdict] {
+        guard evaluation.status == .graded else { return [] }
+        return evaluation.criteria.filter { $0.verdict == .humanPending }
+    }
 }

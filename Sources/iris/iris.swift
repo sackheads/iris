@@ -1133,6 +1133,21 @@ actor IrisEngine {
                     """
                 }
 
+                // Slice D2 — judgement pause. Reached only when nothing agent-fixable is
+                // outstanding (the refusal above returns first), so the user is never asked to
+                // judge a goal that is about to change underneath them.
+                let awaitingJudgement = c.pendingJudgement(from: evaluation)
+                if blocking.isEmpty, !awaitingJudgement.isEmpty {
+                    await MainActor.run { localState?.beginJudgementPause(for: conversationId) }
+                    let lines = awaitingJudgement.map { "- \($0.criterionText)" }.joined(separator: "\n")
+                    return """
+                    Paused for the user's judgement. \(awaitingJudgement.count) criteri\(awaitingJudgement.count == 1 ? "on is" : "a are") human-judged and only they can decide:
+                    \(lines)
+
+                    Do not call goal_complete again — the run resumes on its own once they answer.
+                    """
+                }
+
                 let outcome: GateOutcome = evaluation.status != .graded ? .ungatedGraderFailed
                                          : (blocking.isEmpty ? .passed : .ungatedAtCap)
                 await MainActor.run {

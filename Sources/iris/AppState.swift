@@ -838,6 +838,17 @@ class AppState {
         return true
     }
 
+    /// Park the goal until the user judges its `humanJudged` criteria (spec §4). Deliberately does
+    /// NOT touch `gateAttempts`: the agent cannot satisfy these by working, so spending a retry on
+    /// them would burn the cap on an outcome it provably cannot change.
+    func beginJudgementPause(for conversationId: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              var c = conversations[idx].goalContract else { return }
+        c.awaitingHumanJudgement = true
+        conversations[idx].goalContract = c
+        saveConversations()
+    }
+
     /// Stores a draft contract on the conversation without locking or touching `activeGoal`.
     /// Called by the `propose_goal_contract` tool handler so the user can review before approval.
     func setDraftContract(for conversationId: UUID, _ draft: GoalContract) {
