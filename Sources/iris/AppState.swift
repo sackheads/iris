@@ -813,6 +813,31 @@ class AppState {
         saveConversations()
     }
 
+    /// Record the user's verdict on one `humanJudged` criterion (spec §6).
+    ///
+    /// Returns false when the judgement does not apply: the goal is not awaiting judgement (a
+    /// stale click after `/stop` or completion), the criterion is unknown, or it is not actually
+    /// `human_pending` — a second click must not flip a verdict already given.
+    ///
+    /// `method` stays `.human`, so the row can render "met — your judgement" and never be mistaken
+    /// for grader-verified evidence.
+    @discardableResult
+    func recordHumanJudgement(for conversationId: UUID, criterionId: UUID, accepted: Bool) -> Bool {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              conversations[idx].goalContract?.awaitingHumanJudgement == true,
+              var eval = conversations[idx].lastGoalEvaluation,
+              let vIdx = eval.criteria.firstIndex(where: {
+                  $0.criterionId == criterionId && $0.verdict == .humanPending
+              })
+        else { return false }
+
+        eval.criteria[vIdx].verdict = accepted ? .met : .notMet
+        eval.criteria[vIdx].method = .human
+        conversations[idx].lastGoalEvaluation = eval
+        saveConversations()
+        return true
+    }
+
     /// Stores a draft contract on the conversation without locking or touching `activeGoal`.
     /// Called by the `propose_goal_contract` tool handler so the user can review before approval.
     func setDraftContract(for conversationId: UUID, _ draft: GoalContract) {
