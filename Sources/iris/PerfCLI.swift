@@ -113,10 +113,17 @@ enum PerfCLI {
                 let root = PerfPaths.repoRoot()   // before any cwd change
                 let previousCwd = FileManager.default.currentDirectoryPath
                 var scratch: URL?
+                var memoryBefore: String?
+                let realMemory = IrisPaths.default.memoryDir   // the real home, before any override
                 if suite.lane == .real {
                     let dir = try makeScratchWorkspace()
                     FileManager.default.changeCurrentDirectoryPath(dir.path)
-                    print("perf: real-lane file tools and cwd confined to \(dir.path)")
+                    // Memory tools write through IrisPaths.default: route the whole home at a
+                    // copy under the scratch directory so USER.md, the fact store and skills
+                    // stay untouched. Reads see the same context.
+                    try IrisPaths.useVolatileCopy(at: dir.appendingPathComponent(".iris"))
+                    memoryBefore = IrisPaths.fingerprint(of: realMemory)
+                    print("perf: real-lane file tools, cwd and ~/.iris confined to \(dir.path)")
                     scratch = dir
                 }
                 defer {
@@ -133,6 +140,10 @@ enum PerfCLI {
                 let dir = out.hasPrefix("/") ? URL(fileURLWithPath: out) : root.appendingPathComponent(out)
                 let url = try record.write(toDirectory: dir)
                 print("perf: wrote \(url.path)")
+                if let before = memoryBefore, IrisPaths.fingerprint(of: realMemory) != before {
+                    print("perf: WARNING the real \(realMemory.path) changed during the run; something wrote outside the volatile copy")
+                    return 3
+                }
                 return 0
             case .report(let path):
                 print(PerfReport.render(try PerfRunRecord.load(at: path)))

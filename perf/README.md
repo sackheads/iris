@@ -56,8 +56,10 @@ Real-lane suites force `run_command` through the sandbox (the main-agent sandbox
 to sandboxed inside the run's volatile settings copy, never in your preferences), because tool
 prompts run unattended with auto-approve. Only `run_command` is sandboxed: `read_file`,
 `write_file`, and the other file tools act on the host, so a real-lane run also changes its cwd
-to a fresh scratch directory under the temporary folder and binds each throwaway conversation's
-workspace to it; relative and workspace-relative paths land there and the directory is removed
+to a fresh scratch directory under the temporary folder, binds each throwaway conversation's
+workspace to it, and routes the whole `~/.iris` home (memory, rules, config, plugins copied;
+models symlinked) at a copy inside it, so the memory tools cannot touch your real USER.md, fact
+store or skills; the run exits 3 with a warning if the real memory directory changed anyway; relative and workspace-relative paths land there and the directory is removed
 after the run. An absolute path would still reach the host, which is why prompt files are
 reviewed before they are committed. The record's `toolSandbox` field says which mode ran,
 and `compare` refuses to compare records whose modes differ. Records also keep each tool call's
