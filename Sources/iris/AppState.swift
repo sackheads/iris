@@ -12,7 +12,7 @@ enum ChatRole: String, Codable {
 struct ChatMessage: Identifiable, Codable, Sendable {
     var id = UUID()
     let role: ChatRole
-    let content: String
+    var content: String
     var attachments: [FileAttachment] = []
 
     enum CodingKeys: String, CodingKey {
@@ -667,6 +667,15 @@ class AppState {
         }
     }
     
+    /// Replaces one message's content in place (a streamed reply growing). No title generation;
+    /// the caller asks for a save only when the message is final.
+    func updateMessageContent(id: UUID, content: String, in conversationId: UUID, persist: Bool = false) {
+        guard let c = conversations.firstIndex(where: { $0.id == conversationId }),
+              let m = conversations[c].messages.firstIndex(where: { $0.id == id }) else { return }
+        conversations[c].messages[m].content = content
+        if persist { saveConversations() }
+    }
+
     func updateHistory(for conversationId: UUID, history: [Content]) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].history = history
