@@ -73,6 +73,11 @@ median and p90 wall-clock and median prompt tokens, the two ratios, the top five
 **unexpected tool-call rate**: turns that called any tool outside that list (bait prompts declare
 `[]`, controls declare their one tool, so an extra `read_file` next to a `set_workspace` counts).
 
+`first token ms` is the median time from request start to the first streamed token for rungs that
+streamed (4 and 5 when the streaming setting is on); it is `-` for the bare-call rungs and for
+fake-lane runs, whose clients replay whole responses. The header line `streaming:` records the
+setting; compare does not refuse across it because total wall time is comparable either way.
+
 `iris --perf compare <baseline.json> <run.json>` prints percent change per metric and flags any
 increase past 20% (`--threshold` to change) that is also at least 50 ms in absolute terms, so
 fake-lane turns of a few milliseconds cannot trip the gate on scheduler noise. Exit 1 means a regression was flagged; exit 2 means

@@ -103,4 +103,14 @@ struct PerfRecordTests {
         let data = try r.encoded()
         #expect(throws: PerfRecordError.self) { try PerfRunRecord.decode(from: data) }
     }
+
+    @Test("a model call record without firstTokenMs decodes with nil; one with it round-trips")
+    func firstTokenMsOptional() throws {
+        let legacy = Data(#"{"round":0,"model":"m","latencyMs":10,"returnedToolCalls":false}"#.utf8)
+        let decoded = try JSONDecoder().decode(ModelCallRecord.self, from: legacy)
+        #expect(decoded.firstTokenMs == nil)
+        let rec = ModelCallRecord(round: 1, model: "m", latencyMs: 20, promptTokens: nil, outputTokens: nil, returnedToolCalls: false, firstTokenMs: 3.5)
+        let round = try JSONDecoder().decode(ModelCallRecord.self, from: JSONEncoder().encode(rec))
+        #expect(round.firstTokenMs == 3.5)
+    }
 }

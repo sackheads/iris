@@ -51,10 +51,14 @@ public struct ModelCallRecord: Codable, Sendable, Equatable {
     public let promptTokens: Int?
     public let outputTokens: Int?
     public let returnedToolCalls: Bool
+    /// ms from request start to the first text delta or function call. Set only for native
+    /// streams; nil for replayed calls, calls that produced nothing, and records older than #131.
+    public var firstTokenMs: Double? = nil
 
-    public init(round: Int, model: String, latencyMs: Double, promptTokens: Int?, outputTokens: Int?, returnedToolCalls: Bool) {
+    public init(round: Int, model: String, latencyMs: Double, promptTokens: Int?, outputTokens: Int?, returnedToolCalls: Bool, firstTokenMs: Double? = nil) {
         self.round = round; self.model = model; self.latencyMs = latencyMs
         self.promptTokens = promptTokens; self.outputTokens = outputTokens; self.returnedToolCalls = returnedToolCalls
+        self.firstTokenMs = firstTokenMs
     }
 }
 
