@@ -149,3 +149,11 @@ enum LLMRetry {
         }
     }
 }
+
+/// A model stream that failed after the user had already seen part of the reply. `LLMRetry`
+/// retries only `APIError`/transport errors, so wrapping is what stops a retry that would
+/// duplicate or delete text already on screen (spec §4.4). The engine keeps the partial message
+/// and shows the underlying error after it.
+struct StreamInterruptedError: Error, Sendable {
+    let underlying: any Error
+}

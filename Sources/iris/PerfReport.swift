@@ -13,6 +13,7 @@ enum PerfReport {
         out.append("- provider: \(env.provider)  models: " + env.models.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ", "))
         out.append("- guards: vibecop \(env.vibecopEnabled ? "on (\(env.vibecopEngine))" : "off"), injection guard \(env.injectionGuardEnabled ? "on (\(env.promptGuardEngine))" : "off"), sandbox \(env.sandboxEnabled ? "on" : "off"), headless \(env.headless)")
         if let n = env.toolDeclarationCount { out.append("- tool declarations sent per call: \(n)") }
+        if let streaming = env.streaming { out.append("- streaming: \(streaming ? "on" : "off")") }
         if env.buildConfiguration == "debug" { out.append("- WARNING: debug build; timings are not comparable to release runs") }
         if env.gitDirty { out.append("- WARNING: dirty tree; the sha does not describe this code") }
         out.append("")
@@ -20,13 +21,14 @@ enum PerfReport {
         for s in r.scenarios {
             out.append("## \(s.name)  (\(s.category), \(s.lane))")
             out.append("")
-            out.append("| rung | n | median ms | p90 ms | prompt tokens | failed |")
-            out.append("|---|---|---|---|---|---|")
+            out.append("| rung | n | median ms | p90 ms | first token ms | prompt tokens | failed |")
+            out.append("|---|---|---|---|---|---|---|")
             for rung in s.rungs {
                 let ok = rung.repetitions.filter { $0.error == nil }
                 let failed = rung.repetitions.count - ok.count
                 let tokens = PerfStats.median(ok.flatMap { rep in (rep.modelCalls + rep.turns.flatMap(\.modelCalls)).compactMap { $0.promptTokens }.map(Double.init) })
-                out.append("| \(rung.rung) | \(ok.count) | \(fmt(rung.medianMs)) | \(fmt(rung.p90Ms)) | \(tokens.map { String(Int($0)) } ?? "-") | \(failed > 0 ? "\(failed) failed" : "-") |")
+                let firstToken = PerfStats.median(ok.flatMap { rep in (rep.modelCalls + rep.turns.flatMap(\.modelCalls)).compactMap(\.firstTokenMs) })
+                out.append("| \(rung.rung) | \(ok.count) | \(fmt(rung.medianMs)) | \(fmt(rung.p90Ms)) | \(firstToken.map { String(Int($0)) } ?? "-") | \(tokens.map { String(Int($0)) } ?? "-") | \(failed > 0 ? "\(failed) failed" : "-") |")
             }
             out.append("")
             var ratios: [String] = []

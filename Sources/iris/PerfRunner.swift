@@ -113,6 +113,7 @@ enum PerfSummarizer {
         // Successful repetitions only, consistent with the medians: a turn that then timed out
         // must not count toward the eagerness rate (#137).
         let fullTurns = rungs.first { $0.rung == 5 }?.repetitions.filter { $0.error == nil }.flatMap(\.turns) ?? []
+        let firstTokens = fullTurns.flatMap(\.modelCalls).compactMap(\.firstTokenMs)
         let withTools = fullTurns.filter { !$0.toolCalls.isEmpty }.count
         var byName: [String: Int] = [:]
         for call in fullTurns.flatMap(\.toolCalls) { byName[call.name, default: 0] += 1 }
@@ -141,6 +142,6 @@ enum PerfSummarizer {
                                    toolCallRate: fullTurns.isEmpty ? 0 : Double(withTools) / Double(fullTurns.count),
                                    toolCallsByName: byName,
                                    unexpectedToolCallRate: unexpectedRate, unexpectedToolCallsByName: unexpectedByName,
-                                   missedExpectedToolRate: missedRate)
+                                   missedExpectedToolRate: missedRate, medianFirstTokenMs: PerfStats.median(firstTokens))
     }
 }

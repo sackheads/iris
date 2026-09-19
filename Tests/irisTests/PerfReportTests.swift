@@ -56,7 +56,24 @@ struct PerfReportTests {
         let rung = PerfRungResult(rung: 1, repetitions: [rep], medianMs: 100, p90Ms: 100)
         r.scenarios[0].rungs.append(rung)
         let text = PerfReport.render(r)
-        #expect(text.contains("| 1 | 1 | 100.0 | 100.0 | 42 | - |"))
+        #expect(text.contains("| 1 | 1 | 100.0 | 100.0 | - | 42 | - |"))
+    }
+
+    @Test("the first-token column is the median over the rung's successful turns, or a dash")
+    func firstTokenColumn() throws {
+        var r = PerfRecordTests.sampleRecord()
+        r.environment.streaming = true
+        let call1 = ModelCallRecord(round: 0, model: "m", latencyMs: 100, promptTokens: nil, outputTokens: nil, returnedToolCalls: false, firstTokenMs: 100)
+        let call2 = ModelCallRecord(round: 0, model: "m", latencyMs: 100, promptTokens: nil, outputTokens: nil, returnedToolCalls: false, firstTokenMs: 300)
+        let rep1 = PerfRepetition(index: 0, coldStart: true, wallClockMs: 100, turns: [], modelCalls: [call1], error: nil)
+        let rep2 = PerfRepetition(index: 1, coldStart: false, wallClockMs: 100, turns: [], modelCalls: [call2], error: nil)
+        let streamedRung = PerfRungResult(rung: 4, repetitions: [rep1, rep2], medianMs: 999, p90Ms: 999)
+        r.scenarios[0].rungs.append(streamedRung)
+        // Rung 5 from sampleRecord() has one modelCall with no firstTokenMs, so its row is "- ".
+        let text = PerfReport.render(r)
+        #expect(text.contains("| 200 |"))
+        #expect(text.contains("| - |"))
+        #expect(text.contains("- streaming: on"))
     }
 
     @Test("top spans come from the highest rung number even when rungs are unsorted")

@@ -1,7 +1,8 @@
 import Foundation
 
 struct OpenAIClient {
-    static func generateContent(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "") async throws -> GeminiResponse {
+    /// The full request for one call. `stream` adds the provider's streaming switches and nothing else.
+    static func makeURLRequest(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "", stream: Bool) throws -> URLRequest {
         guard !apiKey.isEmpty else {
             throw URLError(.userAuthenticationRequired)
         }
@@ -159,6 +160,11 @@ struct OpenAIClient {
             }
         }
         
+        if stream {
+            body["stream"] = true
+            body["stream_options"] = ["include_usage": true]
+        }
+
         var endpointUrl = "https://api.openai.com/v1/chat/completions"
         if !baseURL.isEmpty {
             if baseURL.hasSuffix("/chat/completions") {
@@ -179,6 +185,18 @@ struct OpenAIClient {
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
         
         LLMRequestPolicy.apply(to: &urlRequest)
+        return urlRequest
+    }
+
+    /// One streamed call: the same request with the streaming switches on, mapped to stream events.
+    static func streamContent(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "") -> AsyncThrowingStream<LLMStreamEvent, Error> {
+        LLMStreaming.stream(provider: "OpenAI", mapper: OpenAIStreamMapper()) {
+            try makeURLRequest(request: request, model: model, apiKey: apiKey, baseURL: baseURL, stream: true)
+        }
+    }
+
+    static func generateContent(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "") async throws -> GeminiResponse {
+        let urlRequest = try makeURLRequest(request: request, model: model, apiKey: apiKey, baseURL: baseURL, stream: false)
         let (data, response) = try await URLSession.shared.data(for: urlRequest)
         
         guard let httpResponse = response as? HTTPURLResponse else {

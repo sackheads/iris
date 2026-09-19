@@ -27,7 +27,8 @@ extension PerfEnvironment {
             sandboxEnabled: config.enableSandboxing,
             headless: headless,
             toolDeclarationCount: toolDeclarationCount,
-            toolSandbox: toolSandbox)
+            toolSandbox: toolSandbox,
+            streaming: config.streamResponses)
     }
 
     /// Run git in `root` and return trimmed stdout; nil if git is missing or exits non-zero.

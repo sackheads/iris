@@ -33,6 +33,12 @@ class ConfigManager: @unchecked Sendable {
         didSet { ConfigManager.store.set(copyChatsAsMarkdown, forKey: "COPY_CHATS_AS_MARKDOWN") }
     }
 
+    /// Show the reply while the model is still writing it (spec §7). Off means whole replies,
+    /// the pre-streaming behaviour.
+    var streamResponses: Bool {
+        didSet { ConfigManager.store.set(streamResponses, forKey: "STREAM_RESPONSES") }
+    }
+
     var defaultEmojiSkinTone: Int {
         didSet { ConfigManager.store.set(defaultEmojiSkinTone, forKey: "DEFAULT_EMOJI_SKIN_TONE") }
     }
@@ -218,6 +224,12 @@ class ConfigManager: @unchecked Sendable {
             self.copyChatsAsMarkdown = ConfigManager.store.bool(forKey: "COPY_CHATS_AS_MARKDOWN")
         } else {
             self.copyChatsAsMarkdown = true
+        }
+
+        if ConfigManager.store.object(forKey: "STREAM_RESPONSES") != nil {
+            self.streamResponses = ConfigManager.store.bool(forKey: "STREAM_RESPONSES")
+        } else {
+            self.streamResponses = true
         }
 
         self.defaultEmojiSkinTone = ConfigManager.store.object(forKey: "DEFAULT_EMOJI_SKIN_TONE") as? Int ?? SkinTone.none.rawValue

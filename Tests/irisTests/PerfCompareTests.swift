@@ -159,4 +159,14 @@ struct PerfCompareTests {
         let legacy = PerfCompare.compare(baseline: record(medianMs: 1000), current: record(medianMs: 1000), threshold: 0.2)
         #expect(legacy.refusal == nil, "records that predate the field still compare")
     }
+
+    @Test("a streaming flag mismatch is not a refusal")
+    func streamingMismatchCompares() {
+        var baseline = record(medianMs: 1000)
+        var current = record(medianMs: 1000)
+        baseline.environment.streaming = nil
+        current.environment.streaming = true
+        let comparison = PerfCompare.compare(baseline: baseline, current: current, threshold: 0.2)
+        #expect(comparison.refusal == nil)
+    }
 }
