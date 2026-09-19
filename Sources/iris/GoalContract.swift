@@ -56,18 +56,25 @@ struct GoalContract: Codable, Equatable, Sendable {
     /// Slice D1 — how many times the gate has refused completion for this contract. Reset when a
     /// contract is locked.
     var gateAttempts: Int = 0
+    /// Slice D2 — the goal is paused waiting for the user to judge its `humanJudged` criteria.
+    /// Deliberately separate from `checkpointStatus`: that drives ladder UI in a dozen places, and
+    /// `ChatView` suppresses the completion chip while it is `.pausedForReview` — which is exactly
+    /// where this slice's Accept/Reject buttons live (spec §5).
+    var awaitingHumanJudgement: Bool = false
 
     init(id: UUID = UUID(), objective: String, criteria: [Criterion], outOfScope: [String] = [],
          stopBefore: [String] = [], assumptions: [String] = [], changeLog: [ContractChange] = [],
          milestones: [Milestone] = [], currentMilestone: Int = 0,
          checkpointStatus: CheckpointStatus = .running, state: ContractState = .draft,
-         workspace: String? = nil, waivers: [UUID: String] = [:], gateAttempts: Int = 0) {
+         workspace: String? = nil, waivers: [UUID: String] = [:], gateAttempts: Int = 0,
+         awaitingHumanJudgement: Bool = false) {
         self.id = id; self.objective = objective; self.criteria = criteria
         self.outOfScope = outOfScope; self.stopBefore = stopBefore; self.assumptions = assumptions
         self.changeLog = changeLog; self.milestones = milestones; self.currentMilestone = currentMilestone
         self.checkpointStatus = checkpointStatus; self.state = state
         self.workspace = workspace
         self.waivers = waivers; self.gateAttempts = gateAttempts
+        self.awaitingHumanJudgement = awaitingHumanJudgement
     }
 
     /// Custom decoder so the ladder fields (added in slice B1) are `decodeIfPresent`-defaulted:
@@ -91,9 +98,15 @@ struct GoalContract: Codable, Equatable, Sendable {
         workspace = try c.decodeIfPresent(String.self, forKey: .workspace)
         waivers = try c.decodeIfPresent([UUID: String].self, forKey: .waivers) ?? [:]
         gateAttempts = try c.decodeIfPresent(Int.self, forKey: .gateAttempts) ?? 0
+        awaitingHumanJudgement = try c.decodeIfPresent(Bool.self, forKey: .awaitingHumanJudgement) ?? false
     }
 
     var isLocked: Bool { state == .locked }
+
+    /// True when the goal loop must stay quiet: a checkpoint pause (B1) or a judgement pause (D2).
+    /// Only loop-control sites should use this — every UI reader of `checkpointStatus` is asking a
+    /// ladder question and must keep asking it.
+    var isPaused: Bool { checkpointStatus == .pausedForReview || awaitingHumanJudgement }
 
     mutating func lock() { state = .locked }
 

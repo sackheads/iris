@@ -133,7 +133,7 @@ actor IrisEngine {
                 guard let conv = localState?.conversations.first(where: { $0.id == convId }),
                       conv.activeGoal != nil,
                       conv.goalContract?.isLocked == true,
-                      conv.goalContract?.checkpointStatus != .pausedForReview,
+                      conv.goalContract?.isPaused != true,
                       conv.goalIterationCount < ConfigManager.shared.maxGoalIterations
                 else { return false }
                 return true
@@ -926,10 +926,10 @@ actor IrisEngine {
             return (nil, 0)
         }
         
-        let pausedForReview = await MainActor.run {
-            localState?.conversations.first(where: { $0.id == conversationId })?.goalContract?.checkpointStatus == .pausedForReview
+        let paused = await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId })?.goalContract?.isPaused == true
         }
-        if let _ = activeGoalResult.0, !pausedForReview {
+        if let _ = activeGoalResult.0, !paused {
             if activeGoalResult.1 >= ConfigManager.shared.maxGoalIterations {
                 await softStopWithSummary(conversationId: conversationId,
                                           reason: "reached the \(ConfigManager.shared.maxGoalIterations)-iteration limit")
