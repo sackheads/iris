@@ -108,6 +108,18 @@ struct AnthropicStreamMapperTests {
     @Test("a malformed chunk throws instead of being skipped")
     func malformedChunkThrows() {
         var m = AnthropicStreamMapper()
-        #expect(throws: (any Error).self) { try m.handle(SSEEvent(event: nil, data: "{not json")) }
+        #expect(throws: APIError.self) { try m.handle(SSEEvent(event: nil, data: "{not json")) }
+        do { _ = try m.handle(SSEEvent(event: nil, data: "{not json")) }
+        catch let e as APIError { #expect(e.message == "Anthropic stream: unexpected payload") }
+        catch { Issue.record("wrong error type \(error)") }
+    }
+
+    @Test("a valid-JSON-but-non-object payload throws the same unexpected-payload error")
+    func nonObjectPayloadThrows() {
+        var m = AnthropicStreamMapper()
+        #expect(throws: APIError.self) { try m.handle(SSEEvent(event: nil, data: "[1,2]")) }
+        do { _ = try m.handle(SSEEvent(event: nil, data: "[1,2]")) }
+        catch let e as APIError { #expect(e.message == "Anthropic stream: unexpected payload") }
+        catch { Issue.record("wrong error type \(error)") }
     }
 }

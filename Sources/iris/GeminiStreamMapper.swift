@@ -8,7 +8,12 @@ struct GeminiStreamMapper: StreamMapper {
     private var blockReason: String?
 
     mutating func handle(_ sse: SSEEvent) throws -> [LLMStreamEvent] {
-        let chunk = try JSONDecoder().decode(GeminiResponse.self, from: Data(sse.data.utf8))
+        let chunk: GeminiResponse
+        do {
+            chunk = try JSONDecoder().decode(GeminiResponse.self, from: Data(sse.data.utf8))
+        } catch is DecodingError {
+            throw APIError(message: "Gemini stream: unexpected payload")
+        }
         var out: [LLMStreamEvent] = []
         if let candidate = chunk.candidates?.first {
             for part in candidate.content?.parts ?? [] {

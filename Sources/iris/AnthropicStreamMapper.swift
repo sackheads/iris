@@ -11,7 +11,8 @@ struct AnthropicStreamMapper: StreamMapper {
     private var stopped = false
 
     mutating func handle(_ sse: SSEEvent) throws -> [LLMStreamEvent] {
-        guard let json = try JSONSerialization.jsonObject(with: Data(sse.data.utf8)) as? [String: Any] else {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(sse.data.utf8)),
+              let json = object as? [String: Any] else {
             throw APIError(message: "Anthropic stream: unexpected payload")
         }
         let type = (json["type"] as? String) ?? sse.event ?? ""

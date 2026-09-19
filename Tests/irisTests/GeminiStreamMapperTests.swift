@@ -53,6 +53,9 @@ struct GeminiStreamMapperTests {
     @Test("a malformed chunk throws instead of being skipped")
     func malformedChunkThrows() {
         var m = GeminiStreamMapper()
-        #expect(throws: (any Error).self) { try m.handle(SSEEvent(event: nil, data: "{not json")) }
+        #expect(throws: APIError.self) { try m.handle(SSEEvent(event: nil, data: "{not json")) }
+        do { _ = try m.handle(SSEEvent(event: nil, data: "{not json")) }
+        catch let e as APIError { #expect(e.message == "Gemini stream: unexpected payload") }
+        catch { Issue.record("wrong error type \(error)") }
     }
 }
