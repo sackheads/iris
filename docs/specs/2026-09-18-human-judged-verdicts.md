@@ -2,7 +2,7 @@
 
 * **Issues**: [#9](https://github.com/sackheads/iris/issues/9) (deterministic gates) — the **human half**. Builds on **D1** ([2026-09-14-deterministic-done-gates.md](2026-09-14-deterministic-done-gates.md)), **C** ([2026-07-29-goal-drift-evaluator.md](2026-07-29-goal-drift-evaluator.md)), and **A** ([2026-07-28-goal-contract.md](2026-07-28-goal-contract.md)).
 * **Date**: 2026-09-18
-* **Status**: Approved (design)
+* **Status**: Implemented (2026-09-18). The design below is as-built; deviations are noted in §12.
 
 ## 1. Overview
 
@@ -119,3 +119,14 @@ A rejection deliberately does **not** consume a gate attempt either: the agent h
 With D2, every criterion kind is inside the gate: `executable` and `qualitative` through the grader, `humanJudged` through the user. Remaining:
 - **D3 — checkpoint gating:** auto-advance on an all-met verdict, deferred here and by B1 §2 and B4 §2.
 - **E — the ratchet**, **F — ground-truth progress view** — independent, per the slice-A roadmap.
+
+## 12. As-built notes
+
+No deviations. The implementation across Tasks 1-6 matches this design exactly:
+
+- `awaitingHumanJudgement` and `isPaused` on `GoalContract` are exactly as specified in §5, with the `decodeIfPresent`-defaulted decode (AGENTS.md invariant 1).
+- `isPaused` replaces `checkpointStatus == .pausedForReview` at precisely the two sites named in §5 — the auto-reprompt guard and the resume-on-restart guard in `iris.swift` — and nowhere else; every ladder-UI reader (`ChatView`, `GoalContractPanel`) still reads `checkpointStatus == .pausedForReview` directly.
+- `recordHumanJudgement` and `resolveJudgementIfComplete` in `AppState.swift` implement §6 and §7 verbatim: the grader is never re-run on resume, a rejection does not consume a gate attempt, and the verdict is stamped with `method == .human` so the row renders "met — your judgement" rather than a bare checkmark.
+- `beginJudgementPause` leaves `gateAttempts` untouched, per §4.
+- No `judge_criterion` (or any) tool was added; §2's "no new tool" holds, and `HumanJudgementScopeTests.noJudgementTool` drives a real engine turn to confirm no tool name offered to the model contains "judge".
+- `HumanJudgementScopeTests.checkpointPauseIsUnchanged` confirms the two pauses stay distinct: a checkpoint pause leaves `awaitingHumanJudgement == false` while still satisfying `isPaused`.
