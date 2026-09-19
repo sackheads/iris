@@ -26,10 +26,16 @@ final class ParallelToolExecutionTests: XCTestCase {
         let savedPrimaryProvider = ConfigManager.shared.primaryProvider
         let savedMediumModel = ConfigManager.shared.anthropicModelMedium
         let savedAPIKey = ConfigManager.shared.anthropicAPIKey
+        // This mock answers a plain `messages` call with one JSON body; it does not speak SSE.
+        // The engine streams by default, so ask for the non-streaming path — what is under test
+        // here is the ordering of parallel tool results, which is the same either way.
+        let savedStreaming = ConfigManager.shared.streamResponses
+        ConfigManager.shared.streamResponses = false
         defer {
             ConfigManager.shared.primaryProvider = savedPrimaryProvider
             ConfigManager.shared.anthropicModelMedium = savedMediumModel
             ConfigManager.shared.anthropicAPIKey = savedAPIKey
+            ConfigManager.shared.streamResponses = savedStreaming
         }
 
         // We will mock the LLM to return TWO tool calls in its first response.

@@ -673,6 +673,8 @@ actor IrisEngine {
             // Cooperative cancellation: bail out at turn boundaries if this task was cancelled
             // (e.g. the conversation was deleted or the goal was stopped mid-turn).
             if Task.isCancelled { break }
+            // One streamer per model round: it owns the agent row this round grows in place.
+            let streamer = makeStreamer(conversationId: conversationId)
             do {
                 let beforeModelDecision = await HookManager.shared.fireBeforeModel(request: request, useSandbox: hooksSandbox)
                 if case .block(let reason) = beforeModelDecision {
@@ -695,15 +697,17 @@ actor IrisEngine {
                 // its own span so retry backoff sleeps are not counted as model time.
                 let requestToSend = activeRequest
                 let modelCallStart = CFAbsoluteTimeGetCurrent()
-                let response = try await LLMRetry.run(delays: retryDelays, onRetry: { error, attempt, delay in
+                let streamed = ConfigManager.shared.streamResponses && client.supportsStreaming
+                let outcome = try await LLMRetry.run(delays: retryDelays, onRetry: { error, attempt, delay in
                     await self.pushToUI(role: .system,
                                         text: "[retry] \(error.message); retrying in \(Self.formatDelay(delay)) (attempt \(attempt) of \(self.retryDelays.count))",
                                         conversationId: conversationId)
                 }) {
                     try await measure(.primaryLLM) {
-                        try await self.client.generateContent(request: requestToSend, tier: modelTier)
+                        try await self.consumeModelStream(request: requestToSend, streamed: streamed, streamer: streamer)
                     }
                 }
+                let response = outcome.response
                 PerformanceProfiler.shared.recordModelCall(
                     turnID: PerformanceProfiler.currentTurnID,
                     ModelCallRecord(
@@ -712,7 +716,8 @@ actor IrisEngine {
                         latencyMs: (CFAbsoluteTimeGetCurrent() - modelCallStart) * 1000.0,
                         promptTokens: response.usageMetadata?.promptTokenCount,
                         outputTokens: response.usageMetadata?.candidatesTokenCount,
-                        returnedToolCalls: response.candidates?.first?.content?.parts.contains { $0.functionCall != nil } ?? false))
+                        returnedToolCalls: response.candidates?.first?.content?.parts.contains { $0.functionCall != nil } ?? false,
+                        firstTokenMs: streamed ? outcome.firstTokenMs : nil))
                 modelRound += 1
                 await MainActor.run {
                     localState?.updateSubagentStatus(id: conversationId, status: "Executing...")
@@ -720,6 +725,7 @@ actor IrisEngine {
                 
                 let afterModelDecision = await HookManager.shared.fireAfterModel(response: response, useSandbox: hooksSandbox)
                 if case .block(let reason) = afterModelDecision {
+                    _ = await streamer.settle()
                     await pushToUI(role: .system, text: "Hook AfterModel blocked execution: \(reason)", conversationId: conversationId)
                     break
                 }
@@ -734,11 +740,15 @@ actor IrisEngine {
                 // No content is an error pill with the provider's stated reason, not something
                 // Iris "said" and not a decode failure (#136).
                 if let reason = activeResponse.emptyReason {
+                    _ = await streamer.settle()
                     let headline = "\(ConfigManager.shared.primaryProvider) returned no content (\(reason))"
                     await pushToUI(role: .system, text: LLMErrorMessage.encode(LLMErrorDisplay(headline: headline, detail: nil)), conversationId: conversationId)
                     break
                 }
-                guard let responseContent = activeResponse.candidates?.first?.content else { break }
+                guard let responseContent = activeResponse.candidates?.first?.content else {
+                    _ = await streamer.settle()
+                    break
+                }
                 
                 let modelContent = Content(role: "model", parts: responseContent.parts)
                 await MainActor.run { 
@@ -757,7 +767,9 @@ actor IrisEngine {
                 
                 for part in responseContent.parts {
                     if let responseText = part.text {
-                        await pushToUI(role: .agent, text: responseText, conversationId: conversationId)
+                        // The assembler yields one text part, so this runs once; a hook that
+                        // rewrote the text has the last word over what streamed.
+                        await streamer.finish(responseText)
                         
                         let afterAgentDecision = await HookManager.shared.fireAfterAgent(output: responseText, useSandbox: hooksSandbox)
                         if case .block(let reason) = afterAgentDecision {
@@ -896,6 +908,13 @@ actor IrisEngine {
                 // when this task really was cancelled; otherwise it is shown like any failure.
                 let cancelled = error is CancellationError
                     || ((error as? URLError)?.code == .cancelled && Task.isCancelled)
+                // Whatever streamed stays on screen and goes into history: the user saw it, so
+                // the model should know it said it (spec §6).
+                let partial = await streamer.settle()
+                if !partial.isEmpty {
+                    let content = Content(role: "model", parts: [Part(text: partial)])
+                    await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
+                }
                 // Headline only: provider bodies can be huge, and the full body is already on
                 // the console. The pill carries a capped copy behind a disclosure.
                 let display = LLMErrorMessage.display(for: error)
@@ -1335,6 +1354,60 @@ actor IrisEngine {
         return sanitizedResult
     }
     
+    /// One model round's assembled result plus when its first token arrived (spec §4).
+    struct StreamOutcome {
+        let response: GeminiResponse
+        let firstTokenMs: Double?
+    }
+
+    /// One attempt at the model call: opens the native stream or a replayed plain call, feeds
+    /// text to the streamer as it arrives, and returns the assembled response. A failure after
+    /// the first token is wrapped in `StreamInterruptedError` so `LLMRetry` lets it through.
+    func consumeModelStream(request: GeminiRequest, streamed: Bool, streamer: MessageStreamer) async throws -> StreamOutcome {
+        let start = MonotonicClock.nowMs()
+        var assembler = StreamAssembler()
+        let client = self.client, tier = self.modelTier
+        let stream = streamed
+            ? client.streamContent(request: request, tier: tier)
+            : LLMStreamEvent.replay { try await client.generateContent(request: request, tier: tier) }
+        do {
+            for try await event in stream {
+                assembler.apply(event, now: MonotonicClock.nowMs())
+                if case .textDelta(let delta) = event { await streamer.append(delta) }
+            }
+            // A cancelled consumer sees the stream end early instead of throwing; make it a Stop.
+            try Task.checkCancellation()
+        } catch {
+            if assembler.firstTokenAt != nil, !(error is CancellationError), !Task.isCancelled {
+                throw StreamInterruptedError(underlying: error)
+            }
+            throw error
+        }
+        return StreamOutcome(response: assembler.response(), firstTokenMs: assembler.firstTokenAt.map { $0 - start })
+    }
+
+    /// The streamer for one model round: it mints the message id, opens the agent row on the
+    /// first delta and grows it in place from there.
+    func makeStreamer(conversationId: UUID) -> MessageStreamer {
+        MessageStreamer(
+            open: { [weak self] id, text in
+                guard let self else { return }
+                await self.pushToUI(role: .agent, text: text, conversationId: conversationId, id: id)
+                let localState = await self.state
+                await MainActor.run { localState?.updateSubagentStatus(id: conversationId, status: "Responding...") }
+            },
+            update: { [weak self] id, text, isFinal in
+                await self?.updateStreamedMessage(id: id, content: text, isFinal: isFinal, conversationId: conversationId)
+            })
+    }
+
+    func updateStreamedMessage(id: UUID, content: String, isFinal: Bool, conversationId: UUID) async {
+        let localState = state
+        await MainActor.run {
+            localState?.updateMessageContent(id: id, content: content, in: conversationId, persist: isFinal)
+        }
+    }
+
     func pushToUI(role: ChatRole, text: String, conversationId: UUID, id: UUID? = nil) async {
         let localState = state
         await MainActor.run {
