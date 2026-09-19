@@ -64,7 +64,7 @@ struct StreamingEngineTests {
         app.autoApproveTools = true
         let id = UUID()
         app.createNewConversation(id: id)
-        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: retryDelays)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: retryDelays, streamResponses: true)
         return (app, engine, id)
     }
     private func conv(_ app: AppState, _ id: UUID) -> Conversation { app.conversations.first { $0.id == id }! }
