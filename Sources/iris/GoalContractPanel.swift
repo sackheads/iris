@@ -630,7 +630,7 @@ enum CompletionSelfReportMatching {
 /// When `evaluation` is provided the chip expands to a two-column drift view.
 struct CompletionReportChip: View {
     var state: AppState
-    let conversationId: UUID
+    let conversation: Conversation
     /// Self-report JSON from `goal_complete`'s `criteria_status`. May be nil when the model
     /// omitted `criteria_status` but the grader evaluation is still present.
     let report: JSONValue?
@@ -643,8 +643,8 @@ struct CompletionReportChip: View {
         // appeared at goal_complete (#62).
         ScrollView {
             CompletionReportSection(report: report, onDismiss: {
-                state.dismissCompletionReport(for: conversationId)
-            }, evaluation: evaluation)
+                state.dismissCompletionReport(for: conversation.id)
+            }, evaluation: evaluation, conversation: conversation, state: state)
         }
         .frame(maxHeight: 320)
         .background(.thinMaterial)
@@ -671,6 +671,23 @@ struct CompletionReportSection: View {
     var onDismiss: (() -> Void)? = nil
     /// Optional grader result. When nil the section falls back to single-column self-report.
     var evaluation: GoalEvaluation? = nil
+    /// Slice D2 — supplied only by `CompletionReportChip`. nil for the checkpoint pause chip's use
+    /// of this section, which must stay read-only (accept/reject belongs on the finished report).
+    var conversation: Conversation? = nil
+    var state: AppState? = nil
+
+    /// Accept/reject handlers for one criterion, or nil when this section is read-only: either it
+    /// has no conversation/state (the checkpoint pause chip), or the goal is not awaiting human
+    /// judgement (a finished goal's report must not let the user "re-judge" it — recordHumanJudgement
+    /// would just refuse, leaving buttons that visibly do nothing).
+    private func judgementHandlers(for criterionId: UUID) -> (accept: () -> Void, reject: () -> Void)? {
+        guard let conversation, let state,
+              conversation.goalContract?.awaitingHumanJudgement == true else { return nil }
+        return (
+            accept: { state.recordHumanJudgement(for: conversation.id, criterionId: criterionId, accepted: true) },
+            reject: { state.recordHumanJudgement(for: conversation.id, criterionId: criterionId, accepted: false) }
+        )
+    }
 
     private var items: [CompletionReportItem] {
         guard let report, case .array(let elements) = report else { return [] }
@@ -749,7 +766,9 @@ struct CompletionReportSection: View {
                                 selfReportStatus: selfReportStatus(for: verdict.criterionText),
                                 evaluationStatus: evaluation.status,
                                 reportPresent: report != nil,
-                                waiverReason: evaluation.waivers[verdict.criterionId]
+                                waiverReason: evaluation.waivers[verdict.criterionId],
+                                onAccept: judgementHandlers(for: verdict.criterionId)?.accept,
+                                onReject: judgementHandlers(for: verdict.criterionId)?.reject
                             )
                         }
                     }
@@ -798,6 +817,9 @@ private struct DriftCriterionRow: View {
     /// Slice D1 — the agent's stated reason for waiving this criterion, when it waived one. Shown
     /// BESIDE the grader's verdict, never in place of it: a waiver does not erase evidence.
     var waiverReason: String? = nil
+    /// Slice D2 — supplied only by the completion report while the goal awaits judgement.
+    var onAccept: (() -> Void)? = nil
+    var onReject: (() -> Void)? = nil
 
     /// True when the self-report says the criterion is met but the grader disagrees. Requires a
     /// real grade: a `.failed` grader produced placeholders, not a disagreement (#54).
@@ -888,6 +910,25 @@ private struct DriftCriterionRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.top, 1)
+            }
+
+            if let label = verdict.humanJudgementLabel {
+                Text(label)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if verdict.verdict == .humanPending, let onAccept, let onReject {
+                HStack(spacing: 8) {
+                    Button("Accept", action: onAccept)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.green)
+                    Button("Reject", action: onReject)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.orange)
+                }
+                .font(.caption.bold())
+                .padding(.top, 2)
             }
 
             if let waiverReason {

@@ -74,6 +74,20 @@ struct GoalEvaluation: Codable, Equatable, Sendable {
     }
 }
 
+extension CriterionVerdict {
+    /// How to mark a verdict the USER gave, so it is never mistaken for grader-verified evidence
+    /// (spec §6). nil for anything the grader decided, and for one still awaiting judgement — the
+    /// buttons speak for that.
+    var humanJudgementLabel: String? {
+        guard method == .human else { return nil }
+        switch verdict {
+        case .met:    return "met — your judgement"
+        case .notMet: return "not met — your judgement"
+        default:      return nil
+        }
+    }
+}
+
 extension GateOutcome {
     /// One line for the completion chip, or nil when there is nothing to warn about. Kept out of
     /// the view so it can be tested without a SwiftUI harness.
