@@ -835,7 +835,42 @@ class AppState {
         eval.criteria[vIdx].method = .human
         conversations[idx].lastGoalEvaluation = eval
         saveConversations()
+        resolveJudgementIfComplete(for: conversationId)
         return true
+    }
+
+    /// Once nothing is `human_pending`, act on what the user decided (spec §7).
+    ///
+    /// The grader is deliberately NOT re-run: its verdicts are already in hand, and a second run
+    /// would spend minutes re-deriving them AND overwrite the user's judgement with a fresh
+    /// `human_pending`.
+    private func resolveJudgementIfComplete(for conversationId: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              conversations[idx].goalContract?.awaitingHumanJudgement == true,
+              let eval = conversations[idx].lastGoalEvaluation,
+              !eval.criteria.contains(where: { $0.verdict == .humanPending })
+        else { return }
+
+        conversations[idx].goalContract?.awaitingHumanJudgement = false
+        let rejected = eval.criteria.filter { $0.verdict == .notMet }
+
+        if rejected.isEmpty {
+            // Everything the user was asked about passed, and nothing else was blocking when we
+            // paused — so the gate is satisfied.
+            let waivers = conversations[idx].goalContract?.waivers ?? [:]
+            finishGatedGoal(for: conversationId, outcome: .passed, waivers: waivers)
+            clearGoal(for: conversationId)
+            appendMessage(role: .system, content: "Goal complete — your judgement resolved the last criteria.",
+                          to: conversationId)
+        } else {
+            // A rejection is something the agent CAN act on. Hand it back with the reasons named.
+            let names = rejected.map { "- \($0.criterionText)" }.joined(separator: "\n")
+            saveConversations()
+            resumeGoalLoop(for: conversationId,
+                           steer: "You did not meet these, in the user's judgement:\n\(names)")
+            return
+        }
+        saveConversations()
     }
 
     /// Park the goal until the user judges its `humanJudged` criteria (spec §4). Deliberately does
