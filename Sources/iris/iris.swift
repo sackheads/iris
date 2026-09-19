@@ -765,17 +765,27 @@ actor IrisEngine {
                 
                 var hasFunctionCall = false
                 
+                // The round's text is collected and written once, after the per-part hooks: the
+                // assembler yields a single text part, but an AfterModel hook may have stripped it
+                // or split it, and the streamed row must be finalized exactly once either way.
+                // The hook-modified text is what gets written, so a rewriting hook has the last word.
+                var responseTexts: [String] = []
                 for part in responseContent.parts {
                     if let responseText = part.text {
-                        // The assembler yields one text part, so this runs once; a hook that
-                        // rewrote the text has the last word over what streamed.
-                        await streamer.finish(responseText)
-                        
+                        responseTexts.append(responseText)
+
                         let afterAgentDecision = await HookManager.shared.fireAfterAgent(output: responseText, useSandbox: hooksSandbox)
                         if case .block(let reason) = afterAgentDecision {
                             await pushToUI(role: .system, text: "Hook AfterAgent blocked execution: \(reason)", conversationId: conversationId)
                         }
                     }
+                }
+                // Joined the way two parts used to read as two consecutive messages.
+                let roundText = responseTexts.joined(separator: "\n")
+                if !roundText.isEmpty {
+                    await streamer.finish(roundText)
+                } else {
+                    _ = await streamer.settle()
                 }
                 
                 var toolCalls: [FunctionCall] = []
@@ -909,7 +919,10 @@ actor IrisEngine {
                 let cancelled = error is CancellationError
                     || ((error as? URLError)?.code == .cancelled && Task.isCancelled)
                 // Whatever streamed stays on screen and goes into history: the user saw it, so
-                // the model should know it said it (spec §6).
+                // the model should know it said it (spec §6). The round's single final write
+                // happens after the last statement that can throw, so this only ever settles a
+                // round that never finished — a `streamerClosed` flag here is diagnosed by the
+                // compiler as always false. `settle` is idempotent regardless.
                 let partial = await streamer.settle()
                 if !partial.isEmpty {
                     let content = Content(role: "model", parts: [Part(text: partial)])

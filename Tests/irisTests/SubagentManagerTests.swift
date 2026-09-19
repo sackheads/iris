@@ -3,16 +3,10 @@ import XCTest
 
 @MainActor
 final class SubagentManagerTests: XCTestCase {
-
-    /// These mocks answer a plain `messages` call with one JSON body; they do not speak SSE.
-    /// The engine streams by default, so these tests run on the non-streaming path.
-    private var savedStreaming = true
-
+    
     override func setUp() {
         super.setUp()
         URLProtocol.registerClass(MockURLProtocol.self)
-        savedStreaming = ConfigManager.shared.streamResponses
-        ConfigManager.shared.streamResponses = false
         // Clear user defaults for clean state
         UserDefaults.standard.removeObject(forKey: "iris_conversations")
         UserDefaults.standard.set("Anthropic", forKey: "PRIMARY_PROVIDER")
@@ -25,7 +19,6 @@ final class SubagentManagerTests: XCTestCase {
     override func tearDown() {
         URLProtocol.unregisterClass(MockURLProtocol.self)
         MockURLProtocol.handler = nil
-        ConfigManager.shared.streamResponses = savedStreaming
         super.tearDown()
     }
     
