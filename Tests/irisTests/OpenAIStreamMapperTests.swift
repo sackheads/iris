@@ -77,4 +77,10 @@ struct OpenAIStreamMapperTests {
         _ = try m.handle(SSEEvent(event: nil, data: #"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"t","arguments":"{oops"}}]},"finish_reason":"tool_calls"}]}"#))
         #expect(throws: (any Error).self) { try m.handle(SSEEvent(event: nil, data: "[DONE]")) }
     }
+
+    @Test("a malformed chunk throws instead of being skipped")
+    func malformedChunkThrows() {
+        var m = OpenAIStreamMapper()
+        #expect(throws: (any Error).self) { try m.handle(SSEEvent(event: nil, data: "{not json")) }
+    }
 }

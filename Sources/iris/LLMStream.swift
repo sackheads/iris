@@ -66,6 +66,15 @@ protocol StreamMapper: Sendable {
     mutating func finish() throws -> [LLMStreamEvent]
 }
 
+extension StreamMapper {
+    /// Provider tool-argument JSON as the engine's argument dictionary. An empty buffer is `{}`;
+    /// anything that does not parse throws, so a truncated call is never dispatched.
+    static func decodeArguments(_ raw: String) throws -> [String: JSONValue] {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try JSONDecoder().decode([String: JSONValue].self, from: Data((trimmed.isEmpty ? "{}" : trimmed).utf8))
+    }
+}
+
 /// Folds stream events into the `GeminiResponse` the rest of a turn consumes (spec §4.1).
 struct StreamAssembler: Sendable {
     private(set) var text = ""

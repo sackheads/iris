@@ -18,7 +18,9 @@ struct OpenAIStreamMapper: StreamMapper {
             ended = true
             return try endEvents()
         }
-        guard let json = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { return [] }
+        guard let json = try JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else {
+            throw APIError(message: "OpenAI stream: unexpected payload")
+        }
         var out: [LLMStreamEvent] = []
         if let choice = (json["choices"] as? [[String: Any]])?.first {
             if let delta = choice["delta"] as? [String: Any] {
@@ -54,8 +56,7 @@ struct OpenAIStreamMapper: StreamMapper {
         let signature = reasoning.isEmpty ? nil : reasoning
         for index in calls.keys.sorted() {
             guard let call = calls[index], let name = call.name else { continue }
-            let raw = call.arguments.trimmingCharacters(in: .whitespacesAndNewlines)
-            let args = try JSONDecoder().decode([String: JSONValue].self, from: Data((raw.isEmpty ? "{}" : raw).utf8))
+            let args = try Self.decodeArguments(call.arguments)
             out.append(.functionCall(FunctionCall(name: name, args: args, id: call.id ?? "call_\(name)_\(index)",
                                                   thought_signature: signature, thoughtSignature: signature)))
         }

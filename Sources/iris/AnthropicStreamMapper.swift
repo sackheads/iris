@@ -11,7 +11,9 @@ struct AnthropicStreamMapper: StreamMapper {
     private var stopped = false
 
     mutating func handle(_ sse: SSEEvent) throws -> [LLMStreamEvent] {
-        guard let json = try? JSONSerialization.jsonObject(with: Data(sse.data.utf8)) as? [String: Any] else { return [] }
+        guard let json = try JSONSerialization.jsonObject(with: Data(sse.data.utf8)) as? [String: Any] else {
+            throw APIError(message: "Anthropic stream: unexpected payload")
+        }
         let type = (json["type"] as? String) ?? sse.event ?? ""
         switch type {
         case "message_start":
@@ -39,8 +41,7 @@ struct AnthropicStreamMapper: StreamMapper {
             }
         case "content_block_stop":
             if let index = json["index"] as? Int, let block = tools.removeValue(forKey: index) {
-                let raw = block.json.trimmingCharacters(in: .whitespacesAndNewlines)
-                let args = try JSONDecoder().decode([String: JSONValue].self, from: Data((raw.isEmpty ? "{}" : raw).utf8))
+                let args = try Self.decodeArguments(block.json)
                 return [.functionCall(FunctionCall(name: block.name, args: args, id: block.id))]
             }
         case "message_delta":
@@ -56,7 +57,7 @@ struct AnthropicStreamMapper: StreamMapper {
         case "error":
             // Same shape and builder as a non-2xx body, so the pill and retry classification match.
             let errorType = (json["error"] as? [String: Any])?["type"] as? String
-            let status = errorType == "overloaded_error" ? 529 : 500
+            let status = Self.statusCode(forErrorType: errorType)
             throw APIError.http(provider: "Anthropic", statusCode: status, body: Data(sse.data.utf8))
         default:
             break
@@ -66,5 +67,19 @@ struct AnthropicStreamMapper: StreamMapper {
 
     mutating func finish() throws -> [LLMStreamEvent] {
         stopped ? [] : [.done(finishReason: stopReason)]
+    }
+
+    /// Maps Anthropic's error `type` to the status a non-2xx response would have carried, so
+    /// `APIError.isRetryable` classifies a streamed error the same way as an HTTP failure.
+    private static func statusCode(forErrorType errorType: String?) -> Int {
+        switch errorType {
+        case "rate_limit_error": return 429
+        case "overloaded_error": return 529
+        case "authentication_error": return 401
+        case "permission_error": return 403
+        case "not_found_error": return 404
+        case "invalid_request_error": return 400
+        default: return 500
+        }
     }
 }

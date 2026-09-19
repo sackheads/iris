@@ -91,4 +91,23 @@ struct AnthropicStreamMapperTests {
         _ = try m.handle(SSEEvent(event: "message_delta", data: #"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#))
         #expect(try m.finish() == [.done(finishReason: "end_turn")])
     }
+
+    @Test("a rate_limit_error event throws a retryable APIError with the matching status code")
+    func rateLimitErrorThrows() {
+        var m = AnthropicStreamMapper()
+        let data = #"{"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}"#
+        do {
+            _ = try m.handle(SSEEvent(event: "error", data: data))
+            Issue.record("expected a throw")
+        } catch let e as APIError {
+            #expect(e.statusCode == 429)
+            #expect(e.isRetryable == true)
+        } catch { Issue.record("wrong error type \(error)") }
+    }
+
+    @Test("a malformed chunk throws instead of being skipped")
+    func malformedChunkThrows() {
+        var m = AnthropicStreamMapper()
+        #expect(throws: (any Error).self) { try m.handle(SSEEvent(event: nil, data: "{not json")) }
+    }
 }
