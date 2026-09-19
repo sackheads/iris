@@ -80,4 +80,24 @@ struct LLMRetryTests {
         let auth = Flaky(failures: 1, error: APIError.http(provider: "Gemini", statusCode: 401, body: Data()))
         await #expect(throws: APIError.self) { try await LLMRetry.run(delays: [0]) { try auth.attempt() } }
     }
+
+    @Test("an interruption after partial output is never retried, even when it wraps a retryable status")
+    func interruptedIsNotRetried() async {
+        let counter = Counter()
+        let wrapped = StreamInterruptedError(underlying: APIError(message: "overloaded", statusCode: 529))
+        var thrown: Error?
+        do {
+            _ = try await LLMRetry.run(delays: [0, 0]) { () -> Int in
+                await counter.increment()
+                throw wrapped
+            }
+        } catch { thrown = error }
+        #expect(thrown is StreamInterruptedError)
+        #expect(await counter.value == 1)
+    }
+}
+
+private actor Counter {
+    var value = 0
+    func increment() { value += 1 }
 }

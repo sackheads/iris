@@ -58,6 +58,15 @@ struct LLMErrorMessageTests {
         #expect(display.headline.count <= APIError.headlineLimit + 100)
     }
 
+    @Test("an interrupted stream shows the underlying provider error under an interruption headline")
+    func interruptedDisplay() {
+        let inner = APIError.http(provider: "Anthropic", statusCode: 529,
+                                  body: Data(#"{"error":{"type":"overloaded_error","message":"Overloaded"}}"#.utf8))
+        let display = LLMErrorMessage.display(for: StreamInterruptedError(underlying: inner))
+        #expect(display.headline == "Response interrupted: Anthropic HTTP 529 overloaded_error: Overloaded")
+        #expect(display.detail == inner.detail)
+    }
+
     // MARK: - Legacy migration
 
     @Test("a persisted legacy Gemini error bubble becomes a compact system message")

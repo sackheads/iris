@@ -15,6 +15,10 @@ enum LLMErrorMessage {
     private static let legacyPrefix = "Error calling LLM: "
 
     static func display(for error: Error) -> LLMErrorDisplay {
+        if let interrupted = error as? StreamInterruptedError {
+            let inner = display(for: interrupted.underlying)
+            return LLMErrorDisplay(headline: "Response interrupted: " + inner.headline, detail: inner.detail)
+        }
         if let api = error as? APIError {
             return LLMErrorDisplay(headline: api.message, detail: api.detail)
         }
