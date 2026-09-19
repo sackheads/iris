@@ -56,18 +56,31 @@ struct GoalContract: Codable, Equatable, Sendable {
     /// Slice D1 — how many times the gate has refused completion for this contract. Reset when a
     /// contract is locked.
     var gateAttempts: Int = 0
+    /// Slice D2 — the goal is paused waiting for the user to judge its `humanJudged` criteria.
+    /// Deliberately separate from `checkpointStatus`: that drives ladder UI in a dozen places, and
+    /// `ChatView` suppresses the completion chip while it is `.pausedForReview` — which is exactly
+    /// where this slice's Accept/Reject buttons live (spec §5).
+    var awaitingHumanJudgement: Bool = false
+    /// Slice D2 — the `goal_complete` summary captured when the goal paused for judgement. An
+    /// accept must push the same completion message D1 pushes (spec §7: the goal "completes
+    /// exactly as D1 completes it"), and the handler that had the summary returned long ago.
+    /// Nil unless a judgement pause is in flight.
+    var pendingCompletionSummary: String?
 
     init(id: UUID = UUID(), objective: String, criteria: [Criterion], outOfScope: [String] = [],
          stopBefore: [String] = [], assumptions: [String] = [], changeLog: [ContractChange] = [],
          milestones: [Milestone] = [], currentMilestone: Int = 0,
          checkpointStatus: CheckpointStatus = .running, state: ContractState = .draft,
-         workspace: String? = nil, waivers: [UUID: String] = [:], gateAttempts: Int = 0) {
+         workspace: String? = nil, waivers: [UUID: String] = [:], gateAttempts: Int = 0,
+         awaitingHumanJudgement: Bool = false, pendingCompletionSummary: String? = nil) {
         self.id = id; self.objective = objective; self.criteria = criteria
         self.outOfScope = outOfScope; self.stopBefore = stopBefore; self.assumptions = assumptions
         self.changeLog = changeLog; self.milestones = milestones; self.currentMilestone = currentMilestone
         self.checkpointStatus = checkpointStatus; self.state = state
         self.workspace = workspace
         self.waivers = waivers; self.gateAttempts = gateAttempts
+        self.awaitingHumanJudgement = awaitingHumanJudgement
+        self.pendingCompletionSummary = pendingCompletionSummary
     }
 
     /// Custom decoder so the ladder fields (added in slice B1) are `decodeIfPresent`-defaulted:
@@ -91,9 +104,35 @@ struct GoalContract: Codable, Equatable, Sendable {
         workspace = try c.decodeIfPresent(String.self, forKey: .workspace)
         waivers = try c.decodeIfPresent([UUID: String].self, forKey: .waivers) ?? [:]
         gateAttempts = try c.decodeIfPresent(Int.self, forKey: .gateAttempts) ?? 0
+        awaitingHumanJudgement = try c.decodeIfPresent(Bool.self, forKey: .awaitingHumanJudgement) ?? false
+        pendingCompletionSummary = try c.decodeIfPresent(String.self, forKey: .pendingCompletionSummary)
     }
 
     var isLocked: Bool { state == .locked }
+
+    /// True when the goal loop must stay quiet: a checkpoint pause (B1) or a judgement pause (D2).
+    /// Only loop-control sites should use this — every UI reader of `checkpointStatus` is asking a
+    /// ladder question and must keep asking it.
+    var isPaused: Bool { checkpointStatus == .pausedForReview || awaitingHumanJudgement }
+
+    /// What the locked-run chip's header says. Three states, not two: a judgement pause is a pause
+    /// the user has to act on, and a header still reading "LOCKED / Read-only" while the run waits
+    /// on them hides the only thing happening (D2 follow-up).
+    ///
+    /// A checkpoint pause wins when (impossibly) both are set: `ChatView` suppresses the completion
+    /// chip while `checkpointStatus == .pausedForReview`, so the checkpoint is the actionable one.
+    /// Keyed on the two flags explicitly rather than on `isPaused`, which is loop-control only.
+    var lockedChipHeader: (symbolName: String, title: String, trailing: String, isPaused: Bool) {
+        if checkpointStatus == .pausedForReview {
+            return ("pause.circle.fill", "GOAL CONTRACT · PAUSED FOR REVIEW", "Awaiting your decision", true)
+        }
+        if awaitingHumanJudgement {
+            return ("person.crop.circle.badge.questionmark",
+                    "GOAL CONTRACT · AWAITING YOUR JUDGEMENT",
+                    "Accept or reject below", true)
+        }
+        return ("lock.fill", "GOAL CONTRACT · LOCKED", "Read-only", false)
+    }
 
     mutating func lock() { state = .locked }
 
@@ -272,5 +311,14 @@ extension GoalContract {
         return evaluation.criteria.filter {
             $0.verdict == .notMet && waivers[$0.criterionId] == nil
         }
+    }
+
+    /// Criteria still awaiting the user's verdict (slice D2 §3).
+    ///
+    /// Only on a real grade: a `.failed` evaluation's values are placeholders, so a `human_pending`
+    /// among them is not a genuine request for judgement.
+    func pendingJudgement(from evaluation: GoalEvaluation) -> [CriterionVerdict] {
+        guard evaluation.status == .graded else { return [] }
+        return evaluation.criteria.filter { $0.verdict == .humanPending }
     }
 }

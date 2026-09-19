@@ -2,7 +2,7 @@
 
 * **Issues**: [#9](https://github.com/sackheads/iris/issues/9) (deterministic gates) — the **human half**. Builds on **D1** ([2026-09-14-deterministic-done-gates.md](2026-09-14-deterministic-done-gates.md)), **C** ([2026-07-29-goal-drift-evaluator.md](2026-07-29-goal-drift-evaluator.md)), and **A** ([2026-07-28-goal-contract.md](2026-07-28-goal-contract.md)).
 * **Date**: 2026-09-18
-* **Status**: Approved (design)
+* **Status**: Implemented (2026-09-18). The design below is as-built; deviations are noted in §12.
 
 ## 1. Overview
 
@@ -78,13 +78,18 @@ The last judgement landing re-evaluates the gate **without re-running the grader
 - **All accepted** → `awaitingHumanJudgement = false`, `gateOutcome = .passed`, the goal completes exactly as D1 completes it.
 - **Any rejected** → `awaitingHumanJudgement = false`, the goal stays active, and the reprompt carries the agent back with the rejected criteria named. A rejection converts a criterion the agent could not affect into a `not_met` it can.
 
-A rejection deliberately does **not** consume a gate attempt either: the agent has not yet had a chance to respond to it. The next `goal_complete` grades normally, and `not_met` from that point behaves as D1 specifies.
+A rejection deliberately does **not** consume a gate attempt either: the agent has not yet had a chance to respond to it. The next `goal_complete` grades normally, and `not_met` from that point behaves as D1 specifies. It **does** reset `goalIterationCount`, as the checkpoint resumes do — the agent is being sent back to work on something new, and a rejection landing late in a long run would otherwise soft-stop after a single turn. The reprompt is framed for a terminal gate rather than a checkpoint: the goal it lands on frequently has no ladder at all.
+
+"Any rejected" means what the **user** rejected — `verdict == .notMet && method == .human`. Not every `not_met` on the evaluation: a criterion the agent waived is excluded from `blockingCriteria` (which is how the pause fired in the first place) but is still sitting in `evaluation.criteria`, and counting it would resume the agent with a grader's verdict attributed to the user, then pause again on the next `goal_complete` — a full grader run per turn until the iteration cap soft-stopped the goal. This is a third predicate, deliberately neither `blockingCriteria` nor `pendingJudgement`: it asks who decided, not what blocks.
 
 ## 8. Error handling & edge cases
 
 - **The contract has no `humanJudged` criteria** → nothing changes; the pause never triggers.
 - **Judgement on a goal that is no longer paused** (a stale click after `/stop`, or after the goal completed) → ignored, returning false. The button acts on `lastGoalEvaluation`, which outlives the goal.
 - **A grader wrongly returns `human_pending`** → already impossible: `GoalEvaluationParsing` downgrades a submitted `human_pending` to `cannot_verify` (C §4.3). D2 does not relax that; only the system assigns `human_pending`.
+- **A grader volunteers `met`/`not_met` on a `humanJudged` criterion** → ignored. The prompt forbids it, but a prompt is not a guarantee, and honouring one would complete the goal `.passed` with nobody having judged — the hole D2 exists to close — and then label the grader's call `method == .human`, announcing it as "your judgement". `GoalEvaluationParsing` therefore never reads a submitted verdict for a `humanJudged` criterion: it is always `human_pending`, with no evidence carried over. Structural, like C §4.4, rather than trusted to the prompt.
+- **The user dismisses the completion report (✕) mid-pause** → refused. `lastGoalEvaluation` is the only thing Accept/Reject act on and the only reason the chip renders; nilling it would leave `awaitingHumanJudgement == true` with `activeGoal` set, no chip, no resume guard that wakes the loop, and no route back but `/stop`. `AppState.dismissCompletionReport` no-ops in that state and the chip hides the ✕ so it is never a dead button.
+- **A waived `not_met` present at the pause** → not the user's rejection. `blockingCriteria` excludes a waived `not_met`, which is exactly how the pause can fire with one still on the evaluation; the accept/reject split therefore filters on `method == .human`, not on `verdict == .notMet` alone.
 - **Grader `.failed`** → its verdicts are placeholders, so `human_pending` among them is not a real judgement request. D1 already completes with `ungatedGraderFailed` and never reaches the pause.
 - **Restart while paused** → `awaitingHumanJudgement` persists on the contract and the resume guard (§5) keeps the loop quiet until the user acts.
 - **Legacy contract** → no key, decodes false, behaves exactly as before.
@@ -119,3 +124,21 @@ A rejection deliberately does **not** consume a gate attempt either: the agent h
 With D2, every criterion kind is inside the gate: `executable` and `qualitative` through the grader, `humanJudged` through the user. Remaining:
 - **D3 — checkpoint gating:** auto-advance on an all-met verdict, deferred here and by B1 §2 and B4 §2.
 - **E — the ratchet**, **F — ground-truth progress view** — independent, per the slice-A roadmap.
+
+## 12. As-built notes
+
+The implementation across Tasks 1-6 matches this design, with the two as-built details recorded at
+the end of this section:
+
+- `awaitingHumanJudgement` and `isPaused` on `GoalContract` are exactly as specified in §5, with the `decodeIfPresent`-defaulted decode (AGENTS.md invariant 1).
+- `isPaused` replaces `checkpointStatus == .pausedForReview` at precisely the two sites named in §5 — the auto-reprompt guard and the resume-on-restart guard in `iris.swift` — and nowhere else; every ladder-UI reader (`ChatView`, `GoalContractPanel`) still reads `checkpointStatus == .pausedForReview` directly.
+- `recordHumanJudgement` and `resolveJudgementIfComplete` in `AppState.swift` implement §6 and §7 verbatim: the grader is never re-run on resume, a rejection does not consume a gate attempt, and the verdict is stamped with `method == .human` so the row renders "met — your judgement" rather than a bare checkmark.
+- `beginJudgementPause` leaves `gateAttempts` untouched, per §4.
+- No `judge_criterion` (or any) tool was added; §2's "no new tool" holds, and `HumanJudgementScopeTests.noJudgementTool` drives a real engine turn to confirm no tool name offered to the model contains "judge".
+- `HumanJudgementScopeTests.checkpointPauseIsUnchanged` confirms the two pauses stay distinct: a checkpoint pause leaves `awaitingHumanJudgement == false` while still satisfying `isPaused`.
+
+### As-built details (Task 7, post-review)
+
+**1. One UI reader of `awaitingHumanJudgement` beyond the two loop-control sites.** §5 said `isPaused` replaces `checkpointStatus == .pausedForReview` at exactly two sites and that every UI reader keeps asking its ladder question. That still holds — no UI site reads `isPaused` — but `LockedContractChip`'s header now reads `awaitingHumanJudgement` directly, through `GoalContract.lockedChipHeader`. It had to: during a judgement pause the header read "GOAL CONTRACT · LOCKED / Read-only", so nothing outside the Accept/Reject buttons said the run was waiting on the user. The derivation is three-state (running, checkpoint pause, judgement pause), keyed on the two flags explicitly rather than on `isPaused`, and a checkpoint pause still wins — `ChatView` suppresses the completion chip in that state, so the checkpoint is the actionable one.
+
+**2. How a judgement-completed goal gets its summary.** §7 says such a goal "completes exactly as D1 completes it", and it now does: the accept branch pushes the `goal_complete` summary and fires the Goal Completion Skill Check reflection (`IrisEngine.goalCompletionSkillCheck`, shared with the handler), so neither is lost. The mechanism is new state: the handler returns at the pause, long before its own push, so the summary is parked on the contract as `pendingCompletionSummary` (`decodeIfPresent`-defaulted, AGENTS.md invariant 1) and read back before `clearGoal` nils the contract.

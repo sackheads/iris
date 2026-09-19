@@ -249,7 +249,7 @@ struct ChatView: View {
                        conv.goalContract?.checkpointStatus != .pausedForReview {
                         CompletionReportChip(
                             state: state,
-                            conversationId: conv.id,
+                            conversation: conv,
                             report: conv.lastGoalCompletionReport,
                             evaluation: conv.lastGoalEvaluation
                         )

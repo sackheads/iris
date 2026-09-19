@@ -738,8 +738,16 @@ class AppState {
     /// Dismisses the completion self-report chip (the ✕). Independent of `clearGoal` so the
     /// report survives a goal_complete but the user can still put it away without starting a
     /// new goal.
+    ///
+    /// Refuses while the goal is awaiting judgement: `lastGoalEvaluation` is the ONLY thing the
+    /// Accept/Reject buttons act on, and it is also what makes the chip render at all. Dropping it
+    /// mid-pause leaves `awaitingHumanJudgement == true` with `activeGoal` set, no chip, no resume
+    /// guard that wakes the loop, and no way back in — a goal reachable only through `/stop`. The
+    /// guard lives here rather than only in the view so no future caller can re-open the hole; the
+    /// chip also hides the ✕ in that state so it is never a visibly dead button.
     func dismissCompletionReport(for conversationId: UUID) {
-        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              conversations[idx].goalContract?.awaitingHumanJudgement != true else { return }
         conversations[idx].lastGoalCompletionReport = nil
         conversations[idx].lastGoalEvaluation = nil
         saveConversations()
@@ -810,6 +818,109 @@ class AppState {
         eval.gateOutcome = outcome
         eval.waivers = waivers
         conversations[idx].lastGoalEvaluation = eval
+        saveConversations()
+    }
+
+    /// Record the user's verdict on one `humanJudged` criterion (spec §6).
+    ///
+    /// Returns false when the judgement does not apply: the goal is not awaiting judgement (a
+    /// stale click after `/stop` or completion), the criterion is unknown, or it is not actually
+    /// `human_pending` — a second click must not flip a verdict already given.
+    ///
+    /// `method` stays `.human`, so the row can render "met — your judgement" and never be mistaken
+    /// for grader-verified evidence.
+    @discardableResult
+    func recordHumanJudgement(for conversationId: UUID, criterionId: UUID, accepted: Bool) -> Bool {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              conversations[idx].goalContract?.awaitingHumanJudgement == true,
+              var eval = conversations[idx].lastGoalEvaluation,
+              let vIdx = eval.criteria.firstIndex(where: {
+                  $0.criterionId == criterionId && $0.verdict == .humanPending
+              })
+        else { return false }
+
+        eval.criteria[vIdx].verdict = accepted ? .met : .notMet
+        eval.criteria[vIdx].method = .human
+        conversations[idx].lastGoalEvaluation = eval
+        saveConversations()
+        resolveJudgementIfComplete(for: conversationId)
+        return true
+    }
+
+    /// Once nothing is `human_pending`, act on what the user decided (spec §7).
+    ///
+    /// The grader is deliberately NOT re-run: its verdicts are already in hand, and a second run
+    /// would spend minutes re-deriving them AND overwrite the user's judgement with a fresh
+    /// `human_pending`.
+    private func resolveJudgementIfComplete(for conversationId: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              conversations[idx].goalContract?.awaitingHumanJudgement == true,
+              let eval = conversations[idx].lastGoalEvaluation,
+              !eval.criteria.contains(where: { $0.verdict == .humanPending })
+        else { return }
+
+        conversations[idx].goalContract?.awaitingHumanJudgement = false
+        // What the USER rejected — not every `not_met` on the evaluation. A `not_met` the agent
+        // waived is excluded from `blockingCriteria`, which is precisely why the pause could fire
+        // with one still sitting in `eval.criteria`; counting it here would resume the agent and
+        // tell it "you did not meet this, in the user's judgement" about a verdict the user never
+        // gave, then pause again on the next `goal_complete` — looping a full grader run per turn
+        // until the iteration cap soft-stopped the goal. A third predicate, deliberately not
+        // `blockingCriteria` and not `pendingJudgement`: it asks who decided, not what blocks.
+        let rejected = eval.criteria.filter { $0.verdict == .notMet && $0.method == .human }
+
+        if rejected.isEmpty {
+            // Everything the user was asked about passed, and nothing else was blocking when we
+            // paused — so the gate is satisfied.
+            let waivers = conversations[idx].goalContract?.waivers ?? [:]
+            // Captured before `clearGoal` nils the contract it lives on.
+            let summary = conversations[idx].goalContract?.pendingCompletionSummary ?? ""
+            finishGatedGoal(for: conversationId, outcome: .passed, waivers: waivers)
+            clearGoal(for: conversationId)
+            appendMessage(role: .system, content: "Goal complete — your judgement resolved the last criteria.",
+                          to: conversationId)
+            // Spec §7: the goal "completes exactly as D1 completes it". The `goal_complete` handler
+            // returned at the pause, before it could push the summary or run the skill-check
+            // reflection, so both happen here instead.
+            if !summary.isEmpty {
+                appendMessage(role: .agent, content: summary, to: conversationId)
+            }
+            runThinkingTask(conversationId: conversationId) { [self] in
+                await engine.processInput(IrisEngine.goalCompletionSkillCheck, source: "System",
+                                          conversationId: conversationId)
+            }
+        } else {
+            // A rejection is something the agent CAN act on. Hand it back with the reasons named.
+            // Save here: the flag flip above must land WITH the verdict `recordHumanJudgement`
+            // already saved. Skipping this and waiting on `resumeGoalLoop`'s eventual reply would
+            // leave a crash/quit window where the disk has the verdict but still says
+            // `awaitingHumanJudgement == true` with no human_pending criterion left — a goal no
+            // resume guard will wake and no button will render for. That is the exact trapped-goal
+            // failure this gate exists to prevent.
+            let names = rejected.map { "- \($0.criterionText)" }.joined(separator: "\n")
+            // Reset the iteration budget as the checkpoint resumes do: the agent is being sent
+            // back to work on something new, and a rejection that lands late in a long run would
+            // otherwise soft-stop after a single turn.
+            conversations[idx].goalIterationCount = 0
+            saveConversations()
+            resumeGoalLoop(for: conversationId, framing: .judgementRejection,
+                           steer: "You did not meet these, in the user's judgement:\n\(names)")
+        }
+    }
+
+    /// Park the goal until the user judges its `humanJudged` criteria (spec §4). Deliberately does
+    /// NOT touch `gateAttempts`: the agent cannot satisfy these by working, so spending a retry on
+    /// them would burn the cap on an outcome it provably cannot change.
+    ///
+    /// `summary` is the `goal_complete` summary the handler was carrying when it paused. It is
+    /// parked on the contract so an accept can push it, since the handler returns here and never
+    /// reaches its own push (spec §7).
+    func beginJudgementPause(for conversationId: UUID, summary: String = "") {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              var c = conversations[idx].goalContract else { return }
+        c.awaitingHumanJudgement = true
+        c.pendingCompletionSummary = summary
+        conversations[idx].goalContract = c
         saveConversations()
     }
 
@@ -899,12 +1010,40 @@ class AppState {
         resumeGoalLoop(for: conversationId, steer: feedback)
     }
 
-    /// Re-arms the goal loop after a checkpoint resume by sending a fresh oracle reprompt.
-    private func resumeGoalLoop(for conversationId: UUID, steer: String?) {
+    /// Why the loop is being re-armed. The two callers are not the same event, and the checkpoint
+    /// wording is wrong for the other one: a terminal judgement rejection is not feedback "at this
+    /// checkpoint", and the goal it lands on often has no ladder at all.
+    enum GoalResumeFraming {
+        case checkpoint
+        case judgementRejection
+
+        /// How to introduce the human's note.
+        var steerHeading: String {
+            switch self {
+            case .checkpoint:         return "Human feedback at this checkpoint"
+            case .judgementRejection: return "The user judged your completion"
+            }
+        }
+
+        /// What to tell the agent to do next.
+        var closingLine: String {
+            switch self {
+            case .checkpoint:
+                return "Continue toward the current checkpoint. What is your next step?"
+            case .judgementRejection:
+                return "Address that and call `goal_complete` again once it holds. What is your next step?"
+            }
+        }
+    }
+
+    /// Re-arms the goal loop by sending a fresh oracle reprompt — after a checkpoint resume, or
+    /// after the user rejected a human-judged criterion at the terminal gate.
+    private func resumeGoalLoop(for conversationId: UUID, framing: GoalResumeFraming = .checkpoint,
+                                steer: String?) {
         guard let conv = conversations.first(where: { $0.id == conversationId }),
               let contract = conv.goalContract else { return }
-        let steerLine = (steer?.isEmpty == false) ? "\n\nHuman feedback at this checkpoint: \(steer!)" : ""
-        let reprompt = "\(contract.oracleText())\(steerLine)\n\nContinue toward the current checkpoint. What is your next step?"
+        let steerLine = (steer?.isEmpty == false) ? "\n\n\(framing.steerHeading): \(steer!)" : ""
+        let reprompt = "\(contract.oracleText())\(steerLine)\n\n\(framing.closingLine)"
         runThinkingTask(conversationId: conversationId) { [self] in
             await engine.processInput(reprompt, source: "System", conversationId: conversationId)
         }

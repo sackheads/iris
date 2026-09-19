@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// The grader's verdict for one criterion. `met`/`notMet`/`cannotVerify` are gradable outcomes;
 /// `humanPending` marks a `humanJudged` criterion the grader must not auto-grade (spec §4.4).
@@ -71,6 +72,61 @@ struct GoalEvaluation: Codable, Equatable, Sendable {
         completedAt = try c.decodeIfPresent(Date.self, forKey: .completedAt)
         gateOutcome = try c.decodeIfPresent(GateOutcome.self, forKey: .gateOutcome)
         waivers = try c.decodeIfPresent([UUID: String].self, forKey: .waivers) ?? [:]
+    }
+}
+
+/// Everything the completion report's graded column renders for one verdict: glyph, spoken label,
+/// visible text and tint, derived TOGETHER from `(method, verdict)`.
+///
+/// One derivation on purpose. These four were three separate switches, and they drifted: the glyph
+/// and tint learned that a human accept is not grader-verified evidence while the visible text —
+/// the most-read half of the pair — kept saying a flat green "met" under a column headed
+/// "SELF-REPORT vs GRADER" (spec §6). Anything keyed on provenance belongs here, so the next
+/// consumer cannot be fixed in one place and forgotten in another.
+struct GraderColumnPresentation: Equatable {
+    let symbolName: String
+    /// What VoiceOver announces for the glyph.
+    let accessibilityLabel: String
+    /// The visible text beside the glyph.
+    let text: String
+    let tint: Color
+    /// True when the user gave this verdict rather than the grader — the row must never present it
+    /// as verified evidence.
+    let isHumanJudgement: Bool
+}
+
+extension CriterionVerdict {
+    /// The graded column's full rendering for this verdict. Kept out of the view so provenance can
+    /// be tested without a SwiftUI harness.
+    ///
+    /// A human's verdict deliberately does NOT reuse the grader's "verified" green: that would read
+    /// as machine-verified evidence for a claim the user asserted, not the grader. `.blue` still
+    /// communicates "met" without borrowing the grader's colour, and stays legible in both light
+    /// and dark mode.
+    var graderColumnPresentation: GraderColumnPresentation {
+        switch (method, verdict) {
+        case (.human, .met):
+            return .init(symbolName: "person.fill.checkmark", accessibilityLabel: "Your judgement: met",
+                         text: "met — your judgement", tint: .blue, isHumanJudgement: true)
+        case (.human, .notMet):
+            return .init(symbolName: "person.fill.xmark", accessibilityLabel: "Your judgement: not met",
+                         text: "not met — your judgement", tint: .orange, isHumanJudgement: true)
+        case (_, .met):
+            return .init(symbolName: "checkmark.circle.fill", accessibilityLabel: "Grader: met",
+                         text: "met", tint: .green, isHumanJudgement: false)
+        case (_, .notMet):
+            return .init(symbolName: "xmark.octagon.fill", accessibilityLabel: "Grader: not met",
+                         text: "not met", tint: .red, isHumanJudgement: false)
+        case (_, .cannotVerify):
+            return .init(symbolName: "questionmark.circle", accessibilityLabel: "Grader: cannot verify",
+                         text: "cannot verify", tint: .secondary, isHumanJudgement: false)
+        case (_, .humanPending):
+            // Still the user's to decide, so this is not yet a judgement of theirs — the
+            // Accept/Reject buttons speak for it.
+            return .init(symbolName: "person.crop.circle.badge.questionmark",
+                         accessibilityLabel: "Awaiting human judgment",
+                         text: "your call", tint: .secondary, isHumanJudgement: false)
+        }
     }
 }
 

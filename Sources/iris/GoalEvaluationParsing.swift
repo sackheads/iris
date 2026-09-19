@@ -2,9 +2,9 @@ import Foundation
 
 enum GoalEvaluationParsing {
     /// Reconciles the grader's submitted verdicts against the FULL criteria list (spec §4.3):
-    /// use a supplied verdict if present; else `humanPending` for a `humanJudged` criterion; else
-    /// `cannotVerify`. So every criterion always carries a verdict and humanJudged never collapses
-    /// to cannot_verify. `method` derives from the criterion kind.
+    /// a `humanJudged` criterion is ALWAYS `humanPending` (only the user may decide it); otherwise
+    /// use a supplied verdict if present, else `cannotVerify`. So every criterion always carries a
+    /// verdict and humanJudged never collapses to cannot_verify. `method` derives from the kind.
     static func verdicts(from args: [String: JSONValue], criteria: [Criterion]) -> [CriterionVerdict] {
         // Index submitted verdicts by criterion_id.
         var submitted: [UUID: (value: CriterionVerdictValue, evidence: String)] = [:]
@@ -21,19 +21,23 @@ enum GoalEvaluationParsing {
         }
 
         return criteria.map { c in
-            let method: VerdictMethod
-            switch c.kind {
-            case .executable: method = .check
-            case .qualitative: method = .judge
-            case .humanJudged: method = .human
-            }
-            if let s = submitted[c.id] {
+            // A `humanJudged` criterion is the user's to decide, so the grader's answer is not
+            // merely unused — it must not be read at all. Taking it would complete the goal
+            // `.passed` with nobody having judged (the exact hole D2 closes), and it would then be
+            // stamped `method == .human`, announcing a grader's verdict as "your judgement". The
+            // prompt forbids grading one twice; this makes it structural, the same way a submitted
+            // `human_pending` is downgraded above (spec §4.4, §6).
+            guard c.kind != .humanJudged else {
                 return CriterionVerdict(criterionId: c.id, criterionText: c.text, kind: c.kind,
-                                        verdict: s.value, evidence: s.evidence, method: method)
+                                        verdict: .humanPending, evidence: "", method: .human)
             }
-            let fallback: CriterionVerdictValue = (c.kind == .humanJudged) ? .humanPending : .cannotVerify
+            let method: VerdictMethod = (c.kind == .executable) ? .check : .judge
+            guard let s = submitted[c.id] else {
+                return CriterionVerdict(criterionId: c.id, criterionText: c.text, kind: c.kind,
+                                        verdict: .cannotVerify, evidence: "", method: method)
+            }
             return CriterionVerdict(criterionId: c.id, criterionText: c.text, kind: c.kind,
-                                    verdict: fallback, evidence: "", method: method)
+                                    verdict: s.value, evidence: s.evidence, method: method)
         }
     }
 }
