@@ -26,13 +26,19 @@ struct DefaultsIsolationTests {
                 "a test's conversations must not reach the user's real defaults")
     }
 
-    @Test("a fresh AppState starts clean rather than loading prior runs' debris")
+    @Test("a fresh AppState loads only the isolated store, never a prior run's debris")
     func freshStateIsClean() {
-        // Each test process gets its own suite, so nothing survives from an earlier run. This is
-        // also what makes conversation counts usable as a test baseline again.
+        // The per-process suite is wiped when it is created, so an earlier run can never leak in.
+        // Sibling suites in THIS process share that store by design, so the bound is what the
+        // store actually holds — not an absolute count. (It was `<= 1` until #62: saves were
+        // starved by their own debounce, so sibling writes rarely landed and the tighter bound
+        // held by accident.) No suspension point between the read and the construction, so no
+        // other @MainActor test can interleave.
+        let persisted = IrisDefaults.store.data(forKey: "iris_conversations")
+            .flatMap { try? JSONDecoder().decode([Conversation].self, from: $0) } ?? []
         let app = AppState()
-        #expect(app.conversations.count <= 1,
-                "a fresh AppState should hold at most the one conversation it creates for itself")
+        #expect(app.conversations.count <= max(1, persisted.count),
+                "a fresh AppState loaded more conversations than the isolated store holds")
     }
 
     @Test("the setup-completed flag is not flipped by a test run")

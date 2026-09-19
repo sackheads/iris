@@ -1474,6 +1474,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Flush BEFORE _exit: it runs no atexit handlers, so it would kill the pending debounced
+        // save and skip the cfprefsd flush, losing every unwritten change (#62).
+        MainActor.assumeIsolated { AppState.shared.flushSave() }
         // Bypass static destructors in llama.cpp ggml-metal to prevent GGML_ASSERT crash on exit
         _exit(0)
     }
