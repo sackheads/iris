@@ -401,7 +401,7 @@ actor IrisEngine {
         // Add set_workspace tool dynamically
         toolsList.append(FunctionDeclaration(
             name: "set_workspace",
-            description: "Bind this conversation to a local project workspace. Do this when the user says they are working in a specific project or directory.",
+            description: "Bind this conversation to a project directory when the user explicitly asks to work in, open, switch to, or bind one. A path mentioned in passing while asking about something else is not a request.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -432,7 +432,7 @@ actor IrisEngine {
         
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Schedule a recurring cron-like job or interval timer. The job will persist across app restarts and catch up if the computer wakes from sleep. Provide a clear prompt describing what Iris should do when it fires. You MUST provide EITHER intervalSeconds OR one or more cron fields (minute, hour, day, month, weekday), but not both.",
+            description: "Use this whenever the user asks to be reminded of something or to have something done on a schedule, for example every weekday at 9 or every hour; the prompt is what Iris should do when it fires. Never use shell cron for this; no setup, files, or commands are needed, calling this tool is the whole job. The job persists across app restarts and catches up if the computer wakes from sleep. You MUST provide EITHER intervalSeconds OR one or more cron fields (minute, hour, day, month, weekday), but not both.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -450,7 +450,7 @@ actor IrisEngine {
         
         toolsList.append(FunctionDeclaration(
             name: "save_fact",
-            description: "Silently drop atomic facts, state changes, or relationships into the holographic memory graph. Continuously groom this store to maintain mid-term memory.",
+            description: "Record an atomic, durable fact the user asked you to remember, or a project or preference fact they stated as something to keep, into the memory graph. Do not record incidental details from a question.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -499,7 +499,7 @@ actor IrisEngine {
         }
         toolsList.append(FunctionDeclaration(
             name: "search_memory",
-            description: "Actively probe the holographic memory store for past context. Use this if the automatic JIT injection wasn't sufficient.",
+            description: "Search past conversations in the memory store only when the user refers to something not present in the current context.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -510,7 +510,7 @@ actor IrisEngine {
         ))
         toolsList.append(FunctionDeclaration(
             name: "update_user_profile",
-            description: "Overwrite the USER.md profile. Keep it concise. Store high-level facts about the user that define how you should interact with them permanently.",
+            description: "Rewrite USER.md, keeping its existing content, when the user asks you to remember a durable fact or preference about themselves, such as their name, tools, or how they like answers. Keep it concise.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [

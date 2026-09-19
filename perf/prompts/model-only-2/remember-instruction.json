@@ -1,2 +1,2 @@
 { "name": "remember-instruction", "clientMode": "real", "tier": "medium", "expectedTools": [],
-  "turns": [ { "prompt": "Remember to keep answers short. What is a mutex?" } ] }
+  "turns": [ { "prompt": "Remember, I'm in a hurry: what is a mutex?" } ] }

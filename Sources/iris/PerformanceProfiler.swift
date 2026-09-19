@@ -83,11 +83,17 @@ public struct ToolCallRecord: Codable, Sendable, Equatable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let scrubbed = redactKeys(.object(args))
-        var raw = (try? encoder.encode(scrubbed)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        let raw = (try? encoder.encode(scrubbed)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        return APIError.truncated(redactSecrets(raw), to: argsLimit)
+    }
+
+    /// Replace token-shaped substrings anywhere in `text`; shared with the recorded final reply.
+    public static func redactSecrets(_ text: String) -> String {
+        var out = text
         for pattern in secretPatterns {
-            raw = pattern.stringByReplacingMatches(in: raw, range: NSRange(raw.startIndex..., in: raw), withTemplate: "[redacted]")
+            out = pattern.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out), withTemplate: "[redacted]")
         }
-        return APIError.truncated(raw, to: argsLimit)
+        return out
     }
 
     private static let secretKey = try! NSRegularExpression(pattern: "(?i)(token|secret|passw(or)?d|api[_-]?key|authorization|cookie|credential)")

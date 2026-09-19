@@ -131,11 +131,22 @@ struct PerfTurn: Codable {
     var modelCalls: [ModelCallRecord]
     var toolCalls: [ToolCallRecord]
     var finalTextLength: Int
+    /// The turn's final agent reply, capped and redacted, so a missed or unexpected tool call
+    /// can be diagnosed from the record (why did the model answer instead of scheduling?).
+    var finalText: String? = nil
+
+    static let finalTextLimit = 500
 
     init(totalMs: Double, categories: [String: CategoryStat], spans: [String: CategoryStat],
-         modelCalls: [ModelCallRecord], toolCalls: [ToolCallRecord], finalTextLength: Int) {
+         modelCalls: [ModelCallRecord], toolCalls: [ToolCallRecord], finalTextLength: Int, finalText: String? = nil) {
         self.totalMs = totalMs; self.categories = categories; self.spans = spans
         self.modelCalls = modelCalls; self.toolCalls = toolCalls; self.finalTextLength = finalTextLength
+        self.finalText = finalText
+    }
+
+    init(_ profile: CommandProfile, finalText: String) {
+        self.init(profile, finalTextLength: finalText.count)
+        self.finalText = APIError.truncated(ToolCallRecord.redactSecrets(finalText), to: Self.finalTextLimit)
     }
 
     init(_ profile: CommandProfile, finalTextLength: Int) {

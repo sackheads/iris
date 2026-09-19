@@ -25,6 +25,7 @@ struct PerfRunnerTests {
         #expect(cmd.rungs.first?.repetitions.first?.turns.first?.modelCalls.allSatisfy { $0.promptTokens == nil } == true)
         #expect(record.environment.headless == true)
         #expect(record.environment.toolSandbox == "host", "the fake lane never sandboxes")
+        #expect(record.scenarios.first?.rungs.first?.repetitions.first?.turns.first?.finalText == "Canberra.")
     }
 
     @Test("a real-lane suite with an injected client runs the ladder rungs and computes ratios")

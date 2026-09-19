@@ -49,7 +49,7 @@ enum PerfRunner {
                                                               workspacePath: workspacePath)
                         if result.toolsSandboxed { anySandboxed = true }
                         let turns = zip(result.turnProfiles, result.finalTexts + Array(repeating: "", count: max(0, result.turnProfiles.count - result.finalTexts.count)))
-                            .map { PerfTurn($0, finalTextLength: $1.count) }
+                            .map { PerfTurn($0, finalText: $1) }
                         // An engine-level LLM failure is caught and posted as a tagged system
                         // message rather than thrown, so `turnProfiles` is never empty for it;
                         // `turnErrors` is how ScenarioRunner surfaces it back to us.

@@ -12,9 +12,67 @@ struct IrisPaths: Sendable {
 
     init(root: URL) { self.root = root }
 
-    static let `default` = IrisPaths(
+    /// The home every consumer resolves through. A headless perf run installs a volatile copy
+    /// (see `useVolatileCopy(at:)`) before any manager is touched; nothing else ever sets it.
+    static var `default`: IrisPaths { lock.withLock { override } ?? standard }
+
+    private static let standard = IrisPaths(
         root: URL(fileURLWithPath: ("~/.iris" as NSString).expandingTildeInPath)
     )
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var override: IrisPaths?
+
+    /// True only inside a headless run that installed a copy; never under `swift test`.
+    static var isVolatileCopy: Bool { lock.withLock { override != nil } }
+
+    /// Route every path at a fresh copy of the real home under `root` for the rest of the
+    /// process. Real-lane perf runs wrote to the user's USER.md and fact store through
+    /// `IrisPaths.default`, which neither the sandbox (run_command only) nor the scratch cwd
+    /// (relative file tools only) covers. Must run before `MemoryManager.shared`,
+    /// `FactStoreManager.shared`, or any other consumer captures `.default`.
+    static func useVolatileCopy(at root: URL) throws {
+        let copy = try makeVolatileCopy(of: standard, at: root)
+        lock.withLock { override = copy }
+    }
+
+    /// Copy memory/, rules/, config/ and plugins/ into `root`; models/ is a symlink to the
+    /// source (gigabytes, read-only). Reads see the same context; writes stay in the copy.
+    static func makeVolatileCopy(of source: IrisPaths, at root: URL) throws -> IrisPaths {
+        let fm = FileManager.default
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        for dir in [source.memoryDir, source.rulesDir, source.configDir, source.pluginsDir] {
+            let dest = root.appendingPathComponent(dir.lastPathComponent)
+            if fm.fileExists(atPath: dir.path) {
+                try fm.copyItem(at: dir, to: dest)
+            } else {
+                try fm.createDirectory(at: dest, withIntermediateDirectories: true)
+            }
+        }
+        let modelsLink = root.appendingPathComponent(source.modelsDir.lastPathComponent)
+        if fm.fileExists(atPath: source.modelsDir.path) {
+            try fm.createSymbolicLink(at: modelsLink, withDestinationURL: source.modelsDir)
+        } else {
+            try fm.createDirectory(at: modelsLink, withIntermediateDirectories: true)
+        }
+        return IrisPaths(root: root)
+    }
+
+    /// A digest of every file's relative path, size and modification time under `dir`.
+    /// A perf run compares the real memory directory's fingerprint before and after so a leak
+    /// through some path the copy does not cover fails loudly instead of silently.
+    static func fingerprint(of dir: URL) -> String {
+        let fm = FileManager.default
+        var lines: [String] = []
+        if let e = fm.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey], options: [.skipsHiddenFiles]) {
+            for case let url as URL in e {
+                let v = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey])
+                if v?.isDirectory == true { continue }
+                let rel = url.path.dropFirst(dir.path.count)
+                lines.append("\(rel)|\(v?.fileSize ?? -1)|\(v?.contentModificationDate?.timeIntervalSince1970 ?? 0)")
+            }
+        }
+        return lines.sorted().joined(separator: "\n")
+    }
 
     // memory/
     var memoryDir: URL { root.appendingPathComponent("memory") }

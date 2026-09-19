@@ -70,4 +70,46 @@ struct ToolSurfaceTrimTests {
         }
         #expect(!draft.contains("amend_goal_contract"))
     }
+
+    /// #133 slice 2: the second eagerness set traced every remaining unprompted or missed call to
+    /// a description that either invited a call on a mention or failed to invite one on a request.
+    @Test("tool descriptions state when to call, not just what the tool is (#133 slice 2)")
+    func descriptionsStateTriggers() async {
+        let names = await toolNames(prompt: "hello")
+        _ = names
+        let capture = CapturingLLMClient(reply: "ok")
+        let app = AppState(); let id = UUID(); app.createNewConversation(id: id)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: capture, retryDelays: [])
+        await engine.processInput("hello", source: "UI", conversationId: id)
+        let decls = Dictionary(uniqueKeysWithValues: (capture.requests.first?.tools?.flatMap { $0.functionDeclarations } ?? []).map { ($0.name, $0.description) })
+
+        let ws = decls["set_workspace"] ?? ""
+        #expect(ws.contains("explicitly asks"))
+        #expect(!ws.contains("when the user says they are working"))
+        #expect(ws.contains("mentioned in passing"))
+
+        let fact = decls["save_fact"] ?? ""
+        #expect(fact.contains("asked you to remember"))
+        #expect(!fact.contains("Continuously groom"))
+
+        let profile = decls["update_user_profile"] ?? ""
+        #expect(profile.contains("asks you to remember"))
+        #expect(profile.contains("keeping its existing content"))
+
+        let job = decls["schedule_job"] ?? ""
+        #expect(job.contains("asks to be reminded"))
+        #expect(job.contains("Never use shell cron"))
+        #expect(job.contains("intervalSeconds"), "the parameter rules stay")
+
+        let mem = decls["search_memory"] ?? ""
+        #expect(mem.contains("not present in the current context"))
+        #expect(!mem.contains("JIT injection"))
+    }
+
+    @Test("the shipped steering says an explicit request to remember is stored now, not at reflection")
+    func steeringStoresOnRequest() {
+        let steering = SystemSteering.shipped()
+        #expect(steering.contains("asks you to remember"))
+        #expect(steering.contains("store it now"))
+    }
 }
