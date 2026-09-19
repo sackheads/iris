@@ -69,6 +69,29 @@ struct HumanJudgementResumeTests {
                 "the agent has not yet had a chance to respond, so it has not used an attempt")
     }
 
+    @Test("a rejection's persisted state survives a restart — the flag and the verdict land together")
+    func rejectionPersistsConsistently() throws {
+        // Regression for a crash/quit window: if the `awaitingHumanJudgement = false` flip were
+        // saved separately from (or later than) the verdict change, a restart between the two
+        // saves would decode a goal that is permanently stuck — still "awaiting judgement" with no
+        // human_pending criterion left to resolve it, and no button rendered to un-stick it. Encode
+        // and decode the conversation to assert on exactly what a restart would see, not on the
+        // live in-memory AppState.
+        let app = AppState()
+        let id = UUID()
+        let judged = pausedGoal(on: app, id, judged: 1)
+
+        app.recordHumanJudgement(for: id, criterionId: judged[0].id, accepted: false)
+
+        let live = try #require(app.conversations.first { $0.id == id })
+        let restarted = try JSONDecoder().decode(Conversation.self, from: JSONEncoder().encode(live))
+
+        #expect(restarted.goalContract?.awaitingHumanJudgement == false,
+                "the flag must not still say 'awaiting judgement' once the verdict is in")
+        #expect(!(restarted.lastGoalEvaluation?.criteria.contains { $0.verdict == .humanPending } ?? false),
+                "no human_pending criterion may remain once awaitingHumanJudgement is false")
+    }
+
     @Test("a mixed verdict resumes the agent, it does not complete")
     func mixedVerdictResumes() {
         let app = AppState()

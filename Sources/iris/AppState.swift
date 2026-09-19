@@ -864,9 +864,14 @@ class AppState {
                           to: conversationId)
         } else {
             // A rejection is something the agent CAN act on. Hand it back with the reasons named.
-            // No save here: `recordHumanJudgement` (the only caller) already persisted the verdict
-            // change, and `resumeGoalLoop`'s eventual reply will persist the flag flip above.
+            // Save here: the flag flip above must land WITH the verdict `recordHumanJudgement`
+            // already saved. Skipping this and waiting on `resumeGoalLoop`'s eventual reply would
+            // leave a crash/quit window where the disk has the verdict but still says
+            // `awaitingHumanJudgement == true` with no human_pending criterion left — a goal no
+            // resume guard will wake and no button will render for. That is the exact trapped-goal
+            // failure this gate exists to prevent.
             let names = rejected.map { "- \($0.criterionText)" }.joined(separator: "\n")
+            saveConversations()
             resumeGoalLoop(for: conversationId,
                            steer: "You did not meet these, in the user's judgement:\n\(names)")
         }
