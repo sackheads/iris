@@ -3,6 +3,11 @@ import SwiftUI
 import KeyboardShortcuts
 
 actor IrisEngine {
+    /// The reflection turn fired after a goal completes. Shared with `AppState`, which completes a
+    /// goal whose last criteria the user judged — that path returns from this handler long before
+    /// the push below, so it has to fire the same turn itself (D2 spec §7).
+    static let goalCompletionSkillCheck = "System Event [Goal Completion Skill Check]: Evaluate the goal just completed. Did you execute a complex multi-step procedure, overcome non-obvious errors, or discover a reusable recipe? If so, call `create_skill` or `update_skill` now to save or patch it in your permanent skill library."
+
     let client: any LLMClientProtocol
     let executor = ToolExecutor.shared
     let manager = SkillManager.shared
@@ -1138,7 +1143,9 @@ actor IrisEngine {
                 // judge a goal that is about to change underneath them.
                 let awaitingJudgement = c.pendingJudgement(from: evaluation)
                 if blocking.isEmpty, !awaitingJudgement.isEmpty {
-                    await MainActor.run { localState?.beginJudgementPause(for: conversationId) }
+                    // The summary travels with the pause: this handler returns now and never
+                    // reaches its own push below, so an accept has to push it later (spec §7).
+                    await MainActor.run { localState?.beginJudgementPause(for: conversationId, summary: summary) }
                     let lines = awaitingJudgement.map { "- \($0.criterionText)" }.joined(separator: "\n")
                     return """
                     Paused for the user's judgement. \(awaitingJudgement.count) criteri\(awaitingJudgement.count == 1 ? "on is" : "a are") human-judged and only they can decide:
@@ -1162,8 +1169,7 @@ actor IrisEngine {
             }
             await pushToUI(role: .agent, text: summary, conversationId: conversationId)
             if principal == .main {
-                let reflectionNotice = "System Event [Goal Completion Skill Check]: Evaluate the goal just completed. Did you execute a complex multi-step procedure, overcome non-obvious errors, or discover a reusable recipe? If so, call `create_skill` or `update_skill` now to save or patch it in your permanent skill library."
-                await processInput(reflectionNotice, source: "System", conversationId: conversationId)
+                await processInput(IrisEngine.goalCompletionSkillCheck, source: "System", conversationId: conversationId)
             }
             result = "Goal marked as complete. Summary: \(summary)"
         } else if functionCall.name == "reach_checkpoint", principal == .main {
