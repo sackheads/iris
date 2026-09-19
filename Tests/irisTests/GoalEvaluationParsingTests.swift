@@ -38,6 +38,33 @@ struct GoalEvaluationParsingTests {
         #expect(out.first { $0.criterionId == c[2].id }?.method == .human)
     }
 
+    @Test("a grader that volunteers a verdict on a humanJudged criterion is ignored")
+    func graderCannotGradeAHumanJudgedCriterion() {
+        let c = criteria()
+        // The prompt forbids this twice, but a prompt is not a guarantee. Taking the verdict would
+        // complete the goal `.passed` with nobody having judged — the exact hole D2 exists to
+        // close — and would then announce a grader's call as "your judgement" (spec §4.4, §6).
+        let args: [String: JSONValue] = ["evaluations": .array([
+            .object(["criterion_id": .string(c[2].id.uuidString), "verdict": .string("met"),
+                     "evidence": .string("looks tasteful to me")])
+        ])]
+        let out = GoalEvaluationParsing.verdicts(from: args, criteria: c)
+        let judged = out.first { $0.criterionId == c[2].id }
+        #expect(judged?.verdict == .humanPending, "only the user may decide a humanJudged criterion")
+        #expect(judged?.evidence == "", "the grader's reasoning is not evidence for the user's call")
+    }
+
+    @Test("a grader rejecting a humanJudged criterion is ignored too")
+    func graderCannotFailAHumanJudgedCriterion() {
+        let c = criteria()
+        let args: [String: JSONValue] = ["evaluations": .array([
+            .object(["criterion_id": .string(c[2].id.uuidString), "verdict": .string("not_met"),
+                     "evidence": .string("I did not like it")])
+        ])]
+        let out = GoalEvaluationParsing.verdicts(from: args, criteria: c)
+        #expect(out.first { $0.criterionId == c[2].id }?.verdict == .humanPending)
+    }
+
     @Test("an unknown verdict string falls back to cannot_verify")
     func unknownVerdict() {
         let c = criteria()
