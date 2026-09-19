@@ -129,6 +129,35 @@ struct HumanJudgementGateTests {
         #expect(contract.pendingJudgement(from: failed).isEmpty)
     }
 
+    @Test("the retry cap wins over a pending judgement — blocking must be empty to pause")
+    func capReachedWithJudgementPendingCompletesUngated() async {
+        let app = AppState()
+        app.autoApproveTools = true
+        let id = UUID()
+        lockMixedContract(on: app, id)
+        // Every attempt refuses on "builds"; "reads well" (humanJudged) is never resolved, so it
+        // stays human_pending for the life of the goal. `goal_complete` always ends its turn on
+        // the first round (iris.swift), so reaching the cap takes one processInput call per
+        // attempt — cap refusals, then the attempt that trips `gateAttempts == cap`.
+        let cap = ConfigManager.shared.maxDoneGateRetries
+        let client = GateClient(main: Array(repeating: Self.goalComplete(), count: cap + 1),
+                                graderVerdicts: ["builds": "not_met"])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        await engine.processInput("go", source: "User", conversationId: id)
+        for _ in 0..<cap {
+            await engine.processInput("continue", source: "System", conversationId: id)
+        }
+
+        let conv = app.conversations.first { $0.id == id }
+        // The pause branch requires `blocking.isEmpty`; it never runs here, so the goal must
+        // finalize instead — which only `finishGatedGoal` + `clearGoal` do.
+        #expect(conv?.lastGoalEvaluation?.gateOutcome == .ungatedAtCap)
+        #expect(conv?.activeGoal == nil, "the cap outcome clears the goal rather than pausing it")
+        #expect(conv?.goalContract == nil)
+        #expect(conv?.lastGoalEvaluation?.criteria.first { $0.criterionText == "reads well" }?.verdict
+                == .humanPending, "the human-judged criterion really was still pending when this fired")
+    }
+
     @Test("a contract with no humanJudged criteria never pauses")
     func noJudgedCriteriaNeverPauses() async {
         let app = AppState()

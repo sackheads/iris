@@ -56,9 +56,19 @@ struct HumanJudgementStateTests {
 
     @Test("a Conversation carrying a pre-D2 contract still decodes")
     func legacyConversationDecodes() throws {
-        var conv = Conversation(title: "old")
-        conv.goalContract = GoalContract(objective: "ship", criteria: [])
-        let back = try JSONDecoder().decode(Conversation.self, from: JSONEncoder().encode(conv))
+        // Hand-built, mirroring `codable`'s legacy dict above: a real pre-D2 payload never
+        // contains `awaitingHumanJudgement`, so an encoded Conversation (which always carries the
+        // current key) would never exercise the missing-key path this test is named for.
+        let legacy: [String: Any] = [
+            "title": "old",
+            "goalContract": [
+                "objective": "ship",
+                "criteria": [],
+                "state": "locked"
+            ]
+        ]
+        let back = try JSONDecoder().decode(
+            Conversation.self, from: JSONSerialization.data(withJSONObject: legacy))
         #expect(back.goalContract?.awaitingHumanJudgement == false)
         #expect(back.title == "old")
     }

@@ -864,13 +864,12 @@ class AppState {
                           to: conversationId)
         } else {
             // A rejection is something the agent CAN act on. Hand it back with the reasons named.
+            // No save here: `recordHumanJudgement` (the only caller) already persisted the verdict
+            // change, and `resumeGoalLoop`'s eventual reply will persist the flag flip above.
             let names = rejected.map { "- \($0.criterionText)" }.joined(separator: "\n")
-            saveConversations()
             resumeGoalLoop(for: conversationId,
                            steer: "You did not meet these, in the user's judgement:\n\(names)")
-            return
         }
-        saveConversations()
     }
 
     /// Park the goal until the user judges its `humanJudged` criteria (spec §4). Deliberately does

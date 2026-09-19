@@ -74,8 +74,11 @@ struct HumanJudgementRecordingTests {
     func unknownIdRefused() {
         let app = AppState()
         let id = UUID()
-        _ = pausedGoal(on: app, id)
+        let c = pausedGoal(on: app, id)
         #expect(!app.recordHumanJudgement(for: id, criterionId: UUID(), accepted: true))
+        let v = app.conversations.first { $0.id == id }?
+            .lastGoalEvaluation?.criteria.first { $0.criterionId == c.id }
+        #expect(v?.verdict == .humanPending, "a bogus id must not touch the real criterion's verdict")
     }
 
     @Test("a criterion that is not awaiting judgement is refused")
