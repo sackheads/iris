@@ -970,31 +970,29 @@ private struct DriftCriterionRow: View {
                     .foregroundStyle(.orange)
             }
         case .graded:
+            let glyph = verdict.graderColumnGlyph
             HStack(spacing: 4) {
-                switch verdict.verdict {
-                case .met:
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                        .accessibilityLabel("Grader: met")
-                case .notMet:
-                    Image(systemName: "xmark.octagon.fill")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .accessibilityLabel("Grader: not met")
-                case .cannotVerify:
-                    Image(systemName: "questionmark.circle")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .accessibilityLabel("Grader: cannot verify")
-                case .humanPending:
-                    Image(systemName: "person.crop.circle.badge.questionmark")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .accessibilityLabel("Awaiting human judgment")
-                }
+                Image(systemName: glyph.symbolName)
+                    .font(.caption)
+                    .foregroundStyle(graderColumnTint)
+                    .accessibilityLabel(glyph.accessibilityLabel)
                 verdictLabel
             }
+        }
+    }
+
+    /// Colour for the graded-column glyph. A human's own verdict deliberately does NOT reuse the
+    /// grader's "verified" green — that would read as machine-verified evidence for a claim the
+    /// user asserted, not the grader (spec §6). `.blue` still communicates "met" without borrowing
+    /// the grader's colour, and stays legible in both light and dark mode.
+    private var graderColumnTint: Color {
+        switch (verdict.method, verdict.verdict) {
+        case (.human, .met):    return .blue
+        case (.human, .notMet): return .orange
+        case (_, .met):         return .green
+        case (_, .notMet):      return .red
+        case (_, .cannotVerify): return .secondary
+        case (_, .humanPending): return .secondary
         }
     }
 

@@ -86,6 +86,26 @@ extension CriterionVerdict {
         default:      return nil
         }
     }
+
+    /// The icon and accessibility label for the graded-column glyph. Keyed on BOTH `method` and
+    /// `verdict` — a verdict a human gave must never render, or announce, as grader-verified
+    /// evidence (spec §6). Extracted so this can be tested without a SwiftUI harness.
+    var graderColumnGlyph: (symbolName: String, accessibilityLabel: String) {
+        switch (method, verdict) {
+        case (.human, .met):
+            return ("person.fill.checkmark", "Your judgement: met")
+        case (.human, .notMet):
+            return ("person.fill.xmark", "Your judgement: not met")
+        case (_, .met):
+            return ("checkmark.circle.fill", "Grader: met")
+        case (_, .notMet):
+            return ("xmark.octagon.fill", "Grader: not met")
+        case (_, .cannotVerify):
+            return ("questionmark.circle", "Grader: cannot verify")
+        case (_, .humanPending):
+            return ("person.crop.circle.badge.questionmark", "Awaiting human judgment")
+        }
+    }
 }
 
 extension GateOutcome {
