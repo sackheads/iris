@@ -17,6 +17,7 @@ actor MessageStreamer {
     private(set) var text = ""
     private(set) var opened = false
     private var lastSent = ""
+    private var finished = false
     private var flushTask: Task<Void, Never>?
     private let open: Open
     private let update: Update
@@ -30,7 +31,7 @@ actor MessageStreamer {
     }
 
     func append(_ delta: String) async {
-        guard !delta.isEmpty else { return }
+        guard !finished, !delta.isEmpty else { return }
         text += delta
         if !opened {
             opened = true
@@ -57,6 +58,7 @@ actor MessageStreamer {
     /// Writes the final content once and asks for it to be persisted. Opens the row first when
     /// nothing streamed (a replayed call delivers its whole text here).
     func finish(_ finalText: String) async {
+        finished = true
         flushTask?.cancel()
         flushTask = nil
         text = finalText
@@ -72,7 +74,11 @@ actor MessageStreamer {
     /// Ends the stream with whatever has been shown (error, hook block, Stop) and returns it.
     func settle() async -> String {
         let shown = text
-        if opened { await finish(shown) }
+        if opened {
+            await finish(shown)
+        } else {
+            finished = true
+        }
         return shown
     }
 }

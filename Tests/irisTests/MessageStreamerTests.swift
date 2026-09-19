@@ -91,6 +91,27 @@ struct MessageStreamerTests {
         #expect(await recorder.updates.count == before)
     }
 
+    @Test("no writes after finish or settle: a late delta is ignored, on-screen text stays put")
+    func noWritesAfterFinish() async {
+        let recorder = Recorder(), gate = Gate()
+        let s = make(recorder, gate: gate)
+        await s.append("a")
+        await s.finish("ab")
+        await s.append("c")
+        await gate.release()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(await recorder.updates.count == 1)
+        let lastUpdate = await recorder.updates.last
+        #expect(lastUpdate?.1 == "ab" && lastUpdate?.2 == true)
+        #expect(await s.text == "ab")
+
+        let recorder2 = Recorder(), gate2 = Gate()
+        let s2 = make(recorder2, gate: gate2)
+        _ = await s2.settle()
+        await s2.append("x")
+        #expect(await recorder2.opens.isEmpty)
+    }
+
     @Test("the flush interval is 50 ms")
     func interval() {
         #expect(MessageStreamer.flushIntervalMs == 50)
