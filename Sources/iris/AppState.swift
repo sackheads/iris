@@ -1216,6 +1216,8 @@ class AppState {
     }
     
     private var saveTask: Task<Void, Never>? = nil
+    /// When the oldest currently-unwritten change arrived; nil when nothing is pending.
+    private var firstDirtyAt: Date? = nil
     
     /// The conversations that belong on disk: durable, user-facing ones only. Sub-process
     /// (subagent / drift-evaluator) scratch conversations are ephemeral and must never persist.
@@ -1242,21 +1244,63 @@ class AppState {
         return loaded
     }
 
+    /// Quiet period before a debounced save fires.
+    static let saveDebounce: TimeInterval = 0.5
+    /// Longest a pending change may go unwritten. A trailing-only debounce that cancels its
+    /// predecessor on every call never fires at all while mutations keep arriving faster than
+    /// the quiet period — and a working goal loop (messages, tool results, token usage, plus a
+    /// concurrent drift evaluator) mutates continuously for minutes. That starved the save
+    /// indefinitely, so the store held an arbitrarily stale snapshot and a locked goal contract
+    /// could lose criteria across a restart (#62). The max wait bounds that staleness.
+    static let saveMaxWait: TimeInterval = 2.0
+
     private func saveConversations() {
+        let now = Date()
+        let dirtySince = firstDirtyAt ?? now
+        firstDirtyAt = dirtySince
+
+        // Deadline reached: write now rather than schedule yet another cancellable timer.
+        let elapsed = now.timeIntervalSince(dirtySince)
+        guard elapsed < Self.saveMaxWait else {
+            saveTask?.cancel()
+            writeConversationsNow()
+            return
+        }
+
+        // Otherwise debounce, but never past the deadline.
         saveTask?.cancel()
+        let wait = min(Self.saveDebounce, Self.saveMaxWait - elapsed)
         saveTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s debounce
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            // Sub-processes (subagents, the drift evaluator) run in ephemeral scratch
-            // conversations. Persisting them let an orphan survive a mid-run quit and resurrect
-            // on the next launch as a normal main-principal conversation carrying a stale
-            // `activeGoal` — but WITHOUT its restricted toolset — so it would hunt for tools it
-            // no longer has (e.g. `submit_evaluation`). Only durable, user-facing conversations
-            // are persisted; the main goal's state rides along on those and survives restart.
-            let durable = Self.durableConversations(conversations)
-            if let data = try? JSONEncoder().encode(durable) {
-                IrisDefaults.store.set(data, forKey: "iris_conversations")
-            }
+            writeConversationsNow()
+        }
+    }
+
+    /// Writes pending conversation state synchronously, right now.
+    ///
+    /// `applicationWillTerminate` calls `_exit(0)` to dodge a ggml-metal static-destructor crash.
+    /// `_exit` runs no atexit handlers, so it kills the pending debounce task outright and skips
+    /// the `cfprefsd` flush — every unwritten change is lost on quit (#62). Quit must flush
+    /// through this first. `synchronize()` is deprecated for routine use but is exactly right
+    /// here: it is the only way to get bytes to disk before `_exit`.
+    func flushSave() {
+        saveTask?.cancel()
+        writeConversationsNow()
+        IrisDefaults.store.synchronize()
+    }
+
+    private func writeConversationsNow() {
+        firstDirtyAt = nil
+        // Sub-processes (subagents, the drift evaluator) run in ephemeral scratch
+        // conversations. Persisting them let an orphan survive a mid-run quit and resurrect
+        // on the next launch as a normal main-principal conversation carrying a stale
+        // `activeGoal` — but WITHOUT its restricted toolset — so it would hunt for tools it
+        // no longer has (e.g. `submit_evaluation`). Only durable, user-facing conversations
+        // are persisted; the main goal's state rides along on those and survives restart.
+        let durable = Self.durableConversations(conversations)
+        if let data = try? JSONEncoder().encode(durable) {
+            IrisDefaults.store.set(data, forKey: "iris_conversations")
         }
     }
     
