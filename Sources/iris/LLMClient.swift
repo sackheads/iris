@@ -4,6 +4,10 @@ import Foundation
 /// tests supply a mock to drive `IrisEngine` deterministically without network calls.
 protocol LLMClientProtocol: Sendable {
     func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse
+    /// Streams the same call. Default (LLMStream.swift): one `generateContent` replayed as events.
+    func streamContent(request: GeminiRequest, tier: ModelTier) -> AsyncThrowingStream<LLMStreamEvent, Error>
+    /// True only when `streamContent` reads the provider's stream natively. Default false.
+    var supportsStreaming: Bool { get }
 }
 
 extension LLMClient: LLMClientProtocol {}

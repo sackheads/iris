@@ -27,6 +27,8 @@ One provider-neutral event enum, in a new file `Sources/iris/LLMStream.swift`:
 enum LLMStreamEvent: Sendable, Equatable {
     /// A fragment of visible assistant text. Fragments concatenate in order.
     case textDelta(String)
+    /// A provider thought signature that belongs to the text part (Gemini requires it echoed back).
+    case thoughtSignature(String)
     /// A complete function call. Providers that stream arguments (Anthropic, OpenAI)
     /// accumulate inside the client and emit one event per call once its JSON is whole.
     case functionCall(FunctionCall)
@@ -34,8 +36,9 @@ enum LLMStreamEvent: Sendable, Equatable {
     case usage(UsageMetadata)
     /// The provider ended the turn. `finishReason` is the provider's own string
     /// ("STOP", "end_turn", "tool_calls", "MAX_TOKENS", ...), passed through for the
-    /// empty-content pill; `emptyReason` is derived from it by the assembler.
-    case done(finishReason: String?)
+    /// empty-content pill; `emptyReason` is derived from it by the assembler. `blockReason`
+    /// is Gemini's prompt-level block, kept separate so the #136 pill reads exactly as before.
+    case done(finishReason: String?, blockReason: String? = nil)
 }
 ```
 
@@ -44,6 +47,8 @@ Design points:
 - **`functionCall` is whole, never partial.** The engine's tool loop consumes `FunctionCall` values; streaming partial JSON gains nothing here and would add a tolerant-parser dependency. The client owns argument accumulation (Section 3).
 - **`usage` is repeatable.** Gemini sends `usageMetadata` on several chunks with running counts; Anthropic sends `input_tokens` in `message_start` and `output_tokens` in `message_delta`; OpenAI sends one usage chunk at the end. "Last wins, merged field-wise" covers all three: the assembler keeps the max of each count it has seen, because Anthropic's two usage events carry disjoint fields.
 - **No `error` case.** Failures are thrown from the stream, so the engine's existing `catch` and `LLMRetry` see the same `Error` values as today.
+- **`thoughtSignature` is a separate event, not a field on `textDelta`.** A provider thought signature belongs to the text part (Gemini requires it echoed back on the next turn), but arrives independently of the text fragments themselves, so the assembler attaches whichever one it last saw to the whole text part rather than to any one delta.
+- **`blockReason` rides on `done`, not its own case.** It is Gemini's prompt-level block (`promptFeedback.blockReason`), never a provider `finishReason`; keeping it a separate parameter on the terminal event (rather than folding it into `finishReason`) lets the assembler reproduce the #136 empty-content pill's exact wording for both causes.
 
 ## 2. Client protocol
 
@@ -66,19 +71,22 @@ The default extension calls `generateContent` and emits `textDelta` per text par
 
 Each real client implements `streamContent` natively. `generateContent` stays as it is; it is still the right call for the ladder's rungs 1–3, for the summariser, and for anything that wants one response object.
 
-### 2.1 SSE reader
+### 2.1 SSE parser
 
-One shared helper, `SSEReader`, in `LLMStream.swift`:
+One shared helper, `SSEParser`, in `LLMStream.swift`:
 
 ```swift
-struct SSEReader {
-    /// Yields each event's `data:` payload (multi-line data joined with "\n"), plus the
-    /// optional `event:` name. Ignores comments and blank keep-alives.
-    static func events(from bytes: URLSession.AsyncBytes) -> AsyncThrowingStream<(event: String?, data: String), Error>
+struct SSEParser {
+    /// Feed one line at a time (without the line terminator); returns an event on the blank
+    /// line that ends one, else nil. Ignores comments (`:` prefix) and unknown fields (`id`,
+    /// `retry`).
+    mutating func feed(_ line: String) -> SSEEvent?
+    /// Flushes an event the stream ended without a trailing blank line.
+    mutating func finish() -> SSEEvent?
 }
 ```
 
-Built on `URLSession.shared.bytes(for:)` and `AsyncBytes.lines`. Cancelling the consuming task cancels the URLSession task; that is the whole cancellation story at the transport layer (Section 6).
+`SSEParser` is synchronous and holds no I/O of its own; each client's streaming task feeds it one line at a time from `URLSession.shared.bytes(for:).lines`, so the multi-line-`data:`-joining and comment/field-skipping logic is written and tested once and shared across providers. Cancelling the consuming task cancels the URLSession task; that is the whole cancellation story at the transport layer (Section 6).
 
 HTTP status is checked once, on the `URLResponse` returned by `bytes(for:)`, before any line is read. A non-2xx response is read to completion into `Data` and thrown through the same per-provider error decoder that the non-streaming path uses today, so a 429 during streaming produces the identical `LLMError` (and identical retry-after handling) as a 429 during a plain call.
 

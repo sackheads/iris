@@ -58,6 +58,10 @@ public struct FunctionCall: Codable, Sendable {
     }
 }
 
+/// Synthesized in this file (same-file requirement for auto `==`); used by `LLMStreamEvent`
+/// (LLMStream.swift) to compare replayed events.
+extension FunctionCall: Equatable {}
+
 public struct FunctionResponse: Codable, Sendable {
     public var name: String
     public var response: [String: JSONValue]
@@ -194,6 +198,10 @@ struct UsageMetadata: Codable, Sendable {
     var candidatesTokenCount: Int?
     var totalTokenCount: Int?
 }
+
+/// Synthesized in this file (same-file requirement for auto `==`); used by `LLMStreamEvent`
+/// (LLMStream.swift) to compare replayed events.
+extension UsageMetadata: Equatable {}
 
 public enum JSONValue: Codable, Sendable, Equatable {
     case string(String)
