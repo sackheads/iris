@@ -468,77 +468,85 @@ struct CheckpointPauseChip: View {
 
     var body: some View {
         if let contract = conversation.goalContract, contract.checkpointStatus == .pausedForReview {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Image(systemName: "pause.circle.fill")
-                        .foregroundStyle(.orange)
-                        .font(.caption)
-                        .accessibilityHidden(true)
-                    Text("CHECKPOINT \(contract.currentMilestone + 1) OF \(contract.milestones.count) · PAUSED FOR REVIEW")
-                        .font(.caption2).bold()
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("Awaiting your decision")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-                // UNVERIFIED self-report
-                if let report = conversation.lastGoalCompletionReport {
-                    CompletionReportSection(report: report, evaluation: nil)
-                }
-                // Trusted grader verdict, reusing DriftCriterionRow
-                if let evaluation = conversation.lastGoalEvaluation {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label("GRADER VERDICT", systemImage: "checkmark.seal")
-                            .font(.caption.bold())
+            // Bounded like every other goal chip (GoalContractPanel, LockedContractChip,
+            // CompletionReportChip). This one grows with the contract: it embeds the self-report
+            // AND a row per grader verdict. Unbounded in the composer's VStack that is what
+            // blanked the window at goal_complete (#62, aa141d5) — the cap was added to the other
+            // three chips then, and this chip arrived later without it (#164).
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Image(systemName: "pause.circle.fill")
+                            .foregroundStyle(.orange)
+                            .font(.caption)
+                            .accessibilityHidden(true)
+                        Text("CHECKPOINT \(contract.currentMilestone + 1) OF \(contract.milestones.count) · PAUSED FOR REVIEW")
+                            .font(.caption2).bold()
                             .foregroundStyle(.secondary)
-                        ForEach(evaluation.criteria) { verdict in
-                            DriftCriterionRow(
-                                verdict: verdict,
-                                selfReportStatus: "",
-                                evaluationStatus: evaluation.status,
-                                reportPresent: conversation.lastGoalCompletionReport != nil
-                            )
+                        Spacer()
+                        Text("Awaiting your decision")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    // UNVERIFIED self-report
+                    if let report = conversation.lastGoalCompletionReport {
+                        CompletionReportSection(report: report, evaluation: nil)
+                    }
+                    // Trusted grader verdict, reusing DriftCriterionRow
+                    if let evaluation = conversation.lastGoalEvaluation {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("GRADER VERDICT", systemImage: "checkmark.seal")
+                                .font(.caption.bold())
+                                .foregroundStyle(.secondary)
+                            ForEach(evaluation.criteria) { verdict in
+                                DriftCriterionRow(
+                                    verdict: verdict,
+                                    selfReportStatus: "",
+                                    evaluationStatus: evaluation.status,
+                                    reportPresent: conversation.lastGoalCompletionReport != nil
+                                )
+                            }
                         }
                     }
-                }
-                // Steering note + resume controls
-                TextField("Optional feedback for the agent…", text: $sendBackNote, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(.body)
-                    .lineLimit(1...3)
-                    .padding(6)
-                    .background(Color.primary.opacity(0.05))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                HStack(spacing: 10) {
-                    Button("Send back") {
-                        let note = sendBackNote.trimmingCharacters(in: .whitespacesAndNewlines)
-                        state.holdCheckpoint(for: conversation.id, feedback: note.isEmpty ? nil : note)
-                        sendBackNote = ""
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.orange)
-                    .font(.subheadline.bold())
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.orange.opacity(0.10))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    // Steering note + resume controls
+                    TextField("Optional feedback for the agent…", text: $sendBackNote, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .font(.body)
+                        .lineLimit(1...3)
+                        .padding(6)
+                        .background(Color.primary.opacity(0.05))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    HStack(spacing: 10) {
+                        Button("Send back") {
+                            let note = sendBackNote.trimmingCharacters(in: .whitespacesAndNewlines)
+                            state.holdCheckpoint(for: conversation.id, feedback: note.isEmpty ? nil : note)
+                            sendBackNote = ""
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.orange)
+                        .font(.subheadline.bold())
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.orange.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
 
-                    Spacer()
+                        Spacer()
 
-                    Button("Approve & continue") {
-                        state.advanceCheckpoint(for: conversation.id)
+                        Button("Approve & continue") {
+                            state.advanceCheckpoint(for: conversation.id)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.white)
+                        .font(.subheadline.bold())
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .background(Color.irisIndigo)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.white)
-                    .font(.subheadline.bold())
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .background(Color.irisIndigo)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
                 }
+                .padding(12)
             }
-            .padding(12)
+            .frame(maxHeight: 340)
             .background(.thinMaterial)
             .clipShape(.rect(cornerRadius: 10))
             .overlay {
