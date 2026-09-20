@@ -1067,7 +1067,7 @@ class AppState {
         // checkpoint Accept/Reject UI is unbuilt, so `performCheckpoint` stops without asking.
         // This is the backstop for the day it lands, or for any code that sets the flag mid-ladder.
         if conversations[idx].goalContract?.checkpointStatus == .pausedForReview {
-            saveConversations()
+            markChanged(conversationId, .metadata)
             return
         }
 
@@ -1248,7 +1248,7 @@ class AppState {
         c.checkpointStatus = .running
         conversations[idx].goalContract = c
         conversations[idx].goalIterationCount = 0
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// Human approved the checkpoint: advance to the next milestone and resume the loop.
