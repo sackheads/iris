@@ -369,3 +369,21 @@ final class ConversationStore: Sendable {
         try writer.write { db in try db.execute(sql: sql, arguments: arguments) }
     }
 }
+
+extension ConversationStore {
+    /// First-launch import (spec §6). Returns false and writes nothing when the store already
+    /// holds conversations; the check runs inside the write transaction so a crash between a
+    /// previous import's commit and the key move cannot double-import.
+    func importLegacy(_ conversations: [Conversation]) throws -> Bool {
+        try writer.write { db in
+            if (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM conversations") ?? 0) > 0 { return false }
+            let encoder = JSONEncoder()
+            for c in conversations {
+                try Self.upsertMetadata(c, exists: false, db: db, encoder: encoder)
+                try Self.insertMessages(c, from: 0, db: db, encoder: encoder)
+                try Self.insertHistory(c, from: 0, db: db, encoder: encoder)
+            }
+            return true
+        }
+    }
+}
