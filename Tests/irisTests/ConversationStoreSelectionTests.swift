@@ -93,22 +93,51 @@ struct ConversationStoreSelectionTests {
                 .map(\.content)
         }
 
-        let a = AppState(store: store)
+        // Pin `.provisioned` (#202 fix round 1) so this test's outcome does not depend on whether
+        // this machine happens to have the real tier-3 gguf under `~/.iris/models` — without it, a
+        // real `AppState` also emits the #202 tier-3-unprovisioned notice by default, which is
+        // legitimate but unrelated to what this test verifies.
+        let a = AppState(store: store, tier3Provisioning: .provisioned)
         #expect(a.loadedSkippedRows.count == 1)
         #expect(notices(a) == ["1 saved conversation could not be read and was left in place; see the console for details."])
         a.flushSave()
 
         // Launch 2 hits the same condition and finds its own wording already there.
-        let b = AppState(store: store)
+        let b = AppState(store: store, tier3Provisioning: .provisioned)
         #expect(b.loadedSkippedRows.count == 1)
         #expect(notices(b).count == 1)
         b.flushSave()
 
         let loaded = try store.loadAll()
-        #expect(loaded.conversations.flatMap { $0.messages }.filter { $0.role == .system }.count == 1)
+        // Filtered to this notice's own wording, not all system messages: a real `AppState` also
+        // emits other launch notices independent of this scenario.
+        #expect(loaded.conversations.flatMap { $0.messages }.filter { $0.role == .system && $0.content.contains("could not be read and") }.count == 1)
         for conv in loaded.conversations {
             #expect(try store.counts(for: conv.id).messages == conv.messages.count)
         }
+    }
+
+    /// #202 fix round 1: the tier-3-unprovisioned launch notice was wired with no seam and no
+    /// coverage, so it behaved differently on a machine with the real gguf under `~/.iris/models`
+    /// versus one without — and nothing pinned either behaviour. `tier3Provisioning:` lets these
+    /// two tests assert both outcomes without touching the real models directory.
+    @Test("the tier-3-unprovisioned notice is appended when the model is unprovisioned")
+    func tier3UnprovisionedNoticeAppended() throws {
+        let store = try ConversationStore.inMemory()
+        let app = AppState(store: store, tier3Provisioning: .unprovisioned(modelName: "some-model.gguf"))
+        let notices = app.conversations.flatMap { $0.messages }
+            .filter { $0.role == .system && $0.content.contains("tier-3 guard model") }
+            .map(\.content)
+        #expect(notices == ["Prompt-injection protection is on, but the tier-3 guard model some-model.gguf is not downloaded. Tier 3 is skipped until it is (Settings \u{2192} Security)."])
+    }
+
+    @Test("no tier-3-unprovisioned notice is appended when the model is provisioned")
+    func tier3UnprovisionedNoticeAbsentWhenProvisioned() throws {
+        let store = try ConversationStore.inMemory()
+        let app = AppState(store: store, tier3Provisioning: .provisioned)
+        let notices = app.conversations.flatMap { $0.messages }
+            .filter { $0.role == .system && $0.content.contains("tier-3 guard model") }
+        #expect(notices.isEmpty)
     }
 
     /// The bug this pins: a launch notice that lived in `messages` without a row on disk shifted

@@ -117,12 +117,14 @@ final class ModelLEDBarTests: XCTestCase {
         XCTAssertEqual(bar.tier3State(), .off)
     }
 
-    func testTier3ConfiguredWhenGGUFMissing() {
+    func testTier3UnprovisionedWhenGGUFMissing() {
+        // #202: an absent tier-3 model is a distinct LED state from "downloaded but not loaded" —
+        // the guard skips tier 3 entirely rather than blocking, and the LED must say so.
         config.enableAdvancedPromptInjectionProtection = true
         config.promptGuardEngine = "llama_cpp"
         config.promptGuardModel = "nonexistent.gguf"
         let bar = ModelLEDBar(config: config)
-        XCTAssertEqual(bar.tier3State(), .configured)
+        XCTAssertEqual(bar.tier3State(), .unprovisioned)
     }
 
     func testTier3ReadyForOllama() {

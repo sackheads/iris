@@ -53,6 +53,15 @@ final class AuxiliaryModelManager: @unchecked Sendable {
         }
     }
     
+    /// True once a load has been started for `role` — successfully loaded, still in flight, or a
+    /// test's mock via `setMockEngine`. A failed load removes its task (see `getEngine`'s catch),
+    /// so this only stays true once something is actually available to hand back. Used by
+    /// `InjectionGuard.executeTier3Canary` (#202 fix round 2) so a registered engine counts as
+    /// provisioned regardless of what the filesystem says.
+    func hasEngine(for role: String) -> Bool {
+        lock.withLock { loadingTasks[role] != nil }
+    }
+
     func unloadEngine(for role: String) async {
         let task = lock.withLock { loadingTasks.removeValue(forKey: role) }
         if let engine = try? await task?.value {

@@ -260,7 +260,11 @@ class AppState {
     /// the one-time system-line notice below and for tests.
     private(set) var loadedSkippedRows: [SkippedRow] = []
 
-    init(store: ConversationStore = .makeDefault()) {
+    /// Test seam for the #202 launch notice below: nil means compute the real answer from
+    /// `IrisPaths.default.modelsDir` at launch, which is what production always does. Injectable
+    /// so tests can pin `.provisioned`/`.unprovisioned` without depending on whether this machine
+    /// happens to have the real gguf under `~/.iris/models`.
+    init(store: ConversationStore = .makeDefault(), tier3Provisioning: InjectionGuard.Tier3Provisioning? = nil) {
         self.store = store
         self.engine = IrisEngine(state: self)
         loadConversations()
@@ -318,6 +322,20 @@ class AppState {
         if let headline = loadFailureHeadline, let target = selectedConversationId {
             appendLaunchNotice("Saved conversations could not be loaded (\(headline)). Starting with an empty list; the database was left untouched.",
                                to: target)
+        }
+        // #202: a fresh install has protection on by default but no tier-3 model downloaded, and
+        // the guard silently skips tier 3 rather than blocking — say so once, visibly, instead of
+        // leaving that only to the P3 LED's tooltip.
+        if let target = selectedConversationId {
+            let provisioning = tier3Provisioning ?? InjectionGuard.tier3Provisioning(
+                engine: ConfigManager.shared.promptGuardEngine,
+                modelName: ConfigManager.shared.promptGuardModel,
+                modelsDir: IrisPaths.default.modelsDir)
+            if let notice = InjectionGuard.tier3UnprovisionedNotice(
+                protectionEnabled: ConfigManager.shared.enableAdvancedPromptInjectionProtection,
+                provisioning: provisioning) {
+                appendLaunchNotice(notice, to: target)
+            }
         }
     }
 

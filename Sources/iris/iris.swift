@@ -40,9 +40,10 @@ actor IrisEngine {
 
     /// Guard gating for everything this engine sanitizes. nil — always, in the app — means
     /// "consult the config". Injectable for the same reason `SkillManager.loadCustomRules` takes
-    /// it: the model-backed tiers fail closed when no prompt-guard model is provisioned, which is
-    /// the case under `swift test`, so a test that needs to read the content of a guarded string
-    /// pins tier 1 here rather than mutating `ConfigManager.shared` (invariant 7, #109).
+    /// it: under `swift test` the tier-3 model is typically absent, which tier 3 now skips rather
+    /// than blocks (#202) — but any tier still fails closed on a genuine load/inference error once
+    /// its model is present. A test that needs to read the content of a guarded string pins tier 1
+    /// here rather than mutating `ConfigManager.shared` (invariant 7, #109).
     private let protectionEnabled: Bool?
 
     init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool = ConfigManager.shared.streamResponses, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool = ConfigManager.shared.checkpointAutoAdvance) {

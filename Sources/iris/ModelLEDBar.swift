@@ -19,15 +19,19 @@ struct ModelLED: View {
     let state: LEDState
 
     enum LEDState: CaseIterable {
-        case off, configured, ready, active, downloading
+        case off, configured, ready, active, downloading, unprovisioned
 
         var color: Color {
             switch self {
-            case .off:          Color.gray.opacity(0.35)
-            case .configured:   Color.orange.opacity(0.55)
-            case .ready:        Color.green
-            case .active:       Color.green
-            case .downloading:  Color.orange
+            case .off:           Color.gray.opacity(0.35)
+            case .configured:    Color.orange.opacity(0.55)
+            case .ready:         Color.green
+            case .active:        Color.green
+            case .downloading:   Color.orange
+            // A more red-leaning, saturated orange than `.configured` — this state means the
+            // guard is actively skipping tier 3, not just "not loaded yet", and the tooltip
+            // should not be the only way to tell the two apart (#202 fix round 4).
+            case .unprovisioned: Color(red: 0.95, green: 0.35, blue: 0.1).opacity(0.65)
             }
         }
         var glowRadius: CGFloat {
@@ -70,11 +74,12 @@ struct ModelLED: View {
 
     private var tooltip: String {
         switch state {
-        case .off:          "\(label) — disabled"
-        case .configured:   "\(label) — enabled, not loaded"
-        case .ready:        "\(label) — loaded & ready"
-        case .active:       "\(label) — active"
-        case .downloading:  "\(label) — downloading"
+        case .off:           "\(label) — disabled"
+        case .configured:    "\(label) — enabled, not loaded"
+        case .ready:         "\(label) — loaded & ready"
+        case .active:        "\(label) — active"
+        case .downloading:   "\(label) — downloading"
+        case .unprovisioned: "\(label) — enabled, model not downloaded; tier 3 skipped"
         }
     }
 }
@@ -152,10 +157,20 @@ struct ModelLEDBar: View {
         guard config.enableAdvancedPromptInjectionProtection else { return .off }
         let d = ModelDownloader.shared
         if d.isDownloading && d.currentDownloadName == config.promptGuardModel { return .downloading }
-        if config.promptGuardEngine == "llama_cpp" {
-            return d.isModelDownloaded(name: config.promptGuardModel) ? .ready : .configured
+        // Delegate to the same predicate the guard itself evaluates (#202 fix round 4) instead of
+        // re-deriving "downloaded" via `ModelDownloader` here — the two must never drift apart on
+        // what counts as provisioned.
+        switch InjectionGuard.tier3Provisioning(engine: config.promptGuardEngine,
+                                                 modelName: config.promptGuardModel,
+                                                 modelsDir: IrisPaths.default.modelsDir) {
+        case .provisioned:
+            return .ready
+        case .unprovisioned:
+            // Unlike the other LEDs' `.configured` fallback, an absent tier-3 model isn't just
+            // "not loaded yet" — the guard actively skips tier 3 for every evaluation until this
+            // is downloaded (#202), so it gets its own, more informative state.
+            return .unprovisioned
         }
-        return .ready
     }
 }
 

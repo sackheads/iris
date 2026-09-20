@@ -352,10 +352,10 @@ private func textReply() -> GeminiResponse {
 @Suite("search_memory scopes (#177)", .serialized)
 struct SearchMemoryScopeTests {
 
-    /// Structural (tier 1) guarding only: the model-backed tiers fail closed when no prompt-guard
-    /// model is provisioned, which is the case under `swift test`, and a blocked result carries no
-    /// content to assert on. Passed per-call rather than set on `ConfigManager.shared`, which
-    /// parallel suites race on (#109).
+    /// Structural (tier 1) guarding only. Under `swift test` no prompt-guard model is provisioned:
+    /// tier 3 skips in that case (#202) but tier 2 and any error path can still block, and a
+    /// blocked result carries no content to assert on. Passed per-call rather than set on
+    /// `ConfigManager.shared`, which parallel suites race on (#109).
     private static let structuralGuardOnly = false
 
     /// Drive one turn whose model reply is `call`, against isolated in-memory stores, and return

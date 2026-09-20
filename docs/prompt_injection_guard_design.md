@@ -66,14 +66,15 @@ The most robust defense against zero-day injections is to have a small, restrict
 *   **Mechanism:** Iris leverages its `AuxiliaryModelManager` to run a small "canary" model. The engine is configurable via `promptGuardEngine` — `llamaCPP` (default), `ollama`, `mlx`, or `cloud` — and the model via `promptGuardModel`.
 *   **The Probe:** The untrusted text is wrapped in a randomly-named `<UUID>` block and handed to the model under a strict "security scanner" system prompt: judge whether the text tries to override instructions / inject commands, and output `MALICIOUS` if so, otherwise `SAFE`. The random tag name makes it harder for the payload to close the block or address the scanner directly.
 *   **Outcome:** The content passes only if the response contains `SAFE` and not `MALICIOUS`; otherwise it is quarantined (`[CONTENT BLOCKED BY TIER 3 CANARY GUARD]`).
-*   **Fail-closed:** if the canary engine fails to load or generate, the tier treats the content as unsafe and blocks it.
+*   **Fail-closed, but only once provisioned:** if the model is present and the canary engine fails to load or generate, the tier treats the content as unsafe and blocks it. If the `llama_cpp` model file is simply absent from `~/.iris/models` — the state of a fresh install, since enabling protection does not download it — tier 3 is skipped instead of failing closed: content passes with tiers 1/2 still applied (#202). This is visible via the P3 LED (`.unprovisioned`) and a one-time launch notice; `cloud`/`ollama`/`mlx` have no such check and fail closed on any error as before.
 
 ### Verdict cache (Tier 2/3)
 
 The Tier 2 and Tier 3 verdict for a given piece of content is memoized for the process lifetime
 (`InjectionGuard.SanitizationCache`, bounded LRU of 128 entries). The key covers the normalized
 content, the provenance tag, the requested tier, and the settings that decide the verdict
-(protection enabled, `promptGuardEngine`, `promptGuardModel`, `promptGuardCoreMLModel`), so changing
+(protection enabled, `promptGuardEngine`, `promptGuardModel`, `promptGuardCoreMLModel`, the tier-3
+models directory), so changing
 the guard configuration invalidates naturally. Genuine verdicts are cached in both directions (safe and blocked); a
 fail-closed *error* (model unavailable) is not, so a transient outage never pins content as
 blocked. Tier 1 still runs on every call. Motivation: the first perf ladder run measured the
