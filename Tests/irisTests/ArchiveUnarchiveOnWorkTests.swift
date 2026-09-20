@@ -136,4 +136,79 @@ struct ArchiveUnarchiveOnWorkTests {
         #expect(app.selectedConversationId == reading,
                 "resurfacing a row is not a reason to yank the user out of what they are reading")
     }
+
+    // MARK: - The refusal must see engine-started turns (#182 §6.1)
+
+    private func textResponse(_ text: String) -> GeminiResponse {
+        let part = Part(text: text, functionCall: nil, functionResponse: nil,
+                        thought_signature: nil, thoughtSignature: nil)
+        return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [part]))],
+                              usageMetadata: nil)
+    }
+
+    /// Waits for `hasTurnInFlight` to go true, yielding the MainActor so the engine's turn can
+    /// make progress. Bounded so a regression fails the test instead of hanging the suite.
+    private func awaitTurnInFlight(_ app: AppState, _ id: UUID) async -> Bool {
+        for _ in 0..<400 {
+            if app.hasTurnInFlight(for: id) { return true }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return false
+    }
+
+    /// The gap this closes: a scheduled job, a watcher event or a subagent post-back runs through
+    /// `IrisEngine.processInput` directly, which registers nothing in `activeTasks`. Before the
+    /// fix `archiveRefusal` returned nil throughout such a turn, so the Archive menu item was
+    /// enabled and `/archive` succeeded — the agent kept executing inside a collapsed section,
+    /// which is exactly what §6.1 exists to prevent.
+    @Test("an arrival turn in flight refuses the archive")
+    func arrivalTurnRefusesArchive() async {
+        let app = AppState(); app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        app.createNewConversation(id: UUID())   // so a successful archive would not spawn a replacement
+        // No goal: the refusal's other condition cannot cover for a missing in-flight signal.
+        #expect(app.conversations.first { $0.id == id }?.activeGoal == nil)
+
+        // Latency holds the turn open long enough to observe it from the outside.
+        let client = FakeLLMClient(responses: [textResponse("working on it")],
+                                   latency: .init(minMs: 300, maxMs: 300))
+        let engine = IrisEngine(state: app, tier: .medium, client: client)
+        let turn = Task { await engine.handleSystemEvent("Scheduled Job Triggered: do the thing",
+                                                         source: "Scheduler", conversationId: id) }
+
+        #expect(await awaitTurnInFlight(app, id), "the engine's own turn has to be visible per conversation")
+        #expect(app.archiveRefusal(for: id) == .turnInFlight)
+        #expect(app.archiveConversation(id) == .turnInFlight)
+        #expect(app.conversations.first { $0.id == id }?.isArchived == false,
+                "the agent must not end up running tools inside a collapsed section")
+
+        await turn.value
+
+        // And the refusal clears, so the turn cannot leave the conversation un-archivable.
+        #expect(app.hasTurnInFlight(for: id) == false)
+        #expect(app.archiveRefusal(for: id) == nil)
+        #expect(app.archiveConversation(id) == nil)
+        #expect(app.conversations.first { $0.id == id }?.isArchived == true)
+    }
+
+    /// Re-entrancy: the counter, not a flag. Two overlapping turns on one conversation, and the
+    /// first end must not clear the second's registration.
+    @Test("overlapping engine turns keep the refusal until the last one ends")
+    func overlappingEngineTurnsAreCounted() {
+        let app = AppState(); app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        app.createNewConversation(id: UUID())
+
+        app.beginEngineTurn(for: id)
+        app.beginEngineTurn(for: id)
+        app.endEngineTurn(for: id)
+        #expect(app.hasTurnInFlight(for: id), "the second turn is still running")
+        #expect(app.archiveConversation(id) == .turnInFlight)
+
+        app.endEngineTurn(for: id)
+        #expect(app.hasTurnInFlight(for: id) == false)
+        #expect(app.archiveConversation(id) == nil)
+    }
 }

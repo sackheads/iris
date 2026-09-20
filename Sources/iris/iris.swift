@@ -457,14 +457,26 @@ actor IrisEngine {
         // Own the thinking indicator for the whole turn via a balanced begin/end so that
         // overlapping turns can't leave it stuck (centralized in AppState's reference count).
         let stateForThinking = state
-        await MainActor.run { stateForThinking?.beginThinking() }
+        // The same pair also registers the turn against its conversation (#182 §6.1). Nothing
+        // else does for engine-started turns — arrivals from the scheduler, the watcher and
+        // subagent post-backs land here without an `AppState.activeTasks` entry — and without it
+        // "archived means idle" cannot see a turn that has been running tools for minutes.
+        // Balanced for the same reason the thinking count is: every early return in this turn
+        // lives inside `processInputBody`, so nothing between these two hops can return or throw.
+        await MainActor.run {
+            stateForThinking?.beginThinking()
+            stateForThinking?.beginEngineTurn(for: conversationId)
+        }
         let turnID = PerformanceProfiler.shared.beginTurn(label: input, source: source)
         let turnStart = CFAbsoluteTimeGetCurrent()
         await PerformanceProfiler.$currentTurnID.withValue(turnID) {
             await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete)
         }
         PerformanceProfiler.shared.endTurn(turnID, totalMs: (CFAbsoluteTimeGetCurrent() - turnStart) * 1000.0)
-        await MainActor.run { stateForThinking?.endThinking() }
+        await MainActor.run {
+            stateForThinking?.endEngineTurn(for: conversationId)
+            stateForThinking?.endThinking()
+        }
     }
 
     private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false) async {

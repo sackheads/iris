@@ -226,8 +226,33 @@ class AppState {
     }
     private var pendingUserMessages: [UUID: [PendingUserMessage]] = [:]
 
+    /// Turns the engine starts for itself. Arrivals — the scheduler, the watcher, subagent
+    /// post-backs — call `IrisEngine.processInput` directly and never create an `activeTasks`
+    /// entry, so `activeTasks` alone cannot see them and `archiveRefusal` would happily let the
+    /// user archive a conversation the agent is running tools in (#182 §6.1). A count, not a
+    /// flag: two turns can overlap on one conversation and the first to finish must not clear
+    /// the second's.
+    private var engineTurnCounts: [UUID: Int] = [:]
+
+    /// Called from `IrisEngine.processInput`'s own begin/end pair, which brackets every turn the
+    /// engine runs — UI-initiated ones included, so a UI turn is counted by both sources.
+    /// Double-counting is harmless; `hasTurnInFlight` only asks whether either is non-zero.
+    func beginEngineTurn(for conversationId: UUID) {
+        engineTurnCounts[conversationId, default: 0] += 1
+    }
+
+    func endEngineTurn(for conversationId: UUID) {
+        guard let count = engineTurnCounts[conversationId] else { return }
+        // Clamped at zero rather than going negative: an unpaired end must not make the next
+        // real turn invisible.
+        engineTurnCounts[conversationId] = count > 1 ? count - 1 : nil
+    }
+
+    /// Both sources OR'd. `activeTasks` is what cancellation can reach; `engineTurnCounts` also
+    /// covers the arrival path, which nothing tracks per conversation.
     func hasTurnInFlight(for conversationId: UUID) -> Bool {
-        activeTasks.values.contains { $0.conversationId == conversationId }
+        if (engineTurnCounts[conversationId] ?? 0) > 0 { return true }
+        return activeTasks.values.contains { $0.conversationId == conversationId }
     }
 
     func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID) {
