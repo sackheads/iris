@@ -160,4 +160,104 @@ struct CheckpointJudgementUITests {
         #expect(row.lastGoalEvaluation != nil, "an ordinary completion's report survives for the chip")
         #expect(row.lastGoalCompletionReport != nil)
     }
+
+    // MARK: §6 the approve gate
+
+    static func ladder(_ human: Criterion, _ other: Criterion, current: Int) -> GoalContract {
+        var c = GoalContract(objective: "o", criteria: [human, other])
+        c.milestones = [Milestone(title: "A", criterionIds: [human.id]),
+                        Milestone(title: "B", criterionIds: [other.id])]
+        c.currentMilestone = current
+        return c
+    }
+    static func eval(_ verdicts: [CriterionVerdict]) -> GoalEvaluation {
+        GoalEvaluation(status: .graded, criteria: verdicts, startedAt: Date())
+    }
+    static func pending(_ c: Criterion) -> CriterionVerdict {
+        CriterionVerdict(criterionId: c.id, criterionText: c.text, kind: .humanJudged, verdict: .humanPending, evidence: "", method: .human)
+    }
+
+    @Test("Approve is blocked by an unjudged humanJudged criterion of the current milestone")
+    func gateBlocksUnjudged() {
+        let h = Criterion(text: "reads well", kind: .humanJudged, check: nil)
+        let b = Criterion(text: "wired", kind: .qualitative, check: nil)
+        let c = Self.ladder(h, b, current: 0)
+        #expect(c.checkpointApproveBlockers(from: Self.eval([Self.pending(h)])).map(\.criterionId) == [h.id])
+    }
+
+    @Test("Approve is blocked by a REJECTED humanJudged criterion of the current milestone")
+    func gateBlocksRejected() {
+        let h = Criterion(text: "reads well", kind: .humanJudged, check: nil)
+        let b = Criterion(text: "wired", kind: .qualitative, check: nil)
+        var c = Self.ladder(h, b, current: 0)
+        c.judgements[h.id] = false
+        var v = Self.pending(h); v.verdict = .notMet
+        #expect(c.checkpointApproveBlockers(from: Self.eval([v])).map(\.criterionId) == [h.id])
+    }
+
+    @Test("Approve is not blocked once the criterion is accepted")
+    func gateOpensOnAcceptance() {
+        let h = Criterion(text: "reads well", kind: .humanJudged, check: nil)
+        let b = Criterion(text: "wired", kind: .qualitative, check: nil)
+        var c = Self.ladder(h, b, current: 0)
+        c.judgements[h.id] = true
+        var v = Self.pending(h); v.verdict = .met
+        #expect(c.checkpointApproveBlockers(from: Self.eval([v])).isEmpty)
+    }
+
+    @Test("the gate's set equals send-back's set: a rejection in an EARLIER milestone does not block Approve later (§6)")
+    func gateIsScopedToCurrentMilestone() {
+        // Constructed directly: §7's induction makes this unreachable in normal operation, and this
+        // test exists for the day the induction stops holding.
+        let h = Criterion(text: "reads well", kind: .humanJudged, check: nil)
+        let b = Criterion(text: "wired", kind: .qualitative, check: nil)
+        var c = Self.ladder(h, b, current: 1)
+        c.judgements[h.id] = false
+        var v = Self.pending(h); v.verdict = .notMet
+        let bv = CriterionVerdict(criterionId: b.id, criterionText: b.text, kind: .qualitative, verdict: .met, evidence: "ok", method: .judge)
+        #expect(c.checkpointApproveBlockers(from: Self.eval([v, bv])).isEmpty,
+                "milestone 1 is current; milestone 0's rejection is not this gate's to hold")
+    }
+
+    @Test("no evaluation means nothing blocks (the chip has no rows to decide)")
+    func gateWithoutEvaluation() {
+        let h = Criterion(text: "reads well", kind: .humanJudged, check: nil)
+        let b = Criterion(text: "wired", kind: .qualitative, check: nil)
+        #expect(Self.ladder(h, b, current: 0).checkpointApproveBlockers(from: nil).isEmpty)
+    }
+
+    // MARK: §7 the waiver branch is ordered before the humanJudged branch
+
+    @Test("canAutoAdvance passes a WAIVED humanJudged criterion with no judgement recorded (§7 dependency)")
+    func waiverPrecedesJudgement() {
+        // Spec §7: the guarantee "every humanJudged criterion in the checkpoint is accepted" holds
+        // only because checkpoint-level waivers cannot exist today. If they ever can, this ordering
+        // is the single thing that decides whether §7 is still true. This test fails the day the
+        // ordering changes, which is the right moment to decide which of the two §7 should say.
+        let h = Criterion(text: "reads well", kind: .humanJudged, check: nil)
+        let b = Criterion(text: "wired", kind: .qualitative, check: nil)
+        var c = Self.ladder(h, b, current: 0)
+        c.lock()
+        c.waivers[h.id] = "user said skip"
+        var v = Self.pending(h)
+        v.verdict = .humanPending
+        #expect(c.judgements[h.id] == nil)
+        #expect(c.canAutoAdvance(from: Self.eval([v])))
+    }
+
+    // MARK: §11 the history entry carries the post-judgement evaluation
+
+    @Test("the humanApproved history entry carries the verdict the user gave, not the grader's humanPending")
+    func historyCarriesPostJudgementEvaluation() throws {
+        let store = try ConversationStore.inMemory()
+        let id = UUID()
+        let a = Self.isolatedApp(store)
+        let (h, _) = Self.pausedAtCheckpoint(a, id)
+        #expect(a.recordHumanJudgement(for: id, criterionId: h.id, accepted: true))
+        a.advanceCheckpoint(for: id)
+        let entry = try #require(a.conversations.first { $0.id == id }?.checkpointHistory.last)
+        #expect(entry.resolution == .humanApproved)
+        let verdict = try #require(entry.evaluation?.criteria.first { $0.criterionId == h.id })
+        #expect(verdict.verdict == .met && verdict.method == .human)
+    }
 }

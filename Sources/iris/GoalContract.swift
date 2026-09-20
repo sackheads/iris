@@ -448,4 +448,23 @@ extension GoalContract {
             return v.verdict == .met
         }
     }
+
+    /// #191 spec §6: the humanJudged criteria that hold "Approve & continue" shut at this checkpoint —
+    /// rows of the graded evaluation whose criterion is in the CURRENT milestone and is either still
+    /// `.humanPending` or was rejected (`judgements[id] == false`).
+    ///
+    /// Read off the evaluation, never the contract: the evaluation is exactly the graded set, so this
+    /// can never fire on a criterion nobody has worked yet. Scoped to `currentMilestoneCriteria()`
+    /// because that is exactly the set `holdCheckpoint` consumes rejections for; a gate any wider is a
+    /// trap — a rejection carried by an earlier milestone would disable Approve here, Send back would
+    /// not clear it, and the goal would sit behind two buttons with no way past either. §7's
+    /// induction says that cannot arise; equality by construction does not depend on it.
+    func checkpointApproveBlockers(from evaluation: GoalEvaluation?) -> [CriterionVerdict] {
+        guard hasLadder, let evaluation else { return [] }
+        let current = Set(currentMilestoneCriteria().map(\.id))
+        return evaluation.criteria.filter { v in
+            v.kind == .humanJudged && current.contains(v.criterionId)
+                && (v.verdict == .humanPending || judgements[v.criterionId] == false)
+        }
+    }
 }
