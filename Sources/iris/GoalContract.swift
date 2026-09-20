@@ -349,4 +349,25 @@ extension GoalContract {
         guard evaluation.status == .graded else { return [] }
         return evaluation.criteria.filter { $0.verdict == .humanPending }
     }
+
+    /// Slice D3 §3 — may this checkpoint advance without stopping the human?
+    ///
+    /// Affirmative-only: every branch that is not a clean, uncontested grade returns false, so a
+    /// grader that errored, timed out, or produced nothing pauses (§4). That fail-safe used to be
+    /// structural — `performCheckpoint` paused BEFORE grading — and grading first removes it, so
+    /// it is restored here explicitly.
+    func canAutoAdvance(from evaluation: GoalEvaluation?) -> Bool {
+        guard hasLadder, !isFinalMilestone else { return false }
+        guard let evaluation, evaluation.status == .graded, !evaluation.criteria.isEmpty else {
+            return false
+        }
+        return evaluation.criteria.allSatisfy { v in
+            // A waiver is an explicit human decision; do not stop them for it twice.
+            if waivers[v.criterionId] != nil { return true }
+            // Only the user may settle a humanJudged criterion, and only an acceptance clears it.
+            // An unjudged one (nil) and a rejected one (false) both block.
+            if v.kind == .humanJudged { return judgements[v.criterionId] == true }
+            return v.verdict == .met
+        }
+    }
 }
