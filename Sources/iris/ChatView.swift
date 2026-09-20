@@ -477,6 +477,17 @@ struct ChatView: View {
             Button("Export to Markdown...") {
                 exportConversation(id: conv.id)
             }
+            if conv.isArchived {
+                Button("Unarchive") { state.unarchiveConversation(conv.id) }
+            } else {
+                // A context-menu click has no channel for a system message, so the refusal
+                // lives in the disabled title rather than failing silently (#182 §9.1).
+                let refusal = state.archiveRefusal(for: conv.id)
+                Button(refusal == nil ? "Archive" : "Archive (\(refusal!.reason))") {
+                    state.archiveConversation(conv.id)
+                }
+                .disabled(refusal != nil)
+            }
             Divider()
             Button(role: .destructive, action: {
                 state.deleteConversation(conv.id)
