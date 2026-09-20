@@ -190,7 +190,7 @@ struct ConversationStoreSelectionTests {
         let damagedId = damaged.id
         store.failInjection = { $0 == damagedId }
 
-        let a = AppState(store: store)
+        let a = AppState(store: store, tier3Provisioning: .provisioned)
         #expect(a.conversations.map(\.title) == ["healthy"])
         #expect(a.loadedRepairFailed == [damagedId])
         // Exactly one notice: the repair-failed conversation's id is absent from `loadedIds`
