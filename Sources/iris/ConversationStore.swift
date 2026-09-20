@@ -257,11 +257,13 @@ final class ConversationStore: Sendable {
             let cursor = try Row.fetchCursor(db, sql: "SELECT rowid, conversationId, ordinal, payload FROM messages")
             while let row = try cursor.next() {
                 guard let conversationId = Self.readText(row, "conversationId"),
-                      let ordinal: Int = row["ordinal"],
                       let rowid: Int64 = row["rowid"],
                       let payload: Data = row["payload"],
                       let m = try? decoder.decode(ChatMessage.self, from: payload)
                 else { continue }   // an undecodable row is #163's quarantine concern, not ours
+                // Not the trapping `Int` subscript (#189): a pre-existing TEXT ordinal must skip
+                // this row, not crash the migration before #189's own hardening ever runs.
+                guard case .value(let ordinal) = Self.readInt(row, "ordinal") else { continue }
                 try Self.indexMessage(m, conversationId: conversationId, ordinal: ordinal, rowid: rowid, db: db)
             }
         }
@@ -283,11 +285,14 @@ final class ConversationStore: Sendable {
             let cursor = try Row.fetchCursor(db, sql: "SELECT rowid, conversationId, ordinal, payload FROM messages")
             while let row = try cursor.next() {
                 guard let conversationId = Self.readText(row, "conversationId"),
-                      let ordinal: Int = row["ordinal"],
                       let rowid: Int64 = row["rowid"],
                       let payload: Data = row["payload"],
                       let m = try? decoder.decode(ChatMessage.self, from: payload)
                 else { continue }
+                // Not the trapping `Int` subscript (#189): a store with a TEXT ordinal must skip
+                // this row during the migration, not crash on every launch before `loadAll` (and
+                // #189's own hardening) ever gets a chance to quarantine it.
+                guard case .value(let ordinal) = Self.readInt(row, "ordinal") else { continue }
                 try Self.indexMessage(m, conversationId: conversationId, ordinal: ordinal, rowid: rowid, db: db)
             }
         }
@@ -362,8 +367,10 @@ final class ConversationStore: Sendable {
         let decoder = JSONDecoder()
         for row in try Row.fetchAll(db, sql: "SELECT rowid, ordinal, payload FROM messages WHERE conversationId = ? ORDER BY ordinal",
                                     arguments: [conversationId]) {
-            guard let ordinal: Int = row["ordinal"], let rowid: Int64 = row["rowid"], let payload: Data = row["payload"],
+            guard let rowid: Int64 = row["rowid"], let payload: Data = row["payload"],
                   let m = try? decoder.decode(ChatMessage.self, from: payload) else { continue }
+            // Not the trapping `Int` subscript (#189).
+            guard case .value(let ordinal) = readInt(row, "ordinal") else { continue }
             try indexMessage(m, conversationId: conversationId, ordinal: ordinal, rowid: rowid, db: db)
         }
     }
@@ -384,7 +391,10 @@ final class ConversationStore: Sendable {
             var out: [Int: Int64] = [:]
             for row in try Row.fetchAll(db, sql: "SELECT rowid, ordinal FROM messages_fts WHERE conversationId = ?",
                                         arguments: [id.uuidString]) {
-                if let ordinal: Int = row["ordinal"], let rowid: Int64 = row["rowid"] { out[ordinal] = rowid }
+                // Not the trapping `Int` subscript (#189): a fixture testing an unreadable-ordinal
+                // row can otherwise crash this test-support helper itself.
+                guard case .value(let ordinal) = Self.readInt(row, "ordinal"), let rowid: Int64 = row["rowid"] else { continue }
+                out[ordinal] = rowid
             }
             return out
         }
@@ -397,7 +407,10 @@ final class ConversationStore: Sendable {
             var out: [Int: Int64] = [:]
             for row in try Row.fetchAll(db, sql: "SELECT rowid, ordinal FROM messages WHERE conversationId = ?",
                                         arguments: [id.uuidString]) {
-                if let ordinal: Int = row["ordinal"], let rowid: Int64 = row["rowid"] { out[ordinal] = rowid }
+                // Not the trapping `Int` subscript (#189): a fixture testing an unreadable-ordinal
+                // row can otherwise crash this test-support helper itself.
+                guard case .value(let ordinal) = Self.readInt(row, "ordinal"), let rowid: Int64 = row["rowid"] else { continue }
+                out[ordinal] = rowid
             }
             return out
         }
@@ -879,7 +892,7 @@ final class ConversationStore: Sendable {
 
     /// Test support: the `(sourceTable, ordinal, reason)` of every quarantined row for this
     /// conversation. `ordinal` is nil for #189's "unreadable ordinal" case — proves the
-    /// `v4_quarantine_ordinal_nullable` migration actually relaxed the column, since a still-NOT
+    /// `v5_quarantine_ordinal_nullable` migration actually relaxed the column, since a still-NOT
     /// NULL column would have failed the `INSERT` that put the row here in the first place.
     func quarantinedRows(for id: UUID) throws -> [(table: String, ordinal: Int?, reason: String)] {
         try writer.read { db in

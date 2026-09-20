@@ -252,42 +252,60 @@ struct ConversationSearchTests {
     @Test("an in-place update keeps the same FTS rowid as its messages row; only the content changes")
     func inPlaceEditKeepsTheSameRowid() throws {
         let store = try ConversationStore.inMemory()
-        var c = conversation(title: "t", [ChatMessage(role: .agent, content: "draft about herons")])
+        // A `.system` message between the two indexed ones makes the `messages` and FTS rowid
+        // sequences diverge under the old auto-assigned keying: `messages` rowids run 1, 2, 3, but
+        // the old code's auto-assigned FTS rowids for the two *indexed* rows would be 1, 2 (assigned
+        // in insertion order, oblivious to the skipped ordinal), not 1, 3. Without the gap the two
+        // sequences run in lockstep and this test cannot tell the old keying from the new (round 1
+        // review finding).
+        var c = conversation(title: "t", [
+            ChatMessage(role: .agent, content: "draft about herons"),
+            ChatMessage(role: .system, content: "not indexed"),
+            ChatMessage(role: .agent, content: "other content"),
+        ])
         try store.apply([created(c)])
+        let indexedOrdinals: Set<Int> = [0, 2]
         let beforeRowids = try store.ftsRowidsByOrdinal(for: c.id)
-        #expect(beforeRowids == (try store.messageRowidsByOrdinal(for: c.id)))
+        #expect(beforeRowids == (try store.messageRowidsByOrdinal(for: c.id).filter { indexedOrdinals.contains($0.key) }))
 
         c.messages[0].content = "final about cormorants"
         try store.apply([write(c, .messageUpdated(id: c.messages[0].id))])
 
-        #expect(try store.indexCount(for: c.id) == 1)
+        #expect(try store.indexCount(for: c.id) == 2)
         #expect(try store.ftsRowidsByOrdinal(for: c.id) == beforeRowids)
-        #expect(try store.ftsRowidsByOrdinal(for: c.id) == (try store.messageRowidsByOrdinal(for: c.id)))
+        #expect(try store.ftsRowidsByOrdinal(for: c.id) == (try store.messageRowidsByOrdinal(for: c.id).filter { indexedOrdinals.contains($0.key) }))
+        #expect(try store.searchConversations(query: "herons").isEmpty)
+        #expect(try store.searchConversations(query: "cormorants").count == 1)
     }
 
     @Test("a truncate-delete from ordinal N removes exactly the FTS rows at ordinals >= N, by rowid")
     func truncateDeleteRemovesExactOrdinalsByRowid() throws {
         let store = try ConversationStore.inMemory()
+        // Same gap as above: a `.system` message at ordinal 1 keeps `messages` and old-style FTS
+        // rowids from coincidentally matching.
         var c = conversation(title: "t", [
             ChatMessage(role: .user, content: "one about grebes"),
+            ChatMessage(role: .system, content: "not indexed"),
             ChatMessage(role: .agent, content: "two about grebes"),
             ChatMessage(role: .agent, content: "three about grebes"),
         ])
         try store.apply([created(c)])
-        #expect(try store.ftsRowidsByOrdinal(for: c.id).keys.sorted() == [0, 1, 2])
+        let indexedOrdinals: Set<Int> = [0, 2, 3]
+        #expect(try store.ftsRowidsByOrdinal(for: c.id).keys.sorted() == [0, 2, 3])
+        #expect(try store.ftsRowidsByOrdinal(for: c.id) == (try store.messageRowidsByOrdinal(for: c.id).filter { indexedOrdinals.contains($0.key) }))
 
-        c.messages.removeLast(2)
-        try store.apply([write(c, .messagesAppended(from: 1))])
+        c.messages.removeLast(2)   // drop ordinals 2 and 3 ("two"/"three about grebes")
+        try store.apply([write(c, .messagesAppended(from: 2))])
 
         let remaining = try store.ftsRowidsByOrdinal(for: c.id)
         #expect(remaining.keys.sorted() == [0])
-        #expect(remaining == (try store.messageRowidsByOrdinal(for: c.id)))
+        #expect(remaining == (try store.messageRowidsByOrdinal(for: c.id).filter { $0.key == 0 }))
     }
 
-    @Test("a store already on v2 gets consistent FTS rowids after upgrading to v3, and search still works")
-    func v2ToV3RowidMigration() throws {
+    @Test("a store already on v2 gets consistent FTS rowids after upgrading through v3 and v4, and search still works")
+    func v2ToV4RowidMigration() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("iris-convsearch-v2tov3-\(UUID().uuidString)")
+            .appendingPathComponent("iris-convsearch-v2tov4-\(UUID().uuidString)")
         let url = root.appendingPathComponent("conversations.sqlite")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -295,6 +313,7 @@ struct ConversationSearchTests {
         let id = UUID()
         let messages = [
             ChatMessage(role: .user, content: "how do I rotate the kubeconfig"),
+            ChatMessage(role: .system, content: "kubeconfig tool call pill"),
             ChatMessage(role: .agent, content: "run gcloud container clusters get-credentials"),
         ]
         do {
@@ -311,19 +330,36 @@ struct ConversationSearchTests {
                     try db.execute(sql: "INSERT INTO messages (conversationId, ordinal, id, payload) VALUES (?, ?, ?, ?)",
                                    arguments: [id.uuidString, ordinal, m.id.uuidString, payload])
                     // The pre-#201 index shape: FTS5's own auto-assigned rowid, uncorrelated with
-                    // the `messages` row it mirrors.
+                    // the `messages` row it mirrors. Only indexed roles get an FTS row (matching
+                    // production's `indexedRoles`), so the `system` row's messages rowid (2) is
+                    // skipped and the auto-assigned FTS rowids (1, 2) diverge from the messages
+                    // rowids they should eventually match (1, 3) — without this gap the sequences
+                    // run in lockstep and the test cannot tell the old keying from the new.
+                    guard m.role == .user || m.role == .agent else { continue }
                     try db.execute(sql: "INSERT INTO messages_fts (conversationId, ordinal, role, content) VALUES (?, ?, ?, ?)",
                                    arguments: [id.uuidString, ordinal, m.role.rawValue, m.content])
                 }
+                // A row with an unreadable (TEXT) ordinal, inserted directly so v2's backfill never
+                // sees it — only `v4_fts_rowid`'s own scan does, when the store is opened below.
+                // GRDB's typed `Int` subscript traps on this rather than returning nil (#189 round
+                // 1 review finding), which would crash the app on every launch before #189's own
+                // loadAll-level hardening ever gets a chance to quarantine the row.
+                let badPayload = String(decoding: try encoder.encode(ChatMessage(role: .agent, content: "unreadable ordinal")), as: UTF8.self)
+                try db.execute(sql: "INSERT INTO messages (conversationId, ordinal, id, payload) VALUES (?, 'not-an-int', ?, ?)",
+                               arguments: [id.uuidString, UUID().uuidString, badPayload])
             }
             try queue.close()
         }
 
-        // Opening runs the rest of the migrator against the v1+v2 database, i.e. just v4_fts_rowid.
+        // Opening runs the rest of the migrator against the v1+v2 database: v3_checkpoint_history,
+        // v4_fts_rowid and v5_quarantine_ordinal_nullable. Must complete without trapping despite
+        // the unreadable-ordinal row above.
         let store = try ConversationStore.onDisk(at: url)
         #expect(try store.indexCount(for: id) == 2)
         #expect(try store.searchConversations(query: "kubeconfig").count == 1)
-        #expect(try store.ftsRowidsByOrdinal(for: id) == (try store.messageRowidsByOrdinal(for: id)))
+        #expect(try store.searchConversations(query: "unreadable").isEmpty)
+        let indexedOrdinals: Set<Int> = [0, 2]
+        #expect(try store.ftsRowidsByOrdinal(for: id) == (try store.messageRowidsByOrdinal(for: id).filter { indexedOrdinals.contains($0.key) }))
     }
 
     // MARK: 3 — ranking
