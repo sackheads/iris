@@ -174,6 +174,73 @@ class AppState {
     /// Tracked UI-initiated tasks so they can be cancelled (e.g. when a conversation is deleted).
     private var activeTasks: [UUID: (conversationId: UUID?, task: Task<Void, Never>)] = [:]
 
+    // MARK: - Mid-turn user messages (#172)
+
+    /// A user message sent while a turn was already running on its conversation. Text-only
+    /// entries are handed to the engine at its next model round (`takePendingSteers`); an entry
+    /// with attachments, and anything queued behind it, waits and starts a fresh turn when the
+    /// running one ends. Starting a second turn instead interleaves two turns on one history,
+    /// which the providers answer with empty or rejected responses.
+    struct PendingUserMessage: Sendable {
+        let text: String
+        let attachments: [FileAttachment]
+    }
+    private var pendingUserMessages: [UUID: [PendingUserMessage]] = [:]
+
+    func hasTurnInFlight(for conversationId: UUID) -> Bool {
+        activeTasks.values.contains { $0.conversationId == conversationId }
+    }
+
+    func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID) {
+        pendingUserMessages[conversationId, default: []].append(PendingUserMessage(text: text, attachments: attachments))
+    }
+
+    func pendingUserMessageCount(for conversationId: UUID) -> Int {
+        pendingUserMessages[conversationId]?.count ?? 0
+    }
+
+    /// The leading text-only entries, removed from the inbox, in arrival order. Stops at the first
+    /// entry with attachments so order is preserved. The engine calls this at every model round.
+    func takePendingSteers(for conversationId: UUID) -> [String] {
+        var queue = pendingUserMessages[conversationId] ?? []
+        var taken: [String] = []
+        while let first = queue.first, first.attachments.isEmpty {
+            taken.append(first.text)
+            queue.removeFirst()
+        }
+        pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
+        return taken
+    }
+
+    /// Whatever a finished turn did not consume becomes the next turn: the leading text entries
+    /// joined as one message, or the first attachment entry on its own. Runs when a tracked task
+    /// completes, so the new turn never overlaps the old one.
+    private func drainPendingUserMessages(for conversationId: UUID) {
+        guard !hasTurnInFlight(for: conversationId),
+              var queue = pendingUserMessages[conversationId], !queue.isEmpty else { return }
+        var texts: [String] = []
+        while let first = queue.first, first.attachments.isEmpty {
+            texts.append(first.text)
+            queue.removeFirst()
+        }
+        let next = texts.isEmpty ? queue.removeFirst() : PendingUserMessage(text: texts.joined(separator: "\n\n"), attachments: [])
+        pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
+        startTurn(text: next.text, attachments: next.attachments, in: conversationId)
+    }
+
+    /// Empties the inbox and returns how many messages were dropped (Stop, /stop, deletion).
+    @discardableResult
+    private func discardPendingUserMessages(for conversationId: UUID) -> Int {
+        let count = pendingUserMessages[conversationId]?.count ?? 0
+        pendingUserMessages[conversationId] = nil
+        return count
+    }
+
+    /// Test seam: drive `sendMessage` through an engine with a scripted client.
+    func installEngine(_ engine: IrisEngine) {
+        self.engine = engine
+    }
+
     private var engine: IrisEngine!
     
     init() {
@@ -218,6 +285,7 @@ class AppState {
             guard let self else { return }
             self.activeTasks[id] = nil
             self.endThinking()
+            if let conversationId { self.drainPendingUserMessages(for: conversationId) }
         }
         activeTasks[id] = (conversationId, task)
     }
@@ -225,6 +293,8 @@ class AppState {
     /// Cancels any tracked tasks associated with a conversation and asks the engine to stop
     /// its auto-reprompt loop for it.
     private func cancelTasks(for conversationId: UUID) {
+        // Before the cancelled tasks complete and would drain the inbox into a new turn.
+        discardPendingUserMessages(for: conversationId)
         for (_, entry) in activeTasks where entry.conversationId == conversationId {
             entry.task.cancel()
         }
@@ -238,8 +308,11 @@ class AppState {
     /// thinking indicator via the tracked task's completion.
     func interruptActiveConversation() {
         guard let convId = selectedConversationId, isThinking else { return }
+        let dropped = pendingUserMessageCount(for: convId)
         cancelTasks(for: convId)
-        appendMessage(role: .system, content: "Interrupted.", to: convId)
+        let notice = dropped == 0 ? "Interrupted."
+            : "Interrupted. \(dropped) queued message\(dropped == 1 ? "" : "s") dropped."
+        appendMessage(role: .system, content: notice, to: convId)
     }
     
     func createNewConversation(id: UUID = UUID(), isSubagent: Bool = false) {
@@ -475,7 +548,7 @@ class AppState {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!trimmed.isEmpty || !attachments.isEmpty), let convId = selectedConversationId else { return }
         
-        var messageContent = trimmed
+        let messageContent = trimmed
         if trimmed.hasPrefix("/goal") {
             let goalText = trimmed.dropFirst(5).trimmingCharacters(in: .whitespacesAndNewlines)
             if goalText.isEmpty {
@@ -570,6 +643,18 @@ class AppState {
 
         appendMessage(role: .user, content: messageContent, attachments: attachments, to: convId)
 
+        // A turn is already running on this conversation: the message steers it (text) or
+        // follows it (attachments) instead of starting a second, interleaved turn (#172).
+        if hasTurnInFlight(for: convId) {
+            enqueuePendingUserMessage(text: messageContent, attachments: attachments, for: convId)
+            return
+        }
+        startTurn(text: messageContent, attachments: attachments, in: convId)
+    }
+
+    /// Runs one user message as a turn: attachment processing, the engine call, and the
+    /// reflection/rename triggers. The user bubble is already in the chat.
+    private func startTurn(text: String, attachments: [FileAttachment], in convId: UUID) {
         if let idx = conversations.firstIndex(where: { $0.id == convId }) {
             conversations[idx].messageCountSinceReflection += 1
             saveConversations()
@@ -583,7 +668,7 @@ class AppState {
             }
 
             let attachmentsToProcess = attachments
-            let rawContent = messageContent
+            let rawContent = text
             
             runThinkingTask(conversationId: convId) { [self] in
                 var promptForEngine = rawContent
@@ -638,7 +723,7 @@ class AppState {
             }
         } else {
             runThinkingTask(conversationId: convId) { [self] in
-                await engine.processInput(messageContent, source: "UI", conversationId: convId)
+                await engine.processInput(text, source: "UI", conversationId: convId)
             }
         }
     }

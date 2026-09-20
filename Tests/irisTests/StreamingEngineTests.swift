@@ -9,10 +9,14 @@ final class ScriptedStreamClient: LLMClientProtocol, @unchecked Sendable {
         case fail(any Error)
         /// Never ends on its own; the consumer's cancellation ends it.
         case hang
+        /// Suspends until the closure returns, so a test can act while a round is in flight.
+        case block(@Sendable () async -> Void)
     }
     private let lock = NSLock()
     private var scripts: [[Step]]
     private(set) var calls = 0
+    /// Every request the engine sent, in order, so a test can inspect what a later round saw.
+    private(set) var requests: [GeminiRequest] = []
     init(_ scripts: [[Step]]) { self.scripts = scripts }
     var supportsStreaming: Bool { true }
     /// The same script, delivered as one finished response: what the provider would have returned
@@ -20,6 +24,7 @@ final class ScriptedStreamClient: LLMClientProtocol, @unchecked Sendable {
     func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
         let script: [Step] = lock.withLock {
             calls += 1
+            requests.append(request)
             return scripts.isEmpty ? [] : scripts.removeFirst()
         }
         var assembler = StreamAssembler()
@@ -28,6 +33,7 @@ final class ScriptedStreamClient: LLMClientProtocol, @unchecked Sendable {
             case .event(let e): assembler.apply(e, now: 0)
             case .fail(let error): throw error
             case .hang: try await Task.sleep(nanoseconds: 60_000_000_000)
+            case .block(let wait): await wait()
             }
         }
         return assembler.response()
@@ -35,6 +41,7 @@ final class ScriptedStreamClient: LLMClientProtocol, @unchecked Sendable {
     func streamContent(request: GeminiRequest, tier: ModelTier) -> AsyncThrowingStream<LLMStreamEvent, Error> {
         let script: [Step] = lock.withLock {
             calls += 1
+            requests.append(request)
             return scripts.isEmpty ? [] : scripts.removeFirst()
         }
         return AsyncThrowingStream { continuation in
@@ -45,6 +52,7 @@ final class ScriptedStreamClient: LLMClientProtocol, @unchecked Sendable {
                         case .event(let e): continuation.yield(e)
                         case .fail(let error): throw error
                         case .hang: try await Task.sleep(nanoseconds: 60_000_000_000)
+                        case .block(let wait): await wait()
                         }
                         await Task.yield()
                     }
