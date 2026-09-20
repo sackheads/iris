@@ -297,5 +297,10 @@ struct CheckpointAutoAdvanceTests {
                 "the ladder must advance by exactly one milestone, not skip milestone 1")
         let history = app.conversations.first { $0.id == id }?.checkpointHistory ?? []
         #expect(history.count == 1, "one clean grade decided on, one audit entry")
+        // The guard stopped the second advance, but the announcement used to be pushed
+        // unconditionally from the pre-grade snapshot — two identical notices for one checkpoint.
+        let messages = app.conversations.first { $0.id == id }?.messages ?? []
+        #expect(messages.filter { $0.content.contains("auto-advanced") }.count == 1,
+                "the refused call must stay silent, not repeat the winner's announcement")
     }
 }

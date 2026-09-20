@@ -1237,18 +1237,25 @@ class AppState {
     /// calls in one batch can both read milestone 0, both grade it clean, and both advance —
     /// landing on 2 with milestone 1 never worked, never graded, and nobody stopped. It also
     /// closes the stale-read window between `performCheckpoint`'s contract re-read and this write.
+    ///
+    /// Returns whether it actually advanced, so the losing call can stay silent: its transcript
+    /// message and tool result are both built from the pre-grade snapshot, and announcing them
+    /// after a refused advance printed two byte-identical "auto-advanced" notices for one
+    /// checkpoint while the audit trail recorded one.
+    @discardableResult
     func autoAdvanceCheckpoint(for conversationId: UUID, decidedAt milestoneIndex: Int,
-                               evaluation: GoalEvaluation?) {
+                               evaluation: GoalEvaluation?) -> Bool {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
               let existing = conversations[idx].goalContract, existing.hasLadder,
-              existing.currentMilestone == milestoneIndex else { return }
+              existing.currentMilestone == milestoneIndex else { return false }
         recordCheckpointOutcome(at: idx, .autoAdvanced, evaluation: evaluation)
-        guard var c = conversations[idx].goalContract else { return }
+        guard var c = conversations[idx].goalContract else { return false }
         c.currentMilestone = min(c.currentMilestone + 1, c.milestones.count - 1)
         c.checkpointStatus = .running
         conversations[idx].goalContract = c
         conversations[idx].goalIterationCount = 0
         markChanged(conversationId, .metadata)
+        return true
     }
 
     /// Human approved the checkpoint: advance to the next milestone and resume the loop.

@@ -260,9 +260,16 @@ actor IrisEngine {
             // `canAutoAdvance` two lines up: that needs the fresh judgements a re-read provides.
             // Only the index must come from the pre-grade snapshot.
             let decidedAt = contract.currentMilestone
-            await MainActor.run {
+            let advanced = await MainActor.run {
                 localState?.autoAdvanceCheckpoint(for: conversationId, decidedAt: decidedAt,
-                                                  evaluation: evaluation)
+                                                  evaluation: evaluation) ?? false
+            }
+            // The guard refused: a concurrent `reach_checkpoint` already resolved this milestone.
+            // Everything below is built from the pre-grade snapshot, so announcing it would print a
+            // second, byte-identical "auto-advanced" notice for one checkpoint. Falling through to
+            // the pause branch would be worse still — it would pause a milestone nobody graded.
+            guard advanced else {
+                return "This checkpoint was already resolved by a concurrent call; continue with the current milestone."
             }
             // Count only actual `.met` verdicts — `canAutoAdvance` also lets through a waived
             // `not_met` and a `humanJudged` criterion the grader never touched, and reporting
@@ -272,8 +279,11 @@ actor IrisEngine {
             let met = criteria.filter { $0.verdict == .met }.count
             let lines = criteria
                 .map { v -> String in
-                    if v.kind == .humanJudged { return "  \(v.criterionText) — accepted by you" }
+                    // Waiver first, matching `canAutoAdvance`'s order: a waived `humanJudged`
+                    // criterion passes on the waiver, so calling it "accepted by you" would
+                    // credit the user with a verdict they never gave.
                     if let reason = current.waivers[v.criterionId] { return "  \(v.criterionText) — waived: \(reason)" }
+                    if v.kind == .humanJudged { return "  \(v.criterionText) — accepted by you" }
                     return "  \(v.criterionText) — \(v.evidence)"
                 }
                 .joined(separator: "\n")
