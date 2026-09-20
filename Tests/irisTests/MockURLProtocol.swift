@@ -3,6 +3,7 @@ import Foundation
 class MockURLProtocol: URLProtocol {
     private static let handlerLock = NSLock()
     nonisolated(unsafe) private static var _handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    nonisolated(unsafe) private static var _scopedHandlers: [String: (URLRequest) throws -> (HTTPURLResponse, Data)] = [:]
 
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))? {
         get {
@@ -17,6 +18,57 @@ class MockURLProtocol: URLProtocol {
         }
     }
 
+    /// The header a `scopedSession` tags its requests with, so `startLoading` can find that
+    /// session's own handler instead of the single process-global `handler` above.
+    static let scopeHeaderField = "X-Iris-MockURLProtocol-Scope"
+
+    /// A `URLSession` whose requests are answered by `handler`, without touching the global
+    /// `handler` slot — so two Swift Testing suites can each build one of these and run
+    /// concurrently without racing on which handler answers which request (the failure mode a
+    /// single shared `handler` has when more than one suite uses it). Call the returned `remove`
+    /// when the test is done, typically from a `defer`.
+    static func scopedSession(_ handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)) -> (session: URLSession, remove: () -> Void) {
+        let scopeId = UUID().uuidString
+        handlerLock.lock()
+        _scopedHandlers[scopeId] = handler
+        handlerLock.unlock()
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        config.httpAdditionalHeaders = [scopeHeaderField: scopeId]
+        let session = URLSession(configuration: config)
+
+        let remove = {
+            handlerLock.lock()
+            _scopedHandlers.removeValue(forKey: scopeId)
+            handlerLock.unlock()
+        }
+        return (session, remove)
+    }
+
+    /// A request tagged for a scope resolves ONLY within that scope, even if the scope's handler
+    /// has already been removed (or was never registered) — it must never silently borrow another
+    /// suite's global `handler`, which would be the same class of cross-suite race `scopedSession`
+    /// exists to prevent, just moved to the other slot. Only an untagged request falls back to the
+    /// global `handler`.
+    private enum Resolution {
+        case handler((URLRequest) throws -> (HTTPURLResponse, Data))
+        case missingScope(String)
+        case noHandler
+    }
+
+    private static func resolvedHandler(for request: URLRequest) -> Resolution {
+        if let scopeId = request.value(forHTTPHeaderField: scopeHeaderField) {
+            handlerLock.lock()
+            let scoped = _scopedHandlers[scopeId]
+            handlerLock.unlock()
+            if let scoped { return .handler(scoped) }
+            return .missingScope(scopeId)
+        }
+        if let handler { return .handler(handler) }
+        return .noHandler
+    }
+
     override class func canInit(with request: URLRequest) -> Bool {
         return true
     }
@@ -26,7 +78,17 @@ class MockURLProtocol: URLProtocol {
     }
 
     override func startLoading() {
-        guard let handler = Self.handler else {
+        let handler: (URLRequest) throws -> (HTTPURLResponse, Data)
+        switch Self.resolvedHandler(for: request) {
+        case .handler(let h):
+            handler = h
+        case .missingScope(let scopeId):
+            let message = "MockURLProtocol: request is tagged for scope \(scopeId), which has no handler " +
+                "(never registered, or already removed by `remove()`). Refusing to fall back to the global " +
+                "handler, which would belong to a different test."
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown, userInfo: [NSLocalizedDescriptionKey: message]))
+            return
+        case .noHandler:
             client?.urlProtocol(self, didFailWithError: URLError(.unknown))
             return
         }
