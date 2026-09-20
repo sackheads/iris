@@ -66,4 +66,52 @@ struct GoalContractTests {
         #expect(t.contains("selection refactor"))
         #expect(t.contains("force-push"))
     }
+
+    // MARK: - #204 round 2: lenient decoders for nested types
+
+    @Test("a Criterion JSON missing text/kind/check decodes to defaults, id stays required")
+    func criterionLenientDecode() throws {
+        let id = UUID()
+        let json = #"{"id":"\#(id.uuidString)"}"#
+        let c = try JSONDecoder().decode(Criterion.self, from: Data(json.utf8))
+        #expect(c.id == id)
+        #expect(c.text == "")
+        #expect(c.kind == .qualitative)
+        #expect(c.check == nil)
+    }
+
+    @Test("a Criterion JSON missing id throws (identity field stays required)")
+    func criterionMissingIdThrows() {
+        let json = #"{"text":"x","kind":"qualitative"}"#
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(Criterion.self, from: Data(json.utf8))
+        }
+    }
+
+    @Test("a Milestone JSON missing every field decodes to defaults, including a fresh id")
+    func milestoneLenientDecode() throws {
+        let m = try JSONDecoder().decode(Milestone.self, from: Data("{}".utf8))
+        #expect(m.title == "")
+        #expect(m.criterionIds == [])
+        // id is never referenced elsewhere for correlation, so minting one on decode is safe.
+    }
+
+    @Test("a ContractChange JSON missing date/rationale decodes to defaults")
+    func contractChangeLenientDecode() throws {
+        let change = try JSONDecoder().decode(ContractChange.self, from: Data("{}".utf8))
+        #expect(change.rationale == "")
+    }
+
+    @Test("a GoalContract whose criteria element is missing a defaultable field still decodes")
+    func goalContractWithLenientNestedCriterionDecodes() throws {
+        let criterionId = UUID()
+        let json = """
+        {"objective":"ship","criteria":[{"id":"\(criterionId.uuidString)"}]}
+        """
+        let contract = try JSONDecoder().decode(GoalContract.self, from: Data(json.utf8))
+        #expect(contract.criteria.count == 1)
+        #expect(contract.criteria.first?.id == criterionId)
+        #expect(contract.criteria.first?.text == "")
+        #expect(contract.criteria.first?.kind == .qualitative)
+    }
 }

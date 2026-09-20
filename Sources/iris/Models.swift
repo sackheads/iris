@@ -40,6 +40,23 @@ public struct Part: Codable, Sendable {
         self.thought_signature = thought_signature
         self.thoughtSignature = thoughtSignature
     }
+
+    /// Lenient decoder (invariant 1, #204 round 2): every field here was already `Optional`, so the
+    /// synthesized decoder already treated a missing key as nil — this makes that explicit rather
+    /// than incidental, and protects a decode error inside a present-but-malformed nested value
+    /// (`functionCall`/`functionResponse`/`inlineData`) the same way. `decodeIfPresent` on an
+    /// Optional nested type still throws if the key IS present but its value fails to decode;
+    /// nothing here can make that safe without silently discarding a real tool call, so that case
+    /// is unchanged.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        text = try c.decodeIfPresent(String.self, forKey: .text)
+        functionCall = try c.decodeIfPresent(FunctionCall.self, forKey: .functionCall)
+        functionResponse = try c.decodeIfPresent(FunctionResponse.self, forKey: .functionResponse)
+        inlineData = try c.decodeIfPresent(InlineData.self, forKey: .inlineData)
+        thought_signature = try c.decodeIfPresent(String.self, forKey: .thought_signature)
+        thoughtSignature = try c.decodeIfPresent(String.self, forKey: .thoughtSignature)
+    }
 }
 
 public struct FunctionCall: Codable, Sendable {
@@ -56,6 +73,19 @@ public struct FunctionCall: Codable, Sendable {
         self.thought_signature = thought_signature
         self.thoughtSignature = thoughtSignature
     }
+
+    /// Lenient decoder (invariant 1, #204 round 2). `name` stays required: it selects which tool
+    /// dispatches, so there is no default that would not either silently no-op or call the wrong
+    /// tool — an old row is degraded but honest by failing this one `Part` rather than
+    /// misrepresenting a call. `args` defaults to `[:]`, matching a tool invoked with no arguments.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        args = try c.decodeIfPresent([String: JSONValue].self, forKey: .args) ?? [:]
+        id = try c.decodeIfPresent(String.self, forKey: .id)
+        thought_signature = try c.decodeIfPresent(String.self, forKey: .thought_signature)
+        thoughtSignature = try c.decodeIfPresent(String.self, forKey: .thoughtSignature)
+    }
 }
 
 /// Synthesized in this file (same-file requirement for auto `==`); used by `LLMStreamEvent`
@@ -71,6 +101,16 @@ public struct FunctionResponse: Codable, Sendable {
         self.name = name
         self.response = response
         self.id = id
+    }
+
+    /// Lenient decoder (invariant 1, #204 round 2), same rationale as `FunctionCall`: `name`
+    /// correlates the response back to the call it answers, so it stays required; `response`
+    /// defaults to `[:]`, matching a tool that returned nothing.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        response = try c.decodeIfPresent([String: JSONValue].self, forKey: .response) ?? [:]
+        id = try c.decodeIfPresent(String.self, forKey: .id)
     }
 }
 

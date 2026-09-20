@@ -11,12 +11,46 @@ struct Criterion: Codable, Identifiable, Equatable, Sendable {
     var text: String
     var kind: CriterionKind
     var check: String?   // command/test for .executable; nil otherwise
+
+    init(id: UUID = UUID(), text: String, kind: CriterionKind, check: String? = nil) {
+        self.id = id; self.text = text; self.kind = kind; self.check = check
+    }
+
+    /// Lenient decoder (invariant 1, #204 round 2): a `keyNotFound` here throws out of
+    /// `GoalContract.init(from:)`'s `try c.decode([Criterion].self, ...)`, which does not swallow
+    /// nested errors — so a required field added to this type later would fail the WHOLE
+    /// `GoalContract` decode, taking the conversation down with it, exactly like the
+    /// `TokenUsage`/`SubagentResult` case round 1 fixed. `id` stays required: it is the reference
+    /// key `Milestone.criterionIds`, `GoalContract.waivers`/`judgements` and
+    /// `CriterionVerdict.criterionId` all match against, and minting a fresh one on decode would
+    /// silently sever those links rather than merely degrade the criterion's display text.
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        kind = try c.decodeIfPresent(CriterionKind.self, forKey: .kind) ?? .qualitative
+        check = try c.decodeIfPresent(String.self, forKey: .check)
+    }
 }
 
 struct Milestone: Codable, Identifiable, Equatable, Sendable {
     var id = UUID()
     var title: String
     var criterionIds: [UUID]
+
+    init(id: UUID = UUID(), title: String, criterionIds: [UUID]) {
+        self.id = id; self.title = title; self.criterionIds = criterionIds
+    }
+
+    /// Lenient decoder (invariant 1, #204 round 2), same propagation risk as `Criterion`. Unlike
+    /// `Criterion.id`, nothing correlates against `Milestone.id` elsewhere (only `criterionIds`,
+    /// the assignment list, matters to the ladder), so it is safe to mint a fresh one on decode.
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        criterionIds = try c.decodeIfPresent([UUID].self, forKey: .criterionIds) ?? []
+    }
 }
 
 enum CheckpointStatus: String, Codable, Sendable, Equatable {
@@ -27,6 +61,20 @@ enum CheckpointStatus: String, Codable, Sendable, Equatable {
 struct ContractChange: Codable, Equatable, Sendable {
     var date: Date = Date()
     var rationale: String
+
+    init(date: Date = Date(), rationale: String) {
+        self.date = date; self.rationale = rationale
+    }
+
+    /// Lenient decoder (invariant 1, #204 round 2): this array (`GoalContract.changeLog`) is
+    /// already `decodeIfPresent`-defaulted at the `GoalContract` level for a MISSING changeLog key,
+    /// but a `keyNotFound` inside one element still throws out of the array decode itself. No id
+    /// here to protect; both fields get an old-row-shaped default.
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        date = try c.decodeIfPresent(Date.self, forKey: .date) ?? Date()
+        rationale = try c.decodeIfPresent(String.self, forKey: .rationale) ?? ""
+    }
 }
 
 enum ContractState: String, Codable, Sendable, Equatable {

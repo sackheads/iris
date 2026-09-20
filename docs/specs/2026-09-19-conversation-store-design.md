@@ -217,27 +217,46 @@ The legacy key is never read again. An issue is filed at implementation time to 
 
 - **Load time at init stays synchronous.** For the 4.79 MB case this is a few thousand row decodes on launch, comparable to today's one big decode; lazy loading is #177.
 - **Two writers at quit.** Covered in §4; both paths are idempotent and GRDB serializes them.
+- **A mutation site that forgets `markChanged`.** Today it would forget `saveConversations` the same way; a test that walks every public mutating method against a fresh `AppState` and asserts `pendingChanges` is non-empty catches the ones that exist now.
 
 ## 10. Persisted types (invariant 1, #204)
 
 Invariant 1 ("every new field on a persisted `Codable` type must use `decodeIfPresent`") applies to
-every type `loadAll` decodes, not only `Conversation`. A strict decode failure on any of these is
-caught at the row level and skips the **whole conversation** (tokenUsage/goalContract/subagentResult),
-except messages/history payloads, which are quarantined per-row, and checkpointHistory, which
-degrades to `[]`.
+**every persisted type, nested included** — not only `Conversation`, and not only the types
+`loadAll` decodes directly. A `keyNotFound` inside a nested element throws out of whatever
+`decodeIfPresent` wraps it one level up: `decodeIfPresent` swallows a MISSING key at its own level,
+but not a decode error inside a value that IS present, so a required field on a nested type still
+fails every parent that embeds it. "Its fields have always been present together" is not evidence a
+type is safe — it was also true of `TokenUsage` until the day it wasn't. A strict decode failure on
+any top-level column is caught at the row level and skips the **whole conversation**
+(tokenUsage/goalContract/subagentResult), except messages/history payloads, which are quarantined
+per-row, and checkpointHistory, which degrades to `[]`; a nested failure inherits whichever of those
+its containing column has.
 
-| Type | Custom `init(from:)`? | Essential fields kept required |
+Every type below now has a hand-written `init(from:)` using `decodeIfPresent(...) ?? <default>` for
+every field that has a sensible default, keeping the synthesized encoder.
+
+| Type | Fields kept required | Why |
 |---|---|---|
-| `ChatMessage` | yes | `role`, `content` |
-| `TokenUsage` | yes (#204) | none — all three counters default to 0 |
-| `GoalContract` | yes | `objective`, `criteria` |
-| `SubagentResult` | yes (#204) | none — no id field exists to protect |
-| `CheckpointOutcome` | yes | `resolution` |
-| `GoalEvaluation` | yes | `status` |
-| `Criterion`, `Milestone`, `ContractChange`, `CriterionVerdict` | no (synthesized) | all fields — introduced together with their type, never added incrementally, so no forward-compat gap exists today |
+| `ChatMessage` | `role`, `content` | essential content, no sensible default |
+| `TokenUsage` | none | all three counters default to 0 |
+| `GoalContract` | `objective`, `criteria` | essential content, no sensible default |
+| `SubagentResult` | none | no id field exists to protect |
+| `CheckpointOutcome` | `resolution` | essential content, no sensible default |
+| `GoalEvaluation` | `status` | essential content, no sensible default |
+| `Criterion` | `id` | referenced by `Milestone.criterionIds`, `GoalContract.waivers`/`judgements`, `CriterionVerdict.criterionId` — a minted replacement would silently sever those links |
+| `Milestone` | none | `id` is not correlated anywhere else, so a fresh one on decode is safe; `title`/`criterionIds` default to `""`/`[]` |
+| `ContractChange` | none | no id; `date`/`rationale` default to now/`""` |
+| `CriterionVerdict` | `criterionId` | same reference risk as `Criterion.id`; `verdict` defaults to `.cannotVerify` (the closest thing this enum has to "unspecified") and `method` to `.judge` |
+| `FileAttachment` | `fileURL` | not correlated elsewhere (`id` defaults fresh), but no default path makes a missing one behave like a real attachment |
+| `Content` | none | `parts` defaults to `[]` (pre-existing decoder, #136) |
+| `Part` | none | every field was already `Optional`; the decoder is now explicit rather than incidental |
+| `FunctionCall` | `name` | selects which tool dispatches; `args` defaults to `[:]` |
+| `FunctionResponse` | `name` | correlates the response to its call; `response` defaults to `[:]` |
+| `InlineData` | none | `mimeType`/`data` default to a generic placeholder/`""` |
 
 The rule: a field added to any of these types after it started being persisted must be
-`decodeIfPresent`-defaulted (or excluded via `CodingKeys`), and an `id` another row references
-(e.g. `Criterion.id`, matched by `Milestone.criterionIds` and `GoalContract.waivers`/`judgements`)
-should stay required rather than silently minted fresh on decode, which would sever the reference.
-- **A mutation site that forgets `markChanged`.** Today it would forget `saveConversations` the same way; a test that walks every public mutating method against a fresh `AppState` and asserts `pendingChanges` is non-empty catches the ones that exist now.
+`decodeIfPresent`-defaulted (or excluded via `CodingKeys`). An identity field another row
+references (`Criterion.id`, `CriterionVerdict.criterionId`) stays required rather than being
+silently minted fresh on decode, which would sever the reference; every other identity-shaped field
+(`Milestone.id`, `FileAttachment.id`) defaults, because nothing correlates against it elsewhere.

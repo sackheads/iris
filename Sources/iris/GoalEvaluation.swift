@@ -26,6 +26,34 @@ struct CriterionVerdict: Codable, Identifiable, Equatable, Sendable {
     var verdict: CriterionVerdictValue
     var evidence: String
     var method: VerdictMethod
+
+    init(criterionId: UUID, criterionText: String, kind: CriterionKind, verdict: CriterionVerdictValue,
+         evidence: String, method: VerdictMethod) {
+        self.criterionId = criterionId; self.criterionText = criterionText; self.kind = kind
+        self.verdict = verdict; self.evidence = evidence; self.method = method
+    }
+
+    /// Lenient decoder (invariant 1, #204 round 2): a `keyNotFound` here throws out of
+    /// `GoalEvaluation.init(from:)`'s `try c.decodeIfPresent([CriterionVerdict].self, ...)`, which
+    /// swallows a MISSING `criteria` key but not a decode error inside an element already present —
+    /// so a required field added to this type later would still fail the whole `GoalEvaluation`,
+    /// and from there `CheckpointOutcome`/`SubagentResult`/the conversation that owns them.
+    /// `criterionId` stays required: `AppState.waiveCriterion`/`recordHumanJudgement` and
+    /// `GoalContractPanel` match verdicts back to criteria by this value, and minting a fresh one
+    /// would misattribute or orphan the verdict rather than merely blank its text. `verdict`
+    /// defaults to `.cannotVerify` (the closest thing this enum has to "unspecified" — asserting
+    /// `.met`/`.notMet` on missing data would fabricate a result) and `method` to `.judge` (neither
+    /// a hard check nor a human call happened, so "the grader's best guess" is the least wrong
+    /// label for data that arrived without one).
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        criterionId = try c.decode(UUID.self, forKey: .criterionId)
+        criterionText = try c.decodeIfPresent(String.self, forKey: .criterionText) ?? ""
+        kind = try c.decodeIfPresent(CriterionKind.self, forKey: .kind) ?? .qualitative
+        verdict = try c.decodeIfPresent(CriterionVerdictValue.self, forKey: .verdict) ?? .cannotVerify
+        evidence = try c.decodeIfPresent(String.self, forKey: .evidence) ?? ""
+        method = try c.decodeIfPresent(VerdictMethod.self, forKey: .method) ?? .judge
+    }
 }
 
 enum EvaluationStatus: String, Codable, Sendable, Equatable {
