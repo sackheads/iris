@@ -549,13 +549,21 @@ final class ConversationStore: Sendable {
                     c.tokenUsage = try tokenUsage.map { try decoder.decode(TokenUsage.self, from: Data($0.utf8)) } ?? TokenUsage()
                     if let s = goalContract { c.goalContract = try decoder.decode(GoalContract.self, from: Data(s.utf8)) }
                     if let s = subagentResult { c.subagentResult = try decoder.decode(SubagentResult.self, from: Data(s.utf8)) }
-                    // NULL (a row written before v3) leaves the property at its `[]` default.
-                    if let s = checkpointHistory { c.checkpointHistory = try decoder.decode([CheckpointOutcome].self, from: Data(s.utf8)) }
                 } catch {
                     // Whole-conversation skip: nothing in memory represents this conversation, so
                     // nothing can ever write to it again. No quarantine/renumber needed.
                     out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "\(error)"))
                     continue
+                }
+
+                // NULL (a row written before v3) leaves the property at its `[]` default. Unlike
+                // goalContract/tokenUsage above, a corrupt checkpointHistory is not fatal to the
+                // conversation: it's slice D3's supplementary audit trail of past checkpoint
+                // resolutions, not the goal itself. Degrade to `[]` and record the loss rather
+                // than dropping every message, contract, and workspace the row also carries.
+                if let s = checkpointHistory {
+                    do { c.checkpointHistory = try decoder.decode([CheckpointOutcome].self, from: Data(s.utf8)) }
+                    catch { out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable checkpointHistory: \(error)")) }
                 }
 
                 // Per-conversation, so the bulk breaker below can throw the lot away.

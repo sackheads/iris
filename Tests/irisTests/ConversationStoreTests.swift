@@ -442,6 +442,19 @@ struct ConversationStoreTests {
         #expect(loaded.skipped.count == 1 && loaded.skipped.first?.table == "conversations" && loaded.skipped.first?.conversationId == a.id)
     }
 
+    @Test("a corrupt checkpointHistory column degrades to [] and is reported, but the conversation still loads")
+    func corruptedCheckpointHistoryIsNonFatal() throws {
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a")
+        try store.apply([created(a)])
+        try store.rawWrite("UPDATE conversations SET checkpointHistory = '{{{not json' WHERE id = ?", arguments: [a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.conversations.map(\.title) == ["a"])
+        #expect(loaded.conversations.first?.messages.count == a.messages.count)
+        #expect(loaded.conversations.first?.checkpointHistory.isEmpty == true)
+        #expect(loaded.skipped.count == 1 && loaded.skipped.first?.table == "conversations" && loaded.skipped.first?.conversationId == a.id)
+    }
+
     @Test("a write for an id the store has never seen upserts the row even without a created flag")
     func upsertWithoutCreated() throws {
         let store = try ConversationStore.inMemory()
