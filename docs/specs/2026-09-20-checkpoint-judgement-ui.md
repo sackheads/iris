@@ -297,7 +297,9 @@ Accept against a running app. The fix: `CheckpointPauseChip` takes `conversation
 `Conversation`, and reads the live conversation out of `state.conversations` inside its own `body`,
 so `@Observable` tracks the chip's dependency on that array directly and any mutation re-renders it
 regardless of how the parent diffed its inputs. The same hazard applies to any other chip that takes
-a `Conversation` by value rather than an id; see #223 for the sibling chips this was not fixed in.
+a `Conversation` by value rather than an id; #223 fixed the two sibling chips this had not been
+fixed in yet (`LockedContractChip`, `CompletionReportChip`), which now take `conversationId: UUID`
+and read the live conversation inside their own `body` the same way.
 
 ### 9.1 Decisions a planner would otherwise have to invent
 

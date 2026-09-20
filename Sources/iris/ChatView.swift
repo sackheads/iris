@@ -300,7 +300,7 @@ struct ChatView: View {
                     }
 
                     if conv.goalContract?.state == .locked {
-                        LockedContractChip(state: state, conversation: conv)
+                        LockedContractChip(state: state, conversationId: conv.id)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
 
@@ -316,13 +316,8 @@ struct ChatView: View {
                     // duplicate. It reappears for a terminal goal_complete (checkpointStatus != paused).
                     if (conv.lastGoalCompletionReport != nil || conv.lastGoalEvaluation != nil),
                        conv.goalContract?.checkpointStatus != .pausedForReview {
-                        CompletionReportChip(
-                            state: state,
-                            conversation: conv,
-                            report: conv.lastGoalCompletionReport,
-                            evaluation: conv.lastGoalEvaluation
-                        )
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        CompletionReportChip(state: state, conversationId: conv.id)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
 
                     SpectrumLine(active: state.isThinking)

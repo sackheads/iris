@@ -307,13 +307,24 @@ struct GoalContractPanel: View {
 /// Compact read-only chip shown while a goal contract is locked and running.
 struct LockedContractChip: View {
     var state: AppState
-    let conversation: Conversation
+    /// #223: this chip takes the conversation's ID, not the `Conversation` value itself.
+    /// `Conversation.==` compares by `id` only (AppState.swift), so a struct-value
+    /// `let conversation: Conversation` input compares equal before and after an in-place
+    /// mutation (a verdict changing, `awaitingHumanJudgement` flipping, a ladder rung advancing) —
+    /// SwiftUI's diffing can then skip re-running this view's `body` even though
+    /// `state.conversations` mutated underneath it, leaving the header and pause section stuck on
+    /// stale state until something else forces a redraw. Reading `state.conversations` directly
+    /// inside `body` below makes `@Observable` track this view's dependency on that array, so any
+    /// mutation re-renders the chip regardless of how the parent diffed its inputs. Do not go back
+    /// to storing a `Conversation` here (#223, #191/#224).
+    let conversationId: UUID
 
     /// Text the human types before pressing "Send back".
     @State private var sendBackNote: String = ""
 
     var body: some View {
-        if let contract = conversation.goalContract {
+        if let conversation = state.conversations.first(where: { $0.id == conversationId }),
+           let contract = conversation.goalContract {
             VStack(alignment: .leading, spacing: 0) {
                 chipHeader(contract: contract)
                 Divider()
@@ -688,37 +699,47 @@ enum CompletionSelfReportMatching {
 /// When `evaluation` is provided the chip expands to a two-column drift view.
 struct CompletionReportChip: View {
     var state: AppState
-    let conversation: Conversation
-    /// Self-report JSON from `goal_complete`'s `criteria_status`. May be nil when the model
-    /// omitted `criteria_status` but the grader evaluation is still present.
-    let report: JSONValue?
-    /// Optional grader evaluation; when present the chip shows the two-column drift view.
-    var evaluation: GoalEvaluation? = nil
+    /// #223: this chip takes the conversation's ID, not the `Conversation` value (and no longer
+    /// takes `report`/`evaluation` separately). `Conversation.==` compares by `id` only
+    /// (AppState.swift), so a struct-value `let conversation: Conversation` input compares equal
+    /// before and after an in-place mutation — SwiftUI's diffing can then skip re-running this
+    /// view's `body` even though `state.conversations` mutated underneath it. The separate
+    /// `evaluation` input used to mask this (a verdict change also changes `evaluation`), but a
+    /// mutation that changes only the contract (e.g. the `awaitingHumanJudgement` flip after the
+    /// last verdict, which gates the Accept/Reject handlers) would not re-render. Reading
+    /// `state.conversations` directly inside `body` below makes `@Observable` track this view's
+    /// dependency on that array, so any mutation re-renders the chip regardless of how the parent
+    /// diffed its inputs. Do not go back to storing a `Conversation` (or `report`/`evaluation`)
+    /// here (#223, #191/#224).
+    let conversationId: UUID
+
     var body: some View {
         // Bound the chip's height (like GoalContractPanel/LockedContractChip do). Unbounded, it
         // was the only goal chip without a height cap, and an unbounded subview in the composer's
         // VStack could collapse the surrounding layout — the window blanked the instant this chip
         // appeared at goal_complete (#62).
-        ScrollView {
-            CompletionReportSection(
-                report: report,
-                // No ✕ while the goal waits on judgement: dismissing drops the evaluation the
-                // Accept/Reject buttons act on, and `AppState.dismissCompletionReport` refuses in
-                // that state anyway — so the button would be visibly dead. Hide it instead.
-                onDismiss: conversation.goalContract?.awaitingHumanJudgement == true ? nil : {
-                    state.dismissCompletionReport(for: conversation.id)
-                },
-                evaluation: evaluation, conversation: conversation, state: state)
+        if let conversation = state.conversations.first(where: { $0.id == conversationId }) {
+            ScrollView {
+                CompletionReportSection(
+                    report: conversation.lastGoalCompletionReport,
+                    // No ✕ while the goal waits on judgement: dismissing drops the evaluation the
+                    // Accept/Reject buttons act on, and `AppState.dismissCompletionReport` refuses in
+                    // that state anyway — so the button would be visibly dead. Hide it instead.
+                    onDismiss: conversation.goalContract?.awaitingHumanJudgement == true ? nil : {
+                        state.dismissCompletionReport(for: conversation.id)
+                    },
+                    evaluation: conversation.lastGoalEvaluation, conversation: conversation, state: state)
+            }
+            .frame(maxHeight: 320)
+            .background(.thinMaterial)
+            .clipShape(.rect(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+            }
+            .padding(.horizontal)
+            .padding(.bottom, 4)
         }
-        .frame(maxHeight: 320)
-        .background(.thinMaterial)
-        .clipShape(.rect(cornerRadius: 10))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
-        }
-        .padding(.horizontal)
-        .padding(.bottom, 4)
     }
 }
 
