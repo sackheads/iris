@@ -69,7 +69,7 @@ struct GoalContractTests {
 
     // MARK: - #204 round 2: lenient decoders for nested types
 
-    @Test("a Criterion JSON missing text/kind/check decodes to defaults, id stays required")
+    @Test("a Criterion JSON missing text/kind/check decodes to defaults")
     func criterionLenientDecode() throws {
         let id = UUID()
         let json = #"{"id":"\#(id.uuidString)"}"#
@@ -80,12 +80,13 @@ struct GoalContractTests {
         #expect(c.check == nil)
     }
 
-    @Test("a Criterion JSON missing id throws (identity field stays required)")
-    func criterionMissingIdThrows() {
+    @Test("a Criterion JSON missing id decodes with a freshly minted one (round 3: losing the whole conversation is worse than an orphaned reference)")
+    func criterionMissingIdDefaultsToFreshUUID() throws {
         let json = #"{"text":"x","kind":"qualitative"}"#
-        #expect(throws: (any Error).self) {
-            try JSONDecoder().decode(Criterion.self, from: Data(json.utf8))
-        }
+        let c = try JSONDecoder().decode(Criterion.self, from: Data(json.utf8))
+        #expect(c.text == "x")
+        #expect(c.kind == .qualitative)
+        // id is not asserted to any specific value -- only that decode did not throw.
     }
 
     @Test("a Milestone JSON missing every field decodes to defaults, including a fresh id")

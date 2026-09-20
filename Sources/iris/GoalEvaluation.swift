@@ -33,21 +33,23 @@ struct CriterionVerdict: Codable, Identifiable, Equatable, Sendable {
         self.verdict = verdict; self.evidence = evidence; self.method = method
     }
 
-    /// Lenient decoder (invariant 1, #204 round 2): a `keyNotFound` here throws out of
+    /// Lenient decoder (invariant 1, #204 round 2/3): a `keyNotFound` here throws out of
     /// `GoalEvaluation.init(from:)`'s `try c.decodeIfPresent([CriterionVerdict].self, ...)`, which
     /// swallows a MISSING `criteria` key but not a decode error inside an element already present —
     /// so a required field added to this type later would still fail the whole `GoalEvaluation`,
-    /// and from there `CheckpointOutcome`/`SubagentResult`/the conversation that owns them.
-    /// `criterionId` stays required: `AppState.waiveCriterion`/`recordHumanJudgement` and
-    /// `GoalContractPanel` match verdicts back to criteria by this value, and minting a fresh one
-    /// would misattribute or orphan the verdict rather than merely blank its text. `verdict`
-    /// defaults to `.cannotVerify` (the closest thing this enum has to "unspecified" — asserting
-    /// `.met`/`.notMet` on missing data would fabricate a result) and `method` to `.judge` (neither
-    /// a hard check nor a human call happened, so "the grader's best guess" is the least wrong
-    /// label for data that arrived without one).
+    /// and from there `CheckpointOutcome`/`SubagentResult`/the conversation that owns them, via the
+    /// row-level catch in `ConversationStore.loadAll` that drops the WHOLE CONVERSATION (messages,
+    /// history, workspace) permanently. `criterionId` defaults to a fresh `UUID()` rather than
+    /// staying required (reversed from round 2): minting one does mean
+    /// `AppState.waiveCriterion`/`recordHumanJudgement`/`GoalContractPanel` can no longer match this
+    /// verdict back to its criterion, but an orphaned verdict is a degraded, visible, repairable
+    /// state — a vanished conversation is not. `verdict` defaults to `.cannotVerify` (the closest
+    /// thing this enum has to "unspecified" — asserting `.met`/`.notMet` on missing data would
+    /// fabricate a result) and `method` to `.judge` (neither a hard check nor a human call happened,
+    /// so "the grader's best guess" is the least wrong label for data that arrived without one).
     init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        criterionId = try c.decode(UUID.self, forKey: .criterionId)
+        criterionId = try c.decodeIfPresent(UUID.self, forKey: .criterionId) ?? UUID()
         criterionText = try c.decodeIfPresent(String.self, forKey: .criterionText) ?? ""
         kind = try c.decodeIfPresent(CriterionKind.self, forKey: .kind) ?? .qualitative
         verdict = try c.decodeIfPresent(CriterionVerdictValue.self, forKey: .verdict) ?? .cannotVerify

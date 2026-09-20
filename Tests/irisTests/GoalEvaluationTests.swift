@@ -57,12 +57,12 @@ struct GoalEvaluationTests {
         #expect(v.method == .judge)
     }
 
-    @Test("a CriterionVerdict JSON missing criterionId throws (identity field stays required)")
-    func criterionVerdictMissingCriterionIdThrows() {
+    @Test("a CriterionVerdict JSON missing criterionId decodes with a freshly minted one (round 3: losing the whole conversation is worse than an orphaned verdict)")
+    func criterionVerdictMissingCriterionIdDefaultsToFreshUUID() throws {
         let json = #"{"criterionText":"x"}"#
-        #expect(throws: (any Error).self) {
-            try JSONDecoder().decode(CriterionVerdict.self, from: Data(json.utf8))
-        }
+        let v = try JSONDecoder().decode(CriterionVerdict.self, from: Data(json.utf8))
+        #expect(v.criterionText == "x")
+        // criterionId is not asserted to any specific value -- only that decode did not throw.
     }
 
     @Test("a GoalEvaluation whose criteria element is missing defaultable fields still decodes")

@@ -470,6 +470,62 @@ struct ConversationStoreTests {
         #expect(loaded.conversations.first?.tokenUsage == TokenUsage(promptTokenCount: 3, candidatesTokenCount: 0, totalTokenCount: 0))
     }
 
+    @Test("a conversations row whose subagentResult JSON lacks a key loads with that field defaulted, not skipped")
+    func subagentResultMissingKeyStillLoads() throws {
+        // Mirrors tokenUsageMissingKeyStillLoads: SubagentResult had no hand-written init(from:)
+        // before #204, so a stored row missing any top-level key threw keyNotFound and skipped the
+        // whole conversation.
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a")
+        try store.apply([created(a)])
+        let json = #"{"role":"engineer","status":"completed","calledGoalComplete":true,"summary":"done"}"#
+        try store.rawWrite("UPDATE conversations SET subagentResult = ? WHERE id = ?", arguments: [json, a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.skipped.isEmpty)
+        #expect(loaded.conversations.map(\.title) == ["a"])
+        #expect(loaded.conversations.first?.subagentResult?.role == "engineer")
+        #expect(loaded.conversations.first?.subagentResult?.filesWritten == [])
+        #expect(loaded.conversations.first?.subagentResult?.schemaVersion == 1)
+    }
+
+    // MARK: - #204 round 3: Criterion.id / CriterionVerdict.criterionId default rather than throw
+
+    @Test("a goalContract row whose criterion lacks id still loads the conversation, criterion count preserved")
+    func goalContractCriterionMissingIdStillLoads() throws {
+        // Round 3 reversed round 2's ruling: Criterion.id/CriterionVerdict.criterionId now default
+        // to a fresh UUID rather than staying required, because throwing here propagates through
+        // GoalContract.init(from:) into the row-level catch in ConversationStore.loadAll and drops
+        // the WHOLE conversation (messages, history, workspace), not just the criterion's identity.
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a")
+        try store.apply([created(a)])
+        let json = #"{"objective":"ship","criteria":[{"text":"tests pass","kind":"executable"}]}"#
+        try store.rawWrite("UPDATE conversations SET goalContract = ? WHERE id = ?", arguments: [json, a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.skipped.isEmpty)
+        #expect(loaded.conversations.map(\.title) == ["a"])
+        #expect(loaded.conversations.first?.goalContract?.criteria.count == 1)
+        #expect(loaded.conversations.first?.goalContract?.criteria.first?.text == "tests pass")
+    }
+
+    @Test("a subagentResult whose verdict criterion lacks criterionId still loads the conversation")
+    func subagentResultVerdictMissingCriterionIdStillLoads() throws {
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a")
+        try store.apply([created(a)])
+        let json = """
+        {"role":"engineer","status":"completed","calledGoalComplete":true,"summary":"done",
+         "filesWritten":[],"startedAt":0,"endedAt":1,
+         "verdict":{"status":"graded","startedAt":0,"criteria":[{"criterionText":"tests pass"}]}}
+        """
+        try store.rawWrite("UPDATE conversations SET subagentResult = ? WHERE id = ?", arguments: [json, a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.skipped.isEmpty)
+        #expect(loaded.conversations.map(\.title) == ["a"])
+        #expect(loaded.conversations.first?.subagentResult?.verdict?.criteria.count == 1)
+        #expect(loaded.conversations.first?.subagentResult?.verdict?.criteria.first?.criterionText == "tests pass")
+    }
+
     // MARK: - #204 round 2: nested-type leniency, verified through the store
 
     @Test("a goalContract row whose criteria element is missing defaultable fields still loads (not skipped)")

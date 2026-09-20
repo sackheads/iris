@@ -23,8 +23,12 @@ final class SubagentManagerTests: XCTestCase {
     private var config: ConfigManager!
     private var suiteName = ""
 
-    override func setUp() {
-        super.setUp()
+    // Async overrides, not the synchronous `setUp()`/`tearDown()`: XCTestCase declares those two
+    // as nonisolated, so a `@MainActor` subclass overriding them still can't touch `config`/
+    // `suiteName` without a warning (#204 round 3 review) -- the async overloads are isolated to
+    // whatever actor the subclass specifies, matching the rest of this file.
+    override func setUp() async throws {
+        try await super.setUp()
         URLProtocol.registerClass(MockURLProtocol.self)
         suiteName = "iris-subagentmanager-\(UUID().uuidString)"
         let store = UserDefaults(suiteName: suiteName)!
@@ -35,7 +39,7 @@ final class SubagentManagerTests: XCTestCase {
         config.anthropicAPIKey = "mock-api-key"
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         URLProtocol.unregisterClass(MockURLProtocol.self)
         MockURLProtocol.handler = nil
         UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
@@ -43,7 +47,7 @@ final class SubagentManagerTests: XCTestCase {
         // IrisDefaults sweeps stale iris-*-<UUID> plists by age, but clean up anyway.
         IrisDefaults.removeSuiteFile(named: suiteName, in: IrisDefaults.preferencesDirectory)
         config = nil
-        super.tearDown()
+        try await super.tearDown()
     }
     
     func testSubagentExecutionBlocksAndReturnsSummary() async throws {

@@ -62,4 +62,14 @@ final class FileAttachmentSerializationTests: XCTestCase {
         XCTAssertEqual(msg.attachments.count, 1)
         XCTAssertEqual(msg.attachments.first?.category, .unknown)
     }
+
+    // #204 round 3: pins one of the five identity decisions that stay required (element/row
+    // granularity, not conversation) -- unlike Criterion.id/CriterionVerdict.criterionId, a bad
+    // FileAttachment only quarantines the one owning message row, never the whole conversation.
+    func testFileAttachmentMissingFileURLThrows() throws {
+        let json = """
+        {"id": "E621E1F8-C36C-495A-93FC-0C247A3E6E5F"}
+        """.data(using: .utf8)!
+        XCTAssertThrowsError(try JSONDecoder().decode(FileAttachment.self, from: json))
+    }
 }

@@ -16,17 +16,20 @@ struct Criterion: Codable, Identifiable, Equatable, Sendable {
         self.id = id; self.text = text; self.kind = kind; self.check = check
     }
 
-    /// Lenient decoder (invariant 1, #204 round 2): a `keyNotFound` here throws out of
+    /// Lenient decoder (invariant 1, #204 round 2/3): a `keyNotFound` here throws out of
     /// `GoalContract.init(from:)`'s `try c.decode([Criterion].self, ...)`, which does not swallow
     /// nested errors — so a required field added to this type later would fail the WHOLE
-    /// `GoalContract` decode, taking the conversation down with it, exactly like the
-    /// `TokenUsage`/`SubagentResult` case round 1 fixed. `id` stays required: it is the reference
-    /// key `Milestone.criterionIds`, `GoalContract.waivers`/`judgements` and
-    /// `CriterionVerdict.criterionId` all match against, and minting a fresh one on decode would
-    /// silently sever those links rather than merely degrade the criterion's display text.
+    /// `GoalContract` decode, which the row-level catch in `ConversationStore.loadAll` turns into
+    /// dropping the WHOLE CONVERSATION (messages, history, workspace — everything), permanently.
+    /// `id` defaults to a fresh `UUID()` rather than staying required (reversed from round 2):
+    /// minting one does sever `Milestone.criterionIds`/`GoalContract.waivers`/`judgements`/
+    /// `CriterionVerdict.criterionId` links to this criterion, but that is a degraded contract the
+    /// user can see (an orphaned waiver, a criterion missing from its milestone) and repair —
+    /// losing the whole conversation is not recoverable at all. Given that choice, the lesser harm
+    /// wins.
     init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decode(UUID.self, forKey: .id)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
         kind = try c.decodeIfPresent(CriterionKind.self, forKey: .kind) ?? .qualitative
         check = try c.decodeIfPresent(String.self, forKey: .check)

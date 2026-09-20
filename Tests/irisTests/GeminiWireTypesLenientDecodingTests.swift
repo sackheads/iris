@@ -9,7 +9,11 @@ import Foundation
 /// (#136) for the pattern these follow.
 @Suite("Gemini wire types: lenient decoding")
 struct GeminiWireTypesLenientDecodingTests {
-    @Test("a Part JSON missing every field decodes to an all-nil part instead of throwing")
+    // This does not guard against a regression -- every `Part` field is `Optional`, so the
+    // synthesized decoder already treats a missing key as nil with no custom code at all; deleting
+    // `Part`'s `init(from:)` entirely would still pass this test. It documents that the explicit
+    // decoder's behavior matches the always-safe-by-construction baseline, nothing more.
+    @Test("a Part JSON missing every field decodes to an all-nil part (documents existing Optional safety, not a regression guard)")
     func partMissingAllFieldsDecodes() throws {
         let part = try JSONDecoder().decode(Part.self, from: Data("{}".utf8))
         #expect(part.text == nil)
@@ -18,19 +22,6 @@ struct GeminiWireTypesLenientDecodingTests {
         #expect(part.inlineData == nil)
         #expect(part.thought_signature == nil)
         #expect(part.thoughtSignature == nil)
-    }
-
-    @Test("a Part round-trips through Codable with every field populated")
-    func partRoundTrips() throws {
-        let part = Part(text: "hi", functionCall: FunctionCall(name: "f", args: ["a": .string("b")], id: "c1"),
-                        functionResponse: nil, inlineData: InlineData(mimeType: "image/png", data: "AA=="),
-                        thought_signature: "sig1", thoughtSignature: "sig2")
-        let back = try JSONDecoder().decode(Part.self, from: JSONEncoder().encode(part))
-        #expect(back.text == "hi")
-        #expect(back.functionCall?.name == "f")
-        #expect(back.inlineData?.mimeType == "image/png")
-        #expect(back.thought_signature == "sig1")
-        #expect(back.thoughtSignature == "sig2")
     }
 
     @Test("a FunctionCall JSON missing args defaults to an empty dictionary, name stays required")
@@ -58,11 +49,33 @@ struct GeminiWireTypesLenientDecodingTests {
         #expect(response.response.isEmpty)
     }
 
+    @Test("a FunctionResponse JSON missing name throws (identity field stays required)")
+    func functionResponseMissingNameThrows() {
+        let json = #"{"response":{}}"#
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(FunctionResponse.self, from: Data(json.utf8))
+        }
+    }
+
     @Test("an InlineData JSON missing both fields decodes to safe defaults")
     func inlineDataMissingFieldsDefaults() throws {
         let inline = try JSONDecoder().decode(InlineData.self, from: Data("{}".utf8))
         #expect(inline.mimeType == "application/octet-stream")
         #expect(inline.data == "")
+    }
+
+    // JSONValue is a recursive sum type over a single JSON node (FunctionCall.args/
+    // FunctionResponse.response are `[String: JSONValue]`), not a keyed container with named
+    // fields -- there is nothing to decodeIfPresent. Its hand-written init(from:) already matches
+    // every JSON shape exhaustively; this pins that the encoder/decoder pair stays lossless.
+    @Test("JSONValue round-trips every case through Codable")
+    func jsonValueRoundTrips() throws {
+        let value = JSONValue.object([
+            "s": .string("x"), "i": .int(1), "d": .double(1.5), "b": .bool(true),
+            "a": .array([.null, .string("y")]), "n": .null
+        ])
+        let back = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(value))
+        #expect(back == value)
     }
 
     @Test("a Content history row whose Part has a function call missing args still decodes through Content")
