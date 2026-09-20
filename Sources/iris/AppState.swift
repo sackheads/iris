@@ -1283,8 +1283,14 @@ class AppState {
         // the rest of the ladder, and refuses the terminal gate on a verdict the agent can never
         // earn. Send-back IS the rework trigger at a checkpoint, the way resume is at the terminal
         // gate; the user is asked again once the work has actually changed. Acceptances persist.
-        for id in c.currentMilestoneCriteria().map(\.id) where c.judgements[id] == false {
-            c.judgements[id] = nil
+        // Guarded on `hasLadder` to match `recordCheckpointOutcome` above: `currentMilestoneCriteria()`
+        // falls back to ALL criteria on a ladder-less contract, so without this guard a send-back
+        // on a plain (non-laddered) goal would clear every rejection in the contract, not just the
+        // one this rework is for.
+        if c.hasLadder {
+            for id in c.currentMilestoneCriteria().map(\.id) where c.judgements[id] == false {
+                c.judgements[id] = nil
+            }
         }
         c.checkpointStatus = .running
         // Same reason as `advanceCheckpoint`: leaving the flag set while the checkpoint goes back to

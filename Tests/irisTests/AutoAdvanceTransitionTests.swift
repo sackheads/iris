@@ -73,6 +73,23 @@ struct AutoAdvanceTransitionTests {
         #expect(conv?.checkpointHistory.first?.resolution == .humanApproved)
     }
 
+    @Test("approving with no grade on record stores a nil evaluation, not a fabricated failure")
+    func testApproveWithNoGradeRecordsNilEvaluation() {
+        // No `recordEvaluation` call here: `lastGoalEvaluation` stays nil, exactly as it would
+        // after a restart (`sanitizeLoaded` clears it). Re-adding a
+        // `?? GoalEvaluation(status: .failed, criteria: [])` fallback in `recordCheckpointOutcome`
+        // would compile and pass every other test while quietly putting a grade nobody produced
+        // into the audit trail — this is the test that catches it.
+        let app = AppState(); let id = UUID()
+        _ = laddered(app, id)
+
+        app.advanceCheckpoint(for: id)
+
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.checkpointHistory.first?.evaluation == nil)
+        #expect(conv?.checkpointHistory.first?.resolution == .humanApproved)
+    }
+
     @Test("the human send-back path records humanSentBack and does not advance")
     func testSendBackRecordsHistory() {
         let app = AppState(); let id = UUID()
@@ -84,6 +101,27 @@ struct AutoAdvanceTransitionTests {
         let conv = app.conversations.first { $0.id == id }
         #expect(conv?.checkpointHistory.first?.resolution == .humanSentBack)
         #expect(conv?.goalContract?.currentMilestone == 0, "send back keeps working the same milestone")
+    }
+
+    @Test("send-back on a ladder-less contract does not clear rejections goal-wide")
+    func testSendBackWithoutLadderDoesNotClearRejections() {
+        // `currentMilestoneCriteria()` falls back to ALL criteria when `hasLadder` is false.
+        // `recordCheckpointOutcome` (called first, just above) already guards on `hasLadder`;
+        // the rejection-consuming loop below it did not, so a send-back on a plain goal used to
+        // clear every `false` judgement in the contract instead of leaving it for whichever gate
+        // owns it.
+        let app = AppState(); let id = UUID()
+        let a = Criterion(text: "a", kind: .humanJudged, check: nil)
+        var c = GoalContract(objective: "ship it", criteria: [a])
+        c.milestones = []
+        c.judgements[a.id] = false
+        app.createNewConversation(id: id)
+        app.setGoalContract(for: id, c)
+
+        app.holdCheckpoint(for: id, feedback: "not quite")
+
+        #expect(app.conversations.first { $0.id == id }?.goalContract?.judgements[a.id] == false,
+                "a ladder-less send-back must not touch judgements outside its own milestone")
     }
 
     @Test("a second advance decided for the same milestone is a no-op")
