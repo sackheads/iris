@@ -480,6 +480,11 @@ final class ConversationStore: Sendable {
                         out.skipped.append(SkippedRow(conversationId: id, table: table, ordinal: nil,
                                                       reason: "all \(totals[table] ?? 0) rows unreadable; left in place"))
                     }
+                    // The other table's individual bad rows are still worth reporting — they are
+                    // real damage and the console log is the only place they surface. They are not
+                    // quarantined: this conversation is excluded from the load, so nothing may be
+                    // rewritten under it.
+                    out.skipped.append(contentsOf: localSkipped.filter { !bulkFailed.contains($0.table) })
                     continue
                 }
 
@@ -569,10 +574,11 @@ final class ConversationStore: Sendable {
 }
 
 extension ConversationStore {
-    /// First-launch import (spec §6). Returns false and writes nothing when the `meta` marker says
-    /// an import already ran; otherwise imports everything and sets the marker. Both the check and
-    /// the marker live in the same write transaction as the rows, so a crash between the commit
-    /// and the key move cannot double-import.
+    /// First-launch import (spec §6). Returns nil and writes nothing when the `meta` marker says
+    /// an import already ran; otherwise imports everything, sets the marker, and returns how many
+    /// conversations were actually written. Both the check and the marker live in the same write
+    /// transaction as the rows, so a crash between the commit and the key move cannot
+    /// double-import.
     ///
     /// The gate is the marker, deliberately not "the store has rows": after an `.importFailed`
     /// launch the app goes on to create its default conversation, so a row-count gate declared the
@@ -580,11 +586,11 @@ extension ConversationStore {
     /// silent data loss (review finding, #163 round 2). Importing behind conversations that
     /// already exist is fine: positions continue from `MAX(position) + 1`, so the imported ones
     /// simply land after them.
-    func importLegacy(_ conversations: [Conversation]) throws -> Bool {
+    func importLegacy(_ conversations: [Conversation]) throws -> Int? {
         try writer.write { db in
             let done = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM meta WHERE key = ?",
                                         arguments: [Self.legacyImportDoneKey]) ?? 0
-            if done > 0 { return false }
+            if done > 0 { return nil }
             if self.failInjection?(UUID()) == true { throw InjectedWriteFailure() }
             let encoder = JSONEncoder()
             var collided = 0
@@ -602,7 +608,7 @@ extension ConversationStore {
             }
             try db.execute(sql: "INSERT INTO meta (key, value) VALUES (?, ?)",
                            arguments: [Self.legacyImportDoneKey, ISO8601DateFormatter().string(from: Date())])
-            return true
+            return conversations.count - collided
         }
     }
 

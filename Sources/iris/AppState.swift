@@ -255,53 +255,57 @@ class AppState {
         if conversations.isEmpty {
             createNewConversation()
         }
-        // Every launch notice below is `persist: false`: it describes this launch, not the
-        // conversation's history. Persisting them accumulated one copy per launch and made a
-        // resolved problem read as a live one on the next.
+        // Every launch notice below goes through `appendLaunchNotice`, which persists it like any
+        // other system message but skips it when the same wording is already in the conversation.
+        // Several of these conditions recur on every launch until a human intervenes, so dedup by
+        // content is what keeps them from stacking up.
         if !loadedSkippedRows.isEmpty, let target = selectedConversationId {
-            // Two different things end up in `skipped`, and they need different wording. An
-            // individual bad message/history row (it has an ordinal) was moved to `quarantine` and
-            // the conversation loaded without it. Everything else — an unreadable metadata column,
-            // a table whose every row failed to decode (reported once, ordinal nil) — left the
-            // conversation out of this load entirely, with its rows untouched on disk, and will
-            // recur on every launch until a human fixes it.
-            let quarantined = loadedSkippedRows.filter { ($0.table == "messages" || $0.table == "history") && $0.ordinal != nil }
-            let leftInPlace = loadedSkippedRows.filter { !(($0.table == "messages" || $0.table == "history") && $0.ordinal != nil) }
+            // Two different things end up in `skipped`, and they need different wording. A bad
+            // message/history row belonging to a conversation that still loaded was moved to
+            // `quarantine` and the conversation came back without it. Rows belonging to a
+            // conversation that is NOT in the load — an unreadable metadata column, a table whose
+            // every row failed to decode — were deliberately left untouched on disk, and will be
+            // reported again on every launch until someone fixes them.
+            let loadedIds = Set(conversations.map(\.id))
+            let quarantined = loadedSkippedRows.filter { row in
+                guard let id = row.conversationId, loadedIds.contains(id) else { return false }
+                return (row.table == "messages" || row.table == "history") && row.ordinal != nil
+            }
+            let leftInPlace = loadedSkippedRows.filter { row in
+                guard let id = row.conversationId, loadedIds.contains(id) else { return true }
+                return !((row.table == "messages" || row.table == "history") && row.ordinal != nil)
+            }
             if !quarantined.isEmpty {
                 let convs = Set(quarantined.compactMap(\.conversationId)).count
-                appendMessage(role: .system,
-                              content: "\(quarantined.count) unreadable saved entr\(quarantined.count == 1 ? "y" : "ies") in \(convs) conversation\(convs == 1 ? "" : "s") were moved to the quarantine table in \(IrisPaths.default.conversationsDB.lastPathComponent).",
-                              to: target, persist: false)
+                let one = quarantined.count == 1
+                appendLaunchNotice("\(quarantined.count) unreadable saved entr\(one ? "y" : "ies") in \(convs) conversation\(convs == 1 ? "" : "s") \(one ? "was" : "were") moved to the quarantine table in \(IrisPaths.default.conversationsDB.lastPathComponent).",
+                                   to: target)
             }
             if !leftInPlace.isEmpty {
                 // One conversation can contribute more than one row (both its tables unreadable).
                 let n = Set(leftInPlace.compactMap(\.conversationId)).count + leftInPlace.filter { $0.conversationId == nil }.count
-                appendMessage(role: .system,
-                              content: "\(n) saved conversation\(n == 1 ? "" : "s") could not be read and \(n == 1 ? "was" : "were") left in place; see the console for details.",
-                              to: target, persist: false)
+                appendLaunchNotice("\(n) saved conversation\(n == 1 ? "" : "s") could not be read and \(n == 1 ? "was" : "were") left in place; see the console for details.",
+                                   to: target)
             }
         }
         // The legacy UserDefaults blob existed but couldn't be decoded (spec §6): the backup key
         // is already set and the live key already removed (LegacyConversationBlob does both), so
         // this fires exactly once — say so in the app, not just the console log.
         if legacyBlobUndecodable, let target = selectedConversationId {
-            appendMessage(role: .system,
-                          content: "The saved conversations from an earlier version could not be read. A copy was kept in the app settings under a key beginning iris_conversations_backup_.",
-                          to: target, persist: false)
+            appendLaunchNotice("The saved conversations from an earlier version could not be read. A copy was kept in the app settings under a key beginning iris_conversations_backup_.",
+                               to: target)
         }
         // The blob decoded fine but the write into the store failed: the live key is left in
         // place by `LegacyConversationBlob` for a retry, so say that instead of "could not be read".
         if legacyBlobImportFailed, let target = selectedConversationId {
-            appendMessage(role: .system,
-                          content: "The saved conversations from an earlier version could not be imported; they will be retried at the next launch.",
-                          to: target, persist: false)
+            appendLaunchNotice("The saved conversations from an earlier version could not be imported; they will be retried at the next launch.",
+                               to: target)
         }
         // `store.loadAll()` itself threw (not a per-row skip): logged in `loadConversations()`;
         // say so here too so the loss is visible, not only in the console log.
         if let headline = loadFailureHeadline, let target = selectedConversationId {
-            appendMessage(role: .system,
-                          content: "Saved conversations could not be loaded (\(headline)). Starting with an empty list; the database was left untouched.",
-                          to: target, persist: false)
+            appendLaunchNotice("Saved conversations could not be loaded (\(headline)). Starting with an empty list; the database was left untouched.",
+                               to: target)
         }
     }
 
@@ -799,12 +803,13 @@ class AppState {
         appendMessage(role: role, content: text, to: conversationId)
     }
 
-    /// `persist: false` shows the line in this session only. Launch notices (unreadable rows, a
-    /// failed legacy import, a load failure) describe what happened *at this launch* — writing
-    /// them into the conversation makes them permanent history that accumulates one copy per
-    /// launch and, worse, reads on a later launch as a fresh problem (review finding, #163
-    /// round 2).
-    func appendMessage(role: ChatRole, content: String, attachments: [FileAttachment] = [], id: UUID = UUID(), to conversationId: UUID, persist: Bool = true) {
+    /// Every message appended here is recorded for persistence, with no opt-out: the store keys
+    /// message rows by their index in this array, so a message held in memory without a row shifts
+    /// every ordinal after it. On the next launch it is absent, the indices shift back, and the
+    /// first append `INSERT OR REPLACE`s the previous session's last message (review finding, #163
+    /// round 3 — a `persist: false` launch notice did exactly this). Anything that must not
+    /// accumulate is de-duplicated at the point of appending; see `appendLaunchNotice`.
+    func appendMessage(role: ChatRole, content: String, attachments: [FileAttachment] = [], id: UUID = UUID(), to conversationId: UUID) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].messages.append(ChatMessage(id: id, role: role, content: content, attachments: attachments))
 
@@ -812,11 +817,22 @@ class AppState {
             if role == .user && conversations[idx].messages.filter({ $0.role == .user }).count == 1 {
                 let displayTitle = content.isEmpty ? (attachments.first?.filename ?? "Attachment") : content
                 conversations[idx].title = String(displayTitle.prefix(30)) + (displayTitle.count > 30 ? "..." : "")
-                if persist { markChanged(conversationId, .metadata) }
+                markChanged(conversationId, .metadata)
             }
-            guard persist else { return }
             markChanged(conversationId, .messagesAppended(from: conversations[idx].messages.count - 1))
         }
+    }
+
+    /// A launch-time system line, persisted like any other message but written at most once per
+    /// distinct wording. Several of the conditions that raise one recur on every launch until a
+    /// human intervenes (an unreadable metadata column, a table whose every row failed to decode,
+    /// a legacy import that keeps failing), and an unconditional append would stack one copy per
+    /// launch. The text is the dedup key on purpose: a changed count is a genuinely different
+    /// report and earns its own line.
+    func appendLaunchNotice(_ text: String, to conversationId: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
+        guard !conversations[idx].messages.contains(where: { $0.role == .system && $0.content == text }) else { return }
+        appendMessage(role: .system, content: text, to: conversationId)
     }
     
     /// Replaces one message's content in place (a streamed reply growing). No title generation;

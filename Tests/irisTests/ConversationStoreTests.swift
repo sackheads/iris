@@ -325,6 +325,28 @@ struct ConversationStoreTests {
         #expect(try store.loadAll().skipped.count == 1)
     }
 
+    @Test("a bulk-broken table does not hide the other table's individual bad rows")
+    func bulkBreakerStillReportsTheOtherTable() throws {
+        let store = try ConversationStore.inMemory()
+        var c = sample(title: "half bad")
+        c.history = [
+            Content(role: "user", parts: [Part(text: "h0")]),
+            Content(role: "model", parts: [Part(text: "h1")]),
+        ]
+        try store.apply([created(c)])
+        try store.rawWrite("UPDATE messages SET payload = '{not json' WHERE conversationId = ?", arguments: [c.id.uuidString])
+        try store.rawWrite("UPDATE history SET payload = '{not json' WHERE conversationId = ? AND ordinal = 1", arguments: [c.id.uuidString])
+
+        let loaded = try store.loadAll()
+        #expect(loaded.conversations.isEmpty)
+        #expect(loaded.skipped.count == 2)
+        #expect(loaded.skipped.contains { $0.table == "messages" && $0.ordinal == nil })
+        #expect(loaded.skipped.contains { $0.table == "history" && $0.ordinal == 1 })
+        // Still nothing repaired: the conversation is excluded, so nothing may be rewritten.
+        #expect(try store.counts(for: c.id) == (2, 2))
+        #expect(try store.quarantineCount(for: c.id) == 0)
+    }
+
     @Test("a non-UTF8 metadata column skips the whole conversation rather than loading it half-read")
     func nonUTF8MetadataSkipsTheConversation() throws {
         for column in ["title", "goalContract", "subagentResult", "tokenUsage", "workspacePath", "activeGoal", "mainAgentSandbox"] {

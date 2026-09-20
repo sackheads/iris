@@ -106,7 +106,7 @@ struct LegacyConversationBlobTests {
         let store = try ConversationStore.inMemory()
         let (d, name) = defaults()
         defer { cleanup(d, name) }
-        #expect(try store.importLegacy([]))          // sets the marker, imports nothing
+        #expect(try store.importLegacy([]) == 0)     // sets the marker, imports nothing
         #expect(try store.legacyImportMarked())
         #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .nothingToDo)
 
@@ -130,7 +130,8 @@ struct LegacyConversationBlobTests {
         var older = shared
         older.title = "older copy"
         d.set(blob([older, conv("new")]), forKey: LegacyConversationBlob.key)
-        #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .imported(2))
+        // One of the two was written; the count reports what the user actually got.
+        #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .imported(1))
         // The live row wins; the blob's other conversation lands behind it.
         #expect(try store.loadAll().conversations.map(\.title) == ["live", "new"])
     }

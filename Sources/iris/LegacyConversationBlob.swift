@@ -36,7 +36,10 @@ enum LegacyConversationBlob {
             return .undecodable
         }
         let durable = AppState.durableConversations(decoded)
-        let imported: Bool
+        // nil: the marker says an import already ran. Otherwise, how many were actually written —
+        // conversations whose id the store already holds are skipped, and reporting them as
+        // imported would overstate what the user got.
+        let imported: Int?
         do {
             imported = try store.importLegacy(durable)
         } catch {
@@ -48,6 +51,6 @@ enum LegacyConversationBlob {
         // Only after the transaction committed: park the blob and stop reading it.
         defaults.set(data, forKey: legacyKey)
         defaults.removeObject(forKey: key)
-        return imported ? .imported(durable.count) : .alreadyImported
+        return imported.map { Outcome.imported($0) } ?? .alreadyImported
     }
 }
