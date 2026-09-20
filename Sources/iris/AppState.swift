@@ -703,7 +703,55 @@ class AppState {
             createNewConversation()
         }
     }
-    
+
+    /// Why a conversation may not be archived. Archiving is list management, not control: it must
+    /// not quietly stop an agent, and a goal loop running inside a collapsed section is work
+    /// happening where nobody is looking (#182 §6.1).
+    enum ArchiveRefusal: Equatable {
+        case turnInFlight
+        case goalActive
+
+        var reason: String {
+            switch self {
+            case .turnInFlight: return "a turn is still running"
+            case .goalActive: return "a goal is active — /stop it first"
+            }
+        }
+    }
+
+    /// nil means the conversation may be archived. The sidebar calls this to disable its menu item
+    /// with the reason, since a context-menu click has no channel for a system message.
+    func archiveRefusal(for conversationId: UUID) -> ArchiveRefusal? {
+        guard let conv = conversations.first(where: { $0.id == conversationId }) else { return nil }
+        if hasTurnInFlight(for: conversationId) { return .turnInFlight }
+        if conv.activeGoal != nil { return .goalActive }
+        return nil
+    }
+
+    @discardableResult
+    func archiveConversation(_ conversationId: UUID) -> ArchiveRefusal? {
+        if let refusal = archiveRefusal(for: conversationId) { return refusal }
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              !conversations[idx].isArchived else { return nil }
+        conversations[idx].isArchived = true
+        markChanged(conversationId, .metadata)
+
+        // Archiving your only active conversation would leave nowhere to type. §6.1's refusal is
+        // what makes this safe: the replacement can never inherit a running goal, because a
+        // conversation with one cannot be archived at all.
+        if !conversations.contains(where: { !$0.isSubagent && !$0.isArchived }) {
+            createNewConversation()   // selects itself
+        }
+        return nil
+    }
+
+    func unarchiveConversation(_ conversationId: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              conversations[idx].isArchived else { return }
+        conversations[idx].isArchived = false
+        markChanged(conversationId, .metadata)
+    }
+
     func start() {
         Task {
             await engine.start()
