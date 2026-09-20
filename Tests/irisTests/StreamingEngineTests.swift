@@ -205,6 +205,32 @@ struct StreamingEngineTests {
         #expect(off.firstTokenMs == nil)
     }
 
+    @Test("a nil streamResponses override falls through to the live ConfigManager value")
+    func nilStreamResponsesOverrideFallsThroughToConfig() async throws {
+        // #213: streamResponses used to be captured once at construction, so the Settings toggle
+        // never reached the only main-principal engine (built once in AppState.init) without a
+        // relaunch. It is now resolved per model call as `streamResponsesOverride ?? ConfigManager
+        // .shared.streamResponses`. This cannot honestly prove the toggle applies mid-session
+        // without mutating ConfigManager.shared, which invariant 7 forbids -- it only pins that an
+        // explicit nil reaches the live config default (true, unset) rather than being treated as
+        // false. Override precedence itself is covered by `streamingOffMatchesOn` (explicit
+        // true/false both win).
+        let script: [ScriptedStreamClient.Step] = [.event(.textDelta("hi")), .event(.done(finishReason: "STOP"))]
+        let app = AppState()
+        app.autoApproveTools = true
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main,
+                                client: ScriptedStreamClient([script]), retryDelays: [],
+                                streamResponses: nil)
+        let collector = ProfileCollector()
+        await PerformanceProfiler.$runSink.withValue({ collector.append($0) }) {
+            await engine.processInput("hi", source: "User", conversationId: id)
+        }
+        #expect(collector.all.first?.modelCalls.first?.firstTokenMs != nil,
+                "nil must fall through to config (default true), not be treated as false")
+    }
+
     @Test("an empty stream produces the #136 pill and no agent row")
     func emptyStream() async {
         let client = ScriptedStreamClient([[.event(.done(finishReason: "SAFETY"))]])
