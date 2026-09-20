@@ -685,6 +685,30 @@ actor IrisEngine {
             // One streamer per model round: it owns the agent row this round grows in place.
             let streamer = makeStreamer(conversationId: conversationId)
             do {
+                // Mid-task user messages (#172): whatever arrived since the last round joins the
+                // history as its own user entry, after the tool results, so the model sees it
+                // alongside them and can change course. Its own entry, not an extra part: the
+                // OpenAI translator would emit a text part before the tool messages.
+                let steers = await MainActor.run { localState?.takePendingSteers(for: conversationId) ?? [] }
+                if !steers.isEmpty {
+                    for steer in steers {
+                        let decision = await HookManager.shared.fireBeforeAgent(input: steer, useSandbox: hooksSandbox)
+                        var steerText = steer
+                        if case .block(let reason) = decision {
+                            await pushToUI(role: .system, text: "Hook blocked message: \(reason)", conversationId: conversationId)
+                            continue
+                        } else if case .proceed(let modifiedData) = decision, let data = modifiedData,
+                                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                                  let modifiedInput = json["input"] as? String {
+                            steerText = modifiedInput
+                        }
+                        let content = Content(role: "user", parts: [Part(text: "User (mid-task): \(steerText)")])
+                        await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
+                    }
+                    history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
+                    request.contents = history
+                }
+
                 let beforeModelDecision = await HookManager.shared.fireBeforeModel(request: request, useSandbox: hooksSandbox)
                 if case .block(let reason) = beforeModelDecision {
                     await pushToUI(role: .system, text: "Hook BeforeModel blocked execution: \(reason)", conversationId: conversationId)
