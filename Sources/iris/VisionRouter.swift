@@ -11,11 +11,14 @@ public enum VisionRouter {
         return false
     }
 
-    public static func processTextOnlyImages(attachments: [FileAttachment]) async -> (descriptionText: String, warnings: [String]) {
+    /// `config` is injectable so a test can drive the auxiliary-vision-configured/unconfigured
+    /// paths over its own `ConfigManager(store:)` suite rather than mutating `ConfigManager.shared`
+    /// (invariant 7, #215). Not `public` (unlike `isVisionCapable`) because `ConfigManager` itself
+    /// is internal, and its only caller (`AppState`) is in this module.
+    static func processTextOnlyImages(attachments: [FileAttachment], config: ConfigManager = .shared) async -> (descriptionText: String, warnings: [String]) {
         let images = attachments.filter { $0.category == .image }
         guard !images.isEmpty else { return ("", []) }
 
-        let config = ConfigManager.shared
         let auxEngineType = config.auxiliaryVisionEngine
         let auxModelName = config.auxiliaryVisionModel
 

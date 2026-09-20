@@ -38,6 +38,40 @@ struct SubagentResult: Codable, Sendable, Equatable {
     /// `summary` above remains the subagent's own unverified words; these two are never conflated.
     var verdict: GoalEvaluation?
 
+    init(schemaVersion: Int = 1, role: String, status: SubagentTerminalStatus, calledGoalComplete: Bool,
+         summary: String, filesWritten: [String], startedAt: Date, endedAt: Date,
+         unitContract: GoalContract? = nil, verdict: GoalEvaluation? = nil) {
+        self.schemaVersion = schemaVersion
+        self.role = role
+        self.status = status
+        self.calledGoalComplete = calledGoalComplete
+        self.summary = summary
+        self.filesWritten = filesWritten
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+        self.unitContract = unitContract
+        self.verdict = verdict
+    }
+
+    /// Lenient decoder (invariant 1): this type had no hand-written `init(from:)` at all, so every
+    /// non-Optional field threw `keyNotFound` on an absent key. That throw is caught at the
+    /// conversation-row level in `ConversationStore.loadAll` and skips the WHOLE conversation
+    /// (#204). None of these fields is an id another row references, so all get a safe default
+    /// rather than staying required.
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        role = try c.decodeIfPresent(String.self, forKey: .role) ?? ""
+        status = try c.decodeIfPresent(SubagentTerminalStatus.self, forKey: .status) ?? .failed
+        calledGoalComplete = try c.decodeIfPresent(Bool.self, forKey: .calledGoalComplete) ?? false
+        summary = try c.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        filesWritten = try c.decodeIfPresent([String].self, forKey: .filesWritten) ?? []
+        startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt) ?? Date()
+        endedAt = try c.decodeIfPresent(Date.self, forKey: .endedAt) ?? Date()
+        unitContract = try c.decodeIfPresent(GoalContract.self, forKey: .unitContract)
+        verdict = try c.decodeIfPresent(GoalEvaluation.self, forKey: .verdict)
+    }
+
     /// One line per criterion verdict, plus a header tallying how many were met. Only `.met`
     /// counts toward the tally — `human_pending` in particular is never rendered as a passed gate.
     private func verdictBlock(_ verdict: GoalEvaluation) -> String {

@@ -218,3 +218,55 @@ The legacy key is never read again. An issue is filed at implementation time to 
 - **Load time at init stays synchronous.** For the 4.79 MB case this is a few thousand row decodes on launch, comparable to today's one big decode; lazy loading is #177.
 - **Two writers at quit.** Covered in §4; both paths are idempotent and GRDB serializes them.
 - **A mutation site that forgets `markChanged`.** Today it would forget `saveConversations` the same way; a test that walks every public mutating method against a fresh `AppState` and asserts `pendingChanges` is non-empty catches the ones that exist now.
+
+## 10. Persisted types (invariant 1, #204)
+
+Invariant 1 ("every new field on a persisted `Codable` type must use `decodeIfPresent`") applies to
+**every persisted type, nested included** — not only `Conversation`, and not only the types
+`loadAll` decodes directly. A `keyNotFound` inside a nested element throws out of whatever
+`decodeIfPresent` wraps it one level up: `decodeIfPresent` swallows a MISSING key at its own level,
+but not a decode error inside a value that IS present, so a required field on a nested type still
+fails every parent that embeds it. "Its fields have always been present together" is not evidence a
+type is safe — it was also true of `TokenUsage` until the day it wasn't. A strict decode failure on
+any top-level column is caught at the row level and skips the **whole conversation**
+(tokenUsage/goalContract/subagentResult), except messages/history payloads, which are quarantined
+per-row, and checkpointHistory, which degrades to `[]`; a nested failure inherits whichever of those
+its containing column has.
+
+Every type below now has a hand-written `init(from:)` using `decodeIfPresent(...) ?? <default>` for
+every field that has a sensible default, keeping the synthesized encoder.
+
+| Type | Fields kept required | Why |
+|---|---|---|
+| `Conversation` | `title` | essential content, no sensible default; every other field predates this round (pre-existing decoder) |
+| `ChatMessage` | `role`, `content` | essential content, no sensible default |
+| `TokenUsage` | none | all three counters default to 0 |
+| `GoalContract` | `objective`, `criteria` | essential content, no sensible default |
+| `SubagentResult` | none | no id field exists to protect |
+| `CheckpointOutcome` | `resolution` | essential content, no sensible default |
+| `GoalEvaluation` | `status` | essential content, no sensible default |
+| `Criterion` | none | `id` defaults to a fresh `UUID()` (reversed from an earlier round — see below); `text`/`kind`/`check` default too |
+| `Milestone` | none | `id` is not correlated anywhere else, so a fresh one on decode is safe; `title`/`criterionIds` default to `""`/`[]` |
+| `ContractChange` | none | no id; `date`/`rationale` default to now/`""` |
+| `CriterionVerdict` | none | `criterionId` defaults to a fresh `UUID()` (same reversal as `Criterion.id`); `verdict` defaults to `.cannotVerify` (the closest thing this enum has to "unspecified") and `method` to `.judge` |
+| `FileAttachment` | `fileURL` | element/row granularity on failure (quarantines one message, not the conversation) — `id` defaults fresh, but no default path makes a missing one behave like a real attachment |
+| `Content` | none | `parts` defaults to `[]` (pre-existing decoder, #136) |
+| `Part` | none | every field was already `Optional`; the decoder is now explicit rather than incidental |
+| `FunctionCall` | `name` | element/row granularity on failure — selects which tool dispatches; `args` defaults to `[:]` |
+| `FunctionResponse` | `name` | element/row granularity on failure — correlates the response to its call; `response` defaults to `[:]` |
+| `InlineData` | none | `mimeType`/`data` default to a generic placeholder/`""` |
+| `JSONValue` | n/a | a recursive sum type over a single JSON node, not a keyed container — nothing to `decodeIfPresent`; its hand-written `init(from:)` already matches every JSON shape (string/int/double/bool/object/array/null) exhaustively |
+
+The rule: a field added to any of these types after it started being persisted must be
+`decodeIfPresent`-defaulted (or excluded via `CodingKeys`). `Criterion.id` and
+`CriterionVerdict.criterionId` default to a fresh `UUID()` on a missing key even though they are
+reference keys (`Milestone.criterionIds`, `GoalContract.waivers`/`judgements`,
+`CriterionVerdict.criterionId` itself) — a decision reversed mid-batch: keeping them required throws
+out of `GoalContract`/`GoalEvaluation`'s decode into the row-level catch in
+`ConversationStore.loadAll`, which drops the WHOLE CONVERSATION (messages, history, workspace),
+permanently. A severed waiver/judgement link is a degraded contract the user can see and repair; a
+vanished conversation is not — so for these two the lesser, visible harm wins. `FileAttachment.id`
+and `Milestone.id` still default freely with no such tension, because nothing correlates against
+them elsewhere. `FileAttachment.fileURL`, `FunctionCall.name` and `FunctionResponse.name` stay
+required: a decode failure there only quarantines the one owning message/history row (element/row
+granularity), never the whole conversation, so there is no equivalent pressure to default them.

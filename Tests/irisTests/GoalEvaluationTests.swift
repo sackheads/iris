@@ -41,4 +41,39 @@ struct GoalEvaluationTests {
         #expect(EvaluationStatus.verifying.rawValue == "verifying")
         #expect(VerdictMethod.check.rawValue == "check")
     }
+
+    // MARK: - #204 round 2: lenient decoder for the nested CriterionVerdict
+
+    @Test("a CriterionVerdict JSON missing every defaultable field decodes to safe defaults")
+    func criterionVerdictLenientDecode() throws {
+        let criterionId = UUID()
+        let json = #"{"criterionId":"\#(criterionId.uuidString)"}"#
+        let v = try JSONDecoder().decode(CriterionVerdict.self, from: Data(json.utf8))
+        #expect(v.criterionId == criterionId)
+        #expect(v.criterionText == "")
+        #expect(v.kind == .qualitative)
+        #expect(v.verdict == .cannotVerify)
+        #expect(v.evidence == "")
+        #expect(v.method == .judge)
+    }
+
+    @Test("a CriterionVerdict JSON missing criterionId decodes with a freshly minted one (round 3: losing the whole conversation is worse than an orphaned verdict)")
+    func criterionVerdictMissingCriterionIdDefaultsToFreshUUID() throws {
+        let json = #"{"criterionText":"x"}"#
+        let v = try JSONDecoder().decode(CriterionVerdict.self, from: Data(json.utf8))
+        #expect(v.criterionText == "x")
+        // criterionId is not asserted to any specific value -- only that decode did not throw.
+    }
+
+    @Test("a GoalEvaluation whose criteria element is missing defaultable fields still decodes")
+    func goalEvaluationWithLenientNestedVerdictDecodes() throws {
+        let criterionId = UUID()
+        let json = """
+        {"status":"graded","criteria":[{"criterionId":"\(criterionId.uuidString)"}],"startedAt":0}
+        """
+        let e = try JSONDecoder().decode(GoalEvaluation.self, from: Data(json.utf8))
+        #expect(e.criteria.count == 1)
+        #expect(e.criteria.first?.criterionId == criterionId)
+        #expect(e.criteria.first?.verdict == .cannotVerify)
+    }
 }

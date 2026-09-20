@@ -455,6 +455,147 @@ struct ConversationStoreTests {
         #expect(loaded.skipped.count == 1 && loaded.skipped.first?.table == "conversations" && loaded.skipped.first?.conversationId == a.id)
     }
 
+    @Test("a conversations row whose tokenUsage JSON lacks a key loads with that field defaulted, not skipped")
+    func tokenUsageMissingKeyStillLoads() throws {
+        // #204: TokenUsage had no hand-written init(from:), so a stored row missing any of its
+        // three keys threw keyNotFound at decode time -- caught at the row level and skipping the
+        // whole conversation. Invariant 1 requires every field default instead.
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a")
+        try store.apply([created(a)])
+        try store.rawWrite("UPDATE conversations SET tokenUsage = '{\"promptTokenCount\":3}' WHERE id = ?", arguments: [a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.skipped.isEmpty)
+        #expect(loaded.conversations.map(\.title) == ["a"])
+        #expect(loaded.conversations.first?.tokenUsage == TokenUsage(promptTokenCount: 3, candidatesTokenCount: 0, totalTokenCount: 0))
+    }
+
+    @Test("a conversations row whose subagentResult JSON lacks a key loads with that field defaulted, not skipped")
+    func subagentResultMissingKeyStillLoads() throws {
+        // Mirrors tokenUsageMissingKeyStillLoads: SubagentResult had no hand-written init(from:)
+        // before #204, so a stored row missing any top-level key threw keyNotFound and skipped the
+        // whole conversation.
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a")
+        try store.apply([created(a)])
+        let json = #"{"role":"engineer","status":"completed","calledGoalComplete":true,"summary":"done"}"#
+        try store.rawWrite("UPDATE conversations SET subagentResult = ? WHERE id = ?", arguments: [json, a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.skipped.isEmpty)
+        #expect(loaded.conversations.map(\.title) == ["a"])
+        #expect(loaded.conversations.first?.subagentResult?.role == "engineer")
+        #expect(loaded.conversations.first?.subagentResult?.filesWritten == [])
+        #expect(loaded.conversations.first?.subagentResult?.schemaVersion == 1)
+    }
+
+    // MARK: - #204 round 3: Criterion.id / CriterionVerdict.criterionId default rather than throw
+
+    @Test("a goalContract row whose criterion lacks id still loads the conversation, criterion count preserved")
+    func goalContractCriterionMissingIdStillLoads() throws {
+        // Round 3 reversed round 2's ruling: Criterion.id/CriterionVerdict.criterionId now default
+        // to a fresh UUID rather than staying required, because throwing here propagates through
+        // GoalContract.init(from:) into the row-level catch in ConversationStore.loadAll and drops
+        // the WHOLE conversation (messages, history, workspace), not just the criterion's identity.
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a")
+        try store.apply([created(a)])
+        let json = #"{"objective":"ship","criteria":[{"text":"tests pass","kind":"executable"}]}"#
+        try store.rawWrite("UPDATE conversations SET goalContract = ? WHERE id = ?", arguments: [json, a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.skipped.isEmpty)
+        #expect(loaded.conversations.map(\.title) == ["a"])
+        #expect(loaded.conversations.first?.goalContract?.criteria.count == 1)
+        #expect(loaded.conversations.first?.goalContract?.criteria.first?.text == "tests pass")
+    }
+
+    @Test("a subagentResult whose verdict criterion lacks criterionId still loads the conversation")
+    func subagentResultVerdictMissingCriterionIdStillLoads() throws {
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a")
+        try store.apply([created(a)])
+        let json = """
+        {"role":"engineer","status":"completed","calledGoalComplete":true,"summary":"done",
+         "filesWritten":[],"startedAt":0,"endedAt":1,
+         "verdict":{"status":"graded","startedAt":0,"criteria":[{"criterionText":"tests pass"}]}}
+        """
+        try store.rawWrite("UPDATE conversations SET subagentResult = ? WHERE id = ?", arguments: [json, a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.skipped.isEmpty)
+        #expect(loaded.conversations.map(\.title) == ["a"])
+        #expect(loaded.conversations.first?.subagentResult?.verdict?.criteria.count == 1)
+        #expect(loaded.conversations.first?.subagentResult?.verdict?.criteria.first?.criterionText == "tests pass")
+    }
+
+    // MARK: - #204 round 2: nested-type leniency, verified through the store
+
+    @Test("a goalContract row whose criteria element is missing defaultable fields still loads (not skipped)")
+    func goalContractNestedCriterionMissingFieldStillLoads() throws {
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a")
+        try store.apply([created(a)])
+        let criterionId = UUID()
+        let json = #"{"objective":"ship","criteria":[{"id":"\#(criterionId.uuidString)"}]}"#
+        try store.rawWrite("UPDATE conversations SET goalContract = ? WHERE id = ?", arguments: [json, a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.skipped.isEmpty)
+        #expect(loaded.conversations.map(\.title) == ["a"])
+        let criteria = loaded.conversations.first?.goalContract?.criteria
+        #expect(criteria?.count == 1)
+        #expect(criteria?.first?.id == criterionId)
+        #expect(criteria?.first?.text == "")
+        #expect(criteria?.first?.kind == .qualitative)
+    }
+
+    @Test("a checkpointHistory row whose nested CriterionVerdict is missing defaultable fields still loads intact, not degraded to []")
+    func checkpointHistoryNestedVerdictMissingFieldStillLoads() throws {
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a")
+        try store.apply([created(a)])
+        let criterionId = UUID()
+        let json = """
+        [{"milestoneIndex":0,"milestoneTitle":"Parser","resolution":"autoAdvanced",
+          "evaluation":{"status":"graded","startedAt":0,"criteria":[{"criterionId":"\(criterionId.uuidString)"}]}}]
+        """
+        try store.rawWrite("UPDATE conversations SET checkpointHistory = ? WHERE id = ?", arguments: [json, a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.skipped.isEmpty)
+        let history = loaded.conversations.first?.checkpointHistory
+        #expect(history?.count == 1, "a nested-field gap must not degrade the whole column to []")
+        #expect(history?.first?.evaluation?.criteria.first?.criterionId == criterionId)
+        #expect(history?.first?.evaluation?.criteria.first?.verdict == .cannotVerify)
+    }
+
+    @Test("a messages row whose attachment is missing defaultable fields still loads (not quarantined)")
+    func messageNestedAttachmentMissingFieldStillLoads() throws {
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a")
+        try store.apply([created(a)])
+        let messageId = a.messages[0].id
+        let json = #"{"id":"\#(messageId.uuidString)","role":"user","content":"hi","attachments":[{"fileURL":"file:///tmp/a.txt"}]}"#
+        try store.rawWrite("UPDATE messages SET payload = ? WHERE conversationId = ? AND ordinal = 0",
+                           arguments: [json, a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.skipped.isEmpty)
+        let msg = loaded.conversations.first?.messages.first
+        #expect(msg?.attachments.count == 1)
+        #expect(msg?.attachments.first?.category == .unknown)
+    }
+
+    @Test("a history row whose Part's functionCall is missing defaultable fields still loads (not quarantined)")
+    func historyNestedFunctionCallMissingFieldStillLoads() throws {
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a")
+        try store.apply([created(a)])
+        let json = #"{"role":"model","parts":[{"functionCall":{"name":"run_command"}}]}"#
+        try store.rawWrite("UPDATE history SET payload = ? WHERE conversationId = ? AND ordinal = 0",
+                           arguments: [json, a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.skipped.isEmpty)
+        let content = loaded.conversations.first?.history.first
+        #expect(content?.parts.first?.functionCall?.name == "run_command")
+        #expect(content?.parts.first?.functionCall?.args.isEmpty == true)
+    }
+
     @Test("a write for an id the store has never seen upserts the row even without a created flag")
     func upsertWithoutCreated() throws {
         let store = try ConversationStore.inMemory()

@@ -24,18 +24,23 @@ actor IrisEngine {
     let evaluatorChecks: [String]
     /// Backoff schedule for transient provider errors (429/503/529); one wait per retry.
     let retryDelays: [TimeInterval]
-    /// Read once at construction so a turn never consults global config mid-flight, and so a
-    /// test can drive the streaming-off path without touching `ConfigManager.shared`.
-    let streamResponses: Bool
-    /// Explicit per-engine override for the checkpoint auto-advance setting, mirroring
-    /// `protectionEnabled`: `nil` — always, in the app — means "consult the config". Unlike
-    /// `streamResponses`, this is NOT captured once at construction: the only main-principal
-    /// engine is built once in `AppState.init`, so a value fixed for the engine's whole lifetime
-    /// would make the Settings toggle require a relaunch. Instead `performCheckpoint` resolves
-    /// this override against live config once at the top of each checkpoint decision and uses
-    /// that local for the rest of the decision — a flip cannot change the outcome of a decision
-    /// already in flight, but the next checkpoint sees it. Injectable so a test can pin the
-    /// setting-off path directly without touching `ConfigManager.shared` (D3 §7, invariant 7).
+    /// Explicit per-engine override for the streaming toggle, mirroring `checkpointAutoAdvance`:
+    /// `nil` — always, in the app — means "consult the config". This is NOT captured once at
+    /// construction: the only main-principal engine is built once in `AppState.init`, so a value
+    /// fixed for the engine's whole lifetime would make the Settings toggle require a relaunch.
+    /// Instead the model-call site resolves this override against live config once per call, so a
+    /// flip applies to the next request and never mid-stream. Injectable so a test can pin the
+    /// streaming-off path directly without touching `ConfigManager.shared` (invariant 7).
+    private let streamResponsesOverride: Bool?
+    /// Explicit per-engine override for the checkpoint auto-advance setting, same idiom as
+    /// `streamResponsesOverride`: `nil` — always, in the app — means "consult the config". Not
+    /// captured once at construction for the same reason: the only main-principal engine is built
+    /// once in `AppState.init`, so a value fixed for the engine's whole lifetime would make the
+    /// Settings toggle require a relaunch. Instead `performCheckpoint` resolves this override
+    /// against live config once at the top of each checkpoint decision and uses that local for the
+    /// rest of the decision — a flip cannot change the outcome of a decision already in flight,
+    /// but the next checkpoint sees it. Injectable so a test can pin the setting-off path directly
+    /// without touching `ConfigManager.shared` (D3 §7, invariant 7).
     private let checkpointAutoAdvanceOverride: Bool?
 
     /// Conversations already shown the "no sandbox runtime" fallback notice (deduped).
@@ -53,7 +58,7 @@ actor IrisEngine {
     /// here rather than mutating `ConfigManager.shared` (invariant 7, #109).
     private let protectionEnabled: Bool?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool = ConfigManager.shared.streamResponses, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil) {
         self.state = state
         self.protectionEnabled = protectionEnabled
         self.injectedFactStore = factStore
@@ -63,7 +68,7 @@ actor IrisEngine {
         self.client = client
         self.evaluatorChecks = evaluatorChecks
         self.retryDelays = retryDelays
-        self.streamResponses = streamResponses
+        self.streamResponsesOverride = streamResponses
         self.checkpointAutoAdvanceOverride = checkpointAutoAdvance
         systemPrompt = nil
     }
@@ -869,6 +874,10 @@ actor IrisEngine {
                 // its own span so retry backoff sleeps are not counted as model time.
                 let requestToSend = activeRequest
                 let modelCallStart = CFAbsoluteTimeGetCurrent()
+                // Resolved once, here, per model call (see `streamResponsesOverride`): a config
+                // flip after this point cannot change what THIS call does, but the next call
+                // re-resolves and sees it — never mid-stream.
+                let streamResponses = streamResponsesOverride ?? ConfigManager.shared.streamResponses
                 let streamed = streamResponses && client.supportsStreaming
                 let outcome = try await LLMRetry.run(delays: retryDelays, onRetry: { error, attempt, delay in
                     await self.pushToUI(role: .system,

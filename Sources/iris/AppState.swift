@@ -39,6 +39,23 @@ struct TokenUsage: Codable, Equatable, Sendable {
     var promptTokenCount: Int = 0
     var candidatesTokenCount: Int = 0
     var totalTokenCount: Int = 0
+
+    init(promptTokenCount: Int = 0, candidatesTokenCount: Int = 0, totalTokenCount: Int = 0) {
+        self.promptTokenCount = promptTokenCount
+        self.candidatesTokenCount = candidatesTokenCount
+        self.totalTokenCount = totalTokenCount
+    }
+
+    /// Lenient decoder (invariant 1): the synthesized `Decodable` ignores these defaults for
+    /// non-Optional fields and throws `keyNotFound` on any absent key, which `ConversationStore`
+    /// catches at the row level and skips the WHOLE conversation, not just this field (#204 --
+    /// the confirmed case that motivated auditing every persisted type).
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        promptTokenCount = try c.decodeIfPresent(Int.self, forKey: .promptTokenCount) ?? 0
+        candidatesTokenCount = try c.decodeIfPresent(Int.self, forKey: .candidatesTokenCount) ?? 0
+        totalTokenCount = try c.decodeIfPresent(Int.self, forKey: .totalTokenCount) ?? 0
+    }
 }
 
 struct Conversation: Identifiable, Codable, Hashable, Sendable {
