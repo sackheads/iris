@@ -132,4 +132,32 @@ struct CheckpointJudgementUITests {
         #expect(row.lastGoalEvaluation == nil && row.lastGoalCompletionReport == nil,
                 "in-memory nils are correct whether or not the write was scheduled; the row is the proof")
     }
+
+    @Test("clearGoal keeps both surfacing fields after an ordinary completion, in memory and on disk")
+    func clearGoalKeepsFieldsAfterOrdinaryCompletion() throws {
+        let store = try ConversationStore.inMemory()
+        let id = UUID()
+        let a = Self.isolatedApp(store)
+        let c = Criterion(text: "tests pass", kind: .qualitative, check: nil)
+        a.createNewConversation(id: id)
+        a.setGoalContract(for: id, GoalContract(objective: "ship", criteria: [c]))
+        let eval = GoalEvaluation(status: .graded, criteria: [
+            CriterionVerdict(criterionId: c.id, criterionText: c.text, kind: .qualitative,
+                             verdict: .met, evidence: "ok", method: .judge)
+        ], startedAt: Date())
+        a.recordEvaluation(for: id, eval)
+        a.recordCompletionSelfReport(for: id, statusJSON: .array([]))
+        // No pause opened — no beginJudgementPause, no setCheckpointPaused. This is the terminal
+        // gate's ordinary finishGatedGoal -> clearGoal path (spec §9.1), which must leave both
+        // fields alone so the completion-report chip still has something to show and dismiss.
+        a.clearGoal(for: id)
+        let live = a.conversations.first { $0.id == id }
+        #expect(live?.lastGoalEvaluation != nil)
+        #expect(live?.lastGoalCompletionReport != nil)
+        a.flushSave()
+        let row = try #require(try store.loadAll().conversations.first { $0.id == id })
+        #expect(row.goalContract == nil, "the contract is still cleared")
+        #expect(row.lastGoalEvaluation != nil, "an ordinary completion's report survives for the chip")
+        #expect(row.lastGoalCompletionReport != nil)
+    }
 }

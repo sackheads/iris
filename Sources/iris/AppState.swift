@@ -998,14 +998,22 @@ class AppState {
     
     func clearGoal(for conversationId: UUID) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
+            // #191: captured before the contract is nilled below. Do not leave a stopped pause's
+            // inputs behind to be mistaken for a completion report — but an ORDINARY completion
+            // (the terminal gate's finishGatedGoal → clearGoal, with no pause open) must keep both
+            // fields exactly as before, so the completion-report chip and `dismissCompletionReport`
+            // still have something to show and dismiss. A restart is already covered without this:
+            // `sanitizeLoaded`'s no-contract → clear rule drops them on load regardless (spec §9.1).
+            let pausedOnUser = conversations[idx].goalContract.map {
+                $0.checkpointStatus == .pausedForReview || $0.awaitingHumanJudgement
+            } ?? false
             conversations[idx].activeGoal = nil
             conversations[idx].goalContract = nil
             conversations[idx].goalIterationCount = 0
-            // #191: the surfacing fields have columns now, so left alone they would outlive the
-            // contract on disk and resurrect a chip for a goal that no longer exists. They must sit
-            // BEFORE the markChanged below so the same row write carries them (spec §4, §9.1).
-            conversations[idx].lastGoalEvaluation = nil
-            conversations[idx].lastGoalCompletionReport = nil
+            if pausedOnUser {
+                conversations[idx].lastGoalEvaluation = nil
+                conversations[idx].lastGoalCompletionReport = nil
+            }
             markChanged(conversationId, .metadata)
         }
     }

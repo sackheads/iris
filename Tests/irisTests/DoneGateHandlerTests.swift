@@ -104,11 +104,8 @@ struct DoneGateHandlerTests {
         await engine.processInput("go", source: "User", conversationId: id)
 
         let conv = app.conversations.first { $0.id == id }
-        // Detached grading would have left this .verifying (or nil) at this point; awaited means
-        // it graded before completion returned. #191: clearGoal now nils lastGoalEvaluation with
-        // the contract on a successful completion, so that is no longer directly observable here
-        // — graderRunCount == 1 (not left pending / retried) is the surviving evidence of "awaited".
-        #expect(conv?.lastGoalEvaluation == nil)
+        // Detached grading left this .verifying (or nil) at this point; awaited means it is graded.
+        #expect(conv?.lastGoalEvaluation?.status == .graded)
         #expect(client.graderRunCount == 1)
         #expect(conv?.activeGoal == nil, "an all-met goal still completes")
     }
@@ -164,9 +161,7 @@ struct DoneGateHandlerTests {
 
         let conv = app.conversations.first { $0.id == id }
         #expect(conv?.activeGoal == nil)
-        // #191: clearGoal nils lastGoalEvaluation with the contract on completion, so the stamped
-        // gateOutcome (set by finishGatedGoal just before) is no longer readable here.
-        #expect(conv?.goalContract == nil)
+        #expect(conv?.lastGoalEvaluation?.gateOutcome == .passed)
     }
 
     @Test("cannot_verify completes without burning a retry")
@@ -198,9 +193,7 @@ struct DoneGateHandlerTests {
 
         let conv = app.conversations.first { $0.id == id }
         #expect(conv?.activeGoal == nil)
-        // #191: clearGoal nils lastGoalEvaluation with the contract, so the stamped
-        // .ungatedGraderFailed outcome is no longer readable post-completion.
-        #expect(conv?.goalContract == nil)
+        #expect(conv?.lastGoalEvaluation?.gateOutcome == .ungatedGraderFailed)
     }
 
     @Test("refuse, waive, then complete — with the verdict and the waiver both on record")
@@ -226,9 +219,9 @@ struct DoneGateHandlerTests {
 
         let conv = app.conversations.first { $0.id == id }
         #expect(conv?.activeGoal == nil, "the waived criterion no longer blocks")
-        // #191: clearGoal now nils lastGoalEvaluation (waiver map and all) along with the
-        // contract on completion — it no longer survives to be inspected afterward.
-        #expect(conv?.lastGoalEvaluation == nil)
-        #expect(conv?.goalContract == nil)
+        #expect(conv?.lastGoalEvaluation?.waivers[b.id] == "no test harness in this repo",
+                "the waiver must survive clearGoal destroying the contract")
+        #expect(conv?.lastGoalEvaluation?.criteria.first { $0.criterionId == b.id }?.verdict == .notMet,
+                "and the grader's verdict must still be on record beside it")
     }
 }

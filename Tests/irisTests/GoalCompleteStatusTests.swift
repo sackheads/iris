@@ -20,10 +20,8 @@ private func goalCompleteResponse(summary: String, criteriaStatus: JSONValue? = 
 @Suite("GoalComplete status report")
 struct GoalCompleteStatusTests {
 
-    /// When goal_complete carries a criteria_status array, it is stored on the conversation as
-    /// `lastGoalCompletionReport` before grading, and cleared with the contract once the terminal
-    /// gate finishes (#191: `clearGoal` now nils the surfacing fields along with `goalContract`,
-    /// so the report is no longer inspectable once this call returns).
+    /// When goal_complete carries a criteria_status array, it is stored on the conversation
+    /// as lastGoalCompletionReport (recorded BEFORE clearGoal nils the contract).
     @Test("criteria_status is stored and contract is cleared")
     func criteriaStatusStored() async {
         let appState = AppState()
@@ -48,9 +46,8 @@ struct GoalCompleteStatusTests {
         await engine.processInput("Finish the goal.", source: "User", conversationId: convId)
 
         let conv = appState.conversations.first(where: { $0.id == convId })
-        // #191: clearGoal nils lastGoalCompletionReport with the contract, so by the time
-        // processInput returns both are gone — this pins that, rather than the stale payload.
-        #expect(conv?.lastGoalCompletionReport == nil)
+        // The status report was captured before clearGoal ran.
+        #expect(conv?.lastGoalCompletionReport == statusPayload)
         // The contract was cleared as usual.
         #expect(conv?.goalContract == nil)
     }
