@@ -150,8 +150,11 @@ conversation**, stated here rather than enumerated per caller:
    through it: the scheduler, background subagent post-backs, and the file watcher. It resolves its
    target as `conversationId ?? selectedConversationId`, so naming the rule here covers all three
    and cannot go stale when a fourth is added.
-2. **The turn-starting path of `AppState.sendMessage`** — scoped deliberately: `sendMessage` also
-   dispatches slash commands that start no turn, and `/tokens` should not un-archive anything.
+2. **`AppState.runThinkingTask(conversationId:)`** — every user-initiated turn is started through
+   it, so it covers the ordinary send, the four slash commands that start a drafting turn and
+   return before `sendMessage`'s tail (`/goal`, `/reflect`, `/vibecop init`, `/rename`), the
+   goal-contract kickoff, and every goal-loop resume. Scoped deliberately: slash commands that
+   start no turn never reach it, so `/tokens` un-archives nothing.
 
 Enumerating arrival routes is the wrong shape for this rule. The watcher already proves it: it
 calls `handleSystemEvent` with **no** conversation id, so it targets whatever is selected — and §8
@@ -250,6 +253,10 @@ only describe what it adds.
 - Archiving the last active conversation yields a new active conversation **and** moves selection
   to it — the §8 exception, asserted rather than inferred from the two rules it sits between.
 - **`sendMessage` into an archived conversation un-archives it before the turn starts** (§6.2).
+- **`/goal` into an archived conversation un-archives it** (§6.2) — it starts a real drafting turn
+  and returns above `sendMessage`'s tail, so it is the case a per-command rule loses.
+- **The goal-contract kickoff un-archives its conversation** (§6.2) — `GoalContractPanel` calls
+  `sendGoalKickoff` directly, reaching `sendMessage` not at all.
 - **A scheduled job firing into an archived conversation un-archives it** (§6.2).
 - **A background subagent posting back to an archived conversation un-archives it** (§6.2) — the
   same choke point, asserted separately because it is a different caller with a different target

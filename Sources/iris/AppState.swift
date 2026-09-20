@@ -444,6 +444,13 @@ class AppState {
     /// Runs UI-initiated engine work while holding the thinking indicator and tracking the
     /// task so it can be cancelled. The `work` closure must not touch `isThinking` directly.
     private func runThinkingTask(conversationId: UUID?, _ work: @escaping @MainActor () async -> Void) {
+        // #182 §6.2: this is where a turn starts, so this is where "archived means idle" is
+        // enforced for user-initiated work. Stated per command or per call site it goes stale on
+        // the next one added — four already returned above `sendMessage`'s tail (`/goal`,
+        // `/reflect`, `/vibecop init`, `/rename`), and the goal kickoff and every resume start a
+        // turn without passing through `sendMessage` at all. Deterministic commands like `/tokens`
+        // never reach here, which is exactly why they still leave the archive alone.
+        if let conversationId { unarchiveConversation(conversationId) }
         let id = UUID()
         beginThinking()
         let task = Task { @MainActor [weak self] in
@@ -866,10 +873,8 @@ class AppState {
             return
         }
 
-        // #182 §6.2: typing into an archived conversation is how the user says they want it back.
-        // Deliberately not at the top of the method: `/tokens` and friends start no turn.
-        unarchiveConversation(convId)
-
+        // #182 §6.2's un-archive is not here: `runThinkingTask` carries it for every turn-starting
+        // path, this one included (via `startTurn`).
         appendMessage(role: .user, content: messageContent, attachments: attachments, to: convId)
 
         // A turn is already running on this conversation: the message steers it (text) or

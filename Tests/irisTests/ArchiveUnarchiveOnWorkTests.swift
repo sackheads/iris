@@ -62,4 +62,31 @@ struct ArchiveUnarchiveOnWorkTests {
         #expect(app.conversations.first { $0.id == id }?.isArchived == false,
                 "the watcher passes no id, which is why the rule lives at the choke point")
     }
+
+    @Test("/goal un-archives: the drafting turn is a turn, and it returns above sendMessage's tail")
+    func goalCommandUnarchives() {
+        let app = AppState(); app.conversations.removeAll()
+        let id = archived(app)
+        app.selectedConversationId = id
+
+        app.sendMessage("/goal build a snake game")
+
+        #expect(app.conversations.first { $0.id == id }?.isArchived == false,
+                "approving the draft would otherwise leave a goal loop running inside the archive")
+    }
+
+    @Test("the panel-approve kickoff un-archives its conversation")
+    func goalKickoffUnarchives() {
+        let app = AppState(); app.conversations.removeAll()
+        let id = archived(app)
+        let idx = app.conversations.firstIndex { $0.id == id }!
+        app.conversations[idx].goalContract = GoalContract(
+            objective: "ship it",
+            criteria: [Criterion(text: "it ships", kind: .qualitative)])
+
+        app.sendGoalKickoff(for: id)
+
+        #expect(app.conversations.first { $0.id == id }?.isArchived == false,
+                "GoalContractPanel calls this directly; it reaches neither old choke point")
+    }
 }
