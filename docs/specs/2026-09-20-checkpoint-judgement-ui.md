@@ -110,7 +110,10 @@ luck, whenever some later mutation happens to flush the same row. Every site tha
 field does so today: `recordCompletionSelfReport` (`AppState.swift:920-924`), `beginGoalEvaluation`
 (`:948-961`), `recordEvaluation` (`:964-968`), `finishGatedGoal` (`:1003-1010`),
 `recordHumanJudgement` (`:1021-1047`), and the clears in `dismissCompletionReport` (`:936-942`) and
-`setDraftContract` (`:1147-1158`). `sanitizeLoaded` is the exception and needs nothing: it runs
+`setDraftContract` (`:1147-1158`). `clearGoal` (`:909-915`) joins this list when §9.1 adds its two
+nils: they must sit **before** its existing `markChanged` call so the same row write carries them; a
+nil assigned after that call persists only by luck, which is the exact failure this paragraph exists
+to rule out. `sanitizeLoaded` is the exception and needs nothing: it runs
 before `AppState` owns the rows. `beginJudgementPause` (`:1136-1143`), `setCheckpointPaused`
 (`:1200-1206`), `advanceCheckpoint` (`:1262-1280`) and `holdCheckpoint` (`:1282-1310`) mark changed
 too, which is what makes the pause flags and the surfacing fields land in the same row write.
@@ -294,7 +297,7 @@ The chip's Approve button takes the §6 disabled state and its caption. No new v
   left to judge. It must also nil `lastGoalEvaluation` and `lastGoalCompletionReport`: with §4's
   columns they would otherwise outlive the contract on disk and resurrect a chip for a goal that no
   longer exists. `/stop` and the terminal gate both route through `clearGoal`, so one change covers
-  both.
+  both. Both nils go before `clearGoal`'s existing `markChanged` (§4), and §11 asserts the columns.
 - **A verdict landing mid-turn.** Nothing stops a user clicking Accept while a turn is in flight,
   and nothing should. `performCheckpoint` re-reads the contract after grading (`iris.swift:246-250`)
   precisely so a judgement recorded during the grade is seen, and `autoAdvanceCheckpoint` no-ops
@@ -356,7 +359,10 @@ The chip's Approve button takes the §6 disabled state and its caption. No new v
   `reach_checkpoint` (§8).
 - `sanitizeLoaded` keeps the surfacing fields when the run is paused on the user and still clears
   them when it is not.
-- `clearGoal` nils both surfacing fields, so no chip survives the goal (§9.1).
+- `clearGoal` nils both surfacing fields **and the store row has both columns NULL afterwards**: open
+  a pause, clear the goal via `/stop` and, separately, via the terminal gate, flush, load a fresh
+  `AppState` from the same store, and assert the columns. The in-memory nils are correct whether or not
+  the write was scheduled, so a property assertion proves nothing here (§4, §9.1).
 - The `.humanApproved` / `.humanSentBack` history entry carries the **post**-judgement evaluation —
   the verdict the user gave, not the grader's `.humanPending`. It does today by construction
   (`recordHumanJudgement` mutates in place and `recordCheckpointOutcome` is passed
