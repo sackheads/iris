@@ -73,6 +73,14 @@ docs/                     # design specs, plans, reviews, roadmaps
 
 8. **Every chip in the composer's `VStack` must be height-bounded.** `ChatView` stacks the goal chips — `GoalContractPanel`, `LockedContractChip`, `CheckpointPauseChip`, `CompletionReportChip` — directly above the composer. An unbounded subview there can collapse the surrounding layout and blank the entire window the instant the chip appears; the app stays responsive, which makes it read as a state bug rather than a layout one. Wrap the chip in a `ScrollView` and cap it with `.frame(maxHeight:)` (320-340 is the established range). This matters most for chips whose height grows with the contract — anything embedding a `ForEach` over criteria or verdicts. Nothing enforces this at compile time, and it has escaped twice: `aa141d5` capped the three chips that existed then (#62), and `CheckpointPauseChip` was added later without a cap, reintroducing the same bug (#164).
 
+9. **A behaviour change must falsify its own documentation before it lands.** Describing the new thing is the easy half, and not the half that fails. The defects that actually ship are *existing* sentences the change made untrue — and they survive precisely because adding a new paragraph feels like compliance. Two places carry them, and the second matters more:
+   - **`README.md`** — a stale claim misleads a human, who can at least notice it is wrong.
+   - **Agent-facing strings** — `GoalContract.oracleText` (injected into *every* reprompt), the `description` fields in `ToolExecutor.getTools()` and the tool declarations in `iris.swift` / `SubagentManager.swift`, and the system prompts. A stale one steers the model wrong on every turn, silently, and no UI ever shows it.
+
+   Slice D3 is the worked example: it made a cleanly-graded checkpoint advance without pausing, added a correct README bullet saying so — and left the neighbouring bullet still promising "pausing for your review", plus three agent-facing strings telling the model that a checkpoint always pauses. The README was fixed by a docs task; the model kept being lied to until a whole-branch review caught it.
+
+   **Search, do not compose.** Grep for the behaviour you changed and read what comes back. "Nothing was falsified" is a legitimate and common answer; having looked is the requirement.
+
 ## Patterns and conventions
 
 - **Tests** use Swift Testing (`@Suite`, `@Test`, `#expect`). Do not use XCTest. See `Tests/irisTests/ToolCallParserTests.swift` for style.
@@ -89,6 +97,7 @@ docs/                     # design specs, plans, reviews, roadmaps
 - **AttributeGraph cycle from `.textSelection` on agent Markdown views.** A `.textSelection` modifier on the agent message `Markdown` view caused a heisenbug cycle (invisible under the debugger). Fixed in `0ed19c8`; don't re-add `.textSelection` to those views.
 - **Unconditional tool declarations bloating prompt tokens and causing tool eagerness.** Broadcasting 30 tool declarations cost 61% of turn tokens and caused the model to rename conversations unprompted on first messages (#132, #133, #144). Gating tools by credentials and workflow triggers cut declarations from 30 to 17 (-41% tokens) with no loss of capability for the flows that use them.
 - **Mutating global `ConfigManager.shared` in tests.** Leaked settings across parallel test suites, caused flaky runs, and persisted dirty state into user defaults (#109).
+- **Docs that describe the new behaviour while still asserting the old one.** The additive half of a docs update gets done and the falsifying half does not, so a README ends up containing both the new truth and the old lie in adjacent bullets (#195). Worse, the same staleness hides in agent-facing prompt strings, where nothing surfaces it and the model is misled on every turn. "Update the README" was a checklist line here for a long time and measurably did not work — 23 of 179 `feat` commits on main touched README. See invariant 9.
 - **An unbounded chip in the composer stack blanking the window.** A goal chip with no height cap collapsed the surrounding layout the moment it rendered, emptying the sidebar and main pane while the app kept responding (#62, `aa141d5`). Fixed for the chips that existed then; a later chip arrived without the cap and did it again (#164). Bound every chip you add there (Invariant 8).
 
 ## Pre-commit checklist
@@ -99,7 +108,7 @@ docs/                     # design specs, plans, reviews, roadmaps
 - [ ] If you added or changed a tool parameter: `getTools()` schema and `execute()` handler are both updated
 - [ ] If you added a test that configures settings: it does not mutate `ConfigManager.shared` directly; uses an injected instance or parameter (Invariant 7; see Build and test)
 - [ ] If you added a view to the composer's `VStack` in `ChatView`: it is wrapped in a `ScrollView` and capped with `.frame(maxHeight:)` (Invariant 8)
-- [ ] If you changed user-facing behaviour: `README.md` is updated in the same commit
+- [ ] If you changed user-facing or agent-visible behaviour: you searched for what it made **untrue** — in `README.md` and in agent-facing strings (`oracleText`, tool `description` fields, system prompts) — and fixed what you found. Finding nothing is fine; not looking is not (Invariant 9)
 - [ ] No large build artefacts committed (`.build/`, `*.o`, `*.onnx` model weights, etc.)
 
 ## House style
