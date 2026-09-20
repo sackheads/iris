@@ -138,6 +138,10 @@ class AppState {
 
     var conversations: [Conversation] = []
     var selectedConversationId: UUID?
+    /// Set by `reveal(hit:)` when a sidebar search hit is tapped (#183): the id of the
+    /// `ChatMessage` the transcript's `ScrollViewReader` should scroll to on its next pass.
+    /// `ChatView` clears it once it has acted on it, so it never re-fires on later re-renders.
+    var pendingScrollTarget: UUID?
     /// Read-only for observers. Ownership is centralized through `beginThinking()`/`endThinking()`
     /// so overlapping turns (concurrent sends, subagents, auto-reprompt) can't leave it stuck.
     private(set) var isThinking = false
@@ -317,6 +321,23 @@ class AppState {
     
     var activeConversationIndex: Int? {
         conversations.firstIndex(where: { $0.id == selectedConversationId })
+    }
+
+    /// A sidebar search hit was tapped (#183): select its conversation, then point
+    /// `pendingScrollTarget` at the message the hit came from so the transcript's
+    /// `ScrollViewReader` can scroll to it. `hit.ordinal` indexes straight into `messages`
+    /// because the store's FTS index is keyed by that same ordinal; if the conversation's
+    /// messages are not loaded or have since been trimmed and the ordinal no longer resolves,
+    /// still select the conversation but leave the target nil rather than scrolling to the
+    /// wrong row.
+    func reveal(hit: ConversationHit) {
+        selectedConversationId = hit.conversationId
+        guard let conversation = conversations.first(where: { $0.id == hit.conversationId }),
+              hit.ordinal >= 0, hit.ordinal < conversation.messages.count else {
+            pendingScrollTarget = nil
+            return
+        }
+        pendingScrollTarget = conversation.messages[hit.ordinal].id
     }
 
     // MARK: - Thinking state
