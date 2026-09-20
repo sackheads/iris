@@ -4,20 +4,15 @@ import Foundation
 
 /// #206 "Test Models" and #207 "List Available Models" — `ModelCatalog`'s URL builders, response
 /// parsing, and the network paths through `MockURLProtocol` (session-injected, never global
-/// registration and never `ConfigManager.shared`/`ADCCredentialManager`). `.serialized` because
-/// `MockURLProtocol.handler` is one process-global slot (see `StreamingClientTests`).
-@Suite("Model catalog (#206, #207)", .serialized)
+/// registration and never `ConfigManager.shared`/`ADCCredentialManager`). Uses
+/// `MockURLProtocol.scopedSession`, not the shared `.handler` — that single global slot would
+/// otherwise race with `StreamingClientTests`, the other Swift Testing suite using this mock,
+/// since both can run concurrently.
+@Suite("Model catalog (#206, #207)")
 struct ModelCatalogTests {
-    private func mockSession(_ handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)) -> URLSession {
-        MockURLProtocol.handler = handler
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockURLProtocol.self]
-        return URLSession(configuration: config)
-    }
-
     private func withMock<T>(_ handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data), _ body: (URLSession) async throws -> T) async rethrows -> T {
-        let session = mockSession(handler)
-        defer { MockURLProtocol.handler = nil }
+        let (session, remove) = MockURLProtocol.scopedSession(handler)
+        defer { remove() }
         return try await body(session)
     }
 
