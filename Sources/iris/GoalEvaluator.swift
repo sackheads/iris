@@ -56,9 +56,11 @@ final class GoalEvaluator: Sendable {
             app.onEvaluationComplete[evalId] = { payload in
                 let verdicts: [CriterionVerdict]
                 if case .object(let obj)? = payload {
-                    verdicts = GoalEvaluationParsing.verdicts(from: obj, criteria: contract.criteria)
+                    verdicts = GoalEvaluationParsing.verdicts(from: obj, criteria: contract.criteria,
+                                                              judgements: contract.judgements)
                 } else {
-                    verdicts = GoalEvaluationParsing.verdicts(from: [:], criteria: contract.criteria)
+                    verdicts = GoalEvaluationParsing.verdicts(from: [:], criteria: contract.criteria,
+                                                              judgements: contract.judgements)
                 }
                 let eval = GoalEvaluation(status: .graded, criteria: verdicts, startedAt: Date(), completedAt: Date())
                 graded.set(eval)
@@ -93,7 +95,8 @@ final class GoalEvaluator: Sendable {
         // Safety net: the grader loop exited without calling submit_evaluation (crash, timeout,
         // infinite loop detected, etc.). Write a `.failed` evaluation so the UI doesn't hang in
         // `.verifying` forever, and hand the same verdict back to the caller.
-        let fallback = GoalEvaluationParsing.verdicts(from: [:], criteria: contract.criteria)
+        let fallback = GoalEvaluationParsing.verdicts(from: [:], criteria: contract.criteria,
+                                                      judgements: contract.judgements)
         let failed = GoalEvaluation(status: .failed, criteria: fallback, startedAt: Date(), completedAt: Date())
         await MainActor.run {
             app.recordEvaluation(for: originId, failed)
