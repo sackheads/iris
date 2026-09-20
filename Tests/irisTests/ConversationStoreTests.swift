@@ -5,7 +5,7 @@ import GRDB
 
 @Suite("Conversation store")
 struct ConversationStoreTests {
-    private func sample(id: UUID = UUID(), title: String = "t") -> Conversation {
+    static func sample(id: UUID = UUID(), title: String = "t") -> Conversation {
         var c = Conversation(id: id, title: title, workspacePath: "/tmp/w")
         c.messages = [ChatMessage(role: .user, content: "hi", attachments: [
             FileAttachment(id: UUID(), filename: "a.txt", fileURL: URL(fileURLWithPath: "/tmp/a.txt"), mimeType: "text/plain", fileSize: 3, category: .text)
@@ -29,9 +29,14 @@ struct ConversationStoreTests {
                                   startedAt: Date(timeIntervalSince1970: 1_700_000_000)),
                               resolution: .autoAdvanced)
         ]
+        c.lastGoalCompletionReport = .array([.object(["criterion": .string("parses"), "status": .string("met"), "evidence": .string("ran it")])])
+        c.lastGoalEvaluation = GoalEvaluation(status: .graded, criteria: [
+            CriterionVerdict(criterionId: UUID(), criterionText: "reads well", kind: .humanJudged,
+                             verdict: .humanPending, evidence: "", method: .human)
+        ], startedAt: Date())
         return c
     }
-    private func created(_ c: Conversation) -> ConversationWrite {
+    static func created(_ c: Conversation) -> ConversationWrite {
         var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0)); s.add(.historyAppended(from: 0))
         return ConversationWrite(id: c.id, snapshot: c, changes: s)
     }
@@ -62,8 +67,8 @@ struct ConversationStoreTests {
     @Test("a conversation round-trips through the store with every stored field")
     func roundTrip() throws {
         let store = try ConversationStore.inMemory()
-        let c = sample()
-        try store.apply([created(c)])
+        let c = Self.sample()
+        try store.apply([Self.created(c)])
         let loaded = try store.loadAll()
         #expect(loaded.skipped.isEmpty)
         let back = try #require(loaded.conversations.first)
@@ -74,7 +79,11 @@ struct ConversationStoreTests {
         #expect(back.mainAgentSandbox == .sandboxed)
         #expect(back.goalContract?.isLocked == true && back.goalContract?.criteria.count == 1)
         #expect(back.activeGoal == "ship" && back.goalIterationCount == 2 && back.messageCountSinceReflection == 5)
-        #expect(back.isSubagent == false && back.lastGoalEvaluation == nil && back.lastGoalCompletionReport == nil)
+        #expect(back.isSubagent == false)
+        // #191: the pause's surfacing state has columns of its own, so a checkpoint judgement
+        // pause is still answerable after a relaunch (spec §4). Before v6 both came back nil.
+        #expect(back.lastGoalEvaluation?.criteria.first?.verdict == .humanPending)
+        #expect(back.lastGoalCompletionReport == c.lastGoalCompletionReport)
         // Slice D3's audit trail. It had no column at all until v3, so it was silently dropped on
         // every relaunch while the JSON-codec tests passed; this is the test that catches that.
         #expect(back.checkpointHistory.count == 1)
@@ -85,12 +94,44 @@ struct ConversationStoreTests {
         #expect(back.checkpointHistory.first?.evaluation?.criteria.first?.evidence == "swift test exited 0")
     }
 
+    @Test("nil surfacing fields round-trip as SQL NULL, not JSON null")
+    func surfacingFieldsNilRoundTrip() throws {
+        let store = try ConversationStore.inMemory()
+        var c = Self.sample()
+        c.lastGoalEvaluation = nil
+        c.lastGoalCompletionReport = nil
+        try store.apply([Self.created(c)])
+        let raw = try store.rawScalar("SELECT typeof(lastGoalEvaluation) || ',' || typeof(lastGoalCompletionReport) FROM conversations WHERE id = ?",
+                                      arguments: [c.id.uuidString])
+        #expect(raw == "null,null")
+        let back = try #require(try store.loadAll().conversations.first)
+        #expect(back.lastGoalEvaluation == nil && back.lastGoalCompletionReport == nil)
+    }
+
+    @Test("a v5-era row loads with both surfacing fields nil after the v6 migration")
+    func preV6RowLoadsNil() throws {
+        // Build the schema up to v5 by running the real migrator, then pretend v6 never ran:
+        // drop the two columns is not possible in SQLite without a rebuild, so instead insert a
+        // row through raw SQL that names only the v5 columns. That is byte-for-byte what a v5
+        // database row looks like to the v6 reader: both new columns NULL.
+        let store = try ConversationStore.inMemory()
+        let id = UUID()
+        try store.rawWrite("""
+            INSERT INTO conversations (id, position, title, createdAt, updatedAt, messageCountSinceReflection, goalIterationCount, tokenUsage)
+            VALUES (?, 1, 'old', ?, ?, 0, 0, '{"promptTokenCount":0,"candidatesTokenCount":0,"totalTokenCount":0}')
+            """, arguments: [id.uuidString, Date(), Date()])
+        let loaded = try store.loadAll()
+        #expect(loaded.skipped.isEmpty)
+        let back = try #require(loaded.conversations.first { $0.id == id })
+        #expect(back.lastGoalEvaluation == nil && back.lastGoalCompletionReport == nil)
+    }
+
     @Test("checkpointHistory survives a metadata-only update, and an empty one loads as []")
     func checkpointHistoryPersistsAcrossMetadataWrites() throws {
         let store = try ConversationStore.inMemory()
-        var c = sample()
+        var c = Self.sample()
         c.checkpointHistory = []
-        try store.apply([created(c)])
+        try store.apply([Self.created(c)])
         // NULL column, not a missing key: it must read back as empty rather than failing the load.
         #expect(try store.loadAll().conversations.first?.checkpointHistory.isEmpty == true)
 
@@ -140,8 +181,8 @@ struct ConversationStoreTests {
     @Test("appending writes only the new rows")
     func appendIsIncremental() throws {
         let store = try ConversationStore.inMemory()
-        var c = sample()
-        try store.apply([created(c)])
+        var c = Self.sample()
+        try store.apply([Self.created(c)])
         c.messages.append(ChatMessage(role: .agent, content: "third"))
         c.history.append(Content(role: "model", parts: [Part(text: "third")]))
         try store.apply([write(c, .messagesAppended(from: 2), .historyAppended(from: 2))])
@@ -156,8 +197,8 @@ struct ConversationStoreTests {
     @Test("a message is updated in place by id; history can be replaced wholesale; messages can be cleared")
     func updateReplaceClear() throws {
         let store = try ConversationStore.inMemory()
-        var c = sample()
-        try store.apply([created(c)])
+        var c = Self.sample()
+        try store.apply([Self.created(c)])
         c.messages[1].content = "hello, edited"
         try store.apply([write(c, .messageUpdated(id: c.messages[1].id))])
         #expect(try store.loadAll().conversations.first?.messages[1].content == "hello, edited")
@@ -173,8 +214,8 @@ struct ConversationStoreTests {
     @Test("metadata-only writes update the row without touching message rows")
     func metadataOnly() throws {
         let store = try ConversationStore.inMemory()
-        var c = sample()
-        try store.apply([created(c)])
+        var c = Self.sample()
+        try store.apply([Self.created(c)])
         c.title = "renamed"; c.tokenUsage.totalTokenCount = 99
         c.messages.append(ChatMessage(role: .agent, content: "not written"))   // deliberately not marked
         try store.apply([write(c, .metadata)])
@@ -186,12 +227,12 @@ struct ConversationStoreTests {
     @Test("delete cascades to message and history rows; created-then-deleted leaves nothing")
     func deleteCascades() throws {
         let store = try ConversationStore.inMemory()
-        let c = sample()
-        try store.apply([created(c)])
+        let c = Self.sample()
+        try store.apply([Self.created(c)])
         try store.apply([ConversationWrite(id: c.id, snapshot: nil, changes: { var s = ChangeSet(); s.add(.deleted); return s }())])
         #expect(try store.counts(for: c.id) == (0, 0))
         #expect(try store.isEmpty())
-        let d = sample()
+        let d = Self.sample()
         try store.apply([ConversationWrite(id: d.id, snapshot: d, changes: { var s = ChangeSet(); s.add(.created); s.add(.deleted); return s }())])
         #expect(try store.isEmpty())
     }
@@ -199,11 +240,11 @@ struct ConversationStoreTests {
     @Test("positions preserve creation order across loads")
     func ordering() throws {
         let store = try ConversationStore.inMemory()
-        let a = sample(title: "a"), b = sample(title: "b"), c = sample(title: "c")
-        try store.apply([created(a), created(b), created(c)])
+        let a = Self.sample(title: "a"), b = Self.sample(title: "b"), c = Self.sample(title: "c")
+        try store.apply([Self.created(a), Self.created(b), Self.created(c)])
         try store.apply([ConversationWrite(id: b.id, snapshot: nil, changes: { var s = ChangeSet(); s.add(.deleted); return s }())])
-        let d = sample(title: "d")
-        try store.apply([created(d)])
+        let d = Self.sample(title: "d")
+        try store.apply([Self.created(d)])
         #expect(try store.loadAll().conversations.map(\.title) == ["a", "c", "d"])
         let positions = try store.positions()
         #expect(Set([positions[a.id], positions[c.id], positions[d.id]].compactMap { $0 }).count == 3)
@@ -212,8 +253,8 @@ struct ConversationStoreTests {
     @Test("a corrupted message row is skipped and reported; the conversation and its neighbours still load")
     func corruptedMessageRowIsIsolated() throws {
         let store = try ConversationStore.inMemory()
-        let a = sample(title: "a"), b = sample(title: "b")
-        try store.apply([created(a), created(b)])
+        let a = Self.sample(title: "a"), b = Self.sample(title: "b")
+        try store.apply([Self.created(a), Self.created(b)])
         try store.rawWrite("UPDATE messages SET payload = '{not json' WHERE conversationId = ? AND ordinal = 0", arguments: [a.id.uuidString])
         let loaded = try store.loadAll()
         #expect(loaded.conversations.map(\.title) == ["a", "b"])
@@ -229,13 +270,13 @@ struct ConversationStoreTests {
     @Test("a corrupted middle message row is quarantined and the survivors renumbered contiguous, so a later append neither clobbers nor loses a row")
     func middleMessageQuarantinedAndRenumbered() throws {
         let store = try ConversationStore.inMemory()
-        var c = sample()
+        var c = Self.sample()
         c.messages = [
             ChatMessage(role: .user, content: "m0"),
             ChatMessage(role: .agent, content: "m1"),
             ChatMessage(role: .agent, content: "m2"),
         ]
-        try store.apply([created(c)])
+        try store.apply([Self.created(c)])
         try store.rawWrite("UPDATE messages SET payload = '{not json' WHERE conversationId = ? AND ordinal = 1", arguments: [c.id.uuidString])
 
         let loaded = try store.loadAll()
@@ -263,13 +304,13 @@ struct ConversationStoreTests {
     @Test("a corrupted middle history row is quarantined and the survivors renumbered contiguous, so a later append neither clobbers nor loses a row")
     func middleHistoryQuarantinedAndRenumbered() throws {
         let store = try ConversationStore.inMemory()
-        var c = sample()
+        var c = Self.sample()
         c.history = [
             Content(role: "user", parts: [Part(text: "h0")]),
             Content(role: "model", parts: [Part(text: "h1")]),
             Content(role: "user", parts: [Part(text: "h2")]),
         ]
-        try store.apply([created(c)])
+        try store.apply([Self.created(c)])
         try store.rawWrite("UPDATE history SET payload = '{not json' WHERE conversationId = ? AND ordinal = 1", arguments: [c.id.uuidString])
 
         let loaded = try store.loadAll()
@@ -293,8 +334,8 @@ struct ConversationStoreTests {
     @Test("a non-UTF8 message payload is skipped and reported, not a fatal crash")
     func nonUTF8PayloadIsSkipped() throws {
         let store = try ConversationStore.inMemory()
-        let a = sample(title: "a")
-        try store.apply([created(a)])
+        let a = Self.sample(title: "a")
+        try store.apply([Self.created(a)])
         try store.rawWrite("UPDATE messages SET payload = X'FFFE' WHERE conversationId = ? AND ordinal = 0", arguments: [a.id.uuidString])
         let loaded = try store.loadAll()
         #expect(loaded.conversations.map(\.title) == ["a"])
@@ -305,8 +346,8 @@ struct ConversationStoreTests {
     @Test("a non-UTF8 history payload is skipped and reported, not a fatal crash")
     func nonUTF8HistoryPayloadIsSkipped() throws {
         let store = try ConversationStore.inMemory()
-        let a = sample(title: "a")
-        try store.apply([created(a)])
+        let a = Self.sample(title: "a")
+        try store.apply([Self.created(a)])
         try store.rawWrite("UPDATE history SET payload = X'FFFE' WHERE conversationId = ? AND ordinal = 0", arguments: [a.id.uuidString])
         let loaded = try store.loadAll()
         #expect(loaded.conversations.map(\.title) == ["a"])
@@ -317,8 +358,8 @@ struct ConversationStoreTests {
     @Test("appending a shorter snapshot truncates the stale trailing rows")
     func shorterSnapshotTruncatesStaleRows() throws {
         let store = try ConversationStore.inMemory()
-        var c = sample()
-        try store.apply([created(c)])
+        var c = Self.sample()
+        try store.apply([Self.created(c)])
         c.messages.append(ChatMessage(role: .agent, content: "third"))
         c.history.append(Content(role: "model", parts: [Part(text: "third")]))
         try store.apply([write(c, .messagesAppended(from: 2), .historyAppended(from: 2))])
@@ -333,16 +374,16 @@ struct ConversationStoreTests {
     @Test("one conversation's write failing does not block the rest of the batch, and is reported")
     func partialFailureIsolatesOneConversation() throws {
         let store = try ConversationStore.inMemory()
-        let a = sample(title: "a"), b = sample(title: "b")
+        let a = Self.sample(title: "a"), b = Self.sample(title: "b")
         store.failInjection = { $0 == b.id }
         #expect(throws: ConversationStoreError.partialFailure(failedIds: [b.id])) {
-            try store.apply([created(a), created(b)])
+            try store.apply([Self.created(a), Self.created(b)])
         }
         #expect(try store.loadAll().conversations.map(\.title) == ["a"])
         #expect(try store.isEmpty() == false)
         // Clearing the injection and replaying b alone succeeds.
         store.failInjection = nil
-        try store.apply([created(b)])
+        try store.apply([Self.created(b)])
         #expect(try store.loadAll().conversations.map(\.title).sorted() == ["a", "b"])
     }
 
@@ -359,11 +400,11 @@ struct ConversationStoreTests {
     @Test("a cancelled write applies nothing")
     func cancelledWriteAppliesNothing() throws {
         let store = try ConversationStore.inMemory()
-        let c = sample()
-        try store.apply([created(c)], unlessCancelled: { true })
+        let c = Self.sample()
+        try store.apply([Self.created(c)], unlessCancelled: { true })
         #expect(try store.isEmpty())
         // The same batch with the stand-down cleared writes normally.
-        try store.apply([created(c)])
+        try store.apply([Self.created(c)])
         #expect(try store.isEmpty() == false)
     }
 
@@ -374,14 +415,14 @@ struct ConversationStoreTests {
     @Test("a conversation whose every message row is unreadable is reported once and left untouched on disk")
     func allRowsUnreadableIsNotQuarantined() throws {
         let store = try ConversationStore.inMemory()
-        var c = sample(title: "all bad")
+        var c = Self.sample(title: "all bad")
         c.messages = [
             ChatMessage(role: .user, content: "m0"),
             ChatMessage(role: .agent, content: "m1"),
             ChatMessage(role: .agent, content: "m2"),
         ]
-        let other = sample(title: "fine")
-        try store.apply([created(c), created(other)])
+        let other = Self.sample(title: "fine")
+        try store.apply([Self.created(c), Self.created(other)])
         try store.rawWrite("UPDATE messages SET payload = '{not json' WHERE conversationId = ?", arguments: [c.id.uuidString])
 
         let loaded = try store.loadAll()
@@ -398,12 +439,12 @@ struct ConversationStoreTests {
     @Test("a bulk-broken table does not hide the other table's individual bad rows")
     func bulkBreakerStillReportsTheOtherTable() throws {
         let store = try ConversationStore.inMemory()
-        var c = sample(title: "half bad")
+        var c = Self.sample(title: "half bad")
         c.history = [
             Content(role: "user", parts: [Part(text: "h0")]),
             Content(role: "model", parts: [Part(text: "h1")]),
         ]
-        try store.apply([created(c)])
+        try store.apply([Self.created(c)])
         try store.rawWrite("UPDATE messages SET payload = '{not json' WHERE conversationId = ?", arguments: [c.id.uuidString])
         try store.rawWrite("UPDATE history SET payload = '{not json' WHERE conversationId = ? AND ordinal = 1", arguments: [c.id.uuidString])
 
@@ -421,8 +462,8 @@ struct ConversationStoreTests {
     func nonUTF8MetadataSkipsTheConversation() throws {
         for column in ["title", "goalContract", "subagentResult", "tokenUsage", "workspacePath", "activeGoal", "mainAgentSandbox"] {
             let store = try ConversationStore.inMemory()
-            let a = sample(title: "a"), b = sample(title: "b")
-            try store.apply([created(a), created(b)])
+            let a = Self.sample(title: "a"), b = Self.sample(title: "b")
+            try store.apply([Self.created(a), Self.created(b)])
             try store.rawWrite("UPDATE conversations SET \(column) = X'FFFE' WHERE id = ?", arguments: [a.id.uuidString])
             let loaded = try store.loadAll()
             #expect(loaded.conversations.map(\.title) == ["b"], "\(column)")
@@ -434,8 +475,8 @@ struct ConversationStoreTests {
     @Test("a corrupted metadata row skips only that conversation")
     func corruptedMetadataIsIsolated() throws {
         let store = try ConversationStore.inMemory()
-        let a = sample(title: "a"), b = sample(title: "b")
-        try store.apply([created(a), created(b)])
+        let a = Self.sample(title: "a"), b = Self.sample(title: "b")
+        try store.apply([Self.created(a), Self.created(b)])
         try store.rawWrite("UPDATE conversations SET goalContract = 'nope' WHERE id = ?", arguments: [a.id.uuidString])
         let loaded = try store.loadAll()
         #expect(loaded.conversations.map(\.title) == ["b"])
@@ -445,8 +486,8 @@ struct ConversationStoreTests {
     @Test("a corrupt checkpointHistory column degrades to [] and is reported, but the conversation still loads")
     func corruptedCheckpointHistoryIsNonFatal() throws {
         let store = try ConversationStore.inMemory()
-        let a = sample(title: "a")
-        try store.apply([created(a)])
+        let a = Self.sample(title: "a")
+        try store.apply([Self.created(a)])
         try store.rawWrite("UPDATE conversations SET checkpointHistory = '{{{not json' WHERE id = ?", arguments: [a.id.uuidString])
         let loaded = try store.loadAll()
         #expect(loaded.conversations.map(\.title) == ["a"])
@@ -461,8 +502,8 @@ struct ConversationStoreTests {
         // three keys threw keyNotFound at decode time -- caught at the row level and skipping the
         // whole conversation. Invariant 1 requires every field default instead.
         let store = try ConversationStore.inMemory()
-        let a = sample(title: "a")
-        try store.apply([created(a)])
+        let a = Self.sample(title: "a")
+        try store.apply([Self.created(a)])
         try store.rawWrite("UPDATE conversations SET tokenUsage = '{\"promptTokenCount\":3}' WHERE id = ?", arguments: [a.id.uuidString])
         let loaded = try store.loadAll()
         #expect(loaded.skipped.isEmpty)
@@ -476,8 +517,8 @@ struct ConversationStoreTests {
         // before #204, so a stored row missing any top-level key threw keyNotFound and skipped the
         // whole conversation.
         let store = try ConversationStore.inMemory()
-        let a = sample(title: "a")
-        try store.apply([created(a)])
+        let a = Self.sample(title: "a")
+        try store.apply([Self.created(a)])
         let json = #"{"role":"engineer","status":"completed","calledGoalComplete":true,"summary":"done"}"#
         try store.rawWrite("UPDATE conversations SET subagentResult = ? WHERE id = ?", arguments: [json, a.id.uuidString])
         let loaded = try store.loadAll()
@@ -497,8 +538,8 @@ struct ConversationStoreTests {
         // GoalContract.init(from:) into the row-level catch in ConversationStore.loadAll and drops
         // the WHOLE conversation (messages, history, workspace), not just the criterion's identity.
         let store = try ConversationStore.inMemory()
-        let a = sample(title: "a")
-        try store.apply([created(a)])
+        let a = Self.sample(title: "a")
+        try store.apply([Self.created(a)])
         let json = #"{"objective":"ship","criteria":[{"text":"tests pass","kind":"executable"}]}"#
         try store.rawWrite("UPDATE conversations SET goalContract = ? WHERE id = ?", arguments: [json, a.id.uuidString])
         let loaded = try store.loadAll()
@@ -511,8 +552,8 @@ struct ConversationStoreTests {
     @Test("a subagentResult whose verdict criterion lacks criterionId still loads the conversation")
     func subagentResultVerdictMissingCriterionIdStillLoads() throws {
         let store = try ConversationStore.inMemory()
-        let a = sample(title: "a")
-        try store.apply([created(a)])
+        let a = Self.sample(title: "a")
+        try store.apply([Self.created(a)])
         let json = """
         {"role":"engineer","status":"completed","calledGoalComplete":true,"summary":"done",
          "filesWritten":[],"startedAt":0,"endedAt":1,
@@ -531,8 +572,8 @@ struct ConversationStoreTests {
     @Test("a goalContract row whose criteria element is missing defaultable fields still loads (not skipped)")
     func goalContractNestedCriterionMissingFieldStillLoads() throws {
         let store = try ConversationStore.inMemory()
-        let a = sample(title: "a")
-        try store.apply([created(a)])
+        let a = Self.sample(title: "a")
+        try store.apply([Self.created(a)])
         let criterionId = UUID()
         let json = #"{"objective":"ship","criteria":[{"id":"\#(criterionId.uuidString)"}]}"#
         try store.rawWrite("UPDATE conversations SET goalContract = ? WHERE id = ?", arguments: [json, a.id.uuidString])
@@ -549,8 +590,8 @@ struct ConversationStoreTests {
     @Test("a checkpointHistory row whose nested CriterionVerdict is missing defaultable fields still loads intact, not degraded to []")
     func checkpointHistoryNestedVerdictMissingFieldStillLoads() throws {
         let store = try ConversationStore.inMemory()
-        let a = sample(title: "a")
-        try store.apply([created(a)])
+        let a = Self.sample(title: "a")
+        try store.apply([Self.created(a)])
         let criterionId = UUID()
         let json = """
         [{"milestoneIndex":0,"milestoneTitle":"Parser","resolution":"autoAdvanced",
@@ -568,8 +609,8 @@ struct ConversationStoreTests {
     @Test("a messages row whose attachment is missing defaultable fields still loads (not quarantined)")
     func messageNestedAttachmentMissingFieldStillLoads() throws {
         let store = try ConversationStore.inMemory()
-        let a = sample(title: "a")
-        try store.apply([created(a)])
+        let a = Self.sample(title: "a")
+        try store.apply([Self.created(a)])
         let messageId = a.messages[0].id
         let json = #"{"id":"\#(messageId.uuidString)","role":"user","content":"hi","attachments":[{"fileURL":"file:///tmp/a.txt"}]}"#
         try store.rawWrite("UPDATE messages SET payload = ? WHERE conversationId = ? AND ordinal = 0",
@@ -584,8 +625,8 @@ struct ConversationStoreTests {
     @Test("a history row whose Part's functionCall is missing defaultable fields still loads (not quarantined)")
     func historyNestedFunctionCallMissingFieldStillLoads() throws {
         let store = try ConversationStore.inMemory()
-        let a = sample(title: "a")
-        try store.apply([created(a)])
+        let a = Self.sample(title: "a")
+        try store.apply([Self.created(a)])
         let json = #"{"role":"model","parts":[{"functionCall":{"name":"run_command"}}]}"#
         try store.rawWrite("UPDATE history SET payload = ? WHERE conversationId = ? AND ordinal = 0",
                            arguments: [json, a.id.uuidString])
@@ -599,7 +640,7 @@ struct ConversationStoreTests {
     @Test("a write for an id the store has never seen upserts the row even without a created flag")
     func upsertWithoutCreated() throws {
         let store = try ConversationStore.inMemory()
-        let c = sample()
+        let c = Self.sample()
         try store.apply([write(c, .metadata, .messagesAppended(from: 0), .historyAppended(from: 0))])
         #expect(try store.loadAll().conversations.count == 1)
         #expect(try store.counts(for: c.id) == (2, 2))
@@ -612,8 +653,8 @@ struct ConversationStoreTests {
         let paths = IrisPaths(root: root)
         #expect(paths.conversationsDB.lastPathComponent == "conversations.sqlite")
         try paths.ensureDirectories()
-        let c = sample()
-        do { let s = try ConversationStore.onDisk(at: paths.conversationsDB); try s.apply([created(c)]) }
+        let c = Self.sample()
+        do { let s = try ConversationStore.onDisk(at: paths.conversationsDB); try s.apply([Self.created(c)]) }
         let again = try ConversationStore.onDisk(at: paths.conversationsDB)
         #expect(try again.loadAll().conversations.first?.id == c.id)
     }
