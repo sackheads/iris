@@ -1,6 +1,6 @@
 # Checkpoint Auto-Advance (slice D3) — Design
 
-**Status:** approved, not yet implemented
+**Status:** implemented on `feat/checkpoint-auto-advance`; inline checkpoint judgement deferred (see §6)
 **Issue:** #13 (inner/outer loop semantics), #9 (deterministic gates)
 **Deferred here by:** B1 §2, B4 §2, D1 §10, D2 §11
 
@@ -34,6 +34,10 @@ Out of scope, deliberately:
   renders it and adds send-back-to-milestone-N.
 - **Checkpoint-level gate refusals.** A failed checkpoint pauses for the human, who already has
   "Send back" and "Approve & continue". D3 adds no retry loop; D1's retry ladder stays terminal-only.
+- **Inline judgement at a checkpoint → a future slice.** §6 originally specified that a checkpoint
+  holding an unjudged `humanJudged` criterion would ask for the verdict inline. The Accept/Reject
+  UI that requires was never built, so the asking half is deferred; the blocking half ships. See
+  §6 and §6.1.
 - **Subagents and contract-less goals.** Unchanged.
 
 ## 3. The rule
@@ -50,9 +54,14 @@ At a checkpoint, auto-advance **only** when every one of these holds for the pro
 Anything else pauses.
 
 Note that §3.2–3.3 range over the **projected** contract (milestones 0…N), not the current
-milestone alone, because that is what `reach_checkpoint` grades. Since milestones partition the
-criteria, a `humanJudged` criterion from an earlier milestone was already judged at its own
-checkpoint, so in practice only the current milestone can contribute an unjudged one.
+milestone alone, because that is what `reach_checkpoint` grades.
+
+**Consequence of deferring inline judgement (§6).** Nothing can record a judgement mid-ladder, so
+an unjudged `humanJudged` criterion in milestone 1 keeps failing §3.3 at checkpoints 2, 3, 4… —
+auto-advance is effectively off for the remainder of that ladder. This is not a trapped goal: every
+such checkpoint still pauses normally and "Approve & continue" still advances it. But a goal whose
+early milestones carry taste criteria gets little of D3's benefit until the inline UI lands. It is
+a known, accepted cost of shipping the blocking half first, not an oversight.
 
 **On waivers.** A waived criterion counts as resolved: the user made that call explicitly and
 should not be stopped for it twice. This is **inert today** — `waive_criterion` is gated on
@@ -148,9 +157,11 @@ ladder." D3 closes the **blocking** half of that and defers the **asking** half:
   checkpoint offers.
 - Judgement itself stays where D2 put it: the terminal `goal_complete` gate. A `humanJudged`
   criterion is asked about once, at completion.
-- A criterion with a recorded judgement still reconciles to the recorded verdict (§7.1), so a
-  later checkpoint can auto-advance past it. `judgements` remains durable (§5.1) — it is what the
-  terminal gate and every intervening re-grade read.
+- A criterion with a recorded judgement still reconciles to the recorded verdict (§7.1).
+  `judgements` remains durable (§5.1) — it is what the terminal gate and every intervening re-grade
+  read. Note that with inline asking deferred, no judgement can be recorded before the terminal
+  gate, so this path is currently exercised only by the terminal gate itself; it is the mechanism
+  the future inline slice will rely on.
 
 Without the blocking rule, "all met" could advance a milestone with nobody having judged the one
 criterion only a human may judge — the provenance violation D2 closed at the terminal gate, one
@@ -200,8 +211,8 @@ about an acceptance needs re-deciding.
 4. decide:
    - **clean pass (§3)** → append `.autoAdvanced` outcome, `autoAdvanceCheckpoint`, emit the
      system event (§8), return a tool result telling the agent to continue with the next milestone
-   - **otherwise** → `setCheckpointPaused` (plus `beginJudgementPause` when §6 applies), push
-     today's "Paused for your review" message, return today's tool result
+   - **otherwise** → `setCheckpointPaused`, push today's "Paused for your review" message, return
+     today's tool result. **No `beginJudgementPause`** — a checkpoint stops without asking (§6).
 
 **`autoAdvanceCheckpoint(for:)` is a new method beside `advanceCheckpoint`, not a reuse of it.**
 `advanceCheckpoint` ends with `resumeGoalLoop`, which re-arms the auto-reprompt — correct for a
@@ -308,6 +319,25 @@ delicate goal has one switch. Per AGENTS.md invariant 7, tests must not mutate
 - `humanApproved` and `humanSentBack` both append history entries.
 - Round-trip: a `GoalContract` encoded without `checkpointHistory` decodes with `[]` and does not
   throw (invariant 1).
+
+## 11.1 As-built notes
+
+Three things worth recording, all found by review rather than by design:
+
+- **A latent D2 defect (§5.1).** D2 stored human verdicts only in `lastGoalEvaluation`, which the
+  next grade overwrites and `sanitizeLoaded` clears on load. Invisible while grading happened once;
+  fatal once checkpoints grade repeatedly. `GoalContract.judgements` fixes it.
+- **Judgement resolution had to be scoped to the pause that raised it.** `resolveJudgementIfComplete`
+  assumed every pause was terminal, so on the last judgement it finished and cleared the goal.
+  Opening a checkpoint pause without that fix would have erased a running goal because the user
+  answered a question about one milestone. The checkpoint branch remains as a backstop even though
+  inline asking is deferred and it is currently unreachable.
+- **Durable rejections had to be consumable.** Persisting `judgements` made a terminal REJECTION
+  sticky: it reconciled to `.notMet` at every later grade, landed in `blockingCriteria`, and burned
+  the gate's whole retry budget on a verdict the agent could never clear. A rejection is now removed
+  from `judgements` when the rework it triggers resumes; acceptances persist. One consequence: a
+  reject/rework/regrade cycle is bounded by the user's clicks rather than by `gateAttempts`, since
+  the judgement pause deliberately does not spend a retry.
 
 ## 12. The larger arc
 
