@@ -1,6 +1,6 @@
 # Checkpoint Judgement UI (D3 follow-on) — Design
 
-**Status:** approved, not yet implemented
+**Status:** implemented (#191, PR #224)
 **Issue:** #191
 **Builds on:** D3 (`2026-09-20-checkpoint-auto-advance.md`), D2 (`2026-09-18-human-judged-verdicts.md`)
 
@@ -33,7 +33,7 @@ Out of scope: retroactive review of a *skipped* checkpoint (slice F, reading
 
 ## 3. Surviving a restart
 
-`recordHumanJudgement` refuses unless `lastGoalEvaluation` is present (`AppState.swift:1021-1028`):
+`recordHumanJudgement` refuses unless `lastGoalEvaluation` is present (`AppState.swift:1124-1131`):
 that evaluation is the only thing Accept and Reject act on, and it is also what makes the chip
 render a row to click. A checkpoint pause that comes back from disk without it is a pause nothing
 can answer — buttons that do nothing, and a resume guard that keeps the loop quiet because the
@@ -42,27 +42,29 @@ Here it is the whole slice.
 
 Two separate things destroy those fields on the way back, and both have to be fixed.
 
-**Nothing writes them to disk at all.** `lastGoalEvaluation` and `lastGoalCompletionReport` have no
-column on `conversations`: `upsertMetadata` does not write them
-(`ConversationStore.swift:399-427`), `loadAll` does not read them (`:534-567`), and the store's own
-round-trip test asserts they come back nil (`ConversationStoreTests.swift:77`). They survive only
-through `Conversation`'s JSON codec (`AppState.swift:79`, `:95-96`), which since #197 is the
-legacy-import path and nothing else. §4 gives them columns.
+**Nothing wrote them to disk at all.** Before this slice, `lastGoalEvaluation` and
+`lastGoalCompletionReport` had no column on `conversations`: `upsertMetadata` did not write them,
+`loadAll` did not read them, and the store's own round-trip test asserted they came back nil. §4
+gives them columns; `upsertMetadata` writes both today (`ConversationStore.swift:522-553`), `loadAll`
+reads both (`:688-689`) and decodes them (`:745-752`), and the round-trip test now asserts a real
+value for both (`ConversationStoreTests.swift:85-86`). They used to survive only through
+`Conversation`'s synthesized `Codable` conformance over its stored properties
+(`AppState.swift:74-75`), which since #197 is the legacy-import path and nothing else.
 
-**And `sanitizeLoaded` clears whatever does arrive** (`AppState.swift:1540-1547`), running over the
-store's output inside `loadConversations` (`:1718`). Left alone it would throw away the columns §4
+**And `sanitizeLoaded` clears whatever does arrive** (`AppState.swift:1638-1664`), running over the
+store's output inside `loadConversations` (`:1835`). Left alone it would throw away the columns §4
 adds, so the two fixes are both necessary and neither is sufficient.
 
 **`sanitizeLoaded` keeps both fields when the run is stopped on the user** — `checkpointStatus ==
 .pausedForReview` or `awaitingHumanJudgement` — and clears them otherwise exactly as now. The two
 flags are spelled out rather than routed through `GoalContract.isPaused`, whose doc comment
 restricts it to loop-control sites because every UI reader is really asking a ladder question
-(`GoalContract.swift:162-165`). This is a surfacing question, and `lockedChipHeader` already sets
-the precedent of reading the two flags directly for one (`:167-175`).
+(`GoalContract.swift:213-216`). This is a surfacing question, and `lockedChipHeader` already sets
+the precedent of reading the two flags directly for one (`:218-235`).
 
-This also repairs the same hole one level up: a **terminal** judgement pause is equally
-unanswerable across a restart today, which is a latent D2 defect of the same shape as the one D3
-found in `lastGoalEvaluation`.
+This also repairs the same hole one level up: a **terminal** judgement pause was equally
+unanswerable across a restart before this fix, a latent D2 defect of the same shape as the one D3
+found in `lastGoalEvaluation`. The same `sanitizeLoaded` change closes both.
 
 ### 3.1 This removes a workaround — state it plainly
 
@@ -71,9 +73,9 @@ bug. Two things make removing it safe, and if blanking returns **this is the cha
 
 - The root cause was fixed separately in `aa141d5` by bounding `CompletionReportChip`'s height.
   That is now AGENTS.md invariant 8, and `CheckpointPauseChip` was capped at 340 by #166
-  (`GoalContractPanel.swift:471-476`, `:549`).
+  (`GoalContractPanel.swift:507-511`, `:594`).
 - `ChatView` suppresses `CompletionReportChip` entirely while `checkpointStatus == .pausedForReview`
-  (`ChatView.swift:245-249`), so a restored checkpoint pause resurrects only the checkpoint chip —
+  (`ChatView.swift:314-318`), so a restored checkpoint pause resurrects only the checkpoint chip —
   the one we want.
 
 The terminal-pause case (`awaitingHumanJudgement` with `checkpointStatus == .running`) *does*
@@ -84,19 +86,20 @@ now, and an unanswerable terminal pause is a trapped goal, so the trade is worth
 
 Two new nullable TEXT columns on `conversations`, `lastGoalEvaluation` and
 `lastGoalCompletionReport`, JSON-encoded in and out exactly as `goalContract` and
-`checkpointHistory` are, added by a `v4_pause_surfacing` migration written beside
-`v3_checkpoint_history` (`ConversationStore.swift:254-261`). `upsertMetadata` writes both on the
-UPDATE and the INSERT (`:408-425`); `loadAll` reads both (`:534-536`) and decodes them beside
-`checkpointHistory` (`:558-567`). A nil value is stored as SQL NULL rather than a JSON `null`,
-following the `checkpointHistory` precedent at `:404-406`, because the overwhelming majority of rows will never have carried either field. NULL —
-which is what every row written before v4 carries — loads as nil, which is precisely the value
+`checkpointHistory` are, added by a `v6_pause_surfacing` migration registered after
+`v5_quarantine_ordinal_nullable` (main gained `v4_fts_rowid` and `v5_quarantine_ordinal_nullable`
+in #214 between this spec and its implementation) (`ConversationStore.swift:325-330`). `upsertMetadata` writes both on the
+UPDATE and the INSERT (`:522-553`); `loadAll` reads both (`:688-689`) and decodes them beside
+`checkpointHistory` (`:745-752`). A nil value is stored as SQL NULL rather than a JSON `null`,
+following the `checkpointHistory` precedent at `:527-529`, because the overwhelming majority of rows will never have carried either field. NULL —
+which is what every row written before v6 carries — loads as nil, which is precisely the value
 those fields have on load today, so the migration changes nothing for an existing store.
 
 **A corrupt value degrades to nil; it does not drop the conversation.** `loadAll` already has both
 policies. `goalContract` and `tokenUsage` decode inside the block whose `catch` skips the whole
-conversation (`:542-556`); `checkpointHistory` decodes after it, records a `SkippedRow`, and leaves
-the conversation intact (`:558-567`). These two fields follow `checkpointHistory`. They are
-surfacing state, not the contract: an undecodable `goalContract` means nobody knows what the goal
+conversation (`:704-730`); `checkpointHistory` decodes after it, records a `SkippedRow`, and leaves
+the conversation intact (`:737-740`). These two fields follow `checkpointHistory` (`:745-752`). They
+are surfacing state, not the contract: an undecodable `goalContract` means nobody knows what the goal
 was measured against and there is nothing honest to show, whereas an undecodable
 `lastGoalEvaluation` means one chip is empty. Losing a conversation's messages, contract and
 workspace because a transient grader snapshot would not parse is the larger harm by a wide margin.
@@ -104,18 +107,31 @@ The cost is worth saying out loud: in that case the pause is unanswerable exactl
 and the user's route out is `/stop`. The `SkippedRow` is what makes it visible — it reaches the
 launch notice rather than failing silently.
 
+**This policy is narrower than "corrupt" suggests: it covers undecodable JSON, not an unreadable
+column.** `loadAll` reads every metadata text column, these two included, through the same `text(_:)`
+helper as `goalContract` and `checkpointHistory` (`:671-679`); a non-UTF8 blob in either column is
+`.invalid` there, marks the column unreadable, and skips the whole conversation before any
+JSON-specific handling runs (`:698-701`) — the same fate as a non-UTF8 `goalContract` or
+`checkpointHistory`, not the softer nil-and-continue path. Only a column that reads as valid text but
+fails to parse as JSON degrades to nil for these two fields; that is the only case this paragraph's
+"corrupt value degrades to nil" is actually about.
+
 **Every write must mark the conversation changed.** Nothing reaches the store that
 `markChanged(id, .metadata)` did not schedule, so a field assigned without it persists only by
 luck, whenever some later mutation happens to flush the same row. Every site that assigns either
-field does so today: `recordCompletionSelfReport` (`AppState.swift:920-924`), `beginGoalEvaluation`
-(`:948-961`), `recordEvaluation` (`:964-968`), `finishGatedGoal` (`:1003-1010`),
-`recordHumanJudgement` (`:1021-1047`), and the clears in `dismissCompletionReport` (`:936-942`) and
-`setDraftContract` (`:1147-1158`). `clearGoal` (`:909-915`) joins this list when §9.1 adds its two
-nils: they must sit **before** its existing `markChanged` call so the same row write carries them; a
-nil assigned after that call persists only by luck, which is the exact failure this paragraph exists
-to rule out. `sanitizeLoaded` is the exception and needs nothing: it runs
-before `AppState` owns the rows. `beginJudgementPause` (`:1136-1143`), `setCheckpointPaused`
-(`:1200-1206`), `advanceCheckpoint` (`:1262-1280`) and `holdCheckpoint` (`:1282-1310`) mark changed
+field does so today: `recordCompletionSelfReport` (`AppState.swift:1023-1027`), `beginGoalEvaluation`
+(`:1051-1064`), `recordEvaluation` (`:1067-1071`), `finishGatedGoal` (`:1106-1113`),
+`recordHumanJudgement` (`:1124-1148`), and the clears in `dismissCompletionReport` (`:1039-1045`) and
+`setDraftContract` (`:1252-1263`). `clearGoal` (`:999-1014`) joins this list, but only when the
+contract being cleared had a pause open on the user (`checkpointStatus == .pausedForReview ||
+awaitingHumanJudgement`, §9.1): an ordinary completion — the terminal gate's `finishGatedGoal` →
+`clearGoal` with no pause open — keeps both fields so the completion-report chip still has
+something to show. When the nils do apply they sit **before** `clearGoal`'s existing `markChanged`
+call so the same row write carries them; a nil assigned after that call persists only by luck, which
+is the exact failure this paragraph exists to rule out. `sanitizeLoaded` is the exception and needs
+nothing: it runs
+before `AppState` owns the rows. `beginJudgementPause` (`:1241-1248`), `setCheckpointPaused`
+(`:1305-1311`), `advanceCheckpoint` (`:1368-1386`) and `holdCheckpoint` (`:1389-1417`) mark changed
 too, which is what makes the pause flags and the surfacing fields land in the same row write.
 
 That property is to be preserved, not added. It is unobservable while the fields are not persisted
@@ -132,8 +148,8 @@ it is unanswerable for the same reason and reads the same two fields.
 ## 5. Pause scope stays derived
 
 `resolveJudgementIfComplete` keeps distinguishing a checkpoint pause from a terminal one by
-`checkpointStatus == .pausedForReview` (`AppState.swift:1050-1072`). D3 added defensive clears of
-`awaitingHumanJudgement` to `advanceCheckpoint` (`:1274`) and `holdCheckpoint` (`:1305`) so the
+`checkpointStatus == .pausedForReview` (`AppState.swift:1155-1177`). D3 added defensive clears of
+`awaitingHumanJudgement` to `advanceCheckpoint` (`:1381`) and `holdCheckpoint` (`:1412`) so the
 user's own buttons cannot leave the discriminator half-open; those clears become load-bearing here
 and **each gets a test**.
 
@@ -157,7 +173,7 @@ does: the evaluation is exactly the graded set, so the gate can never fire on a 
 to a milestone nobody has worked yet. Intersecting that with the current milestone buys the other
 half, and it is the half that matters: **the set the gate reads is the set send-back clears.**
 `holdCheckpoint` consumes rejections only for `currentMilestoneCriteria()`, and only when
-`hasLadder` (`AppState.swift:1297-1301`). A gate scoped any wider is a trap — a rejection carried by
+`hasLadder` (`AppState.swift:1404-1408`). A gate scoped any wider is a trap — a rejection carried by
 an earlier milestone would disable Approve at a later one, Send back would not clear it, and the
 goal would sit behind two buttons with no way past either.
 
@@ -190,11 +206,11 @@ checkpoint is an **accepted** verdict on every `humanJudged` criterion in it.
 
 **Except a waived one, and that caveat has to be carried forward rather than quietly dropped.**
 `canAutoAdvance` tests the waiver before the `humanJudged` branch
-(`GoalContract.swift:385-398`, the waiver at `:393` and the judgement at `:396`), so a waived
+(`GoalContract.swift:436-450`, the waiver at `:444` and the judgement at `:447`), so a waived
 `humanJudged` criterion auto-advances with nobody having judged it. D3 §3 carried the argument that
-this is inert: `waiveCriterion` refuses unless `gateAttempts > 0` (`AppState.swift:986-993`), only
-`recordGateRefusal` increments that (`:973-978`), and its sole caller is the terminal gate
-(`iris.swift:1423-1424`) — which every checkpoint, gated on `!isFinalMilestone`, strictly precedes.
+this is inert: `waiveCriterion` refuses unless `gateAttempts > 0` (`AppState.swift:1089-1101`), only
+`recordGateRefusal` increments that (`:1076-1082`), and its sole caller is the terminal gate
+(`iris.swift:1462`) — which every checkpoint, gated on `!isFinalMilestone`, strictly precedes.
 So `waivers` is empty at every checkpoint today.
 
 The guarantee therefore reads: **every `humanJudged` criterion in the checkpoint is either accepted
@@ -212,13 +228,13 @@ D3 §3 justified this with a partition argument that was true of the criteria bu
 
 ## 8. Control flow
 
-At a checkpoint that does not auto-advance, `performCheckpoint` (`iris.swift:222-309`):
+At a checkpoint that does not auto-advance, `performCheckpoint` (`iris.swift:235-343`):
 
 1. `setCheckpointPaused` (unchanged), then
 2. `beginJudgementPause` **when the evaluation carries a `.humanPending` verdict.**
 
 **Both callers get this.** `performCheckpoint` is reached from the `reach_checkpoint` handler
-(`iris.swift:1485-1487`) and from `delegate_milestone` (`:1532-1535`). A delegated milestone whose
+(`iris.swift:1523`) and from `delegate_milestone` (`:1570`). A delegated milestone whose
 taste criterion nobody has judged must stop and ask exactly as a directly-worked one does; nothing
 about handing the work to a subagent makes the question someone else's. The pause is raised inside
 `performCheckpoint`, so this costs nothing beyond saying it — and saying it is what stops a planner
@@ -226,7 +242,7 @@ from special-casing the delegated path.
 
 **The summary argument.** Pass `performCheckpoint`'s own `summary` — the agent's
 `milestone_summary`, or the subagent's rendered outcome. `beginJudgementPause` parks it in
-`pendingCompletionSummary` so a terminal accept can push it (`AppState.swift:1136-1143`), and the
+`pendingCompletionSummary` so a terminal accept can push it (`AppState.swift:1241-1248`), and the
 checkpoint branch of `resolveJudgementIfComplete` returns before any such push, so at a checkpoint
 the value is written and never read. Pass it anyway rather than `""`: a wrong summary surfacing the
 day those branches are merged is a worse failure than a redundant write.
@@ -239,53 +255,65 @@ with no row in the evaluation, no button to click, and no way to clear the flag.
 goal, caught in review; the evaluation-based condition is the fix and must not regress.
 
 Resolution reuses D2 unchanged, via the checkpoint branch of `resolveJudgementIfComplete` that D3
-added as a backstop and left unreachable (`AppState.swift:1059-1072`). It clears
+added as a backstop and left unreachable (`AppState.swift:1155-1177`). It clears
 `awaitingHumanJudgement`, leaves the checkpoint `.pausedForReview`, and returns **without**
 finishing or clearing the goal. That branch becomes reachable for the first time here; it was
 written for exactly this.
 
-**The strings the pause emits change with it.** The transcript line and the tool result both
-describe an ordinary review stop — "Paused for your review", "Checkpoint N reached and graded.
-Paused for user review." (`iris.swift:305-308`) — and the comment above them says the checkpoint
-deliberately does not ask (`:298-303`). The tool result is agent-facing, so a stale one is
-invariant 9's worse half: it invites the model to keep working a milestone that is waiting on a
-human verdict. It must say that the checkpoint is waiting on the user's judgement of named
-criteria. §12 lists this with everything else the slice falsifies.
+**The strings the pause emits change with it.** Before this slice the transcript line and the tool
+result both described an ordinary review stop regardless of why the checkpoint paused — "Paused for
+your review", "Checkpoint N reached and graded. Paused for user review." Today those two strings
+still cover the ordinary case (`iris.swift:330-334`), but a `.humanPending` pause gets its own pair
+naming the criteria waiting on the user (`:336-342`), and the comment above the branch explains why
+(`:320-325`). The tool result is agent-facing, so a stale one is invariant 9's worse half: it
+invites the model to keep working a milestone that is waiting on a human verdict. §12 lists the
+pre-#191 wording with everything else the slice falsifies.
 
 ## 9. UI
 
-`CheckpointPauseChip` (`GoalContractPanel.swift:464-560`) passes `onAccept`/`onReject` into
+`CheckpointPauseChip` (`GoalContractPanel.swift:478-605`) passes `onAccept`/`onReject` into
 `DriftCriterionRow`, which already renders Accept/Reject for a `.humanPending` verdict when handed
-both (`:934-944`). It currently constructs the row without them (`:502-508`). The rows render as
-they do at the terminal gate, so a human verdict is still labelled as the user's and never as
-grader-verified evidence (D2 §6).
+both (`:976-989`). The chip constructs the row with them, sourced from the shared
+`judgementHandlers` helper (`:538-546`). The rows render as they do at the terminal gate, so a
+human verdict is still labelled as the user's and never as grader-verified evidence (D2 §6).
 
-**The handler helper has to be extracted, not reused.** `judgementHandlers(for:)` is `private`
-inside `CompletionReportSection` and closes over that view's optional `conversation` and `state`
-(`GoalContractPanel.swift:695-709`); it is not on `GoalContractPanel` and the chip cannot call it.
-Lift it to a file-private function taking `(AppState, Conversation)` and returning the same optional
-pair, still gated on `awaitingHumanJudgement`, and have both `CompletionReportSection` and
-`CheckpointPauseChip` call it. One gate in one place, so the two surfaces cannot drift on when the
-buttons appear — which is the failure mode worth spending an extraction on, since the gate is what
+**The handler helper is a file-private function, not a method on either view.**
+`judgementHandlers(state:conversation:criterionId:)` (`GoalContractPanel.swift:464-472`) takes
+`(AppState, Conversation, UUID)` and returns an optional `(accept, reject)` pair, gated on
+`awaitingHumanJudgement`; both `CompletionReportSection` and `CheckpointPauseChip` call it. One gate
+in one place, so the two surfaces cannot drift on when the buttons appear — which is the failure
+mode worth spending an extraction on, since the gate is what
 keeps a finished goal from offering a re-judge that `recordHumanJudgement` would refuse.
 
 The chip's Approve button takes the §6 disabled state and its caption. No new views.
+
+**What the on-screen check found.** `Conversation.==` compares by `id` only, so a `CheckpointPauseChip`
+that took a `Conversation` value would compare equal before and after a judgement was recorded — the
+id never changes — and SwiftUI's diffing could then skip re-running the chip's `body` even though
+`state.conversations` had mutated underneath it, leaving Accept/Reject and the header stuck on stale
+state until something unrelated forced a redraw. This is not visible to any unit test, which drives
+`AppState` directly and never goes through a `View`'s diffing; it surfaced only on screen, clicking
+Accept against a running app. The fix: `CheckpointPauseChip` takes `conversationId: UUID`, not a
+`Conversation`, and reads the live conversation out of `state.conversations` inside its own `body`,
+so `@Observable` tracks the chip's dependency on that array directly and any mutation re-renders it
+regardless of how the parent diffed its inputs. The same hazard applies to any other chip that takes
+a `Conversation` by value rather than an id; see #223 for the sibling chips this was not fixed in.
 
 ### 9.1 Decisions a planner would otherwise have to invent
 
 - **Caption and Approve placement.** The caption sits under the Send-back/Approve row, `.caption`
   and secondary: "Decide the human-judged criteria above before approving." Approve stays trailing,
-  where it is on every other checkpoint (`GoalContractPanel.swift:535-544`); moving it for the one
+  where it is on every other checkpoint (`GoalContractPanel.swift:573-584`); moving it for the one
   case that asks a question costs the muscle memory of all the others.
 - **Header after a verdict.** The chip's trailing header text is "Awaiting your decision"
-  (`GoalContractPanel.swift:487-489`). It becomes "Awaiting your approval" once nothing in the
+  (`GoalContractPanel.swift:523`). It becomes "Awaiting your approval" once nothing in the
   evaluation is `.humanPending`. The pause is still the user's to resolve, but the question it asked
   has been answered, and a header still asking reads as a UI that did not notice the click.
 - **What a judged row shows.** The recorded verdict, read-only: `met` / `not met` with
   `method == .human`, which `DriftCriterionRow` already renders as the user's judgement rather than
   as evidence. The buttons are gone, because the row only draws them for `.humanPending`.
 - **There is no undo, and that is the design.** After a verdict `resolveJudgementIfComplete` clears
-  `awaitingHumanJudgement` (`AppState.swift:1057`), so the extracted helper returns nil, the
+  `awaitingHumanJudgement` (`AppState.swift:1162`), so the extracted helper returns nil, the
   handlers go nil and the buttons vanish; the verdict is also in `judgements` and outlives the
   evaluation. A mis-click's only recovery is Send back — which consumes the rejection and re-asks
   once the agent has actually reworked the criterion — so correcting a click costs a full rework
@@ -293,33 +321,47 @@ The chip's Approve button takes the §6 disabled state and its caption. No new v
   cannot build an induction on, and the terminal gate has been one-way since D2. It is written down
   here so nobody has to discover it.
 - **Goal cleared while the pause is open.** `clearGoal` nils `goalContract`
-  (`AppState.swift:909-915`), so the chip's `if let contract` guard drops it and there is nothing
-  left to judge. It must also nil `lastGoalEvaluation` and `lastGoalCompletionReport`: with §4's
-  columns they would otherwise outlive the contract on disk and resurrect a chip for a goal that no
+  (`AppState.swift:999-1014`), so the chip's `if let contract` guard drops it and there is nothing
+  left to judge. It also nils `lastGoalEvaluation` and `lastGoalCompletionReport`, but **only when
+  the contract being cleared had a pause open on the user**
+  (`checkpointStatus == .pausedForReview || awaitingHumanJudgement`): without that scope, with §4's
+  columns those fields would outlive the contract on disk and resurrect a chip for a goal that no
   longer exists. `/stop` and the terminal gate both route through `clearGoal`, so one change covers
-  both. Both nils go before `clearGoal`'s existing `markChanged` (§4), and §11 asserts the columns.
+  both. An **ordinary** completion — the terminal gate finishing with no pause open — must keep both
+  fields: they are the completion-report chip's inputs, and nilling them unconditionally removed
+  that chip after every normal finish. `sanitizeLoaded`'s no-contract rule already clears them on a
+  restart regardless, so the restart case does not need `clearGoal` to nil anything. Both nils, when
+  they apply, go before `clearGoal`'s existing `markChanged` (§4); §11 asserts the columns for the
+  pause-open case, and `clearGoalKeepsFieldsAfterOrdinaryCompletion` pins the ordinary case.
 - **A verdict landing mid-turn.** Nothing stops a user clicking Accept while a turn is in flight,
-  and nothing should. `performCheckpoint` re-reads the contract after grading (`iris.swift:246-250`)
+  and nothing should. `performCheckpoint` re-reads the contract after grading (`iris.swift:263-267`)
   precisely so a judgement recorded during the grade is seen, and `autoAdvanceCheckpoint` no-ops
-  when the milestone it was decided for has moved (`AppState.swift:1246-1250`). So a verdict is
+  when the milestone it was decided for has moved (`AppState.swift:1354-1356`). So a verdict is
   applied at the next checkpoint decision and never inside one. No new locking, and no attempt to
   block the buttons during a turn — that would make the chip dead exactly when the grader run makes
   it slowest to come back.
-- **Accessibility.** The Accept/Reject buttons are bare `.plain` today, with no label and nothing
-  distinguishing one row's pair from another's (`GoalContractPanel.swift:934-944`). Each gets an
-  `.accessibilityLabel` naming its criterion — "Accept: tests pass" — so VoiceOver does not read a
-  column of identical "Accept" buttons, and each stays in the tab order and activates from the
-  keyboard when focused. Deliberately **no chip-wide key equivalent** on Accept/Reject: there are as
+- **Accessibility.** Each Accept/Reject button carries `.buttonStyle(.plain)` plus an
+  `.accessibilityLabel` naming its criterion — `"Accept: \(verdict.criterionText)"` /
+  `"Reject: \(verdict.criterionText)"` (`GoalContractPanel.swift:976-989`) — so VoiceOver does not
+  read a column of identical "Accept" buttons, and each stays in the tab order and activates from
+  the keyboard when focused. Deliberately **no chip-wide key equivalent** on Accept/Reject: there are as
   many pairs as there are pending criteria, so a single shortcut has no unambiguous target, and a
   keystroke that records an irreversible verdict on a chip that appears while the user is typing is
   the wrong default. Approve and Send back keep the keyboard behaviour they have.
+- **Approve leaves a completion-report chip showing mid-ladder, and that is fine.** `advanceCheckpoint`
+  clears neither `lastGoalEvaluation` nor `lastGoalCompletionReport`, so once the checkpoint chip
+  disappears (`checkpointStatus` back to `.running`), `ChatView`'s standalone-chip condition is now
+  satisfied and `CompletionReportChip` renders with the milestone just approved's grade
+  (`ChatView.swift:317-318`). This is not new: it already happened in-session before this slice;
+  §4's columns just mean it can also happen right after a restart. It is dismissible
+  (`dismissCompletionReport`) and does not block anything — it is a receipt, not a pause.
 
 ## 10. Interaction constraints
 
 - A rejected criterion is consumed by send-back (`holdCheckpoint`), so re-work re-asks. Unchanged
   from D3; it is what makes §6's rejected-gate coherent.
 - Auto-advance must remain impossible while `awaitingHumanJudgement` — `canAutoAdvance` already
-  guards on it (D3, `GoalContract.swift:386-387`), and that guard is now reachable in earnest.
+  guards on it (D3, `GoalContract.swift:436-438`), and that guard is now reachable in earnest.
 - A laddered goal still completes through the terminal gate after all its checkpoints resolve.
 - Judgements recorded at a checkpoint are not re-asked at completion (D3 §5.1, `judgements` is
   durable and reconciliation reads it).
@@ -328,13 +370,14 @@ The chip's Approve button takes the §6 disabled state and its caption. No new v
 
 - **Restart round-trip through `ConversationStore`**, not the JSON codec. D3 shipped a field that
   round-tripped in JSON and was never persisted, because post-#197 the store enumerates columns by
-  hand. Build an `AppState(store:)` over an in-memory store (`AppState.swift:259`), open a
+  hand. Build an `AppState(store:)` over an in-memory store (`AppState.swift:288`), open a
   checkpoint judgement pause, drop the `AppState`, construct a new one over the same store, and
   assert the chip's inputs are back — `lastGoalEvaluation` present with its `.humanPending` row —
   and that `recordHumanJudgement` accepts a verdict rather than refusing it.
 - **Store round-trip for both new columns** in `ConversationStoreTests.roundTrip`, which asserts
-  every stored field and currently asserts these two come back nil (`:77`). Nil round-trips as nil;
-  a v3-era database migrates and loads its rows with both nil.
+  every stored field and now carries a non-nil value for both (`:85-86`). Nil round-trips as SQL
+  NULL, not JSON `null` (`surfacingFieldsNilRoundTrip`, `:97-109`); a v5-era database migrates and
+  loads its rows with both nil (`preV6RowLoadsNil`, `:111-127`).
 - **An undecodable column value yields nil and keeps the conversation**, with a `SkippedRow`
   recorded — the `checkpointHistory` policy, not the `goalContract` one (§4).
 - **A store write is scheduled** when a judgement pause opens: the fields are unobservably correct
@@ -359,21 +402,34 @@ The chip's Approve button takes the §6 disabled state and its caption. No new v
   `reach_checkpoint` (§8).
 - `sanitizeLoaded` keeps the surfacing fields when the run is paused on the user and still clears
   them when it is not.
-- `clearGoal` nils both surfacing fields **and the store row has both columns NULL afterwards**: open
-  a pause, clear the goal via `/stop` and, separately, via the terminal gate, flush, load a fresh
-  `AppState` from the same store, and assert the columns. The in-memory nils are correct whether or not
-  the write was scheduled, so a property assertion proves nothing here (§4, §9.1).
+- `clearGoal` nils both surfacing fields **and the store row has both columns NULL afterwards**
+  when the contract being cleared had a pause open on the user: open a checkpoint judgement pause,
+  clear the goal (simulating `/stop`), flush, load a fresh `AppState` from the same store, and
+  assert the columns. The in-memory nils are correct whether or not the write was scheduled, so a
+  property assertion proves nothing here (§4, §9.1).
+- `clearGoal` **keeps** both surfacing fields, in memory and on disk, after an ordinary
+  completion — no pause ever opened, `finishGatedGoal` → `clearGoal` — so the completion-report
+  chip still has something to show and dismiss (`clearGoalKeepsFieldsAfterOrdinaryCompletion`,
+  §9.1).
 - The `.humanApproved` / `.humanSentBack` history entry carries the **post**-judgement evaluation —
   the verdict the user gave, not the grader's `.humanPending`. It does today by construction
   (`recordHumanJudgement` mutates in place and `recordCheckpointOutcome` is passed
-  `lastGoalEvaluation`, `AppState.swift:1215-1224`, `:1265-1266`, `:1284-1285`); pin it, because
+  `lastGoalEvaluation`, `AppState.swift:1124-1148`, `:1371-1372`, `:1391-1392`); pin it, because
   nothing else would notice if it stopped.
 - A laddered goal completes through the terminal gate afterwards.
+- **Not unit-testable: `CheckpointPauseChip` re-rendering in place after a judgement.** No unit test
+  drives SwiftUI's diffing, so the stale-chip hazard (§9, "What the on-screen check found") cannot
+  be pinned by one. Verified on screen instead: seeded a fixture conversation paused at a checkpoint
+  with a `.humanPending` criterion, ran the app, clicked Accept, and confirmed the chip's row and
+  header updated in place without switching conversations or otherwise forcing a redraw.
 
 ## 12. What this makes untrue
 
 Invariant 9: the falsifying half of the documentation change, enumerated so the plan has a task for
 it rather than a good intention. Everything below asserts that a checkpoint stops without asking.
+**Line numbers in this section are as they were before #191 and are not maintained** — this is a
+record of what was falsified, not a current index; use the corresponding section elsewhere in this
+document (or the D3 spec) for a citation that still resolves.
 
 - **D3 §6 in full** — its title ("it stops, it does not ask"), "The pause does **not** ask for the
   verdict. No `beginJudgementPause` at a checkpoint", "A `humanJudged` criterion is asked about

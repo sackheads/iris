@@ -153,6 +153,33 @@ struct DelegateMilestoneTests {
         #expect(client.graderCalls > 0)
     }
 
+    @Test("a delegated milestone with an unjudged humanJudged criterion opens a judgement pause too (#191 §8)")
+    func delegatedCheckpointAsks() async {
+        // Same fixture as the delegated-checkpoint test above, with the delegated milestone's
+        // criterion made humanJudged. Nothing about handing work to a subagent makes the question
+        // someone else's.
+        let app = AppState(); let id = UUID()
+        app.createNewConversation(id: id)
+        let a = Criterion(text: "parser works", kind: .qualitative, check: nil)
+        let h = Criterion(text: "output reads well", kind: .humanJudged, check: nil)
+        let b = Criterion(text: "wired up", kind: .qualitative, check: nil)
+        var c = GoalContract(objective: "Ship the parser", criteria: [a, h, b])
+        c.milestones = [Milestone(title: "Parser", criterionIds: [a.id, h.id]),
+                        Milestone(title: "Integration", criterionIds: [b.id])]
+        c.currentMilestone = 0
+        app.setGoalContract(for: id, c)
+
+        let client = RoutingClient(main: [Self.delegateCall(), Self.response(nil)],
+                                   subagentTerminal: Self.subagentDone,
+                                   graderVerdict: ("met", "saw it work"))
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        await engine.processInput("work", source: "User", conversationId: id)
+
+        let after = app.conversations.first { $0.id == id }?.goalContract
+        #expect(after?.checkpointStatus == .pausedForReview)
+        #expect(after?.awaitingHumanJudgement == true, "the delegated path asks exactly as the direct one does")
+    }
+
     /// D3 sibling to the test above: a delegated milestone that grades clean auto-advances just
     /// like a directly-worked one — `performCheckpoint` does not special-case the `via:` path.
     @Test("a completed subagent's clean grade auto-advances, same as a directly-worked milestone")

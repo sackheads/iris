@@ -310,19 +310,36 @@ actor IrisEngine {
             return "Checkpoint \(ladderPos) passed cleanly and advanced. Continue with the next milestone."
         }
 
+        // Read the condition off the EVALUATION, never the contract (spec §8): the evaluation is
+        // exactly the projected criteria, and `GoalEvaluationParsing` assigns `.humanPending`
+        // precisely when a criterion is humanJudged and unjudged. Scanning the contract once opened
+        // a pause for a future milestone's criterion — no row, no button, no way out.
+        let pendingHuman = (evaluation?.criteria ?? []).filter { $0.verdict == .humanPending }
         await MainActor.run {
             localState?.setCheckpointPaused(for: conversationId)   // leaves activeGoal set
-            // A checkpoint STOPS for an unjudged `humanJudged` criterion (`canAutoAdvance` refuses
-            // it, spec §3.3) but deliberately does not ASK for the verdict here: the inline
-            // Accept/Reject surface a checkpoint judgement pause needs was never built, so opening
-            // one would stop the user with a question that has no answer button. Judgement stays
-            // at the terminal `goal_complete` gate until that UI exists; the user resolves this
-            // checkpoint with the existing "Approve & continue" / "Send back" controls.
+            // #191: a checkpoint that stopped on a humanJudged criterion ASKS for the verdict.
+            // The checkpoint chip renders Accept/Reject for `.humanPending` rows, the pause survives
+            // a restart (v6 columns), and `resolveJudgementIfComplete`'s checkpoint branch clears
+            // the flag without finishing the goal. `summary` is parked in
+            // `pendingCompletionSummary`; at a checkpoint it is written and never read, and it is
+            // passed anyway so a wrong summary cannot surface the day the branches merge.
+            if !pendingHuman.isEmpty {
+                localState?.beginJudgementPause(for: conversationId, summary: summary)
+            }
         }
+        if pendingHuman.isEmpty {
+            await pushToUI(role: .agent,
+                           text: "Reached checkpoint \(ladderPos)\(via): \(summary)\nPaused for your review — approve to continue or send me back.",
+                           conversationId: conversationId)
+            return "Checkpoint \(ladderPos) reached and graded. Paused for user review."
+        }
+        let names = pendingHuman.map(\.criterionText).joined(separator: "; ")
         await pushToUI(role: .agent,
-                       text: "Reached checkpoint \(ladderPos)\(via): \(summary)\nPaused for your review — approve to continue or send me back.",
+                       text: "Reached checkpoint \(ladderPos)\(via): \(summary)\nWaiting for your judgement of: \(names). Decide each one in the checkpoint panel, then approve or send me back.",
                        conversationId: conversationId)
-        return "Checkpoint \(ladderPos) reached and graded. Paused for user review."
+        // Agent-facing: a stale "paused for review" here would invite the model to keep working a
+        // milestone that is waiting on a human verdict (invariant 9's worse half).
+        return "Checkpoint \(ladderPos) reached and graded. Waiting on the user's judgement of: \(names). Do not continue this milestone until the user has decided."
     }
 
     /// Tracks the pending auto-reprompt task per conversation so the goal loop can be cancelled.

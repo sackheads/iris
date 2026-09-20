@@ -998,9 +998,22 @@ class AppState {
     
     func clearGoal(for conversationId: UUID) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
+            // #191: captured before the contract is nilled below. Do not leave a stopped pause's
+            // inputs behind to be mistaken for a completion report — but an ORDINARY completion
+            // (the terminal gate's finishGatedGoal → clearGoal, with no pause open) must keep both
+            // fields exactly as before, so the completion-report chip and `dismissCompletionReport`
+            // still have something to show and dismiss. A restart is already covered without this:
+            // `sanitizeLoaded`'s no-contract → clear rule drops them on load regardless (spec §9.1).
+            let pausedOnUser = conversations[idx].goalContract.map {
+                $0.checkpointStatus == .pausedForReview || $0.awaitingHumanJudgement
+            } ?? false
             conversations[idx].activeGoal = nil
             conversations[idx].goalContract = nil
             conversations[idx].goalIterationCount = 0
+            if pausedOnUser {
+                conversations[idx].lastGoalEvaluation = nil
+                conversations[idx].lastGoalCompletionReport = nil
+            }
             markChanged(conversationId, .metadata)
         }
     }
@@ -1121,9 +1134,11 @@ class AppState {
         eval.criteria[vIdx].method = .human
         conversations[idx].lastGoalEvaluation = eval
         // D3: also record it on the contract. `lastGoalEvaluation` is transient — the next
-        // `beginGoalEvaluation` overwrites it and `sanitizeLoaded` clears it on load — so a
-        // checkpoint re-grade would otherwise reset this criterion to `human_pending` and ask the
-        // user for a verdict they already gave (spec §5.1).
+        // `beginGoalEvaluation` overwrites it, and `sanitizeLoaded` clears it on load except while a
+        // pause is open on the user (#191) — so a checkpoint re-grade, or a restart once the pause
+        // has actually closed, would otherwise reset this criterion to `human_pending` and ask the
+        // user for a verdict they already gave (spec §5.1). The judgement must live on the contract
+        // for exactly the cases `lastGoalEvaluation` does not cover.
         var contract = conversations[idx].goalContract
         contract?.judgements[criterionId] = accepted
         conversations[idx].goalContract = contract
@@ -1153,9 +1168,9 @@ class AppState {
         // checkpoint chip's Approve/Send-back controls are the next step, so judging is all that
         // resolves here — approving the milestone stays a separate decision.
         //
-        // Kept deliberately even though nothing opens a checkpoint judgement pause today: the
-        // checkpoint Accept/Reject UI is unbuilt, so `performCheckpoint` stops without asking.
-        // This is the backstop for the day it lands, or for any code that sets the flag mid-ladder.
+        // Reachable since #191: `performCheckpoint` opens a judgement pause when the graded
+        // evaluation carries a `.humanPending` row, and this branch is its resolution — judge, stay
+        // `.pausedForReview`, and leave Approve/Send-back as the next decision.
         if conversations[idx].goalContract?.checkpointStatus == .pausedForReview {
             markChanged(conversationId, .metadata)
             return
@@ -1299,9 +1314,10 @@ class AppState {
     /// recorded, so slice F inherits a complete ladder record rather than only the skipped
     /// checkpoints. Caller must already hold a valid index; this does not save (its callers do).
     ///
-    /// A nil evaluation is stored as nil. `sanitizeLoaded` clears `lastGoalEvaluation` on load, so
-    /// the human controls genuinely have no grade to record after a restart; fabricating a
-    /// `.failed` one would put a grader verdict nobody produced into the audit trail.
+    /// A nil evaluation is stored as nil. `lastGoalEvaluation` is persisted while a pause is open on
+    /// the user (#191, `sanitizeLoaded`), so the entry still carries the grade after a relaunch;
+    /// fabricating a `.failed` one for the rare case it is genuinely absent would put a grader
+    /// verdict nobody produced into the audit trail.
     private func recordCheckpointOutcome(at idx: Int, _ resolution: CheckpointOutcome.Resolution,
                                          evaluation: GoalEvaluation?) {
         guard let c = conversations[idx].goalContract, c.hasLadder,
@@ -1359,8 +1375,9 @@ class AppState {
         c.checkpointStatus = .running
         // Clearing `checkpointStatus` alone would flip the discriminator `resolveJudgementIfComplete`
         // reads without ending the judgement pause, so a later Accept/Reject would take the TERMINAL
-        // branch and complete + clear the whole goal at milestone 2 of 5. Unreachable today (nothing
-        // opens a checkpoint judgement pause), which is exactly why the hole must not be left open.
+        // branch and complete + clear the whole goal at milestone 2 of 5. Reachable since #191
+        // (`performCheckpoint` opens a checkpoint judgement pause), so this clear is load-bearing,
+        // not defensive; pinned by `testAdvanceCheckpointClearsJudgementFlag`.
         c.awaitingHumanJudgement = false
         conversations[idx].goalContract = c
         conversations[idx].goalIterationCount = 0
@@ -1618,20 +1635,29 @@ class AppState {
         all.filter { !$0.isSubagent }
     }
 
-    /// Repairs a decoded conversation list at load time: drops any ephemeral sub-process
-    /// conversations left by an older build, and clears the transient goal-completion surfacing
-    /// (`lastGoalCompletionReport` / `lastGoalEvaluation`).
-    ///
-    /// That surfacing drives the completion "drift chip" above the composer — a per-session,
-    /// dismissable affordance, not durable history. Resurrecting last session's chip on the next
-    /// launch is both semantically wrong and the trigger for a window-blanking render bug when the
-    /// chip auto-appears at startup, so we drop it on load. (The grader is ephemeral anyway, so a
-    /// `.verifying` evaluation could never resolve across a restart.)
+    /// Restores load-time invariants. The completion report and evaluation are per-session
+    /// surfacing state **except** while a judgement or checkpoint pause is open on the user
+    /// (#191): then they are the pause's inputs and are kept so a restored pause is still
+    /// answerable. The unconditional clear that used to live here was the workaround for a
+    /// window-blanking render bug whose root cause was fixed in aa141d5 (invariant 8); if
+    /// blanking returns at launch, this is the change to suspect (spec §3.1).
     nonisolated static func sanitizeLoaded(_ decoded: [Conversation]) -> [Conversation] {
         var loaded = durableConversations(decoded)
         for i in loaded.indices {
-            loaded[i].lastGoalCompletionReport = nil
-            loaded[i].lastGoalEvaluation = nil
+            // #191: while the run is stopped on the user, the surfacing fields are the pause's
+            // inputs — `lastGoalEvaluation` is the only thing Accept/Reject act on and the only
+            // thing that makes the chip render a row to click — so they must come back from the
+            // v6 columns intact. Spelled as the two flags rather than `GoalContract.isPaused`,
+            // whose doc comment reserves it for loop-control sites; `lockedChipHeader` sets the
+            // same precedent for a surfacing question. Everywhere else they are per-session and
+            // cleared as before.
+            let pausedOnUser = loaded[i].goalContract.map {
+                $0.checkpointStatus == .pausedForReview || $0.awaitingHumanJudgement
+            } ?? false
+            if !pausedOnUser {
+                loaded[i].lastGoalCompletionReport = nil
+                loaded[i].lastGoalEvaluation = nil
+            }
             loaded[i].messages = loaded[i].messages.map(LLMErrorMessage.migrateLegacy)
         }
         return loaded

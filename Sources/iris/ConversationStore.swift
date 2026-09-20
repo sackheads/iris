@@ -317,6 +317,17 @@ final class ConversationStore: Sendable {
                 """)
             try db.drop(table: "quarantine_v1")
         }
+        // #191: the checkpoint judgement pause's surfacing state. `lastGoalEvaluation` is the only
+        // thing Accept/Reject act on and the only thing that makes the chip render a row to click,
+        // so a pause restored without it is a question nobody can answer. Nullable: every row
+        // written before v6 reads back NULL, which `loadAll` turns into nil — exactly the value
+        // those fields had on load before this migration, so an existing store is unchanged.
+        m.registerMigration("v6_pause_surfacing") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "lastGoalEvaluation", .text)
+                t.add(column: "lastGoalCompletionReport", .text)
+            }
+        }
         return m
     }
 
@@ -516,25 +527,29 @@ final class ConversationStore: Sendable {
         // NULL when empty, so the overwhelming majority of rows carry nothing rather than "[]".
         // `loadAll` reads NULL back as `[]`, so the two are indistinguishable to every caller.
         let history = c.checkpointHistory.isEmpty ? nil : try json(c.checkpointHistory, encoder)
+        // NULL when absent (the overwhelming majority of rows), like `checkpointHistory` (#191).
+        let evaluation = try c.lastGoalEvaluation.map { try json($0, encoder) }
+        let report = try c.lastGoalCompletionReport.map { try json($0, encoder) }
         if exists {
             try db.execute(sql: """
                 UPDATE conversations SET title = ?, updatedAt = ?, workspacePath = ?, activeGoal = ?,
                     messageCountSinceReflection = ?, goalIterationCount = ?, mainAgentSandbox = ?,
-                    tokenUsage = ?, goalContract = ?, subagentResult = ?, checkpointHistory = ?
+                    tokenUsage = ?, goalContract = ?, subagentResult = ?, checkpointHistory = ?,
+                    lastGoalEvaluation = ?, lastGoalCompletionReport = ?
                 WHERE id = ?
                 """, arguments: [c.title, now, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
-                                 history, c.id.uuidString])
+                                 history, evaluation, report, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
                 INSERT INTO conversations (id, position, title, createdAt, updatedAt, workspacePath, activeGoal,
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
-                    subagentResult, checkpointHistory)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, now, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
-                                 tokenUsage, contract, result, history])
+                                 tokenUsage, contract, result, history, evaluation, report])
         }
     }
 
@@ -670,6 +685,8 @@ final class ConversationStore: Sendable {
                 let goalContract = text("goalContract")
                 let subagentResult = text("subagentResult")
                 let checkpointHistory = text("checkpointHistory")
+                let lastGoalEvaluation = text("lastGoalEvaluation")
+                let lastGoalCompletionReport = text("lastGoalCompletionReport")
                 // `position` only orders the `SELECT` above and is never decoded into `Conversation`,
                 // but an unconvertible value is exactly the same class of damage as an unreadable
                 // text column, so it is checked the same way (#189).
@@ -720,6 +737,18 @@ final class ConversationStore: Sendable {
                 if let s = checkpointHistory {
                     do { c.checkpointHistory = try decoder.decode([CheckpointOutcome].self, from: Data(s.utf8)) }
                     catch { out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable checkpointHistory: \(error)")) }
+                }
+
+                // #191: the pause's surfacing state follows the `checkpointHistory` policy, not the
+                // `goalContract` one — a snapshot that will not parse means one empty chip, not a
+                // lost conversation (spec §4). The `SkippedRow` reaches the launch notice.
+                if let s = lastGoalEvaluation {
+                    do { c.lastGoalEvaluation = try decoder.decode(GoalEvaluation.self, from: Data(s.utf8)) }
+                    catch { out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable lastGoalEvaluation: \(error)")) }
+                }
+                if let s = lastGoalCompletionReport {
+                    do { c.lastGoalCompletionReport = try decoder.decode(JSONValue.self, from: Data(s.utf8)) }
+                    catch { out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable lastGoalCompletionReport: \(error)")) }
                 }
 
                 // Per-conversation, so the bulk breaker below can throw the lot away.
@@ -968,6 +997,11 @@ final class ConversationStore: Sendable {
     /// Tests corrupt rows through this; nothing in the app calls it.
     func rawWrite(_ sql: String, arguments: StatementArguments = []) throws {
         try writer.write { db in try db.execute(sql: sql, arguments: arguments) }
+    }
+
+    /// Tests read a single scalar (e.g. `typeof(column)`) through this; nothing in the app calls it.
+    func rawScalar(_ sql: String, arguments: StatementArguments = []) throws -> String? {
+        try writer.read { try String.fetchOne($0, sql: sql, arguments: arguments) }
     }
 }
 

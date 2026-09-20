@@ -150,4 +150,21 @@ struct ConversationStoreHardeningTests {
         #expect(try store.counts(for: damaged.id).messages == 2)
         #expect(try store.quarantineCount(for: damaged.id) == 0)
     }
+
+    // MARK: lastGoalEvaluation / lastGoalCompletionReport (#191)
+
+    @Test("an undecodable lastGoalEvaluation degrades to nil and keeps the conversation (#191)")
+    func corruptLastGoalEvaluationDegradesToNil() throws {
+        let store = try ConversationStore.inMemory()
+        let c = ConversationStoreTests.sample()
+        try store.apply([ConversationStoreTests.created(c)])
+        try store.rawWrite("UPDATE conversations SET lastGoalEvaluation = '{not json', lastGoalCompletionReport = '[oops' WHERE id = ?",
+                           arguments: [c.id.uuidString])
+        let loaded = try store.loadAll()
+        let back = try #require(loaded.conversations.first { $0.id == c.id })
+        #expect(back.lastGoalEvaluation == nil && back.lastGoalCompletionReport == nil)
+        #expect(back.messages.count == c.messages.count, "the conversation itself survives")
+        #expect(loaded.skipped.contains { $0.conversationId == c.id && $0.reason.hasPrefix("unreadable lastGoalEvaluation") })
+        #expect(loaded.skipped.contains { $0.conversationId == c.id && $0.reason.hasPrefix("unreadable lastGoalCompletionReport") })
+    }
 }
