@@ -20,35 +20,42 @@ public enum GeminiAuthMode: String, CaseIterable, Identifiable, Sendable {
 class ConfigManager: @unchecked Sendable {
     @ObservationIgnored static let shared = ConfigManager()
 
+    /// The suite this instance was constructed with. `nil` — what `shared` and every production
+    /// call site get — means "whatever `IrisDefaults` resolves at the moment of the write".
+    @ObservationIgnored private let storeOverride: UserDefaults?
+
     /// The backing store for every setting — see `IrisDefaults` for why it is volatile under test
-    /// and under `--bench`/`--perf`. Computed, not captured: a headless run's volatile override
-    /// must apply to every later write even if `shared` was initialised before the override was set.
-    static var store: UserDefaults { IrisDefaults.store }
+    /// and under `--bench`/`--perf`. Per instance, so a test can construct a `ConfigManager` over
+    /// its own suite and have the persisting `didSet`s land there instead of the process-global
+    /// store, which every parallel suite would otherwise race through (#193). With no override it
+    /// is computed, not captured: a headless run's volatile override must apply to every later
+    /// write even if `shared` was initialised before the override was set.
+    var store: UserDefaults { storeOverride ?? IrisDefaults.store }
     
     var appearanceTheme: String {
-        didSet { ConfigManager.store.set(appearanceTheme, forKey: "APPEARANCE_THEME") }
+        didSet { store.set(appearanceTheme, forKey: "APPEARANCE_THEME") }
     }
     
     var copyChatsAsMarkdown: Bool {
-        didSet { ConfigManager.store.set(copyChatsAsMarkdown, forKey: "COPY_CHATS_AS_MARKDOWN") }
+        didSet { store.set(copyChatsAsMarkdown, forKey: "COPY_CHATS_AS_MARKDOWN") }
     }
 
     /// Show the reply while the model is still writing it (spec §7). Off means whole replies,
     /// the pre-streaming behaviour.
     var streamResponses: Bool {
-        didSet { ConfigManager.store.set(streamResponses, forKey: "STREAM_RESPONSES") }
+        didSet { store.set(streamResponses, forKey: "STREAM_RESPONSES") }
     }
 
     var defaultEmojiSkinTone: Int {
-        didSet { ConfigManager.store.set(defaultEmojiSkinTone, forKey: "DEFAULT_EMOJI_SKIN_TONE") }
+        didSet { store.set(defaultEmojiSkinTone, forKey: "DEFAULT_EMOJI_SKIN_TONE") }
     }
 
     var primaryProvider: String {
-        didSet { ConfigManager.store.set(primaryProvider, forKey: "PRIMARY_PROVIDER") }
+        didSet { store.set(primaryProvider, forKey: "PRIMARY_PROVIDER") }
     }
     
     var geminiAuthMode: String {
-        didSet { ConfigManager.store.set(geminiAuthMode, forKey: "GEMINI_AUTH_MODE") }
+        didSet { store.set(geminiAuthMode, forKey: "GEMINI_AUTH_MODE") }
     }
     
     var geminiAPIKey: String {
@@ -56,7 +63,7 @@ class ConfigManager: @unchecked Sendable {
     }
     
     var geminiBaseURL: String {
-        didSet { ConfigManager.store.set(geminiBaseURL, forKey: "GEMINI_BASE_URL") }
+        didSet { store.set(geminiBaseURL, forKey: "GEMINI_BASE_URL") }
     }
     
     var anthropicAPIKey: String {
@@ -64,7 +71,7 @@ class ConfigManager: @unchecked Sendable {
     }
     
     var anthropicBaseURL: String {
-        didSet { ConfigManager.store.set(anthropicBaseURL, forKey: "ANTHROPIC_BASE_URL") }
+        didSet { store.set(anthropicBaseURL, forKey: "ANTHROPIC_BASE_URL") }
     }
     
     var openAIAPIKey: String {
@@ -72,37 +79,37 @@ class ConfigManager: @unchecked Sendable {
     }
     
     var openAIBaseURL: String {
-        didSet { ConfigManager.store.set(openAIBaseURL, forKey: "OPENAI_BASE_URL") }
+        didSet { store.set(openAIBaseURL, forKey: "OPENAI_BASE_URL") }
     }
     
     var geminiModelEasy: String {
-        didSet { ConfigManager.store.set(geminiModelEasy, forKey: "GEMINI_MODEL_EASY") }
+        didSet { store.set(geminiModelEasy, forKey: "GEMINI_MODEL_EASY") }
     }
     var geminiModelMedium: String {
-        didSet { ConfigManager.store.set(geminiModelMedium, forKey: "GEMINI_MODEL_MEDIUM") }
+        didSet { store.set(geminiModelMedium, forKey: "GEMINI_MODEL_MEDIUM") }
     }
     var geminiModelHard: String {
-        didSet { ConfigManager.store.set(geminiModelHard, forKey: "GEMINI_MODEL_HARD") }
+        didSet { store.set(geminiModelHard, forKey: "GEMINI_MODEL_HARD") }
     }
     
     var anthropicModelEasy: String {
-        didSet { ConfigManager.store.set(anthropicModelEasy, forKey: "ANTHROPIC_MODEL_EASY") }
+        didSet { store.set(anthropicModelEasy, forKey: "ANTHROPIC_MODEL_EASY") }
     }
     var anthropicModelMedium: String {
-        didSet { ConfigManager.store.set(anthropicModelMedium, forKey: "ANTHROPIC_MODEL_MEDIUM") }
+        didSet { store.set(anthropicModelMedium, forKey: "ANTHROPIC_MODEL_MEDIUM") }
     }
     var anthropicModelHard: String {
-        didSet { ConfigManager.store.set(anthropicModelHard, forKey: "ANTHROPIC_MODEL_HARD") }
+        didSet { store.set(anthropicModelHard, forKey: "ANTHROPIC_MODEL_HARD") }
     }
     
     var openaiModelEasy: String {
-        didSet { ConfigManager.store.set(openaiModelEasy, forKey: "OPENAI_MODEL_EASY") }
+        didSet { store.set(openaiModelEasy, forKey: "OPENAI_MODEL_EASY") }
     }
     var openaiModelMedium: String {
-        didSet { ConfigManager.store.set(openaiModelMedium, forKey: "OPENAI_MODEL_MEDIUM") }
+        didSet { store.set(openaiModelMedium, forKey: "OPENAI_MODEL_MEDIUM") }
     }
     var openaiModelHard: String {
-        didSet { ConfigManager.store.set(openaiModelHard, forKey: "OPENAI_MODEL_HARD") }
+        didSet { store.set(openaiModelHard, forKey: "OPENAI_MODEL_HARD") }
     }
     
     func getModel(for tier: ModelTier) -> String {
@@ -145,94 +152,101 @@ class ConfigManager: @unchecked Sendable {
     }
     
     var googleTokenExpiry: Double {
-        didSet { ConfigManager.store.set(googleTokenExpiry, forKey: "GOOGLE_TOKEN_EXPIRY") }
+        didSet { store.set(googleTokenExpiry, forKey: "GOOGLE_TOKEN_EXPIRY") }
     }
     
     var enableSandboxing: Bool {
-        didSet { ConfigManager.store.set(enableSandboxing, forKey: "ENABLE_SANDBOXING") }
+        didSet { store.set(enableSandboxing, forKey: "ENABLE_SANDBOXING") }
     }
     
     var sandboxImage: String {
-        didSet { ConfigManager.store.set(sandboxImage, forKey: "SANDBOX_IMAGE") }
+        didSet { store.set(sandboxImage, forKey: "SANDBOX_IMAGE") }
     }
 
     var sandboxIdleTimeoutMinutes: Int {
-        didSet { ConfigManager.store.set(sandboxIdleTimeoutMinutes, forKey: "SANDBOX_IDLE_TIMEOUT_MINUTES") }
+        didSet { store.set(sandboxIdleTimeoutMinutes, forKey: "SANDBOX_IDLE_TIMEOUT_MINUTES") }
     }
 
     var mainAgentSandboxDefault: SandboxPref {
-        didSet { ConfigManager.store.set(mainAgentSandboxDefault.rawValue, forKey: "MAIN_AGENT_SANDBOX_DEFAULT") }
+        didSet { store.set(mainAgentSandboxDefault.rawValue, forKey: "MAIN_AGENT_SANDBOX_DEFAULT") }
     }
 
     var enableVibecop: Bool {
-        didSet { ConfigManager.store.set(enableVibecop, forKey: "ENABLE_VIBECOP") }
+        didSet { store.set(enableVibecop, forKey: "ENABLE_VIBECOP") }
     }
     
     var vibecopEngine: String {
-        didSet { ConfigManager.store.set(vibecopEngine, forKey: "VIBECOP_ENGINE") }
+        didSet { store.set(vibecopEngine, forKey: "VIBECOP_ENGINE") }
     }
     
     var vibecopModel: String {
-        didSet { ConfigManager.store.set(vibecopModel, forKey: "VIBECOP_MODEL") }
+        didSet { store.set(vibecopModel, forKey: "VIBECOP_MODEL") }
     }
 
     var maxGoalIterations: Int {
-        didSet { ConfigManager.store.set(maxGoalIterations, forKey: "MAX_GOAL_ITERATIONS") }
+        didSet { store.set(maxGoalIterations, forKey: "MAX_GOAL_ITERATIONS") }
     }
     var maxDoneGateRetries: Int {
-        didSet { ConfigManager.store.set(maxDoneGateRetries, forKey: "MAX_DONE_GATE_RETRIES") }
+        didSet { store.set(maxDoneGateRetries, forKey: "MAX_DONE_GATE_RETRIES") }
     }
     var loopDetectionThreshold: Int {
-        didSet { ConfigManager.store.set(loopDetectionThreshold, forKey: "LOOP_DETECTION_THRESHOLD") }
+        didSet { store.set(loopDetectionThreshold, forKey: "LOOP_DETECTION_THRESHOLD") }
     }
     var vibecopTimeoutSeconds: Int {
-        didSet { ConfigManager.store.set(vibecopTimeoutSeconds, forKey: "VIBECOP_TIMEOUT_SECONDS") }
+        didSet { store.set(vibecopTimeoutSeconds, forKey: "VIBECOP_TIMEOUT_SECONDS") }
     }
 
     var enableAdvancedPromptInjectionProtection: Bool {
-        didSet { ConfigManager.store.set(enableAdvancedPromptInjectionProtection, forKey: "ENABLE_PROMPT_INJECTION_PROTECTION") }
+        didSet { store.set(enableAdvancedPromptInjectionProtection, forKey: "ENABLE_PROMPT_INJECTION_PROTECTION") }
     }
     
     var promptGuardEngine: String {
-        didSet { ConfigManager.store.set(promptGuardEngine, forKey: "PROMPT_GUARD_ENGINE") }
+        didSet { store.set(promptGuardEngine, forKey: "PROMPT_GUARD_ENGINE") }
     }
     
     var promptGuardModel: String {
-        didSet { ConfigManager.store.set(promptGuardModel, forKey: "PROMPT_GUARD_MODEL") }
+        didSet { store.set(promptGuardModel, forKey: "PROMPT_GUARD_MODEL") }
     }
     
     var promptGuardCoreMLModel: String {
-        didSet { ConfigManager.store.set(promptGuardCoreMLModel, forKey: "PROMPT_GUARD_COREML_MODEL") }
+        didSet { store.set(promptGuardCoreMLModel, forKey: "PROMPT_GUARD_COREML_MODEL") }
     }
     
     var auxiliaryVisionEngine: String {
-        didSet { ConfigManager.store.set(auxiliaryVisionEngine, forKey: "AUXILIARY_VISION_ENGINE") }
+        didSet { store.set(auxiliaryVisionEngine, forKey: "AUXILIARY_VISION_ENGINE") }
     }
     
     var auxiliaryVisionModel: String {
-        didSet { ConfigManager.store.set(auxiliaryVisionModel, forKey: "AUXILIARY_VISION_MODEL") }
+        didSet { store.set(auxiliaryVisionModel, forKey: "AUXILIARY_VISION_MODEL") }
     }
     
-    init() {
-        let savedProvider = ConfigManager.store.string(forKey: "PRIMARY_PROVIDER") ?? "Gemini"
+    /// - Parameter store: a suite to read and persist through instead of `IrisDefaults.store`.
+    ///   A test passes one to get a manager no other suite can see the writes of; production
+    ///   passes nothing and follows `IrisDefaults`.
+    init(store storeOverride: UserDefaults? = nil) {
+        self.storeOverride = storeOverride
+        // Bound locally because `self.store` is unreadable until every stored property is
+        // initialised; it is the same store the instance property returns from here on.
+        let store = storeOverride ?? IrisDefaults.store
+        let savedProvider = store.string(forKey: "PRIMARY_PROVIDER") ?? "Gemini"
         self.primaryProvider = savedProvider
-        self.geminiAuthMode = ConfigManager.store.string(forKey: "GEMINI_AUTH_MODE") ?? GeminiAuthMode.apiKey.rawValue
+        self.geminiAuthMode = store.string(forKey: "GEMINI_AUTH_MODE") ?? GeminiAuthMode.apiKey.rawValue
         
-        self.appearanceTheme = ConfigManager.store.string(forKey: "APPEARANCE_THEME") ?? "system"
+        self.appearanceTheme = store.string(forKey: "APPEARANCE_THEME") ?? "system"
         
-        if ConfigManager.store.object(forKey: "COPY_CHATS_AS_MARKDOWN") != nil {
-            self.copyChatsAsMarkdown = ConfigManager.store.bool(forKey: "COPY_CHATS_AS_MARKDOWN")
+        if store.object(forKey: "COPY_CHATS_AS_MARKDOWN") != nil {
+            self.copyChatsAsMarkdown = store.bool(forKey: "COPY_CHATS_AS_MARKDOWN")
         } else {
             self.copyChatsAsMarkdown = true
         }
 
-        if ConfigManager.store.object(forKey: "STREAM_RESPONSES") != nil {
-            self.streamResponses = ConfigManager.store.bool(forKey: "STREAM_RESPONSES")
+        if store.object(forKey: "STREAM_RESPONSES") != nil {
+            self.streamResponses = store.bool(forKey: "STREAM_RESPONSES")
         } else {
             self.streamResponses = true
         }
 
-        self.defaultEmojiSkinTone = ConfigManager.store.object(forKey: "DEFAULT_EMOJI_SKIN_TONE") as? Int ?? SkinTone.none.rawValue
+        self.defaultEmojiSkinTone = store.object(forKey: "DEFAULT_EMOJI_SKIN_TONE") as? Int ?? SkinTone.none.rawValue
         
         var keychainSecrets = KeychainManager.shared.loadSecrets()
         var secretsMigrated = false
@@ -240,10 +254,10 @@ class ConfigManager: @unchecked Sendable {
         func migrate(key: String, dest: inout String) {
             if let keychainValue = keychainSecrets[key] {
                 dest = keychainValue
-            } else if let udValue = ConfigManager.store.string(forKey: key), !udValue.isEmpty {
+            } else if let udValue = store.string(forKey: key), !udValue.isEmpty {
                 dest = udValue
                 keychainSecrets[key] = udValue
-                ConfigManager.store.removeObject(forKey: key)
+                store.removeObject(forKey: key)
                 secretsMigrated = true
             } else {
                 dest = ""
@@ -262,18 +276,18 @@ class ConfigManager: @unchecked Sendable {
         migrate(key: "OPENAI_API_KEY", dest: &openaiKey)
         self.openAIAPIKey = openaiKey
         
-        geminiBaseURL = ConfigManager.store.string(forKey: "GEMINI_BASE_URL") ?? ""
-        anthropicBaseURL = ConfigManager.store.string(forKey: "ANTHROPIC_BASE_URL") ?? ""
-        openAIBaseURL = ConfigManager.store.string(forKey: "OPENAI_BASE_URL") ?? ""
+        geminiBaseURL = store.string(forKey: "GEMINI_BASE_URL") ?? ""
+        anthropicBaseURL = store.string(forKey: "ANTHROPIC_BASE_URL") ?? ""
+        openAIBaseURL = store.string(forKey: "OPENAI_BASE_URL") ?? ""
 
         // Try reading old global models first for migration, else fallback to defaults.
         // The old global keys only migrate onto whichever provider was active at the time.
-        let oldEasy = ConfigManager.store.string(forKey: "MODEL_EASY")
-        let oldMedium = ConfigManager.store.string(forKey: "MODEL_MEDIUM")
-        let oldHard = ConfigManager.store.string(forKey: "MODEL_HARD")
+        let oldEasy = store.string(forKey: "MODEL_EASY")
+        let oldMedium = store.string(forKey: "MODEL_MEDIUM")
+        let oldHard = store.string(forKey: "MODEL_HARD")
 
         func resolveModel(key: String, provider: String, migrated: String?, fallback: String) -> String {
-            if let saved = ConfigManager.store.string(forKey: key) {
+            if let saved = store.string(forKey: key) {
                 return saved
             }
             if savedProvider == provider, let migrated {
@@ -313,59 +327,59 @@ class ConfigManager: @unchecked Sendable {
         if secretsMigrated {
             KeychainManager.shared.saveSecrets(keychainSecrets)
         }
-        self.googleTokenExpiry = ConfigManager.store.double(forKey: "GOOGLE_TOKEN_EXPIRY")
-        self.enableSandboxing = ConfigManager.store.bool(forKey: "ENABLE_SANDBOXING")
-        self.sandboxImage = ConfigManager.store.string(forKey: "SANDBOX_IMAGE") ?? "ubuntu:latest"
-        let savedIdle = ConfigManager.store.integer(forKey: "SANDBOX_IDLE_TIMEOUT_MINUTES")
+        self.googleTokenExpiry = store.double(forKey: "GOOGLE_TOKEN_EXPIRY")
+        self.enableSandboxing = store.bool(forKey: "ENABLE_SANDBOXING")
+        self.sandboxImage = store.string(forKey: "SANDBOX_IMAGE") ?? "ubuntu:latest"
+        let savedIdle = store.integer(forKey: "SANDBOX_IDLE_TIMEOUT_MINUTES")
         self.sandboxIdleTimeoutMinutes = savedIdle == 0 ? 30 : savedIdle
 
-        if ConfigManager.store.object(forKey: "MAIN_AGENT_SANDBOX_DEFAULT") == nil {
+        if store.object(forKey: "MAIN_AGENT_SANDBOX_DEFAULT") == nil {
             // First run with this key. Preserve the experience of users who already run
             // sandboxed (enableSandboxing on today == sandboxed main agent); fresh installs
             // default to host (the dual-layer model).
-            let seeded: SandboxPref = ConfigManager.store.bool(forKey: "ENABLE_SANDBOXING") ? .sandboxed : .host
+            let seeded: SandboxPref = store.bool(forKey: "ENABLE_SANDBOXING") ? .sandboxed : .host
             self.mainAgentSandboxDefault = seeded
-            ConfigManager.store.set(seeded.rawValue, forKey: "MAIN_AGENT_SANDBOX_DEFAULT")
+            store.set(seeded.rawValue, forKey: "MAIN_AGENT_SANDBOX_DEFAULT")
         } else {
-            let raw = ConfigManager.store.string(forKey: "MAIN_AGENT_SANDBOX_DEFAULT") ?? "host"
+            let raw = store.string(forKey: "MAIN_AGENT_SANDBOX_DEFAULT") ?? "host"
             self.mainAgentSandboxDefault = SandboxPref(rawValue: raw) ?? .host
         }
 
-        self.enableVibecop = ConfigManager.store.bool(forKey: "ENABLE_VIBECOP")
-        let savedEngine = ConfigManager.store.string(forKey: "VIBECOP_ENGINE") ?? ""
+        self.enableVibecop = store.bool(forKey: "ENABLE_VIBECOP")
+        let savedEngine = store.string(forKey: "VIBECOP_ENGINE") ?? ""
         self.vibecopEngine = savedEngine.isEmpty ? "llama_cpp" : savedEngine
         
-        let savedVibecop = ConfigManager.store.string(forKey: "VIBECOP_MODEL") ?? ""
+        let savedVibecop = store.string(forKey: "VIBECOP_MODEL") ?? ""
         self.vibecopModel = savedVibecop.isEmpty ? "gemma-4-E2B-it-Q4_K_M.gguf" : savedVibecop
 
-        let savedMaxIters = ConfigManager.store.integer(forKey: "MAX_GOAL_ITERATIONS")
+        let savedMaxIters = store.integer(forKey: "MAX_GOAL_ITERATIONS")
         self.maxGoalIterations = savedMaxIters == 0 ? 50 : savedMaxIters
-        let savedLoop = ConfigManager.store.integer(forKey: "LOOP_DETECTION_THRESHOLD")
-        let savedGateRetries = ConfigManager.store.integer(forKey: "MAX_DONE_GATE_RETRIES")
+        let savedLoop = store.integer(forKey: "LOOP_DETECTION_THRESHOLD")
+        let savedGateRetries = store.integer(forKey: "MAX_DONE_GATE_RETRIES")
         self.maxDoneGateRetries = savedGateRetries == 0 ? 3 : savedGateRetries
         self.loopDetectionThreshold = savedLoop == 0 ? 5 : savedLoop
-        let savedVibecopTO = ConfigManager.store.integer(forKey: "VIBECOP_TIMEOUT_SECONDS")
+        let savedVibecopTO = store.integer(forKey: "VIBECOP_TIMEOUT_SECONDS")
         self.vibecopTimeoutSeconds = savedVibecopTO == 0 ? 5 : savedVibecopTO
 
-        if ConfigManager.store.object(forKey: "ENABLE_PROMPT_INJECTION_PROTECTION") != nil {
-            self.enableAdvancedPromptInjectionProtection = ConfigManager.store.bool(forKey: "ENABLE_PROMPT_INJECTION_PROTECTION")
+        if store.object(forKey: "ENABLE_PROMPT_INJECTION_PROTECTION") != nil {
+            self.enableAdvancedPromptInjectionProtection = store.bool(forKey: "ENABLE_PROMPT_INJECTION_PROTECTION")
         } else {
             self.enableAdvancedPromptInjectionProtection = true // Default to true
         }
         
-        let savedPromptEngine = ConfigManager.store.string(forKey: "PROMPT_GUARD_ENGINE") ?? ""
+        let savedPromptEngine = store.string(forKey: "PROMPT_GUARD_ENGINE") ?? ""
         self.promptGuardEngine = savedPromptEngine.isEmpty ? "llama_cpp" : savedPromptEngine
         
-        let savedPromptModel = ConfigManager.store.string(forKey: "PROMPT_GUARD_MODEL") ?? ""
+        let savedPromptModel = store.string(forKey: "PROMPT_GUARD_MODEL") ?? ""
         self.promptGuardModel = savedPromptModel.isEmpty ? "Qwen3.5-2B-Q4_K_M.gguf" : savedPromptModel
         
         // Default to the accurate DeBERTa-v3 ONNX guard. The old distilbert CoreML default
         // over-blocked ordinary tool output; see docs/prompt_guard_coreml.md.
-        let savedCoreMLModel = ConfigManager.store.string(forKey: "PROMPT_GUARD_COREML_MODEL") ?? ""
+        let savedCoreMLModel = store.string(forKey: "PROMPT_GUARD_COREML_MODEL") ?? ""
         self.promptGuardCoreMLModel = savedCoreMLModel.isEmpty ? "https://luthen.scromp.net/iris/deberta-v3-base-prompt-injection-v2.onnx.zip" : savedCoreMLModel
 
-        self.auxiliaryVisionEngine = ConfigManager.store.string(forKey: "AUXILIARY_VISION_ENGINE") ?? ""
-        self.auxiliaryVisionModel = ConfigManager.store.string(forKey: "AUXILIARY_VISION_MODEL") ?? ""
+        self.auxiliaryVisionEngine = store.string(forKey: "AUXILIARY_VISION_ENGINE") ?? ""
+        self.auxiliaryVisionModel = store.string(forKey: "AUXILIARY_VISION_MODEL") ?? ""
     }
     
     var isConfigured: Bool {

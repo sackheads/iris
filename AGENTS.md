@@ -19,9 +19,23 @@ swift test --filter MyTestSuite      # focused run
 **Never mutate `ConfigManager.shared` in a test.** It is process-global and suites run in
 parallel, so mutating it races — and its setters persist, so a bad value used to outlive the process
 and poison the *next* run (#109). Two seams exist so you don't have to: construct your own
-`ConfigManager()` and inject it (`ModelLEDBar(config:)`), or pass `protectionEnabled:` to
-`InjectionGuard.sanitize` / `SkillManager.loadCustomRules`. Under test `ConfigManager` reads and
-writes a volatile per-process store, so nothing you set can escape the run.
+`ConfigManager(store:)` over a suite of your own and inject it (`ModelLEDBar(config:)`), or pass
+`protectionEnabled:` to `InjectionGuard.sanitize` / `SkillManager.loadCustomRules`. It is the
+injected store that isolates you: a bare `ConfigManager()` is a separate *object* over the same
+process-global store, so its `didSet`s are still visible to every test reading that key (#193).
+
+```swift
+let name = "iris-mytest-\(UUID().uuidString)"
+let store = UserDefaults(suiteName: name)!
+defer {   // removePersistentDomain does not delete the plist on current macOS (#178)
+    store.removePersistentDomain(forName: name)
+    IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
+}
+let config = ConfigManager(store: store)
+```
+
+Under test the process-global store is itself a volatile per-process suite, so nothing you set can
+escape the run either way.
 
 No Makefile. No lint config beyond the Swift compiler's own checks. Keep it that way unless asked.
 
@@ -69,7 +83,7 @@ docs/                     # design specs, plans, reviews, roadmaps
    - *Lifecycle state:* If a tool is valid only during an active state (e.g. `amend_goal_contract` gated on `ladderContract?.isLocked == true`, `reach_checkpoint` gated on `hasLadder && !isFinalMilestone`), gate declaration on that state.
    - *Reference:* See #144 for the canonical pattern (dropping 12 dead-weight tools slashed declaration tokens by 41% and whole-prompt size by 25%).
 
-7. **Never mutate `ConfigManager.shared` in a test.** It is process-global and suites run concurrently, so mutating it races. Use the existing seams instead: construct an isolated `ConfigManager()` and inject it, or pass injectable parameters (`protectionEnabled:`, `workspaceToolsEnabled:`). See **Build and test** above.
+7. **Never mutate `ConfigManager.shared` in a test.** It is process-global and suites run concurrently, so mutating it races. Use the existing seams instead: construct an isolated `ConfigManager(store:)` over your own `UserDefaults` suite and inject it, or pass injectable parameters (`protectionEnabled:`, `workspaceToolsEnabled:`). See **Build and test** above.
 
 8. **Every chip in the composer's `VStack` must be height-bounded.** `ChatView` stacks the goal chips — `GoalContractPanel`, `LockedContractChip`, `CheckpointPauseChip`, `CompletionReportChip` — directly above the composer. An unbounded subview there can collapse the surrounding layout and blank the entire window the instant the chip appears; the app stays responsive, which makes it read as a state bug rather than a layout one. Wrap the chip in a `ScrollView` and cap it with `.frame(maxHeight:)` (320-340 is the established range). This matters most for chips whose height grows with the contract — anything embedding a `ForEach` over criteria or verdicts. Nothing enforces this at compile time, and it has escaped twice: `aa141d5` capped the three chips that existed then (#62), and `CheckpointPauseChip` was added later without a cap, reintroducing the same bug (#164).
 
@@ -96,7 +110,7 @@ docs/                     # design specs, plans, reviews, roadmaps
 - **`withCheckedContinuation` ignores task cancellation.** The Stop button cancels the Swift Task, but a bare `withCheckedContinuation` never wakes up. Wrap it with `withTaskCancellationHandler` so cancellation can terminate the subprocess and resume the continuation.
 - **AttributeGraph cycle from `.textSelection` on agent Markdown views.** A `.textSelection` modifier on the agent message `Markdown` view caused a heisenbug cycle (invisible under the debugger). Fixed in `0ed19c8`; don't re-add `.textSelection` to those views.
 - **Unconditional tool declarations bloating prompt tokens and causing tool eagerness.** Broadcasting 30 tool declarations cost 61% of turn tokens and caused the model to rename conversations unprompted on first messages (#132, #133, #144). Gating tools by credentials and workflow triggers cut declarations from 30 to 17 (-41% tokens) with no loss of capability for the flows that use them.
-- **Mutating global `ConfigManager.shared` in tests.** Leaked settings across parallel test suites, caused flaky runs, and persisted dirty state into user defaults (#109).
+- **Mutating global `ConfigManager.shared` in tests.** Leaked settings across parallel test suites, caused flaky runs, and persisted dirty state into user defaults (#109). The documented escape hatch then quietly had the same hole: `ConfigManager.store` was static, so a test's own `ConfigManager()` wrote to the process-global store anyway and `EmojiSettingsTests` passed on ordering luck (#193). The store is per-instance now — inject one.
 - **Docs that describe the new behaviour while still asserting the old one.** The additive half of a docs update gets done and the falsifying half does not, so a README ends up containing both the new truth and the old lie in adjacent bullets (#195). Worse, the same staleness hides in agent-facing prompt strings, where nothing surfaces it and the model is misled on every turn. "Update the README" was a checklist line here for a long time and measurably did not work — 23 of 179 `feat` commits on main touched README. See invariant 9.
 - **An unbounded chip in the composer stack blanking the window.** A goal chip with no height cap collapsed the surrounding layout the moment it rendered, emptying the sidebar and main pane while the app kept responding (#62, `aa141d5`). Fixed for the chips that existed then; a later chip arrived without the cap and did it again (#164). Bound every chip you add there (Invariant 8).
 
@@ -106,7 +120,7 @@ docs/                     # design specs, plans, reviews, roadmaps
 - [ ] If you added a field to a persisted `Codable` type: it uses `decodeIfPresent` (Invariant 1)
 - [ ] If you added or modified a tool with a credential prerequisite, a triggering command, or a lifecycle state: its declaration is gated on it rather than exposed unconditionally on plain turns (Invariant 6; see #144)
 - [ ] If you added or changed a tool parameter: `getTools()` schema and `execute()` handler are both updated
-- [ ] If you added a test that configures settings: it does not mutate `ConfigManager.shared` directly; uses an injected instance or parameter (Invariant 7; see Build and test)
+- [ ] If you added a test that configures settings: it does not mutate `ConfigManager.shared` directly; uses a `ConfigManager(store:)` over its own suite, or an injectable parameter (Invariant 7; see Build and test)
 - [ ] If you added a view to the composer's `VStack` in `ChatView`: it is wrapped in a `ScrollView` and capped with `.frame(maxHeight:)` (Invariant 8)
 - [ ] If you changed user-facing or agent-visible behaviour: you searched for what it made **untrue** — in `README.md` and in agent-facing strings (`oracleText`, tool `description` fields, system prompts) — and fixed what you found. Finding nothing is fine; not looking is not (Invariant 9)
 - [ ] No large build artefacts committed (`.build/`, `*.o`, `*.onnx` model weights, etc.)
