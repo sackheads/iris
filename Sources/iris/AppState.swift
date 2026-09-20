@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-enum ChatRole: String, Codable {
+enum ChatRole: String, Codable, Sendable, Equatable {
     case user
     case agent
     case system
@@ -9,7 +9,7 @@ enum ChatRole: String, Codable {
     case command
 }
 
-struct ChatMessage: Identifiable, Codable, Sendable {
+struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
     var id = UUID()
     let role: ChatRole
     var content: String
@@ -35,13 +35,13 @@ struct ChatMessage: Identifiable, Codable, Sendable {
     }
 }
 
-struct TokenUsage: Codable, Equatable {
+struct TokenUsage: Codable, Equatable, Sendable {
     var promptTokenCount: Int = 0
     var candidatesTokenCount: Int = 0
     var totalTokenCount: Int = 0
 }
 
-struct Conversation: Identifiable, Codable, Hashable {
+struct Conversation: Identifiable, Codable, Hashable, Sendable {
     var id = UUID()
     var title: String
     var messages: [ChatMessage] = []
