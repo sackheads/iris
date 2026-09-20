@@ -53,6 +53,27 @@ struct CheckpointOutcome: Codable, Identifiable, Equatable, Sendable {
     var evaluation: GoalEvaluation?
     var resolution: Resolution
     var date: Date = Date()
+
+    init(id: UUID = UUID(), milestoneIndex: Int, milestoneTitle: String,
+         evaluation: GoalEvaluation? = nil, resolution: Resolution, date: Date = Date()) {
+        self.id = id; self.milestoneIndex = milestoneIndex; self.milestoneTitle = milestoneTitle
+        self.evaluation = evaluation; self.resolution = resolution; self.date = date
+    }
+
+    /// Lenient decoder for the same reason `GoalContract` and `Conversation` have one (invariant 1):
+    /// these rows are persisted, and slice F will extend this type. A synthesized strict decoder
+    /// would throw `keyNotFound` on every already-stored row the moment a field is added, and a
+    /// throw here fails the whole `[CheckpointOutcome]` decode — taking the conversation that owns
+    /// the audit trail down with it. Every field that can carry a default is `decodeIfPresent`.
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        milestoneIndex = try c.decodeIfPresent(Int.self, forKey: .milestoneIndex) ?? 0
+        milestoneTitle = try c.decodeIfPresent(String.self, forKey: .milestoneTitle) ?? ""
+        evaluation = try c.decodeIfPresent(GoalEvaluation.self, forKey: .evaluation)
+        resolution = try c.decode(Resolution.self, forKey: .resolution)
+        date = try c.decodeIfPresent(Date.self, forKey: .date) ?? Date()
+    }
 }
 
 struct GoalContract: Codable, Equatable, Sendable {

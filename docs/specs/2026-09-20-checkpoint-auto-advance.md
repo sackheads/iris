@@ -30,8 +30,9 @@ Out of scope, deliberately:
 
 - **Retroactive review and send-back → slice F.** F is "a panel that reads the real contract +
   evidence, so the human steers by exception," which is exactly what reviewing a skipped checkpoint
-  is. Building a second review surface here would duplicate it. D3 persists the history (§5); F
-  renders it and adds send-back-to-milestone-N.
+  is. Building a second review surface here would duplicate it. D3 persists the history — in its
+  own `checkpointHistory` column on the store's `conversations` table (§5) — and F renders it and
+  adds send-back-to-milestone-N.
 - **Checkpoint-level gate refusals.** A failed checkpoint pauses for the human, who already has
   "Send back" and "Approve & continue". D3 adds no retry loop; D1's retry ladder stays terminal-only.
 - **Inline judgement at a checkpoint → a future slice.** §6 originally specified that a checkpoint
@@ -142,8 +143,21 @@ recorded decision instead of re-asking. This is a deliberate behaviour change to
 gate: a criterion already judged at a checkpoint no longer prompts again at completion. For a
 ladder-less goal nothing changes, because there are no checkpoints to judge at.
 
-**Invariant 1 applies:** `checkpointHistory` is decoded with `decodeIfPresent(...) ?? []` in
-`Conversation.init(from:)`. A missing key must not throw, or every conversation is dropped.
+**Where it is actually persisted.** Since #197, conversations are stored in SQLite with explicit
+columns (`ConversationStore`), not as a JSON blob, so a field nobody adds a column for is silently
+dropped on every relaunch no matter how leniently it decodes. `checkpointHistory` therefore has its
+own nullable `checkpointHistory` text column on `conversations`, added by the `v3_checkpoint_history`
+migration and JSON-encoded in and out exactly like `goalContract`. An empty history is stored as
+SQL NULL, and NULL — which is what every row written before v3 carries — loads as `[]`.
+`ConversationStoreTests.roundTrip` is the contract test that holds this: it asserts every stored
+field, `checkpointHistory` included.
+
+**Invariant 1 applies** to the JSON codec as well, which is still reached through the legacy blob
+import and through `CheckpointOutcome`'s own rows: `checkpointHistory` is decoded with
+`decodeIfPresent(...) ?? []` in `Conversation.init(from:)`, and `CheckpointOutcome` has a lenient
+`init(from:)` of its own so that a field added by slice F cannot make every already-stored row
+undecodable and take the conversation with it. A missing key must not throw, or every conversation
+is dropped.
 
 **Why it lives on `Conversation` and not on `GoalContract`.** It has to outlive the goal it
 describes. `clearGoal` nils `goalContract` on `goal_complete`, on `/stop`, and on an LLM error, so
@@ -357,7 +371,15 @@ delicate goal has one switch. Per AGENTS.md invariant 7, tests must not mutate
 - Round-trip: a `Conversation` encoded without `checkpointHistory` decodes with `[]` and does not
   throw (invariant 1), and an outcome with no grade round-trips as nil.
 - The history survives `clearGoal`: a completed goal's checkpoint record is still readable.
-- Two advances decided for the same milestone advance once and record one entry.
+- **Store round-trip:** a conversation written through `ConversationStore` and loaded back keeps
+  its `checkpointHistory` (`ConversationStoreTests.roundTrip`, which asserts every stored field);
+  an empty history round-trips as `[]`; and a v2-era database — written before the column existed —
+  migrates and loads its rows with `[]` rather than failing.
+- Two advances decided for the same milestone advance once, record one entry, and push one
+  transcript announcement: the refused call returns a neutral result instead of repeating the
+  winner's notice from its own pre-grade snapshot.
+- `ConfigManager.checkpointAutoAdvance` defaults to `true` when the key is unset, asserted against
+  an injected store (`ConfigManager(store:)`) so it cannot race the process-global defaults.
 - A checkpoint already `.pausedForReview`, and a goal `awaitingHumanJudgement`, each refuse to
   auto-advance.
 - A laddered goal at its final milestone still completes through the terminal gate — the

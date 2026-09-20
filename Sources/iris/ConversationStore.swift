@@ -251,6 +251,14 @@ final class ConversationStore: Sendable {
                 try Self.indexMessage(m, conversationId: conversationId, ordinal: ordinal, db: db)
             }
         }
+        // Slice D3's audit trail (`Conversation.checkpointHistory`). A new nullable column rather
+        // than a rebuild: every existing row reads back as SQL NULL, which `loadAll` turns into
+        // `[]` — the same forward-compat rule invariant 1 imposes on the JSON codec.
+        m.registerMigration("v3_checkpoint_history") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "checkpointHistory", .text)
+            }
+        }
         return m
     }
 
@@ -393,23 +401,28 @@ final class ConversationStore: Sendable {
         let tokenUsage = try json(c.tokenUsage, encoder)
         let contract = try c.goalContract.map { try json($0, encoder) }
         let result = try c.subagentResult.map { try json($0, encoder) }
+        // NULL when empty, so the overwhelming majority of rows carry nothing rather than "[]".
+        // `loadAll` reads NULL back as `[]`, so the two are indistinguishable to every caller.
+        let history = c.checkpointHistory.isEmpty ? nil : try json(c.checkpointHistory, encoder)
         if exists {
             try db.execute(sql: """
                 UPDATE conversations SET title = ?, updatedAt = ?, workspacePath = ?, activeGoal = ?,
                     messageCountSinceReflection = ?, goalIterationCount = ?, mainAgentSandbox = ?,
-                    tokenUsage = ?, goalContract = ?, subagentResult = ?
+                    tokenUsage = ?, goalContract = ?, subagentResult = ?, checkpointHistory = ?
                 WHERE id = ?
                 """, arguments: [c.title, now, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
-                                 c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result, c.id.uuidString])
+                                 c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
+                                 history, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
                 INSERT INTO conversations (id, position, title, createdAt, updatedAt, workspacePath, activeGoal,
-                    messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract, subagentResult)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
+                    subagentResult, checkpointHistory)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, now, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
-                                 tokenUsage, contract, result])
+                                 tokenUsage, contract, result, history])
         }
     }
 
@@ -520,6 +533,7 @@ final class ConversationStore: Sendable {
                 let tokenUsage = text("tokenUsage")
                 let goalContract = text("goalContract")
                 let subagentResult = text("subagentResult")
+                let checkpointHistory = text("checkpointHistory")
                 if let column = unreadableColumn {
                     out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable \(column)"))
                     continue
@@ -535,6 +549,8 @@ final class ConversationStore: Sendable {
                     c.tokenUsage = try tokenUsage.map { try decoder.decode(TokenUsage.self, from: Data($0.utf8)) } ?? TokenUsage()
                     if let s = goalContract { c.goalContract = try decoder.decode(GoalContract.self, from: Data(s.utf8)) }
                     if let s = subagentResult { c.subagentResult = try decoder.decode(SubagentResult.self, from: Data(s.utf8)) }
+                    // NULL (a row written before v3) leaves the property at its `[]` default.
+                    if let s = checkpointHistory { c.checkpointHistory = try decoder.decode([CheckpointOutcome].self, from: Data(s.utf8)) }
                 } catch {
                     // Whole-conversation skip: nothing in memory represents this conversation, so
                     // nothing can ever write to it again. No quarantine/renumber needed.
