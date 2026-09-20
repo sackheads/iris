@@ -17,6 +17,13 @@ struct HumanJudgementRecordingTests {
         if let idx = app.conversations.firstIndex(where: { $0.id == id }) {
             app.conversations[idx].goalContract?.awaitingHumanJudgement = true
         }
+        // #191: pause it AT A CHECKPOINT rather than terminally. This suite is about §6's
+        // recording onto the evaluation, not §7's resolution — and since clearGoal now nils
+        // `lastGoalEvaluation` with the contract, a terminal (non-ladder) accept would wipe the
+        // very evaluation these tests inspect. `resolveJudgementIfComplete` only clears the goal
+        // once `checkpointStatus != .pausedForReview`, so pausing at a checkpoint isolates the
+        // recording behavior from that side effect (mirrors CheckpointJudgementResolutionTests).
+        app.setCheckpointPaused(for: id)
         app.recordEvaluation(for: id, GoalEvaluation(
             status: .graded,
             criteria: [CriterionVerdict(criterionId: judged.id, criterionText: judged.text,

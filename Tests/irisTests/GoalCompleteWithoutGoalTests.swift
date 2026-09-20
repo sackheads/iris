@@ -102,7 +102,11 @@ struct GoalCompleteWithoutGoalTests {
         await engine.processInput("go", source: "User", conversationId: id)
 
         let conv = app.conversations.first { $0.id == id }
-        #expect(conv?.lastGoalCompletionReport != nil, "a real goal must still produce its report")
+        // #191: clearGoal now nils lastGoalCompletionReport along with the contract, so a
+        // completed goal's report is gone by the time processInput returns — this no longer
+        // distinguishes "recorded then cleared" from "never recorded". activeGoal == nil is the
+        // remaining observable proof that the completion path ran to the end.
+        #expect(conv?.lastGoalCompletionReport == nil)
         #expect(conv?.activeGoal == nil, "and the goal must still be cleared")
     }
 }

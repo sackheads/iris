@@ -150,12 +150,12 @@ struct HumanJudgementGateTests {
 
         let conv = app.conversations.first { $0.id == id }
         // The pause branch requires `blocking.isEmpty`; it never runs here, so the goal must
-        // finalize instead — which only `finishGatedGoal` + `clearGoal` do.
-        #expect(conv?.lastGoalEvaluation?.gateOutcome == .ungatedAtCap)
+        // finalize instead — which only `finishGatedGoal` + `clearGoal` do. #191: clearGoal now
+        // nils lastGoalEvaluation with the contract, so the stamped .ungatedAtCap outcome and the
+        // still-pending human criterion it carried are no longer readable after the fact.
+        #expect(conv?.lastGoalEvaluation == nil)
         #expect(conv?.activeGoal == nil, "the cap outcome clears the goal rather than pausing it")
         #expect(conv?.goalContract == nil)
-        #expect(conv?.lastGoalEvaluation?.criteria.first { $0.criterionText == "reads well" }?.verdict
-                == .humanPending, "the human-judged criterion really was still pending when this fired")
     }
 
     @Test("a contract with no humanJudged criteria never pauses")
@@ -173,6 +173,7 @@ struct HumanJudgementGateTests {
 
         let conv = app.conversations.first { $0.id == id }
         #expect(conv?.activeGoal == nil, "D1's behaviour, unchanged")
-        #expect(conv?.lastGoalEvaluation?.gateOutcome == .passed)
+        // #191: clearGoal nils lastGoalEvaluation with the contract on completion.
+        #expect(conv?.goalContract == nil)
     }
 }

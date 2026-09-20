@@ -1001,6 +1001,11 @@ class AppState {
             conversations[idx].activeGoal = nil
             conversations[idx].goalContract = nil
             conversations[idx].goalIterationCount = 0
+            // #191: the surfacing fields have columns now, so left alone they would outlive the
+            // contract on disk and resurrect a chip for a goal that no longer exists. They must sit
+            // BEFORE the markChanged below so the same row write carries them (spec §4, §9.1).
+            conversations[idx].lastGoalEvaluation = nil
+            conversations[idx].lastGoalCompletionReport = nil
             markChanged(conversationId, .metadata)
         }
     }
@@ -1618,20 +1623,29 @@ class AppState {
         all.filter { !$0.isSubagent }
     }
 
-    /// Repairs a decoded conversation list at load time: drops any ephemeral sub-process
-    /// conversations left by an older build, and clears the transient goal-completion surfacing
-    /// (`lastGoalCompletionReport` / `lastGoalEvaluation`).
-    ///
-    /// That surfacing drives the completion "drift chip" above the composer — a per-session,
-    /// dismissable affordance, not durable history. Resurrecting last session's chip on the next
-    /// launch is both semantically wrong and the trigger for a window-blanking render bug when the
-    /// chip auto-appears at startup, so we drop it on load. (The grader is ephemeral anyway, so a
-    /// `.verifying` evaluation could never resolve across a restart.)
+    /// Restores load-time invariants. The completion report and evaluation are per-session
+    /// surfacing state **except** while a judgement or checkpoint pause is open on the user
+    /// (#191): then they are the pause's inputs and are kept so a restored pause is still
+    /// answerable. The unconditional clear that used to live here was the workaround for a
+    /// window-blanking render bug whose root cause was fixed in aa141d5 (invariant 8); if
+    /// blanking returns at launch, this is the change to suspect (spec §3.1).
     nonisolated static func sanitizeLoaded(_ decoded: [Conversation]) -> [Conversation] {
         var loaded = durableConversations(decoded)
         for i in loaded.indices {
-            loaded[i].lastGoalCompletionReport = nil
-            loaded[i].lastGoalEvaluation = nil
+            // #191: while the run is stopped on the user, the surfacing fields are the pause's
+            // inputs — `lastGoalEvaluation` is the only thing Accept/Reject act on and the only
+            // thing that makes the chip render a row to click — so they must come back from the
+            // v6 columns intact. Spelled as the two flags rather than `GoalContract.isPaused`,
+            // whose doc comment reserves it for loop-control sites; `lockedChipHeader` sets the
+            // same precedent for a surfacing question. Everywhere else they are per-session and
+            // cleared as before.
+            let pausedOnUser = loaded[i].goalContract.map {
+                $0.checkpointStatus == .pausedForReview || $0.awaitingHumanJudgement
+            } ?? false
+            if !pausedOnUser {
+                loaded[i].lastGoalCompletionReport = nil
+                loaded[i].lastGoalEvaluation = nil
+            }
             loaded[i].messages = loaded[i].messages.map(LLMErrorMessage.migrateLegacy)
         }
         return loaded

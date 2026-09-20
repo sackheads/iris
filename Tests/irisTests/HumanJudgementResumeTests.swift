@@ -38,7 +38,9 @@ struct HumanJudgementResumeTests {
 
         let conv = app.conversations.first { $0.id == id }
         #expect(conv?.activeGoal == nil, "all criteria resolved — the goal is done")
-        #expect(conv?.lastGoalEvaluation?.gateOutcome == .passed)
+        #expect(conv?.goalContract == nil, "the terminal gate cleared the goal")
+        // #191: clearGoal now nils the surfacing fields with the contract (both the terminal
+        // gate and /stop route through it), so gateOutcome is no longer readable here.
     }
 
     @Test("judging one of several leaves the goal paused")
@@ -133,7 +135,9 @@ struct HumanJudgementResumeTests {
 
         let conv = try #require(app.conversations.first { $0.id == id })
         #expect(conv.activeGoal == nil, "the user accepted everything outstanding — the goal is done")
-        #expect(conv.lastGoalEvaluation?.gateOutcome == .passed)
+        // #191: clearGoal now nils lastGoalEvaluation with the contract, so gateOutcome is no
+        // longer readable here; goalContract == nil already proves the terminal gate ran.
+        #expect(conv.goalContract == nil)
         #expect(!conv.messages.contains { $0.content.contains("in the user's judgement") },
                 "the user never rejected anything, so nothing may be attributed to them")
     }

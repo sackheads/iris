@@ -32,9 +32,11 @@ struct GoalEvaluatorTriggerTests {
 
         // The self-report path still clears the goal…
         #expect(app.conversations.first { $0.id == id }?.activeGoal == nil)
-        // …and a snapshot evaluation was recorded (verifying, or graded if the detached grader already finished).
-        let eval = app.conversations.first { $0.id == id }?.lastGoalEvaluation
-        #expect(eval != nil)
-        #expect(eval?.criteria.count == 1)
+        // …and #191's clearGoal nils lastGoalEvaluation along with goalContract once completion
+        // finishes, so the snapshot this test used to find here (verifying, or graded if the
+        // detached grader already finished) is no longer observable post-hoc.
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.lastGoalEvaluation == nil)
+        #expect(conv?.goalContract == nil)
     }
 }
