@@ -319,7 +319,7 @@ struct ConversationSearchTests {
             try queue.close()
         }
 
-        // Opening runs the rest of the migrator against the v1+v2 database, i.e. just v3_fts_rowid.
+        // Opening runs the rest of the migrator against the v1+v2 database, i.e. just v4_fts_rowid.
         let store = try ConversationStore.onDisk(at: url)
         #expect(try store.indexCount(for: id) == 2)
         #expect(try store.searchConversations(query: "kubeconfig").count == 1)

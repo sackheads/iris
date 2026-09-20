@@ -172,4 +172,35 @@ struct ConversationStoreSelectionTests {
         #expect(u1 < u2)
         #expect(contents.filter { $0.contains("quarantine table") }.count == 1)
     }
+
+    /// #189: a repair write that fails must not fail the whole load — the healthy conversation
+    /// still loads, and the damaged one is reported by name rather than silently dropped.
+    @Test("a failed repair excludes only the damaged conversation and is surfaced as a system line")
+    func failedRepairSurfacesAsANotice() throws {
+        let store = try ConversationStore.inMemory()
+        let healthy = Conversation(id: UUID(), title: "healthy")
+        var hs = ChangeSet(); hs.add(.created)
+        var damaged = Conversation(id: UUID(), title: "damaged")
+        damaged.messages = [ChatMessage(role: .user, content: "d0"), ChatMessage(role: .agent, content: "d1")]
+        var ds = ChangeSet(); ds.add(.created); ds.add(.messagesAppended(from: 0))
+        try store.apply([ConversationWrite(id: healthy.id, snapshot: healthy, changes: hs),
+                         ConversationWrite(id: damaged.id, snapshot: damaged, changes: ds)])
+        try store.rawWrite("UPDATE messages SET payload = '{not json' WHERE conversationId = ? AND ordinal = 0",
+                           arguments: [damaged.id.uuidString])
+        let damagedId = damaged.id
+        store.failInjection = { $0 == damagedId }
+
+        let a = AppState(store: store)
+        #expect(a.conversations.map(\.title) == ["healthy"])
+        #expect(a.loadedRepairFailed == [damagedId])
+        let notice = a.conversations.first?.messages.first {
+            $0.role == .system && $0.content.contains("could not be written") && $0.content.contains("retried at the next launch")
+        }
+        #expect(notice != nil)
+
+        // Left entirely untouched on disk: the bad row is still there, nothing quarantined.
+        store.failInjection = nil
+        #expect(try store.counts(for: damagedId).messages == 2)
+        #expect(try store.quarantineCount(for: damagedId) == 0)
+    }
 }

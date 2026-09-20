@@ -73,6 +73,12 @@ struct SkippedRow: Sendable, Equatable {
 struct LoadResult: Sendable {
     var conversations: [Conversation]
     var skipped: [SkippedRow]
+    /// Conversations that had a quarantine repair to write, where the repair transaction itself
+    /// failed (#189) — e.g. a read-only database. They are excluded from `conversations` rather
+    /// than returned with their in-memory array compacted past ordinals the disk still has gaps
+    /// in, which would re-open the append-clobber bug #163's quarantine exists to prevent. Left
+    /// entirely untouched on disk, so the repair is retried at the next launch.
+    var repairFailed: [UUID] = []
 }
 
 /// A message/history row `loadAll` could not decode, captured with its raw bytes so it can be
@@ -83,7 +89,12 @@ struct LoadResult: Sendable {
 private struct QuarantineCandidate {
     let conversationId: UUID
     let table: String   // "messages" | "history"
-    let ordinal: Int
+    /// nil when the ordinal itself is what's unreadable (#189) — the row is then found and
+    /// deleted by `rowid` instead, and the quarantine row records `ordinal` as NULL.
+    let ordinal: Int?
+    /// Needed only to locate the row when `ordinal` is nil; the `messages`/`history` primary key
+    /// is `(conversationId, ordinal)`, so an unreadable ordinal leaves rowid as the only handle.
+    let rowid: Int64?
     let payload: Data?
     let reason: String
 }
@@ -135,7 +146,9 @@ final class ConversationStore: Sendable {
     /// (spec §3 retry-by-merge) can be exercised deterministically. `nil` (the default) never
     /// fails anything; nothing in the app sets this. Also consulted once (with a throwaway id) at
     /// the top of `importLegacy`'s transaction, so `LegacyConversationBlob`'s `.importFailed`
-    /// outcome can be exercised the same way.
+    /// outcome can be exercised the same way; and once per conversation at the top of `loadAll`'s
+    /// quarantine-repair transaction, so its failure handling (#189) can be exercised the same way
+    /// a real write failure (a read-only database, a full disk) cannot be triggered on demand.
     var failInjection: (@Sendable (UUID) -> Bool)? {
         get { failInjectionLock.withLock { _failInjection } }
         set { failInjectionLock.withLock { _failInjection = newValue } }
@@ -252,11 +265,19 @@ final class ConversationStore: Sendable {
                 try Self.indexMessage(m, conversationId: conversationId, ordinal: ordinal, rowid: rowid, db: db)
             }
         }
+        // Slice D3's audit trail (`Conversation.checkpointHistory`). A new nullable column rather
+        // than a rebuild: every existing row reads back as SQL NULL, which `loadAll` turns into
+        // `[]` — the same forward-compat rule invariant 1 imposes on the JSON codec.
+        m.registerMigration("v3_checkpoint_history") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "checkpointHistory", .text)
+            }
+        }
         // Keys `messages_fts` rows by the `messages` rowid instead of finding them by a
         // `(conversationId, ordinal)` scan over UNINDEXED columns (#201). The index is derived
         // data, so a full rebuild is safe and simplest: it also gives existing installs, which
         // built their v2 rows with FTS5's own auto-assigned rowids, a consistent keying.
-        m.registerMigration("v3_fts_rowid") { db in
+        m.registerMigration("v4_fts_rowid") { db in
             try db.execute(sql: "DELETE FROM messages_fts")
             let decoder = JSONDecoder()
             let cursor = try Row.fetchCursor(db, sql: "SELECT rowid, conversationId, ordinal, payload FROM messages")
@@ -270,13 +291,26 @@ final class ConversationStore: Sendable {
                 try Self.indexMessage(m, conversationId: conversationId, ordinal: ordinal, rowid: rowid, db: db)
             }
         }
-        // Slice D3's audit trail (`Conversation.checkpointHistory`). A new nullable column rather
-        // than a rebuild: every existing row reads back as SQL NULL, which `loadAll` turns into
-        // `[]` — the same forward-compat rule invariant 1 imposes on the JSON codec.
-        m.registerMigration("v3_checkpoint_history") { db in
-            try db.alter(table: "conversations") { t in
-                t.add(column: "checkpointHistory", .text)
+        // `quarantine.ordinal` was NOT NULL, but an unreadable ordinal (#189) has no valid ordinal
+        // to record — the row is found and deleted by rowid instead, and NULL is what the
+        // quarantine row honestly reports. SQLite has no ALTER to drop a NOT NULL constraint, so
+        // the table is rebuilt: renamed aside, recreated with the relaxed column, data copied back.
+        m.registerMigration("v5_quarantine_ordinal_nullable") { db in
+            try db.execute(sql: "ALTER TABLE quarantine RENAME TO quarantine_v1")
+            try db.create(table: "quarantine") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("conversationId", .text).notNull()
+                t.column("sourceTable", .text).notNull()
+                t.column("ordinal", .integer)
+                t.column("payload", .blob)
+                t.column("reason", .text).notNull()
+                t.column("quarantinedAt", .datetime).notNull()
             }
+            try db.execute(sql: """
+                INSERT INTO quarantine (id, conversationId, sourceTable, ordinal, payload, reason, quarantinedAt)
+                SELECT id, conversationId, sourceTable, ordinal, payload, reason, quarantinedAt FROM quarantine_v1
+                """)
+            try db.drop(table: "quarantine_v1")
         }
         return m
     }
@@ -567,11 +601,33 @@ final class ConversationStore: Sendable {
         return .text(s)
     }
 
+    /// The same trap as `readText`, for integer columns: GRDB's typed `Row` subscript
+    /// force-tries the SQLite→Swift conversion, so `row[column] as Int` *and* `row[column] as
+    /// Int?` both crash — rather than returning nil — when a `rawWrite` (or any other means) has
+    /// left a non-NULL, non-numeric value in the column (#189). `.null` and `.unconvertible` are
+    /// told apart because callers treat them differently: an absent `ordinal` is quarantine-worthy
+    /// damage the same as a garbled one, but a NULL `messageCountSinceReflection` is just an
+    /// unset counter defaulting to 0, while a *garbled* one is still worth a console warning.
+    private enum IntValue {
+        case null
+        case unconvertible
+        case value(Int)
+    }
+
+    private static func readInt(_ row: Row, _ column: String) -> IntValue {
+        let dbValue: DatabaseValue = row[column]
+        switch dbValue.storage {
+        case .null: return .null
+        case .int64(let v): return .value(Int(v))
+        default: return .unconvertible
+        }
+    }
+
     // MARK: Read
 
     func loadAll() throws -> LoadResult {
         let decoder = JSONDecoder()
-        let (result, candidates): (LoadResult, [QuarantineCandidate]) = try writer.read { db in
+        var (result, candidates): (LoadResult, [QuarantineCandidate]) = try writer.read { db in
             var out = LoadResult(conversations: [], skipped: [])
             var candidates: [QuarantineCandidate] = []
             let rows = try Row.fetchAll(db, sql: "SELECT * FROM conversations ORDER BY position")
@@ -601,6 +657,14 @@ final class ConversationStore: Sendable {
                 let goalContract = text("goalContract")
                 let subagentResult = text("subagentResult")
                 let checkpointHistory = text("checkpointHistory")
+                // `position` only orders the `SELECT` above and is never decoded into `Conversation`,
+                // but an unconvertible value is exactly the same class of damage as an unreadable
+                // text column, so it is checked the same way (#189).
+                switch Self.readInt(row, "position") {
+                case .null, .unconvertible:
+                    if unreadableColumn == nil { unreadableColumn = "position" }
+                case .value: break
+                }
                 if let column = unreadableColumn {
                     out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable \(column)"))
                     continue
@@ -610,8 +674,20 @@ final class ConversationStore: Sendable {
                 do {
                     c = Conversation(id: id, title: title ?? "Untitled", workspacePath: workspacePath)
                     c.activeGoal = activeGoal
-                    c.messageCountSinceReflection = row["messageCountSinceReflection"] ?? 0
-                    c.goalIterationCount = row["goalIterationCount"] ?? 0
+                    // Losing a whole conversation over a counter is disproportionate: NULL already
+                    // means 0 here, and a garbled value gets the same default plus a console
+                    // warning rather than quarantining the conversation (#189).
+                    func counter(_ column: String) -> Int {
+                        switch Self.readInt(row, column) {
+                        case .null: return 0
+                        case .value(let v): return v
+                        case .unconvertible:
+                            print("WARNING: unreadable \(column) for conversation \(id); defaulting to 0")
+                            return 0
+                        }
+                    }
+                    c.messageCountSinceReflection = counter("messageCountSinceReflection")
+                    c.goalIterationCount = counter("goalIterationCount")
                     c.mainAgentSandbox = sandbox.flatMap(SandboxPref.init(rawValue:))
                     c.tokenUsage = try tokenUsage.map { try decoder.decode(TokenUsage.self, from: Data($0.utf8)) } ?? TokenUsage()
                     if let s = goalContract { c.goalContract = try decoder.decode(GoalContract.self, from: Data(s.utf8)) }
@@ -639,38 +715,56 @@ final class ConversationStore: Sendable {
                 var totals: [String: Int] = ["messages": 0, "history": 0]
                 var failures: [String: Int] = ["messages": 0, "history": 0]
 
-                for r in try Row.fetchAll(db, sql: "SELECT ordinal, payload FROM messages WHERE conversationId = ? ORDER BY ordinal", arguments: [idString]) {
-                    let ordinal: Int? = r["ordinal"]
+                // `rowid` is selected alongside `ordinal`/`payload` so a row whose ordinal is
+                // itself unreadable can still be found and removed in the repair transaction
+                // below — its primary key, `(conversationId, ordinal)`, is exactly the column
+                // that's damaged (#189).
+                for r in try Row.fetchAll(db, sql: "SELECT rowid, ordinal, payload FROM messages WHERE conversationId = ? ORDER BY ordinal", arguments: [idString]) {
+                    let rowid: Int64? = r["rowid"]
                     let raw: Data? = r["payload"]
                     totals["messages", default: 0] += 1
-                    guard let raw else {
+                    switch Self.readInt(r, "ordinal") {
+                    case .null, .unconvertible:
                         failures["messages", default: 0] += 1
-                        localSkipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: ordinal, reason: "unreadable payload"))
-                        if let ordinal { localCandidates.append(QuarantineCandidate(conversationId: id, table: "messages", ordinal: ordinal, payload: nil, reason: "unreadable payload")) }
-                        continue
-                    }
-                    do { c.messages.append(try decoder.decode(ChatMessage.self, from: raw)) }
-                    catch {
-                        failures["messages", default: 0] += 1
-                        localSkipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: ordinal, reason: "\(error)"))
-                        if let ordinal { localCandidates.append(QuarantineCandidate(conversationId: id, table: "messages", ordinal: ordinal, payload: raw, reason: "\(error)")) }
+                        localSkipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: nil, reason: "unreadable ordinal"))
+                        localCandidates.append(QuarantineCandidate(conversationId: id, table: "messages", ordinal: nil, rowid: rowid, payload: raw, reason: "unreadable ordinal"))
+                    case .value(let ordinal):
+                        guard let raw else {
+                            failures["messages", default: 0] += 1
+                            localSkipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: ordinal, reason: "unreadable payload"))
+                            localCandidates.append(QuarantineCandidate(conversationId: id, table: "messages", ordinal: ordinal, rowid: rowid, payload: nil, reason: "unreadable payload"))
+                            continue
+                        }
+                        do { c.messages.append(try decoder.decode(ChatMessage.self, from: raw)) }
+                        catch {
+                            failures["messages", default: 0] += 1
+                            localSkipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: ordinal, reason: "\(error)"))
+                            localCandidates.append(QuarantineCandidate(conversationId: id, table: "messages", ordinal: ordinal, rowid: rowid, payload: raw, reason: "\(error)"))
+                        }
                     }
                 }
-                for r in try Row.fetchAll(db, sql: "SELECT ordinal, payload FROM history WHERE conversationId = ? ORDER BY ordinal", arguments: [idString]) {
-                    let ordinal: Int? = r["ordinal"]
+                for r in try Row.fetchAll(db, sql: "SELECT rowid, ordinal, payload FROM history WHERE conversationId = ? ORDER BY ordinal", arguments: [idString]) {
+                    let rowid: Int64? = r["rowid"]
                     let raw: Data? = r["payload"]
                     totals["history", default: 0] += 1
-                    guard let raw else {
+                    switch Self.readInt(r, "ordinal") {
+                    case .null, .unconvertible:
                         failures["history", default: 0] += 1
-                        localSkipped.append(SkippedRow(conversationId: id, table: "history", ordinal: ordinal, reason: "unreadable payload"))
-                        if let ordinal { localCandidates.append(QuarantineCandidate(conversationId: id, table: "history", ordinal: ordinal, payload: nil, reason: "unreadable payload")) }
-                        continue
-                    }
-                    do { c.history.append(try decoder.decode(Content.self, from: raw)) }
-                    catch {
-                        failures["history", default: 0] += 1
-                        localSkipped.append(SkippedRow(conversationId: id, table: "history", ordinal: ordinal, reason: "\(error)"))
-                        if let ordinal { localCandidates.append(QuarantineCandidate(conversationId: id, table: "history", ordinal: ordinal, payload: raw, reason: "\(error)")) }
+                        localSkipped.append(SkippedRow(conversationId: id, table: "history", ordinal: nil, reason: "unreadable ordinal"))
+                        localCandidates.append(QuarantineCandidate(conversationId: id, table: "history", ordinal: nil, rowid: rowid, payload: raw, reason: "unreadable ordinal"))
+                    case .value(let ordinal):
+                        guard let raw else {
+                            failures["history", default: 0] += 1
+                            localSkipped.append(SkippedRow(conversationId: id, table: "history", ordinal: ordinal, reason: "unreadable payload"))
+                            localCandidates.append(QuarantineCandidate(conversationId: id, table: "history", ordinal: ordinal, rowid: rowid, payload: nil, reason: "unreadable payload"))
+                            continue
+                        }
+                        do { c.history.append(try decoder.decode(Content.self, from: raw)) }
+                        catch {
+                            failures["history", default: 0] += 1
+                            localSkipped.append(SkippedRow(conversationId: id, table: "history", ordinal: ordinal, reason: "\(error)"))
+                            localCandidates.append(QuarantineCandidate(conversationId: id, table: "history", ordinal: ordinal, rowid: rowid, payload: raw, reason: "\(error)"))
+                        }
                     }
                 }
 
@@ -702,6 +796,7 @@ final class ConversationStore: Sendable {
         }
 
         guard !candidates.isEmpty else { return result }
+        let candidateConversationIds = Set(candidates.map(\.conversationId))
 
         // Repair inside one write transaction, only when there is something to repair: quarantine
         // the bad rows, then renumber what's left so ordinals stay contiguous 0..<n. Left as-is,
@@ -709,41 +804,61 @@ final class ConversationStore: Sendable {
         // disagree — the next append uses the compacted in-memory index as the ordinal, so it
         // `INSERT OR REPLACE`s the wrong row while the trailing-row `DELETE` drops a good one
         // (review finding, #163 round 1).
-        try writer.write { db in
-            let now = Date()
-            var grouped: [String: [QuarantineCandidate]] = [:]
-            for candidate in candidates {
-                grouped[candidate.conversationId.uuidString + "|" + candidate.table, default: []].append(candidate)
+        //
+        // A thrown error here rolls the whole transaction back — every group's quarantine and
+        // renumber together, not just the one that failed — so on failure every conversation that
+        // had a candidate is excluded and reported via `repairFailed` (#189); a conversation with
+        // nothing to repair was never touched by this transaction and is returned as-is.
+        do {
+            try writer.write { db in
+                let now = Date()
+                var grouped: [String: [QuarantineCandidate]] = [:]
+                for candidate in candidates {
+                    grouped[candidate.conversationId.uuidString + "|" + candidate.table, default: []].append(candidate)
+                }
+                for (_, group) in grouped {
+                    guard let first = group.first else { continue }
+                    let convIdString = first.conversationId.uuidString
+                    let table = first.table
+                    if self.failInjection?(first.conversationId) == true {
+                        throw InjectedWriteFailure()
+                    }
+                    for candidate in group {
+                        try db.execute(sql: """
+                            INSERT INTO quarantine (conversationId, sourceTable, ordinal, payload, reason, quarantinedAt)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            """, arguments: [convIdString, table, candidate.ordinal, candidate.payload, candidate.reason, now])
+                        // A normal candidate is found by its (conversationId, ordinal) primary key;
+                        // one whose ordinal is itself unreadable (#189) has no usable ordinal to
+                        // match on, so it is found and removed by rowid instead.
+                        if let ordinal = candidate.ordinal {
+                            try db.execute(sql: "DELETE FROM \(table) WHERE conversationId = ? AND ordinal = ?",
+                                           arguments: [convIdString, ordinal])
+                        } else if let rowid = candidate.rowid {
+                            try db.execute(sql: "DELETE FROM \(table) WHERE rowid = ?", arguments: [rowid])
+                        }
+                    }
+                    // Renumber the survivors to a contiguous 0..<n, preserving relative order.
+                    // Shifting by a large, out-of-range offset first avoids colliding with the
+                    // (conversationId, ordinal) primary key while rows are retargeted one at a time.
+                    try db.execute(sql: "UPDATE \(table) SET ordinal = ordinal + 1000000 WHERE conversationId = ?", arguments: [convIdString])
+                    let survivors = try Row.fetchAll(db, sql: "SELECT ordinal FROM \(table) WHERE conversationId = ? ORDER BY ordinal ASC", arguments: [convIdString])
+                    for (index, row) in survivors.enumerated() {
+                        let shifted: Int = row["ordinal"]
+                        try db.execute(sql: "UPDATE \(table) SET ordinal = ? WHERE conversationId = ? AND ordinal = ?", arguments: [index, convIdString, shifted])
+                    }
+                    // The index row itself is now correctly keyed (rowid is untouched by the plain
+                    // UPDATEs above, #201), but it still carries the pre-renumber `ordinal` as a
+                    // display column, and some index rows point at messages just quarantined and
+                    // deleted. Rebuild from the survivors so both are right (#177).
+                    if table == "messages" {
+                        try Self.rebuildIndex(conversationId: convIdString, db: db)
+                    }
+                }
             }
-            for (_, group) in grouped {
-                guard let first = group.first else { continue }
-                let convIdString = first.conversationId.uuidString
-                let table = first.table
-                for candidate in group {
-                    try db.execute(sql: """
-                        INSERT INTO quarantine (conversationId, sourceTable, ordinal, payload, reason, quarantinedAt)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        """, arguments: [convIdString, table, candidate.ordinal, candidate.payload, candidate.reason, now])
-                    try db.execute(sql: "DELETE FROM \(table) WHERE conversationId = ? AND ordinal = ?",
-                                   arguments: [convIdString, candidate.ordinal])
-                }
-                // Renumber the survivors to a contiguous 0..<n, preserving relative order. Shifting
-                // by a large, out-of-range offset first avoids colliding with the
-                // (conversationId, ordinal) primary key while rows are retargeted one at a time.
-                try db.execute(sql: "UPDATE \(table) SET ordinal = ordinal + 1000000 WHERE conversationId = ?", arguments: [convIdString])
-                let survivors = try Row.fetchAll(db, sql: "SELECT ordinal FROM \(table) WHERE conversationId = ? ORDER BY ordinal ASC", arguments: [convIdString])
-                for (index, row) in survivors.enumerated() {
-                    let shifted: Int = row["ordinal"]
-                    try db.execute(sql: "UPDATE \(table) SET ordinal = ? WHERE conversationId = ? AND ordinal = ?", arguments: [index, convIdString, shifted])
-                }
-                // The index row itself is now correctly keyed (rowid is untouched by the plain
-                // UPDATEs above, #201), but it still carries the pre-renumber `ordinal` as a
-                // display column, and some index rows point at messages just quarantined and
-                // deleted. Rebuild from the survivors so both are right (#177).
-                if table == "messages" {
-                    try Self.rebuildIndex(conversationId: convIdString, db: db)
-                }
-            }
+        } catch {
+            result.conversations.removeAll { candidateConversationIds.contains($0.id) }
+            result.repairFailed = candidateConversationIds.sorted { $0.uuidString < $1.uuidString }
         }
         return result
     }
@@ -759,6 +874,19 @@ final class ConversationStore: Sendable {
     func quarantineCount(for id: UUID) throws -> Int {
         try writer.read { db in
             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM quarantine WHERE conversationId = ?", arguments: [id.uuidString]) ?? 0
+        }
+    }
+
+    /// Test support: the `(sourceTable, ordinal, reason)` of every quarantined row for this
+    /// conversation. `ordinal` is nil for #189's "unreadable ordinal" case — proves the
+    /// `v4_quarantine_ordinal_nullable` migration actually relaxed the column, since a still-NOT
+    /// NULL column would have failed the `INSERT` that put the row here in the first place.
+    func quarantinedRows(for id: UUID) throws -> [(table: String, ordinal: Int?, reason: String)] {
+        try writer.read { db in
+            try Row.fetchAll(db, sql: "SELECT sourceTable, ordinal, reason FROM quarantine WHERE conversationId = ?",
+                             arguments: [id.uuidString]).map {
+                (table: Self.readText($0, "sourceTable") ?? "", ordinal: $0["ordinal"], reason: Self.readText($0, "reason") ?? "")
+            }
         }
     }
 
