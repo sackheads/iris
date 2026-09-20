@@ -21,6 +21,17 @@ struct ChatView: View {
     /// whenever the selection is archived (see the group below), so this alone is "did the user
     /// manually toggle it" rather than "is it currently expanded".
     @State private var archivedExpanded = false
+
+    /// #182 §9: the Archived group is expanded when the user opened it, and *also* whenever the
+    /// selected conversation lives in it — a search reveal, a delete re-point, or the launch
+    /// fallback can all select an archived row, and a selected row nobody can see is the hazard
+    /// the same-list design exists to dissolve. Pulled out of the binding so the rule is
+    /// testable; the binding itself is not.
+    static func archivedGroupIsExpanded(userToggle: Bool, archived: [Conversation],
+                                        selection: UUID?) -> Bool {
+        userToggle || archived.contains { $0.id == selection }
+    }
+
     @State private var showSetupWizard = false
     /// Sidebar conversation search (#183). `sidebarSearchGroups` is republished by the debounced
     /// `.task(id: sidebarQuery)` below rather than computed inline, because the store read it
@@ -59,7 +70,9 @@ struct ChatView: View {
                             // launch fallback can never leave a selected row invisible (#182 §9).
                             DisclosureGroup(isExpanded: Binding(
                                 get: {
-                                    archivedExpanded || archived.contains { $0.id == state.selectedConversationId }
+                                    Self.archivedGroupIsExpanded(userToggle: archivedExpanded,
+                                                                 archived: archived,
+                                                                 selection: state.selectedConversationId)
                                 },
                                 set: { archivedExpanded = $0 }
                             )) {
