@@ -111,6 +111,16 @@ final class WriteStandDown: Sendable {
     var isSignalled: Bool { lock.withLock { flag } }
 }
 
+/// One message matching a conversation search, with enough context for the model or the user to
+/// know which chat it came from (#177).
+struct ConversationHit: Sendable, Equatable {
+    let conversationId: UUID
+    let title: String
+    let role: ChatRole
+    let ordinal: Int
+    let snippet: String
+}
+
 /// Per-conversation SQLite persistence (spec §2, §4, §5). One metadata row per conversation,
 /// one JSON row per message and per history entry. Every write is keyed by ordinal or id, so
 /// applying the same batch twice is harmless.
@@ -159,7 +169,9 @@ final class ConversationStore: Sendable {
         return c
     }
 
-    private static var migrator: DatabaseMigrator {
+    /// Internal, not private, so a test can build a v1-era database (`migrate(_:upTo:)`) and prove
+    /// the v2 backfill runs against it.
+    static var migrator: DatabaseMigrator {
         var m = DatabaseMigrator()
         m.registerMigration("v1_conversation_store") { db in
             try db.create(table: "conversations") { t in
@@ -213,7 +225,76 @@ final class ConversationStore: Sendable {
                 t.column("value", .text).notNull()
             }
         }
+        // Cross-conversation full-text search (#177). A standalone FTS5 table, deliberately NOT
+        // `synchronize(withTable: "messages")`: the indexed text is a field *inside* the message
+        // payload JSON, and only two of the four roles are indexed at all, so the shadow triggers
+        // GRDB would install cannot express what belongs in the index. Every write path in
+        // `applyOne` maintains it explicitly, in the same transaction as the row it mirrors.
+        m.registerMigration("v2_conversation_search") { db in
+            try db.create(virtualTable: "messages_fts", using: FTS5()) { t in
+                t.column("conversationId").notIndexed()
+                t.column("ordinal").notIndexed()
+                t.column("role").notIndexed()
+                t.column("content")
+            }
+            let decoder = JSONDecoder()
+            // Streamed, not `fetchAll`: this runs once over every message the user has ever sent,
+            // and materializing all of them — payload text included — would spike memory on a
+            // large store at the worst moment, during a migration.
+            let cursor = try Row.fetchCursor(db, sql: "SELECT conversationId, ordinal, payload FROM messages")
+            while let row = try cursor.next() {
+                guard let conversationId = Self.readText(row, "conversationId"),
+                      let ordinal: Int = row["ordinal"],
+                      let payload: Data = row["payload"],
+                      let m = try? decoder.decode(ChatMessage.self, from: payload)
+                else { continue }   // an undecodable row is #163's quarantine concern, not ours
+                try Self.indexMessage(m, conversationId: conversationId, ordinal: ordinal, db: db)
+            }
+        }
         return m
+    }
+
+    // MARK: Search index (#177)
+
+    /// The roles whose text is worth searching: what the user and Iris actually said. `system`
+    /// (tool-call pills, launch notices) and `command` (deterministic slash output) are harness
+    /// chatter that would drown the record of the conversation.
+    private static let indexedRoles: Set<ChatRole> = [.user, .agent]
+
+    private static func indexMessage(_ m: ChatMessage, conversationId: String, ordinal: Int, db: Database) throws {
+        guard indexedRoles.contains(m.role) else { return }
+        try db.execute(sql: "INSERT INTO messages_fts (conversationId, ordinal, role, content) VALUES (?, ?, ?, ?)",
+                       arguments: [conversationId, ordinal, m.role.rawValue, m.content])
+    }
+
+    private static func deleteIndex(conversationId: String, fromOrdinal: Int?, db: Database) throws {
+        if let fromOrdinal {
+            try db.execute(sql: "DELETE FROM messages_fts WHERE conversationId = ? AND ordinal >= ?",
+                           arguments: [conversationId, fromOrdinal])
+        } else {
+            try db.execute(sql: "DELETE FROM messages_fts WHERE conversationId = ?", arguments: [conversationId])
+        }
+    }
+
+    /// Rebuilds one conversation's index rows from what is currently in `messages`. Used by the
+    /// load-time quarantine repair, which renumbers the surviving rows underneath the index.
+    private static func rebuildIndex(conversationId: String, db: Database) throws {
+        try deleteIndex(conversationId: conversationId, fromOrdinal: nil, db: db)
+        let decoder = JSONDecoder()
+        for row in try Row.fetchAll(db, sql: "SELECT ordinal, payload FROM messages WHERE conversationId = ? ORDER BY ordinal",
+                                    arguments: [conversationId]) {
+            guard let ordinal: Int = row["ordinal"], let payload: Data = row["payload"],
+                  let m = try? decoder.decode(ChatMessage.self, from: payload) else { continue }
+            try indexMessage(m, conversationId: conversationId, ordinal: ordinal, db: db)
+        }
+    }
+
+    /// Test support: how many index rows this conversation has.
+    func indexCount(for id: UUID) throws -> Int {
+        try writer.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM messages_fts WHERE conversationId = ?",
+                             arguments: [id.uuidString]) ?? 0
+        }
     }
 
     /// Set once the legacy blob import has run to completion, successful or empty.
@@ -263,6 +344,9 @@ final class ConversationStore: Sendable {
     private static func applyOne(_ w: ConversationWrite, db: Database, encoder: JSONEncoder) throws {
         if w.changes.deleted {
             try db.execute(sql: "DELETE FROM conversations WHERE id = ?", arguments: [w.id.uuidString])
+            // `messages` goes with the conversation by foreign key; a virtual table cannot carry
+            // one, so the search index is cleared by hand (#177).
+            try Self.deleteIndex(conversationId: w.id.uuidString, fromOrdinal: nil, db: db)
             return
         }
         guard let c = w.snapshot else { return }
@@ -272,6 +356,7 @@ final class ConversationStore: Sendable {
         }
         if w.changes.messagesReplaced {
             try db.execute(sql: "DELETE FROM messages WHERE conversationId = ?", arguments: [c.id.uuidString])
+            try Self.deleteIndex(conversationId: c.id.uuidString, fromOrdinal: nil, db: db)
             try Self.insertMessages(c, from: 0, db: db, encoder: encoder)
         } else {
             if let from = w.changes.messagesFrom { try Self.insertMessages(c, from: from, db: db, encoder: encoder) }
@@ -279,6 +364,16 @@ final class ConversationStore: Sendable {
                 guard let m = c.messages.first(where: { $0.id == id }) else { continue }
                 try db.execute(sql: "UPDATE messages SET payload = ? WHERE conversationId = ? AND id = ?",
                                arguments: [try Self.json(m, encoder), c.id.uuidString, id.uuidString])
+                // The index is keyed by ordinal, which an id-keyed edit does not carry: read it
+                // back from the row just written (#177). The UPDATE's WHERE is on UNINDEXED
+                // columns, so it scans the whole index — acceptable only because an in-place edit
+                // is rare (a streamed reply's final text, a tool-pill rewrite) and the append path
+                // no longer pays it. Keying the index by the `messages` rowid is the follow-up.
+                if let ordinal = try Int.fetchOne(db, sql: "SELECT ordinal FROM messages WHERE conversationId = ? AND id = ?",
+                                                  arguments: [c.id.uuidString, id.uuidString]) {
+                    try db.execute(sql: "UPDATE messages_fts SET content = ? WHERE conversationId = ? AND ordinal = ?",
+                                   arguments: [m.content, c.id.uuidString, ordinal])
+                }
             }
         }
         if w.changes.historyReplaced {
@@ -319,11 +414,31 @@ final class ConversationStore: Sendable {
     }
 
     private static func insertMessages(_ c: Conversation, from: Int, db: Database, encoder: JSONEncoder) throws {
+        // The search index mirrors exactly what this method writes, so it is truncated from the
+        // same ordinal and refilled alongside the rows (#177). `INSERT OR REPLACE` has no
+        // equivalent on a virtual table, hence delete-then-insert. The truncating delete is taken
+        // only when there is something at or past `from`: its WHERE is on the index's UNINDEXED
+        // columns, which costs a scan of every indexed message in the database, and a plain
+        // append — the hot path, once per message — has nothing there to remove. The count that
+        // decides it rides the (conversationId, ordinal) primary key instead. `messagesReplaced`
+        // clears the index itself, before it empties `messages` out from under this check.
+        //
+        // Both are taken from `min(from, count)`, never `from`: the row truncation below deletes
+        // everything at or past `count`, so a `from` beyond the end of the array — a coalesced
+        // ChangeSet against a snapshot that shrank — would otherwise check and clear a range
+        // starting past the rows it is removing, and leave orphaned index entries behind.
+        let truncateFrom = min(from, c.messages.count)
+        let staleRows = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM messages WHERE conversationId = ? AND ordinal >= ?",
+                                         arguments: [c.id.uuidString, truncateFrom]) ?? 0
+        if staleRows > 0 {
+            try deleteIndex(conversationId: c.id.uuidString, fromOrdinal: truncateFrom, db: db)
+        }
         if from < c.messages.count {
             for ordinal in from..<c.messages.count {
                 let m = c.messages[ordinal]
                 try db.execute(sql: "INSERT OR REPLACE INTO messages (conversationId, ordinal, id, payload) VALUES (?, ?, ?, ?)",
                                arguments: [c.id.uuidString, ordinal, m.id.uuidString, try json(m, encoder)])
+                try indexMessage(m, conversationId: c.id.uuidString, ordinal: ordinal, db: db)
             }
         }
         // A snapshot shorter than what's on disk (e.g. history/messages cleared and re-appended
@@ -530,6 +645,11 @@ final class ConversationStore: Sendable {
                     let shifted: Int = row["ordinal"]
                     try db.execute(sql: "UPDATE \(table) SET ordinal = ? WHERE conversationId = ? AND ordinal = ?", arguments: [index, convIdString, shifted])
                 }
+                // The index is keyed by ordinal too, so renumbering underneath it would leave it
+                // pointing at rows that moved. Rebuild it from the survivors (#177).
+                if table == "messages" {
+                    try Self.rebuildIndex(conversationId: convIdString, db: db)
+                }
             }
         }
         return result
@@ -565,6 +685,50 @@ final class ConversationStore: Sendable {
             }
             return out
         }
+    }
+
+    /// Full-text search across every persisted conversation's user and agent messages. Ranked by
+    /// bm25 (best match first), ties broken by the conversation's `updatedAt` so the more recent
+    /// chat wins. An empty or all-punctuation query matches nothing: the fact store answers a
+    /// blank query with "the most recent facts", but there is no equivalent here — "the most
+    /// recent messages" are the ones already in context.
+    func searchConversations(query: String, limit: Int = 10) throws -> [ConversationHit] {
+        let sanitized = Self.sanitizeFTSQuery(query.trimmingCharacters(in: .whitespacesAndNewlines))
+        // FTS5Pattern, not FTS3Pattern: the pattern is tokenized by the same unicode61 tokenizer
+        // that built the index, so a query for "Café" finds the row indexed as "cafe". The FTS3
+        // tokenizer folds ASCII case only and keeps diacritics, which silently missed those rows.
+        guard !sanitized.trimmingCharacters(in: .whitespaces).isEmpty,
+              let pattern = FTS5Pattern(matchingAnyTokenIn: sanitized) else { return [] }
+        return try writer.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT messages_fts.conversationId AS cid, messages_fts.ordinal AS ord,
+                       messages_fts.role AS role, conversations.title AS title,
+                       snippet(messages_fts, 3, '', '', '\u{2026}', 12) AS snippet
+                FROM messages_fts
+                JOIN conversations ON conversations.id = messages_fts.conversationId
+                WHERE messages_fts MATCH ?
+                ORDER BY bm25(messages_fts), conversations.updatedAt DESC
+                LIMIT ?
+                """, arguments: [pattern, limit])
+            return rows.compactMap { row in
+                guard let idString = Self.readText(row, "cid"), let id = UUID(uuidString: idString),
+                      let ordinal: Int = row["ord"],
+                      let role = Self.readText(row, "role").flatMap(ChatRole.init(rawValue:))
+                else { return nil }
+                return ConversationHit(conversationId: id,
+                                       title: Self.readText(row, "title") ?? "Untitled",
+                                       role: role,
+                                       ordinal: ordinal,
+                                       snippet: Self.readText(row, "snippet") ?? "")
+            }
+        }
+    }
+
+    /// Same rule as the fact store's: strip everything that is not alphanumeric or whitespace, so
+    /// no user text can be read as FTS5 query syntax.
+    private static func sanitizeFTSQuery(_ query: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(.whitespaces)
+        return String(String.UnicodeScalarView(query.unicodeScalars.filter { allowed.contains($0) }))
     }
 
     /// Tests corrupt rows through this; nothing in the app calls it.
