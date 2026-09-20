@@ -16,6 +16,17 @@ struct SettingsView: View {
     @State private var isTestingVibecopModel = false
     @State private var tier2TestStatus: String?
     @State private var tier3TestStatus: String?
+
+    // #206 "Test Models" — probes every configured primary-provider tier at once.
+    @State private var isTestingModels = false
+    @State private var modelTestTargets: [(label: String, model: String)] = []
+    @State private var modelTestResultsByLabel: [String: ModelProbeResult] = [:]
+
+    // #207 "List Available Models…" — what the configured account can reach.
+    @State private var showModelListSheet = false
+    @State private var isListingModels = false
+    @State private var modelListResults: [ModelInfo] = []
+    @State private var modelListError: String?
     
     // Ollama model discovery state
     @State private var ollamaDaemonRunning: Bool? = nil  // nil = unchecked
@@ -133,6 +144,8 @@ struct SettingsView: View {
                         TextField("Hard Subagent Model", text: $config.openaiModelHard)
                             .help("Used for complex reasoning and evaluation.")
                     }
+
+                    modelToolsView()
                 }
                 .padding(.bottom)
 
@@ -159,7 +172,18 @@ struct SettingsView: View {
             .tabItem {
                 Label("Models", systemImage: "cpu")
             }
-            
+            .sheet(isPresented: $showModelListSheet) {
+                ModelListSheet(
+                    config: config,
+                    provider: LLMProvider(rawValue: config.primaryProvider) ?? .gemini,
+                    isLoading: isListingModels,
+                    error: modelListError,
+                    models: modelListResults,
+                    onClose: { showModelListSheet = false },
+                    onRetry: { fetchModelList() }
+                )
+            }
+
             // MARK: - Vibecop Tab
             Form {
                 Section(header: Text("Vibecop Guardian").font(.headline)) {
@@ -1014,6 +1038,303 @@ struct SettingsView: View {
                 vibecopTestStatus = "❌ Failed: \(error.localizedDescription)"
             }
             isTestingVibecopModel = false
+        }
+    }
+
+    // MARK: - #206 "Test Models" / #207 "List Available Models…"
+
+    /// The primary provider's current credentials, read once per run so a run reflects the
+    /// settings at the moment the button was pressed rather than racing an in-flight edit.
+    private func currentProviderCredentials() -> (provider: LLMProvider, apiKey: String, baseURL: String, geminiADC: Bool) {
+        let provider = LLMProvider(rawValue: config.primaryProvider) ?? .gemini
+        switch provider {
+        case .anthropic:
+            return (provider, config.anthropicAPIKey, config.anthropicBaseURL, false)
+        case .openai:
+            return (provider, config.openAIAPIKey, config.openAIBaseURL, false)
+        case .gemini:
+            return (provider, config.geminiAPIKey, config.geminiBaseURL, config.geminiAuthMode == GeminiAuthMode.adc.rawValue)
+        }
+    }
+
+    @ViewBuilder
+    private func modelToolsView() -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Button(isTestingModels ? "Testing…" : "Test Models") { runModelTests() }
+                    .disabled(isTestingModels || isListingModels || !config.isConfigured)
+                if isTestingModels {
+                    ProgressView().scaleEffect(0.6)
+                }
+                Button("List Available Models…") {
+                    showModelListSheet = true
+                    fetchModelList()
+                }
+                .disabled(isTestingModels || isListingModels || !config.isConfigured)
+            }
+
+            if !modelTestTargets.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(modelTestTargets.enumerated()), id: \.offset) { _, target in
+                        modelTestRow(target: target)
+                    }
+                }
+                .padding(.top, 4)
+            }
+        }
+        .padding(.top, 4)
+        .help("Tests every model currently configured for the primary provider — Easy, Primary/Medium, Hard, and Vision when the auxiliary vision engine is set to Cloud.")
+    }
+
+    @ViewBuilder
+    private func modelTestRow(target: (label: String, model: String)) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(target.label)
+                .font(.caption)
+                .frame(width: 110, alignment: .leading)
+            Text(target.model)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .textSelection(.enabled)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            if let result = modelTestResultsByLabel[target.label] {
+                switch result.outcome {
+                case .ok(let latencyMs):
+                    Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                    Text("\(latencyMs) ms").font(.caption).foregroundColor(.secondary)
+                case .failed(let message):
+                    Image(systemName: "xmark.octagon.fill").foregroundColor(.red)
+                    Text(message).font(.caption).foregroundColor(.red).textSelection(.enabled)
+                }
+            } else {
+                ProgressView().scaleEffect(0.5)
+            }
+        }
+    }
+
+    /// #206: probes every configured tier of the primary provider concurrently. A model shared by
+    /// two or more tiers is probed once (`ModelCatalog.probeTargets`); Gemini in ADC mode reads the
+    /// token and quota project here, once, rather than inside `ModelCatalog`.
+    private func runModelTests() {
+        guard !isTestingModels else { return }
+        let (provider, apiKey, baseURL, geminiADC) = currentProviderCredentials()
+        let visionModel = config.auxiliaryVisionEngine == "cloud" ? config.auxiliaryVisionModel : nil
+        let targets = ModelCatalog.probeTargets(
+            easy: config.getModel(for: .easy),
+            medium: config.getModel(for: .medium),
+            hard: config.getModel(for: .hard),
+            vision: visionModel
+        )
+        guard !targets.isEmpty else { return }
+
+        isTestingModels = true
+        modelTestTargets = targets
+        modelTestResultsByLabel = [:]
+
+        Task {
+            let adcToken: String?
+            let quotaProject: String?
+            if geminiADC {
+                quotaProject = await ADCCredentialManager.shared.getQuotaProject()
+                adcToken = try? await ADCCredentialManager.shared.getAccessToken()
+            } else {
+                adcToken = nil
+                quotaProject = nil
+            }
+            let catalog = ModelCatalog(provider: provider, apiKey: apiKey, baseURL: baseURL, geminiADC: geminiADC)
+            await withTaskGroup(of: ModelProbeResult.self) { group in
+                for target in targets {
+                    group.addTask {
+                        await catalog.probe(model: target.model, label: target.label, adcToken: adcToken, quotaProject: quotaProject)
+                    }
+                }
+                for await result in group {
+                    modelTestResultsByLabel[result.label] = result
+                }
+            }
+            isTestingModels = false
+        }
+    }
+
+    /// #207: lists every model the configured account can reach.
+    private func fetchModelList() {
+        guard !isListingModels else { return }
+        let (provider, apiKey, baseURL, geminiADC) = currentProviderCredentials()
+
+        isListingModels = true
+        modelListError = nil
+        modelListResults = []
+
+        Task {
+            var adcToken: String?
+            var quotaProject: String?
+            if geminiADC {
+                quotaProject = await ADCCredentialManager.shared.getQuotaProject()
+                adcToken = try? await ADCCredentialManager.shared.getAccessToken()
+            }
+            let catalog = ModelCatalog(provider: provider, apiKey: apiKey, baseURL: baseURL, geminiADC: geminiADC)
+            do {
+                modelListResults = try await catalog.listModels(adcToken: adcToken, quotaProject: quotaProject)
+            } catch {
+                modelListError = error.localizedDescription
+            }
+            isListingModels = false
+        }
+    }
+}
+
+/// #207's "List Available Models…" sheet: every model the account can reach, searchable, with a
+/// per-row Copy and a "Use as" menu that assigns the id straight into a tier field of the
+/// CURRENT primary provider (the amendment to #207). `config` is the same `ConfigManager` instance
+/// the Models tab already holds — this view never reaches for `ConfigManager.shared` itself.
+private struct ModelListSheet: View {
+    let config: ConfigManager
+    let provider: LLMProvider
+    let isLoading: Bool
+    let error: String?
+    let models: [ModelInfo]
+    let onClose: () -> Void
+    let onRetry: () -> Void
+
+    @State private var searchText = ""
+    @State private var copiedId: String?
+    @State private var confirmations: [String: String] = [:]
+
+    private var filtered: [ModelInfo] {
+        guard !searchText.isEmpty else { return models }
+        return models.filter {
+            $0.id.localizedCaseInsensitiveContains(searchText)
+                || ($0.displayName?.localizedCaseInsensitiveContains(searchText) ?? false)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if isLoading {
+                    ProgressView("Listing available models…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let error {
+                    VStack(spacing: 12) {
+                        Text(error)
+                            .font(.callout)
+                            .foregroundColor(.red)
+                            .textSelection(.enabled)
+                            .multilineTextAlignment(.center)
+                            .padding()
+                        Button("Retry", action: onRetry)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List(filtered) { model in
+                        modelRow(model)
+                    }
+                    .safeAreaInset(edge: .bottom) {
+                        HStack {
+                            Text("\(filtered.count) of \(models.count) models")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 6)
+                        .background(.bar)
+                    }
+                }
+            }
+            .navigationTitle("Available Models")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close", action: onClose)
+                }
+            }
+            .searchable(text: $searchText, prompt: "Filter models")
+        }
+        .frame(minWidth: 480, minHeight: 480)
+    }
+
+    @ViewBuilder
+    private func modelRow(_ model: ModelInfo) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.id)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                if let displayName = model.displayName, !displayName.isEmpty {
+                    Text(displayName)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            Spacer()
+
+            let assigned = assignedTierNames(for: model.id)
+            if !assigned.isEmpty {
+                Text(assigned.joined(separator: ", "))
+                    .font(.caption2)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.secondary.opacity(0.15))
+                    .clipShape(Capsule())
+            }
+
+            if let confirmation = confirmations[model.id] {
+                Text(confirmation)
+                    .font(.caption)
+                    .foregroundColor(.green)
+            }
+
+            Menu {
+                Button(ModelTierField.easy.label) { assign(.easy, model) }
+                Button(ModelTierField.medium.label) { assign(.medium, model) }
+                Button(ModelTierField.hard.label) { assign(.hard, model) }
+                if config.auxiliaryVisionEngine == "cloud" {
+                    Button(ModelTierField.vision.label) { assign(.vision, model) }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 22)
+            .help("Use as…")
+
+            Button(copiedId == model.id ? "Copied" : "Copy") { copy(model.id) }
+                .buttonStyle(.link)
+                .font(.caption)
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// The tier short names of the CURRENT provider already pointing at `modelId`, so a row shows
+    /// where it is already assigned before the user picks another slot for it.
+    private func assignedTierNames(for modelId: String) -> [String] {
+        var tiers: [ModelTierField] = [.easy, .medium, .hard]
+        if config.auxiliaryVisionEngine == "cloud" { tiers.append(.vision) }
+        return tiers.filter { config[keyPath: ModelTierField.keyPath(provider: provider, tier: $0)] == modelId }
+            .map(\.shortLabel)
+    }
+
+    /// Writes `model.id` into the tier field for `tier` on the current provider and shows a
+    /// transient confirmation — the sheet stays open so several tiers can be assigned in one visit.
+    private func assign(_ tier: ModelTierField, _ model: ModelInfo) {
+        config[keyPath: ModelTierField.keyPath(provider: provider, tier: tier)] = model.id
+        let label = "Set as \(tier.shortLabel)"
+        confirmations[model.id] = label
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if confirmations[model.id] == label { confirmations[model.id] = nil }
+        }
+    }
+
+    private func copy(_ modelId: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(modelId, forType: .string)
+        copiedId = modelId
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if copiedId == modelId { copiedId = nil }
         }
     }
 }
