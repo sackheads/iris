@@ -649,6 +649,9 @@ class AppState {
         } else if trimmed == "/facts" || trimmed.hasPrefix("/facts ") {
             handleFactsCommand(trimmed, convId: convId)
             return
+        } else if trimmed == "/search" || trimmed.hasPrefix("/search ") {
+            handleSearchCommand(trimmed, convId: convId)
+            return
         } else if trimmed == "/tokens" || trimmed == "/stats" {
             handleTokensCommand(convId: convId)
             return
@@ -1834,6 +1837,22 @@ class AppState {
                 : "**Recent Facts in FactStore (\(facts.count)):**\n\n" + facts.map(Self.factLine).joined(separator: "\n")
             emitCommandOutput(body, format: .markdown, to: convId)
         }
+    }
+
+    /// `/search <query>`: full-text search across every saved conversation (#177). Deterministic
+    /// and model-free — the same index `search_memory scope=conversations` reads.
+    private func handleSearchCommand(_ trimmed: String, convId: UUID) {
+        let query = String(trimmed.dropFirst("/search".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            emitCommandOutput("Usage: `/search <query>`", format: .markdown, to: convId)
+            return
+        }
+        let hits = (try? store.searchConversations(query: query, limit: 10)) ?? []
+        let body = hits.isEmpty
+            ? "No conversations matching '\(query)'."
+            : "**Conversations matching '\(query)':**\n\n"
+                + hits.map { "**\($0.title)** \u{2014} \($0.role.rawValue): \($0.snippet)" }.joined(separator: "\n")
+        emitCommandOutput(body, format: .markdown, to: convId)
     }
 
     /// One `/facts` row. The id is shown because the model and the user both need it to call

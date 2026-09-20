@@ -494,7 +494,7 @@ actor IrisEngine {
         if !facts.isEmpty {
         toolsList.append(FunctionDeclaration(
             name: "manage_fact",
-            description: "Correct the fact store when the user says a remembered fact is wrong, outdated, or replaced, or when a retrieved fact proved right or wrong: retract, supersede (with by_fact_id), restore, or rate it helpful/unhelpful. Fact ids are the bracketed ids in your Mid-Term Fact Store Memory block and in search_memory results.",
+            description: "Correct the fact store when the user says a remembered fact is wrong, outdated, or replaced, or when a retrieved fact proved right or wrong: retract, supersede (with by_fact_id), restore, or rate it helpful/unhelpful. Fact ids are the bracketed ids in your Mid-Term Fact Store Memory block and in the facts results of search_memory (its conversations scope returns conversation titles, not fact ids).",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -546,11 +546,12 @@ actor IrisEngine {
         }
         toolsList.append(FunctionDeclaration(
             name: "search_memory",
-            description: "Search past conversations in the memory store only when the user refers to something not present in the current context.",
+            description: "Search Iris's memory. scope facts (default) searches saved facts; conversations searches what was said in past conversations; all searches both. Use it only when the user refers to something not present in the current context.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
-                    "query": Schema(type: "STRING", description: "The query string to search for.")
+                    "query": Schema(type: "STRING", description: "The query string to search for."),
+                    "scope": Schema(type: "STRING", description: "facts (default) | conversations | all")
                 ],
                 required: ["query"]
             )
@@ -1197,12 +1198,34 @@ actor IrisEngine {
                                 factId: functionCall.args["fact_id"]?.stringValue,
                                 byFactId: functionCall.args["by_fact_id"]?.stringValue)
         } else if functionCall.name == "search_memory", let query = functionCall.args["query"]?.stringValue {
-            let facts = (try? factStore.search(query: query)) ?? []
-            if facts.isEmpty {
-                result = "No relevant facts found."
-            } else {
-                result = facts.map { "- [\($0.id)] \($0.content)" }.joined(separator: "\n")
+            // One tool, two stores (#177). An unrecognised scope falls back to facts — the
+            // pre-#177 behaviour — rather than erroring at the model.
+            let requested = (functionCall.args["scope"]?.stringValue ?? "facts").lowercased()
+            let scope = ["conversations", "all"].contains(requested) ? requested : "facts"
+            var blocks: [String] = []
+            if scope != "conversations" {
+                let facts = (try? factStore.search(query: query)) ?? []
+                let body = facts.isEmpty
+                    ? "No relevant facts found."
+                    : facts.map { "- [\($0.id)] \($0.content)" }.joined(separator: "\n")
+                blocks.append(scope == "all" ? "Facts:\n\(body)" : body)
             }
+            if scope != "facts" {
+                // Through AppState's store, not a global: the engine already holds the one the
+                // app is actually persisting to, and tests inject their own.
+                let store = await MainActor.run { localState?.store }
+                let body: String
+                if let store {
+                    let hits = (try? store.searchConversations(query: query)) ?? []
+                    body = hits.isEmpty
+                        ? "No matching conversations."
+                        : hits.map { "- [\($0.title), \($0.role.rawValue)] \($0.snippet)" }.joined(separator: "\n")
+                } else {
+                    body = "Conversation search is unavailable."
+                }
+                blocks.append(scope == "all" ? "Conversations:\n\(body)" : body)
+            }
+            result = blocks.joined(separator: "\n\n")
         } else if functionCall.name == "update_user_profile", let content = functionCall.args["content"]?.stringValue {
             MemoryManager.shared.updateUserProfile(content: content)
             result = "User profile updated."
