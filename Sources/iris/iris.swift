@@ -118,7 +118,12 @@ actor IrisEngine {
         let localState = state
         let targetId = await MainActor.run { conversationId ?? localState?.selectedConversationId }
         guard let activeId = targetId else { return }
-        
+
+        // #182 §6.2: every non-user arrival lands here — the scheduler, subagent post-backs, and
+        // the watcher (which passes no id and so targets whatever is selected). Stating the rule
+        // at this choke point covers all of them and cannot go stale when a fourth is added.
+        await MainActor.run { localState?.unarchiveConversation(activeId) }
+
         // Sanitize incoming system events (especially those from subagents) to prevent injection
         let structuralSafeEvent = PromptInjectionGuard.sanitizeUntrustedInput(message)
         let safeMessage = await InjectionGuard.sanitize(structuralSafeEvent, contextTag: "system_event_\(source)", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)

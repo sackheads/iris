@@ -858,6 +858,10 @@ class AppState {
             return
         }
 
+        // #182 §6.2: typing into an archived conversation is how the user says they want it back.
+        // Deliberately not at the top of the method: `/tokens` and friends start no turn.
+        unarchiveConversation(convId)
+
         appendMessage(role: .user, content: messageContent, attachments: attachments, to: convId)
 
         // A turn is already running on this conversation: the message steers it (text) or
