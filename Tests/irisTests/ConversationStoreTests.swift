@@ -43,6 +43,10 @@ struct ConversationStoreTests {
         var other = ChangeSet(); other.add(.messagesAppended(from: 1)); other.add(.deleted)
         s.merge(other)
         #expect(s.messagesFrom == 1 && s.deleted)
+        // A merged-in replace absorbs any pending append on either side.
+        var replaced = ChangeSet(); replaced.add(.messagesReplaced)
+        s.merge(replaced)
+        #expect(s.messagesReplaced && s.messagesFrom == nil)
     }
 
     @Test("a conversation round-trips through the store with every stored field")
@@ -131,6 +135,8 @@ struct ConversationStoreTests {
         let d = sample(title: "d")
         try store.apply([created(d)])
         #expect(try store.loadAll().conversations.map(\.title) == ["a", "c", "d"])
+        let positions = try store.positions()
+        #expect(Set([positions[a.id], positions[c.id], positions[d.id]].compactMap { $0 }).count == 3)
     }
 
     @Test("a corrupted message row is skipped and reported; the conversation and its neighbours still load")
@@ -147,6 +153,62 @@ struct ConversationStoreTests {
         #expect(loaded.skipped.first?.reason.isEmpty == false)
         // The row is left on disk, not deleted.
         #expect(try store.counts(for: a.id).messages == 2)
+    }
+
+    @Test("a non-UTF8 message payload is skipped and reported, not a fatal crash")
+    func nonUTF8PayloadIsSkipped() throws {
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a")
+        try store.apply([created(a)])
+        try store.rawWrite("UPDATE messages SET payload = X'FFFE' WHERE conversationId = ? AND ordinal = 0", arguments: [a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.conversations.map(\.title) == ["a"])
+        #expect(loaded.conversations[0].messages.count == 1)
+        #expect(loaded.skipped.count == 1 && loaded.skipped.first?.table == "messages" && loaded.skipped.first?.conversationId == a.id)
+    }
+
+    @Test("a non-UTF8 history payload is skipped and reported, not a fatal crash")
+    func nonUTF8HistoryPayloadIsSkipped() throws {
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a")
+        try store.apply([created(a)])
+        try store.rawWrite("UPDATE history SET payload = X'FFFE' WHERE conversationId = ? AND ordinal = 0", arguments: [a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.conversations.map(\.title) == ["a"])
+        #expect(loaded.conversations[0].history.count == 1)
+        #expect(loaded.skipped.count == 1 && loaded.skipped.first?.table == "history" && loaded.skipped.first?.conversationId == a.id)
+    }
+
+    @Test("appending a shorter snapshot truncates the stale trailing rows")
+    func shorterSnapshotTruncatesStaleRows() throws {
+        let store = try ConversationStore.inMemory()
+        var c = sample()
+        try store.apply([created(c)])
+        c.messages.append(ChatMessage(role: .agent, content: "third"))
+        c.history.append(Content(role: "model", parts: [Part(text: "third")]))
+        try store.apply([write(c, .messagesAppended(from: 2), .historyAppended(from: 2))])
+        #expect(try store.counts(for: c.id) == (3, 3))
+        c.messages = Array(c.messages.prefix(1))
+        c.history = Array(c.history.prefix(1))
+        try store.apply([write(c, .messagesAppended(from: 0), .historyAppended(from: 0))])
+        #expect(try store.counts(for: c.id) == (1, 1))
+        #expect(try store.loadAll().conversations.first?.messages.count == 1)
+    }
+
+    @Test("one conversation's write failing does not block the rest of the batch, and is reported")
+    func partialFailureIsolatesOneConversation() throws {
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a"), b = sample(title: "b")
+        store.failInjection = { $0 == b.id }
+        #expect(throws: ConversationStoreError.partialFailure(failedIds: [b.id])) {
+            try store.apply([created(a), created(b)])
+        }
+        #expect(try store.loadAll().conversations.map(\.title) == ["a"])
+        #expect(try store.isEmpty() == false)
+        // Clearing the injection and replaying b alone succeeds.
+        store.failInjection = nil
+        try store.apply([created(b)])
+        #expect(try store.loadAll().conversations.map(\.title).sorted() == ["a", "b"])
     }
 
     @Test("a corrupted metadata row skips only that conversation")

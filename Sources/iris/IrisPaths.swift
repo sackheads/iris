@@ -74,6 +74,11 @@ struct IrisPaths: Sendable {
         return lines.sorted().joined(separator: "\n")
     }
 
+    /// The conversation store (#163). At the root on purpose: `makeVolatileCopy` copies only
+    /// memory/, rules/, config/ and plugins/, so a headless copy starts with no conversations,
+    /// which is the choice `IrisDefaults.perfSeed` already made for the old blob.
+    var conversationsDB: URL { root.appendingPathComponent("conversations.sqlite") }
+
     // memory/
     var memoryDir: URL { root.appendingPathComponent("memory") }
     var soulMd: URL { memoryDir.appendingPathComponent("SOUL.md") }
@@ -84,11 +89,6 @@ struct IrisPaths: Sendable {
     var libraryDir: URL { memoryDir.appendingPathComponent("library") }
     var factStoreDB: URL { memoryDir.appendingPathComponent("fact_store.sqlite") }
     var holographicDB: URL { memoryDir.appendingPathComponent("holographic_memory.sqlite") }
-
-    /// The conversation store (#163). At the root on purpose: `makeVolatileCopy` copies only
-    /// memory/, rules/, config/ and plugins/, so a headless copy starts with no conversations,
-    /// which is the choice `IrisDefaults.perfSeed` already made for the old blob.
-    var conversationsDB: URL { root.appendingPathComponent("conversations.sqlite") }
 
     // config/
     var configDir: URL { root.appendingPathComponent("config") }

@@ -75,11 +75,33 @@ struct LoadResult: Sendable {
     var skipped: [SkippedRow]
 }
 
+/// Thrown by `apply(_:)` when one or more conversations in the batch failed to write. The
+/// conversations not listed here committed normally.
+enum ConversationStoreError: Error, Equatable {
+    case partialFailure(failedIds: [UUID])
+}
+
+/// Internal signal thrown by `failInjection` to make one conversation's savepoint roll back;
+/// never escapes `apply(_:)`, which reports the id through `ConversationStoreError` instead.
+private struct InjectedWriteFailure: Error {}
+
 /// Per-conversation SQLite persistence (spec §2, §4, §5). One metadata row per conversation,
 /// one JSON row per message and per history entry. Every write is keyed by ordinal or id, so
 /// applying the same batch twice is harmless.
 final class ConversationStore: Sendable {
     private let writer: any DatabaseWriter
+    private let failInjectionLock = NSLock()
+    nonisolated(unsafe) private var _failInjection: (@Sendable (UUID) -> Bool)?
+
+    /// Test-only seam: when set, consulted with each conversation's id at the top of its
+    /// savepoint in `apply(_:)`; returning `true` makes that conversation's write fail without
+    /// needing a naturally-occurring constraint violation, so `apply`'s partial-failure handling
+    /// (spec §3 retry-by-merge) can be exercised deterministically. `nil` (the default) never
+    /// fails anything; nothing in the app sets this.
+    var failInjection: (@Sendable (UUID) -> Bool)? {
+        get { failInjectionLock.withLock { _failInjection } }
+        set { failInjectionLock.withLock { _failInjection = newValue } }
+    }
 
     private init(writer: any DatabaseWriter) throws {
         self.writer = writer
@@ -140,38 +162,64 @@ final class ConversationStore: Sendable {
 
     // MARK: Write
 
+    /// Applies a batch of conversation writes in one transaction, but each conversation gets its
+    /// own savepoint: if one conversation's writes fail, only that savepoint rolls back and the
+    /// rest of the batch still commits. This matters because the spec's retry-by-merge (§3) folds
+    /// a failed write's `ChangeSet` into the next one and tries again — one conversation stuck in
+    /// a permanently failing state (a decode bug, a future migration mismatch) must not block
+    /// persistence for every other open conversation. If any conversation failed, `apply` throws
+    /// `ConversationStoreError.partialFailure(failedIds:)` after the transaction commits the
+    /// successful ones, so the caller knows exactly which writes to re-queue.
     func apply(_ batch: [ConversationWrite]) throws {
         guard !batch.isEmpty else { return }
         let encoder = JSONEncoder()
+        var failedIds: [UUID] = []
         try writer.write { db in
             for w in batch {
-                if w.changes.deleted {
-                    try db.execute(sql: "DELETE FROM conversations WHERE id = ?", arguments: [w.id.uuidString])
-                    continue
-                }
-                guard let c = w.snapshot else { continue }
-                let exists = try (Int.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = ?)", arguments: [c.id.uuidString]) ?? 0) == 1
-                if !exists || w.changes.created || w.changes.metadata {
-                    try Self.upsertMetadata(c, exists: exists, db: db, encoder: encoder)
-                }
-                if w.changes.messagesReplaced {
-                    try db.execute(sql: "DELETE FROM messages WHERE conversationId = ?", arguments: [c.id.uuidString])
-                    try Self.insertMessages(c, from: 0, db: db, encoder: encoder)
-                } else {
-                    if let from = w.changes.messagesFrom { try Self.insertMessages(c, from: from, db: db, encoder: encoder) }
-                    for id in w.changes.updatedMessageIds {
-                        guard let m = c.messages.first(where: { $0.id == id }) else { continue }
-                        try db.execute(sql: "UPDATE messages SET payload = ? WHERE conversationId = ? AND id = ?",
-                                       arguments: [try Self.json(m, encoder), c.id.uuidString, id.uuidString])
+                do {
+                    try db.inSavepoint {
+                        if self.failInjection?(w.id) == true {
+                            throw InjectedWriteFailure()
+                        }
+                        try Self.applyOne(w, db: db, encoder: encoder)
+                        return .commit
                     }
-                }
-                if w.changes.historyReplaced {
-                    try db.execute(sql: "DELETE FROM history WHERE conversationId = ?", arguments: [c.id.uuidString])
-                    try Self.insertHistory(c, from: 0, db: db, encoder: encoder)
-                } else if let from = w.changes.historyFrom {
-                    try Self.insertHistory(c, from: from, db: db, encoder: encoder)
+                } catch {
+                    failedIds.append(w.id)
                 }
             }
+        }
+        if !failedIds.isEmpty {
+            throw ConversationStoreError.partialFailure(failedIds: failedIds)
+        }
+    }
+
+    private static func applyOne(_ w: ConversationWrite, db: Database, encoder: JSONEncoder) throws {
+        if w.changes.deleted {
+            try db.execute(sql: "DELETE FROM conversations WHERE id = ?", arguments: [w.id.uuidString])
+            return
+        }
+        guard let c = w.snapshot else { return }
+        let exists = try (Int.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = ?)", arguments: [c.id.uuidString]) ?? 0) == 1
+        if !exists || w.changes.created || w.changes.metadata {
+            try Self.upsertMetadata(c, exists: exists, db: db, encoder: encoder)
+        }
+        if w.changes.messagesReplaced {
+            try db.execute(sql: "DELETE FROM messages WHERE conversationId = ?", arguments: [c.id.uuidString])
+            try Self.insertMessages(c, from: 0, db: db, encoder: encoder)
+        } else {
+            if let from = w.changes.messagesFrom { try Self.insertMessages(c, from: from, db: db, encoder: encoder) }
+            for id in w.changes.updatedMessageIds {
+                guard let m = c.messages.first(where: { $0.id == id }) else { continue }
+                try db.execute(sql: "UPDATE messages SET payload = ? WHERE conversationId = ? AND id = ?",
+                               arguments: [try Self.json(m, encoder), c.id.uuidString, id.uuidString])
+            }
+        }
+        if w.changes.historyReplaced {
+            try db.execute(sql: "DELETE FROM history WHERE conversationId = ?", arguments: [c.id.uuidString])
+            try Self.insertHistory(c, from: 0, db: db, encoder: encoder)
+        } else if let from = w.changes.historyFrom {
+            try Self.insertHistory(c, from: from, db: db, encoder: encoder)
         }
     }
 
@@ -205,20 +253,39 @@ final class ConversationStore: Sendable {
     }
 
     private static func insertMessages(_ c: Conversation, from: Int, db: Database, encoder: JSONEncoder) throws {
-        guard from < c.messages.count else { return }
-        for ordinal in from..<c.messages.count {
-            let m = c.messages[ordinal]
-            try db.execute(sql: "INSERT OR REPLACE INTO messages (conversationId, ordinal, id, payload) VALUES (?, ?, ?, ?)",
-                           arguments: [c.id.uuidString, ordinal, m.id.uuidString, try json(m, encoder)])
+        if from < c.messages.count {
+            for ordinal in from..<c.messages.count {
+                let m = c.messages[ordinal]
+                try db.execute(sql: "INSERT OR REPLACE INTO messages (conversationId, ordinal, id, payload) VALUES (?, ?, ?, ?)",
+                               arguments: [c.id.uuidString, ordinal, m.id.uuidString, try json(m, encoder)])
+            }
         }
+        // A snapshot shorter than what's on disk (e.g. history/messages cleared and re-appended
+        // to fewer entries) leaves stale trailing rows behind; drop anything past the new end.
+        try db.execute(sql: "DELETE FROM messages WHERE conversationId = ? AND ordinal >= ?", arguments: [c.id.uuidString, c.messages.count])
     }
 
     private static func insertHistory(_ c: Conversation, from: Int, db: Database, encoder: JSONEncoder) throws {
-        guard from < c.history.count else { return }
-        for ordinal in from..<c.history.count {
-            try db.execute(sql: "INSERT OR REPLACE INTO history (conversationId, ordinal, payload) VALUES (?, ?, ?)",
-                           arguments: [c.id.uuidString, ordinal, try json(c.history[ordinal], encoder)])
+        if from < c.history.count {
+            for ordinal in from..<c.history.count {
+                try db.execute(sql: "INSERT OR REPLACE INTO history (conversationId, ordinal, payload) VALUES (?, ?, ?)",
+                               arguments: [c.id.uuidString, ordinal, try json(c.history[ordinal], encoder)])
+            }
         }
+        try db.execute(sql: "DELETE FROM history WHERE conversationId = ? AND ordinal >= ?", arguments: [c.id.uuidString, c.history.count])
+    }
+
+    /// Reads a nullable text column without GRDB's forced-conversion trap on invalid UTF8 bytes.
+    /// GRDB's typed `Row` subscript force-tries (`try!`) the SQLite→Swift conversion for both
+    /// `String` and `String?`, and `String.fromDatabaseValue` *fails* — rather than returning
+    /// nil — when the stored bytes are not valid UTF8, so an ordinary `row[column] as String?`
+    /// still crashes the whole load on a corrupted or `rawWrite`-poked column. `Data` never fails
+    /// that conversion (it just copies the bytes), so every text column here is read through it
+    /// and decoded ourselves; invalid bytes and SQL NULL both come back as `nil`, which is what
+    /// every caller below already treats them as (missing/unreadable).
+    private static func readText(_ row: Row, _ column: String) -> String? {
+        guard let data: Data = row[column] else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     // MARK: Read
@@ -229,33 +296,41 @@ final class ConversationStore: Sendable {
             var out = LoadResult(conversations: [], skipped: [])
             let rows = try Row.fetchAll(db, sql: "SELECT * FROM conversations ORDER BY position")
             for row in rows {
-                guard let idString: String = row["id"], let id = UUID(uuidString: idString) else {
+                guard let idString = Self.readText(row, "id"), let id = UUID(uuidString: idString) else {
                     out.skipped.append(SkippedRow(conversationId: nil, table: "conversations", ordinal: nil, reason: "bad id"))
                     continue
                 }
                 var c: Conversation
                 do {
-                    let title: String = row["title"] ?? "Untitled"
-                    c = Conversation(id: id, title: title, workspacePath: row["workspacePath"])
-                    c.activeGoal = row["activeGoal"]
+                    let title = Self.readText(row, "title") ?? "Untitled"
+                    c = Conversation(id: id, title: title, workspacePath: Self.readText(row, "workspacePath"))
+                    c.activeGoal = Self.readText(row, "activeGoal")
                     c.messageCountSinceReflection = row["messageCountSinceReflection"] ?? 0
                     c.goalIterationCount = row["goalIterationCount"] ?? 0
-                    c.mainAgentSandbox = (row["mainAgentSandbox"] as String?).flatMap(SandboxPref.init(rawValue:))
-                    c.tokenUsage = try decoder.decode(TokenUsage.self, from: Data((row["tokenUsage"] as String? ?? "{}").utf8))
-                    if let s: String = row["goalContract"] { c.goalContract = try decoder.decode(GoalContract.self, from: Data(s.utf8)) }
-                    if let s: String = row["subagentResult"] { c.subagentResult = try decoder.decode(SubagentResult.self, from: Data(s.utf8)) }
+                    c.mainAgentSandbox = Self.readText(row, "mainAgentSandbox").flatMap(SandboxPref.init(rawValue:))
+                    c.tokenUsage = try Self.readText(row, "tokenUsage").map { try decoder.decode(TokenUsage.self, from: Data($0.utf8)) } ?? TokenUsage()
+                    if let s = Self.readText(row, "goalContract") { c.goalContract = try decoder.decode(GoalContract.self, from: Data(s.utf8)) }
+                    if let s = Self.readText(row, "subagentResult") { c.subagentResult = try decoder.decode(SubagentResult.self, from: Data(s.utf8)) }
                 } catch {
                     out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "\(error)"))
                     continue
                 }
                 for r in try Row.fetchAll(db, sql: "SELECT ordinal, payload FROM messages WHERE conversationId = ? ORDER BY ordinal", arguments: [idString]) {
-                    let ordinal: Int = r["ordinal"]
-                    do { c.messages.append(try decoder.decode(ChatMessage.self, from: Data((r["payload"] as String).utf8))) }
+                    let ordinal: Int? = r["ordinal"]
+                    guard let payload = Self.readText(r, "payload") else {
+                        out.skipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: ordinal, reason: "unreadable payload"))
+                        continue
+                    }
+                    do { c.messages.append(try decoder.decode(ChatMessage.self, from: Data(payload.utf8))) }
                     catch { out.skipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: ordinal, reason: "\(error)")) }
                 }
                 for r in try Row.fetchAll(db, sql: "SELECT ordinal, payload FROM history WHERE conversationId = ? ORDER BY ordinal", arguments: [idString]) {
-                    let ordinal: Int = r["ordinal"]
-                    do { c.history.append(try decoder.decode(Content.self, from: Data((r["payload"] as String).utf8))) }
+                    let ordinal: Int? = r["ordinal"]
+                    guard let payload = Self.readText(r, "payload") else {
+                        out.skipped.append(SkippedRow(conversationId: id, table: "history", ordinal: ordinal, reason: "unreadable payload"))
+                        continue
+                    }
+                    do { c.history.append(try decoder.decode(Content.self, from: Data(payload.utf8))) }
                     catch { out.skipped.append(SkippedRow(conversationId: id, table: "history", ordinal: ordinal, reason: "\(error)")) }
                 }
                 out.conversations.append(c)
@@ -273,6 +348,20 @@ final class ConversationStore: Sendable {
 
     func isEmpty() throws -> Bool {
         try writer.read { db in (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM conversations") ?? 0) == 0 }
+    }
+
+    /// Test support: the raw `position` column, keyed by conversation id — lets a test assert
+    /// positions stay distinct across deletions and re-insertions without relying solely on
+    /// `loadAll`'s array order.
+    func positions() throws -> [UUID: Int] {
+        try writer.read { db in
+            var out: [UUID: Int] = [:]
+            for row in try Row.fetchAll(db, sql: "SELECT id, position FROM conversations") {
+                guard let idString = Self.readText(row, "id"), let id = UUID(uuidString: idString) else { continue }
+                if let position: Int = row["position"] { out[id] = position }
+            }
+            return out
+        }
     }
 
     /// Tests corrupt rows through this; nothing in the app calls it.
