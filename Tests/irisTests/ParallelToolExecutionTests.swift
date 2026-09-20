@@ -4,14 +4,23 @@ import XCTest
 @MainActor
 final class ParallelToolExecutionTests: XCTestCase {
 
+    /// Routes straight to `AnthropicClient`'s static entry point with a fixed model/key, bypassing
+    /// `LLMClient`'s `ConfigManager.shared.primaryProvider` dispatch entirely. `IrisEngine` already
+    /// takes an injectable `client:`, so nothing here needs to mutate the process-global config to
+    /// pick a provider (invariant 7, #215; the per-call injection pattern from #109).
+    private struct AnthropicRoutingClient: LLMClientProtocol {
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            try await AnthropicClient.generateContent(request: request, model: "claude-3-5-sonnet", apiKey: "mock-api-key")
+        }
+        func streamContent(request: GeminiRequest, tier: ModelTier) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+            AnthropicClient.streamContent(request: request, model: "claude-3-5-sonnet", apiKey: "mock-api-key")
+        }
+        var supportsStreaming: Bool { false }
+    }
+
     override func setUp() {
         super.setUp()
         URLProtocol.registerClass(MockURLProtocol.self)
-        UserDefaults.standard.set("Anthropic", forKey: "PRIMARY_PROVIDER")
-        UserDefaults.standard.set("claude-3-5-sonnet", forKey: "ANTHROPIC_MODEL_MEDIUM")
-        ConfigManager.shared.primaryProvider = "Anthropic"
-        ConfigManager.shared.anthropicModelMedium = "claude-3-5-sonnet"
-        ConfigManager.shared.anthropicAPIKey = "mock-api-key"
     }
 
     override func tearDown() {
@@ -21,17 +30,6 @@ final class ParallelToolExecutionTests: XCTestCase {
     }
 
     func testParallelToolExecutionMaintainsOrder() async throws {
-        // Save and restore global state so we don't contaminate other tests.
-        // defer guarantees restore even if the test exits early (assertion failure).
-        let savedPrimaryProvider = ConfigManager.shared.primaryProvider
-        let savedMediumModel = ConfigManager.shared.anthropicModelMedium
-        let savedAPIKey = ConfigManager.shared.anthropicAPIKey
-        defer {
-            ConfigManager.shared.primaryProvider = savedPrimaryProvider
-            ConfigManager.shared.anthropicModelMedium = savedMediumModel
-            ConfigManager.shared.anthropicAPIKey = savedAPIKey
-        }
-
         // We will mock the LLM to return TWO tool calls in its first response.
         // We will then intercept the SECOND request (which contains the tool results)
         // and verify that the tool results are in the exact same order as the tool calls.
@@ -108,12 +106,12 @@ final class ParallelToolExecutionTests: XCTestCase {
             }
         }
 
-        let state = AppState()
+        let state = AppState(tier3Provisioning: .provisioned)
         let convId = UUID()
         await MainActor.run {
             state.conversations.append(Conversation(id: convId, title: "Test", history: []))
         }
-        let engine = IrisEngine(state: state)
+        let engine = IrisEngine(state: state, client: AnthropicRoutingClient())
         await engine.processInput("Do the parallel test", source: "User", conversationId: convId)
 
         await fulfillment(of: [expectation], timeout: 5.0)

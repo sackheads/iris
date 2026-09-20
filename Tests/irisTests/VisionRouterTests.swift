@@ -2,11 +2,31 @@ import XCTest
 @testable import iris
 
 final class VisionRouterTests: XCTestCase {
-    
+
+    /// Each test gets its OWN ConfigManager over its OWN UserDefaults suite rather than mutating
+    /// `ConfigManager.shared`, which is process-global: parallel suites racing on it is the in-run
+    /// half of #109 (invariant 7, #215). `VisionRouter.processTextOnlyImages` takes an injectable
+    /// `config:`, so nothing here needs the singleton.
+    private var config: ConfigManager!
+    private var suiteName = ""
+
     override func setUp() {
         super.setUp()
-        ConfigManager.shared.auxiliaryVisionEngine = ""
-        ConfigManager.shared.auxiliaryVisionModel = ""
+        suiteName = "iris-visionrouter-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: suiteName)!
+        store.removePersistentDomain(forName: suiteName)
+        config = ConfigManager(store: store)
+        config.auxiliaryVisionEngine = ""
+        config.auxiliaryVisionModel = ""
+    }
+
+    override func tearDown() {
+        UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+        // removePersistentDomain does not delete the backing plist on current macOS (#178);
+        // IrisDefaults sweeps stale iris-*-<UUID> plists by age, but clean up anyway.
+        IrisDefaults.removeSuiteFile(named: suiteName, in: IrisDefaults.preferencesDirectory)
+        config = nil
+        super.tearDown()
     }
 
     func testPrimaryModelVisionCapabilityDetection() {
@@ -17,7 +37,7 @@ final class VisionRouterTests: XCTestCase {
         XCTAssertFalse(VisionRouter.isVisionCapable(modelName: "deepseek-r1"))
         XCTAssertFalse(VisionRouter.isVisionCapable(modelName: "qwen2.5-coder"))
     }
-    
+
     func testProcessTextOnlyImagesNoImages() async {
         let nonImageAttachment = FileAttachment(
             filename: "notes.txt",
@@ -26,12 +46,12 @@ final class VisionRouterTests: XCTestCase {
             fileSize: 100,
             category: .text
         )
-        
-        let result = await VisionRouter.processTextOnlyImages(attachments: [nonImageAttachment])
+
+        let result = await VisionRouter.processTextOnlyImages(attachments: [nonImageAttachment], config: config)
         XCTAssertEqual(result.descriptionText, "")
         XCTAssertTrue(result.warnings.isEmpty)
     }
-    
+
     func testProcessTextOnlyImagesNoAuxiliaryConfigured() async {
         let imageAttachment = FileAttachment(
             filename: "screenshot.png",
@@ -40,13 +60,13 @@ final class VisionRouterTests: XCTestCase {
             fileSize: 500,
             category: .image
         )
-        
-        let result = await VisionRouter.processTextOnlyImages(attachments: [imageAttachment])
+
+        let result = await VisionRouter.processTextOnlyImages(attachments: [imageAttachment], config: config)
         XCTAssertEqual(result.descriptionText, "")
         XCTAssertEqual(result.warnings.count, 1)
         XCTAssertTrue(result.warnings[0].contains("does not support vision and no auxiliary vision model is configured"))
     }
-    
+
     func testProcessTextOnlyImagesWithAuxiliaryModel() async throws {
         // Create temp image file
         let tempDir = FileManager.default.temporaryDirectory
@@ -54,7 +74,7 @@ final class VisionRouterTests: XCTestCase {
         let dummyData = "fake image data".data(using: .utf8)!
         try dummyData.write(to: imageURL)
         defer { try? FileManager.default.removeItem(at: imageURL) }
-        
+
         let imageAttachment = FileAttachment(
             filename: "test_image.png",
             fileURL: imageURL,
@@ -62,7 +82,7 @@ final class VisionRouterTests: XCTestCase {
             fileSize: Int64(dummyData.count),
             category: .image
         )
-        
+
         // Mock auxiliary engine
         final class MockVisionEngine: AuxiliaryInferenceEngine, @unchecked Sendable {
             var receivedImages: [String]?
@@ -76,13 +96,13 @@ final class VisionRouterTests: XCTestCase {
                 return "A sample diagram showing workflow."
             }
         }
-        
+
         let mockEngine = MockVisionEngine()
         AuxiliaryModelManager.shared.setMockEngine(mockEngine, for: "vision")
-        ConfigManager.shared.auxiliaryVisionEngine = "ollama"
-        ConfigManager.shared.auxiliaryVisionModel = "llava"
-        
-        let result = await VisionRouter.processTextOnlyImages(attachments: [imageAttachment])
+        config.auxiliaryVisionEngine = "ollama"
+        config.auxiliaryVisionModel = "llava"
+
+        let result = await VisionRouter.processTextOnlyImages(attachments: [imageAttachment], config: config)
         XCTAssertTrue(result.warnings.isEmpty)
         XCTAssertTrue(result.descriptionText.contains("<image_description file=\"test_image.png\">"))
         XCTAssertTrue(result.descriptionText.contains("A sample diagram showing workflow."))

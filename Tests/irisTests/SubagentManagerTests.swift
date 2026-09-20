@@ -3,28 +3,52 @@ import XCTest
 
 @MainActor
 final class SubagentManagerTests: XCTestCase {
-    
+
+    /// Routes to `AnthropicClient`'s static entry point using an isolated `ConfigManager` for model
+    /// resolution (`testInvalidEffortStringDefaultsToMedium` asserts on `getModel(for:)`'s tier
+    /// mapping), bypassing `ConfigManager.shared` entirely. `SubagentManager.runSubagent` already
+    /// takes an injectable `client:`, so nothing here needs to mutate the process-global config
+    /// (invariant 7, #215; the per-call injection pattern from #109).
+    private struct IsolatedAnthropicClient: LLMClientProtocol {
+        let config: ConfigManager
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            try await AnthropicClient.generateContent(request: request, model: config.getModel(for: tier), apiKey: config.anthropicAPIKey)
+        }
+        func streamContent(request: GeminiRequest, tier: ModelTier) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+            AnthropicClient.streamContent(request: request, model: config.getModel(for: tier), apiKey: config.anthropicAPIKey)
+        }
+        var supportsStreaming: Bool { false }
+    }
+
+    private var config: ConfigManager!
+    private var suiteName = ""
+
     override func setUp() {
         super.setUp()
         URLProtocol.registerClass(MockURLProtocol.self)
-        // Clear user defaults for clean state
-        UserDefaults.standard.removeObject(forKey: "iris_conversations")
-        UserDefaults.standard.set("Anthropic", forKey: "PRIMARY_PROVIDER")
-        UserDefaults.standard.set("claude-3-5-sonnet", forKey: "ANTHROPIC_MODEL_MEDIUM")
-        ConfigManager.shared.primaryProvider = "Anthropic"
-        ConfigManager.shared.anthropicModelMedium = "claude-3-5-sonnet"
-        ConfigManager.shared.anthropicAPIKey = "mock-api-key"
+        suiteName = "iris-subagentmanager-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: suiteName)!
+        store.removePersistentDomain(forName: suiteName)
+        config = ConfigManager(store: store)
+        config.primaryProvider = "Anthropic"
+        config.anthropicModelMedium = "claude-3-5-sonnet"
+        config.anthropicAPIKey = "mock-api-key"
     }
-    
+
     override func tearDown() {
         URLProtocol.unregisterClass(MockURLProtocol.self)
         MockURLProtocol.handler = nil
+        UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+        // removePersistentDomain does not delete the backing plist on current macOS (#178);
+        // IrisDefaults sweeps stale iris-*-<UUID> plists by age, but clean up anyway.
+        IrisDefaults.removeSuiteFile(named: suiteName, in: IrisDefaults.preferencesDirectory)
+        config = nil
         super.tearDown()
     }
     
     func testSubagentExecutionBlocksAndReturnsSummary() async throws {
         // Setup AppState
-        let state = AppState()
+        let state = AppState(tier3Provisioning: .provisioned)
         
         let lock = NSLock()
         var count = 0
@@ -91,15 +115,15 @@ final class SubagentManagerTests: XCTestCase {
             role: "security_auditor",
             task: "Find vulnerabilities",
             effort: "easy",
-            parentConversationId: parentConversationId, appState: state).rendered
-        
+            parentConversationId: parentConversationId, client: IsolatedAnthropicClient(config: config), appState: state).rendered
+
         XCTAssertTrue(summary.contains("I have audited the code securely."))
         XCTAssertTrue(summary.contains("status: completed"))
         XCTAssertTrue(summary.contains("goal_complete called"))
     }
     
     func testConcurrentSubagentExecution() async throws {
-        let state = AppState()
+        let state = AppState(tier3Provisioning: .provisioned)
         
         let lock = NSLock()
         var count = 0
@@ -155,6 +179,10 @@ final class SubagentManagerTests: XCTestCase {
             state.createNewConversation(id: parentConversationId)
         }
         
+        // Captured as a local before the task group: `config` itself is main-actor-isolated
+        // (a property of this XCTestCase), but the client value is Sendable and safe to hand to
+        // each concurrent child task directly.
+        let anthropicClient = IsolatedAnthropicClient(config: config)
         // Run 5 subagents concurrently using the ResultHolder fix
         let results = await withTaskGroup(of: String.self) { group in
             for i in 0..<5 {
@@ -163,7 +191,7 @@ final class SubagentManagerTests: XCTestCase {
                         role: "worker_\(i)",
                         task: "Task \(i)",
                         effort: "medium",
-                        parentConversationId: parentConversationId, appState: state).rendered
+                        parentConversationId: parentConversationId, client: anthropicClient, appState: state).rendered
                 }
             }
             
@@ -180,7 +208,7 @@ final class SubagentManagerTests: XCTestCase {
         }
     }
     func testInvalidEffortStringDefaultsToMedium() async throws {
-        let state = AppState()
+        let state = AppState(tier3Provisioning: .provisioned)
         
         let lock = NSLock()
         var usedModel = ""
@@ -241,14 +269,14 @@ final class SubagentManagerTests: XCTestCase {
             role: "security_auditor",
             task: "Find vulnerabilities",
             effort: "invalid_effort_string",
-            parentConversationId: parentConversationId, appState: state).rendered
-        
+            parentConversationId: parentConversationId, client: IsolatedAnthropicClient(config: config), appState: state).rendered
+
         XCTAssertTrue(summary.contains("Finished with unknown effort."))
         XCTAssertEqual(usedModel, "claude-3-5-sonnet")
     }
 
     func testNeverCompletingSubagentTimesOut() async throws {
-        let state = AppState()
+        let state = AppState(tier3Provisioning: .provisioned)
 
         // Always return plain text — the subagent never calls goal_complete, so it loops until the cap.
         MockURLProtocol.handler = { request in
@@ -268,7 +296,7 @@ final class SubagentManagerTests: XCTestCase {
 
         let summary = await SubagentManager.shared.runSubagent(
             role: "worker", task: "loop forever", effort: "easy",
-            parentConversationId: parentId, maxIterations: 3, appState: state).rendered   // ~300ms cap
+            parentConversationId: parentId, maxIterations: 3, client: IsolatedAnthropicClient(config: config), appState: state).rendered   // ~300ms cap
 
         XCTAssertTrue(summary.contains("status: timed out"))
     }
@@ -280,7 +308,7 @@ final class SubagentManagerTests: XCTestCase {
     }
 
     func testSubagentWriteIsRecordedInResult() async throws {
-        let state = AppState()
+        let state = AppState(tier3Provisioning: .provisioned)
         // Fast-path approve write_file for the exact path the mock uses (spec §5 / requestApproval).
         PermissionManager.shared.allowGlobally(toolName: "write_file", details: "ledger_probe.txt")
 
@@ -308,7 +336,7 @@ final class SubagentManagerTests: XCTestCase {
         let parentId = UUID()
         await MainActor.run { state.createNewConversation(id: parentId) }
         let summary = await SubagentManager.shared.runSubagent(
-            role: "engineer", task: "write a file", effort: "easy", parentConversationId: parentId, appState: state).rendered
+            role: "engineer", task: "write a file", effort: "easy", parentConversationId: parentId, client: IsolatedAnthropicClient(config: config), appState: state).rendered
 
         XCTAssertTrue(summary.contains("Files written (1)"))
         XCTAssertTrue(summary.contains("ledger_probe.txt"))
