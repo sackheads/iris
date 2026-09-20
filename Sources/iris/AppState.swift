@@ -1047,6 +1047,18 @@ class AppState {
         else { return }
 
         conversations[idx].goalContract?.awaitingHumanJudgement = false
+
+        // A CHECKPOINT judgement pause is not terminal. Everything below this point finishes or
+        // rejects a whole goal: the accept path calls `finishGatedGoal` and `clearGoal`, which
+        // nils the contract. Reaching it from a mid-ladder pause would end the user's goal because
+        // they answered a question about one milestone. The human is already here and the
+        // checkpoint chip's Approve/Send-back controls are the next step, so judging is all that
+        // resolves here — approving the milestone stays a separate decision.
+        if conversations[idx].goalContract?.checkpointStatus == .pausedForReview {
+            saveConversations()
+            return
+        }
+
         // What the USER rejected — not every `not_met` on the evaluation. A `not_met` the agent
         // waived is excluded from `blockingCriteria`, which is precisely why the pause could fire
         // with one still sitting in `eval.criteria`; counting it here would resume the agent and
