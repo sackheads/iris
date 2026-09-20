@@ -1537,6 +1537,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Flush BEFORE _exit: it runs no atexit handlers, so it would kill the pending debounced
         // save and skip the cfprefsd flush, losing every unwritten change (#62).
         MainActor.assumeIsolated { AppState.shared.flushSave() }
+        // Conversations live in their own database now (#163), but settings and other state
+        // still ride on UserDefaults, and `_exit` skips the cfprefsd flush for those too.
+        IrisDefaults.store.synchronize()
         // Bypass static destructors in llama.cpp ggml-metal to prevent GGML_ASSERT crash on exit
         _exit(0)
     }

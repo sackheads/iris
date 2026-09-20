@@ -387,3 +387,17 @@ extension ConversationStore {
         }
     }
 }
+
+extension ConversationStore {
+    /// Spec §1: on disk only in a normal app process. The test bundle links XCTest (the same
+    /// signal `IrisDefaults` uses); headless runs set `HeadlessMode`; a fake-lane perf run has
+    /// volatile defaults but the real `IrisPaths`, and must not open the user's database.
+    static func makeDefault() -> ConversationStore {
+        let isolated = NSClassFromString("XCTestCase") != nil || HeadlessMode.isEnabled || IrisDefaults.isVolatileCopy
+        if !isolated {
+            do { return try onDisk(at: IrisPaths.default.conversationsDB) }
+            catch { print("WARNING: conversation store failed to open on disk, using memory only: \(error)") }
+        }
+        return try! inMemory()
+    }
+}

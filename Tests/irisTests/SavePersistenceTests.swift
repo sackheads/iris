@@ -9,17 +9,15 @@ import Foundation
 @Suite("Save persistence (#62)")
 struct SavePersistenceTests {
 
-    /// Reads the persisted blob back as conversations, so assertions are about real durable
-    /// state rather than byte counts.
-    private func persisted() -> [Conversation] {
-        guard let data = IrisDefaults.store.data(forKey: "iris_conversations"),
-              let decoded = try? JSONDecoder().decode([Conversation].self, from: data) else { return [] }
-        return decoded
+    /// Reads the persisted conversations back out of the store, so assertions are about real
+    /// durable state rather than byte counts.
+    private func persisted(_ app: AppState) -> [Conversation] {
+        (try? app.store.loadAll().conversations) ?? []
     }
 
     @Test("sustained mutation cannot starve the save past the max wait")
     func testMaxWaitDefeatsStarvation() async throws {
-        let app = AppState()
+        let app = AppState(store: try .inMemory())
         let convId = UUID()
         app.createNewConversation(id: convId)
         app.flushSave()
@@ -36,14 +34,14 @@ struct SavePersistenceTests {
         }
 
         // Read the store WITHOUT going quiet first — a trailing-only debounce shows nothing here.
-        let saved = persisted().first(where: { $0.id == convId })
+        let saved = persisted(app).first(where: { $0.id == convId })
         #expect(saved != nil, "conversation never reached the store during sustained mutation")
         #expect((saved?.messages.count ?? 0) > 0, "no messages persisted during sustained mutation")
     }
 
     @Test("flushSave persists immediately without waiting for the debounce")
     func testFlushSaveIsImmediate() throws {
-        let app = AppState()
+        let app = AppState(store: try .inMemory())
         let convId = UUID()
         app.createNewConversation(id: convId)
         app.appendMessage(role: .agent, content: "written before quit", to: convId)
@@ -51,14 +49,14 @@ struct SavePersistenceTests {
         // No sleep: this is the applicationWillTerminate path, which runs just before _exit(0).
         app.flushSave()
 
-        let saved = persisted().first(where: { $0.id == convId })
+        let saved = persisted(app).first(where: { $0.id == convId })
         #expect(saved?.messages.contains(where: { $0.content == "written before quit" }) == true,
                 "flushSave did not persist synchronously")
     }
 
     @Test("a locked contract survives a flush during sustained mutation")
     func testLockedContractSurvivesBusyPeriod() async throws {
-        let app = AppState()
+        let app = AppState(store: try .inMemory())
         let convId = UUID()
         app.createNewConversation(id: convId)
 
@@ -77,7 +75,7 @@ struct SavePersistenceTests {
         }
         app.flushSave()   // the quit
 
-        let saved = persisted().first(where: { $0.id == convId })
+        let saved = persisted(app).first(where: { $0.id == convId })
         #expect(saved?.goalContract?.criteria.count == 4, "locked contract lost criteria across the busy period")
         #expect(saved?.goalContract?.isLocked == true)
     }

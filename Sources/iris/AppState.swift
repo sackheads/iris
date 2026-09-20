@@ -242,8 +242,11 @@ class AppState {
     }
 
     private var engine: IrisEngine!
-    
-    init() {
+    /// Durable conversation persistence (#163). Injected so tests get an in-memory database.
+    let store: ConversationStore
+
+    init(store: ConversationStore = .makeDefault()) {
+        self.store = store
         self.engine = IrisEngine(state: self)
         loadConversations()
         if conversations.isEmpty {
@@ -322,7 +325,7 @@ class AppState {
         if !isSubagent {
             selectedConversationId = newConv.id
         }
-        saveConversations()
+        markChanged(newConv.id, .created)
 
         Task {
             _ = await HookManager.shared.fireSessionStart(conversationId: newConv.id)
@@ -332,7 +335,7 @@ class AppState {
     func updateConversationTitle(id: UUID, title: String) {
         if let idx = conversations.firstIndex(where: { $0.id == id }) {
             conversations[idx].title = title
-            saveConversations()
+            markChanged(id, .metadata)
         }
     }
     
@@ -367,7 +370,7 @@ class AppState {
     func setSubagentResult(for conversationId: UUID, _ result: SubagentResult) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
         conversations[idx].subagentResult = result
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     func updateSubagentStatus(id: UUID, status: String) {
@@ -379,7 +382,7 @@ class AppState {
     func setWorkspace(for conversationId: UUID, path: String) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].workspacePath = path
-            saveConversations()
+            markChanged(conversationId, .metadata)
         }
     }
 
@@ -429,7 +432,7 @@ class AppState {
     func setMainAgentSandbox(for conversationId: UUID, pref: SandboxPref?) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].mainAgentSandbox = pref
-            saveConversations()
+            markChanged(conversationId, .metadata)
         }
     }
 
@@ -529,12 +532,12 @@ class AppState {
         if selectedConversationId == id {
             selectedConversationId = conversations.last(where: { !$0.isSubagent })?.id
         }
+        markChanged(id, .deleted)
         // Scratch conversations don't count: a list holding only those renders an empty sidebar,
-        // so the user still needs somewhere to land.
+        // so the user still needs somewhere to land. The delete is recorded above either way —
+        // `createNewConversation` records its own change and must not swallow this one.
         if !conversations.contains(where: { !$0.isSubagent }) {
             createNewConversation()
-        } else {
-            saveConversations()
         }
     }
     
@@ -657,14 +660,14 @@ class AppState {
     private func startTurn(text: String, attachments: [FileAttachment], in convId: UUID) {
         if let idx = conversations.firstIndex(where: { $0.id == convId }) {
             conversations[idx].messageCountSinceReflection += 1
-            saveConversations()
+            markChanged(convId, .metadata)
             
             let userMessagesCount = conversations[idx].messages.filter { $0.role == .user }.count
             let shouldRename = userMessagesCount == 3 && conversations[idx].messageCountSinceReflection == 3
             let shouldReflect = conversations[idx].messageCountSinceReflection >= 30
             if shouldReflect {
                 conversations[idx].messageCountSinceReflection = 0
-                saveConversations()
+                markChanged(convId, .metadata)
             }
 
             let attachmentsToProcess = attachments
@@ -710,7 +713,7 @@ class AppState {
                 if shouldReflect {
                     if let idx = conversations.firstIndex(where: { $0.id == convId }) {
                         conversations[idx].messageCountSinceReflection = 0
-                        saveConversations()
+                        markChanged(convId, .metadata)
                     }
                     let reflectionPrompt = "System Event [Reflection Trigger]: It's time to consolidate your memories. Reflect on the recent conversation. Have you learned any new user preferences, project structures, or recurring workflows? If so, use `update_soul` to evolve your persona, `update_user_profile` to update the user profile, `update_memory` to consolidate durable facts, and `create_skill`/`update_skill` for procedural skills. When you learn something durable — a lesson, recipe, decision, or reusable artifact — archive it to your permanent library at `~/.iris/memory/library/` (see your Library Management skill). Output a transparent summary of the gist of the updates for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'"
                     appendMessage(role: .system, content: "Triggering automatic memory reflection...", to: convId)
@@ -753,8 +756,9 @@ class AppState {
             if role == .user && conversations[idx].messages.filter({ $0.role == .user }).count == 1 {
                 let displayTitle = content.isEmpty ? (attachments.first?.filename ?? "Attachment") : content
                 conversations[idx].title = String(displayTitle.prefix(30)) + (displayTitle.count > 30 ? "..." : "")
+                markChanged(conversationId, .metadata)
             }
-            saveConversations()
+            markChanged(conversationId, .messagesAppended(from: conversations[idx].messages.count - 1))
         }
     }
     
@@ -764,20 +768,20 @@ class AppState {
         guard let c = conversations.firstIndex(where: { $0.id == conversationId }),
               let m = conversations[c].messages.firstIndex(where: { $0.id == id }) else { return }
         conversations[c].messages[m].content = content
-        if persist { saveConversations() }
+        if persist { markChanged(conversationId, .messageUpdated(id: id)) }
     }
 
     func updateHistory(for conversationId: UUID, history: [Content]) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].history = history
-            saveConversations()
+            markChanged(conversationId, .historyReplaced)
         }
     }
     
     func appendContentToHistory(for conversationId: UUID, content: Content) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].history.append(content)
-            saveConversations()
+            markChanged(conversationId, .historyAppended(from: conversations[idx].history.count - 1))
         }
     }
 
@@ -797,7 +801,7 @@ class AppState {
             }
             if modified {
                 conversations[idx].history = updatedHistory
-                saveConversations()
+                markChanged(conversationId, .historyReplaced)
             }
         }
     }
@@ -805,7 +809,7 @@ class AppState {
     func appendContentsToHistory(for conversationId: UUID, contents: [Content]) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].history.append(contentsOf: contents)
-            saveConversations()
+            markChanged(conversationId, .historyAppended(from: conversations[idx].history.count - contents.count))
         }
     }
     
@@ -814,7 +818,7 @@ class AppState {
             conversations[idx].tokenUsage.promptTokenCount += usage.promptTokenCount ?? 0
             conversations[idx].tokenUsage.candidatesTokenCount += usage.candidatesTokenCount ?? 0
             conversations[idx].tokenUsage.totalTokenCount += usage.totalTokenCount ?? 0
-            saveConversations()
+            markChanged(conversationId, .metadata)
         }
     }
     
@@ -823,7 +827,7 @@ class AppState {
             conversations[idx].activeGoal = nil
             conversations[idx].goalContract = nil
             conversations[idx].goalIterationCount = 0
-            saveConversations()
+            markChanged(conversationId, .metadata)
         }
     }
 
@@ -832,7 +836,7 @@ class AppState {
     func recordCompletionSelfReport(for conversationId: UUID, statusJSON: JSONValue?) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
         conversations[idx].lastGoalCompletionReport = statusJSON
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// Dismisses the completion self-report chip (the ✕). Independent of `clearGoal` so the
@@ -850,7 +854,7 @@ class AppState {
               conversations[idx].goalContract?.awaitingHumanJudgement != true else { return }
         conversations[idx].lastGoalCompletionReport = nil
         conversations[idx].lastGoalEvaluation = nil
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// Captures the locked contract's criteria as a fresh `.verifying` evaluation BEFORE the goal
@@ -868,7 +872,7 @@ class AppState {
             },
             startedAt: Date(), completedAt: nil)
         conversations[idx].lastGoalEvaluation = pending
-        saveConversations()
+        markChanged(conversationId, .metadata)
         return contract
     }
 
@@ -876,7 +880,7 @@ class AppState {
     func recordEvaluation(for conversationId: UUID, _ evaluation: GoalEvaluation) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
         conversations[idx].lastGoalEvaluation = evaluation
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// The gate refused completion: bump the attempt count and leave everything else alone. The
@@ -887,7 +891,7 @@ class AppState {
               var c = conversations[idx].goalContract else { return }
         c.gateAttempts += 1
         conversations[idx].goalContract = c
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// Record the agent's `n/a — <reason>` waiver for one criterion. Returns false when the waiver
@@ -905,7 +909,7 @@ class AppState {
         else { return false }
         c.waivers[criterionId] = trimmed
         conversations[idx].goalContract = c
-        saveConversations()
+        markChanged(conversationId, .metadata)
         return true
     }
 
@@ -918,7 +922,7 @@ class AppState {
         eval.gateOutcome = outcome
         eval.waivers = waivers
         conversations[idx].lastGoalEvaluation = eval
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// Record the user's verdict on one `humanJudged` criterion (spec §6).
@@ -942,7 +946,7 @@ class AppState {
         eval.criteria[vIdx].verdict = accepted ? .met : .notMet
         eval.criteria[vIdx].method = .human
         conversations[idx].lastGoalEvaluation = eval
-        saveConversations()
+        markChanged(conversationId, .metadata)
         resolveJudgementIfComplete(for: conversationId)
         return true
     }
@@ -1002,7 +1006,7 @@ class AppState {
             // back to work on something new, and a rejection that lands late in a long run would
             // otherwise soft-stop after a single turn.
             conversations[idx].goalIterationCount = 0
-            saveConversations()
+            markChanged(conversationId, .metadata)
             resumeGoalLoop(for: conversationId, framing: .judgementRejection,
                            steer: "You did not meet these, in the user's judgement:\n\(names)")
         }
@@ -1021,7 +1025,7 @@ class AppState {
         c.awaitingHumanJudgement = true
         c.pendingCompletionSummary = summary
         conversations[idx].goalContract = c
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// Stores a draft contract on the conversation without locking or touching `activeGoal`.
@@ -1036,7 +1040,7 @@ class AppState {
         conversations[idx].lastGoalCompletionReport = nil
         conversations[idx].lastGoalEvaluation = nil
         conversations[idx].goalContract = draft
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// Locks a drafted contract onto the conversation and mirrors its objective into `activeGoal`
@@ -1048,7 +1052,7 @@ class AppState {
         conversations[idx].goalContract = locked
         conversations[idx].activeGoal = locked.objective
         conversations[idx].goalIterationCount = 0
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// The only sanctioned edit path for a LOCKED contract. Returns false if rejected
@@ -1072,7 +1076,7 @@ class AppState {
         }
         if ok {
             conversations[idx].goalContract = contract
-            saveConversations()
+            markChanged(conversationId, .metadata)
         }
         return ok
     }
@@ -1084,7 +1088,7 @@ class AppState {
               var c = conversations[idx].goalContract else { return }
         c.checkpointStatus = .pausedForReview
         conversations[idx].goalContract = c
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// Human approved the checkpoint: advance to the next milestone and resume the loop.
@@ -1095,7 +1099,7 @@ class AppState {
         c.checkpointStatus = .running
         conversations[idx].goalContract = c
         conversations[idx].goalIterationCount = 0
-        saveConversations()
+        markChanged(conversationId, .metadata)
         resumeGoalLoop(for: conversationId, steer: nil)
     }
 
@@ -1106,7 +1110,7 @@ class AppState {
         c.checkpointStatus = .running
         conversations[idx].goalContract = c
         conversations[idx].goalIterationCount = 0
-        saveConversations()
+        markChanged(conversationId, .metadata)
         resumeGoalLoop(for: conversationId, steer: feedback)
     }
 
@@ -1165,7 +1169,7 @@ class AppState {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].activeGoal = goal
             conversations[idx].goalIterationCount = 0
-            saveConversations()
+            markChanged(conversationId, .metadata)
         }
     }
     
@@ -1309,7 +1313,12 @@ class AppState {
     private var saveTask: Task<Void, Never>? = nil
     /// When the oldest currently-unwritten change arrived; nil when nothing is pending.
     private var firstDirtyAt: Date? = nil
-    
+    /// Changes recorded since the last flush, per conversation (spec §3).
+    private var pendingChanges: [UUID: ChangeSet] = [:]
+    /// The batch a detached write is currently applying. Exactly one at a time; `flushSave`
+    /// replays it, which is harmless because every row write is keyed by ordinal or id.
+    private var inFlight: [ConversationWrite]? = nil
+
     /// The conversations that belong on disk: durable, user-facing ones only. Sub-process
     /// (subagent / drift-evaluator) scratch conversations are ephemeral and must never persist.
     nonisolated static func durableConversations(_ all: [Conversation]) -> [Conversation] {
@@ -1345,7 +1354,9 @@ class AppState {
     /// could lose criteria across a restart (#62). The max wait bounds that staleness.
     static let saveMaxWait: TimeInterval = 2.0
 
-    private func saveConversations() {
+    /// Records one change and schedules a flush with the #62 debounce and max-wait.
+    func markChanged(_ id: UUID, _ change: ConversationChange) {
+        pendingChanges[id, default: ChangeSet()].add(change)
         let now = Date()
         let dirtySince = firstDirtyAt ?? now
         firstDirtyAt = dirtySince
@@ -1354,7 +1365,7 @@ class AppState {
         let elapsed = now.timeIntervalSince(dirtySince)
         guard elapsed < Self.saveMaxWait else {
             saveTask?.cancel()
-            writeConversationsNow()
+            flush()
             return
         }
 
@@ -1364,41 +1375,82 @@ class AppState {
         saveTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            writeConversationsNow()
+            flush()
         }
     }
 
-    /// Writes pending conversation state synchronously, right now.
-    ///
-    /// `applicationWillTerminate` calls `_exit(0)` to dodge a ggml-metal static-destructor crash.
-    /// `_exit` runs no atexit handlers, so it kills the pending debounce task outright and skips
-    /// the `cfprefsd` flush — every unwritten change is lost on quit (#62). Quit must flush
-    /// through this first. `synchronize()` is deprecated for routine use but is exactly right
-    /// here: it is the only way to get bytes to disk before `_exit`.
+    func pendingChangeSet(for id: UUID) -> ChangeSet? { pendingChanges[id] }
+
+    /// Snapshots the dirty conversations (value copies) and clears the pending set. Sub-process
+    /// (subagent / drift-evaluator) conversations are ephemeral scratch and must never persist —
+    /// an orphan surviving a mid-run quit would resurrect on the next launch as a normal
+    /// main-principal conversation carrying a stale `activeGoal` but WITHOUT its restricted
+    /// toolset — so their changes are dropped here.
+    private func takeBatch() -> [ConversationWrite] {
+        firstDirtyAt = nil
+        let batch: [ConversationWrite] = pendingChanges.compactMap { id, changes in
+            let live = conversations.first { $0.id == id }
+            if let live, live.isSubagent { return nil }
+            if live == nil && !changes.deleted { return nil }   // vanished without a delete: nothing to write
+            return ConversationWrite(id: id, snapshot: changes.deleted ? nil : live, changes: changes)
+        }
+        pendingChanges = [:]
+        return batch
+    }
+
+    /// Re-queues a failed write's changes behind whatever arrived since (spec §3 retry-by-merge).
+    private func requeue(_ writes: [ConversationWrite]) {
+        guard !writes.isEmpty else { return }
+        for w in writes { pendingChanges[w.id, default: ChangeSet()].merge(w.changes) }
+        firstDirtyAt = firstDirtyAt ?? Date()
+    }
+
+    /// Off-main write of the dirty set. One batch in flight at a time; a batch that arrives
+    /// while one is being written waits and is flushed when that write completes.
+    private func flush() {
+        guard inFlight == nil, !pendingChanges.isEmpty else { return }
+        let batch = takeBatch()
+        guard !batch.isEmpty else { return }
+        inFlight = batch
+        let store = self.store
+        Task.detached(priority: .utility) { [weak self] in
+            var failure: Error? = nil
+            do { try store.apply(batch) } catch { failure = error }
+            await MainActor.run {
+                guard let self else { return }
+                self.inFlight = nil
+                if let failure {
+                    print("Conversation store write failed; will retry: \(failure)")
+                    // A partial failure already committed everything not listed, so only the
+                    // named conversations go back on the queue; anything else means the whole
+                    // batch is unaccounted for.
+                    if case ConversationStoreError.partialFailure(let failedIds) = failure {
+                        let failed = Set(failedIds)
+                        self.requeue(batch.filter { failed.contains($0.id) })
+                    } else {
+                        self.requeue(batch)
+                    }
+                }
+                if !self.pendingChanges.isEmpty { self.flush() }
+            }
+        }
+    }
+
+    /// Writes everything pending synchronously, right now. `applicationWillTerminate` calls
+    /// `_exit(0)` after this, which runs no atexit handlers and would kill the debounce task
+    /// and any detached write (#62). The in-flight batch is replayed too: it may not have
+    /// started, and replaying rows keyed by ordinal and id is harmless.
     func flushSave() {
         saveTask?.cancel()
-        writeConversationsNow()
-        IrisDefaults.store.synchronize()
-    }
-
-    private func writeConversationsNow() {
-        firstDirtyAt = nil
-        // Sub-processes (subagents, the drift evaluator) run in ephemeral scratch
-        // conversations. Persisting them let an orphan survive a mid-run quit and resurrect
-        // on the next launch as a normal main-principal conversation carrying a stale
-        // `activeGoal` — but WITHOUT its restricted toolset — so it would hunt for tools it
-        // no longer has (e.g. `submit_evaluation`). Only durable, user-facing conversations
-        // are persisted; the main goal's state rides along on those and survives restart.
-        let durable = Self.durableConversations(conversations)
-        if let data = try? JSONEncoder().encode(durable) {
-            IrisDefaults.store.set(data, forKey: "iris_conversations")
-        }
+        let batch = (inFlight ?? []) + takeBatch()
+        guard !batch.isEmpty else { return }
+        do { try store.apply(batch) } catch { print("Conversation store flush failed: \(error)") }
     }
     
     func renameConversation(id: UUID, newTitle: String) {
         if let idx = conversations.firstIndex(where: { $0.id == id }) {
             conversations[idx].title = newTitle
-            saveConversations()
+            markChanged(id, .metadata)
         }
     }
     
@@ -1651,7 +1703,7 @@ class AppState {
         if let idx = conversations.firstIndex(where: { $0.id == convId }) {
             purgeCommandTimings(forMessagesIn: convId)   // before the messages go — they are the keys
             conversations[idx].messages.removeAll()
-            saveConversations()
+            markChanged(convId, .messagesReplaced)
             emitCommandOutput("Conversation cleared.", format: .markdown, to: convId)
         }
     }
