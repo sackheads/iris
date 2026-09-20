@@ -18,6 +18,11 @@ struct ChatView: View {
     /// depends on (`searchConversations`) is synchronous SQLite I/O, not a `View` computation.
     @State private var sidebarQuery = ""
     @State private var sidebarSearchGroups: [SidebarSearchResults.Group] = []
+    /// The trimmed query `sidebarSearchGroups` was actually computed for (review finding 3).
+    /// While the 200ms debounce is pending for a newer keystroke, this lags behind `sidebarQuery`;
+    /// the view uses the mismatch to show nothing rather than an empty-state message for the
+    /// query being typed now, or stale groups that belong to the previous one.
+    @State private var sidebarSearchedQuery = ""
     @Bindable var config = ConfigManager.shared
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
@@ -78,7 +83,14 @@ struct ChatView: View {
                         }
                     } else {
                         Section(header: Text("Results").font(.caption.weight(.bold)).foregroundColor(.secondary).padding(.bottom, 4)) {
-                            if sidebarSearchGroups.isEmpty {
+                            // While the 200ms debounce is still pending for `trimmedQuery`,
+                            // `sidebarSearchGroups` was computed for whatever the *previous*
+                            // query was. Showing it (or an empty-state message worded for the
+                            // query being typed now) would be wrong in different ways on every
+                            // keystroke, so render nothing until they agree (review finding 3).
+                            if sidebarSearchedQuery != trimmedQuery {
+                                EmptyView()
+                            } else if sidebarSearchGroups.isEmpty {
                                 Text("No conversations matching \"\(trimmedQuery)\"")
                                     .font(.subheadline)
                                     .foregroundColor(.secondary)
@@ -230,15 +242,11 @@ struct ChatView: View {
                         // isn't double-handled.
                         .onExitCommand { handleEscape() }
                         .onChange(of: conv.messages.count) { _, _ in
-                            DispatchQueue.main.async {
-                                selectedMessageIDs.removeAll()
-                                proxy.scrollTo("bottomAnchor", anchor: .bottom)
-                            }
+                            selectedMessageIDs.removeAll()
+                            scrollAfterUpdate(proxy)
                         }
                         .onChange(of: conv.messages.last?.content) { _, _ in
-                            DispatchQueue.main.async {
-                                proxy.scrollTo("bottomAnchor", anchor: .bottom)
-                            }
+                            scrollAfterUpdate(proxy)
                         }
                         .onChange(of: state.isThinking) { _, isThinking in
                             if isThinking {
@@ -249,40 +257,24 @@ struct ChatView: View {
                         }
                         // A sidebar search hit (#183) sets `pendingScrollTarget` in the same call
                         // that can also change `selectedConversationId`, so both this handler and
-                        // the one below can fire for one reveal. Checking the pending target here
-                        // is what makes it win that race instead of the "scroll to bottom on
-                        // conversation switch" behaviour immediately undoing it.
+                        // the one below can fire for one reveal. Every site here funnels through
+                        // `scrollAfterUpdate`, which always checks the pending target first — no
+                        // site does its own unconditional "scroll to bottom", so there is no race
+                        // between "which handler's DispatchQueue block runs last" to depend on.
                         .onChange(of: state.activeConversationIndex) { _, _ in
-                            DispatchQueue.main.async {
-                                selectedMessageIDs.removeAll()
-                                if let target = state.pendingScrollTarget {
-                                    proxy.scrollTo(target, anchor: .center)
-                                    state.pendingScrollTarget = nil
-                                } else {
-                                    proxy.scrollTo("bottomAnchor", anchor: .bottom)
-                                }
-                            }
+                            selectedMessageIDs.removeAll()
+                            scrollAfterUpdate(proxy)
                         }
                         // Covers revealing a hit that belongs to the conversation already open,
                         // where `activeConversationIndex` never changes and the handler above
                         // never fires.
                         .onChange(of: state.pendingScrollTarget) { _, target in
-                            guard let target else { return }
-                            DispatchQueue.main.async {
-                                proxy.scrollTo(target, anchor: .center)
-                                state.pendingScrollTarget = nil
-                            }
+                            guard target != nil else { return }
+                            scrollAfterUpdate(proxy)
                         }
                         .onAppear {
-                            DispatchQueue.main.async {
-                                selectedMessageIDs.removeAll()
-                                if let target = state.pendingScrollTarget {
-                                    proxy.scrollTo(target, anchor: .center)
-                                    state.pendingScrollTarget = nil
-                                } else {
-                                    proxy.scrollTo("bottomAnchor", anchor: .bottom)
-                                }
-                            }
+                            selectedMessageIDs.removeAll()
+                            scrollAfterUpdate(proxy)
                         }
                     }
                     
@@ -496,6 +488,21 @@ struct ChatView: View {
         MessageItem.group(conv.messages)
     }
 
+    /// Single source of truth for "where does the transcript scroll after this update" (#183
+    /// review finding 2). A pending sidebar search-reveal target always wins over the default
+    /// scroll-to-bottom, and is cleared once used, so every scroll site shares this one if/else
+    /// instead of each re-implementing (and potentially forgetting) the same check.
+    private func scrollAfterUpdate(_ proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            if let target = state.pendingScrollTarget {
+                proxy.scrollTo(target, anchor: .center)
+                state.pendingScrollTarget = nil
+            } else {
+                proxy.scrollTo("bottomAnchor", anchor: .bottom)
+            }
+        }
+    }
+
     /// Debounced sidebar search (#183): `.task(id: sidebarQuery)` restarts this — and cancels
     /// whatever was in flight — on every keystroke, so the `Task.sleep` below is what keeps a fast
     /// typist from firing a store read per character. The store's read is synchronous SQLite I/O,
@@ -504,6 +511,7 @@ struct ChatView: View {
         let trimmed = sidebarQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             sidebarSearchGroups = []
+            sidebarSearchedQuery = ""
             return
         }
         do {
@@ -515,6 +523,7 @@ struct ChatView: View {
         let hits = (try? state.store.searchConversations(query: trimmed, limit: 50)) ?? []
         guard !Task.isCancelled else { return }
         sidebarSearchGroups = SidebarSearchResults.group(hits)
+        sidebarSearchedQuery = trimmed
     }
     
     private func exportConversation(id: UUID) {
