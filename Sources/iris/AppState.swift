@@ -307,6 +307,19 @@ class AppState {
             appendLaunchNotice("Saved conversations could not be loaded (\(headline)). Starting with an empty list; the database was left untouched.",
                                to: target)
         }
+        // #202: a fresh install has protection on by default but no tier-3 model downloaded, and
+        // the guard silently skips tier 3 rather than blocking — say so once, visibly, instead of
+        // leaving that only to the P3 LED's tooltip.
+        if let target = selectedConversationId {
+            let provisioning = InjectionGuard.tier3Provisioning(engine: ConfigManager.shared.promptGuardEngine,
+                                                                  modelName: ConfigManager.shared.promptGuardModel,
+                                                                  modelsDir: IrisPaths.default.modelsDir)
+            if let notice = InjectionGuard.tier3UnprovisionedNotice(
+                protectionEnabled: ConfigManager.shared.enableAdvancedPromptInjectionProtection,
+                provisioning: provisioning) {
+                appendLaunchNotice(notice, to: target)
+            }
+        }
     }
 
     func invalidateEnginePrompt() {

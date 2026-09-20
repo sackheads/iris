@@ -33,8 +33,15 @@ class ModelDownloader: NSObject, URLSessionDownloadDelegate {
         knownModelSizes[name] ?? "1–8GB"
     }
     
+    /// Resolves a config value that may be a raw filename or a source URL to the file name it
+    /// lives under in `modelsDir`. Shared with `InjectionGuard.tier3Provisioning` (#202) so the
+    /// two checks can never disagree about what "downloaded" means.
+    nonisolated static func resolvedFilename(for name: String) -> String {
+        name.starts(with: "http") ? (URL(string: name)?.lastPathComponent ?? name) : name
+    }
+
     func isModelDownloaded(name: String) -> Bool {
-        let filename = name.starts(with: "http") ? (URL(string: name)?.lastPathComponent ?? name) : name
+        let filename = Self.resolvedFilename(for: name)
         let path = IrisPaths.default.modelsDir.path + "/" + filename
         return FileManager.default.fileExists(atPath: path)
     }

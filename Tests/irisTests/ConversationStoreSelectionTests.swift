@@ -105,7 +105,10 @@ struct ConversationStoreSelectionTests {
         b.flushSave()
 
         let loaded = try store.loadAll()
-        #expect(loaded.conversations.flatMap { $0.messages }.filter { $0.role == .system }.count == 1)
+        // Filtered to this notice's own wording, not all system messages: a real `AppState` also
+        // emits other launch notices independent of this scenario (e.g. the #202 tier-3-unprovisioned
+        // one, since this test environment has protection on by default and no model downloaded).
+        #expect(loaded.conversations.flatMap { $0.messages }.filter { $0.role == .system && $0.content.contains("could not be read and") }.count == 1)
         for conv in loaded.conversations {
             #expect(try store.counts(for: conv.id).messages == conv.messages.count)
         }

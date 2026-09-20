@@ -19,15 +19,16 @@ struct ModelLED: View {
     let state: LEDState
 
     enum LEDState: CaseIterable {
-        case off, configured, ready, active, downloading
+        case off, configured, ready, active, downloading, unprovisioned
 
         var color: Color {
             switch self {
-            case .off:          Color.gray.opacity(0.35)
-            case .configured:   Color.orange.opacity(0.55)
-            case .ready:        Color.green
-            case .active:       Color.green
-            case .downloading:  Color.orange
+            case .off:           Color.gray.opacity(0.35)
+            case .configured:    Color.orange.opacity(0.55)
+            case .ready:         Color.green
+            case .active:        Color.green
+            case .downloading:   Color.orange
+            case .unprovisioned: Color.orange.opacity(0.55)
             }
         }
         var glowRadius: CGFloat {
@@ -70,11 +71,12 @@ struct ModelLED: View {
 
     private var tooltip: String {
         switch state {
-        case .off:          "\(label) — disabled"
-        case .configured:   "\(label) — enabled, not loaded"
-        case .ready:        "\(label) — loaded & ready"
-        case .active:       "\(label) — active"
-        case .downloading:  "\(label) — downloading"
+        case .off:           "\(label) — disabled"
+        case .configured:    "\(label) — enabled, not loaded"
+        case .ready:         "\(label) — loaded & ready"
+        case .active:        "\(label) — active"
+        case .downloading:   "\(label) — downloading"
+        case .unprovisioned: "\(label) — enabled, model not downloaded; tier 3 skipped"
         }
     }
 }
@@ -153,7 +155,10 @@ struct ModelLEDBar: View {
         let d = ModelDownloader.shared
         if d.isDownloading && d.currentDownloadName == config.promptGuardModel { return .downloading }
         if config.promptGuardEngine == "llama_cpp" {
-            return d.isModelDownloaded(name: config.promptGuardModel) ? .ready : .configured
+            // Unlike the other LEDs' `.configured` fallback, an absent tier-3 model isn't just
+            // "not loaded yet" — the guard actively skips tier 3 for every evaluation until this
+            // is downloaded (#202), so it gets its own, more informative state.
+            return d.isModelDownloaded(name: config.promptGuardModel) ? .ready : .unprovisioned
         }
         return .ready
     }
