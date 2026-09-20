@@ -44,46 +44,8 @@ struct ChatView: View {
                     let trimmedQuery = sidebarQuery.trimmingCharacters(in: .whitespacesAndNewlines)
                     if trimmedQuery.isEmpty {
                         Section(header: Text("Conversations").font(.caption.weight(.bold)).foregroundColor(.secondary).padding(.bottom, 4)) {
-                            ForEach(state.conversations.filter { !$0.isSubagent }) { conv in
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(conv.title)
-                                            .font(.subheadline)
-                                            .lineLimit(1)
-                                        if let wp = conv.workspacePath {
-                                            Text(wp)
-                                                .font(.caption2)
-                                                .foregroundColor(.secondary)
-                                                .lineLimit(1)
-                                                .truncationMode(.middle)
-                                        }
-                                    }
-                                    Spacer()
-                                }
-                                .padding(.vertical, 2)
-                                .tag(conv.id)
-                                .contextMenu {
-                                    Button("Link to Workspace...") {
-                                        linkWorkspace(to: conv.id)
-                                    }
-                                    if !conv.isSubagent {
-                                        Toggle("Sandbox main agent", isOn: Binding(
-                                            get: { state.effectiveMainSandboxed(conv) },
-                                            set: { state.setMainAgentSandbox(for: conv.id, pref: $0 ? .sandboxed : .host) }
-                                        ))
-                                        .disabled(!ConfigManager.shared.enableSandboxing)
-                                    }
-                                    Button("Export to Markdown...") {
-                                        exportConversation(id: conv.id)
-                                    }
-                                    Divider()
-                                    Button(role: .destructive, action: {
-                                        state.deleteConversation(conv.id)
-                                    }) {
-                                        Text("Delete Conversation")
-                                        Image(systemName: "trash")
-                                    }
-                                }
+                            ForEach(state.conversations.filter { !$0.isSubagent && !$0.isArchived }) { conv in
+                                conversationRow(conv)
                             }
                         }
                     } else {
@@ -458,6 +420,51 @@ struct ChatView: View {
         }
     }
     
+    /// Shared row body for both the Conversations and Archived sections, so archiving a
+    /// conversation moves it between sections without changing how it renders (#182).
+    @ViewBuilder
+    private func conversationRow(_ conv: Conversation) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(conv.title)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                if let wp = conv.workspacePath {
+                    Text(wp)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer()
+        }
+        .padding(.vertical, 2)
+        .tag(conv.id)
+        .contextMenu {
+            Button("Link to Workspace...") {
+                linkWorkspace(to: conv.id)
+            }
+            if !conv.isSubagent {
+                Toggle("Sandbox main agent", isOn: Binding(
+                    get: { state.effectiveMainSandboxed(conv) },
+                    set: { state.setMainAgentSandbox(for: conv.id, pref: $0 ? .sandboxed : .host) }
+                ))
+                .disabled(!ConfigManager.shared.enableSandboxing)
+            }
+            Button("Export to Markdown...") {
+                exportConversation(id: conv.id)
+            }
+            Divider()
+            Button(role: .destructive, action: {
+                state.deleteConversation(conv.id)
+            }) {
+                Text("Delete Conversation")
+                Image(systemName: "trash")
+            }
+        }
+    }
+
     private func linkWorkspace(to id: UUID) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
