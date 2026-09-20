@@ -69,31 +69,34 @@ struct AutoAdvanceRuleTests {
         #expect(contract.canAutoAdvance(from: eval(.graded, [])) == false)
     }
 
-    @Test("an unjudged humanJudged criterion pauses even when everything else is met")
+    @Test("an unjudged humanJudged criterion pauses even when the grader said met")
     func testUnjudgedHumanCriterionPauses() {
         let a = Criterion(text: "a", kind: .qualitative, check: nil)
         let h = Criterion(text: "looks right", kind: .humanJudged, check: nil)
         let contract = ladder([a, h])
-        let e = eval(.graded, [verdict(a, .met), verdict(h, .humanPending, method: .human)])
+        // Grader said .met, but no judgement (nil) — judgement logic must block this.
+        let e = eval(.graded, [verdict(a, .met), verdict(h, .met, method: .human)])
         #expect(contract.canAutoAdvance(from: e) == false)
     }
 
-    @Test("an accepted humanJudged criterion advances")
+    @Test("an accepted humanJudged criterion advances even when the grader said not met")
     func testAcceptedHumanCriterionAdvances() {
         let a = Criterion(text: "a", kind: .qualitative, check: nil)
         let h = Criterion(text: "looks right", kind: .humanJudged, check: nil)
         var contract = ladder([a, h])
         contract.judgements[h.id] = true
-        let e = eval(.graded, [verdict(a, .met), verdict(h, .met, method: .human)])
+        // Grader said .notMet, but user accepted (true) — judgement logic must govern this.
+        let e = eval(.graded, [verdict(a, .met), verdict(h, .notMet, method: .human)])
         #expect(contract.canAutoAdvance(from: e) == true)
     }
 
-    @Test("a rejected humanJudged criterion pauses")
+    @Test("a rejected humanJudged criterion pauses even when the grader said met")
     func testRejectedHumanCriterionPauses() {
         let h = Criterion(text: "looks right", kind: .humanJudged, check: nil)
         var contract = ladder([h])
         contract.judgements[h.id] = false
-        let e = eval(.graded, [verdict(h, .notMet, method: .human)])
+        // Grader said .met, but user rejected (false) — judgement logic must block this.
+        let e = eval(.graded, [verdict(h, .met, method: .human)])
         #expect(contract.canAutoAdvance(from: e) == false)
     }
 
@@ -103,6 +106,16 @@ struct AutoAdvanceRuleTests {
         var contract = ladder([a])
         contract.waivers[a.id] = "not applicable on macOS"
         #expect(contract.canAutoAdvance(from: eval(.graded, [verdict(a, .notMet)])) == true)
+    }
+
+    @Test("a waived humanJudged criterion resolves without requiring a judgement")
+    func testWaivedHumanJudgedCriterionAdvances() {
+        let h = Criterion(text: "looks right", kind: .humanJudged, check: nil)
+        var contract = ladder([h])
+        contract.waivers[h.id] = "grader has sufficient visibility"
+        // Waiver is an independent resolution path; judgement is never consulted.
+        let e = eval(.graded, [verdict(h, .met, method: .human)])
+        #expect(contract.canAutoAdvance(from: e) == true)
     }
 
     @Test("the final milestone never auto-advances")
