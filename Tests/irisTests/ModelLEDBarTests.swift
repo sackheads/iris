@@ -9,7 +9,7 @@ final class ModelLEDBarTests: XCTestCase {
     /// half of #109. A storeless `ConfigManager()` is a separate object over the same process-global
     /// store (#193), so it is not isolation by itself — the injected suite is what isolates us.
     /// `ModelLEDBar` already takes an injectable `config`, so nothing here needs the singleton.
-    private var config = ConfigManager()
+    private var config: ConfigManager!
     private var suiteName = ""
 
     override func setUp() {
