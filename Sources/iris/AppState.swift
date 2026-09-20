@@ -693,14 +693,16 @@ class AppState {
         // `sendMessage` routes by `selectedConversationId`, so the next message would go into a
         // restricted, soon-to-be-deleted conversation (#167).
         if selectedConversationId == id {
-            selectedConversationId = conversations.last(where: { !$0.isSubagent })?.id
+            selectedConversationId = conversations.last(where: { !$0.isSubagent && !$0.isArchived })?.id
         }
         markChanged(id, .deleted)
-        // Scratch conversations don't count: a list holding only those renders an empty sidebar,
-        // so the user still needs somewhere to land. The delete is recorded above either way —
-        // `createNewConversation` records its own change and must not swallow this one.
-        if !conversations.contains(where: { !$0.isSubagent }) {
+        // Counts active only: deleting your last active conversation puts the user in a new empty
+        // one, not in the archive. There is deliberately no archived fallback above — this check
+        // would immediately supersede it (#182 §5).
+        if !conversations.contains(where: { !$0.isSubagent && !$0.isArchived }) {
             createNewConversation()
+        } else {
+            markChanged(id, .metadata)
         }
     }
 
@@ -1883,6 +1885,14 @@ class AppState {
     /// Set by `loadConversations()` when `store.loadAll()` itself threw (not a per-row skip).
     private var loadFailureHeadline: String? = nil
 
+    /// #182 §5. `position` is assigned at INSERT and never changed, so the last row may well be an
+    /// archived one — which would open every launch inside the collapsed section. Prefer the last
+    /// active conversation; fall back to an archived one only when there is nothing else, in which
+    /// case §6.2 un-archives it on the first thing sent.
+    nonisolated static func selectLaunchConversation(_ loaded: [Conversation]) -> Conversation? {
+        loaded.last(where: { !$0.isArchived }) ?? loaded.last
+    }
+
     private func loadConversations() {
         // One-time move off the UserDefaults blob (spec §6). Cheap when there is no key.
         let outcome = LegacyConversationBlob.migrateIfNeeded(into: store, defaults: IrisDefaults.store)
@@ -1896,7 +1906,7 @@ class AppState {
             loadedRepairFailed = result.repairFailed
             let loaded = Self.sanitizeLoaded(result.conversations)
             self.conversations = loaded
-            self.selectedConversationId = loaded.last?.id
+            self.selectedConversationId = Self.selectLaunchConversation(loaded)?.id
             // A whole-table corruption can be thousands of rows; one line each would bury
             // everything else in the log.
             let logCap = 10
