@@ -143,22 +143,34 @@ The cost is one extra step in exactly the case where the extra step is the point
 
 ### 6.2 Work arriving un-archives
 
-The second direction of §1's rule. A conversation that receives work becomes active again:
+The second direction of §1's rule. **Two choke points clear `isArchived` on their target
+conversation**, stated here rather than enumerated per caller:
 
-- **Typing into it.** `sendMessage` clears `isArchived` on the target conversation before starting
-  the turn. Refusing to send instead would leave a pane the user can read but not use, with no
-  obvious way out; un-archiving is what they meant by typing into it.
-- **A scheduled job firing into it.** `ScheduleManager`'s callback carries a `conversationId`; if
-  that conversation is archived, it is un-archived as the turn starts, exactly as typing would.
-  Skipping the job instead would make archiving silently cancel scheduled work, which is the
-  control-gesture behaviour §1 forbids.
-- **A subagent posting back to it**, by the same rule and the same mechanism.
+1. **`IrisEngine.handleSystemEvent(_:source:conversationId:)`** — every non-user arrival goes
+   through it: the scheduler, background subagent post-backs, and the file watcher. It resolves its
+   target as `conversationId ?? selectedConversationId`, so naming the rule here covers all three
+   and cannot go stale when a fourth is added.
+2. **The turn-starting path of `AppState.sendMessage`** — scoped deliberately: `sendMessage` also
+   dispatches slash commands that start no turn, and `/tokens` should not un-archive anything.
 
-The conversation moves back to **Conversations** and, since it is now the one being worked in, is a
-valid selection by any path. No notice is needed: the user is looking at the thing that moved.
+Enumerating arrival routes is the wrong shape for this rule. The watcher already proves it: it
+calls `handleSystemEvent` with **no** conversation id, so it targets whatever is selected — and §8
+deliberately leaves the user selected on a conversation they just archived. A per-caller rule would
+have missed it.
 
-This is what keeps §6.1 honest. A gate on the archive gesture alone would still permit a turn to
-start inside a collapsed section by three other routes.
+**Why un-archive rather than refuse.** For the composer, refusing leaves a pane the user can read
+but not use, with no obvious way out; un-archiving is what they meant by typing into it. For an
+arrival, skipping the work would make archiving silently cancel a scheduled job or discard a
+subagent's result — the control-gesture behaviour §1 forbids.
+
+**Notices differ by direction, because the user's attention does:**
+
+- **Typing** needs no notice. The user is looking at the thing that moved.
+- **An arrival** happens with the user elsewhere: a row silently reappears, and if it was the last
+  archived conversation the whole section vanishes. `handleSystemEvent` already appends a system
+  line for the event; that line names the un-archive ("un-archived: scheduled job"). **Selection
+  does not move** — the conversation resurfacing is not a reason to yank the user out of what they
+  are reading.
 
 ## 7. Restoring
 
@@ -175,7 +187,7 @@ nowhere to type.
 would leave none. §6.1's refusal is what makes this safe — the newly created conversation can never
 inherit a running goal, because a conversation with one cannot be archived in the first place.
 
-**Selection in that case moves to the new conversation**, which is the one exception to §5's
+**Selection in that case moves to the new conversation**, which is the one exception to §7's
 "selection is untouched". The general rule holds because an archived conversation stays rendered
 and therefore stays a valid selection; but when archiving created a replacement precisely because
 the user had nowhere to type, leaving them selected on the thing they just filed away would defeat
@@ -188,8 +200,9 @@ Archived conversations remain indexed and searchable, unchanged: `searchConversa
 `conversations` only for the title, so no filter is involved.
 
 **While a query is active, neither section renders.** #212 replaces the whole Conversations section
-with Results, so an archived hit is just a row like any other. Results rows mark archived hits with
-a muted "Archived" label, so the user knows where clicking will take them.
+with Results, so an archived hit is just a row like any other. Results are grouped by conversation
+(a header plus its per-message hits), so the muted "Archived" marker belongs on the **group
+header**, not repeated on every hit row — the user needs to know where clicking will take them.
 
 **After the query clears**, the revealed conversation is selected but, if archived, sits inside a
 collapsed group — a selected row the user cannot see, which is the residue of the hazard §5
@@ -218,6 +231,8 @@ only describe what it adds.
 - **`README.md`** — the sidebar and search descriptions (`:18`, `:31`, `:118`) and the context-menu
   list (`:40`) describe a single conversation list. Each needs the archive section, and the search
   bullet needs "archived conversations stay searchable".
+- **`README.md:119`** ("Session Control") — `/archive` and `/unarchive` belong beside `/new` and
+  `/clear`.
 - **`docs/slash_commands.md`** and **`SlashCommandItem.allCommands`** — add `/archive` and
   `/unarchive`. The latter drives the in-app autocomplete, so omitting it makes the commands
   undiscoverable even though they work.
@@ -236,6 +251,14 @@ only describe what it adds.
   to it — the §8 exception, asserted rather than inferred from the two rules it sits between.
 - **`sendMessage` into an archived conversation un-archives it before the turn starts** (§6.2).
 - **A scheduled job firing into an archived conversation un-archives it** (§6.2).
+- **A background subagent posting back to an archived conversation un-archives it** (§6.2) — the
+  same choke point, asserted separately because it is a different caller with a different target
+  (it passes an explicit id, where the watcher passes none).
+- **An arrival un-archive does not move selection**, and its system line names the un-archive
+  (§6.2).
+- **The Archived group auto-expands when the selected conversation is archived** (§9) — the one
+  genuinely new UI rule, and the thing that keeps a selected row from being invisible after a
+  search reveal or the launch fallback.
 - **Launch selection prefers the last non-archived conversation**, and falls back to an archived one
   only when no active conversation exists (§5). Both halves asserted — the fallback is what makes
   the preference meaningful.
