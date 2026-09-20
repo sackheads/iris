@@ -16,7 +16,10 @@ struct IrisPaths: Sendable {
     /// (see `useVolatileCopy(at:)`) before any manager is touched; nothing else ever sets it.
     static var `default`: IrisPaths { lock.withLock { override } ?? standard }
 
-    private static let standard = IrisPaths(
+    /// The real home, regardless of any headless override — isolation tests compare file
+    /// existence at this exact path before and after a test run and must never create anything
+    /// here themselves.
+    static let standard = IrisPaths(
         root: URL(fileURLWithPath: ("~/.iris" as NSString).expandingTildeInPath)
     )
     private static let lock = NSLock()

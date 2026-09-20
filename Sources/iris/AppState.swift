@@ -244,6 +244,9 @@ class AppState {
     private var engine: IrisEngine!
     /// Durable conversation persistence (#163). Injected so tests get an in-memory database.
     let store: ConversationStore
+    /// Rows `loadConversations()` could not decode on the most recent load (#163). Internal for
+    /// the one-time system-line notice below and for tests.
+    private(set) var loadedSkippedRows: [SkippedRow] = []
 
     init(store: ConversationStore = .makeDefault()) {
         self.store = store
@@ -251,6 +254,20 @@ class AppState {
         loadConversations()
         if conversations.isEmpty {
             createNewConversation()
+        }
+        if !loadedSkippedRows.isEmpty, let target = selectedConversationId {
+            let convs = Set(loadedSkippedRows.compactMap(\.conversationId)).count
+            appendMessage(role: .system,
+                          content: "\(loadedSkippedRows.count) saved entr\(loadedSkippedRows.count == 1 ? "y" : "ies") in \(convs) conversation\(convs == 1 ? "" : "s") could not be read and were skipped. They remain in conversations.sqlite.",
+                          to: target)
+        }
+        // The legacy UserDefaults blob existed but couldn't be decoded (spec §6): keep it under
+        // the backup key (LegacyConversationBlob already did that) and say so once, so the loss
+        // is visible in the app rather than only in the console log.
+        if legacyBlobUndecodable, let target = selectedConversationId {
+            appendMessage(role: .system,
+                          content: "The saved conversations from an earlier version could not be read; a backup was kept under the old settings key.",
+                          to: target)
         }
     }
 
@@ -1479,17 +1496,27 @@ class AppState {
         }
     }
     
+    /// Set by `loadConversations()` when the legacy UserDefaults blob existed but could not be
+    /// decoded, so `init` can surface it once a conversation exists to attach the notice to.
+    private var legacyBlobUndecodable = false
+
     private func loadConversations() {
-        if let data = IrisDefaults.store.data(forKey: "iris_conversations") {
-            do {
-                let decoded = try JSONDecoder().decode([Conversation].self, from: data)
-                let loaded = Self.sanitizeLoaded(decoded)
-                self.conversations = loaded
-                self.selectedConversationId = loaded.last?.id
-            } catch {
-                print("Failed to decode conversations: \(error)")
-                IrisDefaults.store.set(data, forKey: "iris_conversations_backup_\(Date().timeIntervalSince1970)")
+        // One-time move off the UserDefaults blob (spec §6). Cheap when there is no key.
+        let outcome = LegacyConversationBlob.migrateIfNeeded(into: store, defaults: IrisDefaults.store)
+        if case .imported(let n) = outcome { print("Imported \(n) conversations from the legacy blob.") }
+        if outcome == .undecodable { legacyBlobUndecodable = true }
+
+        do {
+            let result = try store.loadAll()
+            loadedSkippedRows = result.skipped
+            let loaded = Self.sanitizeLoaded(result.conversations)
+            self.conversations = loaded
+            self.selectedConversationId = loaded.last?.id
+            for row in result.skipped {
+                print("Skipped unreadable \(row.table) row (conversation \(row.conversationId?.uuidString ?? "?"), ordinal \(row.ordinal.map(String.init) ?? "-")): \(row.reason)")
             }
+        } catch {
+            print("Failed to load conversations: \(error)")
         }
     }
 
