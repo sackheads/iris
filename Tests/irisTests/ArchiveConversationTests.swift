@@ -104,4 +104,34 @@ struct ArchiveConversationTests {
         let messages = app.conversations.first { $0.id == a }?.messages ?? []
         #expect(messages.contains { $0.content.contains("goal is active") })
     }
+
+    @Test("archiving an id that is not loaded is refused, not silently reported as done")
+    func unknownIdRefused() {
+        let app = AppState(); app.conversations.removeAll()
+        app.createNewConversation(id: UUID())
+        let stale = UUID()
+
+        #expect(app.archiveRefusal(for: stale) == .noSuchConversation)
+        #expect(app.archiveConversation(stale) == .noSuchConversation,
+                "nil here would tell the caller a conversation was archived when none was")
+    }
+
+    @Test("/unarchive is handled as a command, not sent to the model")
+    func slashUnarchiveIsACommand() {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(), b = UUID()
+        app.createNewConversation(id: a)
+        app.createNewConversation(id: b)
+        _ = app.archiveConversation(a)
+        app.selectedConversationId = a
+
+        app.sendMessage("/unarchive")
+
+        // `isArchived == false` alone proves nothing: falling through would reach the turn path,
+        // which un-archives too (§6.2). The absent user bubble is what says it was a command.
+        #expect(app.conversations.first { $0.id == a }?.isArchived == false)
+        #expect(app.conversations.first { $0.id == a }?.messages.contains { $0.role == .user } == false,
+                "the literal text would otherwise become a real LLM turn")
+        #expect(app.isThinking == false)
+    }
 }

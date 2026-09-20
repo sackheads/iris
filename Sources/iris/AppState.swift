@@ -715,11 +715,15 @@ class AppState {
     /// not quietly stop an agent, and a goal loop running inside a collapsed section is work
     /// happening where nobody is looking (#182 §6.1).
     enum ArchiveRefusal: Equatable {
+        /// A stale id — deleted, or never loaded. Distinguished from `nil` so `archiveConversation`
+        /// cannot report success for an archive it did not perform.
+        case noSuchConversation
         case turnInFlight
         case goalActive
 
         var reason: String {
             switch self {
+            case .noSuchConversation: return "that conversation no longer exists"
             case .turnInFlight: return "a turn is still running"
             case .goalActive: return "a goal is active — /stop it first"
             }
@@ -729,7 +733,9 @@ class AppState {
     /// nil means the conversation may be archived. The sidebar calls this to disable its menu item
     /// with the reason, since a context-menu click has no channel for a system message.
     func archiveRefusal(for conversationId: UUID) -> ArchiveRefusal? {
-        guard let conv = conversations.first(where: { $0.id == conversationId }) else { return nil }
+        guard let conv = conversations.first(where: { $0.id == conversationId }) else {
+            return .noSuchConversation
+        }
         if hasTurnInFlight(for: conversationId) { return .turnInFlight }
         if conv.activeGoal != nil { return .goalActive }
         return nil
