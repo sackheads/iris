@@ -13,6 +13,11 @@ struct ChatView: View {
     @State private var selectedMessageIDs = Set<UUID>()
     @State private var showSubagents = false
     @State private var showSetupWizard = false
+    /// Sidebar conversation search (#183). `sidebarSearchGroups` is republished by the debounced
+    /// `.task(id: sidebarQuery)` below rather than computed inline, because the store read it
+    /// depends on (`searchConversations`) is synchronous SQLite I/O, not a `View` computation.
+    @State private var sidebarQuery = ""
+    @State private var sidebarSearchGroups: [SidebarSearchResults.Group] = []
     @Bindable var config = ConfigManager.shared
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
@@ -26,52 +31,94 @@ struct ChatView: View {
         NavigationSplitView {
             VStack {
                 List(selection: $state.selectedConversationId) {
-                    Section(header: Text("Conversations").font(.caption.weight(.bold)).foregroundColor(.secondary).padding(.bottom, 4)) {
-                        ForEach(state.conversations.filter { !$0.isSubagent }) { conv in
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(conv.title)
-                                        .font(.subheadline)
-                                        .lineLimit(1)
-                                    if let wp = conv.workspacePath {
-                                        Text(wp)
-                                            .font(.caption2)
-                                            .foregroundColor(.secondary)
+                    let trimmedQuery = sidebarQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmedQuery.isEmpty {
+                        Section(header: Text("Conversations").font(.caption.weight(.bold)).foregroundColor(.secondary).padding(.bottom, 4)) {
+                            ForEach(state.conversations.filter { !$0.isSubagent }) { conv in
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(conv.title)
+                                            .font(.subheadline)
                                             .lineLimit(1)
-                                            .truncationMode(.middle)
+                                        if let wp = conv.workspacePath {
+                                            Text(wp)
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                                .lineLimit(1)
+                                                .truncationMode(.middle)
+                                        }
+                                    }
+                                    Spacer()
+                                }
+                                .padding(.vertical, 2)
+                                .tag(conv.id)
+                                .contextMenu {
+                                    Button("Link to Workspace...") {
+                                        linkWorkspace(to: conv.id)
+                                    }
+                                    if !conv.isSubagent {
+                                        Toggle("Sandbox main agent", isOn: Binding(
+                                            get: { state.effectiveMainSandboxed(conv) },
+                                            set: { state.setMainAgentSandbox(for: conv.id, pref: $0 ? .sandboxed : .host) }
+                                        ))
+                                        .disabled(!ConfigManager.shared.enableSandboxing)
+                                    }
+                                    Button("Export to Markdown...") {
+                                        exportConversation(id: conv.id)
+                                    }
+                                    Divider()
+                                    Button(role: .destructive, action: {
+                                        state.deleteConversation(conv.id)
+                                    }) {
+                                        Text("Delete Conversation")
+                                        Image(systemName: "trash")
                                     }
                                 }
-                                Spacer()
                             }
-                            .padding(.vertical, 2)
-                            .tag(conv.id)
-                            .contextMenu {
-                                Button("Link to Workspace...") {
-                                    linkWorkspace(to: conv.id)
-                                }
-                                if !conv.isSubagent {
-                                    Toggle("Sandbox main agent", isOn: Binding(
-                                        get: { state.effectiveMainSandboxed(conv) },
-                                        set: { state.setMainAgentSandbox(for: conv.id, pref: $0 ? .sandboxed : .host) }
-                                    ))
-                                    .disabled(!ConfigManager.shared.enableSandboxing)
-                                }
-                                Button("Export to Markdown...") {
-                                    exportConversation(id: conv.id)
-                                }
-                                Divider()
-                                Button(role: .destructive, action: {
-                                    state.deleteConversation(conv.id)
-                                }) {
-                                    Text("Delete Conversation")
-                                    Image(systemName: "trash")
+                        }
+                    } else {
+                        Section(header: Text("Results").font(.caption.weight(.bold)).foregroundColor(.secondary).padding(.bottom, 4)) {
+                            if sidebarSearchGroups.isEmpty {
+                                Text("No conversations matching \"\(trimmedQuery)\"")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                                    .padding(.vertical, 4)
+                            } else {
+                                ForEach(sidebarSearchGroups) { group in
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(group.title)
+                                            .font(.subheadline.weight(.semibold))
+                                            .lineLimit(1)
+                                        ForEach(group.hits, id: \.ordinal) { hit in
+                                            Button(action: { state.reveal(hit: hit) }) {
+                                                HStack(alignment: .top, spacing: 6) {
+                                                    Image(systemName: hit.role == .user ? "person.fill" : "sparkles")
+                                                        .font(.caption2)
+                                                        .foregroundColor(.secondary)
+                                                        .padding(.top, 2)
+                                                    Text(hit.snippet)
+                                                        .font(.caption)
+                                                        .foregroundColor(.secondary)
+                                                        .lineLimit(2)
+                                                        .multilineTextAlignment(.leading)
+                                                }
+                                            }
+                                            .buttonStyle(.plain)
+                                            .padding(.leading, 8)
+                                        }
+                                    }
+                                    .padding(.vertical, 2)
                                 }
                             }
                         }
                     }
                 }
                 .listStyle(.sidebar)
-                
+                .searchable(text: $sidebarQuery, placement: .sidebar, prompt: "Search conversations")
+                .task(id: sidebarQuery) {
+                    await runSidebarSearch()
+                }
+
                 Button(action: { state.createNewConversation(); composerShouldFocus = true }) {
                     HStack {
                         Image(systemName: "plus.message.fill")
@@ -200,16 +247,41 @@ struct ChatView: View {
                                 }
                             }
                         }
+                        // A sidebar search hit (#183) sets `pendingScrollTarget` in the same call
+                        // that can also change `selectedConversationId`, so both this handler and
+                        // the one below can fire for one reveal. Checking the pending target here
+                        // is what makes it win that race instead of the "scroll to bottom on
+                        // conversation switch" behaviour immediately undoing it.
                         .onChange(of: state.activeConversationIndex) { _, _ in
                             DispatchQueue.main.async {
                                 selectedMessageIDs.removeAll()
-                                proxy.scrollTo("bottomAnchor", anchor: .bottom)
+                                if let target = state.pendingScrollTarget {
+                                    proxy.scrollTo(target, anchor: .center)
+                                    state.pendingScrollTarget = nil
+                                } else {
+                                    proxy.scrollTo("bottomAnchor", anchor: .bottom)
+                                }
+                            }
+                        }
+                        // Covers revealing a hit that belongs to the conversation already open,
+                        // where `activeConversationIndex` never changes and the handler above
+                        // never fires.
+                        .onChange(of: state.pendingScrollTarget) { _, target in
+                            guard let target else { return }
+                            DispatchQueue.main.async {
+                                proxy.scrollTo(target, anchor: .center)
+                                state.pendingScrollTarget = nil
                             }
                         }
                         .onAppear {
                             DispatchQueue.main.async {
                                 selectedMessageIDs.removeAll()
-                                proxy.scrollTo("bottomAnchor", anchor: .bottom)
+                                if let target = state.pendingScrollTarget {
+                                    proxy.scrollTo(target, anchor: .center)
+                                    state.pendingScrollTarget = nil
+                                } else {
+                                    proxy.scrollTo("bottomAnchor", anchor: .bottom)
+                                }
                             }
                         }
                     }
@@ -422,6 +494,27 @@ struct ChatView: View {
     
     private func groupedMessages(for conv: Conversation) -> [MessageItem] {
         MessageItem.group(conv.messages)
+    }
+
+    /// Debounced sidebar search (#183): `.task(id: sidebarQuery)` restarts this — and cancels
+    /// whatever was in flight — on every keystroke, so the `Task.sleep` below is what keeps a fast
+    /// typist from firing a store read per character. The store's read is synchronous SQLite I/O,
+    /// which is fine to run inside this task once the debounce has settled it down to one call.
+    private func runSidebarSearch() async {
+        let trimmed = sidebarQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            sidebarSearchGroups = []
+            return
+        }
+        do {
+            try await Task.sleep(nanoseconds: 200_000_000)
+        } catch {
+            return   // cancelled by a newer keystroke
+        }
+        guard !Task.isCancelled else { return }
+        let hits = (try? state.store.searchConversations(query: trimmed, limit: 50)) ?? []
+        guard !Task.isCancelled else { return }
+        sidebarSearchGroups = SidebarSearchResults.group(hits)
     }
     
     private func exportConversation(id: UUID) {
