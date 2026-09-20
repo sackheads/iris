@@ -4,15 +4,20 @@ import XCTest
 @MainActor
 final class ModelLEDBarTests: XCTestCase {
 
-    /// Each test gets its OWN ConfigManager rather than mutating `ConfigManager.shared`, which is
-    /// process-global: parallel suites racing on it is the in-run half of #109, and the values used
-    /// to outlive the process too. `ModelLEDBar` already takes an injectable `config`, so nothing
-    /// here needs the singleton.
-    private var config = ConfigManager()
+    /// Each test gets its OWN ConfigManager over its OWN UserDefaults suite rather than mutating
+    /// `ConfigManager.shared`, which is process-global: parallel suites racing on it is the in-run
+    /// half of #109. A storeless `ConfigManager()` is a separate object over the same process-global
+    /// store (#193), so it is not isolation by itself — the injected suite is what isolates us.
+    /// `ModelLEDBar` already takes an injectable `config`, so nothing here needs the singleton.
+    private var config: ConfigManager!
+    private var suiteName = ""
 
     override func setUp() {
         super.setUp()
-        config = ConfigManager()
+        suiteName = "iris-modelledbar-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: suiteName)!
+        store.removePersistentDomain(forName: suiteName)
+        config = ConfigManager(store: store)
         // Known defaults so each test starts clean.
         config.primaryProvider = "Gemini"
         config.geminiAPIKey = "test-key"
@@ -25,6 +30,14 @@ final class ModelLEDBarTests: XCTestCase {
         config.promptGuardCoreMLModel = ""
         config.promptGuardEngine = "llama_cpp"
         config.promptGuardModel = ""
+    }
+
+    override func tearDown() {
+        UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+        // removePersistentDomain does not delete the backing plist on current macOS (#178);
+        // IrisDefaults sweeps stale iris-*-<UUID> plists by age, but clean up anyway.
+        IrisDefaults.removeSuiteFile(named: suiteName, in: IrisDefaults.preferencesDirectory)
+        super.tearDown()
     }
 
     // MARK: - Primary LED

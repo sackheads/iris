@@ -238,7 +238,11 @@ final class FactStoreManager: @unchecked Sendable {
                     arguments: [limit * 2]
                 )
             } else {
-                let ftsPattern = FTS3Pattern(matchingAnyTokenIn: sanitizedQuery)
+                // FTS5Pattern, not FTS3Pattern: `facts_fts` is an FTS5 table, tokenized by the
+                // same unicode61 tokenizer that built the index (see
+                // `ConversationStore.searchConversations`'s comment for the FTS3/FTS5 distinction
+                // this mirrors).
+                let ftsPattern = FTS5Pattern(matchingAnyTokenIn: sanitizedQuery)
                 var sql = """
                     SELECT facts.*
                     FROM facts

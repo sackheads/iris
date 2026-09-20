@@ -172,4 +172,40 @@ struct ConversationStoreSelectionTests {
         #expect(u1 < u2)
         #expect(contents.filter { $0.contains("quarantine table") }.count == 1)
     }
+
+    /// #189: a repair write that fails must not fail the whole load — the healthy conversation
+    /// still loads, and the damaged one is reported by name rather than silently dropped.
+    @Test("a failed repair excludes only the damaged conversation and is surfaced as a system line")
+    func failedRepairSurfacesAsANotice() throws {
+        let store = try ConversationStore.inMemory()
+        let healthy = Conversation(id: UUID(), title: "healthy")
+        var hs = ChangeSet(); hs.add(.created)
+        var damaged = Conversation(id: UUID(), title: "damaged")
+        damaged.messages = [ChatMessage(role: .user, content: "d0"), ChatMessage(role: .agent, content: "d1")]
+        var ds = ChangeSet(); ds.add(.created); ds.add(.messagesAppended(from: 0))
+        try store.apply([ConversationWrite(id: healthy.id, snapshot: healthy, changes: hs),
+                         ConversationWrite(id: damaged.id, snapshot: damaged, changes: ds)])
+        try store.rawWrite("UPDATE messages SET payload = '{not json' WHERE conversationId = ? AND ordinal = 0",
+                           arguments: [damaged.id.uuidString])
+        let damagedId = damaged.id
+        store.failInjection = { $0 == damagedId }
+
+        let a = AppState(store: store, tier3Provisioning: .provisioned)
+        #expect(a.conversations.map(\.title) == ["healthy"])
+        #expect(a.loadedRepairFailed == [damagedId])
+        // Exactly one notice: the repair-failed conversation's id is absent from `loadedIds`
+        // (same shape as a "left in place" skip), so without excluding it explicitly its skipped
+        // rows would also raise the "could not be read and was left in place" notice — untrue,
+        // since it was read fine and only the repair failed (round 1 review finding).
+        let systemNotices = a.conversations.first?.messages.filter { $0.role == .system } ?? []
+        #expect(systemNotices.count == 1)
+        #expect(systemNotices.first?.content.contains("could not be written") == true)
+        #expect(systemNotices.first?.content.contains("retried at the next launch") == true)
+        #expect(systemNotices.allSatisfy { !$0.content.contains("could not be read and") })
+
+        // Left entirely untouched on disk: the bad row is still there, nothing quarantined.
+        store.failInjection = nil
+        #expect(try store.counts(for: damagedId).messages == 2)
+        #expect(try store.quarantineCount(for: damagedId) == 0)
+    }
 }

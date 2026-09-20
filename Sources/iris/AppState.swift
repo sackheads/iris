@@ -259,6 +259,9 @@ class AppState {
     /// Rows `loadConversations()` could not decode on the most recent load (#163). Internal for
     /// the one-time system-line notice below and for tests.
     private(set) var loadedSkippedRows: [SkippedRow] = []
+    /// Conversations whose quarantine repair failed to write on the most recent load (#189).
+    /// Internal for the launch-notice below and for tests.
+    private(set) var loadedRepairFailed: [UUID] = []
 
     /// Test seam for the #202 launch notice below: nil means compute the real answer from
     /// `IrisPaths.default.modelsDir` at launch, which is what production always does. Injectable
@@ -283,11 +286,17 @@ class AppState {
             // every row failed to decode — were deliberately left untouched on disk, and will be
             // reported again on every launch until someone fixes them.
             let loadedIds = Set(conversations.map(\.id))
+            // A conversation whose repair failed (#189) is also absent from `loadedIds` — its own
+            // notice below covers it, and without this exclusion its skipped rows would fall into
+            // `leftInPlace`'s catch-all and also claim it "could not be read", which isn't true:
+            // it was read fine, the *repair* failed, and it will be retried, not left in place.
+            let repairFailedIds = Set(loadedRepairFailed)
             let quarantined = loadedSkippedRows.filter { row in
                 guard let id = row.conversationId, loadedIds.contains(id) else { return false }
                 return (row.table == "messages" || row.table == "history") && row.ordinal != nil
             }
             let leftInPlace = loadedSkippedRows.filter { row in
+                if let id = row.conversationId, repairFailedIds.contains(id) { return false }
                 guard let id = row.conversationId, loadedIds.contains(id) else { return true }
                 return !((row.table == "messages" || row.table == "history") && row.ordinal != nil)
             }
@@ -336,6 +345,15 @@ class AppState {
                 provisioning: provisioning) {
                 appendLaunchNotice(notice, to: target)
             }
+        }
+        // A quarantine repair had rows to write but the write itself failed (#189, e.g. a
+        // read-only database): the conversation is left out of this load entirely, untouched on
+        // disk, rather than returned with its in-memory array compacted past ordinals the disk
+        // still has gaps in.
+        if !loadedRepairFailed.isEmpty, let target = selectedConversationId {
+            let n = loadedRepairFailed.count
+            appendLaunchNotice("\(n) conversation\(n == 1 ? "" : "s") need\(n == 1 ? "s" : "") a repair that could not be written to \(IrisPaths.default.conversationsDB.lastPathComponent); \(n == 1 ? "it was" : "they were") left untouched and will be retried at the next launch.",
+                               to: target)
         }
     }
 
@@ -1763,6 +1781,7 @@ class AppState {
         do {
             let result = try store.loadAll()
             loadedSkippedRows = result.skipped
+            loadedRepairFailed = result.repairFailed
             let loaded = Self.sanitizeLoaded(result.conversations)
             self.conversations = loaded
             self.selectedConversationId = loaded.last?.id
