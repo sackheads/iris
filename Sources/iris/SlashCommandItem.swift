@@ -15,7 +15,7 @@ struct SlashCommandItem: Identifiable, Sendable, Equatable {
         SlashCommandItem(id: "rules", command: "/rules", usage: "/rules [reload]", description: "View loaded system rules or force reload"),
         SlashCommandItem(id: "model", command: "/model", usage: "/model [fast|medium|heavy|<name>]", description: "View or switch active model for conversation"),
         SlashCommandItem(id: "mcp", command: "/mcp", usage: "/mcp [reload]", description: "List connected MCP tools or reload transport"),
-        SlashCommandItem(id: "facts", command: "/facts", usage: "/facts [search <q>|probe <e>]", description: "Inspect or search SQLite FactStore memories"),
+        SlashCommandItem(id: "facts", command: "/facts", usage: "/facts [all|search <q>|probe <e>]", description: "Inspect or search SQLite FactStore memories"),
         SlashCommandItem(id: "tokens", command: "/tokens", usage: "/tokens", description: "Show token usage breakdown for active conversation"),
         SlashCommandItem(id: "new", command: "/new", usage: "/new", description: "Start a fresh conversation"),
         SlashCommandItem(id: "clear", command: "/clear", usage: "/clear", description: "Clear current conversation messages"),
