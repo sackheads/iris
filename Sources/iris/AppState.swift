@@ -1174,10 +1174,51 @@ class AppState {
         markChanged(conversationId, .metadata)
     }
 
+    /// Appends one entry to the contract's checkpoint history. All three resolutions are recorded,
+    /// so slice F inherits a complete ladder record rather than only the skipped checkpoints.
+    /// Caller must already hold a valid index; this does not save (its callers do).
+    private func recordCheckpointOutcome(at idx: Int, _ resolution: CheckpointOutcome.Resolution,
+                                         evaluation: GoalEvaluation?) {
+        guard var c = conversations[idx].goalContract, c.hasLadder,
+              c.currentMilestone < c.milestones.count else { return }
+        // No evaluation means nothing was graded; record the resolution with an empty one rather
+        // than dropping the entry, so the ladder record has no silent gaps.
+        let eval = evaluation
+            ?? GoalEvaluation(status: .failed, criteria: [], startedAt: Date(), completedAt: Date())
+        c.checkpointHistory.append(CheckpointOutcome(
+            milestoneIndex: c.currentMilestone,
+            milestoneTitle: c.milestones[c.currentMilestone].title,
+            evaluation: eval,
+            resolution: resolution))
+        conversations[idx].goalContract = c
+    }
+
+    /// Slice D3 — the grader passed this checkpoint cleanly, so advance without stopping the human.
+    ///
+    /// Deliberately NOT `advanceCheckpoint`: that one ends in `resumeGoalLoop`, which is right for
+    /// a human clicking "Approve & continue" after the turn has ended and wrong here. This runs
+    /// inside a live `reach_checkpoint` tool call, so re-arming the reprompt would start a second
+    /// loop alongside the turn in flight. The engine's multi-round turn carries the agent forward
+    /// on the tool result instead.
+    func autoAdvanceCheckpoint(for conversationId: UUID, evaluation: GoalEvaluation?) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              let existing = conversations[idx].goalContract, existing.hasLadder else { return }
+        recordCheckpointOutcome(at: idx, .autoAdvanced, evaluation: evaluation)
+        guard var c = conversations[idx].goalContract else { return }
+        c.currentMilestone = min(c.currentMilestone + 1, c.milestones.count - 1)
+        c.checkpointStatus = .running
+        conversations[idx].goalContract = c
+        conversations[idx].goalIterationCount = 0
+        saveConversations()
+    }
+
     /// Human approved the checkpoint: advance to the next milestone and resume the loop.
     func advanceCheckpoint(for conversationId: UUID) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
-              var c = conversations[idx].goalContract, c.hasLadder else { return }
+              conversations[idx].goalContract?.hasLadder == true else { return }
+        recordCheckpointOutcome(at: idx, .humanApproved,
+                                evaluation: conversations[idx].lastGoalEvaluation)
+        guard var c = conversations[idx].goalContract else { return }
         c.currentMilestone = min(c.currentMilestone + 1, c.milestones.count - 1)
         c.checkpointStatus = .running
         conversations[idx].goalContract = c
@@ -1188,8 +1229,10 @@ class AppState {
 
     /// Human sent the agent back to keep working the current milestone (no advance).
     func holdCheckpoint(for conversationId: UUID, feedback: String?) {
-        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
-              var c = conversations[idx].goalContract else { return }
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
+        recordCheckpointOutcome(at: idx, .humanSentBack,
+                                evaluation: conversations[idx].lastGoalEvaluation)
+        guard var c = conversations[idx].goalContract else { return }
         c.checkpointStatus = .running
         conversations[idx].goalContract = c
         conversations[idx].goalIterationCount = 0
