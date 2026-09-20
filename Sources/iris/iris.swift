@@ -50,6 +50,12 @@ actor IrisEngine {
     nonisolated static let renameTriggerPrefix = "System Event [Rename Trigger]"
     /// Prefix of the system event `/goal` sends to have the model draft a contract.
     nonisolated static let goalDraftTriggerPrefix = "System Event [Goal Contract Draft]"
+    /// Prefix of the history entry left behind when a turn ends before the model replied (Stop,
+    /// provider error, empty content). The chat shows a pill for those; the model never sees it,
+    /// and without this entry the next turn finds an unanswered request above the new message
+    /// and finishes it unasked (#175).
+    nonisolated static let turnEndedEarlyPrefix = "System Event [Turn ended early]"
+    nonisolated static let stoppedByUserReason = "The user stopped this turn."
 
     nonisolated static func formatDelay(_ seconds: TimeInterval) -> String {
         seconds == seconds.rounded() ? "\(Int(seconds))s" : String(format: "%.1fs", seconds)
@@ -330,7 +336,17 @@ actor IrisEngine {
     private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false) async {
         if source == "UI" { loopDetectors[conversationId] = nil }
 
-        let text = (source == "UI") ? input : "System Event [\(source)]: \(input)\nAnalyze this event. If it requires action based on your directives/skills, take it. Otherwise, briefly acknowledge it."
+        // Callers that already shaped their prompt as `System Event [X]: …` (rename, reflection,
+        // goal draft) keep their own label rather than gaining a second `System Event [System]:`.
+        let eventAnalysis = "\nAnalyze this event. If it requires action based on your directives/skills, take it. Otherwise, briefly acknowledge it."
+        let text: String
+        if source == "UI" {
+            text = input
+        } else if input.hasPrefix("System Event [") {
+            text = input + eventAnalysis
+        } else {
+            text = "System Event [\(source)]: \(input)" + eventAnalysis
+        }
 
         let localState = state
 
@@ -677,11 +693,13 @@ actor IrisEngine {
         
         var modelRound = 0
         var turnFinished = false
+        // Why the loop stopped before the model replied, if it did; recorded in history below.
+        var earlyEnd: String? = nil
         while !turnFinished {
             await Task.yield()
             // Cooperative cancellation: bail out at turn boundaries if this task was cancelled
             // (e.g. the conversation was deleted or the goal was stopped mid-turn).
-            if Task.isCancelled { break }
+            if Task.isCancelled { earlyEnd = Self.stoppedByUserReason; break }
             // One streamer per model round: it owns the agent row this round grows in place.
             let streamer = makeStreamer(conversationId: conversationId)
             do {
@@ -773,6 +791,7 @@ actor IrisEngine {
                 // No content is an error pill with the provider's stated reason, not something
                 // Iris "said" and not a decode failure (#136).
                 if let reason = activeResponse.emptyReason {
+                    earlyEnd = "The model returned no content (\(reason))."
                     _ = await streamer.settle()
                     let headline = "\(ConfigManager.shared.primaryProvider) returned no content (\(reason))"
                     await pushToUI(role: .system, text: LLMErrorMessage.encode(LLMErrorDisplay(headline: headline, detail: nil)), conversationId: conversationId)
@@ -964,6 +983,7 @@ actor IrisEngine {
                 // Headline only: provider bodies can be huge, and the full body is already on
                 // the console. The pill carries a capped copy behind a disclosure.
                 let display = LLMErrorMessage.display(for: error)
+                earlyEnd = cancelled ? Self.stoppedByUserReason : "The model call failed (\(display.headline))."
                 if !cancelled {
                     await HookManager.shared.fireNotification(title: "LLM Error", body: display.headline, useSandbox: hooksSandbox)
                     await pushToUI(role: .system, text: LLMErrorMessage.encode(display), conversationId: conversationId)
@@ -978,6 +998,11 @@ actor IrisEngine {
             }
         }
         
+        if let earlyEnd {
+            let marker = Content(role: "user", parts: [Part(text: "\(Self.turnEndedEarlyPrefix): \(earlyEnd) Do not resume the request above on your own; wait for the user's next message and answer that.")])
+            await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: marker) }
+        }
+
         await MainActor.run {
             localState?.stripInlineDataFromHistory(for: conversationId)
         }

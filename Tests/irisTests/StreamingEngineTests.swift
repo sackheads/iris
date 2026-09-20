@@ -138,7 +138,10 @@ struct StreamingEngineTests {
         let agentIndex = messages.firstIndex { $0.role == .agent }!
         let pillIndex = messages.firstIndex { LLMErrorMessage.parse($0.content) != nil }!
         #expect(agentIndex < pillIndex)
-        #expect(conv(app, id).history.last?.parts.first?.text == "partial ")
+        // The partial text is the model's turn; the "turn ended early" marker follows it (#175).
+        let partialHistory = conv(app, id).history
+        #expect(partialHistory.dropLast().last?.parts.first?.text == "partial ")
+        #expect(partialHistory.last?.parts.first?.text?.hasPrefix(IrisEngine.turnEndedEarlyPrefix) == true)
         #expect(!conv(app, id).messages.contains { $0.content.hasPrefix("[retry]") })
     }
 
@@ -167,8 +170,10 @@ struct StreamingEngineTests {
         await turn.value
         #expect(agentTexts(app, id) == ["part"])
         #expect(errorPills(app, id).isEmpty)
-        #expect(conv(app, id).history.last?.role == "model")
-        #expect(conv(app, id).history.last?.parts.first?.text == "part")
+        let stoppedHistory = conv(app, id).history
+        #expect(stoppedHistory.dropLast().last?.role == "model")
+        #expect(stoppedHistory.dropLast().last?.parts.first?.text == "part")
+        #expect(stoppedHistory.last?.parts.first?.text?.hasPrefix(IrisEngine.turnEndedEarlyPrefix) == true)
     }
 
     @Test("streaming off produces the same text and history as streaming on, and records no first-token time")
