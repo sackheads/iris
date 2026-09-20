@@ -178,7 +178,6 @@ class AppState {
     
     init() {
         self.engine = IrisEngine(state: self)
-        SubagentManager.shared.setGlobalState(self)
         loadConversations()
         if conversations.isEmpty {
             createNewConversation()

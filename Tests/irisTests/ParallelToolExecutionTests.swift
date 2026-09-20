@@ -113,7 +113,6 @@ final class ParallelToolExecutionTests: XCTestCase {
         await MainActor.run {
             state.conversations.append(Conversation(id: convId, title: "Test", history: []))
         }
-        SubagentManager.shared.setGlobalState(state)
         let engine = IrisEngine(state: state)
         await engine.processInput("Do the parallel test", source: "User", conversationId: convId)
 

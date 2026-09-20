@@ -99,7 +99,6 @@ struct DelegateMilestoneTests {
                         Milestone(title: "Integration", criterionIds: [b.id])]
         c.currentMilestone = currentMilestone
         app.setGoalContract(for: id, c)
-        SubagentManager.shared.setGlobalState(app)
     }
 
     @Test("the tool declares no criteria parameter — the ladder is the only source")
@@ -158,7 +157,6 @@ struct DelegateMilestoneTests {
                                Milestone(title: "Three", criterionIds: [c.id])]
         contract.currentMilestone = 1
         app.setGoalContract(for: id, contract)
-        SubagentManager.shared.setGlobalState(app)
 
         let client = RoutingClient(main: [Self.delegateCall(), Self.response(nil)],
                                    subagentTerminal: Self.subagentDone)
@@ -193,7 +191,6 @@ struct DelegateMilestoneTests {
         app.setGoalContract(for: id, GoalContract(objective: "Ship", criteria: [
             Criterion(text: "it works", kind: .qualitative, check: nil)
         ]))
-        SubagentManager.shared.setGlobalState(app)
         let client = RoutingClient(main: [Self.delegateCall(), Self.response(nil)],
                                    subagentTerminal: Self.subagentDone)
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)

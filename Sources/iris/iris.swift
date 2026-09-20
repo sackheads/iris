@@ -1098,14 +1098,20 @@ actor IrisEngine {
                 .map { DelegatedUnit(contract: $0, grade: true) }
             let subagentClient = self.client
 
-            if isBackground {
-                Task {
-                    let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient).rendered
-                    await self.handleSystemEvent("Background subagent result:\n\(rendered)", source: "SubagentManager", conversationId: conversationId)
+            // The engine holds its AppState weakly, so the nil case the manager used to guard
+            // against now lives here, at the only place that knows what to say about it (#171).
+            if let appState = self.state {
+                if isBackground {
+                    Task {
+                        let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState).rendered
+                        await self.handleSystemEvent("Background subagent result:\n\(rendered)", source: "SubagentManager", conversationId: conversationId)
+                    }
+                    result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes."
+                } else {
+                    result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState).rendered
                 }
-                result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes."
             } else {
-                result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient).rendered
+                result = "Error: AppState not available for subagent execution."
             }
         } else if functionCall.name == "goal_complete", let summary = functionCall.args["summary"]?.stringValue {
             // No goal to complete. The tool is not offered in this state, but a model can still
@@ -1251,9 +1257,14 @@ actor IrisEngine {
                 ?? unitContract.objective
             // grade: false — the CHECKPOINT grades these criteria cumulatively (spec §6); grading
             // the subagent too would re-grade the same criteria in a second evaluator loop.
+            guard let appState = localState else {
+                result = "Error: AppState not available for subagent execution."
+                return result
+            }
             let outcome = await SubagentManager.shared.runSubagent(
                 role: role, task: task, effort: effort, parentConversationId: conversationId,
-                unit: DelegatedUnit(contract: unitContract, grade: false), client: self.client)
+                unit: DelegatedUnit(contract: unitContract, grade: false), client: self.client,
+                appState: appState)
 
             // Only a `.completed` subagent reaches the checkpoint — it is the run that claimed the
             // milestone is done. Anything else claimed nothing: hand the outcome back to the loop
