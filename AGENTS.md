@@ -71,6 +71,8 @@ docs/                     # design specs, plans, reviews, roadmaps
 
 7. **Never mutate `ConfigManager.shared` in a test.** It is process-global and suites run concurrently, so mutating it races. Use the existing seams instead: construct an isolated `ConfigManager()` and inject it, or pass injectable parameters (`protectionEnabled:`, `workspaceToolsEnabled:`). See **Build and test** above.
 
+8. **Every chip in the composer's `VStack` must be height-bounded.** `ChatView` stacks the goal chips — `GoalContractPanel`, `LockedContractChip`, `CheckpointPauseChip`, `CompletionReportChip` — directly above the composer. An unbounded subview there can collapse the surrounding layout and blank the entire window the instant the chip appears; the app stays responsive, which makes it read as a state bug rather than a layout one. Wrap the chip in a `ScrollView` and cap it with `.frame(maxHeight:)` (320-340 is the established range). This matters most for chips whose height grows with the contract — anything embedding a `ForEach` over criteria or verdicts. Nothing enforces this at compile time, and it has escaped twice: `aa141d5` capped the three chips that existed then (#62), and `CheckpointPauseChip` was added later without a cap, reintroducing the same bug (#164).
+
 ## Patterns and conventions
 
 - **Tests** use Swift Testing (`@Suite`, `@Test`, `#expect`). Do not use XCTest. See `Tests/irisTests/ToolCallParserTests.swift` for style.
@@ -87,6 +89,7 @@ docs/                     # design specs, plans, reviews, roadmaps
 - **AttributeGraph cycle from `.textSelection` on agent Markdown views.** A `.textSelection` modifier on the agent message `Markdown` view caused a heisenbug cycle (invisible under the debugger). Fixed in `0ed19c8`; don't re-add `.textSelection` to those views.
 - **Unconditional tool declarations bloating prompt tokens and causing tool eagerness.** Broadcasting 30 tool declarations cost 61% of turn tokens and caused the model to rename conversations unprompted on first messages (#132, #133, #144). Gating tools by credentials and workflow triggers cut declarations from 30 to 17 (-41% tokens) with no loss of capability for the flows that use them.
 - **Mutating global `ConfigManager.shared` in tests.** Leaked settings across parallel test suites, caused flaky runs, and persisted dirty state into user defaults (#109).
+- **An unbounded chip in the composer stack blanking the window.** A goal chip with no height cap collapsed the surrounding layout the moment it rendered, emptying the sidebar and main pane while the app kept responding (#62, `aa141d5`). Fixed for the chips that existed then; a later chip arrived without the cap and did it again (#164). Bound every chip you add there (Invariant 8).
 
 ## Pre-commit checklist
 
@@ -95,6 +98,7 @@ docs/                     # design specs, plans, reviews, roadmaps
 - [ ] If you added or modified a tool with a credential prerequisite, a triggering command, or a lifecycle state: its declaration is gated on it rather than exposed unconditionally on plain turns (Invariant 6; see #144)
 - [ ] If you added or changed a tool parameter: `getTools()` schema and `execute()` handler are both updated
 - [ ] If you added a test that configures settings: it does not mutate `ConfigManager.shared` directly; uses an injected instance or parameter (Invariant 7; see Build and test)
+- [ ] If you added a view to the composer's `VStack` in `ChatView`: it is wrapped in a `ScrollView` and capped with `.frame(maxHeight:)` (Invariant 8)
 - [ ] If you changed user-facing behaviour: `README.md` is updated in the same commit
 - [ ] No large build artefacts committed (`.build/`, `*.o`, `*.onnx` model weights, etc.)
 
