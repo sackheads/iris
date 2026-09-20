@@ -142,33 +142,56 @@ struct InjectionGuardTests {
         try FileManager.default.createDirectory(at: emptyDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: emptyDir) }
 
-        // Register a mock that would BLOCK if reached — fix round 1 (#202): without this, a
-        // regression that let a *previous* test's throwing/hijacking mock linger in
-        // `loadingTasks["canary"]` could make this assertion pass for the wrong reason (test-order
-        // luck) instead of proving the engine was never touched. No file in `emptyDir` either, so a
-        // real engine load here would also throw/crash on a nonexistent path.
-        AuxiliaryModelManager.shared.setMockEngine(MockInferenceEngine(shouldHijack: true), for: "canary")
+        // #202 fix round 2: a registered engine now legitimately overrides the file-based skip
+        // (see testRegisteredEngineOverridesFileAbsence below), so hardening this test with a
+        // hijacking mock — round 1's fix for test-order flakiness — would now make it fail for
+        // the *right* reason under the *wrong* premise. Instead, explicitly clear any engine a
+        // previous test may have left registered on this process-wide singleton, so "no engine,
+        // no file" is guaranteed regardless of run order.
+        await AuxiliaryModelManager.shared.unloadEngine(for: "canary")
         let sanitized = await InjectionGuard.sanitize(payload, maxTier: .tier3_canary, protectionEnabled: true, tier3ModelsDir: emptyDir)
         #expect(sanitized.contains("Harmless data"))
         #expect(!sanitized.contains("BLOCKED"))
     }
 
-    @Test("Tier 3: a skipped verdict is not cached — downloading the model mid-process changes the outcome (#202 fix round 1)")
-    func testSkippedVerdictNotCached() async throws {
+    @Test("Tier 3: a registered engine counts as provisioned even when the model file is absent (#202 fix round 2)")
+    func testRegisteredEngineOverridesFileAbsence() async throws {
+        let payload = "Registered engine override \(UUID().uuidString)"   // unique: verdicts are cached per content
+        let emptyDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-tier3-engine-override-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: emptyDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: emptyDir) }
+
+        // This is exactly EngineInstrumentationTests' shape: a mock registered for "canary" with
+        // no real model file on disk. Tier 3 must actually run against it rather than skip, or
+        // every test that mocks the canary engine without a backing gguf would silently stop
+        // exercising tier 3 at all.
+        AuxiliaryModelManager.shared.setMockEngine(MockInferenceEngine(shouldHijack: true), for: "canary")
+        let sanitized = await InjectionGuard.sanitize(payload, maxTier: .tier3_canary, protectionEnabled: true, tier3ModelsDir: emptyDir)
+        #expect(sanitized.contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
+    }
+
+    @Test("Tier 3: a skipped verdict does not outlive its provisioning — downloading the model mid-process invalidates the cache (#202 fix round 2)")
+    func testSkippedVerdictDoesNotOutliveProvisioning() async throws {
         let payload = "Round trip \(UUID().uuidString)"   // unique: verdicts are cached per content
         let modelsDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("iris-tier3-skip-cache-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: modelsDir) }
 
-        // First pass: model absent, no mock registered — tier 3 is skipped.
+        // First pass: model absent, no engine registered (cleared for the same reason as above)
+        // — tier 3 is skipped, and the skip IS cached (#202 fix round 2 reverses round 1: a cached
+        // skip is fine, and desirable per #130, as long as the cache key changes when the file
+        // appears — which is exactly what this test proves).
+        await AuxiliaryModelManager.shared.unloadEngine(for: "canary")
         let first = await InjectionGuard.sanitize(payload, maxTier: .tier3_canary, protectionEnabled: true, tier3ModelsDir: modelsDir)
         #expect(first.contains("Round trip"))
         #expect(!first.contains("BLOCKED"))
 
         // The model "arrives" (e.g. the user downloads it from Settings mid-process) and a
-        // hijacked canary response comes back. If the earlier skip had been cached as safe, this
-        // identical content would still come back wrapped-safe from the cache instead of blocked.
+        // hijacked canary response comes back. If the earlier skip's cache key did not depend on
+        // provisioning, this identical content would still come back wrapped-safe from the cache
+        // instead of being re-evaluated and blocked.
         let filename = ModelDownloader.resolvedFilename(for: ConfigManager.shared.promptGuardModel)
         try "stub, not a real gguf".write(to: modelsDir.appendingPathComponent(filename), atomically: true, encoding: .utf8)
         AuxiliaryModelManager.shared.setMockEngine(MockInferenceEngine(shouldHijack: true), for: "canary")

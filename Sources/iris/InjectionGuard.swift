@@ -58,7 +58,9 @@ public struct InjectionGuard {
     /// Pure predicate (#202): is the tier-3 model provisioned? Resolves `modelName` the same way
     /// `ModelDownloader.isModelDownloaded` does, so the two never disagree about a URL-valued
     /// config field. `modelsDir` is a parameter (not `IrisPaths.default.modelsDir`) so tests never
-    /// touch `~/.iris/models`.
+    /// touch `~/.iris/models`. `fileExists(atPath:)` is also true for a directory, so a directory
+    /// sitting at the model path reports `.provisioned` and then fails to load — that is the
+    /// fail-closed direction (`executeTier3Canary`'s `.error` path) and is intended, not a gap.
     static func tier3Provisioning(engine: String, modelName: String, modelsDir: URL) -> Tier3Provisioning {
         guard engine == "llama_cpp" else { return .provisioned }
         let filename = ModelDownloader.resolvedFilename(for: modelName)
@@ -85,15 +87,19 @@ public struct InjectionGuard {
         print("[InjectionGuard] Tier 3 canary skipped: model \(modelName) is not downloaded. Tiers 1/2 still ran; download it in Settings -> Security to enable tier 3.")
     }
 
-    private static func cacheKey(clean: String, source: String, maxTier: SanitizationTier, protectionEnabled: Bool?, modelsDir: URL) -> String {
+    private static func cacheKey(clean: String, source: String, maxTier: SanitizationTier, protectionEnabled: Bool?,
+                                  modelsDir: URL, provisioning: Tier3Provisioning) -> String {
         let config = ConfigManager.shared
         let enabled = protectionEnabled ?? config.enableAdvancedPromptInjectionProtection
         // The tier-2 model path is in the key too, so correctness does not lean on CoreMLEvaluator
         // being load-once: a hot-swapped guard model can never be served a stale verdict. The
-        // models dir is only ever non-default in tests, but including it keeps the key honest.
+        // provisioning result (#202 fix round 2) is what actually changes when the tier-3 model
+        // appears on disk mid-process — engine/model/modelsDir alone do not, since none of those
+        // config values change when the user downloads the file from Settings. Without it, a
+        // `.skipped` verdict cached before the download would keep being served after.
         let parts = [clean, source, String(describing: maxTier), String(enabled),
                      config.promptGuardEngine, config.promptGuardModel, config.promptGuardCoreMLModel,
-                     modelsDir.path]
+                     modelsDir.path, String(describing: provisioning)]
         let digest = SHA256.hash(data: Data(parts.joined(separator: "\u{0}").utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
@@ -132,6 +138,11 @@ public struct InjectionGuard {
         }
         let source = sanitizeSourceLabel(contextTag)
         let modelsDir = tier3ModelsDir ?? IrisPaths.default.modelsDir
+        // Resolved once, up front, so the cache key (below) and the tier-3 skip decision agree on
+        // the exact same filesystem snapshot (#202 fix round 2).
+        let provisioning = tier3Provisioning(engine: ConfigManager.shared.promptGuardEngine,
+                                              modelName: ConfigManager.shared.promptGuardModel,
+                                              modelsDir: modelsDir)
 
         // Tier 1: Strict Structural Isolation & Text Normalization
         let clean = measureSpanSync("guard.tier1") { executeTier1(rawInput) }
@@ -147,7 +158,8 @@ public struct InjectionGuard {
             return wrap(clean, source: source)
         }
 
-        let key = cacheKey(clean: clean, source: source, maxTier: maxTier, protectionEnabled: protectionEnabled, modelsDir: modelsDir)
+        let key = cacheKey(clean: clean, source: source, maxTier: maxTier, protectionEnabled: protectionEnabled,
+                            modelsDir: modelsDir, provisioning: provisioning)
         if let cached = cache.get(key) {
             return cached
         }
@@ -172,7 +184,7 @@ public struct InjectionGuard {
         }
 
         // Tier 3: Behavioral Canary Probe — also evaluates the unwrapped content.
-        let tier3 = await measureSpan("guard.tier3") { await executeTier3Canary(clean, protectionEnabled: protectionEnabled, modelsDir: modelsDir) }
+        let tier3 = await measureSpan("guard.tier3") { await executeTier3Canary(clean, protectionEnabled: protectionEnabled, provisioning: provisioning) }
         switch tier3 {
         case .error:
             return wrapBlocked("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]", source: source)
@@ -180,17 +192,16 @@ public struct InjectionGuard {
             let blocked = wrapBlocked("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]", source: source)
             cache.set(key, blocked)
             return blocked
-        case .safe:
+        case .safe, .skipped:
+            // #202 fix round 2 (reversing fix round 1): a skip IS cached, exactly like `.safe`.
+            // Static context (USER.md, AGENTS.md, plugin rules) being re-sanitized through tiers
+            // 1/2 on every turn is the exact cost #130 measured and this cache exists to avoid —
+            // "tiers 1/2 are cheap enough to redo" was not true. What makes this safe is that
+            // `provisioning` (computed once above) is now part of the cache key: the moment the
+            // model file appears on disk, the key changes and the stale skip can never be served.
             let wrapped = wrap(clean, source: source)
             cache.set(key, wrapped)
             return wrapped
-        case .skipped:
-            // #202 fix round 1: unlike `.safe`, a skip must NOT be cached. The model can be
-            // downloaded mid-process (Settings -> Security) without a restart, and a cached
-            // wrapped-safe verdict would outlive that — silently contradicting the LED/notice
-            // that now say tier 3 is live. Tiers 1/2 already ran and are cheap enough to redo,
-            // same as an `.error` verdict is never cached for the analogous reason.
-            return wrap(clean, source: source)
         }
     }
 
@@ -260,19 +271,24 @@ public struct InjectionGuard {
         }
     }
     
-    private static func executeTier3Canary(_ input: String, protectionEnabled: Bool? = nil, modelsDir: URL) async -> TierVerdict {
+    private static func executeTier3Canary(_ input: String, protectionEnabled: Bool? = nil, provisioning: Tier3Provisioning) async -> TierVerdict {
         guard protectionEnabled ?? ConfigManager.shared.enableAdvancedPromptInjectionProtection else {
             return .safe
         }
+
+        // #202 fix round 2: an engine already registered for "canary" (a real one that finished
+        // loading, or a test's mock via `setMockEngine`) is provisioned by definition regardless
+        // of what the filesystem says — `getEngine` below will hand it straight back without
+        // touching disk again. Checked before the file-based `provisioning` so a test can drive
+        // tier 3 through a mock without a real model file on disk.
+        let hasRegisteredEngine = AuxiliaryModelManager.shared.hasEngine(for: "canary")
 
         let engineTypeString = ConfigManager.shared.promptGuardEngine
 
         // #202: distinguish "no model provisioned" (skip, don't block) from "model present but
         // failed to load/run" (fail closed, below, unchanged). Only llama_cpp has a local file to
         // check; cloud/ollama/mlx are always provisioned per `tier3Provisioning`.
-        if case .unprovisioned(let modelName) = tier3Provisioning(engine: engineTypeString,
-                                                                   modelName: ConfigManager.shared.promptGuardModel,
-                                                                   modelsDir: modelsDir) {
+        if !hasRegisteredEngine, case .unprovisioned(let modelName) = provisioning {
             logTier3SkipOnce(modelName: modelName)
             return .skipped
         }
