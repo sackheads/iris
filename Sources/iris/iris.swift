@@ -27,6 +27,9 @@ actor IrisEngine {
     /// Read once at construction so a turn never consults global config mid-flight, and so a
     /// test can drive the streaming-off path without touching `ConfigManager.shared`.
     let streamResponses: Bool
+    /// Read once at construction, same rationale as `streamResponses`: a checkpoint mid-turn must
+    /// not observe a config flip, and a test can drive the setting-off path directly (D3 §7).
+    private let checkpointAutoAdvance: Bool
 
     /// Conversations already shown the "no sandbox runtime" fallback notice (deduped).
     private var warnedNoRuntime: Set<UUID> = []
@@ -42,7 +45,7 @@ actor IrisEngine {
     /// pins tier 1 here rather than mutating `ConfigManager.shared` (invariant 7, #109).
     private let protectionEnabled: Bool?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool = ConfigManager.shared.streamResponses, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool = ConfigManager.shared.streamResponses, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool = ConfigManager.shared.checkpointAutoAdvance) {
         self.state = state
         self.protectionEnabled = protectionEnabled
         self.injectedFactStore = factStore
@@ -53,6 +56,7 @@ actor IrisEngine {
         self.evaluatorChecks = evaluatorChecks
         self.retryDelays = retryDelays
         self.streamResponses = streamResponses
+        self.checkpointAutoAdvance = checkpointAutoAdvance
         systemPrompt = nil
     }
 
@@ -220,14 +224,50 @@ actor IrisEngine {
         await MainActor.run {
             localState?.recordCompletionSelfReport(for: conversationId, statusJSON: statusReport)
             localState?.beginGoalEvaluation(for: conversationId, contract: projected)
-            localState?.setCheckpointPaused(for: conversationId)   // leaves activeGoal set
         }
+
+        // Grade BEFORE deciding. Until D3 this method paused first, which made pausing the
+        // structural default; `canAutoAdvance` is affirmative-only so that default survives the
+        // inversion (spec §4).
+        var evaluation: GoalEvaluation? = nil
         if let graderApp = localState {
-            await GoalEvaluator.shared.evaluate(contract: projected, workspace: gradeWorkspace,
-                                                originatingConversationId: conversationId,
-                                                app: graderApp, client: self.client)
+            evaluation = await GoalEvaluator.shared.evaluate(
+                contract: projected, workspace: gradeWorkspace,
+                originatingConversationId: conversationId, app: graderApp, client: self.client)
         }
+
         let ladderPos = "\(contract.currentMilestone + 1) of \(contract.milestones.count)"
+        let milestoneTitle = contract.milestones[contract.currentMilestone].title
+
+        // Re-read the contract: the grade landed via recordEvaluation, and a judgement may have
+        // been recorded since this turn began.
+        let current = await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId })?.goalContract
+        }
+
+        if checkpointAutoAdvance, let current, current.canAutoAdvance(from: evaluation) {
+            await MainActor.run {
+                localState?.autoAdvanceCheckpoint(for: conversationId, evaluation: evaluation)
+            }
+            let met = evaluation?.criteria.count ?? 0
+            let lines = (evaluation?.criteria ?? [])
+                .map { "  \($0.criterionText) — \($0.evidence)" }
+                .joined(separator: "\n")
+            await pushToUI(role: .system,
+                           text: "Checkpoint \(ladderPos) (\(milestoneTitle)) auto-advanced — grader found \(met)/\(met) criteria met:\n\(lines)",
+                           conversationId: conversationId)
+            return "Checkpoint \(ladderPos) passed cleanly and advanced. Continue with the next milestone."
+        }
+
+        await MainActor.run {
+            localState?.setCheckpointPaused(for: conversationId)   // leaves activeGoal set
+            // An unjudged humanJudged criterion is why this stopped, so the pause must ASK.
+            // A stop that requests nothing is the rubber-stamp pattern D3 exists to remove.
+            if let c = current,
+               c.criteria.contains(where: { $0.kind == .humanJudged && c.judgements[$0.id] == nil }) {
+                localState?.beginJudgementPause(for: conversationId, summary: summary)
+            }
+        }
         await pushToUI(role: .agent,
                        text: "Reached checkpoint \(ladderPos)\(via): \(summary)\nPaused for your review — approve to continue or send me back.",
                        conversationId: conversationId)

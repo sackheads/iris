@@ -22,11 +22,18 @@ struct DelegateMilestoneTests {
         private var subagentCallCount = 0
         private let mainScript: [GeminiResponse]
         private let subagentTerminal: GeminiResponse?
+        private let verdict: String
+        private let evidence: String
 
         /// `subagentTerminal` nil ⇒ the subagent never calls goal_complete (it will time out).
-        init(main: [GeminiResponse], subagentTerminal: GeminiResponse?) {
+        /// `graderVerdict` lets a test choose a contested grade instead of the default clean one
+        /// (D3: since the checkpoint now grades before pausing, a "met" grade auto-advances).
+        init(main: [GeminiResponse], subagentTerminal: GeminiResponse?,
+             graderVerdict: (String, String) = ("met", "verified")) {
             self.mainScript = main
             self.subagentTerminal = subagentTerminal
+            self.verdict = graderVerdict.0
+            self.evidence = graderVerdict.1
         }
         var graderCalls: Int { lock.withLock { graderCallCount } }
         var subagentCalls: Int { lock.withLock { subagentCallCount } }
@@ -48,8 +55,8 @@ struct DelegateMilestoneTests {
                     guard graderCallCount == 1 else { return Self.text("done") }
                     let ids = systemText.matches(of: Self.uuidPattern).map { String($0.output) }
                     let evaluations = JSONValue.array(ids.map {
-                        .object(["criterion_id": .string($0), "verdict": .string("met"),
-                                 "evidence": .string("verified")])
+                        .object(["criterion_id": .string($0), "verdict": .string(self.verdict),
+                                 "evidence": .string(self.evidence)])
                     })
                     let part = Part(text: nil,
                                     functionCall: FunctionCall(name: "submit_evaluation",
@@ -124,11 +131,17 @@ struct DelegateMilestoneTests {
         #expect(client.subagentCalls > 0, "a subagent should have run the milestone")
     }
 
-    @Test("a completed subagent reaches the checkpoint, graded cumulatively and paused")
+    // D3 note: under grade-first checkpoints, a completed subagent whose work grades clean now
+    // auto-advances instead of pausing (`completedSubagentWithCleanGradeAutoAdvances` below covers
+    // that, and proves delegation gets no special-casing — see `CheckpointAutoAdvanceTests` for the
+    // non-delegated case). This test keeps its original intent — a completed subagent reaches the
+    // checkpoint and is graded cumulatively — by scripting a contested grade, which still pauses.
+    @Test("a completed subagent reaches the checkpoint, graded cumulatively, and a contested grade pauses")
     func completedSubagentReachesCheckpoint() async {
         let app = AppState(); let id = UUID(); ladder(on: app, id)
         let client = RoutingClient(main: [Self.delegateCall(), Self.response(nil)],
-                                   subagentTerminal: Self.subagentDone)
+                                   subagentTerminal: Self.subagentDone,
+                                   graderVerdict: ("not_met", "still broken"))
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
         await engine.processInput("work", source: "User", conversationId: id)
 
@@ -137,6 +150,23 @@ struct DelegateMilestoneTests {
         #expect(conv?.activeGoal != nil, "the goal stays active at a checkpoint pause")
         #expect(conv?.goalContract?.currentMilestone == 0, "advancing is the human's click, not the loop's")
         #expect(conv?.lastGoalEvaluation != nil, "the checkpoint grade must have landed")
+        #expect(client.graderCalls > 0)
+    }
+
+    /// D3 sibling to the test above: a delegated milestone that grades clean auto-advances just
+    /// like a directly-worked one — `performCheckpoint` does not special-case the `via:` path.
+    @Test("a completed subagent's clean grade auto-advances, same as a directly-worked milestone")
+    func completedSubagentWithCleanGradeAutoAdvances() async {
+        let app = AppState(); let id = UUID(); ladder(on: app, id)
+        let client = RoutingClient(main: [Self.delegateCall(), Self.response(nil)],
+                                   subagentTerminal: Self.subagentDone)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        await engine.processInput("work", source: "User", conversationId: id)
+
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.goalContract?.checkpointStatus == .running)
+        #expect(conv?.goalContract?.currentMilestone == 1, "a clean delegated grade should advance")
+        #expect(conv?.goalContract?.checkpointHistory.first?.resolution == .autoAdvanced)
         #expect(client.graderCalls > 0)
     }
 
