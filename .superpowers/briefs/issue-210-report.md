@@ -1,6 +1,45 @@
 # Report: #210 — tier-2 prompt guard must not silently pass content when its CoreML model is absent
 
-## Status: DONE
+## Status: DONE (fix round 1 applied)
+
+## Fix round 1 (commit 9896d05)
+
+Reviewer findings addressed:
+
+1. **No test exercised the changed guard lines.** `CoreMLEvaluator.setModel` now takes
+   `CoreMLModelProtocol?` (source-compatible with all six existing callers), giving tests a way to
+   force `hasModelLoaded` back to `false`. Added three dynamic tests in `InjectionGuardTests.swift`
+   mirroring the tier-3 twins: `testTier2SkippedFallsThroughToTier3`,
+   `testTier2SkippedVerdictDoesNotOutliveProvisioning`, and `testTier2BrokenModelFailsClosed` — the
+   last one covers the do/catch → `.error` path **without** a bigger seam: the provisioning check
+   is driven by a seam temp dir reporting `.provisioned`, while `CoreMLEvaluator.loadModelIfNeeded()`
+   always resolves against the real `IrisPaths.default.modelsDir`, which under `swift test` never
+   has this directory (`IrisDefaults` deliberately points `promptGuardCoreMLModel` at a name that
+   cannot exist there) — so the real load throws exactly as a present-but-corrupted model would.
+   Deleted `testTier2StubPassThrough` (duplicated `testTier2Safe`, named the removed behavior).
+2. **`ModelDownloader`'s unzip never checked `terminationStatus`.** Fixed: checks the exit status,
+   removes whatever a partial/failed extraction left at the resolved path, throws into the existing
+   download-failure surface. No seam exists to unit-test the `URLSessionDownloadDelegate` callback
+   itself (would need a URLSession abstraction) — noted, not added.
+3. **De-duplication finished.** `SettingsView`/`SetupWizardView`'s hand-rolled URL+`.zip`
+   resolution routed through new `ModelDownloader.isCoreMLModelDownloaded(name:)`, which also
+   guards the empty-name case (the Wizard previously showed "Model ready" for a blank Tier 2 field,
+   since `isModelDownloaded(name: "")` tested `modelsDir.path` itself).
+4. **Minor cleanup**, all done: `ModelLED` takes an explicit `tierNumber: Int?` instead of deriving
+   it from the label string; the shared `.unprovisioned` color comment no longer says only "tier
+   3"; `cacheKey` takes `tier2ModelsDir` alongside `tier3ModelsDir`. Not done, noted instead: a
+   `tier2State()` "ready"/"configured" positive-path test — unlike tier 3 (which has an
+   engine-agnostic `"ollama"` bypass), tier 2 always checks the real `IrisPaths.default.modelsDir`
+   with no injectable seam, so exercising that branch would require writing under
+   `~/.iris/models`.
+
+Verification: full suite 967 tests / 175 suites passed (Swift Testing) + all XCTest suites (96
+tests, 0 failures), exit code 0. Isolated `swift test --filter EngineInstrumentationTests`: 5
+tests / 1 suite passed, exit code 0.
+
+## Original submission
+
+### Status: DONE
 
 ## What changed
 
