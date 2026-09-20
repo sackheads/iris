@@ -1,6 +1,6 @@
 # Checkpoint Judgement UI (D3 follow-on) — Design
 
-**Status:** approved, not yet implemented
+**Status:** implemented (#191, PR pending)
 **Issue:** #191
 **Builds on:** D3 (`2026-09-20-checkpoint-auto-advance.md`), D2 (`2026-09-18-human-judged-verdicts.md`)
 
@@ -84,8 +84,9 @@ now, and an unanswerable terminal pause is a trapped goal, so the trade is worth
 
 Two new nullable TEXT columns on `conversations`, `lastGoalEvaluation` and
 `lastGoalCompletionReport`, JSON-encoded in and out exactly as `goalContract` and
-`checkpointHistory` are, added by a `v4_pause_surfacing` migration written beside
-`v3_checkpoint_history` (`ConversationStore.swift:254-261`). `upsertMetadata` writes both on the
+`checkpointHistory` are, added by a `v6_pause_surfacing` migration registered after
+`v5_quarantine_ordinal_nullable` (main gained `v4_fts_rowid` and `v5_quarantine_ordinal_nullable`
+in #214 between this spec and its implementation) (`ConversationStore.swift:325-330`). `upsertMetadata` writes both on the
 UPDATE and the INSERT (`:408-425`); `loadAll` reads both (`:534-536`) and decodes them beside
 `checkpointHistory` (`:558-567`). A nil value is stored as SQL NULL rather than a JSON `null`,
 following the `checkpointHistory` precedent at `:404-406`, because the overwhelming majority of rows will never have carried either field. NULL —
@@ -110,10 +111,14 @@ luck, whenever some later mutation happens to flush the same row. Every site tha
 field does so today: `recordCompletionSelfReport` (`AppState.swift:920-924`), `beginGoalEvaluation`
 (`:948-961`), `recordEvaluation` (`:964-968`), `finishGatedGoal` (`:1003-1010`),
 `recordHumanJudgement` (`:1021-1047`), and the clears in `dismissCompletionReport` (`:936-942`) and
-`setDraftContract` (`:1147-1158`). `clearGoal` (`:909-915`) joins this list when §9.1 adds its two
-nils: they must sit **before** its existing `markChanged` call so the same row write carries them; a
-nil assigned after that call persists only by luck, which is the exact failure this paragraph exists
-to rule out. `sanitizeLoaded` is the exception and needs nothing: it runs
+`setDraftContract` (`:1147-1158`). `clearGoal` (`:999-1014`) joins this list, but only when the
+contract being cleared had a pause open on the user (`checkpointStatus == .pausedForReview ||
+awaitingHumanJudgement`, §9.1): an ordinary completion — the terminal gate's `finishGatedGoal` →
+`clearGoal` with no pause open — keeps both fields so the completion-report chip still has
+something to show. When the nils do apply they sit **before** `clearGoal`'s existing `markChanged`
+call so the same row write carries them; a nil assigned after that call persists only by luck, which
+is the exact failure this paragraph exists to rule out. `sanitizeLoaded` is the exception and needs
+nothing: it runs
 before `AppState` owns the rows. `beginJudgementPause` (`:1136-1143`), `setCheckpointPaused`
 (`:1200-1206`), `advanceCheckpoint` (`:1262-1280`) and `holdCheckpoint` (`:1282-1310`) mark changed
 too, which is what makes the pause flags and the surfacing fields land in the same row write.
@@ -271,6 +276,18 @@ keeps a finished goal from offering a re-judge that `recordHumanJudgement` would
 
 The chip's Approve button takes the §6 disabled state and its caption. No new views.
 
+**What the on-screen check found.** `Conversation.==` compares by `id` only, so a `CheckpointPauseChip`
+that took a `Conversation` value would compare equal before and after a judgement was recorded — the
+id never changes — and SwiftUI's diffing could then skip re-running the chip's `body` even though
+`state.conversations` had mutated underneath it, leaving Accept/Reject and the header stuck on stale
+state until something unrelated forced a redraw. This is not visible to any unit test, which drives
+`AppState` directly and never goes through a `View`'s diffing; it surfaced only on screen, clicking
+Accept against a running app. The fix: `CheckpointPauseChip` takes `conversationId: UUID`, not a
+`Conversation`, and reads the live conversation out of `state.conversations` inside its own `body`,
+so `@Observable` tracks the chip's dependency on that array directly and any mutation re-renders it
+regardless of how the parent diffed its inputs. The same hazard applies to any other chip that takes
+a `Conversation` by value rather than an id; see #223 for the sibling chips this was not fixed in.
+
 ### 9.1 Decisions a planner would otherwise have to invent
 
 - **Caption and Approve placement.** The caption sits under the Send-back/Approve row, `.caption`
@@ -293,11 +310,18 @@ The chip's Approve button takes the §6 disabled state and its caption. No new v
   cannot build an induction on, and the terminal gate has been one-way since D2. It is written down
   here so nobody has to discover it.
 - **Goal cleared while the pause is open.** `clearGoal` nils `goalContract`
-  (`AppState.swift:909-915`), so the chip's `if let contract` guard drops it and there is nothing
-  left to judge. It must also nil `lastGoalEvaluation` and `lastGoalCompletionReport`: with §4's
-  columns they would otherwise outlive the contract on disk and resurrect a chip for a goal that no
+  (`AppState.swift:999-1014`), so the chip's `if let contract` guard drops it and there is nothing
+  left to judge. It also nils `lastGoalEvaluation` and `lastGoalCompletionReport`, but **only when
+  the contract being cleared had a pause open on the user**
+  (`checkpointStatus == .pausedForReview || awaitingHumanJudgement`): without that scope, with §4's
+  columns those fields would outlive the contract on disk and resurrect a chip for a goal that no
   longer exists. `/stop` and the terminal gate both route through `clearGoal`, so one change covers
-  both. Both nils go before `clearGoal`'s existing `markChanged` (§4), and §11 asserts the columns.
+  both. An **ordinary** completion — the terminal gate finishing with no pause open — must keep both
+  fields: they are the completion-report chip's inputs, and nilling them unconditionally removed
+  that chip after every normal finish. `sanitizeLoaded`'s no-contract rule already clears them on a
+  restart regardless, so the restart case does not need `clearGoal` to nil anything. Both nils, when
+  they apply, go before `clearGoal`'s existing `markChanged` (§4); §11 asserts the columns for the
+  pause-open case, and `clearGoalKeepsFieldsAfterOrdinaryCompletion` pins the ordinary case.
 - **A verdict landing mid-turn.** Nothing stops a user clicking Accept while a turn is in flight,
   and nothing should. `performCheckpoint` re-reads the contract after grading (`iris.swift:246-250`)
   precisely so a judgement recorded during the grade is seen, and `autoAdvanceCheckpoint` no-ops
@@ -328,13 +352,14 @@ The chip's Approve button takes the §6 disabled state and its caption. No new v
 
 - **Restart round-trip through `ConversationStore`**, not the JSON codec. D3 shipped a field that
   round-tripped in JSON and was never persisted, because post-#197 the store enumerates columns by
-  hand. Build an `AppState(store:)` over an in-memory store (`AppState.swift:259`), open a
+  hand. Build an `AppState(store:)` over an in-memory store (`AppState.swift:288`), open a
   checkpoint judgement pause, drop the `AppState`, construct a new one over the same store, and
   assert the chip's inputs are back — `lastGoalEvaluation` present with its `.humanPending` row —
   and that `recordHumanJudgement` accepts a verdict rather than refusing it.
 - **Store round-trip for both new columns** in `ConversationStoreTests.roundTrip`, which asserts
-  every stored field and currently asserts these two come back nil (`:77`). Nil round-trips as nil;
-  a v3-era database migrates and loads its rows with both nil.
+  every stored field and now carries a non-nil value for both (`:85-86`). Nil round-trips as SQL
+  NULL, not JSON `null` (`surfacingFieldsNilRoundTrip`, `:97-109`); a v5-era database migrates and
+  loads its rows with both nil (`preV6RowLoadsNil`, `:111-127`).
 - **An undecodable column value yields nil and keeps the conversation**, with a `SkippedRow`
   recorded — the `checkpointHistory` policy, not the `goalContract` one (§4).
 - **A store write is scheduled** when a judgement pause opens: the fields are unobservably correct
@@ -359,16 +384,26 @@ The chip's Approve button takes the §6 disabled state and its caption. No new v
   `reach_checkpoint` (§8).
 - `sanitizeLoaded` keeps the surfacing fields when the run is paused on the user and still clears
   them when it is not.
-- `clearGoal` nils both surfacing fields **and the store row has both columns NULL afterwards**: open
-  a pause, clear the goal via `/stop` and, separately, via the terminal gate, flush, load a fresh
-  `AppState` from the same store, and assert the columns. The in-memory nils are correct whether or not
-  the write was scheduled, so a property assertion proves nothing here (§4, §9.1).
+- `clearGoal` nils both surfacing fields **and the store row has both columns NULL afterwards**
+  when the contract being cleared had a pause open on the user: open a checkpoint judgement pause,
+  clear the goal (simulating `/stop`), flush, load a fresh `AppState` from the same store, and
+  assert the columns. The in-memory nils are correct whether or not the write was scheduled, so a
+  property assertion proves nothing here (§4, §9.1).
+- `clearGoal` **keeps** both surfacing fields, in memory and on disk, after an ordinary
+  completion — no pause ever opened, `finishGatedGoal` → `clearGoal` — so the completion-report
+  chip still has something to show and dismiss (`clearGoalKeepsFieldsAfterOrdinaryCompletion`,
+  §9.1).
 - The `.humanApproved` / `.humanSentBack` history entry carries the **post**-judgement evaluation —
   the verdict the user gave, not the grader's `.humanPending`. It does today by construction
   (`recordHumanJudgement` mutates in place and `recordCheckpointOutcome` is passed
   `lastGoalEvaluation`, `AppState.swift:1215-1224`, `:1265-1266`, `:1284-1285`); pin it, because
   nothing else would notice if it stopped.
 - A laddered goal completes through the terminal gate afterwards.
+- **Not unit-testable: `CheckpointPauseChip` re-rendering in place after a judgement.** No unit test
+  drives SwiftUI's diffing, so the stale-chip hazard (§9, "What the on-screen check found") cannot
+  be pinned by one. Verified on screen instead: seeded a fixture conversation paused at a checkpoint
+  with a `.humanPending` criterion, ran the app, clicked Accept, and confirmed the chip's row and
+  header updated in place without switching conversations or otherwise forcing a redraw.
 
 ## 12. What this makes untrue
 

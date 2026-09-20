@@ -1166,9 +1166,9 @@ class AppState {
         // checkpoint chip's Approve/Send-back controls are the next step, so judging is all that
         // resolves here — approving the milestone stays a separate decision.
         //
-        // Kept deliberately even though nothing opens a checkpoint judgement pause today: the
-        // checkpoint Accept/Reject UI is unbuilt, so `performCheckpoint` stops without asking.
-        // This is the backstop for the day it lands, or for any code that sets the flag mid-ladder.
+        // Reachable since #191: `performCheckpoint` opens a judgement pause when the graded
+        // evaluation carries a `.humanPending` row, and this branch is its resolution — judge, stay
+        // `.pausedForReview`, and leave Approve/Send-back as the next decision.
         if conversations[idx].goalContract?.checkpointStatus == .pausedForReview {
             markChanged(conversationId, .metadata)
             return
@@ -1312,9 +1312,10 @@ class AppState {
     /// recorded, so slice F inherits a complete ladder record rather than only the skipped
     /// checkpoints. Caller must already hold a valid index; this does not save (its callers do).
     ///
-    /// A nil evaluation is stored as nil. `sanitizeLoaded` clears `lastGoalEvaluation` on load, so
-    /// the human controls genuinely have no grade to record after a restart; fabricating a
-    /// `.failed` one would put a grader verdict nobody produced into the audit trail.
+    /// A nil evaluation is stored as nil. `lastGoalEvaluation` is persisted while a pause is open on
+    /// the user (#191, `sanitizeLoaded`), so the entry still carries the grade after a relaunch;
+    /// fabricating a `.failed` one for the rare case it is genuinely absent would put a grader
+    /// verdict nobody produced into the audit trail.
     private func recordCheckpointOutcome(at idx: Int, _ resolution: CheckpointOutcome.Resolution,
                                          evaluation: GoalEvaluation?) {
         guard let c = conversations[idx].goalContract, c.hasLadder,
