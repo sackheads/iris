@@ -330,10 +330,19 @@ class AppState {
     /// messages are not loaded or have since been trimmed and the ordinal no longer resolves,
     /// still select the conversation but leave the target nil rather than scrolling to the
     /// wrong row.
+    ///
+    /// The lookup happens *before* touching `selectedConversationId`: the FTS index can outlive
+    /// the in-memory list (a conversation the load left untouched on disk, or a stale legacy
+    /// subagent row `sanitizeLoaded`/`durableConversations` stripped), and assigning first would
+    /// select an id with no backing conversation — same hazard as `deleteConversation`'s #167
+    /// note above. A miss leaves the current selection exactly as it was.
     func reveal(hit: ConversationHit) {
+        guard let conversation = conversations.first(where: { $0.id == hit.conversationId }) else {
+            pendingScrollTarget = nil
+            return
+        }
         selectedConversationId = hit.conversationId
-        guard let conversation = conversations.first(where: { $0.id == hit.conversationId }),
-              hit.ordinal >= 0, hit.ordinal < conversation.messages.count else {
+        guard hit.ordinal >= 0, hit.ordinal < conversation.messages.count else {
             pendingScrollTarget = nil
             return
         }

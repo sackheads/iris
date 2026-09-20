@@ -56,6 +56,26 @@ struct SidebarSearchTests {
         #expect(state.pendingScrollTarget == nil)
     }
 
+    @Test("a hit for a conversation not in memory leaves the current selection untouched (review finding 1)")
+    func revealMissingConversationLeavesSelectionUnchanged() throws {
+        let store = try ConversationStore.inMemory()
+        let conv = conversation(title: "still here", [ChatMessage(role: .user, content: "hello")])
+        try store.apply([created(conv)])
+
+        let state = AppState(store: store)
+        state.selectedConversationId = conv.id
+        state.pendingScrollTarget = UUID() // prove a miss clears a stale target too
+
+        // The FTS index can outlive the in-memory list (e.g. a conversation the load left
+        // untouched on disk, or a stale legacy subagent row); reveal must not select its id.
+        let missingId = UUID()
+        let hit = ConversationHit(conversationId: missingId, title: "gone", role: .user, ordinal: 0, snippet: "n/a")
+        state.reveal(hit: hit)
+
+        #expect(state.selectedConversationId == conv.id)
+        #expect(state.pendingScrollTarget == nil)
+    }
+
     @Test("end-to-end through the store: search, group, and reveal the winning hit")
     func endToEndSearchGroupReveal() throws {
         let store = try ConversationStore.inMemory()
