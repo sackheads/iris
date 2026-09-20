@@ -659,6 +659,24 @@ final class ConversationStore: Sendable {
         }
     }
 
+    /// Same trap, for `isArchived` (#182): SQLite stores a `Bool` column as an integer 0/1, so
+    /// this mirrors `readInt` rather than reusing GRDB's typed subscript, which force-tries the
+    /// conversion and crashes the whole load on a garbled (non-NULL, non-0/1) value (#189).
+    private enum BoolValue {
+        case null
+        case unconvertible
+        case value(Bool)
+    }
+
+    private static func readBool(_ row: Row, _ column: String) -> BoolValue {
+        let dbValue: DatabaseValue = row[column]
+        switch dbValue.storage {
+        case .null: return .null
+        case .int64(let v): return .value(v != 0)
+        default: return .unconvertible
+        }
+    }
+
     // MARK: Read
 
     func loadAll() throws -> LoadResult {
@@ -761,10 +779,14 @@ final class ConversationStore: Sendable {
 
                 // A garbled flag must not cost the user a conversation: default to active and
                 // warn, matching the counter policy above rather than `position`'s quarantine
-                // (#189). The failure direction is toward visibility.
-                if let archived: Bool = row["isArchived"] {
-                    c.isArchived = archived
-                } else {
+                // (#189). The failure direction is toward visibility. Read through `readBool`,
+                // not GRDB's typed subscript, which force-tries the conversion and crashes the
+                // whole load on a non-NULL, non-0/1 value instead of defaulting.
+                switch Self.readBool(row, "isArchived") {
+                case .null: c.isArchived = false
+                case .value(let v): c.isArchived = v
+                case .unconvertible:
+                    print("WARNING: unreadable isArchived for conversation \(id); defaulting to active")
                     c.isArchived = false
                 }
 

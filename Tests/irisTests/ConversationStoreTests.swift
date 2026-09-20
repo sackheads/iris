@@ -500,6 +500,20 @@ struct ConversationStoreTests {
         #expect(loaded.skipped.count == 1 && loaded.skipped.first?.table == "conversations" && loaded.skipped.first?.conversationId == a.id)
     }
 
+    @Test("a garbled isArchived column does not crash the load; it defaults to active")
+    func garbledIsArchivedDefaultsToActive() throws {
+        // #182 round 1: GRDB's typed Row subscript force-tries the conversion and crashes the
+        // whole load on a non-NULL, non-0/1 value, rather than defaulting like the counter
+        // policy this is supposed to match (readInt's #189 trap, same shape here for Bool).
+        let store = try ConversationStore.inMemory()
+        let a = Self.sample(title: "a")
+        try store.apply([Self.created(a)])
+        try store.rawWrite("UPDATE conversations SET isArchived = X'FFFE' WHERE id = ?", arguments: [a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.conversations.map(\.title) == ["a"])
+        #expect(loaded.conversations.first?.isArchived == false)
+    }
+
     @Test("a conversations row whose tokenUsage JSON lacks a key loads with that field defaulted, not skipped")
     func tokenUsageMissingKeyStillLoads() throws {
         // #204: TokenUsage had no hand-written init(from:), so a stored row missing any of its
