@@ -241,14 +241,33 @@ final class ConversationStore: Sendable {
             // Streamed, not `fetchAll`: this runs once over every message the user has ever sent,
             // and materializing all of them — payload text included — would spike memory on a
             // large store at the worst moment, during a migration.
-            let cursor = try Row.fetchCursor(db, sql: "SELECT conversationId, ordinal, payload FROM messages")
+            let cursor = try Row.fetchCursor(db, sql: "SELECT rowid, conversationId, ordinal, payload FROM messages")
             while let row = try cursor.next() {
                 guard let conversationId = Self.readText(row, "conversationId"),
                       let ordinal: Int = row["ordinal"],
+                      let rowid: Int64 = row["rowid"],
                       let payload: Data = row["payload"],
                       let m = try? decoder.decode(ChatMessage.self, from: payload)
                 else { continue }   // an undecodable row is #163's quarantine concern, not ours
-                try Self.indexMessage(m, conversationId: conversationId, ordinal: ordinal, db: db)
+                try Self.indexMessage(m, conversationId: conversationId, ordinal: ordinal, rowid: rowid, db: db)
+            }
+        }
+        // Keys `messages_fts` rows by the `messages` rowid instead of finding them by a
+        // `(conversationId, ordinal)` scan over UNINDEXED columns (#201). The index is derived
+        // data, so a full rebuild is safe and simplest: it also gives existing installs, which
+        // built their v2 rows with FTS5's own auto-assigned rowids, a consistent keying.
+        m.registerMigration("v3_fts_rowid") { db in
+            try db.execute(sql: "DELETE FROM messages_fts")
+            let decoder = JSONDecoder()
+            let cursor = try Row.fetchCursor(db, sql: "SELECT rowid, conversationId, ordinal, payload FROM messages")
+            while let row = try cursor.next() {
+                guard let conversationId = Self.readText(row, "conversationId"),
+                      let ordinal: Int = row["ordinal"],
+                      let rowid: Int64 = row["rowid"],
+                      let payload: Data = row["payload"],
+                      let m = try? decoder.decode(ChatMessage.self, from: payload)
+                else { continue }
+                try Self.indexMessage(m, conversationId: conversationId, ordinal: ordinal, rowid: rowid, db: db)
             }
         }
         // Slice D3's audit trail (`Conversation.checkpointHistory`). A new nullable column rather
@@ -269,31 +288,49 @@ final class ConversationStore: Sendable {
     /// chatter that would drown the record of the conversation.
     private static let indexedRoles: Set<ChatRole> = [.user, .agent]
 
-    private static func indexMessage(_ m: ChatMessage, conversationId: String, ordinal: Int, db: Database) throws {
+    /// `rowid` is the indexed row's key, explicitly set to the mirrored `messages` row's own
+    /// rowid (#201) rather than left to FTS5's own auto-assignment, so the index can be found and
+    /// maintained by primary-key subselect instead of a scan over the UNINDEXED
+    /// `(conversationId, ordinal)` columns.
+    private static func indexMessage(_ m: ChatMessage, conversationId: String, ordinal: Int, rowid: Int64, db: Database) throws {
         guard indexedRoles.contains(m.role) else { return }
-        try db.execute(sql: "INSERT INTO messages_fts (conversationId, ordinal, role, content) VALUES (?, ?, ?, ?)",
-                       arguments: [conversationId, ordinal, m.role.rawValue, m.content])
+        try db.execute(sql: "INSERT INTO messages_fts (rowid, conversationId, ordinal, role, content) VALUES (?, ?, ?, ?, ?)",
+                       arguments: [rowid, conversationId, ordinal, m.role.rawValue, m.content])
     }
 
+    /// Deletes index rows by a primary-key subselect against the *current* `messages` table, so
+    /// this must run before the `messages` rows it targets are themselves deleted or replaced:
+    /// `INSERT OR REPLACE` allocates a new rowid, and a plain `DELETE` removes the very rows the
+    /// subselect needs to find their index counterparts (#201).
     private static func deleteIndex(conversationId: String, fromOrdinal: Int?, db: Database) throws {
         if let fromOrdinal {
-            try db.execute(sql: "DELETE FROM messages_fts WHERE conversationId = ? AND ordinal >= ?",
-                           arguments: [conversationId, fromOrdinal])
+            try db.execute(sql: """
+                DELETE FROM messages_fts WHERE rowid IN (
+                    SELECT rowid FROM messages WHERE conversationId = ? AND ordinal >= ?
+                )
+                """, arguments: [conversationId, fromOrdinal])
         } else {
-            try db.execute(sql: "DELETE FROM messages_fts WHERE conversationId = ?", arguments: [conversationId])
+            try db.execute(sql: """
+                DELETE FROM messages_fts WHERE rowid IN (
+                    SELECT rowid FROM messages WHERE conversationId = ?
+                )
+                """, arguments: [conversationId])
         }
     }
 
     /// Rebuilds one conversation's index rows from what is currently in `messages`. Used by the
-    /// load-time quarantine repair, which renumbers the surviving rows underneath the index.
+    /// load-time quarantine repair, which renumbers the surviving rows underneath the index. A
+    /// direct wipe by `conversationId` rather than `deleteIndex`'s rowid subselect: some of the
+    /// stale index rows here point at `messages` rows already quarantined and deleted, so a
+    /// subselect against the current table would silently leave those orphaned.
     private static func rebuildIndex(conversationId: String, db: Database) throws {
-        try deleteIndex(conversationId: conversationId, fromOrdinal: nil, db: db)
+        try db.execute(sql: "DELETE FROM messages_fts WHERE conversationId = ?", arguments: [conversationId])
         let decoder = JSONDecoder()
-        for row in try Row.fetchAll(db, sql: "SELECT ordinal, payload FROM messages WHERE conversationId = ? ORDER BY ordinal",
+        for row in try Row.fetchAll(db, sql: "SELECT rowid, ordinal, payload FROM messages WHERE conversationId = ? ORDER BY ordinal",
                                     arguments: [conversationId]) {
-            guard let ordinal: Int = row["ordinal"], let payload: Data = row["payload"],
+            guard let ordinal: Int = row["ordinal"], let rowid: Int64 = row["rowid"], let payload: Data = row["payload"],
                   let m = try? decoder.decode(ChatMessage.self, from: payload) else { continue }
-            try indexMessage(m, conversationId: conversationId, ordinal: ordinal, db: db)
+            try indexMessage(m, conversationId: conversationId, ordinal: ordinal, rowid: rowid, db: db)
         }
     }
 
@@ -302,6 +339,33 @@ final class ConversationStore: Sendable {
         try writer.read { db in
             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM messages_fts WHERE conversationId = ?",
                              arguments: [id.uuidString]) ?? 0
+        }
+    }
+
+    /// Test support: proves the #201 keying invariant directly — each index row's rowid, by
+    /// ordinal — rather than only observing search behavior that would also pass under the old
+    /// ordinal-scan keying. Compare against `messageRowidsByOrdinal(for:)`.
+    func ftsRowidsByOrdinal(for id: UUID) throws -> [Int: Int64] {
+        try writer.read { db in
+            var out: [Int: Int64] = [:]
+            for row in try Row.fetchAll(db, sql: "SELECT rowid, ordinal FROM messages_fts WHERE conversationId = ?",
+                                        arguments: [id.uuidString]) {
+                if let ordinal: Int = row["ordinal"], let rowid: Int64 = row["rowid"] { out[ordinal] = rowid }
+            }
+            return out
+        }
+    }
+
+    /// Test support: the `messages` table's own rowids, by ordinal — the ground truth
+    /// `ftsRowidsByOrdinal(for:)` is checked against.
+    func messageRowidsByOrdinal(for id: UUID) throws -> [Int: Int64] {
+        try writer.read { db in
+            var out: [Int: Int64] = [:]
+            for row in try Row.fetchAll(db, sql: "SELECT rowid, ordinal FROM messages WHERE conversationId = ?",
+                                        arguments: [id.uuidString]) {
+                if let ordinal: Int = row["ordinal"], let rowid: Int64 = row["rowid"] { out[ordinal] = rowid }
+            }
+            return out
         }
     }
 
@@ -351,10 +415,12 @@ final class ConversationStore: Sendable {
 
     private static func applyOne(_ w: ConversationWrite, db: Database, encoder: JSONEncoder) throws {
         if w.changes.deleted {
-            try db.execute(sql: "DELETE FROM conversations WHERE id = ?", arguments: [w.id.uuidString])
-            // `messages` goes with the conversation by foreign key; a virtual table cannot carry
-            // one, so the search index is cleared by hand (#177).
+            // Before the cascade delete: `deleteIndex` finds its rows through a subselect against
+            // `messages`, so it must run while those rows still exist (#201). `messages` goes with
+            // the conversation by foreign key; a virtual table cannot carry one, so the search
+            // index is cleared by hand (#177).
             try Self.deleteIndex(conversationId: w.id.uuidString, fromOrdinal: nil, db: db)
+            try db.execute(sql: "DELETE FROM conversations WHERE id = ?", arguments: [w.id.uuidString])
             return
         }
         guard let c = w.snapshot else { return }
@@ -363,8 +429,9 @@ final class ConversationStore: Sendable {
             try Self.upsertMetadata(c, exists: exists, db: db, encoder: encoder)
         }
         if w.changes.messagesReplaced {
-            try db.execute(sql: "DELETE FROM messages WHERE conversationId = ?", arguments: [c.id.uuidString])
+            // Before the delete, same reason as the conversation-deleted branch above (#201).
             try Self.deleteIndex(conversationId: c.id.uuidString, fromOrdinal: nil, db: db)
+            try db.execute(sql: "DELETE FROM messages WHERE conversationId = ?", arguments: [c.id.uuidString])
             try Self.insertMessages(c, from: 0, db: db, encoder: encoder)
         } else {
             if let from = w.changes.messagesFrom { try Self.insertMessages(c, from: from, db: db, encoder: encoder) }
@@ -372,16 +439,14 @@ final class ConversationStore: Sendable {
                 guard let m = c.messages.first(where: { $0.id == id }) else { continue }
                 try db.execute(sql: "UPDATE messages SET payload = ? WHERE conversationId = ? AND id = ?",
                                arguments: [try Self.json(m, encoder), c.id.uuidString, id.uuidString])
-                // The index is keyed by ordinal, which an id-keyed edit does not carry: read it
-                // back from the row just written (#177). The UPDATE's WHERE is on UNINDEXED
-                // columns, so it scans the whole index — acceptable only because an in-place edit
-                // is rare (a streamed reply's final text, a tool-pill rewrite) and the append path
-                // no longer pays it. Keying the index by the `messages` rowid is the follow-up.
-                if let ordinal = try Int.fetchOne(db, sql: "SELECT ordinal FROM messages WHERE conversationId = ? AND id = ?",
-                                                  arguments: [c.id.uuidString, id.uuidString]) {
-                    try db.execute(sql: "UPDATE messages_fts SET content = ? WHERE conversationId = ? AND ordinal = ?",
-                                   arguments: [m.content, c.id.uuidString, ordinal])
-                }
+                // A plain UPDATE, unlike `INSERT OR REPLACE`, never reallocates the row's rowid, so
+                // the index row keyed by it is still the right one to update in place (#201) — no
+                // need to read the ordinal back first or scan the UNINDEXED columns.
+                try db.execute(sql: """
+                    UPDATE messages_fts SET content = ? WHERE rowid = (
+                        SELECT rowid FROM messages WHERE conversationId = ? AND id = ?
+                    )
+                    """, arguments: [m.content, c.id.uuidString, id.uuidString])
             }
         }
         if w.changes.historyReplaced {
@@ -429,12 +494,14 @@ final class ConversationStore: Sendable {
     private static func insertMessages(_ c: Conversation, from: Int, db: Database, encoder: JSONEncoder) throws {
         // The search index mirrors exactly what this method writes, so it is truncated from the
         // same ordinal and refilled alongside the rows (#177). `INSERT OR REPLACE` has no
-        // equivalent on a virtual table, hence delete-then-insert. The truncating delete is taken
-        // only when there is something at or past `from`: its WHERE is on the index's UNINDEXED
-        // columns, which costs a scan of every indexed message in the database, and a plain
-        // append — the hot path, once per message — has nothing there to remove. The count that
-        // decides it rides the (conversationId, ordinal) primary key instead. `messagesReplaced`
-        // clears the index itself, before it empties `messages` out from under this check.
+        // equivalent on a virtual table, hence delete-then-insert; it also allocates a fresh
+        // `messages` rowid for any ordinal it overwrites, so the truncating delete below (which
+        // finds its rows through a `messages` subselect, #201) must run before this loop's
+        // `INSERT OR REPLACE`s, while the old rows — and their old rowids — are still there to
+        // find. The truncating delete is taken only when there is something at or past `from`:
+        // even keyed by rowid, it costs a scan to build the subselect, and a plain append — the
+        // hot path, once per message — has nothing there to remove. `messagesReplaced` clears the
+        // index itself, before it empties `messages` out from under this check.
         //
         // Both are taken from `min(from, count)`, never `from`: the row truncation below deletes
         // everything at or past `count`, so a `from` beyond the end of the array — a coalesced
@@ -451,7 +518,7 @@ final class ConversationStore: Sendable {
                 let m = c.messages[ordinal]
                 try db.execute(sql: "INSERT OR REPLACE INTO messages (conversationId, ordinal, id, payload) VALUES (?, ?, ?, ?)",
                                arguments: [c.id.uuidString, ordinal, m.id.uuidString, try json(m, encoder)])
-                try indexMessage(m, conversationId: c.id.uuidString, ordinal: ordinal, db: db)
+                try indexMessage(m, conversationId: c.id.uuidString, ordinal: ordinal, rowid: db.lastInsertedRowID, db: db)
             }
         }
         // A snapshot shorter than what's on disk (e.g. history/messages cleared and re-appended
@@ -669,8 +736,10 @@ final class ConversationStore: Sendable {
                     let shifted: Int = row["ordinal"]
                     try db.execute(sql: "UPDATE \(table) SET ordinal = ? WHERE conversationId = ? AND ordinal = ?", arguments: [index, convIdString, shifted])
                 }
-                // The index is keyed by ordinal too, so renumbering underneath it would leave it
-                // pointing at rows that moved. Rebuild it from the survivors (#177).
+                // The index row itself is now correctly keyed (rowid is untouched by the plain
+                // UPDATEs above, #201), but it still carries the pre-renumber `ordinal` as a
+                // display column, and some index rows point at messages just quarantined and
+                // deleted. Rebuild from the survivors so both are right (#177).
                 if table == "messages" {
                     try Self.rebuildIndex(conversationId: convIdString, db: db)
                 }

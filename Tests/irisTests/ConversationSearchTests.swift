@@ -247,6 +247,85 @@ struct ConversationSearchTests {
         #expect(try store.searchConversations(query: "knots").count == 1)
     }
 
+    // MARK: 2b — rowid keying (#201)
+
+    @Test("an in-place update keeps the same FTS rowid as its messages row; only the content changes")
+    func inPlaceEditKeepsTheSameRowid() throws {
+        let store = try ConversationStore.inMemory()
+        var c = conversation(title: "t", [ChatMessage(role: .agent, content: "draft about herons")])
+        try store.apply([created(c)])
+        let beforeRowids = try store.ftsRowidsByOrdinal(for: c.id)
+        #expect(beforeRowids == (try store.messageRowidsByOrdinal(for: c.id)))
+
+        c.messages[0].content = "final about cormorants"
+        try store.apply([write(c, .messageUpdated(id: c.messages[0].id))])
+
+        #expect(try store.indexCount(for: c.id) == 1)
+        #expect(try store.ftsRowidsByOrdinal(for: c.id) == beforeRowids)
+        #expect(try store.ftsRowidsByOrdinal(for: c.id) == (try store.messageRowidsByOrdinal(for: c.id)))
+    }
+
+    @Test("a truncate-delete from ordinal N removes exactly the FTS rows at ordinals >= N, by rowid")
+    func truncateDeleteRemovesExactOrdinalsByRowid() throws {
+        let store = try ConversationStore.inMemory()
+        var c = conversation(title: "t", [
+            ChatMessage(role: .user, content: "one about grebes"),
+            ChatMessage(role: .agent, content: "two about grebes"),
+            ChatMessage(role: .agent, content: "three about grebes"),
+        ])
+        try store.apply([created(c)])
+        #expect(try store.ftsRowidsByOrdinal(for: c.id).keys.sorted() == [0, 1, 2])
+
+        c.messages.removeLast(2)
+        try store.apply([write(c, .messagesAppended(from: 1))])
+
+        let remaining = try store.ftsRowidsByOrdinal(for: c.id)
+        #expect(remaining.keys.sorted() == [0])
+        #expect(remaining == (try store.messageRowidsByOrdinal(for: c.id)))
+    }
+
+    @Test("a store already on v2 gets consistent FTS rowids after upgrading to v3, and search still works")
+    func v2ToV3RowidMigration() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("iris-convsearch-v2tov3-\(UUID().uuidString)")
+        let url = root.appendingPathComponent("conversations.sqlite")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let id = UUID()
+        let messages = [
+            ChatMessage(role: .user, content: "how do I rotate the kubeconfig"),
+            ChatMessage(role: .agent, content: "run gcloud container clusters get-credentials"),
+        ]
+        do {
+            let queue = try DatabaseQueue(path: url.path)
+            try ConversationStore.migrator.migrate(queue, upTo: "v2_conversation_search")
+            let encoder = JSONEncoder()
+            try queue.write { db in
+                try db.execute(sql: """
+                    INSERT INTO conversations (id, position, title, createdAt, updatedAt, tokenUsage)
+                    VALUES (?, 1, 'kubeconfig chat', datetime('now'), datetime('now'), '{}')
+                    """, arguments: [id.uuidString])
+                for (ordinal, m) in messages.enumerated() {
+                    let payload = String(decoding: try encoder.encode(m), as: UTF8.self)
+                    try db.execute(sql: "INSERT INTO messages (conversationId, ordinal, id, payload) VALUES (?, ?, ?, ?)",
+                                   arguments: [id.uuidString, ordinal, m.id.uuidString, payload])
+                    // The pre-#201 index shape: FTS5's own auto-assigned rowid, uncorrelated with
+                    // the `messages` row it mirrors.
+                    try db.execute(sql: "INSERT INTO messages_fts (conversationId, ordinal, role, content) VALUES (?, ?, ?, ?)",
+                                   arguments: [id.uuidString, ordinal, m.role.rawValue, m.content])
+                }
+            }
+            try queue.close()
+        }
+
+        // Opening runs the rest of the migrator against the v1+v2 database, i.e. just v3_fts_rowid.
+        let store = try ConversationStore.onDisk(at: url)
+        #expect(try store.indexCount(for: id) == 2)
+        #expect(try store.searchConversations(query: "kubeconfig").count == 1)
+        #expect(try store.ftsRowidsByOrdinal(for: id) == (try store.messageRowidsByOrdinal(for: id)))
+    }
+
     // MARK: 3 — ranking
 
     @Test("bm25 ranks the tighter matches first, even when the single-match conversation is newer")
