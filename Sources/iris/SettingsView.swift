@@ -56,6 +56,7 @@ struct SettingsView: View {
                         Text("Dark 👋🏿").tag(SkinTone.dark.rawValue)
                     }
                 }
+                .padding(.bottom)
 
                 Section(header: Text("Goals").font(.headline)) {
                     Toggle("Auto-advance checkpoints the grader passes cleanly", isOn: $config.checkpointAutoAdvance)
