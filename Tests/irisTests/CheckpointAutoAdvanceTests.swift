@@ -24,11 +24,20 @@ struct CheckpointAutoAdvanceTests {
         /// `submit_evaluation` — the crashed/confused/timed-out grader §4's fail-safe exists for.
         private let graderSubmits: Bool
 
-        init(main: [GeminiResponse], graderVerdict: (String, String), graderSubmits: Bool = true) {
+        /// How many independent grading sessions may submit a verdict. Every other test in this
+        /// file grades exactly one checkpoint, so the original `== 1` cutoff after the global
+        /// first call was never wrong for them. The concurrent-checkpoint regression grades TWO
+        /// sessions at once (both against milestone 0, since neither has advanced yet), and both
+        /// must submit cleanly for the race it is reproducing to be reachable at all.
+        private let graderSubmitLimit: Int
+
+        init(main: [GeminiResponse], graderVerdict: (String, String), graderSubmits: Bool = true,
+             graderSubmitLimit: Int = 1) {
             self.mainScript = main
             self.verdict = graderVerdict.0
             self.evidence = graderVerdict.1
             self.graderSubmits = graderSubmits
+            self.graderSubmitLimit = graderSubmitLimit
         }
         var graderCalls: Int { lock.withLock { graderCallCount } }
 
@@ -43,25 +52,32 @@ struct CheckpointAutoAdvanceTests {
                 $0.functionDeclarations.contains { $0.name == "submit_evaluation" }
             } ?? false
             let systemText = request.systemInstruction?.parts.compactMap(\.text).joined() ?? ""
+            if offersSubmit {
+                let myCallIndex: Int = lock.withLock { graderCallCount += 1; return graderCallCount }
+                guard self.graderSubmits else { return Self.text("I looked at it and it seems fine.") }
+                guard myCallIndex <= self.graderSubmitLimit else { return Self.text("done") }
+                // Stagger every grading session after the first: in production, two concurrent
+                // `reach_checkpoint` grades finish minutes apart, not in the same instant, which
+                // is exactly the gap the double-advance bug needs — the first call's full
+                // grade-then-write has to land before the second call's re-read. A mocked client
+                // with no delay lets both re-reads race ahead of either write instead, which
+                // happens to self-correct and would hide the bug.
+                if myCallIndex > 1 { try? await Task.sleep(nanoseconds: 50_000_000) }
+                let ids = systemText.matches(of: Self.uuidPattern).map { String($0.output) }
+                let evaluations = JSONValue.array(ids.map {
+                    .object(["criterion_id": .string($0), "verdict": .string(self.verdict),
+                             "evidence": .string(self.evidence)])
+                })
+                let part = Part(text: nil,
+                                functionCall: FunctionCall(name: "submit_evaluation",
+                                                           args: ["evaluations": evaluations],
+                                                           id: nil, thought_signature: nil,
+                                                           thoughtSignature: nil),
+                                functionResponse: nil, thought_signature: nil, thoughtSignature: nil)
+                return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [part]))],
+                                      usageMetadata: nil)
+            }
             return lock.withLock {
-                if offersSubmit {
-                    graderCallCount += 1
-                    guard self.graderSubmits else { return Self.text("I looked at it and it seems fine.") }
-                    guard graderCallCount == 1 else { return Self.text("done") }
-                    let ids = systemText.matches(of: Self.uuidPattern).map { String($0.output) }
-                    let evaluations = JSONValue.array(ids.map {
-                        .object(["criterion_id": .string($0), "verdict": .string(self.verdict),
-                                 "evidence": .string(self.evidence)])
-                    })
-                    let part = Part(text: nil,
-                                    functionCall: FunctionCall(name: "submit_evaluation",
-                                                               args: ["evaluations": evaluations],
-                                                               id: nil, thought_signature: nil,
-                                                               thoughtSignature: nil),
-                                    functionResponse: nil, thought_signature: nil, thoughtSignature: nil)
-                    return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [part]))],
-                                          usageMetadata: nil)
-                }
                 let i = mainIndex
                 mainIndex += 1
                 return mainScript[min(i, mainScript.count - 1)]
@@ -80,6 +96,40 @@ struct CheckpointAutoAdvanceTests {
         response(FunctionCall(name: "reach_checkpoint",
                               args: ["milestone_summary": .string("done with this checkpoint")],
                               id: nil, thought_signature: nil, thoughtSignature: nil))
+    }
+
+    /// Two `reach_checkpoint` calls in ONE model response — the shape a turn's concurrent
+    /// `withTaskGroup` tool dispatch (AGENTS.md invariant 3) actually produces, unlike the
+    /// existing `AutoAdvanceTransitionTests`, which calls `autoAdvanceCheckpoint` directly with a
+    /// hand-written index and so cannot exercise how `performCheckpoint` computes that index.
+    static func twoReachCheckpointCalls() -> GeminiResponse {
+        let parts = (0..<2).map { _ in
+            Part(text: nil,
+                 functionCall: FunctionCall(name: "reach_checkpoint",
+                                            args: ["milestone_summary": .string("done with this checkpoint")],
+                                            id: nil, thought_signature: nil, thoughtSignature: nil),
+                 functionResponse: nil, thought_signature: nil, thoughtSignature: nil)
+        }
+        return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: parts))],
+                              usageMetadata: nil)
+    }
+
+    /// Three-milestone ladder on milestone 0, locked, one qualitative criterion per milestone.
+    /// Three, not two: on a two-milestone ladder a double-advance from 0 would be clamped to the
+    /// final milestone by `min(currentMilestone + 1, milestones.count - 1)` in both the buggy and
+    /// fixed code, making the two indistinguishable. A third milestone gives the race somewhere
+    /// to actually skip to.
+    private func threeMilestoneLadder(on app: AppState, _ id: UUID) {
+        let a = Criterion(text: "parser works", kind: .qualitative, check: nil)
+        let b = Criterion(text: "wired up", kind: .qualitative, check: nil)
+        let c = Criterion(text: "shipped", kind: .qualitative, check: nil)
+        var contract = GoalContract(objective: "Ship the parser", criteria: [a, b, c])
+        contract.milestones = [Milestone(title: "Parser", criterionIds: [a.id]),
+                               Milestone(title: "Integration", criterionIds: [b.id]),
+                               Milestone(title: "Ship", criterionIds: [c.id])]
+        contract.currentMilestone = 0
+        app.createNewConversation(id: id)
+        app.setGoalContract(for: id, contract)
     }
 
     /// Two-milestone ladder on milestone 0, locked, with one qualitative criterion per milestone.
@@ -221,5 +271,31 @@ struct CheckpointAutoAdvanceTests {
         let messages = app.conversations.first { $0.id == id }?.messages ?? []
         #expect(messages.contains { $0.content.contains("auto-advanced") },
                 "a skipped checkpoint must leave an audit trail the user can read")
+    }
+
+    @Test("two concurrent reach_checkpoint calls advance the ladder exactly once")
+    func testConcurrentReachCheckpointCallsAdvanceOnlyOnce() async {
+        // Regression for the double-advance bug: `performCheckpoint` graded the PRE-grade
+        // contract (milestone 0 for both A and B, since neither has written yet) but fed the
+        // guard `decidedAt = current.currentMilestone` — a POST-grade re-read. Whichever call's
+        // grade lands first advances 0→1 and its re-read reflects that; the second call then
+        // re-reads milestone 1, sets decidedAt = 1, and the guard (`existing.currentMilestone ==
+        // decidedAt`) matches trivially because decidedAt was copied FROM that same re-read.
+        // Net effect: 0→2 on one turn, milestone 1 never worked, never graded, and
+        // checkpointHistory gets two entries where a milestone 1 title carries milestone 0's
+        // grade. `IrisEngine` dispatches a turn's tool calls concurrently in a `withTaskGroup`
+        // (AGENTS.md invariant 3), so a model that emits two `reach_checkpoint` calls in one
+        // batch really does hit this.
+        let app = AppState(); let id = UUID(); threeMilestoneLadder(on: app, id)
+        let client = RoutingClient(main: [Self.twoReachCheckpointCalls(), Self.response(nil)],
+                                   graderVerdict: ("met", "saw it work"), graderSubmitLimit: 2)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        await engine.processInput("work", source: "User", conversationId: id)
+
+        let c = app.conversations.first { $0.id == id }?.goalContract
+        #expect(c?.currentMilestone == 1,
+                "the ladder must advance by exactly one milestone, not skip milestone 1")
+        let history = app.conversations.first { $0.id == id }?.checkpointHistory ?? []
+        #expect(history.count == 1, "one clean grade decided on, one audit entry")
     }
 }

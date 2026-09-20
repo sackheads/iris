@@ -250,10 +250,16 @@ actor IrisEngine {
         }
 
         if checkpointAutoAdvance, let current, current.canAutoAdvance(from: evaluation) {
-            // Pass the milestone the decision was made for. Two `reach_checkpoint` calls in one
-            // concurrent tool batch would otherwise both advance from the same index and skip a
-            // milestone entirely; the second is a no-op instead.
-            let decidedAt = current.currentMilestone
+            // Pass the milestone the GRADE was computed for (`contract`, captured before this
+            // call graded anything), not `current`'s post-grade re-read. Two `reach_checkpoint`
+            // calls in one concurrent tool batch both start at the same milestone and both grade
+            // it; if `decidedAt` came from `current` instead, whichever call's grade lands second
+            // would re-read the milestone the FIRST call just advanced to, hand that back to the
+            // guard as the very value it's supposed to be checked against, and pass trivially —
+            // advancing twice and skipping a milestone entirely. `current` is still right for
+            // `canAutoAdvance` two lines up: that needs the fresh judgements a re-read provides.
+            // Only the index must come from the pre-grade snapshot.
+            let decidedAt = contract.currentMilestone
             await MainActor.run {
                 localState?.autoAdvanceCheckpoint(for: conversationId, decidedAt: decidedAt,
                                                   evaluation: evaluation)
