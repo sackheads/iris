@@ -29,7 +29,7 @@ struct AutoAdvanceTransitionTests {
         let app = AppState(); let id = UUID()
         _ = laddered(app, id)
 
-        app.autoAdvanceCheckpoint(for: id, evaluation: gradedEval())
+        app.autoAdvanceCheckpoint(for: id, decidedAt: 0, evaluation: gradedEval())
 
         let c = app.conversations.first { $0.id == id }?.goalContract
         #expect(c?.currentMilestone == 1)
@@ -41,13 +41,13 @@ struct AutoAdvanceTransitionTests {
         let app = AppState(); let id = UUID()
         _ = laddered(app, id)
 
-        app.autoAdvanceCheckpoint(for: id, evaluation: gradedEval())
+        app.autoAdvanceCheckpoint(for: id, decidedAt: 0, evaluation: gradedEval())
 
-        let c = app.conversations.first { $0.id == id }?.goalContract
-        #expect(c?.checkpointHistory.count == 1)
-        #expect(c?.checkpointHistory.first?.resolution == .autoAdvanced)
-        #expect(c?.checkpointHistory.first?.milestoneIndex == 0)
-        #expect(c?.checkpointHistory.first?.milestoneTitle == "First")
+        let history = app.conversations.first { $0.id == id }?.checkpointHistory ?? []
+        #expect(history.count == 1)
+        #expect(history.first?.resolution == .autoAdvanced)
+        #expect(history.first?.milestoneIndex == 0)
+        #expect(history.first?.milestoneTitle == "First")
     }
 
     @Test("auto-advance does not re-arm the goal loop")
@@ -55,7 +55,7 @@ struct AutoAdvanceTransitionTests {
         let app = AppState(); let id = UUID()
         _ = laddered(app, id)
 
-        app.autoAdvanceCheckpoint(for: id, evaluation: gradedEval())
+        app.autoAdvanceCheckpoint(for: id, decidedAt: 0, evaluation: gradedEval())
 
         // resumeGoalLoop sets isThinking by starting a turn. The auto path must not.
         #expect(app.isThinking == false, "auto-advance must not start a second loop mid-turn")
@@ -69,8 +69,8 @@ struct AutoAdvanceTransitionTests {
 
         app.advanceCheckpoint(for: id)
 
-        let c = app.conversations.first { $0.id == id }?.goalContract
-        #expect(c?.checkpointHistory.first?.resolution == .humanApproved)
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.checkpointHistory.first?.resolution == .humanApproved)
     }
 
     @Test("the human send-back path records humanSentBack and does not advance")
@@ -81,9 +81,43 @@ struct AutoAdvanceTransitionTests {
 
         app.holdCheckpoint(for: id, feedback: "not quite")
 
-        let c = app.conversations.first { $0.id == id }?.goalContract
-        #expect(c?.checkpointHistory.first?.resolution == .humanSentBack)
-        #expect(c?.currentMilestone == 0, "send back keeps working the same milestone")
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.checkpointHistory.first?.resolution == .humanSentBack)
+        #expect(conv?.goalContract?.currentMilestone == 0, "send back keeps working the same milestone")
+    }
+
+    @Test("a second advance decided for the same milestone is a no-op")
+    func testDuplicateAdvanceForSameMilestoneIsANoOp() {
+        // A turn's tool calls run concurrently (AGENTS.md invariant 3), so two `reach_checkpoint`
+        // calls in one batch both read milestone 0 and both grade it clean. Advancing twice would
+        // land on 2 with milestone 1 never worked, never graded, and nobody stopped — and would
+        // stamp the second history entry with milestone 1 while carrying milestone 0's grade.
+        let app = AppState(); let id = UUID()
+        _ = laddered(app, id)
+
+        app.autoAdvanceCheckpoint(for: id, decidedAt: 0, evaluation: gradedEval())
+        app.autoAdvanceCheckpoint(for: id, decidedAt: 0, evaluation: gradedEval())
+
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.goalContract?.currentMilestone == 1, "the ladder must advance exactly once")
+        #expect(conv?.checkpointHistory.count == 1, "one checkpoint, one audit entry")
+    }
+
+    @Test("the checkpoint history outlives the goal it describes")
+    func testHistorySurvivesGoalCompletion() {
+        // `clearGoal` nils the contract on `goal_complete`, `/stop`, and LLM errors. A history
+        // kept on the contract could only ever describe a goal still running, which is the
+        // opposite of an audit trail.
+        let app = AppState(); let id = UUID()
+        _ = laddered(app, id)
+        app.autoAdvanceCheckpoint(for: id, decidedAt: 0, evaluation: gradedEval())
+
+        app.clearGoal(for: id)
+
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.goalContract == nil, "the goal really is over")
+        #expect(conv?.checkpointHistory.count == 1, "how its checkpoints went must still be readable")
+        #expect(conv?.checkpointHistory.first?.milestoneTitle == "First")
     }
 
     @Test("auto-advance on a contract with no ladder does nothing")
@@ -95,10 +129,10 @@ struct AutoAdvanceTransitionTests {
         c.milestones = []
         app.setGoalContract(for: id, c)
 
-        app.autoAdvanceCheckpoint(for: id, evaluation: gradedEval())
+        app.autoAdvanceCheckpoint(for: id, decidedAt: 0, evaluation: gradedEval())
 
-        let after = app.conversations.first { $0.id == id }?.goalContract
-        #expect(after?.currentMilestone == 0)
+        let after = app.conversations.first { $0.id == id }
+        #expect(after?.goalContract?.currentMilestone == 0)
         #expect(after?.checkpointHistory.isEmpty == true)
     }
 }

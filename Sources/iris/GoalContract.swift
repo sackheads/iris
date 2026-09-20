@@ -33,7 +33,9 @@ enum ContractState: String, Codable, Sendable, Equatable {
     case draft, locked
 }
 
-/// Slice D3 — how one checkpoint was resolved, kept for the life of the contract.
+/// Slice D3 — how one checkpoint was resolved. Lives on `Conversation`, not on `GoalContract`:
+/// `clearGoal` nils the contract on `goal_complete`, `/stop` and LLM errors, so a history kept
+/// there could only ever describe a goal still running — the opposite of an audit trail.
 /// All three resolutions are recorded, not only auto-advances, so slice F inherits a complete
 /// ladder record rather than a partial one.
 struct CheckpointOutcome: Codable, Identifiable, Equatable, Sendable {
@@ -45,7 +47,10 @@ struct CheckpointOutcome: Codable, Identifiable, Equatable, Sendable {
     var id = UUID()
     var milestoneIndex: Int
     var milestoneTitle: String
-    var evaluation: GoalEvaluation
+    /// Nil when nothing was graded — `sanitizeLoaded` clears `lastGoalEvaluation` on load, so an
+    /// Approve/Send-back after a restart has no grade to record. A synthesized `.failed` stand-in
+    /// would be indistinguishable in the audit trail from a real grader failure.
+    var evaluation: GoalEvaluation?
     var resolution: Resolution
     var date: Date = Date()
 }
@@ -70,10 +75,6 @@ struct GoalContract: Codable, Equatable, Sendable {
     /// conversation was already bound by `set_workspace`.
     var workspace: String?
     var waivers: [UUID: String] = [:]
-    /// Slice D3 — one entry per resolved checkpoint. The durable audit trail: slice F renders it
-    /// and adds retroactive send-back. Lives here rather than beside `lastGoalEvaluation` because
-    /// `sanitizeLoaded` deliberately clears that field on load.
-    var checkpointHistory: [CheckpointOutcome] = []
     /// Slice D3 — human verdicts on `humanJudged` criteria, by criterion id. `true` = accepted.
     /// Mirrors `waivers`: a durable record of a decision the user made. D2 kept these only in
     /// `lastGoalEvaluation`, which the next grade overwrites — fine when grading happens once at
@@ -129,7 +130,6 @@ struct GoalContract: Codable, Equatable, Sendable {
         state = try c.decodeIfPresent(ContractState.self, forKey: .state) ?? .draft
         workspace = try c.decodeIfPresent(String.self, forKey: .workspace)
         waivers = try c.decodeIfPresent([UUID: String].self, forKey: .waivers) ?? [:]
-        checkpointHistory = try c.decodeIfPresent([CheckpointOutcome].self, forKey: .checkpointHistory) ?? []
         judgements = try c.decodeIfPresent([UUID: Bool].self, forKey: .judgements) ?? [:]
         gateAttempts = try c.decodeIfPresent(Int.self, forKey: .gateAttempts) ?? 0
         awaitingHumanJudgement = try c.decodeIfPresent(Bool.self, forKey: .awaitingHumanJudgement) ?? false

@@ -166,7 +166,7 @@ struct DelegateMilestoneTests {
         let conv = app.conversations.first { $0.id == id }
         #expect(conv?.goalContract?.checkpointStatus == .running)
         #expect(conv?.goalContract?.currentMilestone == 1, "a clean delegated grade should advance")
-        #expect(conv?.goalContract?.checkpointHistory.first?.resolution == .autoAdvanced)
+        #expect(conv?.checkpointHistory.first?.resolution == .autoAdvanced)
         #expect(client.graderCalls > 0)
         // The transcript line is the only record that this rung was delegated — nobody stopped to
         // see it happen, and `checkpointHistory` does not carry the delegate's name.

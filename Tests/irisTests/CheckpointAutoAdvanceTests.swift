@@ -99,7 +99,8 @@ struct CheckpointAutoAdvanceTests {
         let c = app.conversations.first { $0.id == id }?.goalContract
         #expect(c?.currentMilestone == 1, "a clean checkpoint should advance")
         #expect(c?.checkpointStatus == .running, "a clean checkpoint should not pause")
-        #expect(c?.checkpointHistory.first?.resolution == .autoAdvanced)
+        let history = app.conversations.first { $0.id == id }?.checkpointHistory ?? []
+        #expect(history.first?.resolution == .autoAdvanced)
     }
 
     @Test("a not_met grade pauses exactly as before")

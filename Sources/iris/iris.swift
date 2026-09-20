@@ -250,8 +250,13 @@ actor IrisEngine {
         }
 
         if checkpointAutoAdvance, let current, current.canAutoAdvance(from: evaluation) {
+            // Pass the milestone the decision was made for. Two `reach_checkpoint` calls in one
+            // concurrent tool batch would otherwise both advance from the same index and skip a
+            // milestone entirely; the second is a no-op instead.
+            let decidedAt = current.currentMilestone
             await MainActor.run {
-                localState?.autoAdvanceCheckpoint(for: conversationId, evaluation: evaluation)
+                localState?.autoAdvanceCheckpoint(for: conversationId, decidedAt: decidedAt,
+                                                  evaluation: evaluation)
             }
             // Count only actual `.met` verdicts — `canAutoAdvance` also lets through a waived
             // `not_met` and a `humanJudged` criterion the grader never touched, and reporting

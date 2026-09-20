@@ -57,6 +57,11 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     var lastGoalCompletionReport: JSONValue? = nil
     var lastGoalEvaluation: GoalEvaluation? = nil
     var subagentResult: SubagentResult? = nil
+    /// Slice D3 — one entry per resolved checkpoint, the durable audit trail slice F renders.
+    /// Lives on the CONVERSATION, not on `goalContract`: `clearGoal` nils the contract when the
+    /// goal completes, is stopped, or errors, which is exactly when the record of how its
+    /// checkpoints went starts to matter.
+    var checkpointHistory: [CheckpointOutcome] = []
 
     init(id: UUID = UUID(), title: String, messages: [ChatMessage] = [], workspacePath: String? = nil, history: [Content] = [], tokenUsage: TokenUsage = TokenUsage(), activeGoal: String? = nil, messageCountSinceReflection: Int = 0, goalContract: GoalContract? = nil) {
         self.id = id
@@ -71,7 +76,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory
     }
 
     init(from decoder: Decoder) throws {
@@ -90,6 +95,9 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         lastGoalCompletionReport = try container.decodeIfPresent(JSONValue.self, forKey: .lastGoalCompletionReport)
         lastGoalEvaluation = try container.decodeIfPresent(GoalEvaluation.self, forKey: .lastGoalEvaluation)
         subagentResult = try container.decodeIfPresent(SubagentResult.self, forKey: .subagentResult)
+        // Invariant 1: a conversation persisted before D3 has no such key, and a throw here fails
+        // the whole [Conversation] decode and drops every conversation.
+        checkpointHistory = try container.decodeIfPresent([CheckpointOutcome].self, forKey: .checkpointHistory) ?? []
         // Migration: a legacy conversation that had a goal (activeGoal) but no contract is
         // upgraded to a locked single-qualitative-criterion contract so in-flight goals survive.
         if goalContract == nil, let legacy = activeGoal {
@@ -1197,23 +1205,22 @@ class AppState {
         markChanged(conversationId, .metadata)
     }
 
-    /// Appends one entry to the contract's checkpoint history. All three resolutions are recorded,
-    /// so slice F inherits a complete ladder record rather than only the skipped checkpoints.
-    /// Caller must already hold a valid index; this does not save (its callers do).
+    /// Appends one entry to the conversation's checkpoint history. All three resolutions are
+    /// recorded, so slice F inherits a complete ladder record rather than only the skipped
+    /// checkpoints. Caller must already hold a valid index; this does not save (its callers do).
+    ///
+    /// A nil evaluation is stored as nil. `sanitizeLoaded` clears `lastGoalEvaluation` on load, so
+    /// the human controls genuinely have no grade to record after a restart; fabricating a
+    /// `.failed` one would put a grader verdict nobody produced into the audit trail.
     private func recordCheckpointOutcome(at idx: Int, _ resolution: CheckpointOutcome.Resolution,
                                          evaluation: GoalEvaluation?) {
-        guard var c = conversations[idx].goalContract, c.hasLadder,
+        guard let c = conversations[idx].goalContract, c.hasLadder,
               c.currentMilestone < c.milestones.count else { return }
-        // No evaluation means nothing was graded; record the resolution with an empty one rather
-        // than dropping the entry, so the ladder record has no silent gaps.
-        let eval = evaluation
-            ?? GoalEvaluation(status: .failed, criteria: [], startedAt: Date(), completedAt: Date())
-        c.checkpointHistory.append(CheckpointOutcome(
+        conversations[idx].checkpointHistory.append(CheckpointOutcome(
             milestoneIndex: c.currentMilestone,
             milestoneTitle: c.milestones[c.currentMilestone].title,
-            evaluation: eval,
+            evaluation: evaluation,
             resolution: resolution))
-        conversations[idx].goalContract = c
     }
 
     /// Slice D3 — the grader passed this checkpoint cleanly, so advance without stopping the human.
@@ -1221,11 +1228,20 @@ class AppState {
     /// Deliberately NOT `advanceCheckpoint`: that one ends in `resumeGoalLoop`, which is right for
     /// a human clicking "Approve & continue" after the turn has ended and wrong here. This runs
     /// inside a live `reach_checkpoint` tool call, so re-arming the reprompt would start a second
-    /// loop alongside the turn in flight. The engine's multi-round turn carries the agent forward
-    /// on the tool result instead.
-    func autoAdvanceCheckpoint(for conversationId: UUID, evaluation: GoalEvaluation?) {
+    /// loop alongside the turn in flight. The agent is carried forward by the ordinary
+    /// auto-reprompt: the engine ends the turn when the batch contained `reach_checkpoint`, and
+    /// the reprompt fires because this leaves `checkpointStatus == .running`.
+    ///
+    /// `decidedAt` is the milestone the caller graded and decided on, and a mismatch is a no-op.
+    /// A turn's tool calls run concurrently (AGENTS.md invariant 3), so two `reach_checkpoint`
+    /// calls in one batch can both read milestone 0, both grade it clean, and both advance —
+    /// landing on 2 with milestone 1 never worked, never graded, and nobody stopped. It also
+    /// closes the stale-read window between `performCheckpoint`'s contract re-read and this write.
+    func autoAdvanceCheckpoint(for conversationId: UUID, decidedAt milestoneIndex: Int,
+                               evaluation: GoalEvaluation?) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
-              let existing = conversations[idx].goalContract, existing.hasLadder else { return }
+              let existing = conversations[idx].goalContract, existing.hasLadder,
+              existing.currentMilestone == milestoneIndex else { return }
         recordCheckpointOutcome(at: idx, .autoAdvanced, evaluation: evaluation)
         guard var c = conversations[idx].goalContract else { return }
         c.currentMilestone = min(c.currentMilestone + 1, c.milestones.count - 1)
