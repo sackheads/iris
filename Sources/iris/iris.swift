@@ -12,8 +12,10 @@ actor IrisEngine {
     let executor = ToolExecutor.shared
     let manager = SkillManager.shared
     /// The fact store this engine reads and writes. Injectable so a test drives the memory tools
-    /// against an in-memory store instead of the user's real `~/.iris/fact_store.sqlite`.
-    let factStore: FactStoreManager
+    /// against its own store. Resolved lazily: forcing `.shared` at construction would open the
+    /// process-wide store for every engine ever built, including ones that never touch memory.
+    private let injectedFactStore: FactStoreManager?
+    var factStore: FactStoreManager { injectedFactStore ?? .shared }
 
     var systemPrompt: Content!
     var modelTier: ModelTier
@@ -33,9 +35,9 @@ actor IrisEngine {
     // Since AppState owns IrisEngine, we can pass it when we start or process.
     private weak var state: AppState?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool = ConfigManager.shared.streamResponses, factStore: FactStoreManager = .shared) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool = ConfigManager.shared.streamResponses, factStore: FactStoreManager? = nil) {
         self.state = state
-        self.factStore = factStore
+        self.injectedFactStore = factStore
         self.modelTier = tier
         self.principal = principal
         self.roleLabel = roleLabel
@@ -417,7 +419,8 @@ actor IrisEngine {
         }
         
         if !facts.isEmpty, let textPart = currentSystemPrompt.parts.first?.text {
-            let factString = facts.map { "- \($0.content)" }.joined(separator: "\n")
+            // The ids go in so `manage_fact` — offered only on these turns — has something to name.
+            let factString = facts.map { "- [\($0.id)] \($0.content)" }.joined(separator: "\n")
             // Append Fact Store Memory last (highly volatile, changes per query)
             currentSystemPrompt.parts[0].text = textPart + "\n\n# Mid-Term Fact Store Memory (JIT Context)\n" + factString
         }
@@ -485,9 +488,13 @@ actor IrisEngine {
                 required: ["content"]
             )
         ))
+        // Correcting a fact needs a fact id, and the only ids the model ever sees come from the
+        // facts injected above or a `search_memory` result. On a turn that surfaced none, this
+        // declaration is dead weight in the prompt (invariant 6).
+        if !facts.isEmpty {
         toolsList.append(FunctionDeclaration(
             name: "manage_fact",
-            description: "Correct the fact store when the user says a remembered fact is wrong, outdated, or replaced, or when a retrieved fact proved right or wrong: retract, supersede (with by_fact_id), restore, or rate it helpful/unhelpful. Fact ids come from search_memory results.",
+            description: "Correct the fact store when the user says a remembered fact is wrong, outdated, or replaced, or when a retrieved fact proved right or wrong: retract, supersede (with by_fact_id), restore, or rate it helpful/unhelpful. Fact ids are the bracketed ids in your Mid-Term Fact Store Memory block and in search_memory results.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -498,6 +505,7 @@ actor IrisEngine {
                 required: ["action", "fact_id"]
             )
         ))
+        }
         toolsList.append(FunctionDeclaration(
             name: "reflect",
             description: "Write down your internal thoughts, analysis, or evaluation of your progress. Use this to think step-by-step or evaluate if you are on the right track.",
@@ -1171,7 +1179,9 @@ actor IrisEngine {
         } else if functionCall.name == "save_fact", let content = functionCall.args["content"]?.stringValue {
             let category = functionCall.args["category"]?.stringValue ?? "general"
             let entity = functionCall.args["entity"]?.stringValue
-            let supersedes = functionCall.args["supersedes"]?.stringValue
+            // An empty `supersedes` is the model filling in a blank, not a supersession request.
+            let supersedesArg = functionCall.args["supersedes"]?.stringValue ?? ""
+            let supersedes = supersedesArg.isEmpty ? nil : supersedesArg
             do {
                 let fact = try factStore.addFact(content: content, category: category, entity: entity, supersedes: supersedes)
                 if let supersedes {

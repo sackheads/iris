@@ -188,6 +188,19 @@ struct FactStoreLifecycleTests {
         #expect(all.first { $0.id == miss.id }?.retrievalCount == 0)
     }
 
+    @Test("a browse read leaves the retrieval count alone")
+    func browseDoesNotCountAsRetrieval() throws {
+        let s = try store()
+        let fact = try s.addFact(content: "Kubernetes autoscaling notes", entity: "Kubernetes")
+
+        _ = try s.search(query: "Kubernetes", countsAsRetrieval: false)
+        _ = try s.probe(entity: "Kubernetes", countsAsRetrieval: false)
+        #expect(try s.listFacts(includeInactive: true, limit: 10).first { $0.id == fact.id }?.retrievalCount == 0)
+
+        _ = try s.search(query: "Kubernetes")
+        #expect(try s.listFacts(includeInactive: true, limit: 10).first { $0.id == fact.id }?.retrievalCount == 1)
+    }
+
     // MARK: 7 — feedback
 
     @Test("helpful feedback raises trust and the helpful count; unhelpful lowers trust only")
@@ -248,6 +261,21 @@ struct FactStoreLifecycleTests {
     func emptyContentRefused() throws {
         let s = try store()
         #expect(throws: FactStoreError.emptyContent) { _ = try s.addFact(content: "   ") }
+    }
+
+    // MARK: test isolation
+
+    @MainActor
+    @Test("under test the shared store is in-memory and building an engine never opens the real one")
+    func sharedStoreIsIsolatedFromTheRealHome() {
+        #expect(FactStoreManager.shared.dbQueue != nil, "the shared store must be in-memory under XCTest")
+
+        let realPath = IrisPaths.default.factStoreDB.path
+        let existedBefore = FileManager.default.fileExists(atPath: realPath)
+        let app = AppState()
+        _ = IrisEngine(state: app, tier: .medium, principal: .main,
+                       client: CapturingLLMClient(reply: "ok"), retryDelays: [])
+        #expect(FileManager.default.fileExists(atPath: realPath) == existedBefore)
     }
 
     // MARK: /facts rendering
@@ -335,6 +363,17 @@ struct FactLifecycleToolTests {
         let out = await results(of: call("manage_fact", ["action": .string("retract"), "fact_id": .string("ghost")]),
                                 store: store)
         #expect(out.contains { $0.lowercased().contains("unknown fact id") })
+    }
+
+    @Test("save_fact treats an empty supersedes as absent")
+    func saveFactEmptySupersedes() async throws {
+        let store = try FactStoreManager(inMemory: true)
+        let out = await results(of: call("save_fact", ["content": .string("Brian lives in Portland"),
+                                                       "supersedes": .string("")]),
+                                store: store)
+        #expect(out.contains { $0.contains("Fact saved to fact store") })
+        #expect(out.allSatisfy { !$0.contains("superseded") })
+        #expect(try store.search(query: "Portland").count == 1)
     }
 
     @Test("save_fact with supersedes marks the old fact superseded")

@@ -91,7 +91,15 @@ final class FactStoreManager: @unchecked Sendable {
         let stillActiveSuccessor: Fact?
     }
 
+    /// A unit run gets its own in-memory store. `IrisPaths.default` resolves to the developer's
+    /// real `~/.iris` under `swift test`, so touching `.shared` there would open, v2-migrate and
+    /// then write retrieval counts into the machine's own fact store — the same isolation rule
+    /// `IrisDefaults.processStore` enforces for user defaults (#121). Tests that want a real
+    /// on-disk store build one with `FactStoreManager(paths:)` against a temp directory.
     static let shared: FactStoreManager = {
+        if NSClassFromString("XCTestCase") != nil {
+            return try! FactStoreManager(inMemory: true)
+        }
         do {
             return try FactStoreManager()
         } catch {
@@ -208,12 +216,15 @@ final class FactStoreManager: @unchecked Sendable {
     }
 
     /// Searches active facts using FTS5 full-text matching, trust weighting, and exponential time decay.
+    /// `countsAsRetrieval` is the usage signal that keeps a fact alive through eviction, so browse
+    /// paths (`/facts`, the journey scan) pass `false`: a human reading the store is not a retrieval.
     func search(
         query: String,
         category: String? = nil,
         entity: String? = nil,
         limit: Int = 5,
-        threshold: Double = 0.1
+        threshold: Double = 0.1,
+        countsAsRetrieval: Bool = true
     ) throws -> [Fact] {
         let results = try reader.read { db -> [Fact] in
             let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -267,12 +278,12 @@ final class FactStoreManager: @unchecked Sendable {
                 .prefix(limit)
                 .map { $0.0 }
         }
-        try incrementRetrievals(ids: results.map(\.id))
+        if countsAsRetrieval { try? incrementRetrievals(ids: results.map(\.id)) }
         return results
     }
 
     /// Retrieves active facts associated with a specific entity (probe).
-    func probe(entity: String, limit: Int = 10) throws -> [Fact] {
+    func probe(entity: String, limit: Int = 10, countsAsRetrieval: Bool = true) throws -> [Fact] {
         let results = try reader.read { db in
             let sql = """
                 SELECT * FROM facts
@@ -281,7 +292,7 @@ final class FactStoreManager: @unchecked Sendable {
                 """
             return try Fact.fetchAll(db, sql: sql, arguments: [entity, "%\(entity)%", limit])
         }
-        try incrementRetrievals(ids: results.map(\.id))
+        if countsAsRetrieval { try? incrementRetrievals(ids: results.map(\.id)) }
         return results
     }
 
@@ -388,7 +399,9 @@ final class FactStoreManager: @unchecked Sendable {
         }
     }
 
-    /// Counts a retrieval against every fact a search or probe just returned.
+    /// Counts a retrieval against every fact a search or probe just returned. Each UPDATE also
+    /// fires the FTS5 after-update trigger, so the index is rewritten for those rows; that churn is
+    /// acceptable at a result set of five to ten facts.
     private func incrementRetrievals(ids: [String]) throws {
         guard !ids.isEmpty else { return }
         try writer.write { db in

@@ -59,7 +59,7 @@ public final class JourneyManager: Sendable {
         }
 
         // 4. Scan FactStore
-        if let facts = try? FactStoreManager.shared.search(query: "", limit: 20) {
+        if let facts = try? FactStoreManager.shared.search(query: "", limit: 20, countsAsRetrieval: false) {
             for fact in facts {
                 items.append(JourneyItem(title: "Fact Saved [\(fact.category)]", category: "Fact", timestamp: fact.timestamp, summary: fact.content))
             }

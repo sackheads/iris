@@ -1614,14 +1614,14 @@ class AppState {
         let args = trimmed.dropFirst(6).trimmingCharacters(in: .whitespacesAndNewlines)
         if args.hasPrefix("probe ") {
             let entity = String(args.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
-            let facts = (try? FactStoreManager.shared.probe(entity: entity)) ?? []
+            let facts = (try? FactStoreManager.shared.probe(entity: entity, countsAsRetrieval: false)) ?? []
             let body = facts.isEmpty
                 ? "No facts found for entity '\(entity)'."
                 : "**Facts for Entity '\(entity)':**\n\n" + facts.map(Self.factLine).joined(separator: "\n")
             emitCommandOutput(body, format: .markdown, to: convId)
         } else if args.hasPrefix("search ") {
             let query = String(args.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
-            let facts = (try? FactStoreManager.shared.search(query: query, limit: 10)) ?? []
+            let facts = (try? FactStoreManager.shared.search(query: query, limit: 10, countsAsRetrieval: false)) ?? []
             let body = facts.isEmpty
                 ? "No facts found matching '\(query)'."
                 : "**Facts matching '\(query)':**\n\n" + facts.map(Self.factLine).joined(separator: "\n")
@@ -1633,7 +1633,7 @@ class AppState {
                 : "**All Facts in FactStore (\(facts.count)):**\n\n" + facts.map(Self.factLine).joined(separator: "\n")
             emitCommandOutput(body, format: .markdown, to: convId)
         } else {
-            let facts = (try? FactStoreManager.shared.search(query: "", limit: 10)) ?? []
+            let facts = (try? FactStoreManager.shared.search(query: "", limit: 10, countsAsRetrieval: false)) ?? []
             let body = facts.isEmpty
                 ? "FactStore is empty."
                 : "**Recent Facts in FactStore (\(facts.count)):**\n\n" + facts.map(Self.factLine).joined(separator: "\n")

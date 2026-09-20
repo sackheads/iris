@@ -15,13 +15,15 @@ struct ToolSurfaceTrimTests {
 
     /// Drive one turn through a real engine against a capturing client and return the declared tool names.
     private func toolNames(prompt: String, source: String = "UI",
+                           factStore: FactStoreManager? = nil,
                            prepare: (AppState, UUID) -> Void = { _, _ in }) async -> [String] {
         let app = AppState()
         let id = UUID()
         app.createNewConversation(id: id)
         prepare(app, id)
         let client = CapturingLLMClient(reply: "ok")
-        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [],
+                                factStore: factStore)
         await engine.processInput(prompt, source: source, conversationId: id)
         return client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? []
     }
@@ -38,15 +40,27 @@ struct ToolSurfaceTrimTests {
     }
 
     @Test("a plain turn in a test process (no refresh token) carries no Google or goal-contract tools")
-    func plainTurn() async {
-        let names = await toolNames(prompt: "What is the capital of Australia?")
+    func plainTurn() async throws {
+        let names = await toolNames(prompt: "What is the capital of Australia?",
+                                    factStore: try FactStoreManager(inMemory: true))
         for name in Self.googleTools { #expect(!names.contains(name), Comment(rawValue: name)) }
         #expect(!names.contains("propose_goal_contract"))
         #expect(!names.contains("amend_goal_contract"))
         #expect(names.contains("run_command"))
-        // #168 added `manage_fact` to the memory trio, taking the plain-turn surface to 18.
-        #expect(names.contains("manage_fact"))
         #expect(names.count <= 18, "expected the plain-turn surface to shrink from 30; got \(names.count): \(names)")
+    }
+
+    /// #168: `manage_fact` needs a fact id, and the only ids the model sees come from the facts
+    /// injected into the turn. A turn that surfaced none must not carry the declaration.
+    @Test("manage_fact is offered only on a turn that surfaced facts")
+    func manageFactGatedOnInjectedFacts() async throws {
+        let store = try FactStoreManager(inMemory: true)
+        let empty = await toolNames(prompt: "Where does Brian live?", factStore: store)
+        #expect(!empty.contains("manage_fact"))
+
+        try store.addFact(content: "Brian lives in Seattle", entity: "Brian")
+        let withFacts = await toolNames(prompt: "Where does Brian live?", factStore: store)
+        #expect(withFacts.contains("manage_fact"))
     }
 
     @Test("the goal-draft trigger turn offers propose_goal_contract")
