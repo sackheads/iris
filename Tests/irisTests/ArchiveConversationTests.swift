@@ -8,6 +8,22 @@ import Foundation
 @Suite("Archive conversations")
 struct ArchiveConversationTests {
 
+    @Test("archiving is refused while a turn is in flight")
+    func refusedWithTurnInFlight() {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID()
+        app.createNewConversation(id: a)
+        app.selectedConversationId = a
+
+        // sendMessage starts a turn asynchronously; the task is added to activeTasks immediately.
+        // In this synchronous test, the async task hasn't completed yet, so hasTurnInFlight is true.
+        app.sendMessage("test message")
+
+        #expect(app.archiveRefusal(for: a) == .turnInFlight)
+        #expect(app.archiveConversation(a) == .turnInFlight)
+        #expect(app.conversations.first { $0.id == a }?.isArchived == false)
+    }
+
     @Test("archiving is refused while a goal is active")
     func refusedWithActiveGoal() {
         let app = AppState(); app.conversations.removeAll()
