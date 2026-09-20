@@ -276,6 +276,16 @@ struct ConversationStoreTests {
         #expect(try store.loadAll().conversations.map(\.title).sorted() == ["a", "b"])
     }
 
+    @Test("the stand-down flag is one-way and visible across threads")
+    func writeStandDownSignals() async throws {
+        let flag = WriteStandDown()
+        #expect(flag.isSignalled == false)
+        await Task.detached { flag.signal() }.value
+        #expect(flag.isSignalled)
+        flag.signal()
+        #expect(flag.isSignalled)
+    }
+
     @Test("a cancelled write applies nothing")
     func cancelledWriteAppliesNothing() throws {
         let store = try ConversationStore.inMemory()
@@ -285,6 +295,48 @@ struct ConversationStoreTests {
         // The same batch with the stand-down cleared writes normally.
         try store.apply([created(c)])
         #expect(try store.isEmpty() == false)
+    }
+
+    /// One bad row among good ones is rot: quarantine it and keep the rest. An entire table
+    /// failing to decode is a bug (a schema or decoder regression), and emptying it into
+    /// `quarantine` would turn something a fix could recover into real data loss — so the rows
+    /// stay exactly where they are and the conversation is left out of this load.
+    @Test("a conversation whose every message row is unreadable is reported once and left untouched on disk")
+    func allRowsUnreadableIsNotQuarantined() throws {
+        let store = try ConversationStore.inMemory()
+        var c = sample(title: "all bad")
+        c.messages = [
+            ChatMessage(role: .user, content: "m0"),
+            ChatMessage(role: .agent, content: "m1"),
+            ChatMessage(role: .agent, content: "m2"),
+        ]
+        let other = sample(title: "fine")
+        try store.apply([created(c), created(other)])
+        try store.rawWrite("UPDATE messages SET payload = '{not json' WHERE conversationId = ?", arguments: [c.id.uuidString])
+
+        let loaded = try store.loadAll()
+        #expect(loaded.conversations.map(\.title) == ["fine"])
+        #expect(loaded.skipped == [SkippedRow(conversationId: c.id, table: "messages", ordinal: nil,
+                                              reason: "all 3 rows unreadable; left in place")])
+        // Nothing moved: the rows are still there, and its history was not renumbered either.
+        #expect(try store.counts(for: c.id) == (3, 2))
+        #expect(try store.quarantineCount(for: c.id) == 0)
+        // And it repeats on the next load, because nothing was repaired.
+        #expect(try store.loadAll().skipped.count == 1)
+    }
+
+    @Test("a non-UTF8 metadata column skips the whole conversation rather than loading it half-read")
+    func nonUTF8MetadataSkipsTheConversation() throws {
+        for column in ["title", "goalContract", "subagentResult", "tokenUsage", "workspacePath", "activeGoal", "mainAgentSandbox"] {
+            let store = try ConversationStore.inMemory()
+            let a = sample(title: "a"), b = sample(title: "b")
+            try store.apply([created(a), created(b)])
+            try store.rawWrite("UPDATE conversations SET \(column) = X'FFFE' WHERE id = ?", arguments: [a.id.uuidString])
+            let loaded = try store.loadAll()
+            #expect(loaded.conversations.map(\.title) == ["b"], "\(column)")
+            #expect(loaded.skipped == [SkippedRow(conversationId: a.id, table: "conversations", ordinal: nil,
+                                                  reason: "unreadable \(column)")], "\(column)")
+        }
     }
 
     @Test("a corrupted metadata row skips only that conversation")

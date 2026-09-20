@@ -79,10 +79,68 @@ struct ChangeTrackingTests {
         a.createNewConversation(id: x); a.createNewConversation(id: y)
         a.flushSave()
         a.appendMessage(role: .user, content: "only x", to: x)
-        try await Task.sleep(nanoseconds: UInt64((AppState.saveDebounce + 0.6) * 1_000_000_000))
+        try await poll { (try? a.store.counts(for: x).messages) == 1 }
         #expect(a.pendingChangeSet(for: x) == nil && a.pendingChangeSet(for: y) == nil)
         #expect(try a.store.counts(for: x).messages == 1)
         #expect(try a.store.counts(for: y).messages == 0)
+    }
+
+    /// The store assigns `position` as `MAX(position) + 1` at first insert, so the order a batch
+    /// is applied in is the order the sidebar comes back in. Taken straight out of the pending
+    /// dictionary that order was whatever hashing gave us, which shuffled conversations created
+    /// inside one debounce window. Repeated, because a single run passes by luck about a sixth of
+    /// the time.
+    @Test("conversations created in one window are written in creation order, every time")
+    func batchOrderFollowsConversationOrder() throws {
+        for _ in 0..<5 {
+            let a = AppState(store: try .inMemory())
+            let x = UUID(), y = UUID(), z = UUID()
+            a.createNewConversation(id: x); a.createNewConversation(id: y); a.createNewConversation(id: z)
+            a.renameConversation(id: x, newTitle: "first")
+            a.renameConversation(id: y, newTitle: "second")
+            a.renameConversation(id: z, newTitle: "third")
+            a.flushSave()
+            // An empty store gets a default conversation from `init`, so it leads the list.
+            #expect(try a.store.loadAll().conversations.map(\.title) == ["New Conversation", "first", "second", "third"])
+            #expect(try a.store.loadAll().conversations.map(\.id) == a.conversations.map(\.id))
+        }
+    }
+
+    /// `flushSave` signals the in-flight write's stand-down flag and then writes the current state
+    /// itself. A detached write that went ahead anyway would re-apply its stale snapshot, whose
+    /// trailing-row `DELETE ... ordinal >= count` drops exactly the rows the quit-time write just
+    /// added. The debounced write is let go first and `flushSave` lands on top of it while it may
+    /// still be running; whichever way the race falls, the store must end up holding exactly one
+    /// copy of what is in memory.
+    @Test("a debounced write overtaken by flushSave leaves exactly one copy of every row, matching memory")
+    func flushSaveBeatsAnInFlightWrite() async throws {
+        let a = AppState(store: try .inMemory())
+        let id = UUID()
+        a.createNewConversation(id: id)
+        a.flushSave()
+
+        // A batch big enough that the detached write is plausibly still inside its transaction
+        // when flushSave lands.
+        for i in 0..<400 {
+            a.appendMessage(role: .agent, content: "m\(i)", to: id)
+            a.appendContentToHistory(for: id, content: Content(role: "model", parts: [Part(text: "h\(i)")]))
+        }
+        // Let the debounce fire and the detached write start...
+        try await Task.sleep(nanoseconds: UInt64((AppState.saveDebounce + 0.02) * 1_000_000_000))
+        // ...then quit on top of it, with more state than the in-flight snapshot carries.
+        a.appendMessage(role: .agent, content: "last", to: id)
+        a.flushSave()
+
+        let live = try #require(a.conversations.first { $0.id == id })
+        #expect(try a.store.counts(for: id) == (live.messages.count, live.history.count))
+        let reloaded = try #require(try a.store.loadAll().conversations.first { $0.id == id })
+        #expect(reloaded.messages.map(\.content) == live.messages.map(\.content))
+        #expect(reloaded.history.map { $0.parts.first?.text } == live.history.map { $0.parts.first?.text })
+
+        // Let any detached write still running finish, then check it changed nothing.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(try a.store.counts(for: id) == (live.messages.count, live.history.count))
+        #expect(try a.store.loadAll().conversations.first { $0.id == id }?.messages.last?.content == "last")
     }
 
     @Test("a conversation deleted and re-created in the same window is written, not deleted")

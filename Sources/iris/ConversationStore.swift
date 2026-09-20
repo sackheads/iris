@@ -99,6 +99,18 @@ enum ConversationStoreError: Error, Equatable {
 /// `importLegacy` lets it propagate so the legacy import can report `.importFailed`.
 private struct InjectedWriteFailure: Error {}
 
+/// The stand-down flag a detached write checks under the writer lock. One instance per detached
+/// write; `AppState.flushSave` signals it before cancelling the task, so the write knows to write
+/// nothing even though a detached `Task`'s cancellation is invisible from inside a synchronous
+/// GRDB write block (`Task.isCancelled` read there is the *enclosing* task's flag, which on a
+/// non-Task thread is simply always false — an explicit flag says what we mean).
+final class WriteStandDown: Sendable {
+    private let lock = NSLock()
+    nonisolated(unsafe) private var flag = false
+    func signal() { lock.withLock { flag = true } }
+    var isSignalled: Bool { lock.withLock { flag } }
+}
+
 /// Per-conversation SQLite persistence (spec §2, §4, §5). One metadata row per conversation,
 /// one JSON row per message and per history entry. Every write is keyed by ordinal or id, so
 /// applying the same batch twice is harmless.
@@ -119,18 +131,25 @@ final class ConversationStore: Sendable {
         set { failInjectionLock.withLock { _failInjection = newValue } }
     }
 
-    private init(writer: any DatabaseWriter) throws {
+    /// Where this store's database file lives, or nil for an in-memory store. Lets a test assert
+    /// the isolation rule in §1 directly ("this process got a memory store") instead of only
+    /// inferring it from the absence of a file under the real paths.
+    let path: URL?
+    var isOnDisk: Bool { path != nil }
+
+    private init(writer: any DatabaseWriter, path: URL?) throws {
         self.writer = writer
+        self.path = path
         try Self.migrator.migrate(writer)
     }
 
     static func inMemory() throws -> ConversationStore {
-        try ConversationStore(writer: DatabaseQueue(configuration: Self.configuration))
+        try ConversationStore(writer: DatabaseQueue(configuration: Self.configuration), path: nil)
     }
 
     static func onDisk(at url: URL) throws -> ConversationStore {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        return try ConversationStore(writer: DatabasePool(path: url.path, configuration: Self.configuration))
+        return try ConversationStore(writer: DatabasePool(path: url.path, configuration: Self.configuration), path: url)
     }
 
     private static var configuration: Configuration {
@@ -184,9 +203,21 @@ final class ConversationStore: Sendable {
                 t.column("reason", .text).notNull()
                 t.column("quarantinedAt", .datetime).notNull()
             }
+            // One-off facts about the store itself. Today it holds exactly one key,
+            // `legacy_import_done`, which is what makes the blob import at-most-once (review
+            // finding, #163 round 2: "the store has rows" is not the same question — after a
+            // failed import the app creates its default conversation, so the next launch saw a
+            // non-empty store, declared the import already done, and parked the blob unimported).
+            try db.create(table: "meta") { t in
+                t.column("key", .text).primaryKey()
+                t.column("value", .text).notNull()
+            }
         }
         return m
     }
+
+    /// Set once the legacy blob import has run to completion, successful or empty.
+    static let legacyImportDoneKey = "legacy_import_done"
 
     // MARK: Write
 
@@ -324,6 +355,23 @@ final class ConversationStore: Sendable {
         return String(data: data, encoding: .utf8)
     }
 
+    /// `readText` with SQL NULL and undecodable bytes told apart. A missing value is ordinary
+    /// (`workspacePath` is nullable); bytes that are not UTF8 are damage, and silently reading
+    /// them as "absent" would load the conversation with a blanked title or a dropped goal
+    /// contract and then persist that loss on the next metadata write (review finding, #163
+    /// round 2). `loadAll` skips the whole conversation instead.
+    private enum TextValue {
+        case null
+        case invalid
+        case text(String)
+    }
+
+    private static func readTextValue(_ row: Row, _ column: String) -> TextValue {
+        guard let data: Data = row[column] else { return .null }
+        guard let s = String(data: data, encoding: .utf8) else { return .invalid }
+        return .text(s)
+    }
+
     // MARK: Read
 
     func loadAll() throws -> LoadResult {
@@ -337,51 +385,106 @@ final class ConversationStore: Sendable {
                     out.skipped.append(SkippedRow(conversationId: nil, table: "conversations", ordinal: nil, reason: "bad id"))
                     continue
                 }
+                // Read every metadata text column first: an undecodable one is damage, and loading
+                // the conversation with that column silently blank would persist the loss on the
+                // next metadata write.
+                var unreadableColumn: String? = nil
+                func text(_ column: String) -> String? {
+                    switch Self.readTextValue(row, column) {
+                    case .null: return nil
+                    case .invalid:
+                        if unreadableColumn == nil { unreadableColumn = column }
+                        return nil
+                    case .text(let s): return s
+                    }
+                }
+                let title = text("title")
+                let workspacePath = text("workspacePath")
+                let activeGoal = text("activeGoal")
+                let sandbox = text("mainAgentSandbox")
+                let tokenUsage = text("tokenUsage")
+                let goalContract = text("goalContract")
+                let subagentResult = text("subagentResult")
+                if let column = unreadableColumn {
+                    out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable \(column)"))
+                    continue
+                }
+
                 var c: Conversation
                 do {
-                    let title = Self.readText(row, "title") ?? "Untitled"
-                    c = Conversation(id: id, title: title, workspacePath: Self.readText(row, "workspacePath"))
-                    c.activeGoal = Self.readText(row, "activeGoal")
+                    c = Conversation(id: id, title: title ?? "Untitled", workspacePath: workspacePath)
+                    c.activeGoal = activeGoal
                     c.messageCountSinceReflection = row["messageCountSinceReflection"] ?? 0
                     c.goalIterationCount = row["goalIterationCount"] ?? 0
-                    c.mainAgentSandbox = Self.readText(row, "mainAgentSandbox").flatMap(SandboxPref.init(rawValue:))
-                    c.tokenUsage = try Self.readText(row, "tokenUsage").map { try decoder.decode(TokenUsage.self, from: Data($0.utf8)) } ?? TokenUsage()
-                    if let s = Self.readText(row, "goalContract") { c.goalContract = try decoder.decode(GoalContract.self, from: Data(s.utf8)) }
-                    if let s = Self.readText(row, "subagentResult") { c.subagentResult = try decoder.decode(SubagentResult.self, from: Data(s.utf8)) }
+                    c.mainAgentSandbox = sandbox.flatMap(SandboxPref.init(rawValue:))
+                    c.tokenUsage = try tokenUsage.map { try decoder.decode(TokenUsage.self, from: Data($0.utf8)) } ?? TokenUsage()
+                    if let s = goalContract { c.goalContract = try decoder.decode(GoalContract.self, from: Data(s.utf8)) }
+                    if let s = subagentResult { c.subagentResult = try decoder.decode(SubagentResult.self, from: Data(s.utf8)) }
                 } catch {
                     // Whole-conversation skip: nothing in memory represents this conversation, so
                     // nothing can ever write to it again. No quarantine/renumber needed.
                     out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "\(error)"))
                     continue
                 }
+
+                // Per-conversation, so the bulk breaker below can throw the lot away.
+                var localSkipped: [SkippedRow] = []
+                var localCandidates: [QuarantineCandidate] = []
+                var totals: [String: Int] = ["messages": 0, "history": 0]
+                var failures: [String: Int] = ["messages": 0, "history": 0]
+
                 for r in try Row.fetchAll(db, sql: "SELECT ordinal, payload FROM messages WHERE conversationId = ? ORDER BY ordinal", arguments: [idString]) {
                     let ordinal: Int? = r["ordinal"]
                     let raw: Data? = r["payload"]
+                    totals["messages", default: 0] += 1
                     guard let raw else {
-                        out.skipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: ordinal, reason: "unreadable payload"))
-                        if let ordinal { candidates.append(QuarantineCandidate(conversationId: id, table: "messages", ordinal: ordinal, payload: nil, reason: "unreadable payload")) }
+                        failures["messages", default: 0] += 1
+                        localSkipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: ordinal, reason: "unreadable payload"))
+                        if let ordinal { localCandidates.append(QuarantineCandidate(conversationId: id, table: "messages", ordinal: ordinal, payload: nil, reason: "unreadable payload")) }
                         continue
                     }
                     do { c.messages.append(try decoder.decode(ChatMessage.self, from: raw)) }
                     catch {
-                        out.skipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: ordinal, reason: "\(error)"))
-                        if let ordinal { candidates.append(QuarantineCandidate(conversationId: id, table: "messages", ordinal: ordinal, payload: raw, reason: "\(error)")) }
+                        failures["messages", default: 0] += 1
+                        localSkipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: ordinal, reason: "\(error)"))
+                        if let ordinal { localCandidates.append(QuarantineCandidate(conversationId: id, table: "messages", ordinal: ordinal, payload: raw, reason: "\(error)")) }
                     }
                 }
                 for r in try Row.fetchAll(db, sql: "SELECT ordinal, payload FROM history WHERE conversationId = ? ORDER BY ordinal", arguments: [idString]) {
                     let ordinal: Int? = r["ordinal"]
                     let raw: Data? = r["payload"]
+                    totals["history", default: 0] += 1
                     guard let raw else {
-                        out.skipped.append(SkippedRow(conversationId: id, table: "history", ordinal: ordinal, reason: "unreadable payload"))
-                        if let ordinal { candidates.append(QuarantineCandidate(conversationId: id, table: "history", ordinal: ordinal, payload: nil, reason: "unreadable payload")) }
+                        failures["history", default: 0] += 1
+                        localSkipped.append(SkippedRow(conversationId: id, table: "history", ordinal: ordinal, reason: "unreadable payload"))
+                        if let ordinal { localCandidates.append(QuarantineCandidate(conversationId: id, table: "history", ordinal: ordinal, payload: nil, reason: "unreadable payload")) }
                         continue
                     }
                     do { c.history.append(try decoder.decode(Content.self, from: raw)) }
                     catch {
-                        out.skipped.append(SkippedRow(conversationId: id, table: "history", ordinal: ordinal, reason: "\(error)"))
-                        if let ordinal { candidates.append(QuarantineCandidate(conversationId: id, table: "history", ordinal: ordinal, payload: raw, reason: "\(error)")) }
+                        failures["history", default: 0] += 1
+                        localSkipped.append(SkippedRow(conversationId: id, table: "history", ordinal: ordinal, reason: "\(error)"))
+                        if let ordinal { localCandidates.append(QuarantineCandidate(conversationId: id, table: "history", ordinal: ordinal, payload: raw, reason: "\(error)")) }
                     }
                 }
+
+                // Bulk breaker (review finding, #163 round 2): one bad row among good ones is a
+                // damaged row and gets quarantined so the good ones stay usable. An entire table
+                // failing is a different animal — a schema or decoder regression, not rot — and
+                // emptying it into `quarantine` would turn a fixable bug into real data loss. Leave
+                // every row exactly where it is, report it once, and drop the conversation from
+                // this load so nothing in memory can overwrite it.
+                let bulkFailed = ["messages", "history"].filter { (totals[$0] ?? 0) > 0 && failures[$0] == totals[$0] }
+                if !bulkFailed.isEmpty {
+                    for table in bulkFailed {
+                        out.skipped.append(SkippedRow(conversationId: id, table: table, ordinal: nil,
+                                                      reason: "all \(totals[table] ?? 0) rows unreadable; left in place"))
+                    }
+                    continue
+                }
+
+                out.skipped.append(contentsOf: localSkipped)
+                candidates.append(contentsOf: localCandidates)
                 out.conversations.append(c)
             }
             return (out, candidates)
@@ -466,20 +569,48 @@ final class ConversationStore: Sendable {
 }
 
 extension ConversationStore {
-    /// First-launch import (spec §6). Returns false and writes nothing when the store already
-    /// holds conversations; the check runs inside the write transaction so a crash between a
-    /// previous import's commit and the key move cannot double-import.
+    /// First-launch import (spec §6). Returns false and writes nothing when the `meta` marker says
+    /// an import already ran; otherwise imports everything and sets the marker. Both the check and
+    /// the marker live in the same write transaction as the rows, so a crash between the commit
+    /// and the key move cannot double-import.
+    ///
+    /// The gate is the marker, deliberately not "the store has rows": after an `.importFailed`
+    /// launch the app goes on to create its default conversation, so a row-count gate declared the
+    /// import already done on the next launch and `migrateIfNeeded` parked the blob unimported —
+    /// silent data loss (review finding, #163 round 2). Importing behind conversations that
+    /// already exist is fine: positions continue from `MAX(position) + 1`, so the imported ones
+    /// simply land after them.
     func importLegacy(_ conversations: [Conversation]) throws -> Bool {
         try writer.write { db in
-            if (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM conversations") ?? 0) > 0 { return false }
+            let done = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM meta WHERE key = ?",
+                                        arguments: [Self.legacyImportDoneKey]) ?? 0
+            if done > 0 { return false }
             if self.failInjection?(UUID()) == true { throw InjectedWriteFailure() }
             let encoder = JSONEncoder()
+            var collided = 0
             for c in conversations {
+                let exists = try (Int.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = ?)",
+                                               arguments: [c.id.uuidString]) ?? 0) == 1
+                // An id the store already holds is the live copy; the blob's is the older one.
+                if exists { collided += 1; continue }
                 try Self.upsertMetadata(c, exists: false, db: db, encoder: encoder)
                 try Self.insertMessages(c, from: 0, db: db, encoder: encoder)
                 try Self.insertHistory(c, from: 0, db: db, encoder: encoder)
             }
+            if collided > 0 {
+                print("Legacy import skipped \(collided) conversation(s) already present in the store.")
+            }
+            try db.execute(sql: "INSERT INTO meta (key, value) VALUES (?, ?)",
+                           arguments: [Self.legacyImportDoneKey, ISO8601DateFormatter().string(from: Date())])
             return true
+        }
+    }
+
+    /// Test support: whether the legacy-import marker has been set.
+    func legacyImportMarked() throws -> Bool {
+        try writer.read { db in
+            (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM meta WHERE key = ?",
+                              arguments: [Self.legacyImportDoneKey]) ?? 0) > 0
         }
     }
 }
@@ -488,8 +619,16 @@ extension ConversationStore {
     /// Spec §1: on disk only in a normal app process. The test bundle links XCTest (the same
     /// signal `IrisDefaults` uses); headless runs set `HeadlessMode`; a fake-lane perf run has
     /// volatile defaults but the real `IrisPaths`, and must not open the user's database.
+    /// The §1 rule as a pure function, so it can be tested as a truth table rather than only
+    /// through whichever process the suite happens to run in.
+    static func shouldIsolate(xctestLinked: Bool, headless: Bool, volatileDefaults: Bool) -> Bool {
+        xctestLinked || headless || volatileDefaults
+    }
+
     static func makeDefault() -> ConversationStore {
-        let isolated = NSClassFromString("XCTestCase") != nil || HeadlessMode.isEnabled || IrisDefaults.isVolatileCopy
+        let isolated = shouldIsolate(xctestLinked: NSClassFromString("XCTestCase") != nil,
+                                     headless: HeadlessMode.isEnabled,
+                                     volatileDefaults: IrisDefaults.isVolatileCopy)
         if !isolated {
             do { return try onDisk(at: IrisPaths.default.conversationsDB) }
             catch { print("WARNING: conversation store failed to open on disk, using memory only: \(error)") }

@@ -8,7 +8,10 @@ enum LegacyConversationBlob {
     enum Outcome: Equatable {
         case nothingToDo
         case imported(Int)
-        case storeNotEmpty
+        /// The store's `legacy_import_done` marker was already set, so this blob is a leftover
+        /// copy of an import that has already happened: nothing is written, but the stale live
+        /// key is still moved out of the way.
+        case alreadyImported
         /// The blob's JSON could not be decoded at all. A timestamped backup is kept and the live
         /// key is removed — the data is presumed lost, so there is nothing to retry, and leaving
         /// the key in place would re-run (and re-notify) this on every single launch.
@@ -45,6 +48,6 @@ enum LegacyConversationBlob {
         // Only after the transaction committed: park the blob and stop reading it.
         defaults.set(data, forKey: legacyKey)
         defaults.removeObject(forKey: key)
-        return imported ? .imported(durable.count) : .storeNotEmpty
+        return imported ? .imported(durable.count) : .alreadyImported
     }
 }

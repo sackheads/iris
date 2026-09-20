@@ -255,14 +255,31 @@ class AppState {
         if conversations.isEmpty {
             createNewConversation()
         }
-        // The bad rows are quarantined (and the disk ordinals renumbered) by `store.loadAll()`
-        // itself, so a later launch against the same store finds nothing left to skip — this
-        // notice is naturally one-shot rather than needing separate dedup state.
+        // Every launch notice below is `persist: false`: it describes this launch, not the
+        // conversation's history. Persisting them accumulated one copy per launch and made a
+        // resolved problem read as a live one on the next.
         if !loadedSkippedRows.isEmpty, let target = selectedConversationId {
-            let convs = Set(loadedSkippedRows.compactMap(\.conversationId)).count
-            appendMessage(role: .system,
-                          content: "\(loadedSkippedRows.count) unreadable saved entr\(loadedSkippedRows.count == 1 ? "y" : "ies") in \(convs) conversation\(convs == 1 ? "" : "s") were moved to the quarantine table in \(IrisPaths.default.conversationsDB.lastPathComponent).",
-                          to: target)
+            // Two different things end up in `skipped`, and they need different wording. An
+            // individual bad message/history row (it has an ordinal) was moved to `quarantine` and
+            // the conversation loaded without it. Everything else — an unreadable metadata column,
+            // a table whose every row failed to decode (reported once, ordinal nil) — left the
+            // conversation out of this load entirely, with its rows untouched on disk, and will
+            // recur on every launch until a human fixes it.
+            let quarantined = loadedSkippedRows.filter { ($0.table == "messages" || $0.table == "history") && $0.ordinal != nil }
+            let leftInPlace = loadedSkippedRows.filter { !(($0.table == "messages" || $0.table == "history") && $0.ordinal != nil) }
+            if !quarantined.isEmpty {
+                let convs = Set(quarantined.compactMap(\.conversationId)).count
+                appendMessage(role: .system,
+                              content: "\(quarantined.count) unreadable saved entr\(quarantined.count == 1 ? "y" : "ies") in \(convs) conversation\(convs == 1 ? "" : "s") were moved to the quarantine table in \(IrisPaths.default.conversationsDB.lastPathComponent).",
+                              to: target, persist: false)
+            }
+            if !leftInPlace.isEmpty {
+                // One conversation can contribute more than one row (both its tables unreadable).
+                let n = Set(leftInPlace.compactMap(\.conversationId)).count + leftInPlace.filter { $0.conversationId == nil }.count
+                appendMessage(role: .system,
+                              content: "\(n) saved conversation\(n == 1 ? "" : "s") could not be read and \(n == 1 ? "was" : "were") left in place; see the console for details.",
+                              to: target, persist: false)
+            }
         }
         // The legacy UserDefaults blob existed but couldn't be decoded (spec §6): the backup key
         // is already set and the live key already removed (LegacyConversationBlob does both), so
@@ -270,21 +287,21 @@ class AppState {
         if legacyBlobUndecodable, let target = selectedConversationId {
             appendMessage(role: .system,
                           content: "The saved conversations from an earlier version could not be read. A copy was kept in the app settings under a key beginning iris_conversations_backup_.",
-                          to: target)
+                          to: target, persist: false)
         }
         // The blob decoded fine but the write into the store failed: the live key is left in
         // place by `LegacyConversationBlob` for a retry, so say that instead of "could not be read".
         if legacyBlobImportFailed, let target = selectedConversationId {
             appendMessage(role: .system,
                           content: "The saved conversations from an earlier version could not be imported; they will be retried at the next launch.",
-                          to: target)
+                          to: target, persist: false)
         }
         // `store.loadAll()` itself threw (not a per-row skip): logged in `loadConversations()`;
         // say so here too so the loss is visible, not only in the console log.
         if let headline = loadFailureHeadline, let target = selectedConversationId {
             appendMessage(role: .system,
                           content: "Saved conversations could not be loaded (\(headline)). Starting with an empty list; the database was left untouched.",
-                          to: target)
+                          to: target, persist: false)
         }
     }
 
@@ -782,16 +799,22 @@ class AppState {
         appendMessage(role: role, content: text, to: conversationId)
     }
 
-    func appendMessage(role: ChatRole, content: String, attachments: [FileAttachment] = [], id: UUID = UUID(), to conversationId: UUID) {
+    /// `persist: false` shows the line in this session only. Launch notices (unreadable rows, a
+    /// failed legacy import, a load failure) describe what happened *at this launch* — writing
+    /// them into the conversation makes them permanent history that accumulates one copy per
+    /// launch and, worse, reads on a later launch as a fresh problem (review finding, #163
+    /// round 2).
+    func appendMessage(role: ChatRole, content: String, attachments: [FileAttachment] = [], id: UUID = UUID(), to conversationId: UUID, persist: Bool = true) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].messages.append(ChatMessage(id: id, role: role, content: content, attachments: attachments))
-            
+
             // Auto-title generation based on first message
             if role == .user && conversations[idx].messages.filter({ $0.role == .user }).count == 1 {
                 let displayTitle = content.isEmpty ? (attachments.first?.filename ?? "Attachment") : content
                 conversations[idx].title = String(displayTitle.prefix(30)) + (displayTitle.count > 30 ? "..." : "")
-                markChanged(conversationId, .metadata)
+                if persist { markChanged(conversationId, .metadata) }
             }
+            guard persist else { return }
             markChanged(conversationId, .messagesAppended(from: conversations[idx].messages.count - 1))
         }
     }
@@ -1354,6 +1377,12 @@ class AppState {
     private var inFlight: [ConversationWrite]? = nil
     /// The detached write applying `inFlight`, kept so `flushSave` can tell it to stand down.
     private var writeTask: Task<Void, Never>? = nil
+    /// The stand-down flag the detached write checks under the writer lock. Explicit rather than
+    /// `Task.isCancelled`: `apply`'s check runs inside GRDB's synchronous write block, which is
+    /// not the detached task's execution context, so the cancellation flag read there belongs to
+    /// whatever task (if any) owns that thread — for a `DatabasePool` writer, never the one we
+    /// cancelled (review finding, #163 round 2).
+    private var writeStandDown: WriteStandDown? = nil
 
     /// The conversations that belong on disk: durable, user-facing ones only. Sub-process
     /// (subagent / drift-evaluator) scratch conversations are ephemeral and must never persist.
@@ -1422,8 +1451,17 @@ class AppState {
     /// an orphan surviving a mid-run quit would resurrect on the next launch as a normal
     /// main-principal conversation carrying a stale `activeGoal` but WITHOUT its restricted
     /// toolset — so their changes are dropped here.
+    ///
+    /// The batch is ordered by the conversation's index in `conversations`, because the store
+    /// assigns `position` as `MAX(position) + 1` at first insert: taken in `pendingChanges`'
+    /// dictionary order, several conversations created inside one debounce window landed on disk
+    /// in an arbitrary order and came back in the sidebar shuffled (review finding, #163 round 2).
+    /// Deleted and vanished ids sort last; their order among themselves does not matter, but it is
+    /// pinned by id so a batch is reproducible.
     private func takeBatch() -> [ConversationWrite] {
         firstDirtyAt = nil
+        var order: [UUID: Int] = [:]
+        for (index, c) in conversations.enumerated() { order[c.id] = index }
         let batch: [ConversationWrite] = pendingChanges.compactMap { id, changes in
             var changes = changes
             let live = conversations.first { $0.id == id }
@@ -1435,7 +1473,10 @@ class AppState {
             return ConversationWrite(id: id, snapshot: changes.deleted ? nil : live, changes: changes)
         }
         pendingChanges = [:]
-        return batch
+        return batch.sorted { lhs, rhs in
+            let l = order[lhs.id] ?? Int.max, r = order[rhs.id] ?? Int.max
+            return l == r ? lhs.id.uuidString < rhs.id.uuidString : l < r
+        }
     }
 
     /// Re-queues a failed write's changes behind whatever arrived since (spec §3 retry-by-merge).
@@ -1453,12 +1494,15 @@ class AppState {
         guard !batch.isEmpty else { return }
         inFlight = batch
         let store = self.store
+        let standDown = WriteStandDown()
+        writeStandDown = standDown
         writeTask = Task.detached(priority: .utility) { [weak self] in
             var failure: Error? = nil
-            do { try store.apply(batch, unlessCancelled: { Task.isCancelled }) } catch { failure = error }
+            do { try store.apply(batch, unlessCancelled: { standDown.isSignalled }) } catch { failure = error }
             await MainActor.run {
                 guard let self else { return }
                 self.inFlight = nil
+                if self.writeStandDown === standDown { self.writeStandDown = nil }
                 // Whether anything NEW arrived while this batch was being written, sampled before
                 // a failure puts the batch back: a durable error (disk full, a corrupt database)
                 // would otherwise loop fail → re-queue → flush forever, one log line and one
@@ -1492,11 +1536,12 @@ class AppState {
     /// so every id is written exactly once from its CURRENT snapshot. Appending the in-flight
     /// batch instead would hand `apply` a stale snapshot, and the append paths truncate trailing
     /// rows — a detached write that took the writer lock after this one committed would delete the
-    /// very rows we just wrote. `writeTask` is cancelled for the same reason; `apply` checks that
-    /// under the lock and stands down. `inFlight` itself is left alone: the detached task's
-    /// completion clears it.
+    /// very rows we just wrote. The write's `WriteStandDown` flag is signalled (and its task
+    /// cancelled) for the same reason; `apply` checks the flag under the writer lock and stands
+    /// down. `inFlight` itself is left alone: the detached task's completion clears it.
     func flushSave() {
         saveTask?.cancel()
+        writeStandDown?.signal()
         writeTask?.cancel()
         if let inFlight { requeue(inFlight) }
         let batch = takeBatch()
@@ -1535,8 +1580,14 @@ class AppState {
             let loaded = Self.sanitizeLoaded(result.conversations)
             self.conversations = loaded
             self.selectedConversationId = loaded.last?.id
-            for row in result.skipped {
-                print("Quarantined unreadable \(row.table) row (conversation \(row.conversationId?.uuidString ?? "?"), ordinal \(row.ordinal.map(String.init) ?? "-")): \(row.reason)")
+            // A whole-table corruption can be thousands of rows; one line each would bury
+            // everything else in the log.
+            let logCap = 10
+            for row in result.skipped.prefix(logCap) {
+                print("Unreadable \(row.table) row (conversation \(row.conversationId?.uuidString ?? "?"), ordinal \(row.ordinal.map(String.init) ?? "-")): \(row.reason)")
+            }
+            if result.skipped.count > logCap {
+                print("… and \(result.skipped.count - logCap) more unreadable row(s).")
             }
         } catch {
             print("Failed to load conversations: \(error)")

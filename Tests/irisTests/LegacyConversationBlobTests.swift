@@ -50,18 +50,89 @@ struct LegacyConversationBlobTests {
         #expect(d.data(forKey: LegacyConversationBlob.legacyKey) == data)
     }
 
-    @Test("a second run finds no key; a blob against a non-empty store is not imported but is still moved")
+    @Test("a second run finds no key; a stale key against an already-imported store is not imported but is still moved")
     func idempotent() throws {
         let store = try ConversationStore.inMemory()
         let (d, name) = defaults()
         defer { cleanup(d, name) }
         d.set(blob([conv("a")]), forKey: LegacyConversationBlob.key)
         #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .imported(1))
+        #expect(try store.legacyImportMarked())
         #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .nothingToDo)
         d.set(blob([conv("stale")]), forKey: LegacyConversationBlob.key)
-        #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .storeNotEmpty)
+        #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .alreadyImported)
         #expect(try store.loadAll().conversations.map(\.title) == ["a"])
         #expect(d.data(forKey: LegacyConversationBlob.key) == nil)
+    }
+
+    /// The bug this pins: the "already imported?" gate used to be `COUNT(*) FROM conversations > 0`.
+    /// After a failed import the app creates its default conversation, so the next launch found a
+    /// non-empty store, concluded the import had already happened, and moved the key anyway — the
+    /// blob was parked unimported and the conversations were gone, silently.
+    @Test("an import that failed at launch 1 is retried at launch 2, behind the conversation created in between")
+    func retriesBehindAnAutoCreatedConversation() throws {
+        let store = try ConversationStore.inMemory()
+        let (d, name) = defaults()
+        defer { cleanup(d, name) }
+        let data = blob([conv("a"), conv("b")])
+        d.set(data, forKey: LegacyConversationBlob.key)
+
+        // Launch 1: the write fails, the key is kept, nothing is marked.
+        store.failInjection = { _ in true }
+        #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .importFailed)
+        #expect(d.data(forKey: LegacyConversationBlob.key) == data)
+        #expect(try store.isEmpty())
+        #expect(try store.legacyImportMarked() == false)
+
+        // ...and the app carries on and writes its default conversation into the store.
+        store.failInjection = nil
+        let fresh = Conversation(id: UUID(), title: "New Conversation")
+        var created = ChangeSet(); created.add(.created)
+        try store.apply([ConversationWrite(id: fresh.id, snapshot: fresh, changes: created)])
+
+        // Launch 2: the store is no longer empty, but the marker is what gates the import.
+        #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .imported(2))
+        #expect(try store.loadAll().conversations.map(\.title) == ["New Conversation", "a", "b"])
+        #expect(try store.legacyImportMarked())
+        #expect(d.data(forKey: LegacyConversationBlob.key) == nil)
+        #expect(d.data(forKey: LegacyConversationBlob.legacyKey) == data)
+
+        // Launch 3: the key is gone, so there is nothing left to do.
+        #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .nothingToDo)
+    }
+
+    @Test("with the marker set: no key is nothing to do, and a stale key is moved without importing")
+    func markerGatesWithoutKey() throws {
+        let store = try ConversationStore.inMemory()
+        let (d, name) = defaults()
+        defer { cleanup(d, name) }
+        #expect(try store.importLegacy([]))          // sets the marker, imports nothing
+        #expect(try store.legacyImportMarked())
+        #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .nothingToDo)
+
+        let stale = blob([conv("stale")])
+        d.set(stale, forKey: LegacyConversationBlob.key)
+        #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .alreadyImported)
+        #expect(try store.isEmpty())
+        #expect(d.data(forKey: LegacyConversationBlob.key) == nil)
+        #expect(d.data(forKey: LegacyConversationBlob.legacyKey) == stale)
+    }
+
+    @Test("an id already in the store is skipped rather than colliding, and the rest still import")
+    func collidingIdIsSkipped() throws {
+        let store = try ConversationStore.inMemory()
+        let (d, name) = defaults()
+        defer { cleanup(d, name) }
+        let shared = conv("live")
+        var created = ChangeSet(); created.add(.created)
+        try store.apply([ConversationWrite(id: shared.id, snapshot: shared, changes: created)])
+
+        var older = shared
+        older.title = "older copy"
+        d.set(blob([older, conv("new")]), forKey: LegacyConversationBlob.key)
+        #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .imported(2))
+        // The live row wins; the blob's other conversation lands behind it.
+        #expect(try store.loadAll().conversations.map(\.title) == ["live", "new"])
     }
 
     @Test("an undecodable blob is backed up under a timestamped key and the live key removed, so it runs once")

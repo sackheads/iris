@@ -23,6 +23,9 @@ struct DefaultsIsolationTests {
         let app = AppState()
         app.createNewConversation(id: UUID())
         app.flushSave()
+        // The rule itself, not only the absence of a side effect: an on-disk store that failed to
+        // open would also leave no file behind.
+        #expect(app.store.isOnDisk == false)
         #expect(UserDefaults.standard.data(forKey: key) == before)
         #expect(FileManager.default.fileExists(atPath: IrisPaths.standard.conversationsDB.path) == fileBefore)
     }
