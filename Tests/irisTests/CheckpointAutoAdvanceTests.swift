@@ -186,6 +186,44 @@ struct CheckpointAutoAdvanceTests {
         #expect(c?.checkpointStatus == .pausedForReview)
     }
 
+    @Test("an explicit true override advances, same as the setting-off override wins false")
+    func testExplicitTrueOverrideAdvances() async {
+        // Override precedence, explicit-true half of the pair with `testSettingOffPauses`
+        // (explicit-false). `checkpointAutoAdvance` is `Bool?` now (#208 review item 1): this
+        // pins the override winning over whatever config says, without reading config at all.
+        let app = AppState(); let id = UUID(); ladder(on: app, id)
+        let client = RoutingClient(main: [Self.reachCheckpointCall(), Self.response(nil)],
+                                   graderVerdict: ("met", "saw it work"))
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main,
+                                client: client, checkpointAutoAdvance: true)
+        await engine.processInput("work", source: "User", conversationId: id)
+
+        let c = app.conversations.first { $0.id == id }?.goalContract
+        #expect(c?.currentMilestone == 1)
+        #expect(c?.checkpointStatus == .running)
+    }
+
+    @Test("a nil override falls through to the live ConfigManager value")
+    func testNilOverrideFallsThroughToConfig() async {
+        // Exercises the fall-through wiring `checkpointAutoAdvanceOverride ?? ConfigManager.shared
+        // .checkpointAutoAdvance` added for #208 review item 1. It cannot honestly prove the
+        // toggle takes effect without a relaunch — doing that would mean mutating
+        // `ConfigManager.shared` from a test, which invariant 7 forbids — so it only pins that an
+        // explicit `nil` reaches the live config default (true, unset) rather than being treated
+        // as `false`. Override precedence is otherwise covered by `testExplicitTrueOverrideAdvances`
+        // and `testSettingOffPauses`.
+        let app = AppState(); let id = UUID(); ladder(on: app, id)
+        let client = RoutingClient(main: [Self.reachCheckpointCall(), Self.response(nil)],
+                                   graderVerdict: ("met", "saw it work"))
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main,
+                                client: client, checkpointAutoAdvance: nil)
+        await engine.processInput("work", source: "User", conversationId: id)
+
+        let c = app.conversations.first { $0.id == id }?.goalContract
+        #expect(c?.currentMilestone == 1, "nil must fall through to config, not be treated as false")
+        #expect(c?.checkpointStatus == .running)
+    }
+
     @Test("an unjudged humanJudged criterion stops the checkpoint without asking for the verdict")
     func testHumanJudgedPausesWithoutAsking() async {
         let app = AppState(); let id = UUID()

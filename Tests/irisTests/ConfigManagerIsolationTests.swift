@@ -53,6 +53,24 @@ struct ConfigManagerIsolationTests {
         #expect(ConfigManager(store: store).checkpointAutoAdvance == false)
     }
 
+    @Test("maxDoneGateRetries treats a stored 0 as unset, so the Settings stepper floors at 1")
+    func maxDoneGateRetriesDefault() {
+        let (store, name) = suite("done-gate-retries")
+        defer { cleanup(store, name) }
+
+        #expect(store.object(forKey: "MAX_DONE_GATE_RETRIES") == nil)
+        #expect(ConfigManager(store: store).maxDoneGateRetries == 3)
+
+        store.set(5, forKey: "MAX_DONE_GATE_RETRIES")
+        #expect(ConfigManager(store: store).maxDoneGateRetries == 5)
+
+        // 0 is indistinguishable from absent here, so it reads back as the default rather than as
+        // "never retry". The Settings stepper starts at 1 so the UI cannot write a value that
+        // means something other than what it shows (#192).
+        store.set(0, forKey: "MAX_DONE_GATE_RETRIES")
+        #expect(ConfigManager(store: store).maxDoneGateRetries == 3)
+    }
+
     @Test("an injected store keeps writes out of the process-global store")
     func injectedWritesDoNotReachTheGlobalStore() {
         let (store, name) = suite("global")
