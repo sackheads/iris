@@ -286,11 +286,17 @@ class AppState {
             // every row failed to decode — were deliberately left untouched on disk, and will be
             // reported again on every launch until someone fixes them.
             let loadedIds = Set(conversations.map(\.id))
+            // A conversation whose repair failed (#189) is also absent from `loadedIds` — its own
+            // notice below covers it, and without this exclusion its skipped rows would fall into
+            // `leftInPlace`'s catch-all and also claim it "could not be read", which isn't true:
+            // it was read fine, the *repair* failed, and it will be retried, not left in place.
+            let repairFailedIds = Set(loadedRepairFailed)
             let quarantined = loadedSkippedRows.filter { row in
                 guard let id = row.conversationId, loadedIds.contains(id) else { return false }
                 return (row.table == "messages" || row.table == "history") && row.ordinal != nil
             }
             let leftInPlace = loadedSkippedRows.filter { row in
+                if let id = row.conversationId, repairFailedIds.contains(id) { return false }
                 guard let id = row.conversationId, loadedIds.contains(id) else { return true }
                 return !((row.table == "messages" || row.table == "history") && row.ordinal != nil)
             }

@@ -193,10 +193,15 @@ struct ConversationStoreSelectionTests {
         let a = AppState(store: store)
         #expect(a.conversations.map(\.title) == ["healthy"])
         #expect(a.loadedRepairFailed == [damagedId])
-        let notice = a.conversations.first?.messages.first {
-            $0.role == .system && $0.content.contains("could not be written") && $0.content.contains("retried at the next launch")
-        }
-        #expect(notice != nil)
+        // Exactly one notice: the repair-failed conversation's id is absent from `loadedIds`
+        // (same shape as a "left in place" skip), so without excluding it explicitly its skipped
+        // rows would also raise the "could not be read and was left in place" notice — untrue,
+        // since it was read fine and only the repair failed (round 1 review finding).
+        let systemNotices = a.conversations.first?.messages.filter { $0.role == .system } ?? []
+        #expect(systemNotices.count == 1)
+        #expect(systemNotices.first?.content.contains("could not be written") == true)
+        #expect(systemNotices.first?.content.contains("retried at the next launch") == true)
+        #expect(systemNotices.allSatisfy { !$0.content.contains("could not be read and") })
 
         // Left entirely untouched on disk: the bad row is still there, nothing quarantined.
         store.failInjection = nil
