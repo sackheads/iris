@@ -10,6 +10,8 @@
 
 **Spec:** `docs/specs/2026-09-20-archive-conversations.md`
 
+**As-shipped correction (this plan is a historical artifact; the two points below are wrong as written):** Task 1 Step 8's `loadAll` snippet reads `isArchived` through GRDB's typed subscript (`if let archived: Bool = row["isArchived"]`), which force-tries the conversion and crashes the whole load on a garbled, non-NULL, non-0/1 value instead of defaulting to visible — an implementer who followed it as written shipped exactly that crash. The real code reads through a `readBool`-style helper that distinguishes null / unconvertible / value and only warns (never throws) on the unconvertible case; see `ConversationStore.readBool` and its call site in `loadAll`. And Task 4 Step 4's snippet adds `else { markChanged(id, .metadata) }` to `deleteConversation`, framed as "preserve whatever the existing `else` branch does" — the base had no such branch; it is new, and inert, since `markChanged(id, .deleted)` is already called unconditionally just above and the store checks `.deleted` first and returns. It was removed from the shipped code. The task bodies below are left as originally written; do not read either snippet as the current shape of the code.
+
 ## Global Constraints
 
 - **Tests use Swift Testing** (`@Suite`, `@Test`, `#expect`). Never XCTest for new tests.
@@ -113,18 +115,9 @@ In `upsertMetadata`, add `isArchived = ?` to the UPDATE's SET list and `c.isArch
 
 - [ ] **Step 8: Read it in `loadAll`**
 
-In `loadAll`, beside the other column reads, and using the **counter** policy (warn and default) rather than the whole-conversation skip:
+In `loadAll`, beside the other column reads, and using the **counter** policy (warn and default) rather than the whole-conversation skip.
 
-```swift
-                    // A garbled flag must not cost the user a conversation: default to active and
-                    // warn, matching the counter policy above rather than `position`'s quarantine
-                    // (#189). The failure direction is toward visibility.
-                    if let archived: Bool = row["isArchived"] {
-                        c.isArchived = archived
-                    } else {
-                        c.isArchived = false
-                    }
-```
+**Do not read this column through GRDB's typed subscript** (`row["isArchived"] as Bool?` or `if let archived: Bool = row["isArchived"]`) — it force-tries the conversion and crashes the *entire load* on a garbled, non-NULL, non-0/1 value instead of defaulting to visible. Route it through a `readBool`-style helper that returns null / unconvertible / value as distinct cases, matching the existing `readInt` pattern, and only warn (never throw) on `unconvertible`. See the shipped `ConversationStore.readBool` and its call site in `loadAll` for the exact shape.
 
 - [ ] **Step 9: Run the tests**
 
@@ -551,12 +544,10 @@ In `deleteConversation`, change the re-point and the creation check so both coun
         // would immediately supersede it (#182 §5).
         if !conversations.contains(where: { !$0.isSubagent && !$0.isArchived }) {
             createNewConversation()
-        } else {
-            markChanged(id, .metadata)
         }
 ```
 
-Preserve whatever the existing `else` branch does; only the two predicates change.
+Only the two predicates change; do not add an `else` branch here. `markChanged(id, .deleted)` is already called unconditionally above this block, and the store checks `.deleted` first and returns — an `else { markChanged(id, .metadata) }` would be new, dead code.
 
 - [ ] **Step 5: Run the tests**
 

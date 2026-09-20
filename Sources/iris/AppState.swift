@@ -701,8 +701,6 @@ class AppState {
         // would immediately supersede it (#182 §5).
         if !conversations.contains(where: { !$0.isSubagent && !$0.isArchived }) {
             createNewConversation()
-        } else {
-            markChanged(id, .metadata)
         }
     }
 
