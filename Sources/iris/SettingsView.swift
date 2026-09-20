@@ -56,6 +56,17 @@ struct SettingsView: View {
                         Text("Dark 👋🏿").tag(SkinTone.dark.rawValue)
                     }
                 }
+
+                Section(header: Text("Goals").font(.headline)) {
+                    Toggle("Auto-advance checkpoints the grader passes cleanly", isOn: $config.checkpointAutoAdvance)
+                        .help("A clean grade means the independent grader found nothing wrong, not that you looked — so a grader's mistake advances unseen too. Turn this off to stop at every checkpoint. Applies to goals started after the change.")
+                    // 1 rather than 0: a stored 0 is how `maxDoneGateRetries` encodes "unset", and
+                    // reads back as the default 3 — so a 0 here would silently not mean zero.
+                    Stepper(value: $config.maxDoneGateRetries, in: 1...10) {
+                        Text("Retries before a goal finishes without passing: \(config.maxDoneGateRetries)")
+                    }
+                    .help("How many times the done-gate sends Iris back to work after the grader finds a criterion unmet. After this many attempts the goal finishes anyway, labelled as having completed without passing.")
+                }
                 .padding(.bottom)
             }
             .formStyle(.grouped)
