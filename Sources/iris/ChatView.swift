@@ -87,9 +87,20 @@ struct ChatView: View {
                             } else {
                                 ForEach(sidebarSearchGroups) { group in
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(group.title)
-                                            .font(.subheadline.weight(.semibold))
-                                            .lineLimit(1)
+                                        HStack(spacing: 4) {
+                                            Text(group.title)
+                                                .font(.subheadline.weight(.semibold))
+                                                .lineLimit(1)
+                                            // Results replaces both the Conversations and Archived
+                                            // sections while a query is active (#212), so this is the
+                                            // only place a hit's archive state is visible before the
+                                            // user clicks into it.
+                                            if state.conversations.first(where: { $0.id == group.conversationId })?.isArchived == true {
+                                                Text("Archived")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.tertiary)
+                                            }
+                                        }
                                         ForEach(group.hits, id: \.ordinal) { hit in
                                             Button(action: { state.reveal(hit: hit) }) {
                                                 HStack(alignment: .top, spacing: 6) {
