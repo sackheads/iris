@@ -449,10 +449,17 @@ class AppState {
         Task { await SandboxSessionManager.shared.endSession(id) }
         purgeCommandTimings(forMessagesIn: id)   // before the messages go — they are the keys
         conversations.removeAll { $0.id == id }
+        // Re-point at what the sidebar actually renders (`ChatView` lists non-subagent
+        // conversations). Picking `conversations.last` could land the selection on a subagent or
+        // evaluator scratch conversation the user cannot see or navigate away from — and
+        // `sendMessage` routes by `selectedConversationId`, so the next message would go into a
+        // restricted, soon-to-be-deleted conversation (#167).
         if selectedConversationId == id {
-            selectedConversationId = conversations.last?.id
+            selectedConversationId = conversations.last(where: { !$0.isSubagent })?.id
         }
-        if conversations.isEmpty {
+        // Scratch conversations don't count: a list holding only those renders an empty sidebar,
+        // so the user still needs somewhere to land.
+        if !conversations.contains(where: { !$0.isSubagent }) {
             createNewConversation()
         } else {
             saveConversations()

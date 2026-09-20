@@ -125,7 +125,7 @@ struct SubagentGradingTests {
 
     @Test("a contracted subagent that completes comes back graded")
     func contractedRunIsGraded() async {
-        let (_, parentId) = freshState()
+        let (state, parentId) = freshState()
         let client = RoutingLLMClient(subagent: [goalComplete, response(nil)],
                                       graderVerdict: ("met", "saw the widget"))
 
@@ -138,11 +138,14 @@ struct SubagentGradingTests {
         #expect(rendered.contains("Independent grader verdict (fresh context): 1/1 met"))
         #expect(rendered.contains("✓ the widget exists — met"))
         #expect(rendered.contains("Summary (UNVERIFIED self-report): unit is done"))
+        // SubagentManager holds its AppState weakly; keep this one alive for the
+        // whole test or the global can go nil mid-run (#167 exposed this).
+        withExtendedLifetime(state) {}
     }
 
     @Test("a contracted run that times out carries its contract but is never graded")
     func timedOutContractedRunIsNotGraded() async {
-        let (_, parentId) = freshState()
+        let (state, parentId) = freshState()
         // Never terminates, so the contract is still observable on the conversation at the cap.
         let client = RoutingLLMClient(subagent: [response(nil)])
 
@@ -158,6 +161,9 @@ struct SubagentGradingTests {
         // The contract still reached the result: the parent is told what the run was held to.
         #expect(rendered.contains("Held to 1 criterion"))
         #expect(rendered.contains("Summary (UNVERIFIED self-report)"))
+        // SubagentManager holds its AppState weakly; keep this one alive for the
+        // whole test or the global can go nil mid-run (#167 exposed this).
+        withExtendedLifetime(state) {}
     }
 
     // MARK: - Tool surface
@@ -196,11 +202,14 @@ struct SubagentGradingTests {
         // The grader only ever runs when a unit contract was bound, so a grader call is proof the
         // tool call's `criteria` reached SubagentManager through the handler.
         #expect(client.graderCalls > 0)
+        // SubagentManager holds its AppState weakly; keep this one alive for the
+        // whole test or the global can go nil mid-run (#167 exposed this).
+        withExtendedLifetime(state) {}
     }
 
     @Test("a subagent with no criteria is never graded and renders the B2 prose")
     func uncontractedRunUnchanged() async {
-        let (_, parentId) = freshState()
+        let (state, parentId) = freshState()
         let client = RoutingLLMClient(subagent: [goalComplete, response(nil)])
 
         let rendered = await SubagentManager.shared.runSubagent(
@@ -210,6 +219,9 @@ struct SubagentGradingTests {
         #expect(client.graderCalls == 0, "no contract means no grade")
         #expect(!rendered.contains("Independent grader verdict"))
         #expect(rendered.contains("Summary: unit is done"))
+        // SubagentManager holds its AppState weakly; keep this one alive for the
+        // whole test or the global can go nil mid-run (#167 exposed this).
+        withExtendedLifetime(state) {}
     }
 
     @Test("a delegated unit is graded in the parent's workspace, not the process cwd")
@@ -232,11 +244,14 @@ struct SubagentGradingTests {
         #expect(client.graderCalls > 0)
         #expect(client.graderPrompt.contains(workspace),
                 "the grader should inspect the parent's workspace, not the process cwd")
+        // SubagentManager holds its AppState weakly; keep this one alive for the
+        // whole test or the global can go nil mid-run (#167 exposed this).
+        withExtendedLifetime(state) {}
     }
 
     @Test("an ungraded unit binds the contract as an oracle but runs no grader")
     func ungradedUnitIsNotGraded() async throws {
-        let (_, parentId) = freshState()
+        let (state, parentId) = freshState()
         let client = RoutingLLMClient(subagent: [goalComplete, response(nil)],
                                       graderVerdict: ("met", "should never be asked for"))
         let contract = try #require(GoalContractParsing.unitContract(
@@ -252,6 +267,9 @@ struct SubagentGradingTests {
         #expect(client.graderCalls == 0, "grade: false must not spin up an evaluator")
         #expect(!rendered.contains("Independent grader verdict"))
         #expect(rendered.contains("Held to 1 criterion"))
+        // SubagentManager holds its AppState weakly; keep this one alive for the
+        // whole test or the global can go nil mid-run (#167 exposed this).
+        withExtendedLifetime(state) {}
     }
 
     // MARK: - Persistence
