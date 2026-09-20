@@ -71,13 +71,15 @@ enum IrisDefaults {
         }
     }
 
-    /// Drop the persisted conversation history from a domain before it seeds a volatile copy.
-    /// `AppState()` is constructed per repetition and decodes this blob on init; on the author's
-    /// machine it is 472 KB and its debounced re-save can land inside the next repetition's
-    /// measured window.
+    /// Drop the legacy conversation blob (live, parked and backup keys) from a domain before it
+    /// seeds a volatile copy. A headless run gets a fresh in-memory conversation store per
+    /// repetition, so a seeded blob would make every repetition decode it and import it into that
+    /// store on `AppState()` — on the author's machine 472 KB of JSON plus the row inserts, inside
+    /// the measured window. The store itself never reaches a volatile copy (spec §1), so there is
+    /// nothing else to strip.
     static func perfSeed(from domain: [String: Any]) -> [String: Any] {
         domain.filter { key, _ in
-            key != "iris_conversations" && !key.hasPrefix("iris_conversations_backup_")
+            key != "iris_conversations" && key != "iris_conversations_legacy" && !key.hasPrefix("iris_conversations_backup_")
         }
     }
 

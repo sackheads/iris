@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-enum ChatRole: String, Codable {
+enum ChatRole: String, Codable, Sendable, Equatable {
     case user
     case agent
     case system
@@ -9,7 +9,7 @@ enum ChatRole: String, Codable {
     case command
 }
 
-struct ChatMessage: Identifiable, Codable, Sendable {
+struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
     var id = UUID()
     let role: ChatRole
     var content: String
@@ -35,13 +35,13 @@ struct ChatMessage: Identifiable, Codable, Sendable {
     }
 }
 
-struct TokenUsage: Codable, Equatable {
+struct TokenUsage: Codable, Equatable, Sendable {
     var promptTokenCount: Int = 0
     var candidatesTokenCount: Int = 0
     var totalTokenCount: Int = 0
 }
 
-struct Conversation: Identifiable, Codable, Hashable {
+struct Conversation: Identifiable, Codable, Hashable, Sendable {
     var id = UUID()
     var title: String
     var messages: [ChatMessage] = []
@@ -242,12 +242,70 @@ class AppState {
     }
 
     private var engine: IrisEngine!
-    
-    init() {
+    /// Durable conversation persistence (#163). Injected so tests get an in-memory database.
+    let store: ConversationStore
+    /// Rows `loadConversations()` could not decode on the most recent load (#163). Internal for
+    /// the one-time system-line notice below and for tests.
+    private(set) var loadedSkippedRows: [SkippedRow] = []
+
+    init(store: ConversationStore = .makeDefault()) {
+        self.store = store
         self.engine = IrisEngine(state: self)
         loadConversations()
         if conversations.isEmpty {
             createNewConversation()
+        }
+        // Every launch notice below goes through `appendLaunchNotice`, which persists it like any
+        // other system message but skips it when the same wording is already in the conversation.
+        // Several of these conditions recur on every launch until a human intervenes, so dedup by
+        // content is what keeps them from stacking up.
+        if !loadedSkippedRows.isEmpty, let target = selectedConversationId {
+            // Two different things end up in `skipped`, and they need different wording. A bad
+            // message/history row belonging to a conversation that still loaded was moved to
+            // `quarantine` and the conversation came back without it. Rows belonging to a
+            // conversation that is NOT in the load — an unreadable metadata column, a table whose
+            // every row failed to decode — were deliberately left untouched on disk, and will be
+            // reported again on every launch until someone fixes them.
+            let loadedIds = Set(conversations.map(\.id))
+            let quarantined = loadedSkippedRows.filter { row in
+                guard let id = row.conversationId, loadedIds.contains(id) else { return false }
+                return (row.table == "messages" || row.table == "history") && row.ordinal != nil
+            }
+            let leftInPlace = loadedSkippedRows.filter { row in
+                guard let id = row.conversationId, loadedIds.contains(id) else { return true }
+                return !((row.table == "messages" || row.table == "history") && row.ordinal != nil)
+            }
+            if !quarantined.isEmpty {
+                let convs = Set(quarantined.compactMap(\.conversationId)).count
+                let one = quarantined.count == 1
+                appendLaunchNotice("\(quarantined.count) unreadable saved entr\(one ? "y" : "ies") in \(convs) conversation\(convs == 1 ? "" : "s") \(one ? "was" : "were") moved to the quarantine table in \(IrisPaths.default.conversationsDB.lastPathComponent).",
+                                   to: target)
+            }
+            if !leftInPlace.isEmpty {
+                // One conversation can contribute more than one row (both its tables unreadable).
+                let n = Set(leftInPlace.compactMap(\.conversationId)).count + leftInPlace.filter { $0.conversationId == nil }.count
+                appendLaunchNotice("\(n) saved conversation\(n == 1 ? "" : "s") could not be read and \(n == 1 ? "was" : "were") left in place; see the console for details.",
+                                   to: target)
+            }
+        }
+        // The legacy UserDefaults blob existed but couldn't be decoded (spec §6): the backup key
+        // is already set and the live key already removed (LegacyConversationBlob does both), so
+        // this fires exactly once — say so in the app, not just the console log.
+        if legacyBlobUndecodable, let target = selectedConversationId {
+            appendLaunchNotice("The saved conversations from an earlier version could not be read. A copy was kept in the app settings under a key beginning iris_conversations_backup_.",
+                               to: target)
+        }
+        // The blob decoded fine but the write into the store failed: the live key is left in
+        // place by `LegacyConversationBlob` for a retry, so say that instead of "could not be read".
+        if legacyBlobImportFailed, let target = selectedConversationId {
+            appendLaunchNotice("The saved conversations from an earlier version could not be imported; they will be retried at the next launch.",
+                               to: target)
+        }
+        // `store.loadAll()` itself threw (not a per-row skip): logged in `loadConversations()`;
+        // say so here too so the loss is visible, not only in the console log.
+        if let headline = loadFailureHeadline, let target = selectedConversationId {
+            appendLaunchNotice("Saved conversations could not be loaded (\(headline)). Starting with an empty list; the database was left untouched.",
+                               to: target)
         }
     }
 
@@ -322,7 +380,7 @@ class AppState {
         if !isSubagent {
             selectedConversationId = newConv.id
         }
-        saveConversations()
+        markChanged(newConv.id, .created)
 
         Task {
             _ = await HookManager.shared.fireSessionStart(conversationId: newConv.id)
@@ -332,7 +390,7 @@ class AppState {
     func updateConversationTitle(id: UUID, title: String) {
         if let idx = conversations.firstIndex(where: { $0.id == id }) {
             conversations[idx].title = title
-            saveConversations()
+            markChanged(id, .metadata)
         }
     }
     
@@ -367,7 +425,7 @@ class AppState {
     func setSubagentResult(for conversationId: UUID, _ result: SubagentResult) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
         conversations[idx].subagentResult = result
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     func updateSubagentStatus(id: UUID, status: String) {
@@ -379,7 +437,7 @@ class AppState {
     func setWorkspace(for conversationId: UUID, path: String) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].workspacePath = path
-            saveConversations()
+            markChanged(conversationId, .metadata)
         }
     }
 
@@ -429,7 +487,7 @@ class AppState {
     func setMainAgentSandbox(for conversationId: UUID, pref: SandboxPref?) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].mainAgentSandbox = pref
-            saveConversations()
+            markChanged(conversationId, .metadata)
         }
     }
 
@@ -529,12 +587,12 @@ class AppState {
         if selectedConversationId == id {
             selectedConversationId = conversations.last(where: { !$0.isSubagent })?.id
         }
+        markChanged(id, .deleted)
         // Scratch conversations don't count: a list holding only those renders an empty sidebar,
-        // so the user still needs somewhere to land.
+        // so the user still needs somewhere to land. The delete is recorded above either way —
+        // `createNewConversation` records its own change and must not swallow this one.
         if !conversations.contains(where: { !$0.isSubagent }) {
             createNewConversation()
-        } else {
-            saveConversations()
         }
     }
     
@@ -657,14 +715,14 @@ class AppState {
     private func startTurn(text: String, attachments: [FileAttachment], in convId: UUID) {
         if let idx = conversations.firstIndex(where: { $0.id == convId }) {
             conversations[idx].messageCountSinceReflection += 1
-            saveConversations()
+            markChanged(convId, .metadata)
             
             let userMessagesCount = conversations[idx].messages.filter { $0.role == .user }.count
             let shouldRename = userMessagesCount == 3 && conversations[idx].messageCountSinceReflection == 3
             let shouldReflect = conversations[idx].messageCountSinceReflection >= 30
             if shouldReflect {
                 conversations[idx].messageCountSinceReflection = 0
-                saveConversations()
+                markChanged(convId, .metadata)
             }
 
             let attachmentsToProcess = attachments
@@ -710,7 +768,7 @@ class AppState {
                 if shouldReflect {
                     if let idx = conversations.firstIndex(where: { $0.id == convId }) {
                         conversations[idx].messageCountSinceReflection = 0
-                        saveConversations()
+                        markChanged(convId, .metadata)
                     }
                     let reflectionPrompt = "System Event [Reflection Trigger]: It's time to consolidate your memories. Reflect on the recent conversation. Have you learned any new user preferences, project structures, or recurring workflows? If so, use `update_soul` to evolve your persona, `update_user_profile` to update the user profile, `update_memory` to consolidate durable facts, and `create_skill`/`update_skill` for procedural skills. When you learn something durable — a lesson, recipe, decision, or reusable artifact — archive it to your permanent library at `~/.iris/memory/library/` (see your Library Management skill). Output a transparent summary of the gist of the updates for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'"
                     appendMessage(role: .system, content: "Triggering automatic memory reflection...", to: convId)
@@ -745,17 +803,36 @@ class AppState {
         appendMessage(role: role, content: text, to: conversationId)
     }
 
+    /// Every message appended here is recorded for persistence, with no opt-out: the store keys
+    /// message rows by their index in this array, so a message held in memory without a row shifts
+    /// every ordinal after it. On the next launch it is absent, the indices shift back, and the
+    /// first append `INSERT OR REPLACE`s the previous session's last message (review finding, #163
+    /// round 3 — a `persist: false` launch notice did exactly this). Anything that must not
+    /// accumulate is de-duplicated at the point of appending; see `appendLaunchNotice`.
     func appendMessage(role: ChatRole, content: String, attachments: [FileAttachment] = [], id: UUID = UUID(), to conversationId: UUID) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].messages.append(ChatMessage(id: id, role: role, content: content, attachments: attachments))
-            
+
             // Auto-title generation based on first message
             if role == .user && conversations[idx].messages.filter({ $0.role == .user }).count == 1 {
                 let displayTitle = content.isEmpty ? (attachments.first?.filename ?? "Attachment") : content
                 conversations[idx].title = String(displayTitle.prefix(30)) + (displayTitle.count > 30 ? "..." : "")
+                markChanged(conversationId, .metadata)
             }
-            saveConversations()
+            markChanged(conversationId, .messagesAppended(from: conversations[idx].messages.count - 1))
         }
+    }
+
+    /// A launch-time system line, persisted like any other message but written at most once per
+    /// distinct wording. Several of the conditions that raise one recur on every launch until a
+    /// human intervenes (an unreadable metadata column, a table whose every row failed to decode,
+    /// a legacy import that keeps failing), and an unconditional append would stack one copy per
+    /// launch. The text is the dedup key on purpose: a changed count is a genuinely different
+    /// report and earns its own line.
+    func appendLaunchNotice(_ text: String, to conversationId: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
+        guard !conversations[idx].messages.contains(where: { $0.role == .system && $0.content == text }) else { return }
+        appendMessage(role: .system, content: text, to: conversationId)
     }
     
     /// Replaces one message's content in place (a streamed reply growing). No title generation;
@@ -764,20 +841,20 @@ class AppState {
         guard let c = conversations.firstIndex(where: { $0.id == conversationId }),
               let m = conversations[c].messages.firstIndex(where: { $0.id == id }) else { return }
         conversations[c].messages[m].content = content
-        if persist { saveConversations() }
+        if persist { markChanged(conversationId, .messageUpdated(id: id)) }
     }
 
     func updateHistory(for conversationId: UUID, history: [Content]) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].history = history
-            saveConversations()
+            markChanged(conversationId, .historyReplaced)
         }
     }
     
     func appendContentToHistory(for conversationId: UUID, content: Content) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].history.append(content)
-            saveConversations()
+            markChanged(conversationId, .historyAppended(from: conversations[idx].history.count - 1))
         }
     }
 
@@ -797,7 +874,7 @@ class AppState {
             }
             if modified {
                 conversations[idx].history = updatedHistory
-                saveConversations()
+                markChanged(conversationId, .historyReplaced)
             }
         }
     }
@@ -805,7 +882,7 @@ class AppState {
     func appendContentsToHistory(for conversationId: UUID, contents: [Content]) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].history.append(contentsOf: contents)
-            saveConversations()
+            markChanged(conversationId, .historyAppended(from: conversations[idx].history.count - contents.count))
         }
     }
     
@@ -814,7 +891,7 @@ class AppState {
             conversations[idx].tokenUsage.promptTokenCount += usage.promptTokenCount ?? 0
             conversations[idx].tokenUsage.candidatesTokenCount += usage.candidatesTokenCount ?? 0
             conversations[idx].tokenUsage.totalTokenCount += usage.totalTokenCount ?? 0
-            saveConversations()
+            markChanged(conversationId, .metadata)
         }
     }
     
@@ -823,7 +900,7 @@ class AppState {
             conversations[idx].activeGoal = nil
             conversations[idx].goalContract = nil
             conversations[idx].goalIterationCount = 0
-            saveConversations()
+            markChanged(conversationId, .metadata)
         }
     }
 
@@ -832,7 +909,7 @@ class AppState {
     func recordCompletionSelfReport(for conversationId: UUID, statusJSON: JSONValue?) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
         conversations[idx].lastGoalCompletionReport = statusJSON
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// Dismisses the completion self-report chip (the ✕). Independent of `clearGoal` so the
@@ -850,7 +927,7 @@ class AppState {
               conversations[idx].goalContract?.awaitingHumanJudgement != true else { return }
         conversations[idx].lastGoalCompletionReport = nil
         conversations[idx].lastGoalEvaluation = nil
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// Captures the locked contract's criteria as a fresh `.verifying` evaluation BEFORE the goal
@@ -868,7 +945,7 @@ class AppState {
             },
             startedAt: Date(), completedAt: nil)
         conversations[idx].lastGoalEvaluation = pending
-        saveConversations()
+        markChanged(conversationId, .metadata)
         return contract
     }
 
@@ -876,7 +953,7 @@ class AppState {
     func recordEvaluation(for conversationId: UUID, _ evaluation: GoalEvaluation) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
         conversations[idx].lastGoalEvaluation = evaluation
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// The gate refused completion: bump the attempt count and leave everything else alone. The
@@ -887,7 +964,7 @@ class AppState {
               var c = conversations[idx].goalContract else { return }
         c.gateAttempts += 1
         conversations[idx].goalContract = c
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// Record the agent's `n/a — <reason>` waiver for one criterion. Returns false when the waiver
@@ -905,7 +982,7 @@ class AppState {
         else { return false }
         c.waivers[criterionId] = trimmed
         conversations[idx].goalContract = c
-        saveConversations()
+        markChanged(conversationId, .metadata)
         return true
     }
 
@@ -918,7 +995,7 @@ class AppState {
         eval.gateOutcome = outcome
         eval.waivers = waivers
         conversations[idx].lastGoalEvaluation = eval
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// Record the user's verdict on one `humanJudged` criterion (spec §6).
@@ -942,7 +1019,7 @@ class AppState {
         eval.criteria[vIdx].verdict = accepted ? .met : .notMet
         eval.criteria[vIdx].method = .human
         conversations[idx].lastGoalEvaluation = eval
-        saveConversations()
+        markChanged(conversationId, .metadata)
         resolveJudgementIfComplete(for: conversationId)
         return true
     }
@@ -1002,7 +1079,7 @@ class AppState {
             // back to work on something new, and a rejection that lands late in a long run would
             // otherwise soft-stop after a single turn.
             conversations[idx].goalIterationCount = 0
-            saveConversations()
+            markChanged(conversationId, .metadata)
             resumeGoalLoop(for: conversationId, framing: .judgementRejection,
                            steer: "You did not meet these, in the user's judgement:\n\(names)")
         }
@@ -1021,7 +1098,7 @@ class AppState {
         c.awaitingHumanJudgement = true
         c.pendingCompletionSummary = summary
         conversations[idx].goalContract = c
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// Stores a draft contract on the conversation without locking or touching `activeGoal`.
@@ -1036,7 +1113,7 @@ class AppState {
         conversations[idx].lastGoalCompletionReport = nil
         conversations[idx].lastGoalEvaluation = nil
         conversations[idx].goalContract = draft
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// Locks a drafted contract onto the conversation and mirrors its objective into `activeGoal`
@@ -1048,7 +1125,7 @@ class AppState {
         conversations[idx].goalContract = locked
         conversations[idx].activeGoal = locked.objective
         conversations[idx].goalIterationCount = 0
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// The only sanctioned edit path for a LOCKED contract. Returns false if rejected
@@ -1072,7 +1149,7 @@ class AppState {
         }
         if ok {
             conversations[idx].goalContract = contract
-            saveConversations()
+            markChanged(conversationId, .metadata)
         }
         return ok
     }
@@ -1084,7 +1161,7 @@ class AppState {
               var c = conversations[idx].goalContract else { return }
         c.checkpointStatus = .pausedForReview
         conversations[idx].goalContract = c
-        saveConversations()
+        markChanged(conversationId, .metadata)
     }
 
     /// Human approved the checkpoint: advance to the next milestone and resume the loop.
@@ -1095,7 +1172,7 @@ class AppState {
         c.checkpointStatus = .running
         conversations[idx].goalContract = c
         conversations[idx].goalIterationCount = 0
-        saveConversations()
+        markChanged(conversationId, .metadata)
         resumeGoalLoop(for: conversationId, steer: nil)
     }
 
@@ -1106,7 +1183,7 @@ class AppState {
         c.checkpointStatus = .running
         conversations[idx].goalContract = c
         conversations[idx].goalIterationCount = 0
-        saveConversations()
+        markChanged(conversationId, .metadata)
         resumeGoalLoop(for: conversationId, steer: feedback)
     }
 
@@ -1165,7 +1242,7 @@ class AppState {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].activeGoal = goal
             conversations[idx].goalIterationCount = 0
-            saveConversations()
+            markChanged(conversationId, .metadata)
         }
     }
     
@@ -1309,7 +1386,20 @@ class AppState {
     private var saveTask: Task<Void, Never>? = nil
     /// When the oldest currently-unwritten change arrived; nil when nothing is pending.
     private var firstDirtyAt: Date? = nil
-    
+    /// Changes recorded since the last flush, per conversation (spec §3).
+    private var pendingChanges: [UUID: ChangeSet] = [:]
+    /// The batch a detached write is currently applying. Exactly one at a time; `flushSave`
+    /// folds it back into `pendingChanges` so the quit-time write uses current snapshots.
+    private var inFlight: [ConversationWrite]? = nil
+    /// The detached write applying `inFlight`, kept so `flushSave` can tell it to stand down.
+    private var writeTask: Task<Void, Never>? = nil
+    /// The stand-down flag the detached write checks under the writer lock. Explicit rather than
+    /// `Task.isCancelled`: `apply`'s check runs inside GRDB's synchronous write block, which is
+    /// not the detached task's execution context, so the cancellation flag read there belongs to
+    /// whatever task (if any) owns that thread — for a `DatabasePool` writer, never the one we
+    /// cancelled (review finding, #163 round 2).
+    private var writeStandDown: WriteStandDown? = nil
+
     /// The conversations that belong on disk: durable, user-facing ones only. Sub-process
     /// (subagent / drift-evaluator) scratch conversations are ephemeral and must never persist.
     nonisolated static func durableConversations(_ all: [Conversation]) -> [Conversation] {
@@ -1345,7 +1435,9 @@ class AppState {
     /// could lose criteria across a restart (#62). The max wait bounds that staleness.
     static let saveMaxWait: TimeInterval = 2.0
 
-    private func saveConversations() {
+    /// Records one change and schedules a flush with the #62 debounce and max-wait.
+    func markChanged(_ id: UUID, _ change: ConversationChange) {
+        pendingChanges[id, default: ChangeSet()].add(change)
         let now = Date()
         let dirtySince = firstDirtyAt ?? now
         firstDirtyAt = dirtySince
@@ -1354,7 +1446,7 @@ class AppState {
         let elapsed = now.timeIntervalSince(dirtySince)
         guard elapsed < Self.saveMaxWait else {
             saveTask?.cancel()
-            writeConversationsNow()
+            flush()
             return
         }
 
@@ -1364,55 +1456,158 @@ class AppState {
         saveTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            writeConversationsNow()
+            flush()
         }
     }
 
-    /// Writes pending conversation state synchronously, right now.
+    func pendingChangeSet(for id: UUID) -> ChangeSet? { pendingChanges[id] }
+
+    /// Snapshots the dirty conversations (value copies) and clears the pending set. Sub-process
+    /// (subagent / drift-evaluator) conversations are ephemeral scratch and must never persist —
+    /// an orphan surviving a mid-run quit would resurrect on the next launch as a normal
+    /// main-principal conversation carrying a stale `activeGoal` but WITHOUT its restricted
+    /// toolset — so their changes are dropped here.
     ///
-    /// `applicationWillTerminate` calls `_exit(0)` to dodge a ggml-metal static-destructor crash.
-    /// `_exit` runs no atexit handlers, so it kills the pending debounce task outright and skips
-    /// the `cfprefsd` flush — every unwritten change is lost on quit (#62). Quit must flush
-    /// through this first. `synchronize()` is deprecated for routine use but is exactly right
-    /// here: it is the only way to get bytes to disk before `_exit`.
+    /// The batch is ordered by the conversation's index in `conversations`, because the store
+    /// assigns `position` as `MAX(position) + 1` at first insert: taken in `pendingChanges`'
+    /// dictionary order, several conversations created inside one debounce window landed on disk
+    /// in an arbitrary order and came back in the sidebar shuffled (review finding, #163 round 2).
+    /// Deleted and vanished ids sort last; their order among themselves does not matter, but it is
+    /// pinned by id so a batch is reproducible.
+    private func takeBatch() -> [ConversationWrite] {
+        firstDirtyAt = nil
+        var order: [UUID: Int] = [:]
+        for (index, c) in conversations.enumerated() { order[c.id] = index }
+        let batch: [ConversationWrite] = pendingChanges.compactMap { id, changes in
+            var changes = changes
+            let live = conversations.first { $0.id == id }
+            if let live, live.isSubagent { return nil }
+            if live == nil && !changes.deleted { return nil }   // vanished without a delete: nothing to write
+            // Deleted and re-created inside one window (the same id came back): the conversation
+            // is live, so write the current snapshot rather than deleting the row out from under it.
+            if live != nil { changes.deleted = false }
+            return ConversationWrite(id: id, snapshot: changes.deleted ? nil : live, changes: changes)
+        }
+        pendingChanges = [:]
+        return batch.sorted { lhs, rhs in
+            let l = order[lhs.id] ?? Int.max, r = order[rhs.id] ?? Int.max
+            return l == r ? lhs.id.uuidString < rhs.id.uuidString : l < r
+        }
+    }
+
+    /// Re-queues a failed write's changes behind whatever arrived since (spec §3 retry-by-merge).
+    private func requeue(_ writes: [ConversationWrite]) {
+        guard !writes.isEmpty else { return }
+        for w in writes { pendingChanges[w.id, default: ChangeSet()].merge(w.changes) }
+        firstDirtyAt = firstDirtyAt ?? Date()
+    }
+
+    /// Off-main write of the dirty set. One batch in flight at a time; a batch that arrives
+    /// while one is being written waits and is flushed when that write completes.
+    private func flush() {
+        guard inFlight == nil, !pendingChanges.isEmpty else { return }
+        let batch = takeBatch()
+        guard !batch.isEmpty else { return }
+        inFlight = batch
+        let store = self.store
+        let standDown = WriteStandDown()
+        writeStandDown = standDown
+        writeTask = Task.detached(priority: .utility) { [weak self] in
+            var failure: Error? = nil
+            do { try store.apply(batch, unlessCancelled: { standDown.isSignalled }) } catch { failure = error }
+            await MainActor.run {
+                guard let self else { return }
+                self.inFlight = nil
+                if self.writeStandDown === standDown { self.writeStandDown = nil }
+                // Whether anything NEW arrived while this batch was being written, sampled before
+                // a failure puts the batch back: a durable error (disk full, a corrupt database)
+                // would otherwise loop fail → re-queue → flush forever, one log line and one
+                // main-actor hop per turn of the spin. A failed batch is logged once and waits for
+                // the next `markChanged` or `flushSave` to retry it (spec §3).
+                let arrivedDuringWrite = !self.pendingChanges.isEmpty
+                if let failure {
+                    print("Conversation store write failed; will retry on the next change: \(failure)")
+                    // A partial failure already committed everything not listed, so only the
+                    // named conversations go back on the queue; anything else means the whole
+                    // batch is unaccounted for.
+                    if case ConversationStoreError.partialFailure(let failedIds) = failure {
+                        let failed = Set(failedIds)
+                        self.requeue(batch.filter { failed.contains($0.id) })
+                    } else {
+                        self.requeue(batch)
+                    }
+                    if arrivedDuringWrite { self.flush() }
+                } else if !self.pendingChanges.isEmpty {
+                    self.flush()
+                }
+            }
+        }
+    }
+
+    /// Writes everything pending synchronously, right now. `applicationWillTerminate` calls
+    /// `_exit(0)` after this, which runs no atexit handlers and would kill the debounce task
+    /// and any detached write (#62).
+    ///
+    /// An in-flight batch is folded back into `pendingChanges` rather than appended to the write,
+    /// so every id is written exactly once from its CURRENT snapshot. Appending the in-flight
+    /// batch instead would hand `apply` a stale snapshot, and the append paths truncate trailing
+    /// rows — a detached write that took the writer lock after this one committed would delete the
+    /// very rows we just wrote. The write's `WriteStandDown` flag is signalled (and its task
+    /// cancelled) for the same reason; `apply` checks the flag under the writer lock and stands
+    /// down. `inFlight` itself is left alone: the detached task's completion clears it.
     func flushSave() {
         saveTask?.cancel()
-        writeConversationsNow()
-        IrisDefaults.store.synchronize()
-    }
-
-    private func writeConversationsNow() {
-        firstDirtyAt = nil
-        // Sub-processes (subagents, the drift evaluator) run in ephemeral scratch
-        // conversations. Persisting them let an orphan survive a mid-run quit and resurrect
-        // on the next launch as a normal main-principal conversation carrying a stale
-        // `activeGoal` — but WITHOUT its restricted toolset — so it would hunt for tools it
-        // no longer has (e.g. `submit_evaluation`). Only durable, user-facing conversations
-        // are persisted; the main goal's state rides along on those and survives restart.
-        let durable = Self.durableConversations(conversations)
-        if let data = try? JSONEncoder().encode(durable) {
-            IrisDefaults.store.set(data, forKey: "iris_conversations")
-        }
+        writeStandDown?.signal()
+        writeTask?.cancel()
+        if let inFlight { requeue(inFlight) }
+        let batch = takeBatch()
+        guard !batch.isEmpty else { return }
+        // Nothing to retry with: the process exits immediately after this on the quit path, so a
+        // failure here is logged and lost. Every other write retries on the next change.
+        do { try store.apply(batch) } catch { print("Conversation store flush failed: \(error)") }
     }
     
     func renameConversation(id: UUID, newTitle: String) {
         if let idx = conversations.firstIndex(where: { $0.id == id }) {
             conversations[idx].title = newTitle
-            saveConversations()
+            markChanged(id, .metadata)
         }
     }
     
+    /// Set by `loadConversations()` when the legacy UserDefaults blob existed but could not be
+    /// decoded, so `init` can surface it once a conversation exists to attach the notice to.
+    private var legacyBlobUndecodable = false
+    /// Set by `loadConversations()` when the legacy blob decoded fine but the write into the
+    /// store failed (the live key is left in place by `LegacyConversationBlob` for a retry).
+    private var legacyBlobImportFailed = false
+    /// Set by `loadConversations()` when `store.loadAll()` itself threw (not a per-row skip).
+    private var loadFailureHeadline: String? = nil
+
     private func loadConversations() {
-        if let data = IrisDefaults.store.data(forKey: "iris_conversations") {
-            do {
-                let decoded = try JSONDecoder().decode([Conversation].self, from: data)
-                let loaded = Self.sanitizeLoaded(decoded)
-                self.conversations = loaded
-                self.selectedConversationId = loaded.last?.id
-            } catch {
-                print("Failed to decode conversations: \(error)")
-                IrisDefaults.store.set(data, forKey: "iris_conversations_backup_\(Date().timeIntervalSince1970)")
+        // One-time move off the UserDefaults blob (spec §6). Cheap when there is no key.
+        let outcome = LegacyConversationBlob.migrateIfNeeded(into: store, defaults: IrisDefaults.store)
+        if case .imported(let n) = outcome { print("Imported \(n) conversations from the legacy blob.") }
+        if outcome == .undecodable { legacyBlobUndecodable = true }
+        if outcome == .importFailed { legacyBlobImportFailed = true }
+
+        do {
+            let result = try store.loadAll()
+            loadedSkippedRows = result.skipped
+            let loaded = Self.sanitizeLoaded(result.conversations)
+            self.conversations = loaded
+            self.selectedConversationId = loaded.last?.id
+            // A whole-table corruption can be thousands of rows; one line each would bury
+            // everything else in the log.
+            let logCap = 10
+            for row in result.skipped.prefix(logCap) {
+                print("Unreadable \(row.table) row (conversation \(row.conversationId?.uuidString ?? "?"), ordinal \(row.ordinal.map(String.init) ?? "-")): \(row.reason)")
             }
+            if result.skipped.count > logCap {
+                print("… and \(result.skipped.count - logCap) more unreadable row(s).")
+            }
+        } catch {
+            print("Failed to load conversations: \(error)")
+            loadFailureHeadline = "\(error)"
         }
     }
 
@@ -1671,7 +1866,7 @@ class AppState {
         if let idx = conversations.firstIndex(where: { $0.id == convId }) {
             purgeCommandTimings(forMessagesIn: convId)   // before the messages go — they are the keys
             conversations[idx].messages.removeAll()
-            saveConversations()
+            markChanged(convId, .messagesReplaced)
             emitCommandOutput("Conversation cleared.", format: .markdown, to: convId)
         }
     }

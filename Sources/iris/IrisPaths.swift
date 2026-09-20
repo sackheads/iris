@@ -16,7 +16,10 @@ struct IrisPaths: Sendable {
     /// (see `useVolatileCopy(at:)`) before any manager is touched; nothing else ever sets it.
     static var `default`: IrisPaths { lock.withLock { override } ?? standard }
 
-    private static let standard = IrisPaths(
+    /// The real home, regardless of any headless override — isolation tests compare file
+    /// existence at this exact path before and after a test run and must never create anything
+    /// here themselves.
+    static let standard = IrisPaths(
         root: URL(fileURLWithPath: ("~/.iris" as NSString).expandingTildeInPath)
     )
     private static let lock = NSLock()
@@ -73,6 +76,11 @@ struct IrisPaths: Sendable {
         }
         return lines.sorted().joined(separator: "\n")
     }
+
+    /// The conversation store (#163). At the root on purpose: `makeVolatileCopy` copies only
+    /// memory/, rules/, config/ and plugins/, so a headless copy starts with no conversations,
+    /// which is the choice `IrisDefaults.perfSeed` already made for the old blob.
+    var conversationsDB: URL { root.appendingPathComponent("conversations.sqlite") }
 
     // memory/
     var memoryDir: URL { root.appendingPathComponent("memory") }
