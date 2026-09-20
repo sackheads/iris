@@ -151,6 +151,35 @@ struct CheckpointAutoAdvanceTests {
         #expect(after?.awaitingHumanJudgement == true, "the pause must ask, not just stop")
     }
 
+    @Test("an unjudged humanJudged criterion in a FUTURE milestone must not trigger a judgement pause")
+    func testFutureMilestoneHumanJudgedDoesNotTrapGoal() async {
+        // Regression for a trapped-goal bug: the judgement-pause scan used to walk the WHOLE
+        // contract, so an unjudged `humanJudged` criterion belonging to a milestone that hasn't
+        // been reached yet — never part of the projected grade — would set
+        // `awaitingHumanJudgement` with no way to ever clear it (it never appears in the
+        // evaluation as `.humanPending`, so `recordHumanJudgement` can never find it). The fix
+        // scans the evaluation, which only ever covers the projected (0...current) criteria.
+        let app = AppState(); let id = UUID()
+        let a = Criterion(text: "parser works", kind: .qualitative, check: nil)
+        let h = Criterion(text: "output reads well", kind: .humanJudged, check: nil)
+        var c = GoalContract(objective: "Ship the parser", criteria: [a, h])
+        c.milestones = [Milestone(title: "Parser", criterionIds: [a.id]),
+                        Milestone(title: "Integration", criterionIds: [h.id])]
+        c.currentMilestone = 0
+        app.createNewConversation(id: id)
+        app.setGoalContract(for: id, c)
+
+        let client = RoutingClient(main: [Self.reachCheckpointCall(), Self.response(nil)],
+                                   graderVerdict: ("not_met", "parser crashes on nested input"))
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        await engine.processInput("work", source: "User", conversationId: id)
+
+        let after = app.conversations.first { $0.id == id }?.goalContract
+        #expect(after?.checkpointStatus == .pausedForReview, "a not_met grade on the current milestone still pauses")
+        #expect(after?.awaitingHumanJudgement == false,
+                "the human is asked about the current milestone only — the future criterion isn't graded yet")
+    }
+
     @Test("an auto-advance announces itself in the transcript")
     func testAutoAdvanceIsAnnounced() async {
         let app = AppState(); let id = UUID(); ladder(on: app, id)

@@ -212,9 +212,13 @@ actor IrisEngine {
     /// Grades the ladder CUMULATIVELY — `projectedContract` across milestones `0...current`, not
     /// just the current one — because that is what catches this milestone's work breaking an
     /// earlier milestone's criterion, which is the reason a checkpoint is a gate and not a status
-    /// print. Awaited, not detached: the run is pausing anyway and the human should see the verdict
-    /// before re-engaging. `currentMilestone` is deliberately NOT advanced — that is the human's
-    /// click (B1 §7). `via` names the delegate when the work was handed off, and is empty otherwise.
+    /// print. Awaited, not detached: the run is pausing (or advancing) anyway and the human should
+    /// see the verdict either way. D3: grades first, then decides — a clean, uncontested grade
+    /// advances `currentMilestone` itself (`AppState.autoAdvanceCheckpoint`, no human click needed);
+    /// anything contested (a `not_met`, an unjudged `humanJudged` criterion, or the setting off)
+    /// falls back to the pre-D3 pause, which still waits on the human's click via
+    /// `advanceCheckpoint`. `via` names the delegate when the work was handed off, and is empty
+    /// otherwise.
     private func performCheckpoint(conversationId: UUID, contract: GoalContract,
                                    summary: String, statusReport: JSONValue?,
                                    workspacePath: String?, via: String = "") async -> String {
@@ -249,22 +253,35 @@ actor IrisEngine {
             await MainActor.run {
                 localState?.autoAdvanceCheckpoint(for: conversationId, evaluation: evaluation)
             }
-            let met = evaluation?.criteria.count ?? 0
-            let lines = (evaluation?.criteria ?? [])
-                .map { "  \($0.criterionText) — \($0.evidence)" }
+            // Count only actual `.met` verdicts — `canAutoAdvance` also lets through a waived
+            // `not_met` and a `humanJudged` criterion the grader never touched, and reporting
+            // those as "met" would misreport the grade the auto-advance is supposed to be
+            // trustworthy evidence of. Name those two cases for what they are instead.
+            let criteria = evaluation?.criteria ?? []
+            let met = criteria.filter { $0.verdict == .met }.count
+            let lines = criteria
+                .map { v -> String in
+                    if v.kind == .humanJudged { return "  \(v.criterionText) — accepted by you" }
+                    if let reason = current.waivers[v.criterionId] { return "  \(v.criterionText) — waived: \(reason)" }
+                    return "  \(v.criterionText) — \(v.evidence)"
+                }
                 .joined(separator: "\n")
             await pushToUI(role: .system,
-                           text: "Checkpoint \(ladderPos) (\(milestoneTitle)) auto-advanced — grader found \(met)/\(met) criteria met:\n\(lines)",
+                           text: "Checkpoint \(ladderPos) (\(milestoneTitle)) auto-advanced — grader found \(met)/\(criteria.count) criteria met:\n\(lines)",
                            conversationId: conversationId)
             return "Checkpoint \(ladderPos) passed cleanly and advanced. Continue with the next milestone."
         }
 
         await MainActor.run {
             localState?.setCheckpointPaused(for: conversationId)   // leaves activeGoal set
-            // An unjudged humanJudged criterion is why this stopped, so the pause must ASK.
-            // A stop that requests nothing is the rubber-stamp pattern D3 exists to remove.
-            if let c = current,
-               c.criteria.contains(where: { $0.kind == .humanJudged && c.judgements[$0.id] == nil }) {
+            // Scan the EVALUATION, not the whole contract: the contract can hold a `humanJudged`
+            // criterion belonging to a FUTURE milestone, never part of the projected grade. Asking
+            // about one of those has no way to resolve — it never appears in `lastGoalEvaluation`
+            // as `.humanPending`, so `recordHumanJudgement` can never find it, and
+            // `awaitingHumanJudgement` (which also gates the loop via `isPaused`) would never clear.
+            // `GoalEvaluationParsing` already reduces a `humanJudged` criterion to `.humanPending`
+            // iff it is ungraded, and only over the criteria this evaluation actually covers.
+            if evaluation?.criteria.contains(where: { $0.verdict == .humanPending }) == true {
                 localState?.beginJudgementPause(for: conversationId, summary: summary)
             }
         }
