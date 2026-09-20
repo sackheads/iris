@@ -858,6 +858,14 @@ class AppState {
                 await engine.processInput(renamePrompt, source: "System", conversationId: convId)
             }
             return
+        } else if trimmed == "/archive" {
+            if let refusal = archiveConversation(convId) {
+                appendMessage(role: .system, content: "Cannot archive: \(refusal.reason).", to: convId)
+            }
+            return
+        } else if trimmed == "/unarchive" {
+            unarchiveConversation(convId)
+            return
         }
 
         // #182 §6.2: typing into an archived conversation is how the user says they want it back.

@@ -75,4 +75,33 @@ struct ArchiveConversationTests {
         app.unarchiveConversation(a)
         #expect(app.conversations.first { $0.id == a }?.isArchived == false)
     }
+
+    @Test("/archive archives the current conversation")
+    func slashArchive() {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(), b = UUID()
+        app.createNewConversation(id: a)
+        app.createNewConversation(id: b)
+        app.selectedConversationId = a
+
+        app.sendMessage("/archive")
+
+        #expect(app.conversations.first { $0.id == a }?.isArchived == true)
+    }
+
+    @Test("/archive reports the refusal rather than archiving")
+    func slashArchiveRefused() {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(), b = UUID()
+        app.createNewConversation(id: a)
+        app.createNewConversation(id: b)
+        app.setGoal(for: a, goal: "ship it")
+        app.selectedConversationId = a
+
+        app.sendMessage("/archive")
+
+        #expect(app.conversations.first { $0.id == a }?.isArchived == false)
+        let messages = app.conversations.first { $0.id == a }?.messages ?? []
+        #expect(messages.contains { $0.content.contains("goal is active") })
+    }
 }
