@@ -1,6 +1,6 @@
 # Conversation Store (#163)
 
-* **Status**: design, awaiting review
+* **Status**: implemented on `feat/163-conversation-store` (plan: `docs/superpowers/plans/2026-09-19-conversation-store.md`); follow-up #184 retires the parked legacy key two releases on
 * **Issue**: #163 (replace the UserDefaults JSON blob). Follow-ups already filed: #177 (cross-conversation search and lazy loading), #178 (stale volatile plists, unrelated but found here).
 * **Decision taken**: SQLite through GRDB with normalized message and history rows (approach A). One JSON file per conversation (B) was rejected because a long conversation is still re-encoded whole on every append and search would need a second index; Core Data was rejected as model churn for no gain.
 

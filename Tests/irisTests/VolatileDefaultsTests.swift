@@ -78,6 +78,7 @@ struct VolatileDefaultsTests {
         let domain: [String: Any] = [
             "iris_conversations": "x",
             "iris_conversations_backup_1.5": "y",
+            "iris_conversations_legacy": "z",
             "ENABLE_VIBECOP": true,
             "PRIMARY_PROVIDER": "Gemini",
         ]

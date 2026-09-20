@@ -53,7 +53,7 @@ docs/                     # design specs, plans, reviews, roadmaps
 
 ## Critical invariants — do not break
 
-1. **Every new field on a persisted `Codable` type must use `decodeIfPresent` (or be excluded via `CodingKeys`).** Adding a stored property with a default value is not enough — Swift's synthesized `Decodable` throws when a key is missing, which causes the entire `conversations` array to fail to load and silently drops ALL conversations. Use `decodeIfPresent(...) ?? default` in a custom `init(from:)`, or add a `CodingKeys` case that excludes the new field entirely.
+1. **Every new field on a persisted `Codable` type must use `decodeIfPresent` (or be excluded via `CodingKeys`).** Adding a stored property with a default value is not enough — Swift's synthesized `Decodable` throws when a key is missing, which makes that row unreadable: since #163 a message or history entry that fails to decode is quarantined and reported at launch rather than dropping every conversation, but a quarantined row is still lost to the user until someone recovers it by hand. Use `decodeIfPresent(...) ?? default` in a custom `init(from:)`, or add a `CodingKeys` case that excludes the new field entirely.
 
 2. **`AppState` is `@Observable`, not `ObservableObject`.** Do not add `@Published`. SwiftUI views that hold `AppState` as a plain `let` or `@State` get automatic re-render tracking from the `@Observable` macro. Adding `@Published` or wrapping in `@ObservedObject` will break this.
 

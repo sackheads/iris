@@ -77,7 +77,7 @@ enum IrisDefaults {
     /// measured window.
     static func perfSeed(from domain: [String: Any]) -> [String: Any] {
         domain.filter { key, _ in
-            key != "iris_conversations" && !key.hasPrefix("iris_conversations_backup_")
+            key != "iris_conversations" && key != "iris_conversations_legacy" && !key.hasPrefix("iris_conversations_backup_")
         }
     }
 

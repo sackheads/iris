@@ -95,7 +95,8 @@ enum ConversationStoreError: Error, Equatable {
 }
 
 /// Internal signal thrown by `failInjection` to make one conversation's savepoint roll back;
-/// never escapes `apply(_:)`, which reports the id through `ConversationStoreError` instead.
+/// never escapes `apply(_:)`, which reports the id through `ConversationStoreError` instead;
+/// `importLegacy` lets it propagate so the legacy import can report `.importFailed`.
 private struct InjectedWriteFailure: Error {}
 
 /// Per-conversation SQLite persistence (spec §2, §4, §5). One metadata row per conversation,
@@ -314,7 +315,8 @@ final class ConversationStore: Sendable {
     /// `String` and `String?`, and `String.fromDatabaseValue` *fails* — rather than returning
     /// nil — when the stored bytes are not valid UTF8, so an ordinary `row[column] as String?`
     /// still crashes the whole load on a corrupted or `rawWrite`-poked column. `Data` never fails
-    /// that conversion (it just copies the bytes), so every text column here is read through it
+    /// that conversion (it just copies the bytes), so the metadata text columns are read through it
+    /// (message and history payloads are read as `Data?` directly and decoded from bytes)
     /// and decoded ourselves; invalid bytes and SQL NULL both come back as `nil`, which is what
     /// every caller below already treats them as (missing/unreadable).
     private static func readText(_ row: Row, _ column: String) -> String? {
