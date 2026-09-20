@@ -343,9 +343,10 @@ struct SettingsView: View {
                             .help("Provide a URL to a .mlmodelc.zip (CoreML) or .onnx.zip (ONNX Runtime) to download and enable the Tier 2 classifier.")
                         
                         if !config.promptGuardCoreMLModel.isEmpty {
-                            let coreMLFilename = config.promptGuardCoreMLModel.starts(with: "http") ? (URL(string: config.promptGuardCoreMLModel)?.lastPathComponent ?? config.promptGuardCoreMLModel) : config.promptGuardCoreMLModel
-                            let coreMLNameNoZip = coreMLFilename.hasSuffix(".zip") ? String(coreMLFilename.dropLast(4)) : coreMLFilename
-                            let isCoreMLDownloaded = downloader.isModelDownloaded(name: coreMLNameNoZip)
+                            // #210 fix round 1: routed through the shared helpers so this can
+                            // never disagree with InjectionGuard.tier2Provisioning/ModelLEDBar.
+                            let coreMLFilename = ModelDownloader.resolvedFilename(for: config.promptGuardCoreMLModel)
+                            let isCoreMLDownloaded = downloader.isCoreMLModelDownloaded(name: config.promptGuardCoreMLModel)
                             
                             if !isCoreMLDownloaded {
                                 let isTier2Downloading = downloader.isDownloading && downloader.currentDownloadName == coreMLFilename

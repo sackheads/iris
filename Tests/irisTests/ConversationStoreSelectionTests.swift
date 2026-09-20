@@ -97,13 +97,13 @@ struct ConversationStoreSelectionTests {
         // this machine happens to have the real tier-3 gguf under `~/.iris/models` — without it, a
         // real `AppState` also emits the #202 tier-3-unprovisioned notice by default, which is
         // legitimate but unrelated to what this test verifies.
-        let a = AppState(store: store, tier3Provisioning: .provisioned)
+        let a = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         #expect(a.loadedSkippedRows.count == 1)
         #expect(notices(a) == ["1 saved conversation could not be read and was left in place; see the console for details."])
         a.flushSave()
 
         // Launch 2 hits the same condition and finds its own wording already there.
-        let b = AppState(store: store, tier3Provisioning: .provisioned)
+        let b = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         #expect(b.loadedSkippedRows.count == 1)
         #expect(notices(b).count == 1)
         b.flushSave()
@@ -124,7 +124,7 @@ struct ConversationStoreSelectionTests {
     @Test("the tier-3-unprovisioned notice is appended when the model is unprovisioned")
     func tier3UnprovisionedNoticeAppended() throws {
         let store = try ConversationStore.inMemory()
-        let app = AppState(store: store, tier3Provisioning: .unprovisioned(modelName: "some-model.gguf"))
+        let app = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .unprovisioned(modelName: "some-model.gguf"))
         let notices = app.conversations.flatMap { $0.messages }
             .filter { $0.role == .system && $0.content.contains("tier-3 guard model") }
             .map(\.content)
@@ -134,9 +134,31 @@ struct ConversationStoreSelectionTests {
     @Test("no tier-3-unprovisioned notice is appended when the model is provisioned")
     func tier3UnprovisionedNoticeAbsentWhenProvisioned() throws {
         let store = try ConversationStore.inMemory()
-        let app = AppState(store: store, tier3Provisioning: .provisioned)
+        let app = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         let notices = app.conversations.flatMap { $0.messages }
             .filter { $0.role == .system && $0.content.contains("tier-3 guard model") }
+        #expect(notices.isEmpty)
+    }
+
+    /// #210: same wiring as the tier-3 pair above, but for the tier-2 CoreML model.
+    /// `tier2Provisioning:` lets these two tests assert both outcomes without touching the real
+    /// models directory.
+    @Test("the tier-2-unprovisioned notice is appended when the model is unprovisioned")
+    func tier2UnprovisionedNoticeAppended() throws {
+        let store = try ConversationStore.inMemory()
+        let app = AppState(store: store, tier2Provisioning: .unprovisioned(modelName: "some-coreml-model.onnx"), tier3Provisioning: .provisioned)
+        let notices = app.conversations.flatMap { $0.messages }
+            .filter { $0.role == .system && $0.content.contains("tier-2 guard model") }
+            .map(\.content)
+        #expect(notices == ["Prompt-injection protection is on, but the tier-2 guard model some-coreml-model.onnx is not downloaded. Tier 2 is skipped until it is (Settings \u{2192} Security)."])
+    }
+
+    @Test("no tier-2-unprovisioned notice is appended when the model is provisioned")
+    func tier2UnprovisionedNoticeAbsentWhenProvisioned() throws {
+        let store = try ConversationStore.inMemory()
+        let app = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        let notices = app.conversations.flatMap { $0.messages }
+            .filter { $0.role == .system && $0.content.contains("tier-2 guard model") }
         #expect(notices.isEmpty)
     }
 
@@ -190,7 +212,7 @@ struct ConversationStoreSelectionTests {
         let damagedId = damaged.id
         store.failInjection = { $0 == damagedId }
 
-        let a = AppState(store: store, tier3Provisioning: .provisioned)
+        let a = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         #expect(a.conversations.map(\.title) == ["healthy"])
         #expect(a.loadedRepairFailed == [damagedId])
         // Exactly one notice: the repair-failed conversation's id is absent from `loadedIds`

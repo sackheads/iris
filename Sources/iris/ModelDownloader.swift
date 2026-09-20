@@ -40,9 +40,34 @@ class ModelDownloader: NSObject, URLSessionDownloadDelegate {
         name.starts(with: "http") ? (URL(string: name)?.lastPathComponent ?? name) : name
     }
 
+    /// Resolves a CoreML/ONNX guard-model config value (raw name, source URL, or `.zip` archive)
+    /// to the directory name it unpacks to under `modelsDir`. Builds on `resolvedFilename` and
+    /// additionally strips a trailing `.zip` — the tier-2 guard model ships as
+    /// `<name>.onnx.zip`/`<name>.mlmodelc.zip` and unzips to `<name>.onnx/`/`<name>.mlmodelc/`.
+    /// Shared by `CoreMLEvaluator.loadModelIfNeeded`, `InjectionGuard.tier2Provisioning` (#210),
+    /// and `ModelLEDBar.tier2State` so none of them can drift on what "downloaded" means.
+    nonisolated static func resolvedCoreMLDirectoryName(for name: String) -> String {
+        let filename = resolvedFilename(for: name)
+        return filename.hasSuffix(".zip") ? String(filename.dropLast(4)) : filename
+    }
+
     func isModelDownloaded(name: String) -> Bool {
         let filename = Self.resolvedFilename(for: name)
         let path = IrisPaths.default.modelsDir.path + "/" + filename
+        return FileManager.default.fileExists(atPath: path)
+    }
+
+    /// CoreML/ONNX-specific downloaded-check (#210 fix round 1). Guards the empty-name case —
+    /// `isModelDownloaded(name: "")` resolves to `modelsDir.path` itself, which exists as soon as
+    /// anything has ever been downloaded, so an unconfigured Tier 2 field showed "Model ready" in
+    /// the Setup Wizard (`SettingsView` happened to guard this itself before calling in, but the
+    /// Wizard did not). Resolves through `resolvedCoreMLDirectoryName` so Settings/Setup Wizard can
+    /// never disagree with `InjectionGuard.tier2Provisioning`/`ModelLEDBar.tier2State` about what
+    /// "downloaded" means. `isModelDownloaded` itself is left alone for its gguf/vibecop callers.
+    func isCoreMLModelDownloaded(name: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        let dirName = Self.resolvedCoreMLDirectoryName(for: name)
+        let path = IrisPaths.default.modelsDir.path + "/" + dirName
         return FileManager.default.fileExists(atPath: path)
     }
     
@@ -118,7 +143,22 @@ class ModelDownloader: NSObject, URLSessionDownloadDelegate {
                 process.arguments = ["-o", destination.path, "-d", dirPath]
                 try process.run()
                 process.waitUntilExit()
-                try? FileManager.default.removeItem(at: destination) // clean up zip
+                try? FileManager.default.removeItem(at: destination) // clean up zip either way
+                // #210 fix round 1: `unzip`'s exit status was never checked. A partial/failed
+                // extraction (disk full, truncated download, corrupt archive) used to leave
+                // whatever it managed to write sitting at the resolved directory path —
+                // `InjectionGuard.tier2Provisioning`/`ModelLEDBar.tier2State` only check that the
+                // directory *exists*, so that reported "provisioned" while the actual load kept
+                // throwing on every guarded turn (the do/catch -> `.error`, fail-closed path),
+                // uncached, with no notice pointing at why. Remove whatever the partial unzip left
+                // behind and surface it the same way other download failures are surfaced below.
+                guard process.terminationStatus == 0 else {
+                    let unpackedName = ModelDownloader.resolvedCoreMLDirectoryName(for: filename)
+                    try? FileManager.default.removeItem(at: URL(fileURLWithPath: dirPath).appendingPathComponent(unpackedName))
+                    throw NSError(domain: "ModelDownloader", code: Int(process.terminationStatus), userInfo: [
+                        NSLocalizedDescriptionKey: "unzip exited with status \(process.terminationStatus); the download was removed, please retry"
+                    ])
+                }
             }
             
             Task { @MainActor in

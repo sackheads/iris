@@ -13,7 +13,10 @@ public final class CoreMLEvaluator: @unchecked Sendable {
     
     private init() {}
     
-    public func setModel(_ newModel: CoreMLModelProtocol) {
+    /// `nil` clears the loaded model (#210 fix round 1) — the test seam for forcing
+    /// `hasModelLoaded` back to `false` regardless of what an earlier test in the process
+    /// installed. Source-compatible with every existing non-nil caller.
+    public func setModel(_ newModel: CoreMLModelProtocol?) {
         lock.withLock {
             model = newModel
         }
@@ -28,12 +31,11 @@ public final class CoreMLEvaluator: @unchecked Sendable {
         let coreMLPathStr = ConfigManager.shared.promptGuardCoreMLModel
         if coreMLPathStr.isEmpty { return }
         
-        let filename = coreMLPathStr.starts(with: "http") ? (URL(string: coreMLPathStr)?.lastPathComponent ?? coreMLPathStr) : coreMLPathStr
-        var modelDirName = filename
-        if modelDirName.hasSuffix(".zip") {
-            modelDirName = String(modelDirName.dropLast(4))
-        }
-        
+        // #210: resolved via the shared helper so this can never disagree with
+        // `InjectionGuard.tier2Provisioning` or `ModelLEDBar.tier2State` about what "downloaded"
+        // means.
+        let modelDirName = ModelDownloader.resolvedCoreMLDirectoryName(for: coreMLPathStr)
+
         let basePath = IrisPaths.default.modelsDir.path
         let fullPath = URL(fileURLWithPath: basePath).appendingPathComponent(modelDirName)
         

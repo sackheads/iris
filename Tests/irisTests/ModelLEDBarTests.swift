@@ -108,18 +108,23 @@ final class ModelLEDBarTests: XCTestCase {
         XCTAssertEqual(bar.tier2State(), .off)
     }
 
-    func testTier2ConfiguredWhenModelFieldEmpty() {
+    func testTier2UnprovisionedWhenModelFieldEmpty() {
+        // #210: an empty field is `.notConfigured`, which the LED treats the same as
+        // `.unprovisioned` — the guard skips tier 2 entirely rather than blocking, so the LED
+        // must say so rather than reporting the more benign "enabled, not loaded" `.configured`.
         config.enableAdvancedPromptInjectionProtection = true
         config.promptGuardCoreMLModel = ""
         let bar = ModelLEDBar(config: config)
-        XCTAssertEqual(bar.tier2State(), .configured)
+        XCTAssertEqual(bar.tier2State(), .unprovisioned)
     }
 
-    func testTier2ConfiguredWhenModelNotDownloaded() {
+    func testTier2UnprovisionedWhenModelNotDownloaded() {
+        // #210: mirror of `testTier3UnprovisionedWhenGGUFMissing` — an absent tier-2 model is a
+        // distinct LED state from "downloaded but not loaded".
         config.enableAdvancedPromptInjectionProtection = true
         config.promptGuardCoreMLModel = "nonexistent.onnx.zip"
         let bar = ModelLEDBar(config: config)
-        XCTAssertEqual(bar.tier2State(), .configured)
+        XCTAssertEqual(bar.tier2State(), .unprovisioned)
     }
 
     // MARK: - Tier 3 LED
