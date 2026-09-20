@@ -17,6 +17,10 @@ struct ChatView: View {
     /// search-reveal target reliably win regardless of which handler happened to run first.
     @State private var scrollPassScheduled = false
     @State private var showSubagents = false
+    /// Backing state for the Archived disclosure group; the effective binding also expands
+    /// whenever the selection is archived (see the group below), so this alone is "did the user
+    /// manually toggle it" rather than "is it currently expanded".
+    @State private var archivedExpanded = false
     @State private var showSetupWizard = false
     /// Sidebar conversation search (#183). `sidebarSearchGroups` is republished by the debounced
     /// `.task(id: sidebarQuery)` below rather than computed inline, because the store read it
@@ -46,6 +50,24 @@ struct ChatView: View {
                         Section(header: Text("Conversations").font(.caption.weight(.bold)).foregroundColor(.secondary).padding(.bottom, 4)) {
                             ForEach(state.conversations.filter { !$0.isSubagent && !$0.isArchived }) { conv in
                                 conversationRow(conv)
+                            }
+                        }
+
+                        let archived = state.conversations.filter { !$0.isSubagent && $0.isArchived }
+                        if !archived.isEmpty {
+                            // Expanded whenever the selection is in here, so a search reveal or the
+                            // launch fallback can never leave a selected row invisible (#182 §9).
+                            DisclosureGroup(isExpanded: Binding(
+                                get: {
+                                    archivedExpanded || archived.contains { $0.id == state.selectedConversationId }
+                                },
+                                set: { archivedExpanded = $0 }
+                            )) {
+                                ForEach(archived) { conv in
+                                    conversationRow(conv)
+                                }
+                            } label: {
+                                Text("Archived").font(.caption.weight(.bold)).foregroundColor(.secondary)
                             }
                         }
                     } else {
