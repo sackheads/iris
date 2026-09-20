@@ -217,4 +217,27 @@ The legacy key is never read again. An issue is filed at implementation time to 
 
 - **Load time at init stays synchronous.** For the 4.79 MB case this is a few thousand row decodes on launch, comparable to today's one big decode; lazy loading is #177.
 - **Two writers at quit.** Covered in §4; both paths are idempotent and GRDB serializes them.
+
+## 10. Persisted types (invariant 1, #204)
+
+Invariant 1 ("every new field on a persisted `Codable` type must use `decodeIfPresent`") applies to
+every type `loadAll` decodes, not only `Conversation`. A strict decode failure on any of these is
+caught at the row level and skips the **whole conversation** (tokenUsage/goalContract/subagentResult),
+except messages/history payloads, which are quarantined per-row, and checkpointHistory, which
+degrades to `[]`.
+
+| Type | Custom `init(from:)`? | Essential fields kept required |
+|---|---|---|
+| `ChatMessage` | yes | `role`, `content` |
+| `TokenUsage` | yes (#204) | none — all three counters default to 0 |
+| `GoalContract` | yes | `objective`, `criteria` |
+| `SubagentResult` | yes (#204) | none — no id field exists to protect |
+| `CheckpointOutcome` | yes | `resolution` |
+| `GoalEvaluation` | yes | `status` |
+| `Criterion`, `Milestone`, `ContractChange`, `CriterionVerdict` | no (synthesized) | all fields — introduced together with their type, never added incrementally, so no forward-compat gap exists today |
+
+The rule: a field added to any of these types after it started being persisted must be
+`decodeIfPresent`-defaulted (or excluded via `CodingKeys`), and an `id` another row references
+(e.g. `Criterion.id`, matched by `Milestone.criterionIds` and `GoalContract.waivers`/`judgements`)
+should stay required rather than silently minted fresh on decode, which would sever the reference.
 - **A mutation site that forgets `markChanged`.** Today it would forget `saveConversations` the same way; a test that walks every public mutating method against a fresh `AppState` and asserts `pendingChanges` is non-empty catches the ones that exist now.

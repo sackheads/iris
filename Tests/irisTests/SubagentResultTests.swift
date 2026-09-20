@@ -50,4 +50,33 @@ struct SubagentResultTests {
         let back = try JSONDecoder().decode(Conversation.self, from: JSONEncoder().encode(conv))
         #expect(back.subagentResult == nil)
     }
+
+    // #204: SubagentResult had no hand-written `init(from:)` at all, so every one of its
+    // non-Optional fields threw `keyNotFound` if absent -- and that throw is caught at the
+    // conversation-row level in ConversationStore.loadAll, taking the whole conversation with it
+    // (invariant 1).
+    @Test("a SubagentResult JSON object missing every field decodes to safe defaults instead of throwing")
+    func missingAllFieldsDefaults() throws {
+        let r = try JSONDecoder().decode(SubagentResult.self, from: Data("{}".utf8))
+        #expect(r.schemaVersion == 1)
+        #expect(r.role == "")
+        #expect(r.status == .failed)
+        #expect(r.calledGoalComplete == false)
+        #expect(r.summary == "")
+        #expect(r.filesWritten == [])
+        #expect(r.unitContract == nil)
+        #expect(r.verdict == nil)
+    }
+
+    @Test("a SubagentResult JSON object missing the newest field (schemaVersion) defaults just that field")
+    func missingSchemaVersionDefaults() throws {
+        let json = """
+        {"role":"engineer","status":"completed","calledGoalComplete":true,"summary":"did the thing",
+         "filesWritten":["a.swift"],"startedAt":0,"endedAt":5}
+        """
+        let r = try JSONDecoder().decode(SubagentResult.self, from: Data(json.utf8))
+        #expect(r.schemaVersion == 1)
+        #expect(r.role == "engineer")
+        #expect(r.filesWritten == ["a.swift"])
+    }
 }
