@@ -135,28 +135,60 @@ already persisted in full and already survives restart.
 **All three resolutions are recorded**, not only auto-advances, so F inherits a complete ladder
 record rather than a partial one. An entry is appended once per checkpoint resolution.
 
-## 6. `humanJudged` at a checkpoint
+## 6. `humanJudged` at a checkpoint — it stops, it does not ask
 
 D2 §2 left a `humanJudged` criterion inside a milestone "surfaced and non-blocking — D3 owns the
-ladder." D3 closes it:
+ladder." D3 closes the **blocking** half of that and defers the **asking** half:
 
 - A milestone containing an **unjudged** `humanJudged` criterion **never** auto-advances (§3.3).
-- The resulting pause **asks for the verdict**: `beginJudgementPause` fires, and
-  `CheckpointPauseChip` renders D2's Accept/Reject controls over `DriftCriterionRow`, which it
-  already uses.
-- Accepting or rejecting writes through to `GoalContract.judgements` (§5.1) as well as to
-  `lastGoalEvaluation`, so the decision survives the next grade and a restart.
-- A criterion with a recorded judgement is **not** re-asked. It reconciles to the recorded verdict
-  (§7.1), so a later checkpoint can auto-advance past it.
+  The checkpoint pauses exactly as any contested grade does.
+- The pause does **not** ask for the verdict. No `beginJudgementPause` at a checkpoint. The user
+  sees the grader's verdict on the checkpoint chip and resolves the stop with the existing
+  "Approve & continue" / "Send back" controls, the same two buttons every other contested
+  checkpoint offers.
+- Judgement itself stays where D2 put it: the terminal `goal_complete` gate. A `humanJudged`
+  criterion is asked about once, at completion.
+- A criterion with a recorded judgement still reconciles to the recorded verdict (§7.1), so a
+  later checkpoint can auto-advance past it. `judgements` remains durable (§5.1) — it is what the
+  terminal gate and every intervening re-grade read.
 
-Without this, "all met" could advance a milestone with nobody having judged the one criterion only
-a human may judge — the exact provenance violation D2 closed at the terminal gate, one level down.
-It also makes the stop earn its keep: under D3 a human is interrupted only when something needs
-them, so an interruption that asks nothing is the rubber-stamp pattern D3 exists to remove.
+Without the blocking rule, "all met" could advance a milestone with nobody having judged the one
+criterion only a human may judge — the provenance violation D2 closed at the terminal gate, one
+level down. The block is what closes it; asking inline is an ergonomic improvement on top, not the
+guarantee.
 
-Judgement recording reuses D2 unchanged: `recordHumanJudgement`, `resolveJudgementIfComplete`,
-`VerdictMethod.human`. A grader still may not produce a `humanJudged` verdict —
-`GoalEvaluationParsing` forces `.humanPending` structurally, and that is not relaxed.
+**Why the inline Accept/Reject is deferred to a future slice.** Asking at the checkpoint requires
+an answer surface — Accept/Reject controls on `CheckpointPauseChip` over `DriftCriterionRow` — and
+that view work was never built in this slice. Shipping the pause without it would stop the user
+with a question that has no answer button, and a restart in that state is unrecoverable:
+`sanitizeLoaded` nils `lastGoalEvaluation`, so `recordHumanJudgement` would always return false
+while `isPaused` blocks the resume guard. Stopping without asking is strictly better than asking
+without a way to answer, and it costs the user only the interruption's *shape* — they are stopped
+either way. Checkpoint judgement (the UI, the restart-survival path, and the plumbing that routes a
+mid-ladder verdict without touching the terminal gate) becomes its own slice.
+
+`resolveJudgementIfComplete`'s checkpoint branch (the mid-ladder discriminator that keeps a
+judgement from finishing the whole goal) stays in place, unreachable but deliberate: it is the
+backstop for the day that slice lands, and for any code that sets `awaitingHumanJudgement`
+mid-ladder. `advanceCheckpoint` and `holdCheckpoint` clear the flag for the same reason.
+
+A grader still may not produce a `humanJudged` verdict — `GoalEvaluationParsing` forces
+`.humanPending` structurally, and that is not relaxed.
+
+### 6.1 A terminal rejection is consumed, not sticky
+
+`judgements` being durable makes a terminal **rejection** permanent, which it must not be. Before
+durable judgements a rejection lived only in `lastGoalEvaluation` and the next grade overwrote it,
+so after the agent reworked the criterion the user was asked again. A persisted
+`judgements[id] == false` instead reconciles to `.notMet` at every later grade, lands in
+`GoalContract.blockingCriteria`, and refuses the gate on every remaining attempt — running a full
+grader each time until `maxDoneGateRetries` is exhausted, on a verdict the agent can never earn
+and only the user can lift.
+
+So `resolveJudgementIfComplete`'s rejection branch removes the rejected criteria from
+`judgements` before it resumes the agent: the rework it is triggering is what consumes the verdict,
+and the user is asked again once the work has actually changed. Acceptances still persist — nothing
+about an acceptance needs re-deciding.
 
 ## 7. Control flow
 
@@ -253,14 +285,19 @@ delicate goal has one switch. Per AGENTS.md invariant 7, tests must not mutate
 - A clean grade does **not** call `resumeGoalLoop` — no second loop while the turn is live.
 - One `not_met` pauses; one `cannot_verify` pauses.
 - A `.failed` evaluation pauses (fail-safe, §4).
-- A milestone containing an unjudged `humanJudged` criterion pauses **and** enters a judgement
-  pause, even when every other criterion is `met`.
-- **A judgement survives the next grade.** Accept a `humanJudged` criterion at checkpoint 1; the
-  checkpoint-2 evaluation reconciles it to `.met` with `method == .human` rather than
-  `.humanPending`, and checkpoint 2 auto-advances. This is the regression the durable
-  `judgements` map exists to prevent (§5.1) — assert it directly, not via the happy path.
-- A rejected judgement reconciles to `.notMet` and blocks auto-advance at every later checkpoint.
-- A criterion already judged at a checkpoint does not prompt again at the terminal gate.
+- A milestone containing an unjudged `humanJudged` criterion pauses with
+  `checkpointStatus == .pausedForReview` **and** `awaitingHumanJudgement == false`, even when every
+  other criterion is `met` — it stops, it does not ask (§6).
+- `advanceCheckpoint` and `holdCheckpoint` each clear `awaitingHumanJudgement`, so the human
+  controls can never leave the terminal/checkpoint discriminator half-flipped (§6).
+- **A judgement survives the next grade.** Accept a `humanJudged` criterion; a later evaluation
+  reconciles it to `.met` with `method == .human` rather than `.humanPending`, and the checkpoint
+  auto-advances. This is the regression the durable `judgements` map exists to prevent (§5.1) —
+  assert it directly, not via the happy path.
+- A recorded rejection reconciles to `.notMet` and blocks auto-advance while it stands.
+- **A terminal rejection is consumed** (§6.1): the rejected criterion is removed from `judgements`
+  on the reject-resume path, so a later re-grade returns it to `.humanPending` rather than
+  re-refusing the gate and burning the retry cap.
 - A grader's submitted verdict on a `humanJudged` criterion is still ignored, and a
   grader-submitted `human_pending` is still downgraded (D2's guarantees, unrelaxed).
 - Round-trip: a `GoalContract` encoded without `judgements` decodes with `[:]` and does not throw
