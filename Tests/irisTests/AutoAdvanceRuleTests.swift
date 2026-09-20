@@ -133,4 +133,25 @@ struct AutoAdvanceRuleTests {
         contract.lock()
         #expect(contract.canAutoAdvance(from: eval(.graded, [verdict(a, .met)])) == false)
     }
+
+    @Test("a checkpoint already paused for review never auto-advances past the human")
+    func testOpenCheckpointPauseNeverAdvances() {
+        // The chip is up and the user is deciding. A user who types instead of clicking gets an
+        // ordinary turn that can reach this checkpoint again; advancing there would consume the
+        // decision they were in the middle of making and drop the chip out from under them.
+        let a = Criterion(text: "a", kind: .qualitative, check: nil)
+        var contract = ladder([a])
+        contract.checkpointStatus = .pausedForReview
+        #expect(contract.canAutoAdvance(from: eval(.graded, [verdict(a, .met)])) == false)
+    }
+
+    @Test("a goal awaiting the human's judgement never auto-advances")
+    func testAwaitingJudgementNeverAdvances() {
+        // Spec §10 requires this asserted, not derived: §3.3 makes it unreachable only for as
+        // long as every pending criterion is still visibly `human_pending` in the grade.
+        let a = Criterion(text: "a", kind: .qualitative, check: nil)
+        var contract = ladder([a])
+        contract.awaitingHumanJudgement = true
+        #expect(contract.canAutoAdvance(from: eval(.graded, [verdict(a, .met)])) == false)
+    }
 }

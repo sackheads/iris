@@ -356,8 +356,14 @@ extension GoalContract {
     /// grader that errored, timed out, or produced nothing pauses (§4). That fail-safe used to be
     /// structural — `performCheckpoint` paused BEFORE grading — and grading first removes it, so
     /// it is restored here explicitly.
+    ///
+    /// A pause already awaiting the human is never auto-advanced past. A user who types instead of
+    /// clicking gets an ordinary turn, and that turn may reach this checkpoint again; advancing
+    /// would consume the decision they were in the middle of making and drop the chip they were
+    /// looking at. Their click stays the only thing that resolves an open pause (spec §10).
     func canAutoAdvance(from evaluation: GoalEvaluation?) -> Bool {
-        guard hasLadder, !isFinalMilestone else { return false }
+        guard hasLadder, !isFinalMilestone,
+              checkpointStatus == .running, !awaitingHumanJudgement else { return false }
         guard let evaluation, evaluation.status == .graded, !evaluation.criteria.isEmpty else {
             return false
         }
