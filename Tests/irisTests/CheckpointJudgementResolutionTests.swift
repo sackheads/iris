@@ -83,11 +83,40 @@ struct CheckpointJudgementResolutionTests {
         #expect(app.isThinking == false, "'Send back' is the human's next click, not an auto-resume")
     }
 
+    @Test("approving a checkpoint clears any outstanding judgement flag")
+    func testAdvanceCheckpointClearsJudgementFlag() {
+        // Defence in depth. `advanceCheckpoint` sets `checkpointStatus = .running`, which is half
+        // the discriminator `resolveJudgementIfComplete` reads. Leaving `awaitingHumanJudgement`
+        // set would make a later Accept/Reject take the TERMINAL branch — finishing and clearing
+        // the whole goal at milestone 1 of 2 because the user answered one criterion.
+        let app = AppState(); let id = UUID()
+        _ = pausedAtCheckpoint(app, id)
+
+        app.advanceCheckpoint(for: id)
+
+        let c = app.conversations.first { $0.id == id }?.goalContract
+        #expect(c?.awaitingHumanJudgement == false,
+                "the checkpoint is over, so nothing may still claim to be awaiting a verdict")
+        #expect(c?.checkpointStatus == .running)
+    }
+
+    @Test("sending a checkpoint back clears any outstanding judgement flag")
+    func testHoldCheckpointClearsJudgementFlag() {
+        let app = AppState(); let id = UUID()
+        _ = pausedAtCheckpoint(app, id)
+
+        app.holdCheckpoint(for: id, feedback: "needs another pass")
+
+        let c = app.conversations.first { $0.id == id }?.goalContract
+        #expect(c?.awaitingHumanJudgement == false)
+        #expect(c?.checkpointStatus == .running)
+    }
+
     @Test("a terminal judgement pause still completes and clears the goal")
     func testTerminalPauseUnchanged() {
         let app = AppState(); let id = UUID()
         let h = Criterion(text: "output reads well", kind: .humanJudged, check: nil)
-        var c = GoalContract(objective: "Ship it", criteria: [h])
+        let c = GoalContract(objective: "Ship it", criteria: [h])
         app.createNewConversation(id: id)
         app.setGoalContract(for: id, c)   // no ladder, checkpointStatus stays .running
 

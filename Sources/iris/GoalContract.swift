@@ -254,7 +254,7 @@ struct GoalContract: Codable, Equatable, Sendable {
             }
             s += isFinalMilestone
                 ? "This is the FINAL checkpoint — when its criteria hold, call `goal_complete`.\n"
-                : "When THIS checkpoint's criteria hold, call `reach_checkpoint` (not `goal_complete`) — the run pauses for the user to review before the next checkpoint.\n"
+                : "When THIS checkpoint's criteria hold, call `reach_checkpoint` (not `goal_complete`) — a clean grade advances on its own; anything contested pauses for the user.\n"
         }
         return s
     }

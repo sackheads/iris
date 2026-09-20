@@ -2,9 +2,11 @@ import Foundation
 
 enum GoalEvaluationParsing {
     /// Reconciles the grader's submitted verdicts against the FULL criteria list (spec §4.3):
-    /// a `humanJudged` criterion is ALWAYS `humanPending` (only the user may decide it); otherwise
-    /// use a supplied verdict if present, else `cannotVerify`. So every criterion always carries a
-    /// verdict and humanJudged never collapses to cannot_verify. `method` derives from the kind.
+    /// a `humanJudged` criterion is never decided by the grader — it resolves to the user's own
+    /// recorded verdict from `judgements` when there is one, and to `humanPending` when there is
+    /// not; otherwise use a supplied verdict if present, else `cannotVerify`. So every criterion
+    /// always carries a verdict and humanJudged never collapses to cannot_verify. `method` derives
+    /// from the kind, so a resolved humanJudged verdict is stamped `.human`, never `.judge`.
     static func verdicts(from args: [String: JSONValue],
                          criteria: [Criterion],
                          judgements: [UUID: Bool] = [:]) -> [CriterionVerdict] {

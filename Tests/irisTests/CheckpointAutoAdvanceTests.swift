@@ -129,8 +129,8 @@ struct CheckpointAutoAdvanceTests {
         #expect(c?.checkpointStatus == .pausedForReview)
     }
 
-    @Test("an unjudged humanJudged criterion pauses and asks for the verdict")
-    func testHumanJudgedPausesAndAsks() async {
+    @Test("an unjudged humanJudged criterion stops the checkpoint without asking for the verdict")
+    func testHumanJudgedPausesWithoutAsking() async {
         let app = AppState(); let id = UUID()
         let a = Criterion(text: "parser works", kind: .qualitative, check: nil)
         let h = Criterion(text: "output reads well", kind: .humanJudged, check: nil)
@@ -148,7 +148,13 @@ struct CheckpointAutoAdvanceTests {
 
         let after = app.conversations.first { $0.id == id }?.goalContract
         #expect(after?.currentMilestone == 0, "an unjudged human criterion must not be skipped")
-        #expect(after?.awaitingHumanJudgement == true, "the pause must ask, not just stop")
+        #expect(after?.checkpointStatus == .pausedForReview, "it still stops for the human")
+        // It must NOT open a judgement pause. The inline Accept/Reject surface does not exist, so
+        // asking here would stop the user with a question that has no answer button — and a
+        // restart in that state is unrecoverable (`sanitizeLoaded` nils `lastGoalEvaluation`, so
+        // `recordHumanJudgement` can never succeed again). Judgement stays at the terminal gate.
+        #expect(after?.awaitingHumanJudgement == false,
+                "the checkpoint stops for review; it does not ask for a verdict it cannot collect")
     }
 
     @Test("an unjudged humanJudged criterion in a FUTURE milestone must not trigger a judgement pause")

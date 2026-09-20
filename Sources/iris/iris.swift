@@ -267,23 +267,19 @@ actor IrisEngine {
                 }
                 .joined(separator: "\n")
             await pushToUI(role: .system,
-                           text: "Checkpoint \(ladderPos) (\(milestoneTitle)) auto-advanced — grader found \(met)/\(criteria.count) criteria met:\n\(lines)",
+                           text: "Checkpoint \(ladderPos) (\(milestoneTitle))\(via) auto-advanced — grader found \(met)/\(criteria.count) criteria met:\n\(lines)",
                            conversationId: conversationId)
             return "Checkpoint \(ladderPos) passed cleanly and advanced. Continue with the next milestone."
         }
 
         await MainActor.run {
             localState?.setCheckpointPaused(for: conversationId)   // leaves activeGoal set
-            // Scan the EVALUATION, not the whole contract: the contract can hold a `humanJudged`
-            // criterion belonging to a FUTURE milestone, never part of the projected grade. Asking
-            // about one of those has no way to resolve — it never appears in `lastGoalEvaluation`
-            // as `.humanPending`, so `recordHumanJudgement` can never find it, and
-            // `awaitingHumanJudgement` (which also gates the loop via `isPaused`) would never clear.
-            // `GoalEvaluationParsing` already reduces a `humanJudged` criterion to `.humanPending`
-            // iff it is ungraded, and only over the criteria this evaluation actually covers.
-            if evaluation?.criteria.contains(where: { $0.verdict == .humanPending }) == true {
-                localState?.beginJudgementPause(for: conversationId, summary: summary)
-            }
+            // A checkpoint STOPS for an unjudged `humanJudged` criterion (`canAutoAdvance` refuses
+            // it, spec §3.3) but deliberately does not ASK for the verdict here: the inline
+            // Accept/Reject surface a checkpoint judgement pause needs was never built, so opening
+            // one would stop the user with a question that has no answer button. Judgement stays
+            // at the terminal `goal_complete` gate until that UI exists; the user resolves this
+            // checkpoint with the existing "Approve & continue" / "Send back" controls.
         }
         await pushToUI(role: .agent,
                        text: "Reached checkpoint \(ladderPos)\(via): \(summary)\nPaused for your review — approve to continue or send me back.",
@@ -704,7 +700,7 @@ actor IrisEngine {
         if principal == .main, let gc = ladderContract, gc.hasLadder, !gc.isFinalMilestone {
             toolsList.append(FunctionDeclaration(
                 name: "reach_checkpoint",
-                description: "Signal that the CURRENT checkpoint's criteria are satisfied. The run pauses and an independent evaluator grades the work so far; the user then reviews before the next checkpoint. Use goal_complete only at the final checkpoint.",
+                description: "Signal that the CURRENT checkpoint's criteria are satisfied. An independent evaluator grades the work so far; a clean grade advances the ladder on its own and you keep working, anything contested pauses for the user. Use goal_complete only at the final checkpoint.",
                 parameters: Schema(
                     type: "OBJECT",
                     properties: [

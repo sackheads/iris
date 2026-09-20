@@ -208,7 +208,7 @@ final class SubagentManager: @unchecked Sendable {
     static func milestoneDelegationDeclaration() -> FunctionDeclaration {
         FunctionDeclaration(
             name: "delegate_milestone",
-            description: "Hand the CURRENT checkpoint's milestone to a bounded subagent that works it in its own context. Its definition of done is taken from the locked ladder — you do not restate it. When the subagent finishes the milestone, the checkpoint is reached and graded automatically and the run pauses for the user. Use reach_checkpoint instead when you did the work yourself.",
+            description: "Hand the CURRENT checkpoint's milestone to a bounded subagent that works it in its own context. Its definition of done is taken from the locked ladder — you do not restate it. When the subagent finishes the milestone, the checkpoint is reached and graded automatically: a clean grade advances the ladder on its own, anything contested pauses for the user. Use reach_checkpoint instead when you did the work yourself.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [

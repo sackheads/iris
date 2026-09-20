@@ -168,6 +168,11 @@ struct DelegateMilestoneTests {
         #expect(conv?.goalContract?.currentMilestone == 1, "a clean delegated grade should advance")
         #expect(conv?.goalContract?.checkpointHistory.first?.resolution == .autoAdvanced)
         #expect(client.graderCalls > 0)
+        // The transcript line is the only record that this rung was delegated — nobody stopped to
+        // see it happen, and `checkpointHistory` does not carry the delegate's name.
+        #expect(conv?.messages.contains {
+            $0.content.contains("auto-advanced") && $0.content.contains("via subagent")
+        } == true, "a delegated auto-advance must not read as work the main agent did itself")
     }
 
     @Test("the checkpoint grade covers earlier milestones, not just the delegated one")

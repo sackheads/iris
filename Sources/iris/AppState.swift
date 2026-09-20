@@ -1054,6 +1054,10 @@ class AppState {
         // they answered a question about one milestone. The human is already here and the
         // checkpoint chip's Approve/Send-back controls are the next step, so judging is all that
         // resolves here — approving the milestone stays a separate decision.
+        //
+        // Kept deliberately even though nothing opens a checkpoint judgement pause today: the
+        // checkpoint Accept/Reject UI is unbuilt, so `performCheckpoint` stops without asking.
+        // This is the backstop for the day it lands, or for any code that sets the flag mid-ladder.
         if conversations[idx].goalContract?.checkpointStatus == .pausedForReview {
             saveConversations()
             return
@@ -1097,6 +1101,13 @@ class AppState {
             // resume guard will wake and no button will render for. That is the exact trapped-goal
             // failure this gate exists to prevent.
             let names = rejected.map { "- \($0.criterionText)" }.joined(separator: "\n")
+            // Consume the rejection. `judgements` is durable, so leaving it in place would
+            // reconcile the criterion to `.notMet` at every later grade, keep it in
+            // `blockingCriteria`, and refuse the gate on every remaining attempt — burning the
+            // whole retry cap (a full grader run each time) on a verdict only the user can lift
+            // and the agent can never earn. The rework being triggered here is what spends it; the
+            // user is asked again once the work has actually changed. Acceptances still persist.
+            for v in rejected { conversations[idx].goalContract?.judgements[v.criterionId] = nil }
             // Reset the iteration budget as the checkpoint resumes do: the agent is being sent
             // back to work on something new, and a rejection that lands late in a long run would
             // otherwise soft-stop after a single turn.
@@ -1233,6 +1244,11 @@ class AppState {
         guard var c = conversations[idx].goalContract else { return }
         c.currentMilestone = min(c.currentMilestone + 1, c.milestones.count - 1)
         c.checkpointStatus = .running
+        // Clearing `checkpointStatus` alone would flip the discriminator `resolveJudgementIfComplete`
+        // reads without ending the judgement pause, so a later Accept/Reject would take the TERMINAL
+        // branch and complete + clear the whole goal at milestone 2 of 5. Unreachable today (nothing
+        // opens a checkpoint judgement pause), which is exactly why the hole must not be left open.
+        c.awaitingHumanJudgement = false
         conversations[idx].goalContract = c
         conversations[idx].goalIterationCount = 0
         markChanged(conversationId, .metadata)
@@ -1246,6 +1262,9 @@ class AppState {
                                 evaluation: conversations[idx].lastGoalEvaluation)
         guard var c = conversations[idx].goalContract else { return }
         c.checkpointStatus = .running
+        // Same reason as `advanceCheckpoint`: leaving the flag set while the checkpoint goes back to
+        // `.running` turns a later judgement into a terminal goal completion mid-ladder.
+        c.awaitingHumanJudgement = false
         conversations[idx].goalContract = c
         conversations[idx].goalIterationCount = 0
         markChanged(conversationId, .metadata)
