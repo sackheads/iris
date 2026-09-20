@@ -52,4 +52,24 @@ struct ArchiveSelectionTests {
                 "falls back only when there is nothing else")
         #expect(AppState.selectLaunchConversation([]) == nil)
     }
+
+    @Test("launch through the real load path selects the active conversation, not the last row")
+    func launchWiringSelectsActive() throws {
+        // The helper above is pure, so it stays green if `loadConversations` stops calling it.
+        // This one goes through the store and the real init, so reverting that call site to
+        // `loaded.last?.id` fails here.
+        let store = try ConversationStore.inMemory()
+        let active = Conversation(id: UUID(), title: "active")
+        var archivedOne = Conversation(id: UUID(), title: "archived")
+        archivedOne.isArchived = true
+        var created = ChangeSet(); created.add(.created)
+        try store.apply([ConversationWrite(id: active.id, snapshot: active, changes: created),
+                         ConversationWrite(id: archivedOne.id, snapshot: archivedOne, changes: created)])
+
+        let app = AppState(store: store)
+
+        #expect(app.conversations.map(\.title) == ["active", "archived"], "archived sorts last by position")
+        #expect(app.selectedConversationId == active.id,
+                "opening inside the collapsed Archived section is the failure this rule prevents")
+    }
 }
