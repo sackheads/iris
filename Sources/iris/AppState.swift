@@ -1022,6 +1022,13 @@ class AppState {
         eval.criteria[vIdx].verdict = accepted ? .met : .notMet
         eval.criteria[vIdx].method = .human
         conversations[idx].lastGoalEvaluation = eval
+        // D3: also record it on the contract. `lastGoalEvaluation` is transient — the next
+        // `beginGoalEvaluation` overwrites it and `sanitizeLoaded` clears it on load — so a
+        // checkpoint re-grade would otherwise reset this criterion to `human_pending` and ask the
+        // user for a verdict they already gave (spec §5.1).
+        var contract = conversations[idx].goalContract
+        contract?.judgements[criterionId] = accepted
+        conversations[idx].goalContract = contract
         markChanged(conversationId, .metadata)
         resolveJudgementIfComplete(for: conversationId)
         return true
