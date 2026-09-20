@@ -1,6 +1,6 @@
 # Checkpoint Auto-Advance (slice D3) — Design
 
-**Status:** implemented on `feat/checkpoint-auto-advance`; inline checkpoint judgement deferred (see §6)
+**Status:** implemented on `feat/checkpoint-auto-advance`; inline checkpoint judgement shipped by #191 (see §6 and `2026-09-20-checkpoint-judgement-ui.md`)
 **Issue:** #13 (inner/outer loop semantics), #9 (deterministic gates)
 **Deferred here by:** B1 §2, B4 §2, D1 §10, D2 §11
 
