@@ -146,7 +146,8 @@ public struct InjectionGuard {
     }
 
     private static func cacheKey(clean: String, source: String, maxTier: SanitizationTier, protectionEnabled: Bool?,
-                                  modelsDir: URL, tier2Provisioning: Tier2Provisioning, tier3Provisioning: Tier3Provisioning) -> String {
+                                  tier2ModelsDir: URL, tier3ModelsDir: URL,
+                                  tier2Provisioning: Tier2Provisioning, tier3Provisioning: Tier3Provisioning) -> String {
         let config = ConfigManager.shared
         let enabled = protectionEnabled ?? config.enableAdvancedPromptInjectionProtection
         // The tier-2 model path is in the key too, so correctness does not lean on CoreMLEvaluator
@@ -155,10 +156,13 @@ public struct InjectionGuard {
         // change when a model appears on disk mid-process — engine/model/modelsDir alone do not,
         // since none of those config values change when the user downloads the file from Settings.
         // Without them, a `.skipped` verdict cached before the download would keep being served
-        // after.
+        // after. Both models-dir paths are included for symmetry/defense-in-depth (#210 fix round
+        // 1) even though production only ever passes `IrisPaths.default.modelsDir` for both — a
+        // test that varies one independently of the other must still get its own cache entry.
         let parts = [clean, source, String(describing: maxTier), String(enabled),
                      config.promptGuardEngine, config.promptGuardModel, config.promptGuardCoreMLModel,
-                     modelsDir.path, String(describing: tier2Provisioning), String(describing: tier3Provisioning)]
+                     tier2ModelsDir.path, tier3ModelsDir.path,
+                     String(describing: tier2Provisioning), String(describing: tier3Provisioning)]
         let digest = SHA256.hash(data: Data(parts.joined(separator: "\u{0}").utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
@@ -200,14 +204,15 @@ public struct InjectionGuard {
                                               durationMs: (MonotonicClock.nowMs() - __start))
         }
         let source = sanitizeSourceLabel(contextTag)
-        let modelsDir = tier3ModelsDir ?? IrisPaths.default.modelsDir
+        let resolvedTier2ModelsDir = tier2ModelsDir ?? IrisPaths.default.modelsDir
+        let resolvedTier3ModelsDir = tier3ModelsDir ?? IrisPaths.default.modelsDir
         // Resolved once, up front, so the cache key (below) and the tier-2/tier-3 skip decisions
         // agree on the exact same filesystem snapshot (#202 fix round 2, extended to tier 2 by #210).
         let tier2ProvisioningResult = tier2Provisioning(modelName: ConfigManager.shared.promptGuardCoreMLModel,
-                                                         modelsDir: tier2ModelsDir ?? IrisPaths.default.modelsDir)
+                                                         modelsDir: resolvedTier2ModelsDir)
         let tier3ProvisioningResult = tier3Provisioning(engine: ConfigManager.shared.promptGuardEngine,
                                               modelName: ConfigManager.shared.promptGuardModel,
-                                              modelsDir: modelsDir)
+                                              modelsDir: resolvedTier3ModelsDir)
 
         // Tier 1: Strict Structural Isolation & Text Normalization
         let clean = measureSpanSync("guard.tier1") { executeTier1(rawInput) }
@@ -224,7 +229,8 @@ public struct InjectionGuard {
         }
 
         let key = cacheKey(clean: clean, source: source, maxTier: maxTier, protectionEnabled: protectionEnabled,
-                            modelsDir: modelsDir, tier2Provisioning: tier2ProvisioningResult, tier3Provisioning: tier3ProvisioningResult)
+                            tier2ModelsDir: resolvedTier2ModelsDir, tier3ModelsDir: resolvedTier3ModelsDir,
+                            tier2Provisioning: tier2ProvisioningResult, tier3Provisioning: tier3ProvisioningResult)
         if let cached = cache.get(key) {
             return cached
         }

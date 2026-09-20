@@ -17,6 +17,11 @@ import SwiftUI
 struct ModelLED: View {
     let label: String
     let state: LEDState
+    /// Which numbered guard tier this LED represents, for the `.unprovisioned` tooltip below.
+    /// Only P2/P3 ever reach `.unprovisioned` (#202, #210), so this is nil for every other LED.
+    /// Passed explicitly by `ModelLEDBar` rather than derived from `label` so the tooltip text
+    /// isn't coupled to the display string (#210 fix round 1).
+    var tierNumber: Int? = nil
 
     enum LEDState: CaseIterable {
         case off, configured, ready, active, downloading, unprovisioned
@@ -29,8 +34,9 @@ struct ModelLED: View {
             case .active:        Color.green
             case .downloading:   Color.orange
             // A more red-leaning, saturated orange than `.configured` — this state means the
-            // guard is actively skipping tier 3, not just "not loaded yet", and the tooltip
-            // should not be the only way to tell the two apart (#202 fix round 4).
+            // guard (tier 2 or tier 3, #202/#210) is actively skipping that tier, not just "not
+            // loaded yet", and the tooltip should not be the only way to tell the two apart
+            // (#202 fix round 4).
             case .unprovisioned: Color(red: 0.95, green: 0.35, blue: 0.1).opacity(0.65)
             }
         }
@@ -80,9 +86,9 @@ struct ModelLED: View {
         case .active:        return "\(label) — active"
         case .downloading:   return "\(label) — downloading"
         case .unprovisioned:
-            // Shared LED state for both P2 and P3 (#210): the tooltip names whichever tier this
-            // LED represents rather than hardcoding "tier 3".
-            let tier = label == "P2" ? "2" : "3"
+            // Shared LED state for both P2 and P3 (#210): names whichever tier this LED
+            // represents via the explicit `tierNumber`, not by pattern-matching `label`.
+            let tier = tierNumber.map(String.init) ?? "?"
             return "\(label) — enabled, model not downloaded; tier \(tier) skipped"
         }
     }
@@ -99,8 +105,8 @@ struct ModelLEDBar: View {
             ModelLED(label: "PRI", state: primaryState())
             ModelLED(label: "VC",  state: vibecopState())
             ModelLED(label: "P1",  state: tier1State())
-            ModelLED(label: "P2",  state: tier2State())
-            ModelLED(label: "P3",  state: tier3State())
+            ModelLED(label: "P2",  state: tier2State(), tierNumber: 2)
+            ModelLED(label: "P3",  state: tier3State(), tierNumber: 3)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 6)

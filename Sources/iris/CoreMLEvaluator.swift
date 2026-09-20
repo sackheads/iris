@@ -13,7 +13,10 @@ public final class CoreMLEvaluator: @unchecked Sendable {
     
     private init() {}
     
-    public func setModel(_ newModel: CoreMLModelProtocol) {
+    /// `nil` clears the loaded model (#210 fix round 1) — the test seam for forcing
+    /// `hasModelLoaded` back to `false` regardless of what an earlier test in the process
+    /// installed. Source-compatible with every existing non-nil caller.
+    public func setModel(_ newModel: CoreMLModelProtocol?) {
         lock.withLock {
             model = newModel
         }

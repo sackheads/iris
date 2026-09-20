@@ -420,9 +420,13 @@ struct SecurityStepView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                         
-                        let coreMLName = config.promptGuardCoreMLModel.starts(with: "http") ? (URL(string: config.promptGuardCoreMLModel)?.lastPathComponent ?? "") : config.promptGuardCoreMLModel
-                        let coreMLNoZip = coreMLName.hasSuffix(".zip") ? String(coreMLName.dropLast(4)) : coreMLName
-                        let isDownloaded = downloader.isModelDownloaded(name: coreMLNoZip)
+                        // #210 fix round 1: routed through the shared helpers so this can never
+                        // disagree with InjectionGuard.tier2Provisioning/ModelLEDBar, and so an
+                        // empty field is guarded (matches SettingsView's `!isEmpty` check above it)
+                        // rather than `isModelDownloaded(name: "")` reporting "downloaded" because
+                        // the models directory itself exists.
+                        let coreMLName = ModelDownloader.resolvedFilename(for: config.promptGuardCoreMLModel)
+                        let isDownloaded = downloader.isCoreMLModelDownloaded(name: config.promptGuardCoreMLModel)
                         
                         if !isDownloaded {
                             if downloader.isDownloading && downloader.currentDownloadName == coreMLName {
