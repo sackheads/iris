@@ -1134,9 +1134,11 @@ class AppState {
         eval.criteria[vIdx].method = .human
         conversations[idx].lastGoalEvaluation = eval
         // D3: also record it on the contract. `lastGoalEvaluation` is transient — the next
-        // `beginGoalEvaluation` overwrites it and `sanitizeLoaded` clears it on load — so a
-        // checkpoint re-grade would otherwise reset this criterion to `human_pending` and ask the
-        // user for a verdict they already gave (spec §5.1).
+        // `beginGoalEvaluation` overwrites it, and `sanitizeLoaded` clears it on load except while a
+        // pause is open on the user (#191) — so a checkpoint re-grade, or a restart once the pause
+        // has actually closed, would otherwise reset this criterion to `human_pending` and ask the
+        // user for a verdict they already gave (spec §5.1). The judgement must live on the contract
+        // for exactly the cases `lastGoalEvaluation` does not cover.
         var contract = conversations[idx].goalContract
         contract?.judgements[criterionId] = accepted
         conversations[idx].goalContract = contract
@@ -1373,8 +1375,9 @@ class AppState {
         c.checkpointStatus = .running
         // Clearing `checkpointStatus` alone would flip the discriminator `resolveJudgementIfComplete`
         // reads without ending the judgement pause, so a later Accept/Reject would take the TERMINAL
-        // branch and complete + clear the whole goal at milestone 2 of 5. Unreachable today (nothing
-        // opens a checkpoint judgement pause), which is exactly why the hole must not be left open.
+        // branch and complete + clear the whole goal at milestone 2 of 5. Reachable since #191
+        // (`performCheckpoint` opens a checkpoint judgement pause), so this clear is load-bearing,
+        // not defensive; pinned by `testAdvanceCheckpointClearsJudgementFlag`.
         c.awaitingHumanJudgement = false
         conversations[idx].goalContract = c
         conversations[idx].goalIterationCount = 0
