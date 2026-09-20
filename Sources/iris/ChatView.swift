@@ -17,19 +17,20 @@ struct ChatView: View {
     /// search-reveal target reliably win regardless of which handler happened to run first.
     @State private var scrollPassScheduled = false
     @State private var showSubagents = false
-    /// Backing state for the Archived disclosure group; the effective binding also expands
-    /// whenever the selection is archived (see the group below), so this alone is "did the user
-    /// manually toggle it" rather than "is it currently expanded".
+    /// Whether the Archived disclosure group is open. The single source of truth: the group
+    /// binds to it directly, so the disclosure triangle always does what it looks like it does.
     @State private var archivedExpanded = false
 
-    /// #182 §9: the Archived group is expanded when the user opened it, and *also* whenever the
-    /// selected conversation lives in it — a search reveal, a delete re-point, or the launch
-    /// fallback can all select an archived row, and a selected row nobody can see is the hazard
-    /// the same-list design exists to dissolve. Pulled out of the binding so the rule is
-    /// testable; the binding itself is not.
-    static func archivedGroupIsExpanded(userToggle: Bool, archived: [Conversation],
-                                        selection: UUID?) -> Bool {
-        userToggle || archived.contains { $0.id == selection }
+    /// #182 §9: the group auto-expands when the selection *moves into* it — a search reveal, a
+    /// delete re-point, or the launch fallback can all select an archived row, and a selected row
+    /// nobody can see is the hazard the same-list design exists to dissolve. It is an expand, not
+    /// a pin: evaluating it only on a selection change is what lets an explicit collapse stick
+    /// while that same archived row stays selected. Pulled out of the view so the rule is
+    /// testable; the `onChange` that applies it is not.
+    static func archivedGroupExpansion(current: Bool, archived: [Conversation],
+                                       previous: UUID?, selection: UUID?) -> Bool {
+        guard selection != previous else { return current }
+        return current || archived.contains { $0.id == selection }
     }
 
     @State private var showSetupWizard = false
@@ -52,6 +53,10 @@ struct ChatView: View {
     /// and resets it after making itself first responder.
     @State private var composerShouldFocus = false
     
+    private var archivedConversations: [Conversation] {
+        state.conversations.filter { !$0.isSubagent && $0.isArchived }
+    }
+
     var body: some View {
         NavigationSplitView {
             VStack {
@@ -64,18 +69,12 @@ struct ChatView: View {
                             }
                         }
 
-                        let archived = state.conversations.filter { !$0.isSubagent && $0.isArchived }
+                        let archived = archivedConversations
                         if !archived.isEmpty {
-                            // Expanded whenever the selection is in here, so a search reveal or the
-                            // launch fallback can never leave a selected row invisible (#182 §9).
-                            DisclosureGroup(isExpanded: Binding(
-                                get: {
-                                    Self.archivedGroupIsExpanded(userToggle: archivedExpanded,
-                                                                 archived: archived,
-                                                                 selection: state.selectedConversationId)
-                                },
-                                set: { archivedExpanded = $0 }
-                            )) {
+                            // A plain binding: the auto-expand is applied by the selection
+                            // `onChange` below, not by the getter, so a collapse is never
+                            // undone on the next render (#182 §9).
+                            DisclosureGroup(isExpanded: $archivedExpanded) {
                                 ForEach(archived) { conv in
                                     conversationRow(conv)
                                 }
@@ -139,6 +138,20 @@ struct ChatView: View {
                     }
                 }
                 .listStyle(.sidebar)
+                // Attached to the List rather than the group: the group only exists while
+                // something is archived, and the selection can land in it in the same pass that
+                // creates it. `onAppear` covers launch, where the restored selection never
+                // "changes" (#182 §9).
+                .onAppear {
+                    archivedExpanded = Self.archivedGroupExpansion(
+                        current: archivedExpanded, archived: archivedConversations,
+                        previous: nil, selection: state.selectedConversationId)
+                }
+                .onChange(of: state.selectedConversationId) { old, new in
+                    archivedExpanded = Self.archivedGroupExpansion(
+                        current: archivedExpanded, archived: archivedConversations,
+                        previous: old, selection: new)
+                }
                 .searchable(text: $sidebarQuery, placement: .sidebar, prompt: "Search conversations")
                 .task(id: sidebarQuery) {
                     await runSidebarSearch()
@@ -504,11 +517,17 @@ struct ChatView: View {
             if conv.isArchived {
                 Button("Unarchive") { state.unarchiveConversation(conv.id) }
             } else {
-                // A context-menu click has no channel for a system message, so the refusal
-                // lives in the disabled title rather than failing silently (#182 §9.1).
+                // The refusal lives in the disabled title (#182 §9.1). The title is computed
+                // when the menu is built, though, and a turn can start between that and the
+                // click, so the re-check writes the same system line `/archive` does rather
+                // than dropping its result on the floor.
                 let refusal = state.archiveRefusal(for: conv.id)
                 Button(refusal == nil ? "Archive" : "Archive (\(refusal!.reason))") {
-                    state.archiveConversation(conv.id)
+                    if let denied = state.archiveConversation(conv.id) {
+                        state.appendMessage(role: .system,
+                                            content: "Cannot archive: \(denied.reason).",
+                                            to: conv.id)
+                    }
                 }
                 .disabled(refusal != nil)
             }

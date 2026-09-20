@@ -19,23 +19,34 @@ struct ArchivedGroupExpansionTests {
     @Test("collapsed by default, and the user's toggle opens it")
     func userToggleWins() {
         let archived = [archivedConversation(UUID())]
-        #expect(ChatView.archivedGroupIsExpanded(userToggle: false, archived: archived,
-                                                 selection: UUID()) == false)
-        #expect(ChatView.archivedGroupIsExpanded(userToggle: true, archived: archived,
-                                                 selection: UUID()))
+        #expect(ChatView.archivedGroupExpansion(current: false, archived: archived,
+                                                previous: nil, selection: UUID()) == false)
+        #expect(ChatView.archivedGroupExpansion(current: true, archived: archived,
+                                                previous: nil, selection: UUID()))
     }
 
-    @Test("a selected archived conversation forces it open regardless of the toggle")
-    func selectionForcesExpanded() {
+    @Test("selecting an archived conversation opens the group")
+    func selectionExpands() {
         let id = UUID()
-        #expect(ChatView.archivedGroupIsExpanded(userToggle: false,
-                                                 archived: [archivedConversation(id)],
-                                                 selection: id))
+        #expect(ChatView.archivedGroupExpansion(current: false,
+                                                archived: [archivedConversation(id)],
+                                                previous: UUID(), selection: id))
+    }
+
+    /// The bug this replaced: the old `userToggle || selectionIsArchived` getter pinned the group
+    /// open while an archived row was selected, so the disclosure triangle visibly did nothing.
+    /// §9 asks for an auto-expand, not a pin.
+    @Test("an explicit collapse sticks while the same archived row stays selected")
+    func collapseWinsForTheCurrentSelection() {
+        let id = UUID()
+        #expect(ChatView.archivedGroupExpansion(current: false,
+                                                archived: [archivedConversation(id)],
+                                                previous: id, selection: id) == false)
     }
 
     @Test("no selection and nothing archived leave it closed")
     func nothingToShow() {
-        #expect(ChatView.archivedGroupIsExpanded(userToggle: false, archived: [],
-                                                 selection: nil) == false)
+        #expect(ChatView.archivedGroupExpansion(current: false, archived: [],
+                                                previous: nil, selection: nil) == false)
     }
 }
