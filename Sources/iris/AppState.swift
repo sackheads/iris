@@ -126,6 +126,11 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         if let gc = goalContract { goalContract = gc.normalizedLadder() }
     }
     
+    // Equality is identity ON PURPOSE: selection state and `Hashable` use in sets need "is this
+    // the same conversation", not "does every field currently match". Consequence: a SwiftUI view
+    // must never take a `Conversation` value as its only changing input — two values comparing
+    // equal by id will make SwiftUI's diffing skip re-running `body` after an in-place mutation.
+    // Take `conversationId: UUID` instead and read the live value from `state` inside `body` (#223, #224).
     static func == (lhs: Conversation, rhs: Conversation) -> Bool {
         lhs.id == rhs.id
     }
