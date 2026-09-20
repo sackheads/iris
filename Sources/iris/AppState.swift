@@ -1277,6 +1277,15 @@ class AppState {
         recordCheckpointOutcome(at: idx, .humanSentBack,
                                 evaluation: conversations[idx].lastGoalEvaluation)
         guard var c = conversations[idx].goalContract else { return }
+        // Consume the rejections this send-back is the rework for, exactly as the terminal gate's
+        // rejection branch does (spec §6.1). `judgements` is durable, so a `false` left in place
+        // reconciles the criterion to `.notMet` at every later grade, blocks `canAutoAdvance` for
+        // the rest of the ladder, and refuses the terminal gate on a verdict the agent can never
+        // earn. Send-back IS the rework trigger at a checkpoint, the way resume is at the terminal
+        // gate; the user is asked again once the work has actually changed. Acceptances persist.
+        for id in c.currentMilestoneCriteria().map(\.id) where c.judgements[id] == false {
+            c.judgements[id] = nil
+        }
         c.checkpointStatus = .running
         // Same reason as `advanceCheckpoint`: leaving the flag set while the checkpoint goes back to
         // `.running` turns a later judgement into a terminal goal completion mid-ladder.

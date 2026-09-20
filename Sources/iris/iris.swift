@@ -660,7 +660,7 @@ actor IrisEngine {
         if input.hasPrefix(Self.goalDraftTriggerPrefix) {
             toolsList.append(FunctionDeclaration(
                 name: "propose_goal_contract",
-                description: "Draft a structured contract for a goal the user is starting. Produce concrete criteria for 'done'. Honesty rules: never invent an `executable` check you cannot actually run; prefer a `qualitative` criterion over a fabricated number; flag taste/direction as `humanJudged`. Optionally group criteria into ordered checkpoints via a per-criterion 'milestone' label; the run pauses at each checkpoint for the user. This proposes a DRAFT for the user to edit and approve — it does not start the loop.",
+                description: "Draft a structured contract for a goal the user is starting. Produce concrete criteria for 'done'. Honesty rules: never invent an `executable` check you cannot actually run; prefer a `qualitative` criterion over a fabricated number; flag taste/direction as `humanJudged`. Optionally group criteria into ordered checkpoints via a per-criterion 'milestone' label; at each checkpoint an independent evaluator grades the work so far — a clean grade advances the ladder on its own, anything contested pauses for the user. This proposes a DRAFT for the user to edit and approve — it does not start the loop.",
                 parameters: Schema(
                     type: "OBJECT",
                     properties: [

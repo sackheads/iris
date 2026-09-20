@@ -20,10 +20,15 @@ struct CheckpointAutoAdvanceTests {
         private let verdict: String
         private let evidence: String
 
-        init(main: [GeminiResponse], graderVerdict: (String, String)) {
+        /// `graderSubmits: false` scripts a grader that answers in prose and never calls
+        /// `submit_evaluation` — the crashed/confused/timed-out grader §4's fail-safe exists for.
+        private let graderSubmits: Bool
+
+        init(main: [GeminiResponse], graderVerdict: (String, String), graderSubmits: Bool = true) {
             self.mainScript = main
             self.verdict = graderVerdict.0
             self.evidence = graderVerdict.1
+            self.graderSubmits = graderSubmits
         }
         var graderCalls: Int { lock.withLock { graderCallCount } }
 
@@ -41,6 +46,7 @@ struct CheckpointAutoAdvanceTests {
             return lock.withLock {
                 if offersSubmit {
                     graderCallCount += 1
+                    guard self.graderSubmits else { return Self.text("I looked at it and it seems fine.") }
                     guard graderCallCount == 1 else { return Self.text("done") }
                     let ids = systemText.matches(of: Self.uuidPattern).map { String($0.output) }
                     let evaluations = JSONValue.array(ids.map {
@@ -185,6 +191,23 @@ struct CheckpointAutoAdvanceTests {
         #expect(after?.checkpointStatus == .pausedForReview, "a not_met grade on the current milestone still pauses")
         #expect(after?.awaitingHumanJudgement == false,
                 "the human is asked about the current milestone only — the future criterion isn't graded yet")
+    }
+
+    @Test("a grader that never submits a verdict pauses the checkpoint")
+    func testGraderThatNeverSubmitsPauses() async {
+        // Spec §4's fail-safe, asserted end to end rather than only at the predicate. Grade-first
+        // removed the structural guarantee that pausing is the default, so the path a real grader
+        // actually fails on — answering in prose and never calling `submit_evaluation` — has to be
+        // pinned where it can regress.
+        let app = AppState(); let id = UUID(); ladder(on: app, id)
+        let client = RoutingClient(main: [Self.reachCheckpointCall(), Self.response(nil)],
+                                   graderVerdict: ("met", "unused"), graderSubmits: false)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        await engine.processInput("work", source: "User", conversationId: id)
+
+        let c = app.conversations.first { $0.id == id }?.goalContract
+        #expect(c?.checkpointStatus == .pausedForReview, "an ungraded checkpoint must stop")
+        #expect(c?.currentMilestone == 0, "nothing was verified, so nothing may advance")
     }
 
     @Test("an auto-advance announces itself in the transcript")

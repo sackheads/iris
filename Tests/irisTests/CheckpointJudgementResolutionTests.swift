@@ -79,8 +79,40 @@ struct CheckpointJudgementResolutionTests {
         let conv = app.conversations.first { $0.id == id }
         #expect(conv?.goalContract?.checkpointStatus == .pausedForReview)
         #expect(conv?.goalContract?.awaitingHumanJudgement == false)
+        // The verdict stands while the pause is open — it is what the user is about to act on.
         #expect(conv?.goalContract?.judgements[h.id] == false)
         #expect(app.isThinking == false, "'Send back' is the human's next click, not an auto-resume")
+    }
+
+    @Test("sending back at a checkpoint consumes the rejection rather than making it permanent")
+    func testSendBackConsumesRejection() {
+        // The mirror of the terminal gate's rejection branch (spec §6.1). `judgements` is durable,
+        // so a `false` left in place reconciles to `.notMet` at every later grade, blocks
+        // `canAutoAdvance` for the rest of the ladder, and refuses the terminal gate on a verdict
+        // the agent can never earn. Send-back IS the rework trigger at a checkpoint, exactly as
+        // resume is at the terminal gate, so it is what spends the verdict; the user is asked
+        // again once the work has actually changed.
+        let app = AppState(); let id = UUID()
+        let h = pausedAtCheckpoint(app, id)
+        _ = app.recordHumanJudgement(for: id, criterionId: h.id, accepted: false)
+
+        app.holdCheckpoint(for: id, feedback: "try the phrasing again")
+
+        let c = app.conversations.first { $0.id == id }?.goalContract
+        #expect(c?.judgements[h.id] == nil, "the rework consumes the rejection")
+        #expect(c?.currentMilestone == 0, "send back keeps working the same milestone")
+    }
+
+    @Test("sending back does not discard an acceptance")
+    func testSendBackKeepsAcceptance() {
+        let app = AppState(); let id = UUID()
+        let h = pausedAtCheckpoint(app, id)
+        _ = app.recordHumanJudgement(for: id, criterionId: h.id, accepted: true)
+
+        app.holdCheckpoint(for: id, feedback: "the other criterion needs work")
+
+        let c = app.conversations.first { $0.id == id }?.goalContract
+        #expect(c?.judgements[h.id] == true, "nothing about an acceptance needs re-deciding")
     }
 
     @Test("approving a checkpoint clears any outstanding judgement flag")
@@ -110,6 +142,38 @@ struct CheckpointJudgementResolutionTests {
         let c = app.conversations.first { $0.id == id }?.goalContract
         #expect(c?.awaitingHumanJudgement == false)
         #expect(c?.checkpointStatus == .running)
+    }
+
+    @Test("a LADDERED goal at its final milestone still completes through the terminal gate")
+    func testLadderedTerminalPauseCompletes() {
+        // The checkpoint early return keys on `checkpointStatus`, which a ladder-less contract can
+        // never set — so the no-ladder case below pins nothing about the laddered terminal path.
+        // A ladder that has walked to its last milestone finishes through `goal_complete` like any
+        // other goal, and the early return must not swallow that.
+        let app = AppState(); let id = UUID()
+        let a = Criterion(text: "parser works", kind: .qualitative, check: nil)
+        let h = Criterion(text: "output reads well", kind: .humanJudged, check: nil)
+        var c = GoalContract(objective: "Ship the parser", criteria: [a, h])
+        c.milestones = [Milestone(title: "Parser", criterionIds: [a.id]),
+                        Milestone(title: "Polish", criterionIds: [h.id])]
+        c.currentMilestone = 1   // the final milestone, reached by walking the ladder
+        app.createNewConversation(id: id)
+        app.setGoalContract(for: id, c)
+
+        let eval = GoalEvaluation(status: .graded, criteria: [
+            CriterionVerdict(criterionId: a.id, criterionText: a.text, kind: .qualitative,
+                             verdict: .met, evidence: "saw it work", method: .judge),
+            CriterionVerdict(criterionId: h.id, criterionText: h.text, kind: .humanJudged,
+                             verdict: .humanPending, evidence: "", method: .human)
+        ], startedAt: Date())
+        app.recordEvaluation(for: id, eval)
+        app.beginJudgementPause(for: id, summary: "all done")
+
+        _ = app.recordHumanJudgement(for: id, criterionId: h.id, accepted: true)
+
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.goalContract == nil, "the final milestone completes the goal")
+        #expect(conv?.activeGoal == nil)
     }
 
     @Test("a terminal judgement pause still completes and clears the goal")
