@@ -33,6 +33,23 @@ enum ContractState: String, Codable, Sendable, Equatable {
     case draft, locked
 }
 
+/// Slice D3 — how one checkpoint was resolved, kept for the life of the contract.
+/// All three resolutions are recorded, not only auto-advances, so slice F inherits a complete
+/// ladder record rather than a partial one.
+struct CheckpointOutcome: Codable, Identifiable, Equatable, Sendable {
+    enum Resolution: String, Codable, Sendable, Equatable {
+        case autoAdvanced     // D3 advanced it; no human saw the verdict
+        case humanApproved    // "Approve & continue"
+        case humanSentBack    // "Send back"
+    }
+    var id = UUID()
+    var milestoneIndex: Int
+    var milestoneTitle: String
+    var evaluation: GoalEvaluation
+    var resolution: Resolution
+    var date: Date = Date()
+}
+
 struct GoalContract: Codable, Equatable, Sendable {
     var id = UUID()
     var objective: String
@@ -53,6 +70,15 @@ struct GoalContract: Codable, Equatable, Sendable {
     /// conversation was already bound by `set_workspace`.
     var workspace: String?
     var waivers: [UUID: String] = [:]
+    /// Slice D3 — one entry per resolved checkpoint. The durable audit trail: slice F renders it
+    /// and adds retroactive send-back. Lives here rather than beside `lastGoalEvaluation` because
+    /// `sanitizeLoaded` deliberately clears that field on load.
+    var checkpointHistory: [CheckpointOutcome] = []
+    /// Slice D3 — human verdicts on `humanJudged` criteria, by criterion id. `true` = accepted.
+    /// Mirrors `waivers`: a durable record of a decision the user made. D2 kept these only in
+    /// `lastGoalEvaluation`, which the next grade overwrites — fine when grading happens once at
+    /// the terminal gate, fatal once checkpoints grade cumulatively.
+    var judgements: [UUID: Bool] = [:]
     /// Slice D1 — how many times the gate has refused completion for this contract. Reset when a
     /// contract is locked.
     var gateAttempts: Int = 0
@@ -103,6 +129,8 @@ struct GoalContract: Codable, Equatable, Sendable {
         state = try c.decodeIfPresent(ContractState.self, forKey: .state) ?? .draft
         workspace = try c.decodeIfPresent(String.self, forKey: .workspace)
         waivers = try c.decodeIfPresent([UUID: String].self, forKey: .waivers) ?? [:]
+        checkpointHistory = try c.decodeIfPresent([CheckpointOutcome].self, forKey: .checkpointHistory) ?? []
+        judgements = try c.decodeIfPresent([UUID: Bool].self, forKey: .judgements) ?? [:]
         gateAttempts = try c.decodeIfPresent(Int.self, forKey: .gateAttempts) ?? 0
         awaitingHumanJudgement = try c.decodeIfPresent(Bool.self, forKey: .awaitingHumanJudgement) ?? false
         pendingCompletionSummary = try c.decodeIfPresent(String.self, forKey: .pendingCompletionSummary)
