@@ -46,14 +46,27 @@ class MockURLProtocol: URLProtocol {
         return (session, remove)
     }
 
-    private static func resolvedHandler(for request: URLRequest) -> ((URLRequest) throws -> (HTTPURLResponse, Data))? {
+    /// A request tagged for a scope resolves ONLY within that scope, even if the scope's handler
+    /// has already been removed (or was never registered) — it must never silently borrow another
+    /// suite's global `handler`, which would be the same class of cross-suite race `scopedSession`
+    /// exists to prevent, just moved to the other slot. Only an untagged request falls back to the
+    /// global `handler`.
+    private enum Resolution {
+        case handler((URLRequest) throws -> (HTTPURLResponse, Data))
+        case missingScope(String)
+        case noHandler
+    }
+
+    private static func resolvedHandler(for request: URLRequest) -> Resolution {
         if let scopeId = request.value(forHTTPHeaderField: scopeHeaderField) {
             handlerLock.lock()
             let scoped = _scopedHandlers[scopeId]
             handlerLock.unlock()
-            if let scoped { return scoped }
+            if let scoped { return .handler(scoped) }
+            return .missingScope(scopeId)
         }
-        return handler
+        if let handler { return .handler(handler) }
+        return .noHandler
     }
 
     override class func canInit(with request: URLRequest) -> Bool {
@@ -65,7 +78,17 @@ class MockURLProtocol: URLProtocol {
     }
 
     override func startLoading() {
-        guard let handler = Self.resolvedHandler(for: request) else {
+        let handler: (URLRequest) throws -> (HTTPURLResponse, Data)
+        switch Self.resolvedHandler(for: request) {
+        case .handler(let h):
+            handler = h
+        case .missingScope(let scopeId):
+            let message = "MockURLProtocol: request is tagged for scope \(scopeId), which has no handler " +
+                "(never registered, or already removed by `remove()`). Refusing to fall back to the global " +
+                "handler, which would belong to a different test."
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown, userInfo: [NSLocalizedDescriptionKey: message]))
+            return
+        case .noHandler:
             client?.urlProtocol(self, didFailWithError: URLError(.unknown))
             return
         }

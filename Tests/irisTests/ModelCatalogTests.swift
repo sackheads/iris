@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import os
 @testable import iris
 
 /// #206 "Test Models" and #207 "List Available Models" — `ModelCatalog`'s URL builders, response
@@ -27,6 +28,17 @@ struct ModelCatalogTests {
         let items = Dictionary(uniqueKeysWithValues: (comps?.queryItems ?? []).map { ($0.name, $0.value) })
         #expect(items["pageToken"] == "tok")
         #expect(items["key"] == "k")
+    }
+
+    @Test("Gemini ADC list URL is Vertex's publisher-models endpoint, with a pageToken and no key")
+    func geminiListURLADC() throws {
+        let url = try ModelCatalog.listURL(provider: .gemini, baseURL: "", apiKey: "should-be-ignored", isADC: true, pageToken: "tok")
+        let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        #expect(comps?.host == "aiplatform.googleapis.com")
+        #expect(comps?.path == "/v1beta1/publishers/google/models")
+        let items = Dictionary(uniqueKeysWithValues: (comps?.queryItems ?? []).map { ($0.name, $0.value) })
+        #expect(items["pageToken"] == "tok")
+        #expect(items["key"] == nil, "ADC listing authenticates with a Bearer token, never a query key")
     }
 
     @Test("a custom Gemini base URL cannot be turned into a list URL")
@@ -75,6 +87,21 @@ struct ModelCatalogTests {
         #expect(next == "page2")
     }
 
+    @Test("Gemini publisher-model parsing (ADC) strips the publishers/google/models/ prefix, keeping a version suffix")
+    func parseGeminiPublisherModels() throws {
+        let body = try JSONSerialization.data(withJSONObject: [
+            "publisherModels": [
+                ["name": "publishers/google/models/gemini-2.5-pro", "displayName": "Gemini 2.5 Pro"],
+                ["name": "publishers/google/models/gemini-1.5-pro-002"]
+            ]
+        ])
+        let (models, next) = try ModelCatalog.parseGeminiPublisherModels(body)
+        #expect(models.map(\.id) == ["gemini-2.5-pro", "gemini-1.5-pro-002"])
+        #expect(models[0].displayName == "Gemini 2.5 Pro")
+        #expect(models[1].displayName == nil)
+        #expect(next == nil)
+    }
+
     @Test("Anthropic model parsing reads has_more and last_id")
     func parseAnthropic() throws {
         let body = try JSONSerialization.data(withJSONObject: [
@@ -105,15 +132,15 @@ struct ModelCatalogTests {
 
     @Test("Gemini listModels (API key) sends the key as a query item and paginates over two pages")
     func listModelsGeminiAPIKey() async throws {
-        var callCount = 0
+        let callCount = OSAllocatedUnfairLock(initialState: 0)
         try await withMock({ request in
-            callCount += 1
+            let count = callCount.withLock { $0 += 1; return $0 }
             #expect(request.url?.path == "/v1beta/models")
             let comps = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)
             let items = Dictionary(uniqueKeysWithValues: (comps?.queryItems ?? []).map { ($0.name, $0.value) })
             #expect(items["key"] == "test-gemini-key")
             let body: [String: Any]
-            if callCount == 1 {
+            if count == 1 {
                 #expect(items["pageToken"] == nil)
                 body = ["models": [["name": "models/gemini-3.5-flash"]], "nextPageToken": "p2"]
             } else {
@@ -127,35 +154,37 @@ struct ModelCatalogTests {
             let models = try await catalog.listModels()
             #expect(models.map(\.id) == ["gemini-3.5-flash", "gemini-3.1-pro-preview"])
         }
-        #expect(callCount == 2)
+        #expect(callCount.withLock { $0 } == 2)
     }
 
-    @Test("Gemini listModels (ADC) sends a bearer token and quota project header, not a query key")
+    @Test("Gemini listModels (ADC) uses Vertex's publisher-models endpoint with a bearer token and quota project header, not the generativelanguage host or a query key")
     func listModelsGeminiADC() async throws {
         try await withMock({ request in
+            #expect(request.url?.host == "aiplatform.googleapis.com")
+            #expect(request.url?.path == "/v1beta1/publishers/google/models")
             #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer adc-token-123")
             #expect(request.value(forHTTPHeaderField: "x-goog-user-project") == "my-quota-project")
             let comps = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)
             #expect((comps?.queryItems ?? []).allSatisfy { $0.name != "key" })
-            let body: [String: Any] = ["models": [["name": "models/gemini-3.5-flash"]]]
+            let body: [String: Any] = ["publisherModels": [["name": "publishers/google/models/gemini-2.5-pro"]]]
             let data = try JSONSerialization.data(withJSONObject: body)
             return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
         }) { session in
             let catalog = ModelCatalog(provider: .gemini, apiKey: "", baseURL: "", geminiADC: true, session: session)
             let models = try await catalog.listModels(adcToken: "adc-token-123", quotaProject: "my-quota-project")
-            #expect(models.map(\.id) == ["gemini-3.5-flash"])
+            #expect(models.map(\.id) == ["gemini-2.5-pro"])
         }
     }
 
     @Test("Anthropic listModels sends x-api-key and anthropic-version, and paginates over two pages")
     func listModelsAnthropic() async throws {
-        var callCount = 0
+        let callCount = OSAllocatedUnfairLock(initialState: 0)
         try await withMock({ request in
-            callCount += 1
+            let count = callCount.withLock { $0 += 1; return $0 }
             #expect(request.value(forHTTPHeaderField: "x-api-key") == "test-anthropic-key")
             #expect(request.value(forHTTPHeaderField: "anthropic-version") == "2023-06-01")
             let body: [String: Any]
-            if callCount == 1 {
+            if count == 1 {
                 #expect(request.url?.query == nil)
                 body = ["data": [["id": "claude-haiku-4-5-20251001"]], "has_more": true, "last_id": "claude-haiku-4-5-20251001"]
             } else {
@@ -169,7 +198,68 @@ struct ModelCatalogTests {
             let models = try await catalog.listModels()
             #expect(models.map(\.id) == ["claude-haiku-4-5-20251001", "claude-sonnet-5"])
         }
-        #expect(callCount == 2)
+        #expect(callCount.withLock { $0 } == 2)
+    }
+
+    @Test("a page token that keeps repeating stops the loop instead of spinning forever")
+    func listModelsStopsOnRepeatingToken() async throws {
+        let callCount = OSAllocatedUnfairLock(initialState: 0)
+        let models = try await withMock({ request in
+            let count = callCount.withLock { $0 += 1; return $0 }
+            // Every page claims "more" with the SAME token — a proxy bug the loop must not trust.
+            let body: [String: Any] = ["models": [["name": "models/gemini-page-\(count)"]], "nextPageToken": "stuck"]
+            let data = try JSONSerialization.data(withJSONObject: body)
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+        }) { session in
+            let catalog = ModelCatalog(provider: .gemini, apiKey: "k", baseURL: "", session: session)
+            return try await catalog.listModels()
+        }
+        // First page returns "stuck" as next; second page also returns "stuck" — identical to the
+        // token just used — so the loop takes exactly 2 pages and stops, not 20 or forever.
+        #expect(callCount.withLock { $0 } == 2)
+        #expect(models.map(\.id) == ["gemini-page-1", "gemini-page-2"])
+    }
+
+    @Test("a page token that changes every time is still capped at 20 pages")
+    func listModelsCapsAtMaxPages() async throws {
+        let callCount = OSAllocatedUnfairLock(initialState: 0)
+        let models = try await withMock({ request in
+            let count = callCount.withLock { $0 += 1; return $0 }
+            let body: [String: Any] = ["models": [["name": "models/gemini-page-\(count)"]], "nextPageToken": "token-\(count)"]
+            let data = try JSONSerialization.data(withJSONObject: body)
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+        }) { session in
+            let catalog = ModelCatalog(provider: .gemini, apiKey: "k", baseURL: "", session: session)
+            return try await catalog.listModels()
+        }
+        #expect(callCount.withLock { $0 } == 20)
+        #expect(models.count == 20)
+    }
+
+    @Test("cancelling the calling Task stops a multi-page listModels mid-flight")
+    func listModelsRespondsToCancellation() async throws {
+        let callCount = OSAllocatedUnfairLock(initialState: 0)
+        let (session, remove) = MockURLProtocol.scopedSession { request in
+            callCount.withLock { $0 += 1 }
+            let body: [String: Any] = ["models": [["name": "models/gemini-x"]], "nextPageToken": "next"]
+            let data = try JSONSerialization.data(withJSONObject: body)
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+        }
+        defer { remove() }
+        let catalog = ModelCatalog(provider: .gemini, apiKey: "k", baseURL: "", session: session)
+        let task = Task {
+            try await catalog.listModels()
+        }
+        task.cancel()
+        do {
+            _ = try await task.value
+            Issue.record("expected cancellation to propagate as an error")
+        } catch is CancellationError {
+            // expected
+        } catch {
+            // `Task.checkCancellation()` throws `CancellationError` specifically; anything else is a bug.
+            Issue.record("expected CancellationError, got \(error)")
+        }
     }
 
     @Test("OpenAI listModels sends a bearer token and returns the sorted list")
@@ -251,7 +341,11 @@ struct ModelCatalogTests {
     @Test("probe against Gemini in ADC mode with no token supplied fails cleanly, never touching ADCCredentialManager")
     func probeGeminiADCMissingToken() async throws {
         let catalog = ModelCatalog(provider: .gemini, apiKey: "", baseURL: "", geminiADC: true, session: .shared)
-        let result = await catalog.probe(model: "gemini-3.5-flash", label: "Primary/Medium")
+        // A quota project is required so `resolveGeminiRequestURL` succeeds and the request
+        // actually reaches the missing-adcToken guard, instead of failing earlier on "GCP Project
+        // ID not found" (both are legitimate failures, but only one exercises the guard this test
+        // is for).
+        let result = await catalog.probe(model: "gemini-3.5-flash", label: "Primary/Medium", quotaProject: "my-quota-project")
         guard case .failed(let message) = result.outcome else {
             Issue.record("expected .failed, got \(result.outcome)")
             return
@@ -287,5 +381,64 @@ struct ModelCatalogTests {
     func probeTargetsBlank() {
         let targets = ModelCatalog.probeTargets(easy: "", medium: "  ", hard: "h", vision: nil)
         #expect(targets.map(\.label) == ["Hard"])
+    }
+
+    // MARK: - id de-duplication
+
+    @Test("listModels de-duplicates ids, keeping the first occurrence")
+    func listModelsDeduplicatesIds() async throws {
+        let models = try await withMock({ request in
+            let body: [String: Any] = ["data": [
+                ["id": "gpt-5.6-terra", "display_name": "first"],
+                ["id": "gpt-5.6-terra", "display_name": "duplicate, dropped"],
+                ["id": "gpt-5.6-luna"]
+            ]]
+            let data = try JSONSerialization.data(withJSONObject: body)
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+        }) { session in
+            let catalog = ModelCatalog(provider: .openai, apiKey: "k", baseURL: "", session: session)
+            return try await catalog.listModels()
+        }
+        #expect(models.map(\.id) == ["gpt-5.6-luna", "gpt-5.6-terra"])
+    }
+
+    // MARK: - MockURLProtocol scoping
+
+    @Test("a scoped session with no handler (removed, or never registered) fails fast with a distinct message, never silently borrowing another slot")
+    func scopedSessionMissingHandlerFailsFast() async throws {
+        // Deliberately does NOT touch the process-global `MockURLProtocol.handler` — doing so here
+        // would itself risk answering a concurrently-running suite's real request with this test's
+        // handler, the exact class of bug `scopedSession` exists to avoid. `resolvedHandler`'s
+        // `.missingScope` branch returns before ever consulting the global slot, which the error
+        // message asserted below is what actually proves; this test does not need to set the
+        // global handler to prove it does not run.
+        let (session, remove) = MockURLProtocol.scopedSession { _ in
+            throw URLError(.unknown)
+        }
+        remove() // the scope's handler is gone before any request is made
+
+        do {
+            _ = try await session.data(for: URLRequest(url: URL(string: "https://example.com/models")!))
+            Issue.record("expected the request to fail")
+        } catch {
+            #expect(error.localizedDescription.contains("scope"), "expected the distinct missing-scope message, got: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - timeout
+
+    @Test("a request that times out reports a clear 20 s message, not a raw URLError")
+    func requestTimesOutCleanly() async throws {
+        let result = try await withMock({ _ in
+            throw URLError(.timedOut)
+        }) { session -> ModelProbeResult in
+            let catalog = ModelCatalog(provider: .openai, apiKey: "k", baseURL: "", session: session)
+            return await catalog.probe(model: "gpt-5.6-terra", label: "Easy")
+        }
+        guard case .failed(let message) = result.outcome else {
+            Issue.record("expected .failed, got \(result.outcome)")
+            return
+        }
+        #expect(message.contains("timed out after 20 s"))
     }
 }

@@ -19,14 +19,17 @@ struct SettingsView: View {
 
     // #206 "Test Models" — probes every configured primary-provider tier at once.
     @State private var isTestingModels = false
+    @State private var hasRunModelTest = false
     @State private var modelTestTargets: [(label: String, model: String)] = []
     @State private var modelTestResultsByLabel: [String: ModelProbeResult] = [:]
+    @State private var modelTestTask: Task<Void, Never>?
 
     // #207 "List Available Models…" — what the configured account can reach.
     @State private var showModelListSheet = false
     @State private var isListingModels = false
     @State private var modelListResults: [ModelInfo] = []
     @State private var modelListError: String?
+    @State private var modelListTask: Task<Void, Never>?
     
     // Ollama model discovery state
     @State private var ollamaDaemonRunning: Bool? = nil  // nil = unchecked
@@ -182,6 +185,23 @@ struct SettingsView: View {
                     onClose: { showModelListSheet = false },
                     onRetry: { fetchModelList() }
                 )
+            }
+            .onChange(of: showModelListSheet) { _, isShowing in
+                // The sheet can be dismissed by Esc/swipe as well as the Close button, and none of
+                // those routes run `onClose` — cancel the in-flight listing whichever way it closed.
+                if !isShowing { modelListTask?.cancel() }
+            }
+            .onChange(of: config.primaryProvider) { _, _ in
+                // Rows from the old provider's models are meaningless once the provider changes.
+                modelTestTask?.cancel()
+                isTestingModels = false
+                hasRunModelTest = false
+                modelTestTargets = []
+                modelTestResultsByLabel = [:]
+            }
+            .onDisappear {
+                modelTestTask?.cancel()
+                modelListTask?.cancel()
             }
 
             // MARK: - Vibecop Tab
@@ -1080,6 +1100,11 @@ struct SettingsView: View {
                     }
                 }
                 .padding(.top, 4)
+            } else if hasRunModelTest {
+                Text("No models configured")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.top, 4)
             }
         }
         .padding(.top, 4)
@@ -1118,6 +1143,7 @@ struct SettingsView: View {
     /// token and quota project here, once, rather than inside `ModelCatalog`.
     private func runModelTests() {
         guard !isTestingModels else { return }
+        modelTestTask?.cancel()
         let (provider, apiKey, baseURL, geminiADC) = currentProviderCredentials()
         let visionModel = config.auxiliaryVisionEngine == "cloud" ? config.auxiliaryVisionModel : nil
         let targets = ModelCatalog.probeTargets(
@@ -1126,13 +1152,14 @@ struct SettingsView: View {
             hard: config.getModel(for: .hard),
             vision: visionModel
         )
+        hasRunModelTest = true
+        modelTestTargets = targets
+        modelTestResultsByLabel = [:]
         guard !targets.isEmpty else { return }
 
         isTestingModels = true
-        modelTestTargets = targets
-        modelTestResultsByLabel = [:]
 
-        Task {
+        modelTestTask = Task {
             let adcToken: String?
             let quotaProject: String?
             if geminiADC {
@@ -1150,6 +1177,7 @@ struct SettingsView: View {
                     }
                 }
                 for await result in group {
+                    if Task.isCancelled { break }
                     modelTestResultsByLabel[result.label] = result
                 }
             }
@@ -1160,13 +1188,14 @@ struct SettingsView: View {
     /// #207: lists every model the configured account can reach.
     private func fetchModelList() {
         guard !isListingModels else { return }
+        modelListTask?.cancel()
         let (provider, apiKey, baseURL, geminiADC) = currentProviderCredentials()
 
         isListingModels = true
         modelListError = nil
         modelListResults = []
 
-        Task {
+        modelListTask = Task {
             var adcToken: String?
             var quotaProject: String?
             if geminiADC {
@@ -1175,9 +1204,12 @@ struct SettingsView: View {
             }
             let catalog = ModelCatalog(provider: provider, apiKey: apiKey, baseURL: baseURL, geminiADC: geminiADC)
             do {
-                modelListResults = try await catalog.listModels(adcToken: adcToken, quotaProject: quotaProject)
+                let models = try await catalog.listModels(adcToken: adcToken, quotaProject: quotaProject)
+                if !Task.isCancelled { modelListResults = models }
+            } catch is CancellationError {
+                // The sheet was closed mid-fetch; nothing to show.
             } catch {
-                modelListError = error.localizedDescription
+                if !Task.isCancelled { modelListError = error.localizedDescription }
             }
             isListingModels = false
         }
