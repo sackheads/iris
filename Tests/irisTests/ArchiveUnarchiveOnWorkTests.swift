@@ -89,4 +89,51 @@ struct ArchiveUnarchiveOnWorkTests {
         #expect(app.conversations.first { $0.id == id }?.isArchived == false,
                 "GoalContractPanel calls this directly; it reaches neither old choke point")
     }
+
+    @Test("an arrival's system line names the un-archive")
+    func arrivalNamesTheUnarchive() async {
+        let app = AppState(); app.conversations.removeAll()
+        let id = archived(app)
+        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []))
+
+        await engine.handleSystemEvent("Scheduled Job Triggered: do the thing",
+                                       source: "Scheduler", conversationId: id)
+
+        let line = app.conversations.first { $0.id == id }?.messages
+            .first { $0.role == .system && $0.content.contains("Scheduled Job Triggered") }
+        #expect(line?.content.contains("Un-archived") == true,
+                "the row reappears while the user is elsewhere; the line has to say so")
+        #expect(line?.content.contains("Scheduled Job Triggered: do the thing") == true)
+    }
+
+    @Test("an arrival into a conversation that was never archived says nothing about archiving")
+    func arrivalIntoActiveIsSilent() async {
+        let app = AppState(); app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []))
+
+        await engine.handleSystemEvent("File changed: notes.md", source: "FileWatcher",
+                                       conversationId: id)
+
+        let messages = app.conversations.first { $0.id == id }?.messages ?? []
+        #expect(messages.contains { $0.content.contains("Un-archived") } == false)
+    }
+
+    @Test("an arrival un-archive does not move selection")
+    func arrivalDoesNotMoveSelection() async {
+        let app = AppState(); app.conversations.removeAll()
+        let id = archived(app)
+        let reading = UUID()
+        app.createNewConversation(id: reading)
+        app.selectedConversationId = reading
+        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []))
+
+        await engine.handleSystemEvent("Background subagent result:\nok",
+                                       source: "SubagentManager", conversationId: id)
+
+        #expect(app.conversations.first { $0.id == id }?.isArchived == false)
+        #expect(app.selectedConversationId == reading,
+                "resurfacing a row is not a reason to yank the user out of what they are reading")
+    }
 }

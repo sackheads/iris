@@ -752,11 +752,16 @@ class AppState {
         return nil
     }
 
-    func unarchiveConversation(_ conversationId: UUID) {
+    /// True when this call is what moved the conversation out of the archive. Callers that need to
+    /// report the move — `handleSystemEvent`'s arrival notice (#182 §6.2) — use it to stay silent
+    /// about conversations that were never archived.
+    @discardableResult
+    func unarchiveConversation(_ conversationId: UUID) -> Bool {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
-              conversations[idx].isArchived else { return }
+              conversations[idx].isArchived else { return false }
         conversations[idx].isArchived = false
         markChanged(conversationId, .metadata)
+        return true
     }
 
     func start() {

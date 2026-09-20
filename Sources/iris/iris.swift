@@ -122,14 +122,21 @@ actor IrisEngine {
         // #182 §6.2: every non-user arrival lands here — the scheduler, subagent post-backs, and
         // the watcher (which passes no id and so targets whatever is selected). Stating the rule
         // at this choke point covers all of them and cannot go stale when a fourth is added.
-        await MainActor.run { localState?.unarchiveConversation(activeId) }
+        let wasArchived = await MainActor.run { localState?.unarchiveConversation(activeId) ?? false }
 
         // Sanitize incoming system events (especially those from subagents) to prevent injection
         let structuralSafeEvent = PromptInjectionGuard.sanitizeUntrustedInput(message)
         let safeMessage = await InjectionGuard.sanitize(structuralSafeEvent, contextTag: "system_event_\(source)", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         
         await MainActor.run {
-            localState?.appendMessage(role: .system, content: safeMessage, to: activeId)
+            // #182 §6.2: an arrival lands with the user looking elsewhere, so the line that
+            // reports the event also reports the row reappearing in the sidebar. Only when the
+            // conversation actually moved — a never-archived one has nothing to announce — and
+            // only on the transcript line: the engine below still sees the event alone.
+            // Selection deliberately does not move; resurfacing is not a reason to yank the user
+            // out of what they are reading.
+            let notice = wasArchived ? "Un-archived: work arrived from \(source).\n\n" : ""
+            localState?.appendMessage(role: .system, content: notice + safeMessage, to: activeId)
         }
         await processInput(safeMessage, source: source, conversationId: activeId)
     }
