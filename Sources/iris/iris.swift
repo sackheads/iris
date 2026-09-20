@@ -27,6 +27,9 @@ actor IrisEngine {
     /// Read once at construction so a turn never consults global config mid-flight, and so a
     /// test can drive the streaming-off path without touching `ConfigManager.shared`.
     let streamResponses: Bool
+    /// Read once at construction, same rationale as `streamResponses`: a checkpoint mid-turn must
+    /// not observe a config flip, and a test can drive the setting-off path directly (D3 §7).
+    private let checkpointAutoAdvance: Bool
 
     /// Conversations already shown the "no sandbox runtime" fallback notice (deduped).
     private var warnedNoRuntime: Set<UUID> = []
@@ -42,7 +45,7 @@ actor IrisEngine {
     /// pins tier 1 here rather than mutating `ConfigManager.shared` (invariant 7, #109).
     private let protectionEnabled: Bool?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool = ConfigManager.shared.streamResponses, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool = ConfigManager.shared.streamResponses, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool = ConfigManager.shared.checkpointAutoAdvance) {
         self.state = state
         self.protectionEnabled = protectionEnabled
         self.injectedFactStore = factStore
@@ -53,6 +56,7 @@ actor IrisEngine {
         self.evaluatorChecks = evaluatorChecks
         self.retryDelays = retryDelays
         self.streamResponses = streamResponses
+        self.checkpointAutoAdvance = checkpointAutoAdvance
         systemPrompt = nil
     }
 
@@ -208,9 +212,13 @@ actor IrisEngine {
     /// Grades the ladder CUMULATIVELY — `projectedContract` across milestones `0...current`, not
     /// just the current one — because that is what catches this milestone's work breaking an
     /// earlier milestone's criterion, which is the reason a checkpoint is a gate and not a status
-    /// print. Awaited, not detached: the run is pausing anyway and the human should see the verdict
-    /// before re-engaging. `currentMilestone` is deliberately NOT advanced — that is the human's
-    /// click (B1 §7). `via` names the delegate when the work was handed off, and is empty otherwise.
+    /// print. Awaited, not detached: the run is pausing (or advancing) anyway and the human should
+    /// see the verdict either way. D3: grades first, then decides — a clean, uncontested grade
+    /// advances `currentMilestone` itself (`AppState.autoAdvanceCheckpoint`, no human click needed);
+    /// anything contested (a `not_met`, an unjudged `humanJudged` criterion, or the setting off)
+    /// falls back to the pre-D3 pause, which still waits on the human's click via
+    /// `advanceCheckpoint`. `via` names the delegate when the work was handed off, and is empty
+    /// otherwise.
     private func performCheckpoint(conversationId: UUID, contract: GoalContract,
                                    summary: String, statusReport: JSONValue?,
                                    workspacePath: String?, via: String = "") async -> String {
@@ -220,14 +228,80 @@ actor IrisEngine {
         await MainActor.run {
             localState?.recordCompletionSelfReport(for: conversationId, statusJSON: statusReport)
             localState?.beginGoalEvaluation(for: conversationId, contract: projected)
-            localState?.setCheckpointPaused(for: conversationId)   // leaves activeGoal set
         }
+
+        // Grade BEFORE deciding. Until D3 this method paused first, which made pausing the
+        // structural default; `canAutoAdvance` is affirmative-only so that default survives the
+        // inversion (spec §4).
+        var evaluation: GoalEvaluation? = nil
         if let graderApp = localState {
-            await GoalEvaluator.shared.evaluate(contract: projected, workspace: gradeWorkspace,
-                                                originatingConversationId: conversationId,
-                                                app: graderApp, client: self.client)
+            evaluation = await GoalEvaluator.shared.evaluate(
+                contract: projected, workspace: gradeWorkspace,
+                originatingConversationId: conversationId, app: graderApp, client: self.client)
         }
+
         let ladderPos = "\(contract.currentMilestone + 1) of \(contract.milestones.count)"
+        let milestoneTitle = contract.milestones[contract.currentMilestone].title
+
+        // Re-read the contract: the grade landed via recordEvaluation, and a judgement may have
+        // been recorded since this turn began.
+        let current = await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId })?.goalContract
+        }
+
+        if checkpointAutoAdvance, let current, current.canAutoAdvance(from: evaluation) {
+            // Pass the milestone the GRADE was computed for (`contract`, captured before this
+            // call graded anything), not `current`'s post-grade re-read. Two `reach_checkpoint`
+            // calls in one concurrent tool batch both start at the same milestone and both grade
+            // it; if `decidedAt` came from `current` instead, whichever call's grade lands second
+            // would re-read the milestone the FIRST call just advanced to, hand that back to the
+            // guard as the very value it's supposed to be checked against, and pass trivially —
+            // advancing twice and skipping a milestone entirely. `current` is still right for
+            // `canAutoAdvance` two lines up: that needs the fresh judgements a re-read provides.
+            // Only the index must come from the pre-grade snapshot.
+            let decidedAt = contract.currentMilestone
+            let advanced = await MainActor.run {
+                localState?.autoAdvanceCheckpoint(for: conversationId, decidedAt: decidedAt,
+                                                  evaluation: evaluation) ?? false
+            }
+            // The guard refused: a concurrent `reach_checkpoint` already resolved this milestone.
+            // Everything below is built from the pre-grade snapshot, so announcing it would print a
+            // second, byte-identical "auto-advanced" notice for one checkpoint. Falling through to
+            // the pause branch would be worse still — it would pause a milestone nobody graded.
+            guard advanced else {
+                return "This checkpoint was already resolved by a concurrent call; continue with the current milestone."
+            }
+            // Count only actual `.met` verdicts — `canAutoAdvance` also lets through a waived
+            // `not_met` and a `humanJudged` criterion the grader never touched, and reporting
+            // those as "met" would misreport the grade the auto-advance is supposed to be
+            // trustworthy evidence of. Name those two cases for what they are instead.
+            let criteria = evaluation?.criteria ?? []
+            let met = criteria.filter { $0.verdict == .met }.count
+            let lines = criteria
+                .map { v -> String in
+                    // Waiver first, matching `canAutoAdvance`'s order: a waived `humanJudged`
+                    // criterion passes on the waiver, so calling it "accepted by you" would
+                    // credit the user with a verdict they never gave.
+                    if let reason = current.waivers[v.criterionId] { return "  \(v.criterionText) — waived: \(reason)" }
+                    if v.kind == .humanJudged { return "  \(v.criterionText) — accepted by you" }
+                    return "  \(v.criterionText) — \(v.evidence)"
+                }
+                .joined(separator: "\n")
+            await pushToUI(role: .system,
+                           text: "Checkpoint \(ladderPos) (\(milestoneTitle))\(via) auto-advanced — grader found \(met)/\(criteria.count) criteria met:\n\(lines)",
+                           conversationId: conversationId)
+            return "Checkpoint \(ladderPos) passed cleanly and advanced. Continue with the next milestone."
+        }
+
+        await MainActor.run {
+            localState?.setCheckpointPaused(for: conversationId)   // leaves activeGoal set
+            // A checkpoint STOPS for an unjudged `humanJudged` criterion (`canAutoAdvance` refuses
+            // it, spec §3.3) but deliberately does not ASK for the verdict here: the inline
+            // Accept/Reject surface a checkpoint judgement pause needs was never built, so opening
+            // one would stop the user with a question that has no answer button. Judgement stays
+            // at the terminal `goal_complete` gate until that UI exists; the user resolves this
+            // checkpoint with the existing "Approve & continue" / "Send back" controls.
+        }
         await pushToUI(role: .agent,
                        text: "Reached checkpoint \(ladderPos)\(via): \(summary)\nPaused for your review — approve to continue or send me back.",
                        conversationId: conversationId)
@@ -602,7 +676,7 @@ actor IrisEngine {
         if input.hasPrefix(Self.goalDraftTriggerPrefix) {
             toolsList.append(FunctionDeclaration(
                 name: "propose_goal_contract",
-                description: "Draft a structured contract for a goal the user is starting. Produce concrete criteria for 'done'. Honesty rules: never invent an `executable` check you cannot actually run; prefer a `qualitative` criterion over a fabricated number; flag taste/direction as `humanJudged`. Optionally group criteria into ordered checkpoints via a per-criterion 'milestone' label; the run pauses at each checkpoint for the user. This proposes a DRAFT for the user to edit and approve — it does not start the loop.",
+                description: "Draft a structured contract for a goal the user is starting. Produce concrete criteria for 'done'. Honesty rules: never invent an `executable` check you cannot actually run; prefer a `qualitative` criterion over a fabricated number; flag taste/direction as `humanJudged`. Optionally group criteria into ordered checkpoints via a per-criterion 'milestone' label; at each checkpoint an independent evaluator grades the work so far — a clean grade advances the ladder on its own, anything contested pauses for the user. This proposes a DRAFT for the user to edit and approve — it does not start the loop.",
                 parameters: Schema(
                     type: "OBJECT",
                     properties: [
@@ -647,7 +721,7 @@ actor IrisEngine {
         if principal == .main, let gc = ladderContract, gc.hasLadder, !gc.isFinalMilestone {
             toolsList.append(FunctionDeclaration(
                 name: "reach_checkpoint",
-                description: "Signal that the CURRENT checkpoint's criteria are satisfied. The run pauses and an independent evaluator grades the work so far; the user then reviews before the next checkpoint. Use goal_complete only at the final checkpoint.",
+                description: "Signal that the CURRENT checkpoint's criteria are satisfied. An independent evaluator grades the work so far; a clean grade advances the ladder on its own and you keep working, anything contested pauses for the user. Use goal_complete only at the final checkpoint.",
                 parameters: Schema(
                     type: "OBJECT",
                     properties: [

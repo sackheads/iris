@@ -38,6 +38,21 @@ struct ConfigManagerIsolationTests {
         #expect(ConfigManager(store: storeB).defaultEmojiSkinTone == SkinTone.light.rawValue)
     }
 
+    /// The default-true-when-unset branch lost its coverage when the racy settings suite was
+    /// deleted; #199's `ConfigManager(store:)` seam lets it be asserted against a store nobody
+    /// else touches, so the test can never race `IrisDefaults.store` or `ConfigManager.shared`.
+    @Test("checkpointAutoAdvance defaults to true when unset and honours an explicit false")
+    func checkpointAutoAdvanceDefault() {
+        let (store, name) = suite("checkpoint-auto-advance")
+        defer { cleanup(store, name) }
+
+        #expect(store.object(forKey: "CHECKPOINT_AUTO_ADVANCE") == nil)
+        #expect(ConfigManager(store: store).checkpointAutoAdvance == true)
+
+        store.set(false, forKey: "CHECKPOINT_AUTO_ADVANCE")
+        #expect(ConfigManager(store: store).checkpointAutoAdvance == false)
+    }
+
     @Test("an injected store keeps writes out of the process-global store")
     func injectedWritesDoNotReachTheGlobalStore() {
         let (store, name) = suite("global")

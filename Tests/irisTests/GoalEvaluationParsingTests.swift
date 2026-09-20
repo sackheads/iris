@@ -74,4 +74,45 @@ struct GoalEvaluationParsingTests {
         let out = GoalEvaluationParsing.verdicts(from: args, criteria: c)
         #expect(out.first { $0.criterionId == c[0].id }?.verdict == .cannotVerify)
     }
+
+    @Test("a recorded acceptance resolves a humanJudged criterion instead of human_pending")
+    func testRecordedAcceptanceIsUsed() {
+        let h = Criterion(text: "looks right", kind: .humanJudged, check: nil)
+        let out = GoalEvaluationParsing.verdicts(from: [:], criteria: [h],
+                                                 judgements: [h.id: true])
+        #expect(out.count == 1)
+        #expect(out[0].verdict == .met)
+        #expect(out[0].method == .human)
+    }
+
+    @Test("a recorded rejection resolves to not_met")
+    func testRecordedRejectionIsUsed() {
+        let h = Criterion(text: "looks right", kind: .humanJudged, check: nil)
+        let out = GoalEvaluationParsing.verdicts(from: [:], criteria: [h],
+                                                 judgements: [h.id: false])
+        #expect(out[0].verdict == .notMet)
+        #expect(out[0].method == .human)
+    }
+
+    @Test("with no recorded judgement a humanJudged criterion is still human_pending")
+    func testUnjudgedStaysPending() {
+        let h = Criterion(text: "looks right", kind: .humanJudged, check: nil)
+        let out = GoalEvaluationParsing.verdicts(from: [:], criteria: [h])
+        #expect(out[0].verdict == .humanPending)
+        #expect(out[0].method == .human)
+    }
+
+    @Test("a grader's verdict on a humanJudged criterion is still ignored when a judgement exists")
+    func testGraderCannotOverrideRecordedJudgement() {
+        let h = Criterion(text: "looks right", kind: .humanJudged, check: nil)
+        let args: [String: JSONValue] = ["evaluations": .array([
+            .object(["criterion_id": .string(h.id.uuidString),
+                     "verdict": .string("not_met"),
+                     "evidence": .string("grader says no")])
+        ])]
+        let out = GoalEvaluationParsing.verdicts(from: args, criteria: [h],
+                                                 judgements: [h.id: true])
+        #expect(out[0].verdict == .met, "the human accepted it; the grader does not get a vote")
+        #expect(out[0].evidence == "", "grader evidence must not attach to a human verdict")
+    }
 }

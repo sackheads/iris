@@ -57,6 +57,11 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     var lastGoalCompletionReport: JSONValue? = nil
     var lastGoalEvaluation: GoalEvaluation? = nil
     var subagentResult: SubagentResult? = nil
+    /// Slice D3 — one entry per resolved checkpoint, the durable audit trail slice F renders.
+    /// Lives on the CONVERSATION, not on `goalContract`: `clearGoal` nils the contract when the
+    /// goal completes, is stopped, or errors, which is exactly when the record of how its
+    /// checkpoints went starts to matter.
+    var checkpointHistory: [CheckpointOutcome] = []
 
     init(id: UUID = UUID(), title: String, messages: [ChatMessage] = [], workspacePath: String? = nil, history: [Content] = [], tokenUsage: TokenUsage = TokenUsage(), activeGoal: String? = nil, messageCountSinceReflection: Int = 0, goalContract: GoalContract? = nil) {
         self.id = id
@@ -71,7 +76,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory
     }
 
     init(from decoder: Decoder) throws {
@@ -90,6 +95,9 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         lastGoalCompletionReport = try container.decodeIfPresent(JSONValue.self, forKey: .lastGoalCompletionReport)
         lastGoalEvaluation = try container.decodeIfPresent(GoalEvaluation.self, forKey: .lastGoalEvaluation)
         subagentResult = try container.decodeIfPresent(SubagentResult.self, forKey: .subagentResult)
+        // Invariant 1: a conversation persisted before D3 has no such key, and a throw here fails
+        // the whole [Conversation] decode and drops every conversation.
+        checkpointHistory = try container.decodeIfPresent([CheckpointOutcome].self, forKey: .checkpointHistory) ?? []
         // Migration: a legacy conversation that had a goal (activeGoal) but no contract is
         // upgraded to a locked single-qualitative-criterion contract so in-flight goals survive.
         if goalContract == nil, let legacy = activeGoal {
@@ -1022,6 +1030,13 @@ class AppState {
         eval.criteria[vIdx].verdict = accepted ? .met : .notMet
         eval.criteria[vIdx].method = .human
         conversations[idx].lastGoalEvaluation = eval
+        // D3: also record it on the contract. `lastGoalEvaluation` is transient — the next
+        // `beginGoalEvaluation` overwrites it and `sanitizeLoaded` clears it on load — so a
+        // checkpoint re-grade would otherwise reset this criterion to `human_pending` and ask the
+        // user for a verdict they already gave (spec §5.1).
+        var contract = conversations[idx].goalContract
+        contract?.judgements[criterionId] = accepted
+        conversations[idx].goalContract = contract
         markChanged(conversationId, .metadata)
         resolveJudgementIfComplete(for: conversationId)
         return true
@@ -1040,6 +1055,22 @@ class AppState {
         else { return }
 
         conversations[idx].goalContract?.awaitingHumanJudgement = false
+
+        // A CHECKPOINT judgement pause is not terminal. Everything below this point finishes or
+        // rejects a whole goal: the accept path calls `finishGatedGoal` and `clearGoal`, which
+        // nils the contract. Reaching it from a mid-ladder pause would end the user's goal because
+        // they answered a question about one milestone. The human is already here and the
+        // checkpoint chip's Approve/Send-back controls are the next step, so judging is all that
+        // resolves here — approving the milestone stays a separate decision.
+        //
+        // Kept deliberately even though nothing opens a checkpoint judgement pause today: the
+        // checkpoint Accept/Reject UI is unbuilt, so `performCheckpoint` stops without asking.
+        // This is the backstop for the day it lands, or for any code that sets the flag mid-ladder.
+        if conversations[idx].goalContract?.checkpointStatus == .pausedForReview {
+            markChanged(conversationId, .metadata)
+            return
+        }
+
         // What the USER rejected — not every `not_met` on the evaluation. A `not_met` the agent
         // waived is excluded from `blockingCriteria`, which is precisely why the pause could fire
         // with one still sitting in `eval.criteria`; counting it here would resume the agent and
@@ -1078,6 +1109,13 @@ class AppState {
             // resume guard will wake and no button will render for. That is the exact trapped-goal
             // failure this gate exists to prevent.
             let names = rejected.map { "- \($0.criterionText)" }.joined(separator: "\n")
+            // Consume the rejection. `judgements` is durable, so leaving it in place would
+            // reconcile the criterion to `.notMet` at every later grade, keep it in
+            // `blockingCriteria`, and refuse the gate on every remaining attempt — burning the
+            // whole retry cap (a full grader run each time) on a verdict only the user can lift
+            // and the agent can never earn. The rework being triggered here is what spends it; the
+            // user is asked again once the work has actually changed. Acceptances still persist.
+            for v in rejected { conversations[idx].goalContract?.judgements[v.criterionId] = nil }
             // Reset the iteration budget as the checkpoint resumes do: the agent is being sent
             // back to work on something new, and a rejection that lands late in a long run would
             // otherwise soft-stop after a single turn.
@@ -1167,12 +1205,73 @@ class AppState {
         markChanged(conversationId, .metadata)
     }
 
+    /// Appends one entry to the conversation's checkpoint history. All three resolutions are
+    /// recorded, so slice F inherits a complete ladder record rather than only the skipped
+    /// checkpoints. Caller must already hold a valid index; this does not save (its callers do).
+    ///
+    /// A nil evaluation is stored as nil. `sanitizeLoaded` clears `lastGoalEvaluation` on load, so
+    /// the human controls genuinely have no grade to record after a restart; fabricating a
+    /// `.failed` one would put a grader verdict nobody produced into the audit trail.
+    private func recordCheckpointOutcome(at idx: Int, _ resolution: CheckpointOutcome.Resolution,
+                                         evaluation: GoalEvaluation?) {
+        guard let c = conversations[idx].goalContract, c.hasLadder,
+              c.currentMilestone < c.milestones.count else { return }
+        conversations[idx].checkpointHistory.append(CheckpointOutcome(
+            milestoneIndex: c.currentMilestone,
+            milestoneTitle: c.milestones[c.currentMilestone].title,
+            evaluation: evaluation,
+            resolution: resolution))
+    }
+
+    /// Slice D3 — the grader passed this checkpoint cleanly, so advance without stopping the human.
+    ///
+    /// Deliberately NOT `advanceCheckpoint`: that one ends in `resumeGoalLoop`, which is right for
+    /// a human clicking "Approve & continue" after the turn has ended and wrong here. This runs
+    /// inside a live `reach_checkpoint` tool call, so re-arming the reprompt would start a second
+    /// loop alongside the turn in flight. The agent is carried forward by the ordinary
+    /// auto-reprompt: the engine ends the turn when the batch contained `reach_checkpoint`, and
+    /// the reprompt fires because this leaves `checkpointStatus == .running`.
+    ///
+    /// `decidedAt` is the milestone the caller graded and decided on, and a mismatch is a no-op.
+    /// A turn's tool calls run concurrently (AGENTS.md invariant 3), so two `reach_checkpoint`
+    /// calls in one batch can both read milestone 0, both grade it clean, and both advance —
+    /// landing on 2 with milestone 1 never worked, never graded, and nobody stopped. It also
+    /// closes the stale-read window between `performCheckpoint`'s contract re-read and this write.
+    ///
+    /// Returns whether it actually advanced, so the losing call can stay silent: its transcript
+    /// message and tool result are both built from the pre-grade snapshot, and announcing them
+    /// after a refused advance printed two byte-identical "auto-advanced" notices for one
+    /// checkpoint while the audit trail recorded one.
+    @discardableResult
+    func autoAdvanceCheckpoint(for conversationId: UUID, decidedAt milestoneIndex: Int,
+                               evaluation: GoalEvaluation?) -> Bool {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              let existing = conversations[idx].goalContract, existing.hasLadder,
+              existing.currentMilestone == milestoneIndex else { return false }
+        recordCheckpointOutcome(at: idx, .autoAdvanced, evaluation: evaluation)
+        guard var c = conversations[idx].goalContract else { return false }
+        c.currentMilestone = min(c.currentMilestone + 1, c.milestones.count - 1)
+        c.checkpointStatus = .running
+        conversations[idx].goalContract = c
+        conversations[idx].goalIterationCount = 0
+        markChanged(conversationId, .metadata)
+        return true
+    }
+
     /// Human approved the checkpoint: advance to the next milestone and resume the loop.
     func advanceCheckpoint(for conversationId: UUID) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
-              var c = conversations[idx].goalContract, c.hasLadder else { return }
+              conversations[idx].goalContract?.hasLadder == true else { return }
+        recordCheckpointOutcome(at: idx, .humanApproved,
+                                evaluation: conversations[idx].lastGoalEvaluation)
+        guard var c = conversations[idx].goalContract else { return }
         c.currentMilestone = min(c.currentMilestone + 1, c.milestones.count - 1)
         c.checkpointStatus = .running
+        // Clearing `checkpointStatus` alone would flip the discriminator `resolveJudgementIfComplete`
+        // reads without ending the judgement pause, so a later Accept/Reject would take the TERMINAL
+        // branch and complete + clear the whole goal at milestone 2 of 5. Unreachable today (nothing
+        // opens a checkpoint judgement pause), which is exactly why the hole must not be left open.
+        c.awaitingHumanJudgement = false
         conversations[idx].goalContract = c
         conversations[idx].goalIterationCount = 0
         markChanged(conversationId, .metadata)
@@ -1181,9 +1280,29 @@ class AppState {
 
     /// Human sent the agent back to keep working the current milestone (no advance).
     func holdCheckpoint(for conversationId: UUID, feedback: String?) {
-        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
-              var c = conversations[idx].goalContract else { return }
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
+        recordCheckpointOutcome(at: idx, .humanSentBack,
+                                evaluation: conversations[idx].lastGoalEvaluation)
+        guard var c = conversations[idx].goalContract else { return }
+        // Consume the rejections this send-back is the rework for, exactly as the terminal gate's
+        // rejection branch does (spec §6.1). `judgements` is durable, so a `false` left in place
+        // reconciles the criterion to `.notMet` at every later grade, blocks `canAutoAdvance` for
+        // the rest of the ladder, and refuses the terminal gate on a verdict the agent can never
+        // earn. Send-back IS the rework trigger at a checkpoint, the way resume is at the terminal
+        // gate; the user is asked again once the work has actually changed. Acceptances persist.
+        // Guarded on `hasLadder` to match `recordCheckpointOutcome` above: `currentMilestoneCriteria()`
+        // falls back to ALL criteria on a ladder-less contract, so without this guard a send-back
+        // on a plain (non-laddered) goal would clear every rejection in the contract, not just the
+        // one this rework is for.
+        if c.hasLadder {
+            for id in c.currentMilestoneCriteria().map(\.id) where c.judgements[id] == false {
+                c.judgements[id] = nil
+            }
+        }
         c.checkpointStatus = .running
+        // Same reason as `advanceCheckpoint`: leaving the flag set while the checkpoint goes back to
+        // `.running` turns a later judgement into a terminal goal completion mid-ladder.
+        c.awaitingHumanJudgement = false
         conversations[idx].goalContract = c
         conversations[idx].goalIterationCount = 0
         markChanged(conversationId, .metadata)

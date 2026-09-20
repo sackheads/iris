@@ -19,6 +19,16 @@ struct ConversationStoreTests {
         c.activeGoal = "ship"
         c.goalIterationCount = 2
         c.messageCountSinceReflection = 5
+        c.checkpointHistory = [
+            CheckpointOutcome(milestoneIndex: 0, milestoneTitle: "Parser",
+                              evaluation: GoalEvaluation(
+                                  status: .graded,
+                                  criteria: [CriterionVerdict(criterionId: UUID(), criterionText: "tests pass",
+                                                              kind: .executable, verdict: .met,
+                                                              evidence: "swift test exited 0", method: .check)],
+                                  startedAt: Date(timeIntervalSince1970: 1_700_000_000)),
+                              resolution: .autoAdvanced)
+        ]
         return c
     }
     private func created(_ c: Conversation) -> ConversationWrite {
@@ -65,6 +75,66 @@ struct ConversationStoreTests {
         #expect(back.goalContract?.isLocked == true && back.goalContract?.criteria.count == 1)
         #expect(back.activeGoal == "ship" && back.goalIterationCount == 2 && back.messageCountSinceReflection == 5)
         #expect(back.isSubagent == false && back.lastGoalEvaluation == nil && back.lastGoalCompletionReport == nil)
+        // Slice D3's audit trail. It had no column at all until v3, so it was silently dropped on
+        // every relaunch while the JSON-codec tests passed; this is the test that catches that.
+        #expect(back.checkpointHistory.count == 1)
+        #expect(back.checkpointHistory.first?.resolution == .autoAdvanced)
+        #expect(back.checkpointHistory.first?.milestoneTitle == "Parser")
+        #expect(back.checkpointHistory.first?.milestoneIndex == 0)
+        #expect(back.checkpointHistory.first?.evaluation?.criteria.first?.verdict == .met)
+        #expect(back.checkpointHistory.first?.evaluation?.criteria.first?.evidence == "swift test exited 0")
+    }
+
+    @Test("checkpointHistory survives a metadata-only update, and an empty one loads as []")
+    func checkpointHistoryPersistsAcrossMetadataWrites() throws {
+        let store = try ConversationStore.inMemory()
+        var c = sample()
+        c.checkpointHistory = []
+        try store.apply([created(c)])
+        // NULL column, not a missing key: it must read back as empty rather than failing the load.
+        #expect(try store.loadAll().conversations.first?.checkpointHistory.isEmpty == true)
+
+        c.checkpointHistory = [
+            CheckpointOutcome(milestoneIndex: 1, milestoneTitle: "Integration", resolution: .humanSentBack)
+        ]
+        try store.apply([write(c, .metadata)])
+        let back = try #require(try store.loadAll().conversations.first)
+        #expect(back.checkpointHistory.count == 1)
+        #expect(back.checkpointHistory.first?.resolution == .humanSentBack)
+        // Nil evaluation is a real state (nothing was graded), not an encoding accident.
+        #expect(back.checkpointHistory.first?.evaluation == nil)
+    }
+
+    @Test("a v2-era database gains the checkpointHistory column and its rows load with []")
+    func v2DatabaseMigratesToV3() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("iris-convstore-v2-\(UUID().uuidString)")
+        let url = root.appendingPathComponent("conversations.sqlite")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let id = UUID()
+        do {
+            let queue = try DatabaseQueue(path: url.path)
+            try ConversationStore.migrator.migrate(queue, upTo: "v2_conversation_search")
+            try queue.write { db in
+                try db.execute(sql: """
+                    INSERT INTO conversations (id, position, title, createdAt, updatedAt, tokenUsage)
+                    VALUES (?, 1, 'old chat', datetime('now'), datetime('now'), ?)
+                    """, arguments: [id.uuidString, String(decoding: try JSONEncoder().encode(TokenUsage()), as: UTF8.self)])
+            }
+            try queue.close()
+        }
+
+        let store = try ConversationStore.onDisk(at: url)
+        var back = try #require(try store.loadAll().conversations.first)
+        #expect(back.checkpointHistory.isEmpty)
+
+        // And the upgraded row can then be written to and read back.
+        back.checkpointHistory = [CheckpointOutcome(milestoneIndex: 0, milestoneTitle: "Parser",
+                                                    resolution: .humanApproved)]
+        try store.apply([write(back, .metadata)])
+        #expect(try store.loadAll().conversations.first?.checkpointHistory.first?.resolution == .humanApproved)
     }
 
     @Test("appending writes only the new rows")
@@ -369,6 +439,19 @@ struct ConversationStoreTests {
         try store.rawWrite("UPDATE conversations SET goalContract = 'nope' WHERE id = ?", arguments: [a.id.uuidString])
         let loaded = try store.loadAll()
         #expect(loaded.conversations.map(\.title) == ["b"])
+        #expect(loaded.skipped.count == 1 && loaded.skipped.first?.table == "conversations" && loaded.skipped.first?.conversationId == a.id)
+    }
+
+    @Test("a corrupt checkpointHistory column degrades to [] and is reported, but the conversation still loads")
+    func corruptedCheckpointHistoryIsNonFatal() throws {
+        let store = try ConversationStore.inMemory()
+        let a = sample(title: "a")
+        try store.apply([created(a)])
+        try store.rawWrite("UPDATE conversations SET checkpointHistory = '{{{not json' WHERE id = ?", arguments: [a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.conversations.map(\.title) == ["a"])
+        #expect(loaded.conversations.first?.messages.count == a.messages.count)
+        #expect(loaded.conversations.first?.checkpointHistory.isEmpty == true)
         #expect(loaded.skipped.count == 1 && loaded.skipped.first?.table == "conversations" && loaded.skipped.first?.conversationId == a.id)
     }
 

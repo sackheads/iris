@@ -33,6 +33,49 @@ enum ContractState: String, Codable, Sendable, Equatable {
     case draft, locked
 }
 
+/// Slice D3 — how one checkpoint was resolved. Lives on `Conversation`, not on `GoalContract`:
+/// `clearGoal` nils the contract on `goal_complete`, `/stop` and LLM errors, so a history kept
+/// there could only ever describe a goal still running — the opposite of an audit trail.
+/// All three resolutions are recorded, not only auto-advances, so slice F inherits a complete
+/// ladder record rather than a partial one.
+struct CheckpointOutcome: Codable, Identifiable, Equatable, Sendable {
+    enum Resolution: String, Codable, Sendable, Equatable {
+        case autoAdvanced     // D3 advanced it; no human saw the verdict
+        case humanApproved    // "Approve & continue"
+        case humanSentBack    // "Send back"
+    }
+    var id = UUID()
+    var milestoneIndex: Int
+    var milestoneTitle: String
+    /// Nil when nothing was graded — `sanitizeLoaded` clears `lastGoalEvaluation` on load, so an
+    /// Approve/Send-back after a restart has no grade to record. A synthesized `.failed` stand-in
+    /// would be indistinguishable in the audit trail from a real grader failure.
+    var evaluation: GoalEvaluation?
+    var resolution: Resolution
+    var date: Date = Date()
+
+    init(id: UUID = UUID(), milestoneIndex: Int, milestoneTitle: String,
+         evaluation: GoalEvaluation? = nil, resolution: Resolution, date: Date = Date()) {
+        self.id = id; self.milestoneIndex = milestoneIndex; self.milestoneTitle = milestoneTitle
+        self.evaluation = evaluation; self.resolution = resolution; self.date = date
+    }
+
+    /// Lenient decoder for the same reason `GoalContract` and `Conversation` have one (invariant 1):
+    /// these rows are persisted, and slice F will extend this type. A synthesized strict decoder
+    /// would throw `keyNotFound` on every already-stored row the moment a field is added, and a
+    /// throw here fails the whole `[CheckpointOutcome]` decode — taking the conversation that owns
+    /// the audit trail down with it. Every field that can carry a default is `decodeIfPresent`.
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        milestoneIndex = try c.decodeIfPresent(Int.self, forKey: .milestoneIndex) ?? 0
+        milestoneTitle = try c.decodeIfPresent(String.self, forKey: .milestoneTitle) ?? ""
+        evaluation = try c.decodeIfPresent(GoalEvaluation.self, forKey: .evaluation)
+        resolution = try c.decode(Resolution.self, forKey: .resolution)
+        date = try c.decodeIfPresent(Date.self, forKey: .date) ?? Date()
+    }
+}
+
 struct GoalContract: Codable, Equatable, Sendable {
     var id = UUID()
     var objective: String
@@ -53,6 +96,11 @@ struct GoalContract: Codable, Equatable, Sendable {
     /// conversation was already bound by `set_workspace`.
     var workspace: String?
     var waivers: [UUID: String] = [:]
+    /// Slice D3 — human verdicts on `humanJudged` criteria, by criterion id. `true` = accepted.
+    /// Mirrors `waivers`: a durable record of a decision the user made. D2 kept these only in
+    /// `lastGoalEvaluation`, which the next grade overwrites — fine when grading happens once at
+    /// the terminal gate, fatal once checkpoints grade cumulatively.
+    var judgements: [UUID: Bool] = [:]
     /// Slice D1 — how many times the gate has refused completion for this contract. Reset when a
     /// contract is locked.
     var gateAttempts: Int = 0
@@ -103,6 +151,7 @@ struct GoalContract: Codable, Equatable, Sendable {
         state = try c.decodeIfPresent(ContractState.self, forKey: .state) ?? .draft
         workspace = try c.decodeIfPresent(String.self, forKey: .workspace)
         waivers = try c.decodeIfPresent([UUID: String].self, forKey: .waivers) ?? [:]
+        judgements = try c.decodeIfPresent([UUID: Bool].self, forKey: .judgements) ?? [:]
         gateAttempts = try c.decodeIfPresent(Int.self, forKey: .gateAttempts) ?? 0
         awaitingHumanJudgement = try c.decodeIfPresent(Bool.self, forKey: .awaitingHumanJudgement) ?? false
         pendingCompletionSummary = try c.decodeIfPresent(String.self, forKey: .pendingCompletionSummary)
@@ -226,7 +275,7 @@ struct GoalContract: Codable, Equatable, Sendable {
             }
             s += isFinalMilestone
                 ? "This is the FINAL checkpoint — when its criteria hold, call `goal_complete`.\n"
-                : "When THIS checkpoint's criteria hold, call `reach_checkpoint` (not `goal_complete`) — the run pauses for the user to review before the next checkpoint.\n"
+                : "When THIS checkpoint's criteria hold, call `reach_checkpoint` (not `goal_complete`) — a clean grade advances on its own; anything contested pauses for the user.\n"
         }
         return s
     }
@@ -320,5 +369,32 @@ extension GoalContract {
     func pendingJudgement(from evaluation: GoalEvaluation) -> [CriterionVerdict] {
         guard evaluation.status == .graded else { return [] }
         return evaluation.criteria.filter { $0.verdict == .humanPending }
+    }
+
+    /// Slice D3 §3 — may this checkpoint advance without stopping the human?
+    ///
+    /// Affirmative-only: every branch that is not a clean, uncontested grade returns false, so a
+    /// grader that errored, timed out, or produced nothing pauses (§4). That fail-safe used to be
+    /// structural — `performCheckpoint` paused BEFORE grading — and grading first removes it, so
+    /// it is restored here explicitly.
+    ///
+    /// A pause already awaiting the human is never auto-advanced past. A user who types instead of
+    /// clicking gets an ordinary turn, and that turn may reach this checkpoint again; advancing
+    /// would consume the decision they were in the middle of making and drop the chip they were
+    /// looking at. Their click stays the only thing that resolves an open pause (spec §10).
+    func canAutoAdvance(from evaluation: GoalEvaluation?) -> Bool {
+        guard hasLadder, !isFinalMilestone,
+              checkpointStatus == .running, !awaitingHumanJudgement else { return false }
+        guard let evaluation, evaluation.status == .graded, !evaluation.criteria.isEmpty else {
+            return false
+        }
+        return evaluation.criteria.allSatisfy { v in
+            // A waiver is an explicit human decision; do not stop them for it twice.
+            if waivers[v.criterionId] != nil { return true }
+            // Only the user may settle a humanJudged criterion, and only an acceptance clears it.
+            // An unjudged one (nil) and a rejected one (false) both block.
+            if v.kind == .humanJudged { return judgements[v.criterionId] == true }
+            return v.verdict == .met
+        }
     }
 }

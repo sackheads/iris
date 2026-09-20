@@ -46,6 +46,12 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(streamResponses, forKey: "STREAM_RESPONSES") }
     }
 
+    /// Slice D3 — when true (the default), a checkpoint the grader passes cleanly advances without
+    /// stopping the human. False forces every checkpoint to pause, which is pre-D3 behaviour.
+    var checkpointAutoAdvance: Bool {
+        didSet { store.set(checkpointAutoAdvance, forKey: "CHECKPOINT_AUTO_ADVANCE") }
+    }
+
     var defaultEmojiSkinTone: Int {
         didSet { store.set(defaultEmojiSkinTone, forKey: "DEFAULT_EMOJI_SKIN_TONE") }
     }
@@ -244,6 +250,12 @@ class ConfigManager: @unchecked Sendable {
             self.streamResponses = store.bool(forKey: "STREAM_RESPONSES")
         } else {
             self.streamResponses = true
+        }
+
+        if store.object(forKey: "CHECKPOINT_AUTO_ADVANCE") != nil {
+            self.checkpointAutoAdvance = store.bool(forKey: "CHECKPOINT_AUTO_ADVANCE")
+        } else {
+            self.checkpointAutoAdvance = true
         }
 
         self.defaultEmojiSkinTone = store.object(forKey: "DEFAULT_EMOJI_SKIN_TONE") as? Int ?? SkinTone.none.rawValue
