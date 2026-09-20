@@ -900,12 +900,20 @@ class AppState {
             }
             return
         } else if trimmed == "/archive" {
+            // Read before the call: a successful archive and an already-archived no-op both
+            // return nil, and a command that does nothing silently reads as a command that was
+            // not understood.
+            let alreadyArchived = conversations.first { $0.id == convId }?.isArchived == true
             if let refusal = archiveConversation(convId) {
                 appendMessage(role: .system, content: "Cannot archive: \(refusal.reason).", to: convId)
+            } else if alreadyArchived {
+                appendMessage(role: .system, content: "Already archived.", to: convId)
             }
             return
         } else if trimmed == "/unarchive" {
-            unarchiveConversation(convId)
+            if !unarchiveConversation(convId) {
+                appendMessage(role: .system, content: "Not archived.", to: convId)
+            }
             return
         }
 

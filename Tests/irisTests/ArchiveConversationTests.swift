@@ -134,4 +134,37 @@ struct ArchiveConversationTests {
                 "the literal text would otherwise become a real LLM turn")
         #expect(app.isThinking == false)
     }
+
+    @Test("/archive on an already-archived conversation confirms rather than doing nothing")
+    func slashArchiveAlreadyArchived() {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(), b = UUID()
+        app.createNewConversation(id: a)
+        app.createNewConversation(id: b)
+        _ = app.archiveConversation(a)
+        app.selectedConversationId = a
+
+        app.sendMessage("/archive")
+
+        #expect(app.conversations.first { $0.id == a }?.isArchived == true)
+        let messages = app.conversations.first { $0.id == a }?.messages ?? []
+        #expect(messages.contains { $0.role == .system && $0.content == "Already archived." },
+                "a silent no-op reads as a command that was not understood")
+        #expect(messages.contains { $0.role == .user } == false)
+    }
+
+    @Test("/unarchive on an active conversation confirms rather than doing nothing")
+    func slashUnarchiveNotArchived() {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID()
+        app.createNewConversation(id: a)
+        app.selectedConversationId = a
+
+        app.sendMessage("/unarchive")
+
+        #expect(app.conversations.first { $0.id == a }?.isArchived == false)
+        let messages = app.conversations.first { $0.id == a }?.messages ?? []
+        #expect(messages.contains { $0.role == .system && $0.content == "Not archived." })
+        #expect(messages.contains { $0.role == .user } == false)
+    }
 }
