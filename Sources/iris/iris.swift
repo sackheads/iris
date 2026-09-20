@@ -11,6 +11,9 @@ actor IrisEngine {
     let client: any LLMClientProtocol
     let executor = ToolExecutor.shared
     let manager = SkillManager.shared
+    /// The fact store this engine reads and writes. Injectable so a test drives the memory tools
+    /// against an in-memory store instead of the user's real `~/.iris/fact_store.sqlite`.
+    let factStore: FactStoreManager
 
     var systemPrompt: Content!
     var modelTier: ModelTier
@@ -30,8 +33,9 @@ actor IrisEngine {
     // Since AppState owns IrisEngine, we can pass it when we start or process.
     private weak var state: AppState?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool = ConfigManager.shared.streamResponses) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool = ConfigManager.shared.streamResponses, factStore: FactStoreManager = .shared) {
         self.state = state
+        self.factStore = factStore
         self.modelTier = tier
         self.principal = principal
         self.roleLabel = roleLabel
@@ -381,11 +385,11 @@ actor IrisEngine {
         let userProfile = MemoryManager.shared.getUserProfile()
         
         let facts = measureSpanSync("assembly.factSearch") {
-            (try? FactStoreManager.shared.search(query: input, limit: 5)) ?? []
+            (try? factStore.search(query: input, limit: 5)) ?? []
         }
         
         if !facts.isEmpty {
-            try? FactStoreManager.shared.reinforceFacts(ids: facts.map { $0.id })
+            try? factStore.reinforceFacts(ids: facts.map { $0.id })
         }
         
     if let textPart = currentSystemPrompt.parts.first?.text {
@@ -475,9 +479,23 @@ actor IrisEngine {
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
-                    "content": Schema(type: "STRING", description: "The factual content to save.")
+                    "content": Schema(type: "STRING", description: "The factual content to save."),
+                    "supersedes": Schema(type: "STRING", description: "Id of the fact this one replaces; the old fact is marked superseded with lineage.")
                 ],
                 required: ["content"]
+            )
+        ))
+        toolsList.append(FunctionDeclaration(
+            name: "manage_fact",
+            description: "Correct the fact store when the user says a remembered fact is wrong, outdated, or replaced, or when a retrieved fact proved right or wrong: retract, supersede (with by_fact_id), restore, or rate it helpful/unhelpful. Fact ids come from search_memory results.",
+            parameters: Schema(
+                type: "OBJECT",
+                properties: [
+                    "action": Schema(type: "STRING", description: "retract | supersede | restore | helpful | unhelpful"),
+                    "fact_id": Schema(type: "STRING", description: "Id of the fact to act on."),
+                    "by_fact_id": Schema(type: "STRING", description: "For supersede only: id of the fact that replaces it.")
+                ],
+                required: ["action", "fact_id"]
             )
         ))
         toolsList.append(FunctionDeclaration(
@@ -1059,6 +1077,48 @@ actor IrisEngine {
         }
     }
     
+    /// Renders a fact-store failure as a sentence the model can act on rather than a raw error.
+    private static func factStoreFailure(_ error: Error) -> String {
+        switch error {
+        case FactStoreError.notFound(let id): return "unknown fact id \(id)."
+        case FactStoreError.selfSupersession: return "a fact cannot supersede itself."
+        case FactStoreError.cycle: return "that supersession would create a cycle."
+        case FactStoreError.emptyContent: return "the content was empty."
+        default: return "\(error)"
+        }
+    }
+
+    /// `manage_fact`: the retraction lifecycle and the helpful/unhelpful trust signal.
+    private func manageFact(action: String, factId: String?, byFactId: String?) -> String {
+        guard let factId, !factId.isEmpty else { return "manage_fact needs a fact_id." }
+        do {
+            switch action {
+            case "retract":
+                try factStore.retractFact(id: factId)
+                return "Fact [\(factId)] is now retracted."
+            case "supersede":
+                guard let byFactId, !byFactId.isEmpty else {
+                    return "manage_fact supersede needs by_fact_id (the fact that replaces it)."
+                }
+                try factStore.supersedeFact(id: factId, by: byFactId)
+                return "Fact [\(factId)] is now superseded by [\(byFactId)]."
+            case "restore":
+                let restored = try factStore.restoreFact(id: factId)
+                if let successor = restored.stillActiveSuccessor {
+                    return "Fact [\(factId)] is active again. Its former replacement [\(successor.id)] is still active: \(successor.content)"
+                }
+                return "Fact [\(factId)] is active again."
+            case "helpful", "unhelpful":
+                let fact = try factStore.recordFeedback(id: factId, helpful: action == "helpful")
+                return "Fact [\(factId)] rated \(action); trust is now \(String(format: "%.2f", fact.trustScore))."
+            default:
+                return "Unknown action '\(action)'. Use retract, supersede, restore, helpful, or unhelpful."
+            }
+        } catch {
+            return "Fact [\(factId)] unchanged: \(Self.factStoreFailure(error))"
+        }
+    }
+
     private func executeFunctionCall(_ functionCall: FunctionCall, conversationId: UUID, workspacePath: String?, restrictToGoalComplete: Bool = false) async -> String {
         let localState = state
         var result = ""
@@ -1111,14 +1171,27 @@ actor IrisEngine {
         } else if functionCall.name == "save_fact", let content = functionCall.args["content"]?.stringValue {
             let category = functionCall.args["category"]?.stringValue ?? "general"
             let entity = functionCall.args["entity"]?.stringValue
-            _ = try? FactStoreManager.shared.addFact(content: content, category: category, entity: entity)
-            result = "Fact saved to fact store."
+            let supersedes = functionCall.args["supersedes"]?.stringValue
+            do {
+                let fact = try factStore.addFact(content: content, category: category, entity: entity, supersedes: supersedes)
+                if let supersedes {
+                    result = "Fact saved as [\(fact.id)]; fact [\(supersedes)] marked superseded."
+                } else {
+                    result = "Fact saved to fact store as [\(fact.id)]."
+                }
+            } catch {
+                result = "Fact not saved: \(Self.factStoreFailure(error))"
+            }
+        } else if functionCall.name == "manage_fact", let action = functionCall.args["action"]?.stringValue {
+            result = manageFact(action: action,
+                                factId: functionCall.args["fact_id"]?.stringValue,
+                                byFactId: functionCall.args["by_fact_id"]?.stringValue)
         } else if functionCall.name == "search_memory", let query = functionCall.args["query"]?.stringValue {
-            let facts = (try? FactStoreManager.shared.search(query: query)) ?? []
+            let facts = (try? factStore.search(query: query)) ?? []
             if facts.isEmpty {
                 result = "No relevant facts found."
             } else {
-                result = facts.map { "- \($0.content)" }.joined(separator: "\n")
+                result = facts.map { "- [\($0.id)] \($0.content)" }.joined(separator: "\n")
             }
         } else if functionCall.name == "update_user_profile", let content = functionCall.args["content"]?.stringValue {
             MemoryManager.shared.updateUserProfile(content: content)

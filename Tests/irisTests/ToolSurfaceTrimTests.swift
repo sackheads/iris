@@ -44,6 +44,8 @@ struct ToolSurfaceTrimTests {
         #expect(!names.contains("propose_goal_contract"))
         #expect(!names.contains("amend_goal_contract"))
         #expect(names.contains("run_command"))
+        // #168 added `manage_fact` to the memory trio, taking the plain-turn surface to 18.
+        #expect(names.contains("manage_fact"))
         #expect(names.count <= 18, "expected the plain-turn surface to shrink from 30; got \(names.count): \(names)")
     }
 
