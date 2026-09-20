@@ -14,20 +14,8 @@ struct DelegatedUnit: Sendable {
 
 final class SubagentManager: @unchecked Sendable {
     static let shared = SubagentManager()
-    
-    private let lock = NSLock()
-    private weak var _state: AppState?
-    
-    var state: AppState? {
-        get { lock.withLock { _state } }
-        set { lock.withLock { _state = newValue } }
-    }
-    
+
     private init() {}
-    
-    func setGlobalState(_ state: AppState) {
-        self.state = state
-    }
     
     /// Runs a delegated unit to termination, returning the prose the parent sees and how the run
     /// ended. Callers that only render take `.rendered`; slice B4 branches on `.status`, because
@@ -39,13 +27,13 @@ final class SubagentManager: @unchecked Sendable {
     /// where the checkpoint grades the same criteria cumulatively). With no unit this is the
     /// unchanged B2 path: a plain goal, no contract, no grade. `client` is injectable so tests can
     /// drive both the subagent and its grader without touching the network.
+    /// `appState` is injected rather than read from a global. It used to live in a weak
+    /// process-wide property that `AppState.init` wrote to, so constructing an AppState anywhere —
+    /// including in an unrelated test — swapped it, and letting one deallocate nilled it (#171).
     func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID,
                      unit: DelegatedUnit? = nil, maxIterations: Int = 3000,
-                     client: (any LLMClientProtocol)? = nil) async -> (rendered: String, status: SubagentTerminalStatus) {
-        guard let appState = self.state else {
-            return ("Error: AppState not available for subagent execution.", .failed)
-        }
-
+                     client: (any LLMClientProtocol)? = nil,
+                     appState: AppState) async -> (rendered: String, status: SubagentTerminalStatus) {
         let startedAt = Date()
 
         // 1. Create a new conversation for the subagent

@@ -4,10 +4,8 @@ import Foundation
 
 /// Slice B3 loop behaviour: binding a unit contract to a delegated subagent and grading the
 /// finished run with the slice-C evaluator.
-// Serialized: `SubagentManager.shared` holds the AppState globally, so parallel tests in this
-// suite would hand each other's state to runSubagent.
 @MainActor
-@Suite("Subagent grading (B3)", .serialized)
+@Suite("Subagent grading (B3)")
 struct SubagentGradingTests {
 
     /// Routes scripted responses by principal rather than by call order: the grader is the engine
@@ -117,7 +115,6 @@ struct SubagentGradingTests {
     // covered separately by `storesTheGradedResult` below, which touches no singleton.
     private func freshState() -> (AppState, UUID) {
         let state = AppState()
-        SubagentManager.shared.setGlobalState(state)
         let parentId = UUID()
         state.createNewConversation(id: parentId)
         return (state, parentId)
@@ -132,15 +129,12 @@ struct SubagentGradingTests {
         let rendered = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "build a widget", effort: "easy",
             parentConversationId: parentId, unit: gradedUnit("the widget exists"),
-            client: client).rendered
+            client: client, appState: state).rendered
 
         #expect(client.graderCalls > 0, "the evaluator should have been invoked")
         #expect(rendered.contains("Independent grader verdict (fresh context): 1/1 met"))
         #expect(rendered.contains("✓ the widget exists — met"))
         #expect(rendered.contains("Summary (UNVERIFIED self-report): unit is done"))
-        // SubagentManager holds its AppState weakly; keep this one alive for the
-        // whole test or the global can go nil mid-run (#167 exposed this).
-        withExtendedLifetime(state) {}
     }
 
     @Test("a contracted run that times out carries its contract but is never graded")
@@ -152,7 +146,7 @@ struct SubagentGradingTests {
         let rendered = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "build a widget", effort: "easy",
             parentConversationId: parentId, unit: gradedUnit("the widget exists"),
-            maxIterations: 2, client: client).rendered
+            maxIterations: 2, client: client, appState: state).rendered
 
         // A run that never claimed done is never graded, even though it carried a contract.
         #expect(client.graderCalls == 0)
@@ -161,9 +155,6 @@ struct SubagentGradingTests {
         // The contract still reached the result: the parent is told what the run was held to.
         #expect(rendered.contains("Held to 1 criterion"))
         #expect(rendered.contains("Summary (UNVERIFIED self-report)"))
-        // SubagentManager holds its AppState weakly; keep this one alive for the
-        // whole test or the global can go nil mid-run (#167 exposed this).
-        withExtendedLifetime(state) {}
     }
 
     // MARK: - Tool surface
@@ -202,9 +193,6 @@ struct SubagentGradingTests {
         // The grader only ever runs when a unit contract was bound, so a grader call is proof the
         // tool call's `criteria` reached SubagentManager through the handler.
         #expect(client.graderCalls > 0)
-        // SubagentManager holds its AppState weakly; keep this one alive for the
-        // whole test or the global can go nil mid-run (#167 exposed this).
-        withExtendedLifetime(state) {}
     }
 
     @Test("a subagent with no criteria is never graded and renders the B2 prose")
@@ -214,14 +202,11 @@ struct SubagentGradingTests {
 
         let rendered = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "build a widget", effort: "easy",
-            parentConversationId: parentId, client: client).rendered
+            parentConversationId: parentId, client: client, appState: state).rendered
 
         #expect(client.graderCalls == 0, "no contract means no grade")
         #expect(!rendered.contains("Independent grader verdict"))
         #expect(rendered.contains("Summary: unit is done"))
-        // SubagentManager holds its AppState weakly; keep this one alive for the
-        // whole test or the global can go nil mid-run (#167 exposed this).
-        withExtendedLifetime(state) {}
     }
 
     @Test("a delegated unit is graded in the parent's workspace, not the process cwd")
@@ -239,14 +224,11 @@ struct SubagentGradingTests {
         _ = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "build a widget", effort: "easy",
             parentConversationId: parentId, unit: gradedUnit("the widget exists"),
-            client: client).rendered
+            client: client, appState: state).rendered
 
         #expect(client.graderCalls > 0)
         #expect(client.graderPrompt.contains(workspace),
                 "the grader should inspect the parent's workspace, not the process cwd")
-        // SubagentManager holds its AppState weakly; keep this one alive for the
-        // whole test or the global can go nil mid-run (#167 exposed this).
-        withExtendedLifetime(state) {}
     }
 
     @Test("an ungraded unit binds the contract as an oracle but runs no grader")
@@ -261,15 +243,12 @@ struct SubagentGradingTests {
             role: "engineer", task: "build a widget", effort: "easy",
             parentConversationId: parentId,
             unit: DelegatedUnit(contract: contract, grade: false),
-            client: client).rendered
+            client: client, appState: state).rendered
 
         // The unit was bound (the parent is told what it was held to) but nothing graded it.
         #expect(client.graderCalls == 0, "grade: false must not spin up an evaluator")
         #expect(!rendered.contains("Independent grader verdict"))
         #expect(rendered.contains("Held to 1 criterion"))
-        // SubagentManager holds its AppState weakly; keep this one alive for the
-        // whole test or the global can go nil mid-run (#167 exposed this).
-        withExtendedLifetime(state) {}
     }
 
     // MARK: - Persistence

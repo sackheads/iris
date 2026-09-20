@@ -25,7 +25,6 @@ final class SubagentManagerTests: XCTestCase {
     func testSubagentExecutionBlocksAndReturnsSummary() async throws {
         // Setup AppState
         let state = AppState()
-        SubagentManager.shared.setGlobalState(state)
         
         let lock = NSLock()
         var count = 0
@@ -92,8 +91,7 @@ final class SubagentManagerTests: XCTestCase {
             role: "security_auditor",
             task: "Find vulnerabilities",
             effort: "easy",
-            parentConversationId: parentConversationId
-        ).rendered
+            parentConversationId: parentConversationId, appState: state).rendered
         
         XCTAssertTrue(summary.contains("I have audited the code securely."))
         XCTAssertTrue(summary.contains("status: completed"))
@@ -102,7 +100,6 @@ final class SubagentManagerTests: XCTestCase {
     
     func testConcurrentSubagentExecution() async throws {
         let state = AppState()
-        SubagentManager.shared.setGlobalState(state)
         
         let lock = NSLock()
         var count = 0
@@ -166,8 +163,7 @@ final class SubagentManagerTests: XCTestCase {
                         role: "worker_\(i)",
                         task: "Task \(i)",
                         effort: "medium",
-                        parentConversationId: parentConversationId
-                    ).rendered
+                        parentConversationId: parentConversationId, appState: state).rendered
                 }
             }
             
@@ -183,22 +179,8 @@ final class SubagentManagerTests: XCTestCase {
             XCTAssertTrue(res.contains("Concurrent execution complete."))
         }
     }
-    func testNilStateReturnsError() async throws {
-        SubagentManager.shared.state = nil
-        
-        let summary = await SubagentManager.shared.runSubagent(
-            role: "security_auditor",
-            task: "Find vulnerabilities",
-            effort: "easy",
-            parentConversationId: UUID()
-        ).rendered
-        
-        XCTAssertEqual(summary, "Error: AppState not available for subagent execution.")
-    }
-    
     func testInvalidEffortStringDefaultsToMedium() async throws {
         let state = AppState()
-        SubagentManager.shared.setGlobalState(state)
         
         let lock = NSLock()
         var usedModel = ""
@@ -259,8 +241,7 @@ final class SubagentManagerTests: XCTestCase {
             role: "security_auditor",
             task: "Find vulnerabilities",
             effort: "invalid_effort_string",
-            parentConversationId: parentConversationId
-        ).rendered
+            parentConversationId: parentConversationId, appState: state).rendered
         
         XCTAssertTrue(summary.contains("Finished with unknown effort."))
         XCTAssertEqual(usedModel, "claude-3-5-sonnet")
@@ -268,7 +249,6 @@ final class SubagentManagerTests: XCTestCase {
 
     func testNeverCompletingSubagentTimesOut() async throws {
         let state = AppState()
-        SubagentManager.shared.setGlobalState(state)
 
         // Always return plain text — the subagent never calls goal_complete, so it loops until the cap.
         MockURLProtocol.handler = { request in
@@ -288,7 +268,7 @@ final class SubagentManagerTests: XCTestCase {
 
         let summary = await SubagentManager.shared.runSubagent(
             role: "worker", task: "loop forever", effort: "easy",
-            parentConversationId: parentId, maxIterations: 3).rendered   // ~300ms cap
+            parentConversationId: parentId, maxIterations: 3, appState: state).rendered   // ~300ms cap
 
         XCTAssertTrue(summary.contains("status: timed out"))
     }
@@ -301,7 +281,6 @@ final class SubagentManagerTests: XCTestCase {
 
     func testSubagentWriteIsRecordedInResult() async throws {
         let state = AppState()
-        SubagentManager.shared.setGlobalState(state)
         // Fast-path approve write_file for the exact path the mock uses (spec §5 / requestApproval).
         PermissionManager.shared.allowGlobally(toolName: "write_file", details: "ledger_probe.txt")
 
@@ -329,7 +308,7 @@ final class SubagentManagerTests: XCTestCase {
         let parentId = UUID()
         await MainActor.run { state.createNewConversation(id: parentId) }
         let summary = await SubagentManager.shared.runSubagent(
-            role: "engineer", task: "write a file", effort: "easy", parentConversationId: parentId).rendered
+            role: "engineer", task: "write a file", effort: "easy", parentConversationId: parentId, appState: state).rendered
 
         XCTAssertTrue(summary.contains("Files written (1)"))
         XCTAssertTrue(summary.contains("ledger_probe.txt"))
