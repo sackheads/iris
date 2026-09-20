@@ -11,6 +11,11 @@ struct ChatView: View {
     @State private var draftAttachments: [FileAttachment] = []
     @State private var isDraggingOver = false
     @State private var selectedMessageIDs = Set<UUID>()
+    /// Guards `scrollAfterUpdate` so one SwiftUI update pass enqueues at most one scroll (#183 fix
+    /// round 2). See that function's doc comment for why: several `onChange` handlers can fire in
+    /// the same pass, and only coalescing to a single, later-evaluated scroll makes the pending
+    /// search-reveal target reliably win regardless of which handler happened to run first.
+    @State private var scrollPassScheduled = false
     @State private var showSubagents = false
     @State private var showSetupWizard = false
     /// Sidebar conversation search (#183). `sidebarSearchGroups` is republished by the debounced
@@ -489,10 +494,27 @@ struct ChatView: View {
     }
 
     /// Single source of truth for "where does the transcript scroll after this update" (#183
-    /// review finding 2). A pending sidebar search-reveal target always wins over the default
-    /// scroll-to-bottom, and is cleared once used, so every scroll site shares this one if/else
-    /// instead of each re-implementing (and potentially forgetting) the same check.
+    /// review finding 2, revised in fix round 2). A pending sidebar search-reveal target always
+    /// wins over the default scroll-to-bottom, and is cleared once used.
+    ///
+    /// Revealing a hit in a different conversation changes several observed values in one SwiftUI
+    /// update (`selectedConversationId`, `conv.messages.count`/`last?.content` via the new
+    /// conversation's own values, `pendingScrollTarget`), so more than one `onChange` handler below
+    /// can call this in the same pass. The first version of this fix still called
+    /// `DispatchQueue.main.async` from every call site: the first block to run consumed and
+    /// cleared `pendingScrollTarget`, so every later block queued in the *same* pass then took the
+    /// `else` branch and scrolled to "bottomAnchor" — deterministically landing on the bottom
+    /// scroll instead of the centred one, regardless of which handler fired first (reported as a
+    /// regression against the reviewer's original ordering-luck finding).
+    ///
+    /// `scrollPassScheduled` fixes that by coalescing to at most one enqueued block per pass: every
+    /// synchronous `onChange` handler for a given SwiftUI update runs before any `DispatchQueue`
+    /// block that update enqueues, so by the time the one scheduled block actually runs,
+    /// `pendingScrollTarget` already reflects the *pass's* outcome — set if any handler in the pass
+    /// resulted from a reveal, nil otherwise — independent of handler firing order.
     private func scrollAfterUpdate(_ proxy: ScrollViewProxy) {
+        guard !scrollPassScheduled else { return }
+        scrollPassScheduled = true
         DispatchQueue.main.async {
             if let target = state.pendingScrollTarget {
                 proxy.scrollTo(target, anchor: .center)
@@ -500,6 +522,7 @@ struct ChatView: View {
             } else {
                 proxy.scrollTo("bottomAnchor", anchor: .bottom)
             }
+            scrollPassScheduled = false
         }
     }
 
