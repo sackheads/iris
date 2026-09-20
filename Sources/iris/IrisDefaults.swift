@@ -50,8 +50,9 @@ enum IrisDefaults {
 
     /// Seed a throwaway suite from the user's real domain and route the store to it. Call it before
     /// `ConfigManager.shared` is first touched so the run's initial values come from the copy; even
-    /// if that ordering slips, `ConfigManager.store` is computed, so every later write still lands
-    /// in the copy and never in the real domain.
+    /// if that ordering slips, a `ConfigManager` built without an injected store (which is every
+    /// production one, `shared` included) computes `store` from here on each write, so every later
+    /// write still lands in the copy and never in the real domain.
     static func useVolatileCopyOfStandard() {
         // Also clears plists left by earlier bench/perf/test processes that crashed or were
         // killed before their own atexit handler ran; live pids and this process are skipped.
@@ -96,31 +97,61 @@ enum IrisDefaults {
 
     /// Delete `<name>.plist` from `directory` directly, since `removePersistentDomain` won't.
     /// A missing file is not an error.
+    /// Note this is best-effort, not a guarantee: `cfprefsd` still holds the domain and writes an
+    /// empty 42-byte plist back after the delete, so a suite whose test cleaned up properly can
+    /// still leave a file behind — measured at one file per suite on macOS 25.6, which is how
+    /// `iris-legacy-blob-<UUID>` reached 164 files despite doing everything right (#178).
+    /// `CFPreferencesAppSynchronize` before the delete does not change that. The age-based half of
+    /// `staleTestSuiteFiles` is the backstop.
     static func removeSuiteFile(named name: String, in directory: URL) {
         try? FileManager.default.removeItem(at: directory.appendingPathComponent("\(name).plist"))
     }
 
-    /// `iris-tests-<pid>.plist` / `iris-bench-<pid>.plist` files in `directory` whose process is
-    /// gone. The current process's own file is never included.
-    static func staleTestSuiteFiles(in directory: URL, isAlive: (pid_t) -> Bool) -> [URL] {
+    /// How long a pid-less test suite plist must have gone untouched before the sweep takes it.
+    /// Long enough that a concurrently running test process's own suites are never pulled out from
+    /// under it; short enough that the files do not accumulate across a day's work.
+    static let volatileSuiteMaxAge: TimeInterval = 3600
+
+    /// Test-only suite plists in `directory` that nothing can still be using:
+    /// - `iris-tests-<pid>.plist` / `iris-bench-<pid>.plist` whose process is gone. The current
+    ///   process's own file is never included.
+    /// - `iris-volatile-*.plist`, and any `iris-*-<UUID>.plist`, last modified more than
+    ///   `volatileSuiteMaxAge` before `now`. A per-test suite is named with a UUID rather than a
+    ///   pid, so age is the only liveness signal there is — and it needs one, because a test that
+    ///   deletes its own plist in a `defer` still gets it recreated by `cfprefsd` (see
+    ///   `removeSuiteFile`). This machine had 108 `iris-volatile-*` and 164 `iris-legacy-blob-*`
+    ///   of them, each one kept resident by `cfprefsd` (#178).
+    static func staleTestSuiteFiles(in directory: URL, isAlive: (pid_t) -> Bool, now: Date = Date()) -> [URL] {
         let me = ProcessInfo.processInfo.processIdentifier
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         return names.sorted().compactMap { name in
-            guard let prefix = ["iris-tests-", "iris-bench-"].first(where: name.hasPrefix), name.hasSuffix(".plist"),
+            guard name.hasSuffix(".plist") else { return nil }
+            let url = directory.appendingPathComponent(name)
+            let stem = name.dropLast(".plist".count)
+            let isPidless = name.hasPrefix("iris-volatile-")
+                || (name.hasPrefix("iris-") && UUID(uuidString: String(stem.suffix(36))) != nil)
+            if isPidless {
+                guard let modified = try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date,
+                      now.timeIntervalSince(modified) > volatileSuiteMaxAge else { return nil }
+                return url
+            }
+            guard let prefix = ["iris-tests-", "iris-bench-"].first(where: name.hasPrefix),
                   let pid = pid_t(name.dropFirst(prefix.count).dropLast(".plist".count)),
                   pid != me, !isAlive(pid) else { return nil }
-            return directory.appendingPathComponent(name)
+            return url
         }
     }
 
-    static func sweepStaleTestSuites(in directory: URL, isAlive: (pid_t) -> Bool) {
-        for url in staleTestSuiteFiles(in: directory, isAlive: isAlive) {
+    static func sweepStaleTestSuites(in directory: URL, isAlive: (pid_t) -> Bool, now: Date = Date()) {
+        for url in staleTestSuiteFiles(in: directory, isAlive: isAlive, now: now) {
             try? FileManager.default.removeItem(at: url)
         }
     }
 
     /// Sweep the real preferences folder. A concurrent test process (XCTest and swift-testing
-    /// run as separate processes) is still alive, so its suite is left alone.
+    /// run as separate processes) is still alive, so its suite is left alone — and any
+    /// `iris-volatile-*` suite it is using right now was written within the hour, so that is left
+    /// alone too.
     private static func sweepStaleTestSuites() {
         sweepStaleTestSuites(in: preferencesDirectory, isAlive: { pid in kill(pid, 0) == 0 || errno == EPERM })
     }
