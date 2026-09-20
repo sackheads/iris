@@ -142,13 +142,39 @@ struct InjectionGuardTests {
         try FileManager.default.createDirectory(at: emptyDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: emptyDir) }
 
-        // No mock engine registered and no file in `emptyDir` — if the guard tried to load a real
-        // engine here it would attempt to load llama.cpp with a nonexistent path and throw/crash.
-        // The point of #202 is that it must never get that far: content should pass through as if
-        // tier 3 said safe.
+        // Register a mock that would BLOCK if reached — fix round 1 (#202): without this, a
+        // regression that let a *previous* test's throwing/hijacking mock linger in
+        // `loadingTasks["canary"]` could make this assertion pass for the wrong reason (test-order
+        // luck) instead of proving the engine was never touched. No file in `emptyDir` either, so a
+        // real engine load here would also throw/crash on a nonexistent path.
+        AuxiliaryModelManager.shared.setMockEngine(MockInferenceEngine(shouldHijack: true), for: "canary")
         let sanitized = await InjectionGuard.sanitize(payload, maxTier: .tier3_canary, protectionEnabled: true, tier3ModelsDir: emptyDir)
         #expect(sanitized.contains("Harmless data"))
         #expect(!sanitized.contains("BLOCKED"))
+    }
+
+    @Test("Tier 3: a skipped verdict is not cached — downloading the model mid-process changes the outcome (#202 fix round 1)")
+    func testSkippedVerdictNotCached() async throws {
+        let payload = "Round trip \(UUID().uuidString)"   // unique: verdicts are cached per content
+        let modelsDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-tier3-skip-cache-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: modelsDir) }
+
+        // First pass: model absent, no mock registered — tier 3 is skipped.
+        let first = await InjectionGuard.sanitize(payload, maxTier: .tier3_canary, protectionEnabled: true, tier3ModelsDir: modelsDir)
+        #expect(first.contains("Round trip"))
+        #expect(!first.contains("BLOCKED"))
+
+        // The model "arrives" (e.g. the user downloads it from Settings mid-process) and a
+        // hijacked canary response comes back. If the earlier skip had been cached as safe, this
+        // identical content would still come back wrapped-safe from the cache instead of blocked.
+        let filename = ModelDownloader.resolvedFilename(for: ConfigManager.shared.promptGuardModel)
+        try "stub, not a real gguf".write(to: modelsDir.appendingPathComponent(filename), atomically: true, encoding: .utf8)
+        AuxiliaryModelManager.shared.setMockEngine(MockInferenceEngine(shouldHijack: true), for: "canary")
+
+        let second = await InjectionGuard.sanitize(payload, maxTier: .tier3_canary, protectionEnabled: true, tier3ModelsDir: modelsDir)
+        #expect(second.contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
     }
 
 #if canImport(OnnxRuntimeBindings)

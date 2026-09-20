@@ -180,12 +180,17 @@ public struct InjectionGuard {
             let blocked = wrapBlocked("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]", source: source)
             cache.set(key, blocked)
             return blocked
-        case .safe, .skipped:
-            // #202: an unprovisioned model is treated exactly like a safe verdict — tiers 1/2
-            // already ran, and there is no model to blame a block on.
+        case .safe:
             let wrapped = wrap(clean, source: source)
             cache.set(key, wrapped)
             return wrapped
+        case .skipped:
+            // #202 fix round 1: unlike `.safe`, a skip must NOT be cached. The model can be
+            // downloaded mid-process (Settings -> Security) without a restart, and a cached
+            // wrapped-safe verdict would outlive that — silently contradicting the LED/notice
+            // that now say tier 3 is live. Tiers 1/2 already ran and are cheap enough to redo,
+            // same as an `.error` verdict is never cached for the analogous reason.
+            return wrap(clean, source: source)
         }
     }
 
