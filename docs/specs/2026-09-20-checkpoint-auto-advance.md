@@ -83,9 +83,17 @@ That includes a `.failed` evaluation, a grader crash or timeout, a missing evalu
 criteria list. There is no path where an error advances the ladder. Tests assert this directly
 rather than inferring it from the happy path.
 
+**Only the in-process half is restored.** `.pausedForReview` is now written *after* the grade, so
+there is a window — a grader run is minutes long — in which the disk still says `.running`. Quit
+inside it and the resume guard, seeing a running goal, re-kicks the loop on restart; the grade in
+flight is discarded and the checkpoint is worked again rather than paused. The fail-safe holds for
+every outcome the process lives to see, and for nothing else. Restoring the durable half means
+writing a pre-grade marker distinct from `.pausedForReview` (so the UI does not show a review chip
+for a checkpoint nobody has graded yet), which D3 does not do.
+
 ## 5. State — the checkpoint history
 
-New on `GoalContract`:
+New on `Conversation` (the history) and `GoalContract` (the judgements):
 
 ```swift
 struct CheckpointOutcome: Codable, Equatable, Sendable {
@@ -97,13 +105,15 @@ struct CheckpointOutcome: Codable, Equatable, Sendable {
     var id = UUID()
     var milestoneIndex: Int
     var milestoneTitle: String
-    var evaluation: GoalEvaluation
+    var evaluation: GoalEvaluation?   // nil when nothing was graded — never a synthesized failure
     var resolution: Resolution
     var date: Date = Date()
 }
 
+// on Conversation
 var checkpointHistory: [CheckpointOutcome] = []
 
+// on GoalContract
 /// Human verdicts on `humanJudged` criteria, by criterion id. `true` = accepted.
 /// Same shape and lifecycle as `waivers` — a durable record of a decision the user made.
 var judgements: [UUID: Bool] = [:]
@@ -133,13 +143,24 @@ gate: a criterion already judged at a checkpoint no longer prompts again at comp
 ladder-less goal nothing changes, because there are no checkpoints to judge at.
 
 **Invariant 1 applies:** `checkpointHistory` is decoded with `decodeIfPresent(...) ?? []` in
-`GoalContract.init(from:)`. A missing key must not throw, or every conversation is dropped.
+`Conversation.init(from:)`. A missing key must not throw, or every conversation is dropped.
 
-**Why it lives on `GoalContract` and not beside `lastGoalEvaluation`.** `sanitizeLoaded` clears
-`lastGoalCompletionReport` and `lastGoalEvaluation` on load, deliberately — that surfacing is a
-per-session dismissable chip, and resurrecting it at startup was the trigger for a window-blanking
-render bug. Durable history must not ride on a field designed to be cleared. `GoalContract` is
-already persisted in full and already survives restart.
+**Why it lives on `Conversation` and not on `GoalContract`.** It has to outlive the goal it
+describes. `clearGoal` nils `goalContract` on `goal_complete`, on `/stop`, and on an LLM error, so
+a history kept there could only ever be read while the goal was still running — and slice F's
+reason for existing is reviewing a ladder after the fact. It is the same shape as the D2 defect
+§5.1 records: durable evidence parked on a field something else is designed to clear.
+`lastGoalEvaluation` is not an option either, for its own reason: `sanitizeLoaded` clears it on
+load, deliberately, because that surfacing is a per-session dismissable chip whose resurrection at
+startup once caused a window-blanking render bug.
+
+`judgements` stays on `GoalContract`, and correctly so: it is keyed by criterion id and means
+nothing once the contract that defines those criteria is gone.
+
+**An outcome's `evaluation` is optional.** `sanitizeLoaded` nils `lastGoalEvaluation` on load, so
+after a restart the chip's Approve/Send-back genuinely has no grade to record. Synthesizing a
+`.failed` stand-in would write a grader verdict nobody produced into the audit trail, where it
+would be indistinguishable from a real grader failure. Nil means "not graded".
 
 **All three resolutions are recorded**, not only auto-advances, so F inherits a complete ladder
 record rather than a partial one. An entry is appended once per checkpoint resolution.
@@ -201,6 +222,12 @@ So `resolveJudgementIfComplete`'s rejection branch removes the rejected criteria
 and the user is asked again once the work has actually changed. Acceptances still persist — nothing
 about an acceptance needs re-deciding.
 
+The same rule applies one level down. `resolveJudgementIfComplete` returns early at a checkpoint
+pause (§6) and never reaches that branch, so `holdCheckpoint` consumes the current milestone's
+rejected judgements itself: "Send back" is the rework trigger at a checkpoint exactly as resume is
+at the terminal gate. Without it a mid-ladder rejection would be permanently sticky — the failure
+this section describes, reintroduced at the checkpoint the moment inline judgement ships.
+
 ## 7. Control flow
 
 `performCheckpoint` inverts to grade-first:
@@ -210,7 +237,10 @@ about an acceptance needs re-deciding.
 3. **grade** — `GoalEvaluator.evaluate` on the projected contract
 4. decide:
    - **clean pass (§3)** → append `.autoAdvanced` outcome, `autoAdvanceCheckpoint`, emit the
-     system event (§8), return a tool result telling the agent to continue with the next milestone
+     system event (§8), return a tool result telling the agent to continue with the next milestone.
+     The advance is passed the milestone index it was decided for and no-ops on a mismatch: a
+     turn's tool calls run concurrently (AGENTS.md invariant 3), so two `reach_checkpoint` calls in
+     one batch would otherwise both advance from the same index and skip a milestone outright.
    - **otherwise** → `setCheckpointPaused`, push today's "Paused for your review" message, return
      today's tool result. **No `beginJudgementPause`** — a checkpoint stops without asking (§6).
 
@@ -226,9 +256,11 @@ flight; that is the failure #172/#173 just fixed for mid-turn steering. The auto
 - appends the history entry
 - **does not** call `resumeGoalLoop`
 
-The engine's multi-round turn loop carries the agent forward on the returned tool result. Two
-callers, two events — the same distinction `GoalResumeFraming` already draws between a checkpoint
-resume and a judgement rejection.
+What carries the agent forward is the ordinary auto-reprompt, **not** the multi-round turn loop:
+the engine sets `turnFinished = true` whenever a batch contains `reach_checkpoint`, so the turn
+ends on the tool result rather than continuing through it. The reprompt then fires because the
+auto path left `checkpointStatus == .running`. Two callers, two events — the same distinction
+`GoalResumeFraming` already draws between a checkpoint resume and a judgement rejection.
 
 ### 7.1 Verdict reconciliation
 
@@ -270,6 +302,8 @@ renders `checkpointHistory` properly.
 
 `ConfigManager.checkpointAutoAdvance: Bool` (default `true`), idiomatic with `maxDoneGateRetries`.
 
+It is not exposed in Settings yet (#192); the flag is reachable only by editing defaults.
+
 When `false`, every checkpoint pauses — byte-identical to today's behaviour. Cutting low-value
 stops only helps if it is the default, so it is; a user who wants the full ladder discipline on a
 delicate goal has one switch. Per AGENTS.md invariant 7, tests must not mutate
@@ -283,8 +317,11 @@ delicate goal has one switch. Per AGENTS.md invariant 7, tests must not mutate
 - **B4 delegated milestones.** `performCheckpoint` is reached via `delegate_milestone` too, with
   `grade: false` on the unit because the checkpoint grades cumulatively. That path must
   auto-advance on a clean grade and must not double-resume the loop.
-- **Judgement pause.** Auto-advance while `awaitingHumanJudgement == true` must be impossible;
-  §3.3 makes it unreachable, and a test asserts it rather than trusting the derivation.
+- **Judgement pause.** Auto-advance while `awaitingHumanJudgement == true` must be impossible, and
+  so must auto-advance past an open `.pausedForReview` chip — a user who types instead of clicking
+  gets an ordinary turn, and that turn must not consume the decision they were in the middle of
+  making. `canAutoAdvance` refuses both flags in its first guard rather than deriving the property
+  from §3.3, and a test asserts each.
 - **Restart.** A goal paused for judgement at a checkpoint is not auto-resumed on restart, matching
   D2 §7. `isPaused` already covers both `pausedForReview` and `awaitingHumanJudgement`.
 - **Contract-less goals and subagents.** Unchanged; neither has a ladder.
@@ -317,8 +354,18 @@ delicate goal has one switch. Per AGENTS.md invariant 7, tests must not mutate
 - A delegated (B4) milestone auto-advances on a clean grade without double-resuming.
 - The final milestone is never auto-advanced.
 - `humanApproved` and `humanSentBack` both append history entries.
-- Round-trip: a `GoalContract` encoded without `checkpointHistory` decodes with `[]` and does not
-  throw (invariant 1).
+- Round-trip: a `Conversation` encoded without `checkpointHistory` decodes with `[]` and does not
+  throw (invariant 1), and an outcome with no grade round-trips as nil.
+- The history survives `clearGoal`: a completed goal's checkpoint record is still readable.
+- Two advances decided for the same milestone advance once and record one entry.
+- A checkpoint already `.pausedForReview`, and a goal `awaitingHumanJudgement`, each refuse to
+  auto-advance.
+- A laddered goal at its final milestone still completes through the terminal gate — the
+  ladder-less case cannot reach the checkpoint early return at all.
+- A grader that answers in prose and never calls `submit_evaluation` pauses the checkpoint (§4),
+  asserted end to end rather than only at the predicate.
+- A checkpoint send-back consumes the milestone's rejected judgements (§6.1 at the ladder level);
+  an acceptance survives it.
 
 ## 11.1 As-built notes
 
