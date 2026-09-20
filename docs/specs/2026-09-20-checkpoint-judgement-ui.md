@@ -1,6 +1,6 @@
 # Checkpoint Judgement UI (D3 follow-on) — Design
 
-**Status:** implemented (#191, PR pending)
+**Status:** implemented (#191, PR #224)
 **Issue:** #191
 **Builds on:** D3 (`2026-09-20-checkpoint-auto-advance.md`), D2 (`2026-09-18-human-judged-verdicts.md`)
 
