@@ -238,7 +238,11 @@ final class ConversationStore: Sendable {
                 t.column("content")
             }
             let decoder = JSONDecoder()
-            for row in try Row.fetchAll(db, sql: "SELECT conversationId, ordinal, payload FROM messages") {
+            // Streamed, not `fetchAll`: this runs once over every message the user has ever sent,
+            // and materializing all of them — payload text included — would spike memory on a
+            // large store at the worst moment, during a migration.
+            let cursor = try Row.fetchCursor(db, sql: "SELECT conversationId, ordinal, payload FROM messages")
+            while let row = try cursor.next() {
                 guard let conversationId = Self.readText(row, "conversationId"),
                       let ordinal: Int = row["ordinal"],
                       let payload: Data = row["payload"],
@@ -361,7 +365,10 @@ final class ConversationStore: Sendable {
                 try db.execute(sql: "UPDATE messages SET payload = ? WHERE conversationId = ? AND id = ?",
                                arguments: [try Self.json(m, encoder), c.id.uuidString, id.uuidString])
                 // The index is keyed by ordinal, which an id-keyed edit does not carry: read it
-                // back from the row just written (#177).
+                // back from the row just written (#177). The UPDATE's WHERE is on UNINDEXED
+                // columns, so it scans the whole index — acceptable only because an in-place edit
+                // is rare (a streamed reply's final text, a tool-pill rewrite) and the append path
+                // no longer pays it. Keying the index by the `messages` rowid is the follow-up.
                 if let ordinal = try Int.fetchOne(db, sql: "SELECT ordinal FROM messages WHERE conversationId = ? AND id = ?",
                                                   arguments: [c.id.uuidString, id.uuidString]) {
                     try db.execute(sql: "UPDATE messages_fts SET content = ? WHERE conversationId = ? AND ordinal = ?",
@@ -415,10 +422,16 @@ final class ConversationStore: Sendable {
         // append — the hot path, once per message — has nothing there to remove. The count that
         // decides it rides the (conversationId, ordinal) primary key instead. `messagesReplaced`
         // clears the index itself, before it empties `messages` out from under this check.
+        //
+        // Both are taken from `min(from, count)`, never `from`: the row truncation below deletes
+        // everything at or past `count`, so a `from` beyond the end of the array — a coalesced
+        // ChangeSet against a snapshot that shrank — would otherwise check and clear a range
+        // starting past the rows it is removing, and leave orphaned index entries behind.
+        let truncateFrom = min(from, c.messages.count)
         let staleRows = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM messages WHERE conversationId = ? AND ordinal >= ?",
-                                         arguments: [c.id.uuidString, from]) ?? 0
+                                         arguments: [c.id.uuidString, truncateFrom]) ?? 0
         if staleRows > 0 {
-            try deleteIndex(conversationId: c.id.uuidString, fromOrdinal: from, db: db)
+            try deleteIndex(conversationId: c.id.uuidString, fromOrdinal: truncateFrom, db: db)
         }
         if from < c.messages.count {
             for ordinal in from..<c.messages.count {
@@ -681,8 +694,11 @@ final class ConversationStore: Sendable {
     /// recent messages" are the ones already in context.
     func searchConversations(query: String, limit: Int = 10) throws -> [ConversationHit] {
         let sanitized = Self.sanitizeFTSQuery(query.trimmingCharacters(in: .whitespacesAndNewlines))
+        // FTS5Pattern, not FTS3Pattern: the pattern is tokenized by the same unicode61 tokenizer
+        // that built the index, so a query for "Café" finds the row indexed as "cafe". The FTS3
+        // tokenizer folds ASCII case only and keeps diacritics, which silently missed those rows.
         guard !sanitized.trimmingCharacters(in: .whitespaces).isEmpty,
-              let pattern = FTS3Pattern(matchingAnyTokenIn: sanitized) else { return [] }
+              let pattern = FTS5Pattern(matchingAnyTokenIn: sanitized) else { return [] }
         return try writer.read { db in
             let rows = try Row.fetchAll(db, sql: """
                 SELECT messages_fts.conversationId AS cid, messages_fts.ordinal AS ord,

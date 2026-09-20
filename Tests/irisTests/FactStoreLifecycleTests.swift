@@ -310,13 +310,19 @@ struct FactLifecycleToolTests {
 
     /// Drive one turn whose model reply is `call`, against an isolated in-memory fact store,
     /// and return every tool result the turn recorded.
+    ///
+    /// Structural (tier 1) guarding only: since #177 the `search_memory` result goes through the
+    /// injection guard like any other tool output, and the model-backed tiers fail closed when no
+    /// prompt-guard model is provisioned — which is the case under `swift test`, where a blocked
+    /// result carries no fact ids to assert on. Pinned per-call rather than on
+    /// `ConfigManager.shared`, which parallel suites race on (#109).
     private func results(of response: GeminiResponse, store: FactStoreManager) async -> [String] {
         let app = AppState()
         let id = UUID()
         app.createNewConversation(id: id)
         let engine = IrisEngine(state: app, tier: .medium, principal: .main,
                                 client: FakeLLMClient(responses: [response, textReply()]),
-                                retryDelays: [], factStore: store)
+                                retryDelays: [], factStore: store, protectionEnabled: false)
         await engine.processInput("go", source: "User", conversationId: id)
         let history = app.conversations.first { $0.id == id }?.history ?? []
         return history.flatMap { $0.parts }.compactMap { $0.functionResponse?.response["result"]?.stringValue }

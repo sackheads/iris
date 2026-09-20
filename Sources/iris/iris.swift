@@ -35,8 +35,16 @@ actor IrisEngine {
     // Since AppState owns IrisEngine, we can pass it when we start or process.
     private weak var state: AppState?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool = ConfigManager.shared.streamResponses, factStore: FactStoreManager? = nil) {
+    /// Guard gating for everything this engine sanitizes. nil — always, in the app — means
+    /// "consult the config". Injectable for the same reason `SkillManager.loadCustomRules` takes
+    /// it: the model-backed tiers fail closed when no prompt-guard model is provisioned, which is
+    /// the case under `swift test`, so a test that needs to read the content of a guarded string
+    /// pins tier 1 here rather than mutating `ConfigManager.shared` (invariant 7, #109).
+    private let protectionEnabled: Bool?
+
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool = ConfigManager.shared.streamResponses, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil) {
         self.state = state
+        self.protectionEnabled = protectionEnabled
         self.injectedFactStore = factStore
         self.modelTier = tier
         self.principal = principal
@@ -96,7 +104,7 @@ actor IrisEngine {
         
         // Sanitize incoming system events (especially those from subagents) to prevent injection
         let structuralSafeEvent = PromptInjectionGuard.sanitizeUntrustedInput(message)
-        let safeMessage = await InjectionGuard.sanitize(structuralSafeEvent, contextTag: "system_event_\(source)", maxTier: .tier3_canary)
+        let safeMessage = await InjectionGuard.sanitize(structuralSafeEvent, contextTag: "system_event_\(source)", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         
         await MainActor.run {
             localState?.appendMessage(role: .system, content: safeMessage, to: activeId)
@@ -398,7 +406,7 @@ actor IrisEngine {
         // Append USER.md first (mostly static)
         let safeUserProfile = await measureSpan("assembly.userProfile") {
             let structural = PromptInjectionGuard.sanitizeUntrustedInput(userProfile)
-            return await InjectionGuard.sanitize(structural, contextTag: "user_profile", maxTier: .tier3_canary)
+            return await InjectionGuard.sanitize(structural, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         }
         currentSystemPrompt.parts[0].text = textPart + "\n\n# User Profile (USER.md)\n" + safeUserProfile
     }
@@ -411,7 +419,7 @@ actor IrisEngine {
                     // Append AGENTS.md next (static per workspace)
                     let safeAgentsMd = await measureSpan("assembly.agentsMd") {
                         let structural = PromptInjectionGuard.sanitizeUntrustedInput(agentsMdContent)
-                        return await InjectionGuard.sanitize(structural, contextTag: "workspace_rules", maxTier: .tier3_canary)
+                        return await InjectionGuard.sanitize(structural, contextTag: "workspace_rules", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
                     }
                     currentSystemPrompt.parts[0].text = textPart + "\n\n# Project Workspace Rules (AGENTS.md)\n" + safeAgentsMd
                 }
@@ -1198,10 +1206,11 @@ actor IrisEngine {
                                 factId: functionCall.args["fact_id"]?.stringValue,
                                 byFactId: functionCall.args["by_fact_id"]?.stringValue)
         } else if functionCall.name == "search_memory", let query = functionCall.args["query"]?.stringValue {
-            // One tool, two stores (#177). An unrecognised scope falls back to facts — the
-            // pre-#177 behaviour — rather than erroring at the model.
+            // One tool, two stores (#177). An unrecognised scope searches facts — the pre-#177
+            // behaviour — and says so, rather than silently answering a different question than
+            // the one the model asked.
             let requested = (functionCall.args["scope"]?.stringValue ?? "facts").lowercased()
-            let scope = ["conversations", "all"].contains(requested) ? requested : "facts"
+            let scope = ["facts", "conversations", "all"].contains(requested) ? requested : "facts"
             var blocks: [String] = []
             if scope != "conversations" {
                 let facts = (try? factStore.search(query: query)) ?? []
@@ -1216,16 +1225,32 @@ actor IrisEngine {
                 let store = await MainActor.run { localState?.store }
                 let body: String
                 if let store {
-                    let hits = (try? store.searchConversations(query: query)) ?? []
-                    body = hits.isEmpty
-                        ? "No matching conversations."
-                        : hits.map { "- [\($0.title), \($0.role.rawValue)] \($0.snippet)" }.joined(separator: "\n")
+                    do {
+                        let hits = try store.searchConversations(query: query)
+                        body = hits.isEmpty
+                            ? "No matching conversations."
+                            : hits.map { "- [\($0.title), \($0.role.rawValue)] \($0.snippet)" }.joined(separator: "\n")
+                    } catch {
+                        // A search that failed is not a search that found nothing. Rendered as
+                        // "no matches" it would have the model conclude the subject was never
+                        // discussed, which is the opposite of what a broken index means.
+                        body = "Conversation search failed: \(error)"
+                    }
                 } else {
                     body = "Conversation search is unavailable."
                 }
                 blocks.append(scope == "all" ? "Conversations:\n\(body)" : body)
             }
-            result = blocks.joined(separator: "\n\n")
+            if scope != requested {
+                blocks.append("(Unknown scope '\(requested)'; searched facts. Use facts, conversations, or all.)")
+            }
+            // This branch returns its result directly, so it never passes through
+            // `executeToolWithHooks`, where the only other tool-output guard call lives. Message
+            // snippets are raw composer and paste content, so the guard is applied here
+            // explicitly (#177 review round 1) — facts included, which were unguarded before too.
+            result = await InjectionGuard.sanitize(
+                PromptInjectionGuard.sanitizeUntrustedInput(blocks.joined(separator: "\n\n")),
+                contextTag: "tool_output_search_memory", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         } else if functionCall.name == "update_user_profile", let content = functionCall.args["content"]?.stringValue {
             MemoryManager.shared.updateUserProfile(content: content)
             result = "User profile updated."
@@ -1553,7 +1578,7 @@ actor IrisEngine {
         let maxTier: InjectionGuard.SanitizationTier = trustedTools.contains(name) ? .tier1_structural : .tier3_canary
         
         // Tier 2 & 3 Sanitization: Active heuristic and canary detection (skipped for trusted tools)
-        let sanitizedResult = await InjectionGuard.sanitize(structuralSafeResult, contextTag: "tool_output_\(name)", maxTier: maxTier)
+        let sanitizedResult = await InjectionGuard.sanitize(structuralSafeResult, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled)
         
         return sanitizedResult
     }
