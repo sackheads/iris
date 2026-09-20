@@ -27,9 +27,16 @@ actor IrisEngine {
     /// Read once at construction so a turn never consults global config mid-flight, and so a
     /// test can drive the streaming-off path without touching `ConfigManager.shared`.
     let streamResponses: Bool
-    /// Read once at construction, same rationale as `streamResponses`: a checkpoint mid-turn must
-    /// not observe a config flip, and a test can drive the setting-off path directly (D3 §7).
-    private let checkpointAutoAdvance: Bool
+    /// Explicit per-engine override for the checkpoint auto-advance setting, mirroring
+    /// `protectionEnabled`: `nil` — always, in the app — means "consult the config". Unlike
+    /// `streamResponses`, this is NOT captured once at construction: the only main-principal
+    /// engine is built once in `AppState.init`, so a value fixed for the engine's whole lifetime
+    /// would make the Settings toggle require a relaunch. Instead `performCheckpoint` resolves
+    /// this override against live config once at the top of each checkpoint decision and uses
+    /// that local for the rest of the decision — a flip cannot change the outcome of a decision
+    /// already in flight, but the next checkpoint sees it. Injectable so a test can pin the
+    /// setting-off path directly without touching `ConfigManager.shared` (D3 §7, invariant 7).
+    private let checkpointAutoAdvanceOverride: Bool?
 
     /// Conversations already shown the "no sandbox runtime" fallback notice (deduped).
     private var warnedNoRuntime: Set<UUID> = []
@@ -45,7 +52,7 @@ actor IrisEngine {
     /// pins tier 1 here rather than mutating `ConfigManager.shared` (invariant 7, #109).
     private let protectionEnabled: Bool?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool = ConfigManager.shared.streamResponses, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool = ConfigManager.shared.checkpointAutoAdvance) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool = ConfigManager.shared.streamResponses, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil) {
         self.state = state
         self.protectionEnabled = protectionEnabled
         self.injectedFactStore = factStore
@@ -56,7 +63,7 @@ actor IrisEngine {
         self.evaluatorChecks = evaluatorChecks
         self.retryDelays = retryDelays
         self.streamResponses = streamResponses
-        self.checkpointAutoAdvance = checkpointAutoAdvance
+        self.checkpointAutoAdvanceOverride = checkpointAutoAdvance
         systemPrompt = nil
     }
 
@@ -222,6 +229,10 @@ actor IrisEngine {
     private func performCheckpoint(conversationId: UUID, contract: GoalContract,
                                    summary: String, statusReport: JSONValue?,
                                    workspacePath: String?, via: String = "") async -> String {
+        // Resolved once, here, for the whole decision (see `checkpointAutoAdvanceOverride`): a
+        // config flip after this point cannot change what THIS checkpoint decides, but the next
+        // call to `performCheckpoint` re-resolves and sees it.
+        let autoAdvance = checkpointAutoAdvanceOverride ?? ConfigManager.shared.checkpointAutoAdvance
         let localState = state
         let projected = contract.projectedContract(throughMilestone: contract.currentMilestone)
         let gradeWorkspace = workspacePath ?? FileManager.default.currentDirectoryPath
@@ -249,7 +260,7 @@ actor IrisEngine {
             localState?.conversations.first(where: { $0.id == conversationId })?.goalContract
         }
 
-        if checkpointAutoAdvance, let current, current.canAutoAdvance(from: evaluation) {
+        if autoAdvance, let current, current.canAutoAdvance(from: evaluation) {
             // Pass the milestone the GRADE was computed for (`contract`, captured before this
             // call graded anything), not `current`'s post-grade re-read. Two `reach_checkpoint`
             // calls in one concurrent tool batch both start at the same milestone and both grade

@@ -59,7 +59,7 @@ struct SettingsView: View {
 
                 Section(header: Text("Goals").font(.headline)) {
                     Toggle("Auto-advance checkpoints the grader passes cleanly", isOn: $config.checkpointAutoAdvance)
-                        .help("A clean grade means the independent grader found nothing wrong, not that you looked — so a grader's mistake advances unseen too. Turn this off to stop at every checkpoint. Applies to goals started after the change.")
+                        .help("A clean grade means the independent grader found nothing wrong, not that you looked — so a grader's mistake advances unseen too. Turn this off to stop at every checkpoint. Takes effect at the next checkpoint.")
                     // 1 rather than 0: a stored 0 is how `maxDoneGateRetries` encodes "unset", and
                     // reads back as the default 3 — so a 0 here would silently not mean zero.
                     Stepper(value: $config.maxDoneGateRetries, in: 1...10) {
