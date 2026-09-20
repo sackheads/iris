@@ -457,6 +457,20 @@ struct LockedContractChip: View {
     }
 }
 
+/// #191: one gate in one place. Accept/Reject appear only while a judgement pause is open, on
+/// BOTH surfaces that can show a `.humanPending` row — the terminal completion report and the
+/// checkpoint chip — so the two cannot drift on when the buttons exist. The gate is what keeps a
+/// finished goal from offering a re-judge that `recordHumanJudgement` would refuse.
+@MainActor
+fileprivate func judgementHandlers(state: AppState, conversation: Conversation,
+                                   criterionId: UUID) -> (accept: () -> Void, reject: () -> Void)? {
+    guard conversation.goalContract?.awaitingHumanJudgement == true else { return nil }
+    return (
+        accept: { _ = state.recordHumanJudgement(for: conversation.id, criterionId: criterionId, accepted: true) },
+        reject: { _ = state.recordHumanJudgement(for: conversation.id, criterionId: criterionId, accepted: false) }
+    )
+}
+
 /// The checkpoint pause panel, rendered as a top-level chip by ChatView (like CompletionReportChip)
 /// rather than nested in LockedContractChip — a nested section did not reliably re-render when the
 /// contract flipped to `pausedForReview`. Shows the UNVERIFIED self-report, the trusted grader
@@ -465,6 +479,16 @@ struct CheckpointPauseChip: View {
     var state: AppState
     let conversation: Conversation
     @State private var sendBackNote: String = ""
+
+    /// §9.1: once nothing is `.humanPending` the question has been answered; a header still asking
+    /// reads as a UI that did not notice the click.
+    private var hasPendingJudgement: Bool {
+        conversation.lastGoalEvaluation?.criteria.contains { $0.verdict == .humanPending } == true
+    }
+    /// §6: the rows holding Approve shut, scoped to the current milestone.
+    private var approveBlockers: [CriterionVerdict] {
+        conversation.goalContract?.checkpointApproveBlockers(from: conversation.lastGoalEvaluation) ?? []
+    }
 
     var body: some View {
         if let contract = conversation.goalContract, contract.checkpointStatus == .pausedForReview {
@@ -484,7 +508,7 @@ struct CheckpointPauseChip: View {
                             .font(.caption2).bold()
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Text("Awaiting your decision")
+                        Text(hasPendingJudgement ? "Awaiting your decision" : "Awaiting your approval")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     }
@@ -503,7 +527,9 @@ struct CheckpointPauseChip: View {
                                     verdict: verdict,
                                     selfReportStatus: "",
                                     evaluationStatus: evaluation.status,
-                                    reportPresent: conversation.lastGoalCompletionReport != nil
+                                    reportPresent: conversation.lastGoalCompletionReport != nil,
+                                    onAccept: judgementHandlers(state: state, conversation: conversation, criterionId: verdict.criterionId)?.accept,
+                                    onReject: judgementHandlers(state: state, conversation: conversation, criterionId: verdict.criterionId)?.reject
                                 )
                             }
                         }
@@ -540,8 +566,15 @@ struct CheckpointPauseChip: View {
                         .font(.subheadline.bold())
                         .padding(.horizontal, 14)
                         .padding(.vertical, 6)
-                        .background(Color.irisIndigo)
+                        .background(approveBlockers.isEmpty ? Color.irisIndigo : Color.irisIndigo.opacity(0.35))
                         .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .disabled(!approveBlockers.isEmpty)
+                        .accessibilityHint(approveBlockers.isEmpty ? "" : "Decide the human-judged criteria first")
+                    }
+                    if !approveBlockers.isEmpty {
+                        Text("Decide the human-judged criteria above before approving.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
                 .padding(12)
@@ -691,21 +724,18 @@ struct CompletionReportSection: View {
     /// Optional grader result. When nil the section falls back to single-column self-report.
     var evaluation: GoalEvaluation? = nil
     /// Slice D2 — supplied only by `CompletionReportChip`. nil for the checkpoint pause chip's use
-    /// of this section, which must stay read-only (accept/reject belongs on the finished report).
+    /// of this section; both surfaces share the `judgementHandlers` gate (#191), so Accept/Reject
+    /// appear on either one only while a judgement pause is open.
     var conversation: Conversation? = nil
     var state: AppState? = nil
 
     /// Accept/reject handlers for one criterion, or nil when this section is read-only: either it
-    /// has no conversation/state (the checkpoint pause chip), or the goal is not awaiting human
-    /// judgement (a finished goal's report must not let the user "re-judge" it — recordHumanJudgement
-    /// would just refuse, leaving buttons that visibly do nothing).
-    private func judgementHandlers(for criterionId: UUID) -> (accept: () -> Void, reject: () -> Void)? {
-        guard let conversation, let state,
-              conversation.goalContract?.awaitingHumanJudgement == true else { return nil }
-        return (
-            accept: { state.recordHumanJudgement(for: conversation.id, criterionId: criterionId, accepted: true) },
-            reject: { state.recordHumanJudgement(for: conversation.id, criterionId: criterionId, accepted: false) }
-        )
+    /// has no conversation/state (the checkpoint pause chip did not supply one), or the goal is not
+    /// awaiting human judgement (a finished goal's report must not let the user "re-judge" it —
+    /// recordHumanJudgement would just refuse, leaving buttons that visibly do nothing).
+    private func handlers(for criterionId: UUID) -> (accept: () -> Void, reject: () -> Void)? {
+        guard let conversation, let state else { return nil }
+        return judgementHandlers(state: state, conversation: conversation, criterionId: criterionId)
     }
 
     private var items: [CompletionReportItem] {
@@ -786,8 +816,8 @@ struct CompletionReportSection: View {
                                 evaluationStatus: evaluation.status,
                                 reportPresent: report != nil,
                                 waiverReason: evaluation.waivers[verdict.criterionId],
-                                onAccept: judgementHandlers(for: verdict.criterionId)?.accept,
-                                onReject: judgementHandlers(for: verdict.criterionId)?.reject
+                                onAccept: handlers(for: verdict.criterionId)?.accept,
+                                onReject: handlers(for: verdict.criterionId)?.reject
                             )
                         }
                     }
@@ -936,9 +966,11 @@ private struct DriftCriterionRow: View {
                     Button("Accept", action: onAccept)
                         .buttonStyle(.plain)
                         .foregroundStyle(.green)
+                        .accessibilityLabel("Accept: \(verdict.criterionText)")
                     Button("Reject", action: onReject)
                         .buttonStyle(.plain)
                         .foregroundStyle(.orange)
+                        .accessibilityLabel("Reject: \(verdict.criterionText)")
                 }
                 .font(.caption.bold())
                 .padding(.top, 2)
