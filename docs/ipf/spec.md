@@ -230,8 +230,13 @@ for authors:
 - Role-delimiter strings (`system:`, `assistant:`, `user:`) and the
   sequences `---` and `###` are stripped. Use `#` or `##` headings and
   avoid horizontal rules.
-- If the model-backed tiers are enabled but no prompt-guard model can
-  load, the guard fails closed and the rule is blocked for that session.
+- If a model-backed tier's guard model is simply not downloaded, that
+  tier is skipped (not blocked) and the rule still reaches the prompt
+  through the remaining tiers — the state of a fresh install, since
+  enabling protection does not download the guard models (#202, #210).
+  If a guard model *is* present but fails to load or errors during
+  evaluation, that tier fails closed and the rule is blocked for that
+  session.
 
 ### Unknown component keys
 

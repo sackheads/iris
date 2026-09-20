@@ -65,25 +65,8 @@ struct Tier3ProvisioningTests {
         }
     }
 
-    // MARK: - Launch notice text
-
-    @Test("notice is nil when provisioned")
-    func noticeNilWhenProvisioned() {
-        let notice = InjectionGuard.tier3UnprovisionedNotice(protectionEnabled: true, provisioning: .provisioned)
-        #expect(notice == nil)
-    }
-
-    @Test("notice is nil when protection is off, even if unprovisioned")
-    func noticeNilWhenProtectionOff() {
-        let notice = InjectionGuard.tier3UnprovisionedNotice(protectionEnabled: false, provisioning: .unprovisioned(modelName: "Qwen3.5-2B-Q4_K_M.gguf"))
-        #expect(notice == nil)
-    }
-
-    @Test("notice names the model when protection is on and it is unprovisioned")
-    func noticeNamesModelWhenUnprovisioned() {
-        let notice = InjectionGuard.tier3UnprovisionedNotice(protectionEnabled: true, provisioning: .unprovisioned(modelName: "Qwen3.5-2B-Q4_K_M.gguf"))
-        let unwrapped = try? #require(notice)
-        #expect(unwrapped?.contains("Qwen3.5-2B-Q4_K_M.gguf") == true)
-        #expect(unwrapped?.contains("Settings") == true)
-    }
+    // Launch-notice text for tier 3 (and the combined tier-2/tier-3 form) moved to
+    // `UnprovisionedGuardNoticeTests` in Tier2ProvisioningTests.swift (#210): the notice function
+    // now names whichever of tier 2 / tier 3 are unprovisioned, replacing the tier-3-only
+    // `tier3UnprovisionedNotice` this suite used to test directly.
 }

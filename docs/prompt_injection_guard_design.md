@@ -47,7 +47,7 @@ While Tier 1 stops structural escapes, semantic prompt injections (e.g., "Ignore
 To catch these, Iris uses a small classifier (e.g., DeBERTa-v3-small) converted to an Apple `.mlpackage` via a BYOM script.
 - **Mechanism:** Evaluates tool outputs asynchronously via `CoreMLEvaluator` on the Apple Neural Engine (ANE). The model is bring-your-own (compiled `.mlmodelc.zip`); see `docs/prompt_guard_coreml.md`.
 - **Outcome:** If the classifier scores an injection probability **> 0.9**, the text is quarantined (replaced with a `[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]` marker) before it reaches the primary model's context.
-- **Fail-closed:** if the model errors during evaluation, the tier treats the content as unsafe and blocks it.
+- **Fail-closed, but only once provisioned:** if the model is present and fails to load, or evaluation itself errors, the tier treats the content as unsafe and blocks it. If the CoreML/ONNX model is absent from `~/.iris/models` (or `promptGuardCoreMLModel` is left blank) — the state of a fresh install, since enabling protection does not download it — tier 2 is skipped instead of failing closed: content passes with tier 1 still applied (#210, same shape as tier 3's #202). This is visible via the P2 LED (`.unprovisioned`) and a one-time launch notice.
 
 > **Ordering invariant (critical):** the Tier 2/Tier 3 classifiers must evaluate the
 > **normalized but unwrapped** content — *never* the `<untrusted_context>`-wrapped string.
@@ -73,10 +73,12 @@ The most robust defense against zero-day injections is to have a small, restrict
 The Tier 2 and Tier 3 verdict for a given piece of content is memoized for the process lifetime
 (`InjectionGuard.SanitizationCache`, bounded LRU of 128 entries). The key covers the normalized
 content, the provenance tag, the requested tier, and the settings that decide the verdict
-(protection enabled, `promptGuardEngine`, `promptGuardModel`, `promptGuardCoreMLModel`, the tier-3
-models directory), so changing
-the guard configuration invalidates naturally. Genuine verdicts are cached in both directions (safe and blocked); a
-fail-closed *error* (model unavailable) is not, so a transient outage never pins content as
+(protection enabled, `promptGuardEngine`, `promptGuardModel`, `promptGuardCoreMLModel`, the models
+directory, and the resolved tier-2/tier-3 provisioning state), so changing
+the guard configuration — or a model appearing on disk mid-process — invalidates naturally. Genuine
+verdicts are cached in both directions (safe and blocked), and a `skipped` verdict (tier
+unprovisioned) caches exactly like a safe one, since provisioning is part of the key; a
+fail-closed *error* (model unavailable) is not cached, so a transient outage never pins content as
 blocked. Tier 1 still runs on every call. Motivation: the first perf ladder run measured the
 Tier 3 cloud canary re-sanitizing the static 32-byte `USER.md` on every turn, 0.7-0.9 s each
 (#130, `docs/reviews/2026-09-17-tool-eagerness-analysis.md`).

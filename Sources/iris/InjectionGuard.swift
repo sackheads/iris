@@ -18,10 +18,20 @@ public struct InjectionGuard {
         case unprovisioned(modelName: String)
     }
 
+    /// Whether the tier-2 CoreML/ONNX classifier is available to run at all (#210, mirror of
+    /// #202's `Tier3Provisioning`). Unlike tier 3, tier 2 has a third state: the config field can
+    /// simply be empty (`.notConfigured`), which behaves like `.unprovisioned` everywhere but
+    /// carries no filename to report.
+    public enum Tier2Provisioning: Equatable {
+        case provisioned
+        case unprovisioned(modelName: String)
+        case notConfigured
+    }
+
     /// Outcome of a model-backed tier. `error` is fail-closed at the call site but is never
     /// cached, so a transient model outage does not pin content as blocked for the process.
-    /// `skipped` means tier 3 was never evaluated because its model is unprovisioned; the call
-    /// site treats it exactly like `safe` for wrapping and caching (tiers 1/2 already ran).
+    /// `skipped` means the tier was never evaluated because its model is unprovisioned; the call
+    /// site treats it exactly like `safe` for wrapping and caching (earlier tiers already ran).
     enum TierVerdict { case safe, malicious, error, skipped }
 
     /// Tier-2/3 verdicts are memoized per content for the process lifetime (#130): the static
@@ -68,11 +78,48 @@ public struct InjectionGuard {
         return FileManager.default.fileExists(atPath: path) ? .provisioned : .unprovisioned(modelName: filename)
     }
 
-    /// Launch-notice text for an unprovisioned tier-3 model, or nil when there is nothing to say.
-    /// Pure function of the predicate result so it is testable without constructing `AppState`.
-    static func tier3UnprovisionedNotice(protectionEnabled: Bool, provisioning: Tier3Provisioning) -> String? {
-        guard protectionEnabled, case .unprovisioned(let modelName) = provisioning else { return nil }
-        return "Prompt-injection protection is on, but the tier-3 guard model \(modelName) is not downloaded. Tier 3 is skipped until it is (Settings → Security)."
+    /// Pure predicate (#210, mirror of `tier3Provisioning`): is the tier-2 CoreML/ONNX model
+    /// provisioned? An empty `modelName` (the config field left blank) is `.notConfigured` rather
+    /// than `.unprovisioned` — there is no filename to look for or to report. Otherwise resolves
+    /// `modelName` exactly as `ModelLEDBar.tier2State()` and `CoreMLEvaluator.loadModelIfNeeded()`
+    /// do (URL → last path component, then strip a `.zip` suffix, since the download unzips to a
+    /// directory) via `ModelDownloader.resolvedCoreMLDirectoryName`, so none of the three can
+    /// disagree about what "downloaded" means. `modelsDir` is a parameter, not
+    /// `IrisPaths.default.modelsDir`, so tests never touch `~/.iris/models`.
+    static func tier2Provisioning(modelName: String, modelsDir: URL) -> Tier2Provisioning {
+        guard !modelName.isEmpty else { return .notConfigured }
+        let filename = ModelDownloader.resolvedCoreMLDirectoryName(for: modelName)
+        let path = modelsDir.appendingPathComponent(filename).path
+        return FileManager.default.fileExists(atPath: path) ? .provisioned : .unprovisioned(modelName: filename)
+    }
+
+    /// Launch-notice text naming whichever of tier 2 / tier 3 are unprovisioned, or nil when
+    /// there is nothing to say. Pure function of the predicate results so it is testable without
+    /// constructing `AppState`. Replaces the #202-only `tier3UnprovisionedNotice` (#210).
+    static func unprovisionedGuardNotice(protectionEnabled: Bool, tier2: Tier2Provisioning, tier3: Tier3Provisioning) -> String? {
+        guard protectionEnabled else { return nil }
+
+        func tier2Phrase() -> (tier: String, phrase: String)? {
+            switch tier2 {
+            case .provisioned: return nil
+            case .unprovisioned(let modelName): return ("2", "tier-2 guard model \(modelName)")
+            case .notConfigured: return ("2", "tier-2 guard model")
+            }
+        }
+        func tier3Phrase() -> (tier: String, phrase: String)? {
+            switch tier3 {
+            case .provisioned: return nil
+            case .unprovisioned(let modelName): return ("3", "tier-3 guard model \(modelName)")
+            }
+        }
+
+        let missing = [tier2Phrase(), tier3Phrase()].compactMap { $0 }
+        guard !missing.isEmpty else { return nil }
+
+        if missing.count == 1 {
+            return "Prompt-injection protection is on, but the \(missing[0].phrase) is not downloaded. Tier \(missing[0].tier) is skipped until it is (Settings → Security)."
+        }
+        return "Prompt-injection protection is on, but the \(missing[0].phrase) and the \(missing[1].phrase) are not downloaded. Those tiers are skipped until they are (Settings → Security)."
     }
 
     private static let tier3SkipLogLock = NSLock()
@@ -87,19 +134,31 @@ public struct InjectionGuard {
         print("[InjectionGuard] Tier 3 canary skipped: model \(modelName) is not downloaded. Tiers 1/2 still ran; download it in Settings -> Security to enable tier 3.")
     }
 
+    private static let tier2SkipLogLock = NSLock()
+    nonisolated(unsafe) private static var tier2SkipLogged = false
+
+    /// Logs the tier-2 skip once per process (#210, mirror of `logTier3SkipOnce`).
+    private static func logTier2SkipOnce(description: String) {
+        tier2SkipLogLock.lock(); defer { tier2SkipLogLock.unlock() }
+        guard !tier2SkipLogged else { return }
+        tier2SkipLogged = true
+        print("[InjectionGuard] Tier 2 CoreML skipped: \(description) is not downloaded/configured. Tier 1 still ran; configure and download it in Settings -> Security to enable tier 2.")
+    }
+
     private static func cacheKey(clean: String, source: String, maxTier: SanitizationTier, protectionEnabled: Bool?,
-                                  modelsDir: URL, provisioning: Tier3Provisioning) -> String {
+                                  modelsDir: URL, tier2Provisioning: Tier2Provisioning, tier3Provisioning: Tier3Provisioning) -> String {
         let config = ConfigManager.shared
         let enabled = protectionEnabled ?? config.enableAdvancedPromptInjectionProtection
         // The tier-2 model path is in the key too, so correctness does not lean on CoreMLEvaluator
         // being load-once: a hot-swapped guard model can never be served a stale verdict. The
-        // provisioning result (#202 fix round 2) is what actually changes when the tier-3 model
-        // appears on disk mid-process — engine/model/modelsDir alone do not, since none of those
-        // config values change when the user downloads the file from Settings. Without it, a
-        // `.skipped` verdict cached before the download would keep being served after.
+        // provisioning results (#202 fix round 2, extended to tier 2 by #210) are what actually
+        // change when a model appears on disk mid-process — engine/model/modelsDir alone do not,
+        // since none of those config values change when the user downloads the file from Settings.
+        // Without them, a `.skipped` verdict cached before the download would keep being served
+        // after.
         let parts = [clean, source, String(describing: maxTier), String(enabled),
                      config.promptGuardEngine, config.promptGuardModel, config.promptGuardCoreMLModel,
-                     modelsDir.path, String(describing: provisioning)]
+                     modelsDir.path, String(describing: tier2Provisioning), String(describing: tier3Provisioning)]
         let digest = SHA256.hash(data: Data(parts.joined(separator: "\u{0}").utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
@@ -126,9 +185,13 @@ public struct InjectionGuard {
     /// `tier3ModelsDir` overrides where the tier-3 provisioning check (#202) looks for the local
     /// model file. nil means `IrisPaths.default.modelsDir`, which is what production always does;
     /// tests pass a temp directory so they never touch `~/.iris/models`.
+    /// `tier2ModelsDir` is the same seam for the tier-2 provisioning check (#210); nil also means
+    /// `IrisPaths.default.modelsDir`. Kept as a separate parameter (rather than reusing
+    /// `tier3ModelsDir`) so a test can drive the two tiers independently.
     public static func sanitize(_ rawInput: String, contextTag: String = "",
                                 maxTier: SanitizationTier = .tier1_structural,
                                 protectionEnabled: Bool? = nil,
+                                tier2ModelsDir: URL? = nil,
                                 tier3ModelsDir: URL? = nil) async -> String {
         let __turnID = PerformanceProfiler.currentTurnID
         let __start = MonotonicClock.nowMs()
@@ -138,9 +201,11 @@ public struct InjectionGuard {
         }
         let source = sanitizeSourceLabel(contextTag)
         let modelsDir = tier3ModelsDir ?? IrisPaths.default.modelsDir
-        // Resolved once, up front, so the cache key (below) and the tier-3 skip decision agree on
-        // the exact same filesystem snapshot (#202 fix round 2).
-        let provisioning = tier3Provisioning(engine: ConfigManager.shared.promptGuardEngine,
+        // Resolved once, up front, so the cache key (below) and the tier-2/tier-3 skip decisions
+        // agree on the exact same filesystem snapshot (#202 fix round 2, extended to tier 2 by #210).
+        let tier2ProvisioningResult = tier2Provisioning(modelName: ConfigManager.shared.promptGuardCoreMLModel,
+                                                         modelsDir: tier2ModelsDir ?? IrisPaths.default.modelsDir)
+        let tier3ProvisioningResult = tier3Provisioning(engine: ConfigManager.shared.promptGuardEngine,
                                               modelName: ConfigManager.shared.promptGuardModel,
                                               modelsDir: modelsDir)
 
@@ -159,13 +224,13 @@ public struct InjectionGuard {
         }
 
         let key = cacheKey(clean: clean, source: source, maxTier: maxTier, protectionEnabled: protectionEnabled,
-                            modelsDir: modelsDir, provisioning: provisioning)
+                            modelsDir: modelsDir, tier2Provisioning: tier2ProvisioningResult, tier3Provisioning: tier3ProvisioningResult)
         if let cached = cache.get(key) {
             return cached
         }
 
         // Tier 2: Local Token-Classification (CoreML/ONNX) — evaluates the unwrapped content.
-        let tier2 = await measureSpan("guard.tier2") { await executeTier2CoreML(clean, protectionEnabled: protectionEnabled) }
+        let tier2 = await measureSpan("guard.tier2") { await executeTier2CoreML(clean, protectionEnabled: protectionEnabled, provisioning: tier2ProvisioningResult) }
         switch tier2 {
         case .error:
             return wrapBlocked("[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]", source: source)
@@ -174,6 +239,10 @@ public struct InjectionGuard {
             cache.set(key, blocked)
             return blocked
         case .safe, .skipped:
+            // A tier-2 skip (unprovisioned/notConfigured) IS cached, exactly like `.safe` — same
+            // reasoning as tier 3's cache (#210 mirrors #202 fix round 2): `tier2Provisioning`
+            // (computed once above) is part of the cache key, so the moment the model appears on
+            // disk the key changes and a stale skip can never be served.
             break
         }
 
@@ -184,7 +253,7 @@ public struct InjectionGuard {
         }
 
         // Tier 3: Behavioral Canary Probe — also evaluates the unwrapped content.
-        let tier3 = await measureSpan("guard.tier3") { await executeTier3Canary(clean, protectionEnabled: protectionEnabled, provisioning: provisioning) }
+        let tier3 = await measureSpan("guard.tier3") { await executeTier3Canary(clean, protectionEnabled: protectionEnabled, provisioning: tier3ProvisioningResult) }
         switch tier3 {
         case .error:
             return wrapBlocked("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]", source: source)
@@ -241,31 +310,62 @@ public struct InjectionGuard {
         String(raw.filter { $0 != "\"" && $0 != "<" && $0 != ">" && !$0.isNewline })
     }
     
-    private static func executeTier2CoreML(_ input: String, protectionEnabled: Bool? = nil) async -> TierVerdict {
+    private static func executeTier2CoreML(_ input: String, protectionEnabled: Bool? = nil, provisioning: Tier2Provisioning) async -> TierVerdict {
         guard protectionEnabled ?? ConfigManager.shared.enableAdvancedPromptInjectionProtection else {
             return .safe
         }
-        try? await CoreMLEvaluator.shared.loadModelIfNeeded()
+
+        // #210 fix (mirror of #202 fix round 2 for tier 3): an evaluator that already has a model
+        // loaded — a real one, or a test's mock via `CoreMLEvaluator.shared.setModel` — counts as
+        // provisioned regardless of what the filesystem says. Checked before the file-based
+        // `provisioning` so a test can drive tier 2 through a mock without a real model directory
+        // on disk.
+        if !CoreMLEvaluator.shared.hasModelLoaded {
+            switch provisioning {
+            case .unprovisioned(let modelName):
+                logTier2SkipOnce(description: modelName)
+                return .skipped
+            case .notConfigured:
+                logTier2SkipOnce(description: "no tier-2 model configured")
+                return .skipped
+            case .provisioned:
+                break
+            }
+        }
+
+        // #210: the original `try?` here swallowed any load error (a present-but-corrupt model,
+        // a missing tokenizer, ...) and let `CoreMLEvaluator.evaluate` fall back to 0.0 ("safe")
+        // with no model loaded — silently passing everything. A genuine load failure on a model
+        // the provisioning check above said was present now fails closed instead, exactly like
+        // the tier-3 canary's catch below.
+        do {
+            try await CoreMLEvaluator.shared.loadModelIfNeeded()
+        } catch {
+            print("[InjectionGuard] Tier 2 CoreML load error: \(error). Failing closed.")
+            return .error
+        }
+
+        // A load that did not throw but also did not leave a model loaded is the same bug in a
+        // different shape (#210) — never let it fall through to `evaluate`'s silent 0.0 default.
+        guard CoreMLEvaluator.shared.hasModelLoaded else {
+            print("[InjectionGuard] Tier 2 CoreML: loadModelIfNeeded returned without a model loaded. Failing closed.")
+            return .error
+        }
+
         let startTime = Date()
-        let hasModelLoaded = CoreMLEvaluator.shared.hasModelLoaded
         do {
             let probability = try await CoreMLEvaluator.shared.evaluate(text: input)
-            
-            if hasModelLoaded {
-                let durationMs = Date().timeIntervalSince(startTime) * 1000
-                await MetricsManager.shared.trackLatency(operation: .promptGuardTier2, modelName: "CoreML", durationMs: durationMs, success: true)
-            }
-            
+            let durationMs = Date().timeIntervalSince(startTime) * 1000
+            await MetricsManager.shared.trackLatency(operation: .promptGuardTier2, modelName: "CoreML", durationMs: durationMs, success: true)
+
             if probability > 0.9 {
                 print("[InjectionGuard] Tier 2 CoreML flagged injection with probability: \(probability)")
                 return .malicious
             }
             return .safe
         } catch {
-            if hasModelLoaded {
-                let durationMs = Date().timeIntervalSince(startTime) * 1000
-                await MetricsManager.shared.trackLatency(operation: .promptGuardTier2, modelName: "CoreML", durationMs: durationMs, success: false)
-            }
+            let durationMs = Date().timeIntervalSince(startTime) * 1000
+            await MetricsManager.shared.trackLatency(operation: .promptGuardTier2, modelName: "CoreML", durationMs: durationMs, success: false)
             print("[InjectionGuard] Tier 2 CoreML error: \(error). Failing closed.")
             return .error
         }

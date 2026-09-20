@@ -74,12 +74,16 @@ struct ModelLED: View {
 
     private var tooltip: String {
         switch state {
-        case .off:           "\(label) — disabled"
-        case .configured:    "\(label) — enabled, not loaded"
-        case .ready:         "\(label) — loaded & ready"
-        case .active:        "\(label) — active"
-        case .downloading:   "\(label) — downloading"
-        case .unprovisioned: "\(label) — enabled, model not downloaded; tier 3 skipped"
+        case .off:           return "\(label) — disabled"
+        case .configured:    return "\(label) — enabled, not loaded"
+        case .ready:         return "\(label) — loaded & ready"
+        case .active:        return "\(label) — active"
+        case .downloading:   return "\(label) — downloading"
+        case .unprovisioned:
+            // Shared LED state for both P2 and P3 (#210): the tooltip names whichever tier this
+            // LED represents rather than hardcoding "tier 3".
+            let tier = label == "P2" ? "2" : "3"
+            return "\(label) — enabled, model not downloaded; tier \(tier) skipped"
         }
     }
 }
@@ -140,17 +144,23 @@ struct ModelLEDBar: View {
 
     func tier2State() -> ModelLED.LEDState {
         guard config.enableAdvancedPromptInjectionProtection else { return .off }
-        guard !config.promptGuardCoreMLModel.isEmpty else { return .configured }
-        let fn = config.promptGuardCoreMLModel.starts(with: "http")
-            ? (URL(string: config.promptGuardCoreMLModel)?.lastPathComponent ?? config.promptGuardCoreMLModel)
-            : config.promptGuardCoreMLModel
-        let nozip = fn.hasSuffix(".zip") ? String(fn.dropLast(4)) : fn
         let d = ModelDownloader.shared
+        let fn = ModelDownloader.resolvedFilename(for: config.promptGuardCoreMLModel)
         if d.isDownloading && d.currentDownloadName == fn { return .downloading }
-        if d.isModelDownloaded(name: nozip) {
+        // Delegate to the same predicate the guard itself evaluates (#210, mirror of tier 3's
+        // #202 fix round 4) instead of re-deriving "downloaded" here — the two must never drift
+        // apart on what counts as provisioned.
+        switch InjectionGuard.tier2Provisioning(modelName: config.promptGuardCoreMLModel,
+                                                 modelsDir: IrisPaths.default.modelsDir) {
+        case .provisioned:
             return CoreMLEvaluator.shared.hasModelLoaded ? .ready : .configured
+        case .unprovisioned, .notConfigured:
+            // Unlike the other LEDs' `.configured` fallback, an absent/unconfigured tier-2 model
+            // isn't just "not loaded yet" — the guard actively skips tier 2 for every evaluation
+            // until this is downloaded (#210), so it gets the same distinguishing state tier 3 got
+            // in #202.
+            return .unprovisioned
         }
-        return .configured
     }
 
     func tier3State() -> ModelLED.LEDState {

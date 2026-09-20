@@ -263,11 +263,14 @@ class AppState {
     /// Internal for the launch-notice below and for tests.
     private(set) var loadedRepairFailed: [UUID] = []
 
-    /// Test seam for the #202 launch notice below: nil means compute the real answer from
+    /// Test seams for the launch notice below: nil means compute the real answer from
     /// `IrisPaths.default.modelsDir` at launch, which is what production always does. Injectable
     /// so tests can pin `.provisioned`/`.unprovisioned` without depending on whether this machine
-    /// happens to have the real gguf under `~/.iris/models`.
-    init(store: ConversationStore = .makeDefault(), tier3Provisioning: InjectionGuard.Tier3Provisioning? = nil) {
+    /// happens to have the real guard models under `~/.iris/models`. `tier2Provisioning` mirrors
+    /// `tier3Provisioning` (#202) for the tier-2 CoreML model (#210).
+    init(store: ConversationStore = .makeDefault(),
+         tier2Provisioning: InjectionGuard.Tier2Provisioning? = nil,
+         tier3Provisioning: InjectionGuard.Tier3Provisioning? = nil) {
         self.store = store
         self.engine = IrisEngine(state: self)
         loadConversations()
@@ -332,17 +335,21 @@ class AppState {
             appendLaunchNotice("Saved conversations could not be loaded (\(headline)). Starting with an empty list; the database was left untouched.",
                                to: target)
         }
-        // #202: a fresh install has protection on by default but no tier-3 model downloaded, and
-        // the guard silently skips tier 3 rather than blocking — say so once, visibly, instead of
-        // leaving that only to the P3 LED's tooltip.
+        // #202, extended to tier 2 by #210: a fresh install has protection on by default but
+        // neither guard model downloaded, and the guard silently skips the model-backed tiers
+        // rather than blocking — say so once, visibly, naming whichever tier(s) are missing,
+        // instead of leaving that only to the P2/P3 LEDs' tooltips.
         if let target = selectedConversationId {
-            let provisioning = tier3Provisioning ?? InjectionGuard.tier3Provisioning(
+            let resolvedTier2Provisioning = tier2Provisioning ?? InjectionGuard.tier2Provisioning(
+                modelName: ConfigManager.shared.promptGuardCoreMLModel,
+                modelsDir: IrisPaths.default.modelsDir)
+            let resolvedTier3Provisioning = tier3Provisioning ?? InjectionGuard.tier3Provisioning(
                 engine: ConfigManager.shared.promptGuardEngine,
                 modelName: ConfigManager.shared.promptGuardModel,
                 modelsDir: IrisPaths.default.modelsDir)
-            if let notice = InjectionGuard.tier3UnprovisionedNotice(
+            if let notice = InjectionGuard.unprovisionedGuardNotice(
                 protectionEnabled: ConfigManager.shared.enableAdvancedPromptInjectionProtection,
-                provisioning: provisioning) {
+                tier2: resolvedTier2Provisioning, tier3: resolvedTier3Provisioning) {
                 appendLaunchNotice(notice, to: target)
             }
         }

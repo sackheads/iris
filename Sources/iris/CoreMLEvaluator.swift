@@ -28,12 +28,11 @@ public final class CoreMLEvaluator: @unchecked Sendable {
         let coreMLPathStr = ConfigManager.shared.promptGuardCoreMLModel
         if coreMLPathStr.isEmpty { return }
         
-        let filename = coreMLPathStr.starts(with: "http") ? (URL(string: coreMLPathStr)?.lastPathComponent ?? coreMLPathStr) : coreMLPathStr
-        var modelDirName = filename
-        if modelDirName.hasSuffix(".zip") {
-            modelDirName = String(modelDirName.dropLast(4))
-        }
-        
+        // #210: resolved via the shared helper so this can never disagree with
+        // `InjectionGuard.tier2Provisioning` or `ModelLEDBar.tier2State` about what "downloaded"
+        // means.
+        let modelDirName = ModelDownloader.resolvedCoreMLDirectoryName(for: coreMLPathStr)
+
         let basePath = IrisPaths.default.modelsDir.path
         let fullPath = URL(fileURLWithPath: basePath).appendingPathComponent(modelDirName)
         

@@ -40,6 +40,17 @@ class ModelDownloader: NSObject, URLSessionDownloadDelegate {
         name.starts(with: "http") ? (URL(string: name)?.lastPathComponent ?? name) : name
     }
 
+    /// Resolves a CoreML/ONNX guard-model config value (raw name, source URL, or `.zip` archive)
+    /// to the directory name it unpacks to under `modelsDir`. Builds on `resolvedFilename` and
+    /// additionally strips a trailing `.zip` — the tier-2 guard model ships as
+    /// `<name>.onnx.zip`/`<name>.mlmodelc.zip` and unzips to `<name>.onnx/`/`<name>.mlmodelc/`.
+    /// Shared by `CoreMLEvaluator.loadModelIfNeeded`, `InjectionGuard.tier2Provisioning` (#210),
+    /// and `ModelLEDBar.tier2State` so none of them can drift on what "downloaded" means.
+    nonisolated static func resolvedCoreMLDirectoryName(for name: String) -> String {
+        let filename = resolvedFilename(for: name)
+        return filename.hasSuffix(".zip") ? String(filename.dropLast(4)) : filename
+    }
+
     func isModelDownloaded(name: String) -> Bool {
         let filename = Self.resolvedFilename(for: name)
         let path = IrisPaths.default.modelsDir.path + "/" + filename
