@@ -211,6 +211,17 @@ struct ConversationStoreTests {
         #expect(try store.loadAll().conversations.map(\.title).sorted() == ["a", "b"])
     }
 
+    @Test("a cancelled write applies nothing")
+    func cancelledWriteAppliesNothing() throws {
+        let store = try ConversationStore.inMemory()
+        let c = sample()
+        try store.apply([created(c)], unlessCancelled: { true })
+        #expect(try store.isEmpty())
+        // The same batch with the stand-down cleared writes normally.
+        try store.apply([created(c)])
+        #expect(try store.isEmpty() == false)
+    }
+
     @Test("a corrupted metadata row skips only that conversation")
     func corruptedMetadataIsIsolated() throws {
         let store = try ConversationStore.inMemory()

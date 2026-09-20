@@ -170,11 +170,18 @@ final class ConversationStore: Sendable {
     /// persistence for every other open conversation. If any conversation failed, `apply` throws
     /// `ConversationStoreError.partialFailure(failedIds:)` after the transaction commits the
     /// successful ones, so the caller knows exactly which writes to re-queue.
-    func apply(_ batch: [ConversationWrite]) throws {
+    ///
+    /// `unlessCancelled` is checked as the first statement inside the write transaction, after the
+    /// writer lock is held: a detached write that lost the race to `AppState.flushSave` must not
+    /// re-apply its now-stale snapshot, because the append paths truncate trailing rows and would
+    /// delete exactly the rows the quit-time write just added. Standing down here writes nothing
+    /// and throws nothing — the caller that cancelled it has already written the current state.
+    func apply(_ batch: [ConversationWrite], unlessCancelled: @Sendable () -> Bool = { false }) throws {
         guard !batch.isEmpty else { return }
         let encoder = JSONEncoder()
         var failedIds: [UUID] = []
         try writer.write { db in
+            if unlessCancelled() { return }
             for w in batch {
                 do {
                     try db.inSavepoint {

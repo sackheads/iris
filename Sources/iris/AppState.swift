@@ -1316,8 +1316,10 @@ class AppState {
     /// Changes recorded since the last flush, per conversation (spec §3).
     private var pendingChanges: [UUID: ChangeSet] = [:]
     /// The batch a detached write is currently applying. Exactly one at a time; `flushSave`
-    /// replays it, which is harmless because every row write is keyed by ordinal or id.
+    /// folds it back into `pendingChanges` so the quit-time write uses current snapshots.
     private var inFlight: [ConversationWrite]? = nil
+    /// The detached write applying `inFlight`, kept so `flushSave` can tell it to stand down.
+    private var writeTask: Task<Void, Never>? = nil
 
     /// The conversations that belong on disk: durable, user-facing ones only. Sub-process
     /// (subagent / drift-evaluator) scratch conversations are ephemeral and must never persist.
@@ -1389,9 +1391,13 @@ class AppState {
     private func takeBatch() -> [ConversationWrite] {
         firstDirtyAt = nil
         let batch: [ConversationWrite] = pendingChanges.compactMap { id, changes in
+            var changes = changes
             let live = conversations.first { $0.id == id }
             if let live, live.isSubagent { return nil }
             if live == nil && !changes.deleted { return nil }   // vanished without a delete: nothing to write
+            // Deleted and re-created inside one window (the same id came back): the conversation
+            // is live, so write the current snapshot rather than deleting the row out from under it.
+            if live != nil { changes.deleted = false }
             return ConversationWrite(id: id, snapshot: changes.deleted ? nil : live, changes: changes)
         }
         pendingChanges = [:]
@@ -1413,14 +1419,20 @@ class AppState {
         guard !batch.isEmpty else { return }
         inFlight = batch
         let store = self.store
-        Task.detached(priority: .utility) { [weak self] in
+        writeTask = Task.detached(priority: .utility) { [weak self] in
             var failure: Error? = nil
-            do { try store.apply(batch) } catch { failure = error }
+            do { try store.apply(batch, unlessCancelled: { Task.isCancelled }) } catch { failure = error }
             await MainActor.run {
                 guard let self else { return }
                 self.inFlight = nil
+                // Whether anything NEW arrived while this batch was being written, sampled before
+                // a failure puts the batch back: a durable error (disk full, a corrupt database)
+                // would otherwise loop fail → re-queue → flush forever, one log line and one
+                // main-actor hop per turn of the spin. A failed batch is logged once and waits for
+                // the next `markChanged` or `flushSave` to retry it (spec §3).
+                let arrivedDuringWrite = !self.pendingChanges.isEmpty
                 if let failure {
-                    print("Conversation store write failed; will retry: \(failure)")
+                    print("Conversation store write failed; will retry on the next change: \(failure)")
                     // A partial failure already committed everything not listed, so only the
                     // named conversations go back on the queue; anything else means the whole
                     // batch is unaccounted for.
@@ -1430,20 +1442,33 @@ class AppState {
                     } else {
                         self.requeue(batch)
                     }
+                    if arrivedDuringWrite { self.flush() }
+                } else if !self.pendingChanges.isEmpty {
+                    self.flush()
                 }
-                if !self.pendingChanges.isEmpty { self.flush() }
             }
         }
     }
 
     /// Writes everything pending synchronously, right now. `applicationWillTerminate` calls
     /// `_exit(0)` after this, which runs no atexit handlers and would kill the debounce task
-    /// and any detached write (#62). The in-flight batch is replayed too: it may not have
-    /// started, and replaying rows keyed by ordinal and id is harmless.
+    /// and any detached write (#62).
+    ///
+    /// An in-flight batch is folded back into `pendingChanges` rather than appended to the write,
+    /// so every id is written exactly once from its CURRENT snapshot. Appending the in-flight
+    /// batch instead would hand `apply` a stale snapshot, and the append paths truncate trailing
+    /// rows — a detached write that took the writer lock after this one committed would delete the
+    /// very rows we just wrote. `writeTask` is cancelled for the same reason; `apply` checks that
+    /// under the lock and stands down. `inFlight` itself is left alone: the detached task's
+    /// completion clears it.
     func flushSave() {
         saveTask?.cancel()
-        let batch = (inFlight ?? []) + takeBatch()
+        writeTask?.cancel()
+        if let inFlight { requeue(inFlight) }
+        let batch = takeBatch()
         guard !batch.isEmpty else { return }
+        // Nothing to retry with: the process exits immediately after this on the quit path, so a
+        // failure here is logged and lost. Every other write retries on the next change.
         do { try store.apply(batch) } catch { print("Conversation store flush failed: \(error)") }
     }
     
