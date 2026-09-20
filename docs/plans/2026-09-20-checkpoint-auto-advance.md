@@ -4,11 +4,13 @@
 
 **Goal:** A checkpoint the grader passes cleanly advances the ladder without stopping the human; anything contested still pauses for review.
 
-**Architecture:** `performCheckpoint` inverts from pause-then-grade to grade-then-decide. A pure predicate on `GoalContract` decides; a new `autoAdvanceCheckpoint` performs the advance without re-arming the goal loop (the turn is still live). Two new persisted fields on `GoalContract` — `checkpointHistory` (the audit trail slice F will render) and `judgements` (durable human verdicts, which a per-checkpoint re-grade would otherwise destroy).
+**Architecture:** `performCheckpoint` inverts from pause-then-grade to grade-then-decide. A pure predicate on `GoalContract` decides; a new `autoAdvanceCheckpoint` performs the advance without re-arming the goal loop (the turn is still live). Two new persisted fields — `checkpointHistory` (the audit trail slice F will render) and `judgements` on `GoalContract` (durable human verdicts, which a per-checkpoint re-grade would otherwise destroy).
 
 **Tech Stack:** Swift 6, SwiftUI, Swift Testing (`@Suite`/`@Test`/`#expect`).
 
 **Spec:** `docs/specs/2026-09-20-checkpoint-auto-advance.md`
+
+**As-shipped correction (this plan is a historical artifact; the two points below moved after it was written — see spec §11.1):** `checkpointHistory` ended up on `Conversation`, not `GoalContract` — a later fix round found the contract-scoped placement did not outlive `goal_complete`/`clearGoal`, which nils the contract and would have taken the audit trail with it. And `CheckpointOutcome.evaluation` shipped as `GoalEvaluation?`, not the non-optional type Task 1 below writes — a nil grade (nothing to record, e.g. after a restart) is stored as nil rather than synthesizing a fake `.failed` verdict nobody produced. The task bodies below are left as originally written; do not read their code blocks as the current shape of either type.
 
 ## Global Constraints
 
