@@ -224,8 +224,8 @@ struct CheckpointAutoAdvanceTests {
         #expect(c?.checkpointStatus == .running)
     }
 
-    @Test("an unjudged humanJudged criterion stops the checkpoint without asking for the verdict")
-    func testHumanJudgedPausesWithoutAsking() async {
+    @Test("an unjudged humanJudged criterion stops the checkpoint AND opens a judgement pause (#191)")
+    func testHumanJudgedAsksAtCheckpoint() async {
         let app = AppState(); let id = UUID()
         let a = Criterion(text: "parser works", kind: .qualitative, check: nil)
         let h = Criterion(text: "output reads well", kind: .humanJudged, check: nil)
@@ -244,12 +244,13 @@ struct CheckpointAutoAdvanceTests {
         let after = app.conversations.first { $0.id == id }?.goalContract
         #expect(after?.currentMilestone == 0, "an unjudged human criterion must not be skipped")
         #expect(after?.checkpointStatus == .pausedForReview, "it still stops for the human")
-        // It must NOT open a judgement pause. The inline Accept/Reject surface does not exist, so
-        // asking here would stop the user with a question that has no answer button — and a
-        // restart in that state is unrecoverable (`sanitizeLoaded` nils `lastGoalEvaluation`, so
-        // `recordHumanJudgement` can never succeed again). Judgement stays at the terminal gate.
-        #expect(after?.awaitingHumanJudgement == false,
-                "the checkpoint stops for review; it does not ask for a verdict it cannot collect")
+        // #191: the checkpoint now ASKS. The inline Accept/Reject surface exists on the checkpoint
+        // chip, and the pause survives a restart (v6 columns), so opening it is safe.
+        #expect(after?.awaitingHumanJudgement == true, "the checkpoint asks for the verdict it stopped on")
+        let conv = app.conversations.first { $0.id == id }
+        #expect(conv?.lastGoalEvaluation?.criteria.contains { $0.verdict == .humanPending } == true)
+        let lastAgentLine = conv?.messages.last { $0.role == .agent }?.content ?? ""
+        #expect(lastAgentLine.contains("output reads well"), "the transcript names the criterion waiting on the user")
     }
 
     @Test("an unjudged humanJudged criterion in a FUTURE milestone must not trigger a judgement pause")
