@@ -64,7 +64,7 @@ struct LegacyConversationBlobTests {
         #expect(d.data(forKey: LegacyConversationBlob.key) == nil)
     }
 
-    @Test("an undecodable blob is backed up under a timestamped key and left in place, as before")
+    @Test("an undecodable blob is backed up under a timestamped key and the live key removed, so it runs once")
     func undecodable() throws {
         let store = try ConversationStore.inMemory()
         let (d, name) = defaults()
@@ -73,7 +73,25 @@ struct LegacyConversationBlobTests {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d, now: now) == .undecodable)
         #expect(d.data(forKey: "iris_conversations_backup_1700000000.0") != nil)
-        #expect(d.data(forKey: LegacyConversationBlob.key) != nil)
+        #expect(d.data(forKey: LegacyConversationBlob.key) == nil)
         #expect(try store.isEmpty())
+        // The live key is gone, so a second launch finds nothing to do.
+        #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .nothingToDo)
+    }
+
+    @Test("an import failure leaves the live key in place so it is retried at the next launch")
+    func importFailed() throws {
+        let store = try ConversationStore.inMemory()
+        let (d, name) = defaults()
+        defer { cleanup(d, name) }
+        let data = blob([conv("a")])
+        d.set(data, forKey: LegacyConversationBlob.key)
+        store.failInjection = { _ in true }
+        #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .importFailed)
+        #expect(d.data(forKey: LegacyConversationBlob.key) == data)
+        #expect(try store.isEmpty())
+        // Clearing the injection and retrying (as the next launch would) succeeds.
+        store.failInjection = nil
+        #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .imported(1))
     }
 }

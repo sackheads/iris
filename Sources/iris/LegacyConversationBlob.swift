@@ -9,7 +9,13 @@ enum LegacyConversationBlob {
         case nothingToDo
         case imported(Int)
         case storeNotEmpty
+        /// The blob's JSON could not be decoded at all. A timestamped backup is kept and the live
+        /// key is removed — the data is presumed lost, so there is nothing to retry, and leaving
+        /// the key in place would re-run (and re-notify) this on every single launch.
         case undecodable
+        /// The blob decoded fine but the write into the store failed (disk full, some other
+        /// transient condition). The live key is left in place so the next launch retries.
+        case importFailed
     }
 
     static func migrateIfNeeded(into store: ConversationStore, defaults: UserDefaults, now: Date = Date()) -> Outcome {
@@ -18,9 +24,12 @@ enum LegacyConversationBlob {
         do {
             decoded = try JSONDecoder().decode([Conversation].self, from: data)
         } catch {
-            // Same behaviour as the old loader: keep the blob, park a copy, start empty.
+            // Park a copy under a timestamped key and stop reading the live key: the data is
+            // presumed lost, and leaving the key in place made the old loader re-back-up (and,
+            // with #163's notice, re-tell the user) on every single launch instead of once.
             print("Failed to decode legacy conversations: \(error)")
             defaults.set(data, forKey: "iris_conversations_backup_\(now.timeIntervalSince1970)")
+            defaults.removeObject(forKey: key)
             return .undecodable
         }
         let durable = AppState.durableConversations(decoded)
@@ -28,8 +37,10 @@ enum LegacyConversationBlob {
         do {
             imported = try store.importLegacy(durable)
         } catch {
-            print("Legacy conversation import failed; leaving the blob in place: \(error)")
-            return .undecodable
+            // Unlike an undecodable blob, this is worth retrying: the data is fine, only the write
+            // failed. Leave the live key in place so the next launch tries again.
+            print("Legacy conversation import failed; will retry at the next launch: \(error)")
+            return .importFailed
         }
         // Only after the transaction committed: park the blob and stop reading it.
         defaults.set(data, forKey: legacyKey)

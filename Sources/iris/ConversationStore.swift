@@ -75,6 +75,19 @@ struct LoadResult: Sendable {
     var skipped: [SkippedRow]
 }
 
+/// A message/history row `loadAll` could not decode, captured with its raw bytes so it can be
+/// moved to `quarantine` and the surviving rows renumbered before the read returns (review
+/// finding, #163 round 1: leaving the bad row's ordinal occupied while the in-memory array is
+/// compacted made the next append — which uses the compacted index as the ordinal — overwrite
+/// the wrong row and its trailing-row cleanup delete a good one).
+private struct QuarantineCandidate {
+    let conversationId: UUID
+    let table: String   // "messages" | "history"
+    let ordinal: Int
+    let payload: Data?
+    let reason: String
+}
+
 /// Thrown by `apply(_:)` when one or more conversations in the batch failed to write. The
 /// conversations not listed here committed normally.
 enum ConversationStoreError: Error, Equatable {
@@ -97,7 +110,9 @@ final class ConversationStore: Sendable {
     /// savepoint in `apply(_:)`; returning `true` makes that conversation's write fail without
     /// needing a naturally-occurring constraint violation, so `apply`'s partial-failure handling
     /// (spec §3 retry-by-merge) can be exercised deterministically. `nil` (the default) never
-    /// fails anything; nothing in the app sets this.
+    /// fails anything; nothing in the app sets this. Also consulted once (with a throwaway id) at
+    /// the top of `importLegacy`'s transaction, so `LegacyConversationBlob`'s `.importFailed`
+    /// outcome can be exercised the same way.
     var failInjection: (@Sendable (UUID) -> Bool)? {
         get { failInjectionLock.withLock { _failInjection } }
         set { failInjectionLock.withLock { _failInjection = newValue } }
@@ -155,6 +170,18 @@ final class ConversationStore: Sendable {
                 t.column("ordinal", .integer).notNull()
                 t.column("payload", .text).notNull()
                 t.primaryKey(["conversationId", "ordinal"])
+            }
+            // Where `loadAll` moves a message/history row it could not decode (review finding,
+            // #163 round 1). Deliberately NOT a foreign key to `conversations`: a quarantined row
+            // must survive the conversation being deleted so it can still be recovered manually.
+            try db.create(table: "quarantine") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("conversationId", .text).notNull()
+                t.column("sourceTable", .text).notNull()      // "messages" | "history"
+                t.column("ordinal", .integer).notNull()       // the ordinal it occupied
+                t.column("payload", .blob)                    // raw bytes as stored; may be NULL
+                t.column("reason", .text).notNull()
+                t.column("quarantinedAt", .datetime).notNull()
             }
         }
         return m
@@ -299,8 +326,9 @@ final class ConversationStore: Sendable {
 
     func loadAll() throws -> LoadResult {
         let decoder = JSONDecoder()
-        return try writer.read { db in
+        let (result, candidates): (LoadResult, [QuarantineCandidate]) = try writer.read { db in
             var out = LoadResult(conversations: [], skipped: [])
+            var candidates: [QuarantineCandidate] = []
             let rows = try Row.fetchAll(db, sql: "SELECT * FROM conversations ORDER BY position")
             for row in rows {
                 guard let idString = Self.readText(row, "id"), let id = UUID(uuidString: idString) else {
@@ -319,37 +347,95 @@ final class ConversationStore: Sendable {
                     if let s = Self.readText(row, "goalContract") { c.goalContract = try decoder.decode(GoalContract.self, from: Data(s.utf8)) }
                     if let s = Self.readText(row, "subagentResult") { c.subagentResult = try decoder.decode(SubagentResult.self, from: Data(s.utf8)) }
                 } catch {
+                    // Whole-conversation skip: nothing in memory represents this conversation, so
+                    // nothing can ever write to it again. No quarantine/renumber needed.
                     out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "\(error)"))
                     continue
                 }
                 for r in try Row.fetchAll(db, sql: "SELECT ordinal, payload FROM messages WHERE conversationId = ? ORDER BY ordinal", arguments: [idString]) {
                     let ordinal: Int? = r["ordinal"]
-                    guard let payload = Self.readText(r, "payload") else {
+                    let raw: Data? = r["payload"]
+                    guard let raw else {
                         out.skipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: ordinal, reason: "unreadable payload"))
+                        if let ordinal { candidates.append(QuarantineCandidate(conversationId: id, table: "messages", ordinal: ordinal, payload: nil, reason: "unreadable payload")) }
                         continue
                     }
-                    do { c.messages.append(try decoder.decode(ChatMessage.self, from: Data(payload.utf8))) }
-                    catch { out.skipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: ordinal, reason: "\(error)")) }
+                    do { c.messages.append(try decoder.decode(ChatMessage.self, from: raw)) }
+                    catch {
+                        out.skipped.append(SkippedRow(conversationId: id, table: "messages", ordinal: ordinal, reason: "\(error)"))
+                        if let ordinal { candidates.append(QuarantineCandidate(conversationId: id, table: "messages", ordinal: ordinal, payload: raw, reason: "\(error)")) }
+                    }
                 }
                 for r in try Row.fetchAll(db, sql: "SELECT ordinal, payload FROM history WHERE conversationId = ? ORDER BY ordinal", arguments: [idString]) {
                     let ordinal: Int? = r["ordinal"]
-                    guard let payload = Self.readText(r, "payload") else {
+                    let raw: Data? = r["payload"]
+                    guard let raw else {
                         out.skipped.append(SkippedRow(conversationId: id, table: "history", ordinal: ordinal, reason: "unreadable payload"))
+                        if let ordinal { candidates.append(QuarantineCandidate(conversationId: id, table: "history", ordinal: ordinal, payload: nil, reason: "unreadable payload")) }
                         continue
                     }
-                    do { c.history.append(try decoder.decode(Content.self, from: Data(payload.utf8))) }
-                    catch { out.skipped.append(SkippedRow(conversationId: id, table: "history", ordinal: ordinal, reason: "\(error)")) }
+                    do { c.history.append(try decoder.decode(Content.self, from: raw)) }
+                    catch {
+                        out.skipped.append(SkippedRow(conversationId: id, table: "history", ordinal: ordinal, reason: "\(error)"))
+                        if let ordinal { candidates.append(QuarantineCandidate(conversationId: id, table: "history", ordinal: ordinal, payload: raw, reason: "\(error)")) }
+                    }
                 }
                 out.conversations.append(c)
             }
-            return out
+            return (out, candidates)
         }
+
+        guard !candidates.isEmpty else { return result }
+
+        // Repair inside one write transaction, only when there is something to repair: quarantine
+        // the bad rows, then renumber what's left so ordinals stay contiguous 0..<n. Left as-is,
+        // the in-memory array above (already compacted by the skips) and the on-disk ordinals
+        // disagree — the next append uses the compacted in-memory index as the ordinal, so it
+        // `INSERT OR REPLACE`s the wrong row while the trailing-row `DELETE` drops a good one
+        // (review finding, #163 round 1).
+        try writer.write { db in
+            let now = Date()
+            var grouped: [String: [QuarantineCandidate]] = [:]
+            for candidate in candidates {
+                grouped[candidate.conversationId.uuidString + "|" + candidate.table, default: []].append(candidate)
+            }
+            for (_, group) in grouped {
+                guard let first = group.first else { continue }
+                let convIdString = first.conversationId.uuidString
+                let table = first.table
+                for candidate in group {
+                    try db.execute(sql: """
+                        INSERT INTO quarantine (conversationId, sourceTable, ordinal, payload, reason, quarantinedAt)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """, arguments: [convIdString, table, candidate.ordinal, candidate.payload, candidate.reason, now])
+                    try db.execute(sql: "DELETE FROM \(table) WHERE conversationId = ? AND ordinal = ?",
+                                   arguments: [convIdString, candidate.ordinal])
+                }
+                // Renumber the survivors to a contiguous 0..<n, preserving relative order. Shifting
+                // by a large, out-of-range offset first avoids colliding with the
+                // (conversationId, ordinal) primary key while rows are retargeted one at a time.
+                try db.execute(sql: "UPDATE \(table) SET ordinal = ordinal + 1000000 WHERE conversationId = ?", arguments: [convIdString])
+                let survivors = try Row.fetchAll(db, sql: "SELECT ordinal FROM \(table) WHERE conversationId = ? ORDER BY ordinal ASC", arguments: [convIdString])
+                for (index, row) in survivors.enumerated() {
+                    let shifted: Int = row["ordinal"]
+                    try db.execute(sql: "UPDATE \(table) SET ordinal = ? WHERE conversationId = ? AND ordinal = ?", arguments: [index, convIdString, shifted])
+                }
+            }
+        }
+        return result
     }
 
     func counts(for id: UUID) throws -> (messages: Int, history: Int) {
         try writer.read { db in
             (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM messages WHERE conversationId = ?", arguments: [id.uuidString]) ?? 0,
              try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM history WHERE conversationId = ?", arguments: [id.uuidString]) ?? 0)
+        }
+    }
+
+    /// Test support: how many rows this conversation has had quarantined by `loadAll`.
+    func quarantineCount(for id: UUID) throws -> Int {
+        try writer.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM quarantine WHERE conversationId = ?", arguments: [id.uuidString]) ?? 0
         }
     }
 
@@ -384,6 +470,7 @@ extension ConversationStore {
     func importLegacy(_ conversations: [Conversation]) throws -> Bool {
         try writer.write { db in
             if (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM conversations") ?? 0) > 0 { return false }
+            if self.failInjection?(UUID()) == true { throw InjectedWriteFailure() }
             let encoder = JSONEncoder()
             for c in conversations {
                 try Self.upsertMetadata(c, exists: false, db: db, encoder: encoder)

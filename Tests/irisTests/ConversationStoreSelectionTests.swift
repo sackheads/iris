@@ -47,8 +47,17 @@ struct ConversationStoreSelectionTests {
         var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
         try store.apply([ConversationWrite(id: c.id, snapshot: c, changes: s)])
         try store.rawWrite("UPDATE messages SET payload = 'x' WHERE conversationId = ?", arguments: [c.id.uuidString])
+
         let a = AppState(store: store)
         #expect(a.loadedSkippedRows.count == 1)
-        #expect(a.conversations.first?.messages.contains { $0.role == .system && $0.content.contains("could not be read") } == true)
+        #expect(a.conversations.first?.messages.contains { $0.role == .system && $0.content.contains("quarantine table") } == true)
+        a.flushSave()
+
+        // The corrupted row was quarantined by the first `loadAll`, so a second AppState against
+        // the same store finds nothing left to skip and never adds a second notice.
+        let b = AppState(store: store)
+        #expect(b.loadedSkippedRows.isEmpty)
+        let notices = b.conversations.first?.messages.filter { $0.role == .system && $0.content.contains("quarantine table") } ?? []
+        #expect(notices.count == 1)
     }
 }

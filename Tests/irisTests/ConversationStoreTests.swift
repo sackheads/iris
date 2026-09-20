@@ -151,8 +151,73 @@ struct ConversationStoreTests {
         #expect(loaded.conversations[1].messages.count == 2)
         #expect(loaded.skipped == [SkippedRow(conversationId: a.id, table: "messages", ordinal: 0, reason: loaded.skipped.first?.reason ?? "")])
         #expect(loaded.skipped.first?.reason.isEmpty == false)
-        // The row is left on disk, not deleted.
-        #expect(try store.counts(for: a.id).messages == 2)
+        // The bad row is quarantined and the survivor renumbered, not left in place on disk.
+        #expect(try store.counts(for: a.id).messages == 1)
+        #expect(try store.quarantineCount(for: a.id) == 1)
+    }
+
+    @Test("a corrupted middle message row is quarantined and the survivors renumbered contiguous, so a later append neither clobbers nor loses a row")
+    func middleMessageQuarantinedAndRenumbered() throws {
+        let store = try ConversationStore.inMemory()
+        var c = sample()
+        c.messages = [
+            ChatMessage(role: .user, content: "m0"),
+            ChatMessage(role: .agent, content: "m1"),
+            ChatMessage(role: .agent, content: "m2"),
+        ]
+        try store.apply([created(c)])
+        try store.rawWrite("UPDATE messages SET payload = '{not json' WHERE conversationId = ? AND ordinal = 1", arguments: [c.id.uuidString])
+
+        let loaded = try store.loadAll()
+        let back = try #require(loaded.conversations.first)
+        #expect(back.messages.map(\.content) == ["m0", "m2"])
+        #expect(loaded.skipped.count == 1)
+        #expect(try store.counts(for: c.id).messages == 2)
+        #expect(try store.quarantineCount(for: c.id) == 1)
+
+        // Idempotent: the bad row is gone, so a second load (no writes in between) reports nothing.
+        #expect(try store.loadAll().skipped.isEmpty)
+
+        // Append using the in-memory (already-compacted) index, exactly as AppState would after
+        // a load with a skip. Before the fix this ordinal (2) collided with the still-occupied
+        // original "m2" row on disk and its trailing DELETE dropped a good row.
+        var next = back
+        next.messages.append(ChatMessage(role: .agent, content: "new"))
+        try store.apply([write(next, .messagesAppended(from: 2))])
+
+        let reloaded = try store.loadAll()
+        #expect(reloaded.conversations.first?.messages.map(\.content) == ["m0", "m2", "new"])
+        #expect(reloaded.skipped.isEmpty)
+    }
+
+    @Test("a corrupted middle history row is quarantined and the survivors renumbered contiguous, so a later append neither clobbers nor loses a row")
+    func middleHistoryQuarantinedAndRenumbered() throws {
+        let store = try ConversationStore.inMemory()
+        var c = sample()
+        c.history = [
+            Content(role: "user", parts: [Part(text: "h0")]),
+            Content(role: "model", parts: [Part(text: "h1")]),
+            Content(role: "user", parts: [Part(text: "h2")]),
+        ]
+        try store.apply([created(c)])
+        try store.rawWrite("UPDATE history SET payload = '{not json' WHERE conversationId = ? AND ordinal = 1", arguments: [c.id.uuidString])
+
+        let loaded = try store.loadAll()
+        let back = try #require(loaded.conversations.first)
+        #expect(back.history.map { $0.parts.first?.text } == ["h0", "h2"])
+        #expect(loaded.skipped.count == 1)
+        #expect(try store.counts(for: c.id).history == 2)
+        #expect(try store.quarantineCount(for: c.id) == 1)
+
+        #expect(try store.loadAll().skipped.isEmpty)
+
+        var next = back
+        next.history.append(Content(role: "model", parts: [Part(text: "new")]))
+        try store.apply([write(next, .historyAppended(from: 2))])
+
+        let reloaded = try store.loadAll()
+        #expect(reloaded.conversations.first?.history.map { $0.parts.first?.text } == ["h0", "h2", "new"])
+        #expect(reloaded.skipped.isEmpty)
     }
 
     @Test("a non-UTF8 message payload is skipped and reported, not a fatal crash")

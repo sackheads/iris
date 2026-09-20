@@ -70,6 +70,15 @@ history
   ordinal        INTEGER NOT NULL                       -- index in Conversation.history
   payload        TEXT NOT NULL                          -- JSON of Content
   PRIMARY KEY (conversationId, ordinal)
+
+quarantine                                              -- where loadAll moves rows it can't decode
+  id             INTEGER PRIMARY KEY AUTOINCREMENT
+  conversationId TEXT NOT NULL                          -- no FK: survives the conversation's deletion
+  sourceTable    TEXT NOT NULL                          -- "messages" | "history"
+  ordinal        INTEGER NOT NULL                       -- the ordinal it occupied
+  payload        BLOB                                   -- raw bytes as stored; may be NULL
+  reason         TEXT NOT NULL
+  quarantinedAt  DATETIME NOT NULL
 ```
 
 - Payloads are the existing Codable encodings, so every custom `init(from:)` and every `decodeIfPresent` keeps working unchanged; invariant 1 still applies to new fields, but its blast radius is now one row.
@@ -141,7 +150,11 @@ Writes are keyed by ordinal and id, so replaying a batch after a failed write is
 
 ## 5. Load
 
-`AppState.init` calls `store.loadAll()` synchronously, as `loadConversations()` is synchronous today. For each `conversations` row in `position` order: decode the metadata columns; fetch message and history rows in ordinal order and decode each payload; a payload that fails to decode is skipped and counted; a metadata row that fails to decode skips the whole conversation. The result goes through `sanitizeLoaded` exactly as today. `LoadResult.skipped` (conversation id, table, ordinal, error) is printed to the console and, when non-empty, shown once as a system line in the selected conversation so the loss is visible rather than silent. Skipped rows stay on disk.
+`AppState.init` calls `store.loadAll()` synchronously, as `loadConversations()` is synchronous today. For each `conversations` row in `position` order: decode the metadata columns; fetch message and history rows in ordinal order and decode each payload; a payload that fails to decode is skipped and counted; a metadata row that fails to decode skips the whole conversation. The result goes through `sanitizeLoaded` exactly as today. `LoadResult.skipped` (conversation id, table, ordinal, error) is printed to the console.
+
+A message/history payload that fails to decode is **quarantined and the survivors renumbered**, inside one write transaction, before `loadAll` returns: the row (with its raw bytes, whatever they were) moves to `quarantine`, the bad row is deleted from its table, and the remaining rows for that conversation/table are renumbered to a contiguous `0..<n`, preserving order. This matters because `loadAll`'s in-memory array is already compacted past the skip — leaving the bad row's ordinal occupied on disk let the next append (which uses the compacted in-memory index as the ordinal) `INSERT OR REPLACE` the wrong row while its trailing-row `DELETE ... ordinal >= count` dropped a good one, silently losing a readable message on the next flush. A metadata row that fails to decode skips the whole conversation and is left alone: nothing in memory represents that conversation, so nothing can ever write to it again.
+
+Because the bad row is gone after quarantining, a second `loadAll` against the same store reports no skips for it — the skipped-rows notice shown once in the selected conversation (worded around "moved to the quarantine table in `conversations.sqlite`") is naturally one-shot, with no separate dedup state needed. If `store.loadAll()` itself throws (rather than a per-row skip), the error is logged, surfaced as its own one-line notice ("Saved conversations could not be loaded... the database was left untouched"), and the app starts with an empty list.
 
 Position gaps after deletes are fine; positions are only compared.
 
@@ -149,8 +162,8 @@ Position gaps after deletes are fine; positions are only compared.
 
 On the first launch that finds the store empty and the `iris_conversations` key present:
 
-1. Decode the blob with today's decoder. If that throws, behave as today (write the `iris_conversations_backup_<ts>` key, start empty) and stop.
-2. `importLegacyBlob(durableConversations(decoded))` inserts every conversation, message and history row in one transaction, positions in array order.
+1. Decode the blob with today's decoder. If that throws: write the `iris_conversations_backup_<ts>` key **and remove the live `iris_conversations` key**, report `.undecodable`, and surface a one-line notice ("could not be read... a copy was kept..."). The live key must go here, not just on success — leaving it in place made this re-run (and, once the notice existed, re-tell the user) on every single launch instead of once; the data is presumed lost, so there is nothing to retry.
+2. `importLegacy(durableConversations(decoded))` inserts every conversation, message and history row in one transaction, positions in array order. If the write itself fails (disk full, some other transient condition), the live key is **left in place**, `.importFailed` is reported, and a one-line notice says it will be retried at the next launch — unlike an undecodable blob, the data here is fine and worth another attempt.
 3. Only after the transaction commits: copy the blob to `iris_conversations_legacy`, then remove `iris_conversations`. A crash between the commit and the key move re-runs the import on next launch against a non-empty store, so step 2 first checks emptiness again inside the transaction and skips if rows exist.
 
 The legacy key is never read again. An issue is filed at implementation time to delete it two releases later. `perfSeed` keeps excluding both keys.
