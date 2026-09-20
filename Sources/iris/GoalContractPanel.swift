@@ -477,21 +477,33 @@ fileprivate func judgementHandlers(state: AppState, conversation: Conversation,
 /// verdict, and the resume controls (Send back / Approve & continue).
 struct CheckpointPauseChip: View {
     var state: AppState
-    let conversation: Conversation
+    /// #191 fix round 1: this chip takes the conversation's ID, not the `Conversation` value
+    /// itself. `Conversation.==` compares by `id` only (AppState.swift), so a struct-value
+    /// `let conversation: Conversation` input compares equal before and after a judgement is
+    /// recorded (the id never changes) — SwiftUI's diffing can then skip re-running this view's
+    /// `body` even though `state.conversations` mutated underneath it, leaving Accept/Reject and
+    /// the header stuck on stale state until something else (e.g. switching conversations) forces
+    /// a redraw. Reading `state.conversations` directly inside `body` below makes `@Observable`
+    /// track this view's dependency on that array, so any mutation re-renders the chip regardless
+    /// of how the parent diffed its inputs. Do not go back to storing a `Conversation` here.
+    let conversationId: UUID
     @State private var sendBackNote: String = ""
 
     /// §9.1: once nothing is `.humanPending` the question has been answered; a header still asking
     /// reads as a UI that did not notice the click.
-    private var hasPendingJudgement: Bool {
+    private func hasPendingJudgement(_ conversation: Conversation) -> Bool {
         conversation.lastGoalEvaluation?.criteria.contains { $0.verdict == .humanPending } == true
     }
     /// §6: the rows holding Approve shut, scoped to the current milestone.
-    private var approveBlockers: [CriterionVerdict] {
+    private func approveBlockers(_ conversation: Conversation) -> [CriterionVerdict] {
         conversation.goalContract?.checkpointApproveBlockers(from: conversation.lastGoalEvaluation) ?? []
     }
 
     var body: some View {
-        if let contract = conversation.goalContract, contract.checkpointStatus == .pausedForReview {
+        if let conversation = state.conversations.first(where: { $0.id == conversationId }),
+           let contract = conversation.goalContract, contract.checkpointStatus == .pausedForReview {
+            let hasPendingJudgement = hasPendingJudgement(conversation)
+            let approveBlockers = approveBlockers(conversation)
             // Bounded like every other goal chip (GoalContractPanel, LockedContractChip,
             // CompletionReportChip). This one grows with the contract: it embeds the self-report
             // AND a row per grader verdict. Unbounded in the composer's VStack that is what
