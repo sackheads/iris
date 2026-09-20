@@ -328,6 +328,14 @@ final class ConversationStore: Sendable {
                 t.add(column: "lastGoalCompletionReport", .text)
             }
         }
+        // #182. A new nullable column rather than a table rebuild: NULL reads back as `false`,
+        // so every existing conversation loads active, which is the desired migration. v7, not
+        // v6: v6_pause_surfacing (#191) landed on main first and took that number.
+        m.registerMigration("v7_archive") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "isArchived", .boolean)
+            }
+        }
         return m
     }
 
@@ -535,21 +543,21 @@ final class ConversationStore: Sendable {
                 UPDATE conversations SET title = ?, updatedAt = ?, workspacePath = ?, activeGoal = ?,
                     messageCountSinceReflection = ?, goalIterationCount = ?, mainAgentSandbox = ?,
                     tokenUsage = ?, goalContract = ?, subagentResult = ?, checkpointHistory = ?,
-                    lastGoalEvaluation = ?, lastGoalCompletionReport = ?
+                    lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?
                 WHERE id = ?
                 """, arguments: [c.title, now, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
-                                 history, evaluation, report, c.id.uuidString])
+                                 history, evaluation, report, c.isArchived, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
                 INSERT INTO conversations (id, position, title, createdAt, updatedAt, workspacePath, activeGoal,
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
-                    subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, now, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
-                                 tokenUsage, contract, result, history, evaluation, report])
+                                 tokenUsage, contract, result, history, evaluation, report, c.isArchived])
         }
     }
 
@@ -749,6 +757,15 @@ final class ConversationStore: Sendable {
                 if let s = lastGoalCompletionReport {
                     do { c.lastGoalCompletionReport = try decoder.decode(JSONValue.self, from: Data(s.utf8)) }
                     catch { out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable lastGoalCompletionReport: \(error)")) }
+                }
+
+                // A garbled flag must not cost the user a conversation: default to active and
+                // warn, matching the counter policy above rather than `position`'s quarantine
+                // (#189). The failure direction is toward visibility.
+                if let archived: Bool = row["isArchived"] {
+                    c.isArchived = archived
+                } else {
+                    c.isArchived = false
                 }
 
                 // Per-conversation, so the bulk breaker below can throw the lot away.

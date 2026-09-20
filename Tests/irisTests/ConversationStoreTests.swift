@@ -67,7 +67,8 @@ struct ConversationStoreTests {
     @Test("a conversation round-trips through the store with every stored field")
     func roundTrip() throws {
         let store = try ConversationStore.inMemory()
-        let c = Self.sample()
+        var c = Self.sample()
+        c.isArchived = true
         try store.apply([Self.created(c)])
         let loaded = try store.loadAll()
         #expect(loaded.skipped.isEmpty)
@@ -92,6 +93,9 @@ struct ConversationStoreTests {
         #expect(back.checkpointHistory.first?.milestoneIndex == 0)
         #expect(back.checkpointHistory.first?.evaluation?.criteria.first?.verdict == .met)
         #expect(back.checkpointHistory.first?.evaluation?.criteria.first?.evidence == "swift test exited 0")
+        // #182: archived state is a stored column, not just a Codable field. A JSON round-trip
+        // test would pass while the column did not exist and the flag was dropped on every load.
+        #expect(back.isArchived == true)
     }
 
     @Test("nil surfacing fields round-trip as SQL NULL, not JSON null")
@@ -657,5 +661,15 @@ struct ConversationStoreTests {
         do { let s = try ConversationStore.onDisk(at: paths.conversationsDB); try s.apply([Self.created(c)]) }
         let again = try ConversationStore.onDisk(at: paths.conversationsDB)
         #expect(try again.loadAll().conversations.first?.id == c.id)
+    }
+
+    @Test("a conversation with no isArchived key decodes as active")
+    func legacyConversationDecodesActive() throws {
+        // Invariant 1: a synthesized decoder throws on a missing key and drops every conversation.
+        let legacy = """
+        {"id":"\(UUID().uuidString)","title":"old"}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(Conversation.self, from: legacy)
+        #expect(decoded.isArchived == false)
     }
 }
