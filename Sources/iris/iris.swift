@@ -840,14 +840,25 @@ actor IrisEngine {
         }
     }
 
+    /// Whether a call of `toolName` in this conversation would run in the container — the same
+    /// answer `resolveUseSandbox` gives the dispatcher, minus the host-fallback notice, which
+    /// belongs to a call that is actually about to run and not to a card describing one. Asked by
+    /// `JobRunner` so the Vibecop verdict on a blocked call is taken in the context the call would
+    /// have run in (#187 §6).
+    func runsInSandbox(toolName: String, conversationId: UUID, workspacePath: String?) async -> Bool {
+        guard toolName == "run_command" else { return false }
+        return await isSandboxed(conversationId: conversationId, workspacePath: workspacePath)
+    }
+
     /// Whether this conversation's turn runs sandboxed, with no side effect — the plain question,
     /// asked by everything that needs the answer without a specific call in hand.
     ///
-    /// Two callers, and both want it warning-free. Command hooks follow the agent's sandbox policy
+    /// Every caller wants it warning-free. Command hooks follow the agent's sandbox policy
     /// (subagents always sandboxed; main agent per its resolution) independent of any one tool,
     /// and `run_command` already surfaces the missing-runtime notice for itself. The read-only
     /// declaration gate (#187 §0.2) asks before the model has proposed anything at all, so
-    /// `resolveUseSandbox`'s notice would be a warning about a call that does not exist.
+    /// `resolveUseSandbox`'s notice would be a warning about a call that does not exist — and
+    /// `runsInSandbox` above asks about a call that has already been refused.
     private func isSandboxed(conversationId: UUID, workspacePath: String?) async -> Bool {
         if case .sandboxed = await sandboxDecision(conversationId: conversationId, workspacePath: workspacePath) {
             return true
@@ -2661,7 +2672,46 @@ actor IrisEngine {
         return result
     }
     
-    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool) async -> String {
+    /// Runs the one call a person clicked "Approve and run" for, and nothing else (#187 §6).
+    ///
+    /// `executeToolWithHooks`, not `executeFunctionCall`: the approval is already given, there is
+    /// no model in this conversation, and the dispatcher's model-facing machinery — the read-only
+    /// narrowing, the denial bookkeeping, the tool-result guard — is all addressed to a reader
+    /// that does not exist here. The user's own hooks do still run: a `BeforeTool` hook is their
+    /// policy, and an approval is not a reason to skip it.
+    ///
+    /// The result comes back unguarded for the same reason: nothing model-legible is produced
+    /// here. The one sentence that does reach a model — the follow-up card's history line — is
+    /// sanitized by `AppState.deliverEvent`, and `get_job_run` guards the row when it reads it
+    /// back. Guarding here as well would put an `<untrusted_context>` wrapper in the outcome the
+    /// card shows a human.
+    func executeApprovedCall(_ call: BlockedCall, conversationId: UUID) async -> String {
+        // R10 as a backstop. The card does not offer this and `JobRunner.runApproved` refuses it,
+        // but neither of those is on this path if something else ever calls in here: a write into
+        // `~/.iris/config` or `~/.iris/plugins` grants permission rather than editing a file, and
+        // no click makes it legal.
+        let localState = state
+        let permissions = await MainActor.run { localState?.permissions } ?? .shared
+        guard !permissions.isProtectedWrite(call) else {
+            return Self.protectedWriteRefusal(tool: call.toolName)
+        }
+        let useSandbox = await resolveUseSandbox(toolName: call.toolName,
+                                                 conversationId: conversationId,
+                                                 workspacePath: call.cwd)
+        return await executeToolWithHooks(name: call.toolName, args: call.args, cwd: call.cwd,
+                                          conversationId: conversationId, useSandbox: useSandbox,
+                                          guardResult: false)
+    }
+
+    /// What an approved call that turns out to target a protected directory returns instead of
+    /// running. Also the run's outcome, so the card says why nothing happened.
+    static func protectedWriteRefusal(tool: String) -> String {
+        "Not run: `\(tool)` would write into a protected directory (`~/.iris/config` or `~/.iris/plugins`), which an approval cannot authorise."
+    }
+
+    /// `guardResult: false` returns the tool's own output verbatim, for the one caller with no
+    /// model reading it (`executeApprovedCall`). Every model-facing call leaves it alone.
+    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, guardResult: Bool = true) async -> String {
         var execArgs: [String: JSONValue] = args
 
         // Session strip activity (#217/#19): the detail is derived from the tool's own arguments
@@ -2708,6 +2758,8 @@ actor IrisEngine {
             result = newResult
         }
         
+        if !guardResult { return result }
+
         // First-party trust: reading a file under ~/.iris/ returns Iris's OWN content
         // (SOUL, USER, memory.md, skills, artifacts, library, rules, configs) — not untrusted external data.
         // Return it raw, bypassing the guard, so the same `---`-stripping / <untrusted_context>
@@ -2893,9 +2945,15 @@ extension IrisEngine {
         return jsonString(["jobs": rows, "unreadableJobs": unreadableJobs]) ?? "{\"jobs\":[],\"unreadableJobs\":0}"
     }
 
-    /// `get_job_run`'s body: every ledger column, plus the transcript's last agent message when
+    /// `get_job_run`'s body: the ledger's columns, plus the transcript's last agent message when
     /// there still is a transcript. `outcome`, `failureReason` and the message are the fields a
     /// model wrote rather than the harness, so the caller hands all three in already guarded.
+    ///
+    /// The one column deliberately left out is the blocked call itself (#187 §6): its arguments
+    /// are a previous run's model output in full — a command, a file body — and putting them here
+    /// would hand the model an unguarded payload to answer questions about. `blockedTool` names
+    /// what was refused, which is what a question about the run is actually asking; the whole call
+    /// is for the person reading the card.
     nonisolated static func jobRunJSON(_ run: JobRun, outcome: String?, failureReason: String?,
                                        lastAgentMessage: String?) -> String {
         let iso = ISO8601DateFormatter()
@@ -2917,6 +2975,8 @@ extension IrisEngine {
             "gateSignal": run.gateSignal ?? NSNull(),
             "transcriptConversationId": run.transcriptConversationId?.uuidString ?? NSNull(),
             "acknowledgedAt": run.acknowledgedAt.map { iso.string(from: $0) } ?? NSNull(),
+            "approvedAt": run.approvedAt.map { iso.string(from: $0) } ?? NSNull(),
+            "parentRunId": run.parentRunId?.uuidString ?? NSNull(),
             "lastAgentMessage": lastAgentMessage ?? NSNull(),
         ]
         return jsonString(row) ?? "{}"

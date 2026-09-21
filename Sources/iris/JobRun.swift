@@ -128,4 +128,31 @@ struct BlockedCall: Codable, Equatable, Sendable {
         reason = Reason(rawValue: try c.decodeIfPresent(String.self, forKey: .reason) ?? "") ?? .approval
         at = try c.decodeIfPresent(Date.self, forKey: .at) ?? Date(timeIntervalSince1970: 0)
     }
+
+    /// The one string that says what a call would actually do — the command, the path — and `nil`
+    /// for a tool that never goes through an approval at all.
+    ///
+    /// Spelled once because three places have to agree on it: the dispatcher, which asks the
+    /// permission layer and Vibecop about a call before it runs; the card, which asks Vibecop
+    /// about the same call afterwards; and the re-dispatch. Two spellings would mean a call judged
+    /// on one string when it was refused and another when it was approved.
+    static func approvalDetails(toolName: String, args: [String: JSONValue]) -> String? {
+        switch toolName {
+        case "run_command": return args["command"]?.stringValue
+        case "read_file", "write_file": return args["path"]?.stringValue
+        default: return nil
+        }
+    }
+
+    /// This call's own `approvalDetails`, empty for a tool that has none.
+    var details: String { Self.approvalDetails(toolName: toolName, args: args) ?? "" }
+
+    /// The file this call would write, resolved against its `cwd` — `nil` when it writes nothing.
+    /// Resolved rather than taken raw: a relative path is decided against the run's directory, and
+    /// the protected-directory check (R10) must see the location, not the spelling.
+    var writeTarget: String? {
+        guard toolName == "write_file", let path = args["path"]?.stringValue, !path.isEmpty
+        else { return nil }
+        return ToolExecutor.resolvePath(path, cwd: cwd)
+    }
 }

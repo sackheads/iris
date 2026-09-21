@@ -191,8 +191,10 @@ are reading.
 Every fire writes a row to `job_runs`, in the same database as the jobs and the conversations: job,
 trigger kind, start and finish, status, outcome (the first line of the last thing the run said,
 capped at 200 characters), token counts, the background conversation it ran in, and — for a
-failure — the reason and the tool it wanted. The row is written *before* the turn, so a run the app
-died inside leaves evidence behind.
+failure — the reason and the tool it wanted. A run that stopped on a call it was not allowed to
+make also stores the whole call (name, every argument, working directory, and why it was refused),
+which is what "Approve and run" re-dispatches. The row is written *before* the turn, so a run the
+app died inside leaves evidence behind.
 
 A run ends in one of five statuses:
 
@@ -212,7 +214,9 @@ never got as far as a reply" must not look the same on a card.
 When a run ends, one **event card** is delivered: job name, status, the one-line outcome, tokens,
 and a "View run" button onto the transcript. It goes to the job's destination conversation if it
 has one, and otherwise to **Iris Activity** — a pinned conversation Iris creates on first use and
-keeps at the top of the sidebar. (Pinned conversations refuse `/clear`.)
+keeps at the top of the sidebar. (Pinned conversations refuse `/clear`.) A run that stopped on a
+refused call gets a second half as well — the call in full, and what you can do about it; see
+"Approve and run" below.
 
 Delivery never wakes a model turn. The card is a `ChatRole.event` message, drawn as a card and
 never indexed for search; alongside it the card's one-line summary is appended to the destination's
@@ -226,8 +230,9 @@ five-minute agent loop. Raw run output never enters the destination's messages.
 Nobody is watching a background run, so it never blocks on an approval dialog. A tool call from a
 background conversation is checked against the deterministic allowlist — a call that is already
 permitted needs no human, so it runs — and anything else is denied on the spot, without consulting
-Vibecop and without a dialog. The denial is recorded, the run ends `blocked on approval`, and the
-card names the tool that was refused so you can decide in the morning.
+Vibecop and without a dialog. The whole call is recorded, the run ends `blocked on approval`, and
+the card shows what was refused — with an "Approve and run" button, below — so you can decide in
+the morning.
 
 This outranks everything, including the headless auto-approve used by scenario runs, and it is
 inherited: a subagent or an evaluator a run spawns is a background conversation too, so delegating
@@ -250,6 +255,38 @@ message starts a real turn in an attended conversation — which would run the w
 conversation's approval path — and the roster is how a sender picks its target. A run reports
 through its card; it does not ask a peer to act for it, and it does not advertise itself to peers
 that cannot reach it.
+
+## Approve and run
+
+The card for a run that stopped on an approval shows the **whole call** — the tool, every argument,
+and a long body cut to the first 500 characters — because an approval given without sight of the
+payload is worse than no button. Vibecop is asked about that same persisted call when the card is
+written, and its verdict and reason sit beside the button. A verdict is information, not a veto: a
+`DENY` still leaves the button there, and clicking it is you overruling Vibecop, not skipping it.
+
+**Approve and run** dispatches exactly that one call, once, as a tracked run of its own: a fresh
+hidden conversation titled `<job> · approved <tool>`, a `job_runs` row with the trigger kind
+`approval` and a pointer back to the run that asked, and a follow-up card with what the call
+returned. It is not "resume the job": the original turn is over, and what the model would have done
+next with the result is unknowable. If the job needs to go further, its next fire takes it there.
+
+Approving is one-shot, and the claim is stamped in the database *before* the call runs — so a
+second click, a second window, or the app dying between the click and the execution all get the
+same refusal rather than running the call twice. The approved run is an ordinary row, so it counts
+towards the breaker and the daily budgets the next fire is judged against; admission is not re-run
+over it, because a person clicking a button is not an unattended fire.
+
+Two calls are never offered the button, and are refused again by the runner and by the ledger if
+one is reached another way:
+
+- a call a **read-only** job's profile refused. It was not stopped for want of a human, so no human
+  can grant it; the job would have to be created `mutating`.
+- a **write into a protected directory** (`~/.iris/config`, `~/.iris/plugins`). A write there grants
+  further permission rather than editing a file, and a click says a person vouches for the call —
+  it does not change what may be written. Make that change yourself if you want it.
+
+**Dismiss** acknowledges the run: it leaves `/jobs`'s failure list and stops being exempt from
+retention. The card stays in the transcript, because it is a record of what happened.
 
 ## Limits
 

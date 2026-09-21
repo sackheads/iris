@@ -34,6 +34,20 @@ struct EventCard: Codable, Equatable, Sendable {
     /// this can name a conversation that is already gone (the card then says "transcript pruned"
     /// rather than offering a dead button).
     let transcriptConversationId: UUID?
+    /// The exact call the run failed closed on (#187 §6), so the card can show what was refused —
+    /// the command, the path, a preview of the body — rather than a tool name. An approval given
+    /// without sight of the payload is worse than no button.
+    let blockedCall: BlockedCall?
+    /// What Vibecop made of `blockedCall`, taken when the card was written and shown beside the
+    /// button. `APPROVE` / `ESCALATE` / `DENY`, or nil when it was not consulted (it is disabled,
+    /// it failed, or the call is one no click can authorise anyway). Advisory, never a veto: a
+    /// person clicking through a `DENY` is the case the verdict exists to inform, not to prevent.
+    let vibecopVerdict: String?
+    let vibecopReason: String?
+    /// Why this build refuses to offer "Approve and run" for `blockedCall`, decided when the card
+    /// was written — today, a write into a protected directory (#187 R10). `nil` means nothing
+    /// stored objected; `approvalRefusal` is what the view asks, and it has the last word.
+    let approvalBlockedReason: String?
 
     init(kind: String = "job_run",
          runId: UUID,
@@ -45,7 +59,11 @@ struct EventCard: Codable, Equatable, Sendable {
          startedAt: Date,
          finishedAt: Date,
          totalTokens: Int = 0,
-         transcriptConversationId: UUID? = nil) {
+         transcriptConversationId: UUID? = nil,
+         blockedCall: BlockedCall? = nil,
+         vibecopVerdict: String? = nil,
+         vibecopReason: String? = nil,
+         approvalBlockedReason: String? = nil) {
         self.kind = kind
         self.runId = runId
         self.jobId = jobId
@@ -57,6 +75,10 @@ struct EventCard: Codable, Equatable, Sendable {
         self.finishedAt = finishedAt
         self.totalTokens = totalTokens
         self.transcriptConversationId = transcriptConversationId
+        self.blockedCall = blockedCall
+        self.vibecopVerdict = vibecopVerdict
+        self.vibecopReason = vibecopReason
+        self.approvalBlockedReason = approvalBlockedReason
     }
 
     /// A card that fails to decode renders as raw JSON in the transcript, so every field a future
@@ -92,6 +114,13 @@ struct EventCard: Codable, Equatable, Sendable {
         finishedAt = try container.decodeIfPresent(Date.self, forKey: .finishedAt) ?? startedAt
         totalTokens = try container.decodeIfPresent(Int.self, forKey: .totalTokens) ?? 0
         transcriptConversationId = try container.decodeIfPresent(UUID.self, forKey: .transcriptConversationId)
+        // A blocked call this build cannot read is no blocked call: "there is something here and I
+        // do not know what it is" must never become a button. Same direction `JobLedger`'s
+        // `markApproved` takes for an undecodable stored call.
+        blockedCall = try? container.decodeIfPresent(BlockedCall.self, forKey: .blockedCall)
+        vibecopVerdict = try container.decodeIfPresent(String.self, forKey: .vibecopVerdict)
+        vibecopReason = try container.decodeIfPresent(String.self, forKey: .vibecopReason)
+        approvalBlockedReason = try container.decodeIfPresent(String.self, forKey: .approvalBlockedReason)
     }
 
     private static let unknownId = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
@@ -155,6 +184,96 @@ struct EventCard: Codable, Equatable, Sendable {
 
     /// `pr-sweep · blocked on approval: run_command` — the card's title, also its tooltip.
     var headline: String { "\(jobName) · \(statusDetail)" }
+
+    // MARK: The blocked call (#187 §6)
+
+    /// Why "Approve and run" is not offered for this card's blocked call — `nil` when it is, and
+    /// `nil` for a card with no blocked call, which has nothing to offer either way.
+    ///
+    /// A read-only job's refusal is decided here rather than read out of `approvalBlockedReason`,
+    /// so a card written by a build that did not store one still cannot offer a button for it
+    /// (R13). `JobLedger.markApproved` refuses the same call at the data layer: three layers,
+    /// because each can be reached without the others.
+    var approvalRefusal: String? {
+        guard let blockedCall else { return nil }
+        if blockedCall.reason == .profile { return Self.profileNotApprovable }
+        return approvalBlockedReason
+    }
+
+    /// Whether the card shows an "Approve and run" button at all.
+    var offersApproval: Bool { blockedCall != nil && approvalRefusal == nil }
+
+    /// Shown in place of the button for a call the read-only profile refused: no approval widens a
+    /// profile, so the honest answer is what the person would have to change instead.
+    static let profileNotApprovable =
+        "This job is read-only, so nothing can approve this call. Recreate the job as mutating if it should be able to do this."
+
+    /// Shown in place of the button for a write into `~/.iris/config` or `~/.iris/plugins` (R10):
+    /// a write there grants further permission, so it is not a thing a click can authorise.
+    static let protectedNotApprovable =
+        "This writes into a protected directory (`config/` or `plugins/`), which grants permission rather than editing a file. Make the change yourself if you want it."
+
+    /// How much of one argument a card shows. A `write_file` body is the argument that matters
+    /// most and the one that can be a megabyte; 500 characters is enough to see what is being
+    /// written without pasting the file into the transcript (spec §6).
+    static let argumentPreviewLimit = 500
+
+    /// One rendered argument of the blocked call.
+    struct BlockedArgument: Identifiable, Equatable, Sendable {
+        var id: String { key }
+        let key: String
+        let value: String
+    }
+
+    /// Every argument of the blocked call, sorted by key and cut to `argumentPreviewLimit`, so the
+    /// person approving sees the whole call and two renders of it read the same. Empty when there
+    /// is no blocked call.
+    var blockedArguments: [BlockedArgument] {
+        guard let blockedCall else { return [] }
+        return blockedCall.args.keys.sorted().map { key in
+            BlockedArgument(key: key, value: Self.preview(blockedCall.args[key] ?? .null))
+        }
+    }
+
+    /// `Vibecop: DENY — recursive delete` — its opinion of the call, or `nil` when it was not
+    /// consulted. Information for the person deciding; the button is offered regardless.
+    var vibecopLine: String? {
+        guard let vibecopVerdict, !vibecopVerdict.isEmpty else { return nil }
+        guard let vibecopReason, !vibecopReason.isEmpty else { return "Vibecop: \(vibecopVerdict)" }
+        return "Vibecop: \(vibecopVerdict) — \(vibecopReason)"
+    }
+
+    /// The call as a CARD keeps it: every argument already cut to `argumentPreviewLimit`. A card
+    /// is a display snapshot living in a message row, and "Approve and run" re-dispatches the
+    /// LEDGER's copy of the call, never this one — so storing a megabyte `write_file` body here
+    /// would write the whole file into the transcript for nothing. Values that fit are untouched,
+    /// and keep their type.
+    static func displayCopy(of call: BlockedCall) -> BlockedCall {
+        BlockedCall(toolName: call.toolName,
+                    args: call.args.mapValues { value in
+                        let rendered = preview(value)
+                        return rendered == value.stringValue ? value : .string(rendered)
+                    },
+                    cwd: call.cwd, reason: call.reason, at: call.at)
+    }
+
+    /// One argument value as a card shows it: compact JSON for a structure (so a nested argument
+    /// is still readable rather than `{...}`), and the text itself for everything else, cut with a
+    /// note of how much there was.
+    private static func preview(_ value: JSONValue) -> String {
+        let text: String
+        switch value {
+        case .object, .array:
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            text = (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) }
+                ?? value.stringValue
+        default:
+            text = value.stringValue
+        }
+        guard text.count > argumentPreviewLimit else { return text }
+        return String(text.prefix(argumentPreviewLimit)) + "… (\(text.count) characters)"
+    }
 
     /// The run's wall time, in the same format the session strip uses so the two never show two
     /// styles of elapsed time side by side.

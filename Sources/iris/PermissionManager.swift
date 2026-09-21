@@ -36,7 +36,7 @@ struct PermissionManager: Sendable {
         // symlinks before deciding, since `isAllowed` re-reads the allowlist on every call — one
         // carved-out write there would grant every later call whatever it asked for. Unattended,
         // the refusal is absolute: not even an explicit rule hands a background run the keys.
-        let targetsProtected = isWrite && paths.isUnderProtectedWriteDir(details)
+        let targetsProtected = isProtectedWrite(toolName: toolName, path: details)
         if targetsProtected && isBackground { return false }
 
         // Automatically allow access to agent's own ~/.iris directory — reads for anyone, writes
@@ -63,6 +63,24 @@ struct PermissionManager: Sendable {
         return false
     }
     
+    /// Whether this call would write into a directory where a write is a *grant* rather than an
+    /// edit — `IrisPaths.protectedWriteDirs`, resolved canonically. The one refusal that is not a
+    /// question of who is asking: `isAllowed` never auto-allows one, and neither does a human
+    /// clicking "Approve and run" on an event card (#187 R10). A click says a person vouches for
+    /// the call; it cannot make `permissions.json` or a plugin an ordinary file.
+    ///
+    /// Deny-side only, like `isUnderProtectedWriteDir` itself: never invert it to widen an allow.
+    func isProtectedWrite(toolName: String, path: String) -> Bool {
+        toolName == "write_file" && paths.isUnderProtectedWriteDir(path)
+    }
+
+    /// The same question about a persisted call, asked of the path it would actually write (which
+    /// is resolved against the run's directory, not the spelling the model sent).
+    func isProtectedWrite(_ call: BlockedCall) -> Bool {
+        guard let target = call.writeTarget else { return false }
+        return isProtectedWrite(toolName: call.toolName, path: target)
+    }
+
     func allowGlobally(toolName: String, details: String) {
         let rule = PermissionRule(toolName: toolName, details: details)
         var rules = loadRules(from: globalPermissionsURL) ?? []
