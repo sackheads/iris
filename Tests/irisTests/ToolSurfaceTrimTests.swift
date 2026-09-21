@@ -22,8 +22,12 @@ struct ToolSurfaceTrimTests {
         app.createNewConversation(id: id)
         prepare(app, id)
         let client = CapturingLLMClient(reply: "ok")
+        // `AppState()` auto-creates a blank conversation when its store is empty (or loads
+        // whatever is already on disk), so this harness always has a second conversation besides
+        // the one just created — #185's session-tools gate would see a peer and this suite's
+        // counts predate that feature entirely. Pin it off; this suite is not testing sessions.
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [],
-                                factStore: factStore)
+                                factStore: factStore, sessionPeerCount: 0)
         await engine.processInput(prompt, source: source, conversationId: id)
         return client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? []
     }
