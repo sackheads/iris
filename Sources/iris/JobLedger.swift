@@ -282,6 +282,26 @@ extension JobLedger {
         }
     }
 
+    /// Writes what a run has spent so far without closing it — called after every model round
+    /// (`TurnUsageSink`). `tokensToday` sums `totalTokens`, which `finish` used to be the only
+    /// writer of, so a run the app quit in the middle of left an `interrupted` row costed at zero
+    /// and its spend counted against nobody's budget.
+    ///
+    /// `status = 'running'` in the WHERE clause, and no `unknownRun` throw: a turn the deadline
+    /// already gave up on goes on running, and its next round must not write over the `failed` row
+    /// the timeout wrote. A no-op is the expected answer here, not an error.
+    func recordUsage(runId: UUID, tokens: TokenUsage) throws {
+        try writer.write { db in
+            try db.execute(sql: """
+                UPDATE job_runs SET promptTokens = ?, candidateTokens = ?, totalTokens = ?
+                WHERE id = ? AND status = ?
+                """, arguments: [
+                    tokens.promptTokenCount, tokens.candidatesTokenCount, tokens.totalTokenCount,
+                    runId.uuidString, JobRun.Status.running.rawValue,
+                ])
+        }
+    }
+
     /// Marks a failed or blocked run as seen, taking it out of `unacknowledgedFailures()` and out
     /// of retention's exemption. Throws `JobLedgerError.unknownRun` for an id that is not in the
     /// table.
@@ -466,11 +486,11 @@ extension JobLedger {
     /// Attributed by start, not by finish: a run that began before midnight and ended after it
     /// belongs to the day it was admitted on, which is the day whose budget let it start.
     ///
-    /// A run still in flight contributes nothing: `totalTokens` is written by `finish`, so a long
-    /// run's spend is invisible to the budget until it ends. Accepted for this slice — the per-run
-    /// budget is what bounds a single run (§4, "during a run"), and the day's total catches up the
-    /// moment it closes. It does mean a burst of concurrent runs can overshoot the daily figure by
-    /// up to one per-run budget apiece.
+    /// A run still in flight counts what it has reported: `recordUsage` writes the running total
+    /// onto the row after every model round, so the day's figure is at worst one round behind
+    /// rather than blind until the run ends — and a run the app quit during still costs the day
+    /// what it spent. A burst of concurrent runs can still overshoot the daily figure by up to one
+    /// round apiece, which the per-run budget bounds (§4, "during a run").
     func tokensToday(jobId: UUID?, calendar: Calendar, now: Date) throws -> Int {
         try writer.read { db in try Self.tokensToday(db, jobId: jobId, calendar: calendar, now: now) }
     }
@@ -490,10 +510,11 @@ extension JobLedger {
             """, arguments: [dayStart, dayEnd]) ?? 0
     }
 
-    /// Both of a job's live figures in one call — what `/jobs` and `list_jobs` print beside the
-    /// budgets, and what a budget or breaker pause card names (spec §9). Nothing but the two
-    /// queries above: the numbers a person reads are the same ones admission decides on, rather
-    /// than a second, drifting accounting.
+    /// Both of a job's live figures in one call: what admission decides on, and what a budget or
+    /// breaker pause names on the row, the reason and the card (spec §9). Nothing but the two
+    /// queries above, so when `/jobs` and `list_jobs` grow the columns for them (the last PR of
+    /// this deliverable — today neither prints a running total), the numbers a person reads will
+    /// be the ones admission decided on rather than a second, drifting accounting.
     ///
     /// One `read`, so both figures come from one snapshot: a run finishing between two separate
     /// reads would otherwise let a card print a token total that the run count it sits beside does
@@ -705,7 +726,8 @@ private struct RowReader {
 }
 
 /// What one job has spent and how hard it has been running (#187 deliverable 3, spec §9): the two
-/// figures admission decides on, and the same two `/jobs` and `list_jobs` print.
+/// figures admission decides on, and the two `/jobs` and `list_jobs` are to print once they have
+/// columns for them (the last PR of this deliverable).
 struct JobUsage: Equatable, Sendable {
     let tokensToday: Int
     let runsLastHour: Int

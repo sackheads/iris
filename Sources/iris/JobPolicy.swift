@@ -11,7 +11,9 @@ import Foundation
 /// build has written a policy an older one cannot parse.
 ///
 /// The `nil` budgets are not "no budget": they mean "take the global default", which the runner
-/// resolves at admission time.
+/// resolves at admission time. A stored negative decodes to `nil` for the same reason: nobody
+/// writes -1 to mean unlimited, so it is a typo, and reading it as "no budget" would quietly take
+/// a job's ceiling off.
 struct JobPolicy: Codable, Equatable, Sendable {
     /// What a fire does when the job's previous run has not finished. `skip` drops it (with an
     /// `interrupted` ledger row); `queue` remembers one pending fire in `Job.queuedFire` and takes
@@ -68,11 +70,22 @@ struct JobPolicy: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         overlap = Overlap(rawValue: try c.decodeIfPresent(String.self, forKey: .overlap) ?? "") ?? .skip
         catchUp = try c.decodeIfPresent(CatchUp.self, forKey: .catchUp) ?? .coalesce
-        runTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .runTimeoutSeconds) ?? 600
-        perRunTokenBudget = try c.decodeIfPresent(Int.self, forKey: .perRunTokenBudget)
-        dailyTokenBudget = try c.decodeIfPresent(Int.self, forKey: .dailyTokenBudget)
-        maxRunsPerHour = try c.decodeIfPresent(Int.self, forKey: .maxRunsPerHour)
+        // Negatives are dropped here, not carried and argued with later: a policy that has been
+        // read back is one whose numbers mean what the rest of the code thinks they mean.
+        runTimeoutSeconds = Self.notNegative(try c.decodeIfPresent(Int.self, forKey: .runTimeoutSeconds)) ?? 600
+        perRunTokenBudget = Self.notNegative(try c.decodeIfPresent(Int.self, forKey: .perRunTokenBudget))
+        dailyTokenBudget = Self.notNegative(try c.decodeIfPresent(Int.self, forKey: .dailyTokenBudget))
+        maxRunsPerHour = Self.notNegative(try c.decodeIfPresent(Int.self, forKey: .maxRunsPerHour))
         retry = try c.decodeIfPresent(Bool.self, forKey: .retry) ?? true
+    }
+
+    /// A stored figure, or `nil` — absent, which is "take the default" — when it is below zero.
+    /// Zero is kept: for the token budgets and the breaker it deliberately means unbounded (§0.1),
+    /// and for `runTimeoutSeconds` `JobLimits.resolve` reads it as the global default, because a
+    /// turn nothing can end is the failure the timeout exists for.
+    private static func notNegative(_ value: Int?) -> Int? {
+        guard let value, value >= 0 else { return nil }
+        return value
     }
 }
 
@@ -100,7 +113,11 @@ extension JobPolicy.CatchUp {
         case "skip":
             self = .skip
         case "replay":
-            self = .replay(cap: try c.decodeIfPresent(Int.self, forKey: .cap) ?? JobPolicy.defaultReplayCap)
+            // Clamped like the four limits above (R15): a negative cap is a typo, and the wake
+            // handling that will read this must not have to decide what "replay -1 occurrences"
+            // means. Zero is kept and is a real answer: replay nothing, drop the lot.
+            let cap = JobPolicy.notNegative(try c.decodeIfPresent(Int.self, forKey: .cap))
+            self = .replay(cap: cap ?? JobPolicy.defaultReplayCap)
         default:
             self = .coalesce
         }

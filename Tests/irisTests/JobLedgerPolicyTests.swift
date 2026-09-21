@@ -171,6 +171,65 @@ struct JobLedgerPolicyTests {
         #expect(try store.ledger.tokensToday(jobId: a.id, calendar: utc, now: now) == 5)
     }
 
+    @Test("a run the app quit during keeps what it reported, and the day's budget counts it")
+    func recordUsageOutlivesAnUnfinishedRun() throws {
+        let store = try ConversationStore.inMemory()
+        let job = try seedJob(store, "j")
+        let utc = calendar("UTC")
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        let run = makeRun(job, at: now, status: .running, tokens: 0)
+        try store.ledger.begin(run: run)
+        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: utc, now: now) == 0)
+
+        // Two rounds' worth: the figure is the turn's running total, not this round's, so the
+        // second write replaces the first rather than adding to it.
+        try store.ledger.recordUsage(runId: run.id, tokens: TokenUsage(promptTokenCount: 30,
+                                                                       candidatesTokenCount: 10,
+                                                                       totalTokenCount: 40))
+        try store.ledger.recordUsage(runId: run.id, tokens: TokenUsage(promptTokenCount: 70,
+                                                                       candidatesTokenCount: 20,
+                                                                       totalTokenCount: 90))
+        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: utc, now: now) == 90,
+                "a run in flight counts what it has reported")
+
+        // The app quits here. `finish` never runs; the next launch's sweep closes the row — and
+        // must leave the spend on it, or the run was free as far as every budget is concerned.
+        #expect(try store.ledger.closeRunningRuns(reason: JobRunner.releasedReason, at: now.addingTimeInterval(10)) == 1)
+        let back = try #require(try store.ledger.run(id: run.id))
+        #expect(back.status == .interrupted)
+        #expect(back.totalTokens == 90 && back.promptTokens == 70 && back.candidateTokens == 20)
+        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: utc, now: now) == 90)
+        #expect(try store.ledger.tokensToday(jobId: nil, calendar: utc, now: now) == 90,
+                "and against the global ceiling too")
+    }
+
+    @Test("a report from a turn the deadline already gave up on cannot reopen or rewrite the row")
+    func recordUsageOnlyWritesARunningRow() throws {
+        let store = try ConversationStore.inMemory()
+        let job = try seedJob(store, "j")
+        let utc = calendar("UTC")
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        let run = makeRun(job, at: now, status: .running, tokens: 0)
+        try store.ledger.begin(run: run)
+        try store.ledger.recordUsage(runId: run.id, tokens: TokenUsage(totalTokenCount: 40))
+        try store.ledger.finish(runId: run.id, status: .failed, outcome: nil,
+                                failureReason: TurnBudget.timeExceeded, blockedTool: nil,
+                                tokens: TokenUsage(totalTokenCount: 40),
+                                finishedAt: now.addingTimeInterval(1))
+
+        // The orphaned turn runs on and reports another round. It must land nowhere: the row has
+        // an ending already, and it is not this turn's to change.
+        try store.ledger.recordUsage(runId: run.id, tokens: TokenUsage(totalTokenCount: 4_000))
+        // And a run id that is not in the table is not an error either — unlike `finish`.
+        try store.ledger.recordUsage(runId: UUID(), tokens: TokenUsage(totalTokenCount: 1))
+
+        let back = try #require(try store.ledger.run(id: run.id))
+        #expect(back.status == .failed)
+        #expect(back.failureReason == TurnBudget.timeExceeded)
+        #expect(back.totalTokens == 40)
+        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: utc, now: now) == 40)
+    }
+
     @Test("usage reports today's tokens and the last hour's runs together")
     func usageQuery() throws {
         let store = try ConversationStore.inMemory()

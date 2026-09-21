@@ -216,6 +216,67 @@ struct JobAdmissionTests {
                 "an explicit 600 reads as unset")
     }
 
+    @Test("a negative limit resolves to the default, exactly as an absent one does")
+    func limitsResolveClampNegatives() {
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        config.jobMaxRunsPerHour = 4
+        config.jobDailyTokenBudget = 50_000
+        config.jobGlobalDailyTokenBudget = 90_000
+        config.jobPerRunTokenBudget = 12_000
+        config.jobRunTimeoutSeconds = 120
+
+        // A hand-edited policy. -1 is a typo, never a request for no limit at all, so each of
+        // these takes the global number rather than switching its limit off.
+        let negatives = job(policy: JobPolicy(runTimeoutSeconds: -1, perRunTokenBudget: -1,
+                                              dailyTokenBudget: -5, maxRunsPerHour: -99))
+        #expect(JobLimits.resolve(job: negatives, config: config)
+                == JobLimits(maxRunsPerHour: 4, dailyTokens: 50_000, globalDailyTokens: 90_000,
+                             perRunTokens: 12_000, runTimeoutSeconds: 120))
+
+        // And a global set negative after launch — the one path `ConfigManager`'s own clamp at
+        // init cannot see — falls back to the spec's figure rather than unbounding the system.
+        config.jobMaxRunsPerHour = -1
+        config.jobDailyTokenBudget = -1
+        config.jobGlobalDailyTokenBudget = -1
+        config.jobPerRunTokenBudget = -1
+        config.jobRunTimeoutSeconds = -1
+        #expect(JobLimits.resolve(job: job(), config: config)
+                == JobLimits(maxRunsPerHour: 6, dailyTokens: 1_000_000, globalDailyTokens: 3_000_000,
+                             perRunTokens: 200_000, runTimeoutSeconds: 600))
+
+        // Zero is still the other reading, and deliberately so: a person may want a budget
+        // unbounded, and only the timeout refuses that (a turn nothing can end).
+        let zeroes = job(policy: JobPolicy(runTimeoutSeconds: 0, perRunTokenBudget: 0,
+                                           dailyTokenBudget: 0, maxRunsPerHour: 0))
+        let resolved = JobLimits.resolve(job: zeroes, config: config)
+        #expect(resolved.perRunTokens == 0 && resolved.dailyTokens == 0 && resolved.maxRunsPerHour == 0)
+        #expect(resolved.runTimeoutSeconds == 600)
+    }
+
+    @Test("a negative settings key reads back as the default, the same as an unset one")
+    func configClampsNegativeJobLimits() {
+        let name = "iris-admission-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        defer {
+            store.removePersistentDomain(forName: name)
+            IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
+        }
+        // A hand-edited plist, or a stepper driven past zero, before the app is launched.
+        store.set(-1, forKey: "JOB_PER_RUN_TOKEN_BUDGET")
+        store.set(-1, forKey: "JOB_DAILY_TOKEN_BUDGET")
+        store.set(-1, forKey: "JOB_GLOBAL_DAILY_TOKEN_BUDGET")
+        store.set(-1, forKey: "JOB_MAX_RUNS_PER_HOUR")
+        store.set(-1, forKey: "JOB_RUN_TIMEOUT_SECONDS")
+
+        let config = ConfigManager(store: store)
+        #expect(config.jobPerRunTokenBudget == 200_000)
+        #expect(config.jobDailyTokenBudget == 1_000_000)
+        #expect(config.jobGlobalDailyTokenBudget == 3_000_000)
+        #expect(config.jobMaxRunsPerHour == 6)
+        #expect(config.jobRunTimeoutSeconds == 600)
+    }
+
     @Test("an unset settings key resolves to the spec's default, not zero")
     func limitsResolveDefaults() {
         let (config, teardown) = isolatedConfig()

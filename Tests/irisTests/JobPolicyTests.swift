@@ -38,6 +38,37 @@ struct JobPolicyTests {
         #expect(try decoder.decode(JobPolicy.self, from: Data(encodedJSON(policy).utf8)) == policy)
     }
 
+    @Test("a negative limit decodes as unset, not as unlimited")
+    func negativeLimitsDecodeAsUnset() throws {
+        let policy = try decoder.decode(JobPolicy.self, from: Data(#"""
+            {"runTimeoutSeconds":-1,"perRunTokenBudget":-1,"dailyTokenBudget":-5,"maxRunsPerHour":-99}
+            """#.utf8))
+        // `nil` is "take the global default", which is what a missing key means too. Reading -1 as
+        // "no budget" would take a job's ceiling off on a typo.
+        #expect(policy.perRunTokenBudget == nil)
+        #expect(policy.dailyTokenBudget == nil)
+        #expect(policy.maxRunsPerHour == nil)
+        #expect(policy.runTimeoutSeconds == JobPolicy().runTimeoutSeconds,
+                "and the timeout falls back to the default, which resolve reads as unset")
+
+        // Zero is a different answer and is kept: it means unbounded for a budget on purpose.
+        let zeroes = try decoder.decode(JobPolicy.self, from: Data(#"""
+            {"perRunTokenBudget":0,"dailyTokenBudget":0,"maxRunsPerHour":0}
+            """#.utf8))
+        #expect(zeroes.perRunTokenBudget == 0)
+        #expect(zeroes.dailyTokenBudget == 0)
+        #expect(zeroes.maxRunsPerHour == 0)
+    }
+
+    @Test("a negative replay cap decodes as the default, like every other number in a policy")
+    func negativeReplayCapDecodesAsTheDefault() throws {
+        let negative = try decoder.decode(JobPolicy.self, from: Data(#"{"catchUp":{"kind":"replay","cap":-2}}"#.utf8))
+        #expect(negative.catchUp == .replay(cap: JobPolicy.defaultReplayCap))
+        // Zero is a real answer here and is kept: replay nothing, drop the lot.
+        let none = try decoder.decode(JobPolicy.self, from: Data(#"{"catchUp":{"kind":"replay","cap":0}}"#.utf8))
+        #expect(none.catchUp == .replay(cap: 0))
+    }
+
     @Test("an unknown overlap decodes as skip rather than failing the row")
     func unknownOverlap() throws {
         let policy = try decoder.decode(JobPolicy.self, from: Data(#"{"overlap":"stampede"}"#.utf8))

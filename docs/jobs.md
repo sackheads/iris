@@ -313,16 +313,21 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
   a job cannot trip its own breaker by being skipped.
 - **Daily token budget** — **1,000,000 tokens per job** per local calendar day, and **3,000,000
   across every background run together**. The fire that finds the day's spend at or over the figure
-  pauses the job rather than starting.
+  pauses the job rather than starting. A run still in flight counts too: its spend is written to its
+  row after every model round, so a run the app quit in the middle of still costs the day what it
+  spent.
 - A refused fire writes a zero-length `interrupted` row and one card naming the figure that tripped
   it, so a pause is never silent.
 
 **During a run**, the turn itself is bounded: **200,000 tokens** and **10 minutes**. The token
-budget is checked between model rounds; the deadline can also end a turn parked inside a model call
-that never returns. Either one ends the run `failed` with `budget: tokens exceeded` or
-`budget: time exceeded` on the row and on the card. The budget stop does not summarize — there is
-nothing left to spend on a summary — and any message you steered in mid-run is written to the
-transcript before the turn ends, without starting another turn.
+budget is checked between model rounds; the deadline does not wait for a round, and does not wait
+for the turn either. At the deadline the run is closed `failed`, the Mac is let go back to sleep and
+the job is free to fire again; the turn is asked to stop, and if it is parked somewhere that never
+checks — a blocking subprocess, a stream with no timeout — it is abandoned rather than waited on.
+Whichever bound bit, the row and the card say `budget: tokens exceeded` or `budget: time exceeded`.
+The budget stop does not summarize — there is nothing left to spend on a summary — and any message
+you steered in mid-run is written to the transcript before the turn ends, without starting another
+turn.
 
 **After a run**, a failure climbs the retry ladder: **1 minute, 5 minutes, 25 minutes**, and the
 fourth consecutive failure pauses the job ("failed 3 times; paused"). A run that finally works
@@ -338,6 +343,25 @@ The five global numbers are `ConfigManager` keys — `JOB_MAX_RUNS_PER_HOUR`,
 `JOB_DAILY_TOKEN_BUDGET`, `JOB_GLOBAL_DAILY_TOKEN_BUDGET`, `JOB_PER_RUN_TOKEN_BUDGET` and
 `JOB_RUN_TIMEOUT_SECONDS` — and Settings → Advanced grows a stepper for each of them later in this
 deliverable; today they are defaults with per-job overrides.
+
+**What zero means depends on which number it is.** An unset settings key — which is how a `0` reads
+— is simply the default above. In a job's own `JobPolicy`, `0` is an answer rather than a gap, and
+it means two different things: for the token budgets and the breaker it means **unlimited**, and for
+`runTimeoutSeconds` it means **take the global default**. The reason for the split is what each
+number bounds: a budget bounds spend, which a person may reasonably want unbounded, while the
+timeout bounds a turn that has stopped responding, and a run nothing can end is the failure this
+whole section exists to prevent. A **negative** figure is not a third answer — nobody writes `-1` to
+mean unlimited — so it is read as the typo it is and takes the default, wherever it was written: a
+settings key, or a hand-edited `policy` column.
+
+**What you can see of all this today.** `/jobs` shows a job's place on the retry ladder
+(`retry 1/3`) beside its next fire, and any pause names the figure that caused it — the breaker
+count, or the budget and the spend that reached it — in the pause reason the table prints, on the
+`interrupted` row and on the card. `list_jobs` shows the model less: name, trigger, whether the job
+is enabled, its next fire and how its last run ended. Neither shows a **running** total — there is
+no per-job token figure and no runs-this-hour count in either — so between pauses, what a job is
+spending has to be read off its run rows (`get_job_run`, or the token counts on a card). Both
+figures land with the last PR of this deliverable.
 
 ## `/jobs`
 

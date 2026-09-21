@@ -32,6 +32,59 @@ struct TurnBudget: Sendable, Equatable {
     }
 }
 
+/// Where a turn reports what it has spent so far, after every model round (#187 §4). A protocol
+/// rather than a ledger reference because the engine knows nothing about jobs: the only
+/// implementation writes the running total onto the run's row, so a run the app quit in the middle
+/// of leaves its spend behind on the row the next launch closes — and the day's budget counts it.
+/// Without it, `totalTokens` was written only by `finish`, and a run that never finished was free.
+protocol TurnUsageSink: Sendable {
+    /// The turn's accumulated usage, not this round's: absolute like everything else in
+    /// `TurnBudget`, so a report that never arrives cannot leave a half-counted row behind.
+    func record(_ tokens: TokenUsage) async
+}
+
+/// A turn's claim on the thinking indicator and its conversation's engine-turn count, given back
+/// exactly once: by the turn when it returns, or by whoever gave up waiting for it.
+///
+/// `withEngineTurn` used to take and release the pair around `await body()`, on the stated
+/// grounds that `body` cannot throw. A job run's deadline now makes "body never returns" a
+/// supported ending (`JobRunner.run`), and that reasoning does not cover it: `thinkingCount` is one
+/// global count, so a single abandoned turn leaves `isThinking` true for the life of the process —
+/// the spectrum and the LED bar lit, and Escape appending "Interrupted." to whatever conversation
+/// the user is actually reading.
+///
+/// The idempotency lives here rather than in `AppState`'s counters on purpose. `endThinking`
+/// clamps at zero, but an unmatched *extra* release would still take a concurrent real turn's
+/// indicator down with it, which is a worse bug than the one being fixed.
+actor TurnLifetime {
+    private var give: (@Sendable () async -> Void)?
+    private var released = false
+
+    /// Whether the pair has been given back. For tests and for a caller deciding whether there is
+    /// anything left to do.
+    var isReleased: Bool { released }
+
+    /// Installed by `withEngineTurn` once it holds the pair. A lifetime already released — the
+    /// deadline got there before the turn had begun — hands it straight back rather than storing
+    /// a claim nothing will ever take.
+    func arm(_ give: @escaping @Sendable () async -> Void) async {
+        guard !released else {
+            await give()
+            return
+        }
+        self.give = give
+    }
+
+    /// Gives the pair back if it is still held; a no-op every time after the first.
+    func release() async {
+        guard !released else { return }
+        released = true
+        let give = self.give
+        self.give = nil
+        await give?()
+    }
+}
+
 actor IrisEngine {
     /// The reflection turn fired after a goal completes. Shared with `AppState`, which completes a
     /// goal whose last criteria the user judged — that path returns from this handler long before
@@ -872,33 +925,45 @@ actor IrisEngine {
     /// which is what "archived means idle" reads and what hands a queued user message on when it
     /// reaches zero (#172). A leaked count would therefore mean a conversation that can never be
     /// archived *and* whose inbox never drains — which is why the pair is a closure rather than
-    /// two statements a future early `return` could step between. `body` cannot throw, so the
-    /// release needs no `defer`.
-    private func withEngineTurn(_ conversationId: UUID, _ body: () async -> Void) async {
+    /// two statements a future early `return` could step between.
+    ///
+    /// The release goes through a `TurnLifetime` rather than being two statements after `body()`,
+    /// because `body` not returning at all is now a supported ending: a job run's deadline
+    /// abandons a turn parked where cancellation is never checked, and hands the caller's
+    /// `lifetime` back itself. Either side may release; only the first one does anything.
+    private func withEngineTurn(_ conversationId: UUID, lifetime: TurnLifetime? = nil,
+                                _ body: () async -> Void) async {
         let stateForThinking = state
         await MainActor.run {
             stateForThinking?.beginThinking()
             stateForThinking?.beginEngineTurn(for: conversationId)
         }
-        await body()
-        await MainActor.run {
-            stateForThinking?.endEngineTurn(for: conversationId)
-            stateForThinking?.endThinking()
+        let lifetime = lifetime ?? TurnLifetime()
+        // Weak: a lifetime nobody ever releases (a wedged turn of a caller that passed none) must
+        // not be the thing keeping a whole app state alive.
+        await lifetime.arm { [weak stateForThinking] in
+            guard let stateForThinking else { return }
+            await MainActor.run {
+                stateForThinking.endEngineTurn(for: conversationId)
+                stateForThinking.endThinking()
+            }
         }
+        await body()
+        await lifetime.release()
     }
 
-    func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil) async {
-        await withEngineTurn(conversationId) {
+    func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil, lifetime: TurnLifetime? = nil) async {
+        await withEngineTurn(conversationId, lifetime: lifetime) {
             let turnID = PerformanceProfiler.shared.beginTurn(label: input, source: source)
             let turnStart = CFAbsoluteTimeGetCurrent()
             await PerformanceProfiler.$currentTurnID.withValue(turnID) {
-                await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, turnBudget: turnBudget)
+                await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, turnBudget: turnBudget, usageSink: usageSink)
             }
             PerformanceProfiler.shared.endTurn(turnID, totalMs: (CFAbsoluteTimeGetCurrent() - turnStart) * 1000.0)
         }
     }
 
-    private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil) async {
+    private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil) async {
         if source == "UI" {
             loopDetectors[conversationId] = nil
             blockedResultTrackers[conversationId] = nil
@@ -1524,11 +1589,16 @@ actor IrisEngine {
                 history = await MainActor.run {
                     localState?.conversations.first(where: { $0.id == conversationId })?.history ?? []
                 }
-                await MainActor.run { 
+                let spentSoFar = await MainActor.run { () -> TokenUsage in
                     if let usage = activeResponse.usageMetadata {
                         localState?.updateTokenUsage(for: conversationId, usage: usage)
                     }
+                    return localState?.conversations.first(where: { $0.id == conversationId })?.tokenUsage ?? TokenUsage()
                 }
+                // What the run has spent, on the run's own row, before the next round can start
+                // (#187 §4). A row only ever costed by its `finish` counts as zero against the
+                // day's budget when the app quits mid-turn and nothing ever finishes it.
+                if let usageSink { await usageSink.record(spentSoFar) }
                 
                 var hasFunctionCall = false
                 

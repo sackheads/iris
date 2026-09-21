@@ -28,6 +28,8 @@ struct ScheduleJobArgumentsTests {
         let made = try? a?.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: [],
                                    sandboxAvailable: true).get()
         #expect(made?.profile == .mutating)
+        // The refusal must leave the model somewhere to go and name no milestone (invariant 9).
+        #expect(!ScheduleJobArguments.noRuntimeForMutating.lowercased().contains("deliverable"))
     }
 
     @Test("name is slugged and made unique against existing names")
