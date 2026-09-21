@@ -2689,7 +2689,8 @@ actor IrisEngine {
         // R10 as a backstop. The card does not offer this and `JobRunner.runApproved` refuses it,
         // but neither of those is on this path if something else ever calls in here: a write into
         // `~/.iris/config` or `~/.iris/plugins` grants permission rather than editing a file, and
-        // no click makes it legal.
+        // no click makes it legal. Asked again after the hooks below, because a `BeforeTool` hook
+        // can rewrite the path this one read.
         let localState = state
         let permissions = await MainActor.run { localState?.permissions } ?? .shared
         guard !permissions.isProtectedWrite(call) else {
@@ -2698,9 +2699,16 @@ actor IrisEngine {
         let useSandbox = await resolveUseSandbox(toolName: call.toolName,
                                                  conversationId: conversationId,
                                                  workspacePath: call.cwd)
+        // R20: there is no host fallback for a command that came out of a background run. The
+        // conversation is pinned `.sandboxed` for exactly this call, so `false` here means the
+        // resolution found no container to honour the pin with — the runtime uninstalled, or
+        // sandboxing switched off — and the answer is not "run it anyway".
+        guard call.toolName != "run_command" || useSandbox else {
+            return Self.sandboxUnavailableRefusal(tool: call.toolName)
+        }
         return await executeToolWithHooks(name: call.toolName, args: call.args, cwd: call.cwd,
                                           conversationId: conversationId, useSandbox: useSandbox,
-                                          guardResult: false)
+                                          origin: .approvedCall)
     }
 
     /// What an approved call that turns out to target a protected directory returns instead of
@@ -2709,9 +2717,21 @@ actor IrisEngine {
         "Not run: `\(tool)` would write into a protected directory (`~/.iris/config` or `~/.iris/plugins`), which an approval cannot authorise."
     }
 
-    /// `guardResult: false` returns the tool's own output verbatim, for the one caller with no
-    /// model reading it (`executeApprovedCall`). Every model-facing call leaves it alone.
-    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, guardResult: Bool = true) async -> String {
+    /// What an approved command with no container to run in returns instead of running on the
+    /// host. Carries `JobRunner.sandboxUnavailableReason`'s words so a person seeing this on a
+    /// card and in `/jobs` reads the same phrase for the same thing.
+    static func sandboxUnavailableRefusal(tool: String) -> String {
+        "Not run: `\(tool)` from a background job runs in the container or not at all (sandbox unavailable)."
+    }
+
+    /// Which caller `executeToolWithHooks` is running for. Two things differ between a model's own
+    /// tool call and a call a person approved on an event card, and both follow from there being
+    /// no model on the second path: nothing reads the result, so it is not guarded (see
+    /// `executeApprovedCall`), and the protected-directory rule is re-checked after the hook layer
+    /// has had its say about the arguments, which is the last point anything can change them.
+    enum ToolCallOrigin: Sendable { case modelTurn, approvedCall }
+
+    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, origin: ToolCallOrigin = .modelTurn) async -> String {
         var execArgs: [String: JSONValue] = args
 
         // Session strip activity (#217/#19): the detail is derived from the tool's own arguments
@@ -2741,6 +2761,20 @@ actor IrisEngine {
                 }
             }
         }
+
+        // R10, on the arguments that are actually about to run. A `BeforeTool` hook may have
+        // rewritten the path since `executeApprovedCall` looked at it, and there is no check
+        // inside `ToolExecutor.writeFile`. Only the approved-call path: an attended user may
+        // legitimately approve a write into their own config, and refusing that here would be a
+        // different (and wrong) rule.
+        if origin == .approvedCall, name == "write_file", let path = execArgs["path"]?.stringValue {
+            let localState = state
+            let permissions = await MainActor.run { localState?.permissions } ?? .shared
+            if permissions.isProtectedWrite(toolName: name,
+                                            path: ToolExecutor.resolvePath(path, cwd: cwd)) {
+                return Self.protectedWriteRefusal(tool: name)
+            }
+        }
         
         var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox)
 
@@ -2758,7 +2792,9 @@ actor IrisEngine {
             result = newResult
         }
         
-        if !guardResult { return result }
+        // Nothing model-legible comes out of an approved call, so the guard has nothing to protect
+        // and would only wrap the outcome a human reads on the card. See `executeApprovedCall`.
+        if origin == .approvedCall { return result }
 
         // First-party trust: reading a file under ~/.iris/ returns Iris's OWN content
         // (SOUL, USER, memory.md, skills, artifacts, library, rules, configs) — not untrusted external data.

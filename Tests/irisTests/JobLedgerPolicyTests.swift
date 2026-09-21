@@ -223,6 +223,11 @@ struct JobLedgerPolicyTests {
         let job = try seedJob(store, "j")
         let run = makeRun(job, at: t0, status: .blockedOnApproval)
         try store.ledger.begin(run: run)
+        // Nothing to approve yet: a row with no blocked call must not burn its one claim.
+        #expect(try store.ledger.markApproved(runId: run.id, at: t0) == false)
+        #expect(try store.ledger.run(id: run.id)?.approvedAt == nil)
+        try store.ledger.setBlockedCall(runId: run.id, BlockedCall(
+            toolName: "run_command", args: ["command": .string("ls")], at: t0))
         #expect(try store.ledger.markApproved(runId: run.id, at: t0) == true)
         #expect(try store.ledger.run(id: run.id)?.approvedAt == t0)
         #expect(try store.ledger.markApproved(runId: run.id, at: t0.addingTimeInterval(60)) == false)

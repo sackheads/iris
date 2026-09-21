@@ -381,6 +381,12 @@ struct ApproveAndRunTests {
 
         #expect(await runner.runApproved(runId: blocked.id) == .refused(JobRunner.missingRunRefusal))
         #expect(state.conversations.filter { $0.isBackground }.isEmpty)
+        // There is no job left to ask where its news goes, so the answer goes to Activity rather
+        // than nowhere: the card the person clicked is still on screen.
+        let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
+        #expect(activity.messages.contains {
+            $0.content == JobRunner.refusalNotice(JobRunner.missingRunRefusal)
+        })
     }
 
     @Test("a read-only job's refused call is not approvable, whichever door it is tried at (R13)")
@@ -402,6 +408,11 @@ struct ApproveAndRunTests {
 
         #expect(await runner.runApproved(runId: blocked.id) == .refused(JobRunner.profileNotApprovableRefusal))
         #expect(!FileManager.default.fileExists(atPath: target))
+        // Said out loud, where the card is — this job has no destination, so that is Activity.
+        let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
+        #expect(activity.messages.contains {
+            $0.content == JobRunner.refusalNotice(JobRunner.profileNotApprovableRefusal)
+        })
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1)
         // And the data layer refuses it too, even if something skipped the runner entirely.
         #expect(try store.ledger.markApproved(runId: blocked.id, at: Date()) == false)
@@ -444,6 +455,160 @@ struct ApproveAndRunTests {
         #expect(conversation.mainAgentSandbox == .sandboxed,
                 "the approved call runs with the job's own sandbox setting")
         #expect(conversation.jobProfile == .mutating)
+    }
+
+    // MARK: R20 — the profile is re-asked at click time
+
+    @Test("a read-only job's approved command is refused when the container has gone, and never runs on the host")
+    func readOnlyApprovedCommandNeedsTheContainer() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let marker = dir.appendingPathComponent("ran-on-the-host").path
+        let (store, state, engine) = try harness()
+        // A `readOnly` job whose `run_command` was allowed by the profile at fire time (it was
+        // sandboxed then) and refused only for want of a human — so the reason is `.approval` and
+        // R13 does not cover it. Between that run and this click the runtime went away.
+        let job = self.job(name: "reader", profile: .readOnly)
+        try store.ledger.upsert(job)
+        let call = BlockedCall(toolName: "run_command",
+                               args: ["command": .string("touch \(marker)")], cwd: dir.path)
+        let blocked = try blockedRun(call, job: job, ledger: store.ledger)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               sandboxAvailable: { false })
+
+        let outcome = await runner.runApproved(runId: blocked.id)
+
+        #expect(outcome == .refused(JobRunner.sandboxUnavailableReason))
+        #expect(!FileManager.default.fileExists(atPath: marker), "it never reached the host executor")
+        #expect(try store.ledger.run(id: blocked.id)?.approvedAt == nil, "the claim is not burnt")
+        #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1)
+        // And the person who clicked is told, where they clicked.
+        let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
+        #expect(activity.messages.contains {
+            $0.role == .system
+                && $0.content == JobRunner.refusalNotice(JobRunner.sandboxUnavailableReason)
+        })
+    }
+
+    @Test("an approved command is pinned to the container, and refused rather than run outside it")
+    func approvedCommandIsPinnedToTheContainer() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let marker = dir.appendingPathComponent("ran-on-the-host").path
+        let (store, state, engine) = try harness()
+        let job = self.job(name: "reader", profile: .readOnly)
+        try store.ledger.upsert(job)
+        let blocked = try blockedRun(BlockedCall(toolName: "run_command",
+                                                 args: ["command": .string("touch \(marker)")],
+                                                 cwd: dir.path),
+                                     job: job, ledger: store.ledger)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        // The runner's own seam says the VM is there, so admission lets the call through.
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               sandboxAvailable: { true })
+
+        guard case .dispatched(let approvedRunId) = await runner.runApproved(runId: blocked.id) else {
+            Issue.record("the approval was refused before it could be dispatched")
+            return
+        }
+
+        let approved = try #require(try store.ledger.run(id: approvedRunId))
+        let conversation = try #require(state.conversations.first {
+            $0.id == approved.transcriptConversationId
+        })
+        // R20: the pin is not conditioned on `.mutating` — a read-only job's approved command asks
+        // for the container too, because the host is where its containment would end.
+        #expect(conversation.mainAgentSandbox == .sandboxed)
+        // A test process has sandboxing off (as `JobRunnerTests` also assumes), so the pin cannot
+        // be honoured and the executor refuses instead of falling back to the host. Whatever this
+        // machine's runtime says, the one thing that must never happen is the host run.
+        #expect(!FileManager.default.fileExists(atPath: marker))
+        #expect(approved.status == .failed)
+        #expect(approved.outcome?.contains("sandbox unavailable") == true)
+    }
+
+    // MARK: Where a refusal is said, and what a dispatch leaves behind
+
+    @Test("a refused click is reported in the conversation the card is in")
+    func aRefusalLandsWhereTheCardIs() async throws {
+        let (store, state, engine) = try harness()
+        let destination = state.createNewConversation(title: "Work")
+        let job = Job(name: "writer", prompt: "x", trigger: .schedule(.interval(seconds: 60)),
+                      profile: .mutating, destinationConversationId: destination)
+        try store.ledger.upsert(job)
+        let blocked = try blockedRun(BlockedCall(toolName: "run_command",
+                                                 args: ["command": .string("echo hi")]),
+                                     job: job, ledger: store.ledger)
+        // Already claimed: the refusal every second click gets.
+        #expect(try store.ledger.markApproved(runId: blocked.id, at: Date()))
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               sandboxAvailable: { true })
+
+        #expect(await runner.runApproved(runId: blocked.id) == .refused(JobRunner.alreadyApprovedRefusal))
+
+        let notice = JobRunner.refusalNotice(JobRunner.alreadyApprovedRefusal)
+        let card = try #require(state.conversations.first { $0.id == destination })
+        #expect(card.messages.contains { $0.role == .system && $0.content == notice },
+                "the sentence lands where the person clicked")
+        let activity = state.conversations.first { $0.id == state.activityConversationId() }
+        #expect(activity?.messages.contains { $0.content == notice } != true,
+                "and not in a conversation they may not have open")
+    }
+
+    @Test("the one-shot grant does not outlive the call it was for")
+    func theGrantIsTakenBackAfterADispatch() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (store, state, engine) = try harness()
+        let job = self.job(name: "writer")
+        try store.ledger.upsert(job)
+        let blocked = try blockedRun(BlockedCall(
+            toolName: "write_file",
+            args: ["path": .string(dir.appendingPathComponent("g.txt").path),
+                   "content": .string("g")], cwd: dir.path), job: job, ledger: store.ledger)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               sandboxAvailable: { true })
+
+        _ = await runner.runApproved(runId: blocked.id)
+
+        #expect(state.approvedCalls.isEmpty,
+                "a conversation left pre-authorised would approve whatever asked next")
+    }
+
+    @Test("two clicks racing each other still run the call once")
+    func concurrentClicksRaceForOneClaim() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = dir.appendingPathComponent("raced.txt").path
+        let (store, state, engine) = try harness()
+        let job = self.job(name: "writer")
+        try store.ledger.upsert(job)
+        let blocked = try blockedRun(BlockedCall(toolName: "write_file",
+                                                 args: ["path": .string(target),
+                                                        "content": .string("once")],
+                                                 cwd: dir.path),
+                                     job: job, ledger: store.ledger)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               sandboxAvailable: { true })
+
+        // The claim is one conditional UPDATE, so the two can interleave at every await before it
+        // and still only one can win.
+        async let first = runner.runApproved(runId: blocked.id)
+        async let second = runner.runApproved(runId: blocked.id)
+        let outcomes = await [first, second]
+
+        #expect(outcomes.filter { if case .dispatched = $0 { return true } else { return false } }.count == 1)
+        #expect(outcomes.contains(.refused(JobRunner.alreadyApprovedRefusal)))
+        #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 2, "one blocked row, one approved")
     }
 
     // MARK: R10 — the protected directories, at all three doors
@@ -525,7 +690,7 @@ struct ApproveAndRunTests {
         state.permissions = PermissionManager(paths: paths)
         let conversationId = state.createNewConversation(isBackground: true, title: "approved")
 
-        state.approvedCalls.insert(conversationId)
+        state.grantApprovedCall(conversationId)
         let command = "true --never-run-\(UUID().uuidString)"
         #expect(await state.requestApproval(toolName: "run_command", details: command,
                                             conversationId: conversationId))
@@ -536,7 +701,7 @@ struct ApproveAndRunTests {
         #expect(state.firstBackgroundDenial(for: conversationId)?.toolName == "run_command")
 
         // R10: the grant says who is asking, not what may be written.
-        state.approvedCalls.insert(conversationId)
+        state.grantApprovedCall(conversationId)
         let target = paths.configDir.appendingPathComponent("permissions.json").path
         #expect(await state.requestApproval(toolName: "write_file", details: target,
                                             conversationId: conversationId) == false)

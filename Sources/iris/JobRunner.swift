@@ -383,7 +383,8 @@ actor JobRunner {
     private func run(job: Job, origin: FireOrigin, limits: JobLimits) async {
         let startedAt = now()
         let title = "\(job.name) · \(ISO8601DateFormatter().string(from: startedAt))"
-        guard let conversationId = await openConversation(for: job, titled: title) else {
+        guard let conversationId = await openConversation(for: job, titled: title,
+                                                          sandboxed: job.profile == .mutating) else {
             print("[JobRunner] not running \(job.name): \(Self.releasedReason)")
             return
         }
@@ -599,6 +600,11 @@ actor JobRunner {
     static let runnerUnavailableRefusal = "jobs are not available right now"
     static func ledgerRefusal(_ error: any Error) -> String { "the ledger could not be read: \(error)" }
 
+    /// The sentence a refused click puts in the conversation the card is in. Spelled once: the
+    /// runner writes it for every refusal it decides, and `AppState` writes it for the one case
+    /// there is no runner to decide anything.
+    static func refusalNotice(_ reason: String) -> String { "Not run: \(reason)." }
+
     /// Dispatches the call a person approved on an event card: exactly that call, exactly once, as
     /// a tracked run of its own (§6).
     ///
@@ -617,42 +623,78 @@ actor JobRunner {
     /// NOT re-run over it: a person clicking a button is not an unattended fire, and refusing them
     /// because the job is paused (it usually is, after a failure) would make the button a lie.
     func runApproved(runId: UUID) async -> ApprovalOutcome {
+        // Every refusal is said out loud, and the ones decided before the job is known have
+        // nowhere but Activity to say it — a pruned row is exactly the click that most needs an
+        // answer, because the card it came from is still on screen.
         let blocked: JobRun?
-        do { blocked = try ledger.run(id: runId) } catch { return .refused(Self.ledgerRefusal(error)) }
-        guard let blocked else { return .refused(Self.missingRunRefusal) }
-        guard let call = blocked.blockedCall else { return .refused(Self.noBlockedCallRefusal) }
-        guard call.reason != .profile else { return .refused(Self.profileNotApprovableRefusal) }
-
+        do { blocked = try ledger.run(id: runId) } catch {
+            return await refuse(Self.ledgerRefusal(error), for: nil)
+        }
+        guard let blocked else { return await refuse(Self.missingRunRefusal, for: nil) }
+        guard let call = blocked.blockedCall else {
+            return await refuse(Self.noBlockedCallRefusal, for: nil)
+        }
         let stored: Job?
         do { stored = try ledger.job(id: blocked.jobId) } catch {
-            return .refused(Self.ledgerRefusal(error))
+            return await refuse(Self.ledgerRefusal(error), for: nil)
         }
-        guard let job = stored else { return .refused(Self.missingJobRefusal) }
-        guard let state, let engine else { return .refused(Self.runnerUnavailableRefusal) }
+        // Read before R13 rather than after, only so the refusal can be said where the card is.
+        guard let job = stored else { return await refuse(Self.missingJobRefusal, for: nil) }
+        guard call.reason != .profile else {
+            return await refuse(Self.profileNotApprovableRefusal, for: job)
+        }
+        guard let state, let engine else {
+            return await refuse(Self.runnerUnavailableRefusal, for: job)
+        }
         // R10, again — the card does not offer this one, and a stale card in an old transcript
         // still has a button that would try.
         let protectedTarget = await MainActor.run { state.permissions.isProtectedWrite(call) }
-        if protectedTarget { return .refused(Self.protectedWriteRefusal) }
-        // R12: a `mutating` job's work runs in the container or not at all, and an approved call
-        // is that job's work. Asked afresh here for the same reason a fire asks: the runtime can
-        // have gone away since the run that was blocked.
-        if job.profile == .mutating, !sandboxAvailable() {
-            return .refused(Self.sandboxUnavailableReason)
+        if protectedTarget { return await refuse(Self.protectedWriteRefusal, for: job) }
+        // R20: the profile is re-asked HERE, at click time, not inherited from the fire. Between
+        // the run that was blocked and this click the user can have uninstalled the runtime or
+        // turned sandboxing off, and the answer to "may this job do this?" changes with it. The
+        // click authorises the command; it does not authorise dropping the isolation, and nothing
+        // on the card would say the isolation had gone.
+        let sandboxed = sandboxAvailable()
+        // A `run_command` that came out of a background run is the container's or nobody's,
+        // whatever the profile. `readOnly` says so because the host is where its containment ends;
+        // `mutating` says so because the VM is what pays for its wider surface (R12).
+        if call.toolName == "run_command", !sandboxed {
+            return await refuse(Self.sandboxUnavailableReason, for: job)
+        }
+        if job.profile == .mutating, !sandboxed {
+            return await refuse(Self.sandboxUnavailableReason, for: job)
+        }
+        if job.profile == .readOnly {
+            // The same predicate the fire's dispatcher uses, asked again with today's answers: a
+            // tool this build has since taken off the allowlist, or an MCP server that no longer
+            // claims a tool is read-only, is refused now even though it was only an approval
+            // denial then.
+            let readOnlyMCP = JobProfile.isMCPTool(call.toolName)
+                ? await MCPManager.shared.readOnlyToolNames() : []
+            if JobProfile.readOnlyDenies(call.toolName, sandboxedRunCommand: sandboxed,
+                                         readOnlyMCPTools: readOnlyMCP) {
+                return await refuse(Self.profileNotApprovableRefusal, for: job)
+            }
         }
         // The claim, before anything runs. Every refusal above is a decision about the call rather
         // than a dispatch of it, so none of them burns it.
         do {
             guard try ledger.markApproved(runId: runId, at: now()) else {
-                return .refused(Self.alreadyApprovedRefusal)
+                return await refuse(Self.alreadyApprovedRefusal, for: job)
             }
         } catch {
-            return .refused(Self.ledgerRefusal(error))
+            return await refuse(Self.ledgerRefusal(error), for: job)
         }
 
         let startedAt = now()
+        // Pinned to the container whenever the call could run a command: `openConversation`'s
+        // profile rule alone would leave a `readOnly` job's approved `run_command` to fall through
+        // to whatever the per-workspace default says, which is the host fallback R20 forbids.
         guard let conversationId = await openConversation(
-            for: job, titled: "\(job.name) · approved \(call.toolName)")
-        else { return .refused(Self.runnerUnavailableRefusal) }
+            for: job, titled: "\(job.name) · approved \(call.toolName)",
+            sandboxed: job.profile == .mutating || call.toolName == "run_command")
+        else { return await refuse(Self.runnerUnavailableRefusal, for: job) }
 
         var approved = JobRun(jobId: job.id, jobName: job.name,
                               triggerKind: Self.approvalTriggerKind, startedAt: startedAt,
@@ -663,22 +705,19 @@ actor JobRunner {
         } catch {
             print("[JobRunner] could not record the approved run for \(job.name): \(error)")
             await closeSession(conversationId, status: "not recorded")
-            return .refused(Self.ledgerRefusal(error))
+            return await refuse(Self.ledgerRefusal(error), for: job)
         }
 
-        // The grant and the call, in that order and nothing in between: the entry is consumed by
-        // the first thing that asks, so it covers this call and no other.
-        await MainActor.run { state.approvedCalls.insert(conversationId) }
-        let result = await engine.executeApprovedCall(call, conversationId: conversationId)
+        let result = await withApprovedCall(in: conversationId, of: state) {
+            await engine.executeApprovedCall(call, conversationId: conversationId)
+        }
         let finishedAt = now()
         await MainActor.run {
             // The transcript "View run" opens: what was run, and what came back.
             state.appendMessage(role: .system, content: Self.approvedCallLine(call), to: conversationId)
             state.appendMessage(role: .system, content: result, to: conversationId)
-            // An unused grant must not outlive the call it was for, and anything the call was
-            // refused on the way (a nested ask, fail-closed like any other) belongs to nothing
-            // once this run is over.
-            state.approvedCalls.remove(conversationId)
+            // Anything the call was refused on the way (a nested ask, fail-closed like any other)
+            // belongs to nothing once this run is over.
             _ = state.takeBackgroundDenials(for: conversationId)
         }
 
@@ -702,6 +741,31 @@ actor JobRunner {
         return .dispatched(runId: approved.id)
     }
 
+    /// Grants the one-shot approval for the length of `body` and takes it back however `body`
+    /// leaves. A closure rather than an insert/remove pair inline: an early `return` added inside
+    /// it later returns from the closure, so the take-back still runs — and the grant lives in a
+    /// conversation whose whole purpose is to be pre-authorised, which is not a thing to leak.
+    private func withApprovedCall(in conversationId: UUID, of state: AppState,
+                                  _ body: () async -> String) async -> String {
+        await MainActor.run { state.grantApprovedCall(conversationId) }
+        let result = await body()
+        await MainActor.run { state.consumeApprovedCall(conversationId) }
+        return result
+    }
+
+    /// Says why a click did nothing, where the card the person clicked actually is — the job's
+    /// destination conversation, or Activity when it has none (or when there is no job left to
+    /// ask). Silence after a click reads as a broken button rather than a refused one, and a
+    /// sentence in a conversation the user does not have open is the same silence.
+    private func refuse(_ reason: String, for job: Job?) async -> ApprovalOutcome {
+        guard let state else { return .refused(reason) }
+        let destination = await destination(for: job)
+        await MainActor.run {
+            state.appendMessage(role: .system, content: Self.refusalNotice(reason), to: destination)
+        }
+        return .refused(reason)
+    }
+
     /// The transcript line naming the call that was approved, so the hidden conversation reads as
     /// a record of an action rather than an unattributed result.
     static func approvedCallLine(_ call: BlockedCall) -> String {
@@ -721,9 +785,14 @@ actor JobRunner {
 
     /// Whether a tool result reads as a failure. There is no status channel out of the executor —
     /// every tool returns a string — so this matches the shapes the tools, the hook layer and the
-    /// approval backstops actually produce, and anything unrecognised counts as a success. Erring
-    /// that way is right here: the transcript and the card both carry the result verbatim, so a
-    /// misread status is a wrong colour on a line the user can read, not a hidden failure.
+    /// approval backstops actually produce, and anything unrecognised counts as a success.
+    ///
+    /// Deliberately NOT covered: a `run_command` that exited non-zero. `ToolExecutor.runCommand`
+    /// discards `terminationStatus` and returns stdout plus a `Stderr:` block, so no caller in this
+    /// harness can see an exit code — a failed `git push` therefore writes a `completed` row with
+    /// its stderr as the outcome. That is a harness-wide blind spot rather than one this path
+    /// invents, and the stderr is verbatim on the card and in the transcript, so what is wrong is
+    /// the dot's colour and the row's status word, not what the person is told happened.
     static func approvedCallFailed(_ result: String) -> Bool {
         let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
         return ["Error", "Not run:", "System Hook blocked"].contains { trimmed.hasPrefix($0) }
@@ -817,7 +886,8 @@ actor JobRunner {
     /// ordinary fire is named for when it started, an approved call for what it runs. `nil` when
     /// the app state has been released — there is nothing to run a turn against, and no row has been
     /// written yet, so the fire is simply dropped.
-    private func openConversation(for job: Job, titled title: String) async -> UUID? {
+    private func openConversation(for job: Job, titled title: String,
+                                  sandboxed: Bool) async -> UUID? {
         guard let state else { return nil }
         return await MainActor.run { () -> UUID in
             let id = state.createNewConversation(isBackground: true, title: title)
@@ -826,10 +896,11 @@ actor JobRunner {
             // for (§4). Stamped for both profiles — nil means "not a job run at all", which is
             // the unnarrowed surface.
             state.setJobProfile(for: id, job.profile)
-            // `.mutating` is the only profile that asks for a container. `.readOnly` leaves the
-            // field nil deliberately: nil means "fall through to the per-workspace/global
-            // default", which is not the same as pinning this run to the host (§9).
-            if job.profile == .mutating, let idx = state.conversations.firstIndex(where: { $0.id == id }) {
+            // An ordinary `.mutating` fire asks for a container, and so does any approved call
+            // that could run a command (R20). `.readOnly` otherwise leaves the field nil
+            // deliberately: nil means "fall through to the per-workspace/global default", which is
+            // not the same as pinning this run to the host (§9).
+            if sandboxed, let idx = state.conversations.firstIndex(where: { $0.id == id }) {
                 state.conversations[idx].mainAgentSandbox = .sandboxed
             }
             // The strip is the only place a run in flight is visible at all, since the
@@ -917,17 +988,26 @@ actor JobRunner {
 
     private func deliver(_ card: EventCard, for job: Job) async {
         guard let state else { return }
-        let destination = await MainActor.run { () -> UUID in
-            // A destination that has since been deleted falls back to Activity rather than
-            // dropping the card: `deliverEvent` is a no-op for an unknown id, and a run nobody
-            // hears about is the failure mode this whole deliverable exists to fix.
-            if let wanted = job.destinationConversationId,
+        await state.deliverEvent(card, to: await destination(for: job))
+    }
+
+    /// Where a job's news goes: its own destination conversation, or Activity. Shared by the card
+    /// and by a refused "Approve and run", because the sentence explaining a click has to land
+    /// where the card the person clicked is — anywhere else is silence with extra steps.
+    ///
+    /// A destination that has since been deleted falls back to Activity rather than dropping the
+    /// news: `deliverEvent` is a no-op for an unknown id, and a run nobody hears about is the
+    /// failure mode this whole deliverable exists to fix. `nil` — no job left at all — is Activity
+    /// for the same reason.
+    private func destination(for job: Job?) async -> UUID {
+        guard let state else { return UUID() }
+        return await MainActor.run { () -> UUID in
+            if let wanted = job?.destinationConversationId,
                state.conversations.contains(where: { $0.id == wanted }) {
                 return wanted
             }
             return state.activityConversationId()
         }
-        await state.deliverEvent(card, to: destination)
     }
 
     /// The job's prompt, plus the paths that woke it when a watch did.

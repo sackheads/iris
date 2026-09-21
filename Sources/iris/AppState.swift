@@ -272,7 +272,23 @@ class AppState {
     /// finishes — so a retried or duplicated dispatch cannot reuse it. The durable half of the
     /// one-shot is the run's `approvedAt` column; this is only what gets the call past the
     /// fail-closed background branch it would otherwise land in.
-    var approvedCalls: Set<UUID> = []
+    ///
+    /// `private(set)` with two verbs rather than a settable set: this is the one field in the app
+    /// whose contents mean "skip the approval gate", so it gets the narrowest door that still lets
+    /// the runner grant and take back a call across a main-actor hop.
+    private(set) var approvedCalls: Set<UUID> = []
+
+    /// Pre-grants the single call `JobRunner.runApproved` is about to dispatch into `conversationId`.
+    func grantApprovedCall(_ conversationId: UUID) {
+        approvedCalls.insert(conversationId)
+    }
+
+    /// Takes the grant back. `true` when there was one — which is how `requestApproval` consumes it
+    /// on read, and what makes a second ask in the same conversation fail closed like any other.
+    @discardableResult
+    func consumeApprovedCall(_ conversationId: UUID) -> Bool {
+        approvedCalls.remove(conversationId) != nil
+    }
     /// Which background run a spawned conversation belongs to. A subagent or an evaluator
     /// descended from an unattended run is unattended too, and what it was refused is the RUN's
     /// denial: the ledger row and the event card belong to the job, not to the scratch
@@ -2122,7 +2138,7 @@ class AppState {
         // would otherwise refuse the very call the human just authorised. Taken as it is read, so
         // the grant covers one call and no more — a second ask in the same conversation falls
         // through and fails closed like any other unattended call.
-        if let id = conversationId, approvedCalls.remove(id) != nil {
+        if let id = conversationId, consumeApprovedCall(id) {
             // R10: the click says a person vouches for this call; it does not make a write into
             // `~/.iris/config` or `~/.iris/plugins` an ordinary file edit. Those directories are
             // where permission itself is granted, so a write there would be the approval granting
@@ -2226,23 +2242,22 @@ class AppState {
     /// Dispatches the call an event card's "Approve and run" was clicked for. The work is the
     /// runner's — one call, once, as a tracked run of its own — and everything the user hears back
     /// about it arrives as a follow-up card, or as a line saying why nothing happened.
+    ///
+    /// The runner says why it refused, because it is the half that knows which conversation the
+    /// card went to. Only the case it cannot reach — there is no runner at all — is answered here,
+    /// and Activity is the only destination left to answer it in.
     func approveBlockedCall(runId: UUID) {
         let engine = self.engine
         Task { [weak self] in
             guard let runner = await engine?.jobRunner() else {
-                self?.noteApprovalRefusal(JobRunner.runnerUnavailableRefusal)
+                guard let self else { return }
+                self.appendMessage(role: .system,
+                                   content: JobRunner.refusalNotice(JobRunner.runnerUnavailableRefusal),
+                                   to: self.activityConversationId())
                 return
             }
-            if case .refused(let reason) = await runner.runApproved(runId: runId) {
-                self?.noteApprovalRefusal(reason)
-            }
+            await runner.runApproved(runId: runId)
         }
-    }
-
-    /// Says why a click did nothing, in the Activity conversation where the cards live. Silence
-    /// after a click reads as a button that is broken rather than one that was refused.
-    private func noteApprovalRefusal(_ reason: String) {
-        appendMessage(role: .system, content: "Not run: \(reason).", to: activityConversationId())
     }
 
     /// The card's "Dismiss": marks the run seen, which takes it out of `/jobs`'s failure list and

@@ -276,8 +276,19 @@ same refusal rather than running the call twice. The approved run is an ordinary
 towards the breaker and the daily budgets the next fire is judged against; admission is not re-run
 over it, because a person clicking a button is not an unattended fire.
 
-Two calls are never offered the button, and are refused again by the runner and by the ledger if
-one is reached another way:
+The job's **profile is re-asked at the moment you click**, not inherited from the run that was
+blocked. Between the two you can have uninstalled the container runtime or turned sandboxing off,
+and the answer to "may this job do this?" changes with that. In particular, a `run_command` that
+came out of a background run — read-only or mutating — runs in the container or not at all: with no
+VM to run it in the click is refused with `sandbox unavailable`, the claim is left unspent, and it
+is never run on the host instead. A click authorises the command; it does not authorise dropping
+the isolation.
+
+A refusal is said in the conversation the card is in — the job's destination, or Iris Activity —
+because a sentence in a conversation you do not have open is the same as silence.
+
+Two calls are never offered the button at all, and are refused again by the runner and by the
+ledger if one is reached another way:
 
 - a call a **read-only** job's profile refused. It was not stopped for want of a human, so no human
   can grant it; the job would have to be created `mutating`.

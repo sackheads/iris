@@ -317,16 +317,18 @@ extension JobLedger {
     /// but because the job is `readOnly`, and re-dispatching it would reopen the profile gate
     /// through the ledger. So is a stored call this build cannot read: "there is a blocked call
     /// and I do not know what it is" is not a thing to approve, and the same direction is what
-    /// `ConversationStore` takes for an unreadable `jobProfile`. The refusal lives here rather
-    /// than only in whatever UI offers the button, so a second caller cannot get it wrong.
+    /// `ConversationStore` takes for an unreadable `jobProfile`. So, finally, is a row with no
+    /// blocked call at all — a completed run, or one whose call failed to store — because burning
+    /// `approvedAt` on a row with nothing to approve turns the one-shot into a wasted shot. The
+    /// refusals live here rather than only in whatever UI offers the button, so a second caller
+    /// cannot get them wrong.
     func markApproved(runId: UUID, at: Date) throws -> Bool {
         try writer.write { db in
             let json = try String.fetchOne(db, sql: "SELECT blockedCall FROM job_runs WHERE id = ?",
                                            arguments: [runId.uuidString])
-            if let json {
-                let call = try? JSONDecoder().decode(BlockedCall.self, from: Data(json.utf8))
-                guard let call, call.reason != .profile else { return false }
-            }
+            guard let json else { return false }
+            let call = try? JSONDecoder().decode(BlockedCall.self, from: Data(json.utf8))
+            guard let call, call.reason != .profile else { return false }
             try db.execute(sql: "UPDATE job_runs SET approvedAt = ? WHERE id = ? AND approvedAt IS NULL",
                            arguments: [at, runId.uuidString])
             return db.changesCount > 0
