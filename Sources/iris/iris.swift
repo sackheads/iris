@@ -842,27 +842,30 @@ actor IrisEngine {
             currentSystemPrompt.parts[0].text = textPart + "\n\n# Mid-Term Fact Store Memory (JIT Context)\n" + factString
         }
 
+        // Read once for the three gates below that all ask about this conversation: whether it is
+        // an unattended run, and whether it has a goal to complete.
+        let (isUnattended, hasActiveGoal) = await MainActor.run { () -> (Bool, Bool) in
+            let conversation = localState?.conversations.first(where: { $0.id == conversationId })
+            return (conversation?.isBackground == true, conversation?.activeGoal != nil)
+        }
+
         // #185 §6: computed once per turn and reused below for the session-tools declaration
         // gate — never call `sessionPeerCount` a second time there, that would reintroduce the
         // MainActor hop plus O(n log n) sort fix round 2 removed it for. `.main` only: a
-        // subagent/evaluator turn must not pay for a value it discards.
-        let peerCount = principal == .main ? await sessionPeerCount(excluding: conversationId) : 0
+        // subagent/evaluator turn must not pay for a value it discards. A background run is not a
+        // session either (see the declaration gate below), so it skips the count too — a roster it
+        // may not act on is prompt weight, and the hop is work for a value it discards.
+        let peerCount = (principal == .main && !isUnattended) ? await sessionPeerCount(excluding: conversationId) : 0
         if principal == .main, peerCount > 0, let textPart = currentSystemPrompt.parts.first?.text {
             // #185 §6: one line, never a roster. Detail is available on demand through
             // `list_sessions`; a per-peer list would grow with session count and churn every turn.
             currentSystemPrompt.parts[0].text = textPart + "\n\n\(peerCount) other session\(peerCount == 1 ? " is" : "s are") active."
         }
 
+        var toolsList = await executor.getTools()
         // No unattended job creation (the agency epic's standing ruling): a background run may
         // not write itself a cadence or a watch, so the two tools that do are not declared to it
         // at all — undeclared costs it nothing, and `executeFunctionCall` refuses the call anyway.
-        // Read in the same hop as the goal gate below, which needs the same conversation.
-        let (isUnattended, hasActiveGoal) = await MainActor.run { () -> (Bool, Bool) in
-            let conversation = localState?.conversations.first(where: { $0.id == conversationId })
-            return (conversation?.isBackground == true, conversation?.activeGoal != nil)
-        }
-
-        var toolsList = await executor.getTools()
         if isUnattended { toolsList.removeAll { Self.jobCreationTools.contains($0.name) } }
         // Add set_workspace tool dynamically
         toolsList.append(FunctionDeclaration(
@@ -1062,6 +1065,10 @@ actor IrisEngine {
         // same way) for the system-prompt count line — reusing it here, rather than calling
         // `sessionPeerCount` again, is what keeps a subagent/evaluator turn from paying the
         // MainActor hop plus O(n log n) sort twice for a value it discards either way.
+        // `peerCount` is zero for a background run by construction above, so this gate also holds
+        // "a background run is not a session": it may not list peers, message them, or advertise
+        // itself. A send would start a real turn in an attended conversation, which runs under
+        // that conversation's approval path — the laundering `invoke_subagent` used to allow.
         if principal == .main, peerCount > 0 {
             toolsList.append(FunctionDeclaration(
                 name: "list_sessions",
@@ -1767,6 +1774,12 @@ actor IrisEngine {
     /// run is a run that grows its own footprint with nobody asked.
     static let jobCreationTools: Set<String> = ["schedule_job", "register_directory_watcher"]
 
+    /// What the dispatcher tells a background run that tried to message a peer. Its result
+    /// reaches a person through its event card; borrowing an attended session's approval path is
+    /// not a second delivery channel.
+    static let unattendedSessionMessageRefusal =
+        "A background run cannot message sessions; its result is delivered as a card."
+
     /// What the dispatcher tells a background run that reached for one anyway.
     static let unattendedJobCreationRefusal =
         "A background run cannot create jobs or watches; describe what you want and the user can create it."
@@ -1899,6 +1912,17 @@ actor IrisEngine {
             // a name the dispatcher will still act on.
             guard principal == .main else {
                 result = "Refused — a subagent is not a session."
+                return result
+            }
+            // Same property on the sender side (#187): the target is already refused when IT is a
+            // background conversation, but a background SENDER was not — and delivery starts a
+            // real turn in a user-facing conversation, under that conversation's attended
+            // approval path. An unattended run does not get to have a peer do its gated work.
+            let senderIsUnattended = await MainActor.run {
+                localState?.conversations.first(where: { $0.id == conversationId })?.isBackground == true
+            }
+            guard !senderIsUnattended else {
+                result = Self.unattendedSessionMessageRefusal
                 return result
             }
             guard !message.trimmingCharacters(in: .whitespaces).isEmpty else {

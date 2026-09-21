@@ -168,6 +168,11 @@ actor JobRunner {
     /// launch, because it is the same situation — nothing will ever finish this turn. No card:
     /// there is nowhere to deliver one to.
     private func closeInterrupted(run: JobRun, conversationId: UUID, at: Date) async {
+        // The normal path drains through `readTurn`; this one has to drain too, or a denial (and
+        // the descendant links behind it) outlives the run that caused it in `AppState`.
+        if let state {
+            await MainActor.run { _ = state.takeBackgroundDenials(for: conversationId) }
+        }
         do {
             try ledger.finish(runId: run.id, status: .interrupted, outcome: nil,
                               failureReason: Self.releasedReason, blockedTool: nil,

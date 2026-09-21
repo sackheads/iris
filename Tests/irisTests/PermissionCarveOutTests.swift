@@ -43,6 +43,45 @@ struct PermissionCarveOutTests {
         #expect(permissions.isAllowed(toolName: "write_file", details: traversal, workspace: nil) == false)
     }
 
+    @Test("a plugins/ write is protected the same way config/ is")
+    func pluginWritesAreNeverAutoAllowed() throws {
+        let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        let permissions = PermissionManager(paths: paths)
+
+        // A plugin with an `mcp` component spawns a command at the next launch, and `PluginState`
+        // defaults to enabled — dropping one in is as good as being handed `run_command`.
+        for target in [paths.pluginsDir.appendingPathComponent("evil/plugin.json"),
+                       paths.pluginsDir.appendingPathComponent("evil/mcp.json")] {
+            #expect(permissions.isAllowed(toolName: "write_file", details: target.path, workspace: nil) == false)
+        }
+        #expect(permissions.isAllowed(toolName: "read_file", details: paths.pluginsJSON.path, workspace: nil),
+                "reading a plugin manifest is not the danger")
+        #expect(permissions.isAllowed(toolName: "write_file",
+                                      details: paths.rulesDir.appendingPathComponent("r.md").path,
+                                      workspace: nil),
+                "rules/ is prompt persistence, not a grant surface — deliberately unprotected")
+    }
+
+    @Test("the protected-dir check is canonical: case and symlinks do not evade it")
+    func protectedCheckIsCanonical() throws {
+        let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        let permissions = PermissionManager(paths: paths)
+
+        // APFS is case-insensitive by default, so this is the same file as config/permissions.json.
+        let shouted = paths.root.appendingPathComponent("CONFIG/permissions.json").path
+        #expect(permissions.isAllowed(toolName: "write_file", details: shouted, workspace: nil) == false)
+
+        // memory/ IS writable, so a symlink planted there is a legal path to an illegal target.
+        let link = paths.memoryDir.appendingPathComponent("cfg")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: paths.configDir)
+        let throughLink = link.appendingPathComponent("permissions.json").path
+        #expect(permissions.isAllowed(toolName: "write_file", details: throughLink, workspace: nil) == false)
+        // The same symlink is not an excuse to deny an ordinary memory write.
+        #expect(permissions.isAllowed(toolName: "write_file", details: paths.memoryMd.path, workspace: nil))
+    }
+
     @Test("reading config/ is still auto-allowed, and so is writing elsewhere under ~/.iris")
     func readsAndNonConfigWritesAreUnaffected() throws {
         let paths = try tempPaths()

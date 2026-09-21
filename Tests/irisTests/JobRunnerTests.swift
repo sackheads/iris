@@ -322,6 +322,10 @@ struct JobRunnerTests {
         #expect(run.status == .interrupted)
         #expect(run.failureReason == JobRunner.releasedReason)
         #expect(run.finishedAt != nil)
+        // The interrupted path drains its denial bookkeeping too: only `readTurn` used to, so an
+        // interrupted run left its entry (and any descendant links) behind in `AppState`.
+        let background = try #require(state.conversations.first { $0.isBackground })
+        #expect(state.takeBackgroundDenials(for: background.id).isEmpty)
         let activity = state.conversations.first { $0.title == AppState.activityConversationTitle }
         #expect(activity?.messages.isEmpty ?? true, "nothing to deliver a card to, so no card")
     }

@@ -198,9 +198,19 @@ is not a way around the gate. What a descendant was refused is recorded against 
 it is the run that ends `blocked on approval` and the run's card that names the tool.
 
 The allowlist has one carve-out — the agent's own `~/.iris` directory — and it stops short of two
-things: nothing auto-allows a *write* into `~/.iris/config`, which is where the file that grants
-permissions lives, and a background run gets no write carve-out at all. It reads its own memory
-freely; anything it wants to write outside that needs a rule you approved.
+things. Nothing auto-allows a *write* into a protected directory: `config/`, which holds the file
+that grants permissions along with the hook and plugin settings, and `plugins/`, where a plugin
+with an `mcp` component becomes a command spawned at the next launch. That check is canonical —
+case-insensitive, with symlinks resolved — so `~/.iris/CONFIG/permissions.json` or a link planted
+under `memory/` is the same refusal. (`rules/` is not protected: it is prompt text, which the guard
+already treats as untrusted, not a way to make something run.) And a background run gets no write
+carve-out at all: it reads its own memory freely, but anything it writes needs a rule you approved,
+and no rule can hand it a protected directory.
+
+A background run cannot message other sessions either. `list_sessions`, `send_to_session` and
+`set_session_card` are not offered to it and a send is refused, because delivering a message starts
+a real turn in an attended conversation — which would run the work under *that* conversation's
+approval path. A run reports through its card; it does not ask a peer to act for it.
 
 ## `/jobs`
 

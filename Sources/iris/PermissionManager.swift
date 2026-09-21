@@ -31,17 +31,17 @@ struct PermissionManager: Sendable {
     /// It narrows the `~/.iris` carve-out to reads, because nobody is watching what it writes.
     func isAllowed(toolName: String, details: String, workspace: String?, isBackground: Bool = false) -> Bool {
         let isWrite = (toolName == "write_file")
-        // A file that grants permissions must not be writable through an auto-allow. `config/`
-        // holds permissions.json, the hook definitions and the plugin config, and `isAllowed`
-        // re-reads that file on every call — so one carved-out write there would grant every
-        // later call whatever it asked for. Unattended, the refusal is absolute: not even an
-        // explicit rule hands a background run the keys.
-        let targetsConfig = isWrite && paths.isUnderConfigDir(details)
-        if targetsConfig && isBackground { return false }
+        // A write that grants permissions must not come from an auto-allow. `IrisPaths`
+        // enumerates the directories that qualify (`config/`, `plugins/`) and resolves case and
+        // symlinks before deciding, since `isAllowed` re-reads the allowlist on every call — one
+        // carved-out write there would grant every later call whatever it asked for. Unattended,
+        // the refusal is absolute: not even an explicit rule hands a background run the keys.
+        let targetsProtected = isWrite && paths.isUnderProtectedWriteDir(details)
+        if targetsProtected && isBackground { return false }
 
         // Automatically allow access to agent's own ~/.iris directory — reads for anyone, writes
-        // only for an attended caller and only outside `config/`.
-        if toolName == "read_file" || (isWrite && !isBackground && !targetsConfig) {
+        // only for an attended caller and only outside the protected directories.
+        if toolName == "read_file" || (isWrite && !isBackground && !targetsProtected) {
             if paths.isUnderIrisDir(details) { return true }
         }
 
