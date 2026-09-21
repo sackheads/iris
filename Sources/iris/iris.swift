@@ -1354,8 +1354,13 @@ actor IrisEngine {
                 }
                 if let reason = turnBudget.stopReason(tokensUsed: spent, now: Date()) {
                     turnFinished = true
-                    // Whatever arrived while the last round ran still belongs in the transcript:
-                    // the turn is ending, but a mid-task message taken and dropped is gone.
+                    // The drain consumes queued steers into history and no follow-up turn starts
+                    // (R8). Both halves are deliberate. Leaving them queued would be worse than
+                    // losing them: this is a job run's own hidden conversation, so the next thing
+                    // to read that inbox would be a turn nobody budgeted and nobody is watching —
+                    // the run has already spent everything it was allowed. Taking them into
+                    // history keeps them in the transcript a person reads back from the card, and
+                    // a mid-task message taken and dropped is gone without a trace.
                     _ = await drainPendingInput(conversationId: conversationId, hooksSandbox: hooksSandbox)
                     await endTurnForBudget(conversationId: conversationId, reason: reason)
                     break
@@ -1853,7 +1858,7 @@ actor IrisEngine {
             guard let runner = await self?.jobRunner() else { return }
             // `fire`, not `run`: the runner is the single admission point, so a due job meets the
             // same overlap, breaker and budget checks a watch fire does (§4).
-            await runner.fire(job: job, reason: reason)
+            await runner.fire(job: job, origin: .cadence(kind: reason))
         }
     }
 
@@ -1924,7 +1929,7 @@ actor IrisEngine {
     func watcherCallback() -> @Sendable (Job, [String]) async -> Void {
         { [weak self] job, paths in
             guard let runner = await self?.jobRunner() else { return }
-            await runner.fire(job: job, reason: "fsEvent", changedPaths: paths)
+            await runner.fire(job: job, origin: .watcher(paths: paths))
         }
     }
 

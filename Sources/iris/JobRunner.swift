@@ -34,6 +34,8 @@ actor JobRunner {
     private weak var state: AppState?
     private weak var engine: IrisEngine?
     private let ledger: JobLedger
+    /// The ledger, except where a test needs the usage read itself to fail (`JobUsageReading`).
+    private let usageSource: any JobUsageReading
     private let now: @Sendable () -> Date
     /// Whose day "tokens today" is counted in — the user's, so the budget resets at their
     /// midnight. Injectable only so a test can pin the zone.
@@ -46,19 +48,21 @@ actor JobRunner {
     /// The jobs with a run in flight right now. Every fire goes through `fire`, so one set here is
     /// the whole overlap story, whatever woke the job.
     private var inFlight: Set<UUID> = []
-    /// The changed paths belonging to a held (`policy.overlap == .queue`) fire, by job. In memory
-    /// on purpose: see `hold(fire:for:paths:)`.
-    private var queuedPaths: [UUID: [String]] = [:]
+    /// The origin of a held (`policy.overlap == .queue`) fire, by job. In memory on purpose: see
+    /// `hold(fire:for:origin:)`.
+    private var queuedOrigins: [UUID: FireOrigin] = [:]
 
     init(state: AppState, engine: IrisEngine, ledger: JobLedger,
          now: @escaping @Sendable () -> Date = Date.init,
          calendar: Calendar = .current,
          config: ConfigManager = .shared,
          protectionEnabled: Bool? = nil,
-         activity: any ActivityAPI = ProcessInfoActivity()) {
+         activity: any ActivityAPI = ProcessInfoActivity(),
+         usageSource: (any JobUsageReading)? = nil) {
         self.state = state
         self.engine = engine
         self.ledger = ledger
+        self.usageSource = usageSource ?? ledger
         self.now = now
         self.calendar = calendar
         self.config = config
@@ -79,6 +83,9 @@ actor JobRunner {
         case queued
         case pauseBreaker(count: Int)
         case pauseBudget(scope: String, used: Int, limit: Int)
+        /// The ledger could not say what this job has spent, so admission could not be decided.
+        /// Not a pause: see `unavailableReason`.
+        case dropUnavailable(reason: String)
     }
 
     /// Why a fire was not started, as a person reads it — `nil` for `.run`. `/jobs run` prints it:
@@ -93,6 +100,7 @@ actor JobRunner {
         case .pauseBreaker(let count): return breakerReason(count: count)
         case .pauseBudget(let scope, let used, let limit):
             return budgetReason(scope: scope, used: used, limit: limit)
+        case .dropUnavailable(let reason): return reason
         }
     }
 
@@ -140,11 +148,20 @@ actor JobRunner {
         "daily token budget reached (\(scope)): \(used) / \(limit)"
     }
 
-    /// A fire that came from a filesystem watch. FSEvents delivers a burst per save, so the
-    /// overlap it causes is not news: it is dropped without a row, where a scheduled overlap
-    /// writes one. D2's decision, kept — a row per dropped event would bury the ledger far worse
-    /// than the overlap it recorded.
-    static func isWatcherFire(reason: String) -> Bool { reason.hasPrefix("fsEvent") }
+    /// What an unreadable ledger writes on the row it skips a fire with. Not a pause: the read
+    /// that failed is a transient database error, and pausing the job would turn one bad query
+    /// into a stop that only a person typing `/jobs resume` can undo. Fail closed for this fire
+    /// only — the next one asks again.
+    static func unavailableReason(_ error: any Error) -> String { "admission unavailable: \(error)" }
+
+    /// Whether this run's input was the filesystem's, which is what decides the retry (R7). Three
+    /// fires answer yes: a watch fire, the held re-fire standing in for one, and any fire of a
+    /// watch job at all — a hand-started one never had paths to begin with, so retrying it minutes
+    /// later would re-run the prompt without them, a different run wearing the same name. The next
+    /// save is the retry a watch actually has.
+    static func isPathDriven(origin: FireOrigin, job: Job) -> Bool {
+        origin.isWatcher || job.trigger.kind == Trigger.fsEventKind
+    }
 
     /// The single admission point for every fire, scheduled or watcher-driven (§4). Decides, acts
     /// on the decision (a row, a pause, a card), runs the turn when it is allowed, and afterwards
@@ -168,9 +185,8 @@ actor JobRunner {
     /// of claiming a run that never started. `nil` means there was no job left to fire: the row was
     /// deleted out from under the trigger, or could not be read.
     @discardableResult
-    func fire(job: Job, reason: String, changedPaths: [String] = []) async -> Admission? {
-        var reason = reason
-        var paths = changedPaths
+    func fire(job: Job, origin: FireOrigin) async -> Admission? {
+        var origin = origin
         var decided: Admission?
         // A loop, not recursion: the `queue` policy can hand this straight back a trigger, and a
         // busy job would otherwise grow one stack frame per held fire.
@@ -192,9 +208,25 @@ actor JobRunner {
 
             let at = now()
             let limits = JobLimits.resolve(job: current, config: config)
-            let usage = (try? ledger.usage(jobId: current.id, now: at, calendar: calendar))
-                ?? JobUsage(tokensToday: 0, runsLastHour: 0)
-            let tokensAll = (try? ledger.tokensToday(jobId: nil, calendar: calendar, now: at)) ?? 0
+            let usage: JobUsage
+            let tokensAll: Int
+            do {
+                usage = try usageSource.usage(jobId: current.id, now: at, calendar: calendar)
+                tokensAll = try usageSource.tokensToday(jobId: nil, calendar: calendar, now: at)
+            } catch {
+                // Swallowed, this read used to answer zero — which opens the breaker and both
+                // budgets on a job that may be far past either, silently. Skip the fire instead,
+                // say so on a row, and leave the job running: see `unavailableReason`.
+                let reason = Self.unavailableReason(error)
+                print("[JobRunner] not firing \(current.name): \(reason)")
+                do {
+                    try Self.recordStillborn(job: current, ledger: ledger, reason: reason,
+                                             triggerKind: origin.triggerKind, now: at)
+                } catch {
+                    print("[JobRunner] could not record the skipped fire for \(current.name): \(error)")
+                }
+                return decided ?? .dropUnavailable(reason: reason)
+            }
 
             let admission = Self.admit(job: current, inFlight: inFlight.contains(current.id),
                                        runsLastHour: usage.runsLastHour,
@@ -202,24 +234,26 @@ actor JobRunner {
                                        tokensTodayAll: tokensAll, limits: limits)
             if decided == nil { decided = admission }
             switch admission {
-            case .dropPaused, .dropDisabled:
+            case .dropPaused, .dropDisabled, .dropUnavailable:
                 return decided
             case .skipInFlight:
-                guard !Self.isWatcherFire(reason: reason) else { return decided }
+                guard !origin.isWatcher else { return decided }
                 do {
-                    try Self.recordSkip(job: current, ledger: ledger, now: at)
+                    try Self.recordSkip(job: current, ledger: ledger,
+                                        triggerKind: origin.triggerKind, now: at)
                 } catch {
                     print("[JobRunner] could not record the skipped run for \(current.name): \(error)")
                 }
                 return decided
             case .queued:
-                hold(fire: at, for: current, paths: paths)
+                hold(fire: at, for: current, origin: origin)
                 return decided
             case .pauseBreaker(let count):
-                await pause(job: current, reason: Self.breakerReason(count: count), at: at)
+                await pause(job: current, origin: origin,
+                            reason: Self.breakerReason(count: count), at: at)
                 return decided
             case .pauseBudget(let scope, let used, let limit):
-                await pause(job: current,
+                await pause(job: current, origin: origin,
                             reason: Self.budgetReason(scope: scope, used: used, limit: limit), at: at)
                 return decided
             case .run:
@@ -227,64 +261,104 @@ actor JobRunner {
             }
 
             inFlight.insert(current.id)
-            await run(job: current, reason: reason, changedPaths: paths, limits: limits)
+            await run(job: current, origin: origin, limits: limits)
             inFlight.remove(current.id)
 
             guard let held = takeQueuedFire(job: current) else { return decided }
-            reason = "queued"
-            paths = held
+            // The held fire's own origin, wrapped rather than replaced: what woke the job is what
+            // the retry ladder decides on, and re-entering as a bare "queued" erased it (R7).
+            origin = .queued(from: held)
         }
+    }
+
+    /// Forgets everything held in memory for a job that is gone. `/jobs delete` calls it: the
+    /// `queuedFire` column goes with the row, but this actor's copy of the origin would outlive it
+    /// and be handed to a job created later under the same id.
+    func forget(jobId: UUID) {
+        queuedOrigins.removeValue(forKey: jobId)
     }
 
     /// Remembers the one trigger held back while this job is busy. One, never a queue of them: a
     /// job that fell far behind should run once when it is free, not N times in a row.
-    private func hold(fire at: Date, for job: Job, paths: [String]) {
-        // The paths are the runner's own, not a column: they are what a watch saw seconds ago, so
-        // they are worth carrying into the held fire but not worth surviving a restart — and a
-        // `queuedPaths` column would be a second thing to keep in step with `queuedFire`. The
-        // latest burst wins; an empty list (a scheduled fire) leaves whatever a watch left.
-        if !paths.isEmpty { queuedPaths[job.id] = paths }
+    private func hold(fire at: Date, for job: Job, origin: FireOrigin) {
+        // The origin is the runner's own, not a column: the paths in it are what a watch saw
+        // seconds ago, so they are worth carrying into the held fire but not worth surviving a
+        // restart — and a second column would be a second thing to keep in step with `queuedFire`.
+        // The latest burst wins; a fire with no paths (a scheduled one) leaves whatever a watch
+        // left rather than overwriting it with less.
+        if !origin.paths.isEmpty || queuedOrigins[job.id] == nil { queuedOrigins[job.id] = origin }
         do {
             guard job.queuedFire == nil else { return }
             try ledger.setQueuedFire(jobId: job.id, at: at)
         } catch {
+            // Nothing will take a fire that was never recorded, so the origin must not be left
+            // behind either: it would be handed to the *next* held fire as if it were its own.
+            queuedOrigins.removeValue(forKey: job.id)
             print("[JobRunner] could not queue a fire for \(job.name): \(error)")
         }
     }
 
     /// The trigger held back while this job ran, cleared as it is taken — so a trigger arriving
     /// during the *next* run is what refills the slot rather than this one firing forever. `nil`
-    /// when nothing was held; an empty array is a held fire that carried no paths.
-    private func takeQueuedFire(job: Job) -> [String]? {
+    /// when nothing was held.
+    private func takeQueuedFire(job: Job) -> FireOrigin? {
         let stored: Job?
         do { stored = try ledger.job(id: job.id) } catch {
             print("[JobRunner] could not take the queued fire for \(job.name): \(error)")
             return nil
         }
+        guard let stored else {
+            // Deleted mid-run: there is no column left to clear, but this actor's copy would
+            // outlive the row it belonged to.
+            queuedOrigins.removeValue(forKey: job.id)
+            return nil
+        }
         // The freshly read row's policy, not the snapshot's: a job switched to `skip` mid-run must
-        // not take a fire its policy no longer keeps, and one switched to `queue` must.
-        guard let stored, stored.policy.overlap == .queue, stored.queuedFire != nil else { return nil }
+        // not take a fire its policy no longer keeps, and one switched to `queue` must. Switched
+        // away, the held fire is not deferred, it is abandoned — so both halves of it go, or
+        // `/jobs` keeps showing a queued fire nothing will ever take and a later switch back to
+        // `queue` inherits a trigger from another era.
+        guard stored.policy.overlap == .queue else {
+            discardQueuedFire(job: stored)
+            return nil
+        }
+        guard stored.queuedFire != nil else {
+            queuedOrigins.removeValue(forKey: job.id)
+            return nil
+        }
         do {
             try ledger.setQueuedFire(jobId: job.id, at: nil)
         } catch {
             print("[JobRunner] could not clear the queued fire for \(job.name): \(error)")
             return nil
         }
-        return queuedPaths.removeValue(forKey: job.id) ?? []
+        return queuedOrigins.removeValue(forKey: job.id) ?? .schedule
+    }
+
+    /// Drops a held fire that nothing is going to take, column and origin together.
+    private func discardQueuedFire(job: Job) {
+        queuedOrigins.removeValue(forKey: job.id)
+        guard job.queuedFire != nil else { return }
+        do {
+            try ledger.setQueuedFire(jobId: job.id, at: nil)
+        } catch {
+            print("[JobRunner] could not drop the queued fire for \(job.name): \(error)")
+        }
     }
 
     /// Stops a job, says why on the job itself, and tells the user once: the reason on a
     /// zero-length `interrupted` row and on a card. Both, because they answer different questions
     /// — `/jobs` shows the row, and the card is the only thing that reaches someone who is not
     /// looking for it.
-    private func pause(job: Job, reason: String, at: Date) async {
+    private func pause(job: Job, origin: FireOrigin, reason: String, at: Date) async {
         do {
             try ledger.setPaused(jobId: job.id, reason: reason)
         } catch {
             print("[JobRunner] could not pause \(job.name): \(error)")
         }
         do {
-            let run = try Self.recordStillborn(job: job, ledger: ledger, reason: reason, now: at)
+            let run = try Self.recordStillborn(job: job, ledger: ledger, reason: reason,
+                                               triggerKind: origin.triggerKind, now: at)
             await deliver(EventCard(runId: run.id, jobId: job.id, jobName: job.name,
                                     status: .interrupted, outcome: reason, startedAt: at,
                                     finishedAt: at), for: job)
@@ -299,15 +373,15 @@ actor JobRunner {
     /// to tell.
     ///
     /// Private: `fire` is the only way in, so nothing can start a run that skipped admission.
-    private func run(job: Job, reason: String, changedPaths: [String] = [], limits: JobLimits) async {
+    private func run(job: Job, origin: FireOrigin, limits: JobLimits) async {
         let startedAt = now()
         guard let conversationId = await openConversation(for: job, at: startedAt) else {
             print("[JobRunner] not running \(job.name): \(Self.releasedReason)")
             return
         }
 
-        let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: reason, startedAt: startedAt,
-                         transcriptConversationId: conversationId)
+        let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: origin.triggerKind,
+                         startedAt: startedAt, transcriptConversationId: conversationId)
         do {
             try ledger.begin(run: run)
         } catch {
@@ -330,7 +404,7 @@ actor JobRunner {
             await closeInterrupted(run: run, conversationId: conversationId, at: now())
             return
         }
-        let prompt = await Self.prompt(job: job, changedPaths: changedPaths,
+        let prompt = await Self.prompt(job: job, changedPaths: origin.paths,
                                        protectionEnabled: protectionEnabled)
 
         // The wall clock, not the injected `now`: this deadline bounds a turn that is happening
@@ -349,7 +423,12 @@ actor JobRunner {
             await engine?.processInput(prompt, source: "job:\(job.name)",
                                        conversationId: conversationId, turnBudget: budget)
         }
-        let timedOut = DeadlineFlag()
+        // One claim, taken by whichever of the two gets there first, because "the turn came back"
+        // and "the deadline arrived" are a race and the run has exactly one ending. The watchdog
+        // used to set a flag unconditionally, so a turn that returned microseconds before the
+        // deadline was still written `failed` / "budget: time exceeded" — a completed run reported
+        // as a timeout.
+        let ending = DeadlineFlag()
         let watchdog = Task.detached {
             let seconds = deadline.timeIntervalSinceNow
             if seconds > 0 {
@@ -357,14 +436,18 @@ actor JobRunner {
                 // below are the deadline's alone to do.
                 do { try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) } catch { return }
             }
+            // Lost the claim: the turn is already over, so ending its assertion and cancelling it
+            // are not this task's to do.
+            guard await ending.claim() else { return }
             await holder.end()
-            await timedOut.fire()
             turnTask.cancel()
         }
         await turnTask.value
+        // Claimed the instant the turn is back, before anything else can suspend: having won, this
+        // run ended on its own terms and is never an overrun, whatever the watchdog does next.
+        let overran = !(await ending.claim())
         watchdog.cancel()
         await holder.end()
-        let overran = await timedOut.value
         let finishedAt = now()
 
         guard let turn = await readTurn(conversationId: conversationId) else {
@@ -395,7 +478,7 @@ actor JobRunner {
         // news to someone who has to decide whether to go and look.
         let retry = Self.retryDecision(status: status, attempt: job.retryAttempt,
                                        retryEnabled: job.policy.retry,
-                                       watcherFire: Self.isWatcherFire(reason: reason),
+                                       watcherFire: Self.isPathDriven(origin: origin, job: job),
                                        now: finishedAt)
         await apply(retry, job: job, status: status)
 
@@ -674,16 +757,23 @@ actor JobRunner {
     /// transcript, because no turn ever happened. `interrupted` rather than `failed` — nothing
     /// went wrong, the previous copy was simply still going, and `failed` would put it in front of
     /// a person as something to fix.
-    static func recordSkip(job: Job, ledger: JobLedger, now: Date) throws {
-        _ = try recordStillborn(job: job, ledger: ledger, reason: skipReason, now: now)
+    static func recordSkip(job: Job, ledger: JobLedger, triggerKind: String, now: Date) throws {
+        _ = try recordStillborn(job: job, ledger: ledger, reason: skipReason,
+                                triggerKind: triggerKind, now: now)
     }
 
     /// A run that never happened, recorded so `/jobs` can show why: begun and finished at the same
     /// instant, `interrupted`, no transcript, no tokens. Every admission branch that refuses a
-    /// fire and owes the user an explanation writes one — the overlap skip and both pauses.
+    /// fire and owes the user an explanation writes one — the overlap skip, both pauses and an
+    /// unreadable ledger.
+    ///
+    /// `triggerKind` is the *fire's*, not `job.trigger.kind`: what was refused was a hand-started
+    /// fire or a held one, and a row saying "fsEvent" because that is how the job is configured
+    /// describes a fire that never happened.
     @discardableResult
-    static func recordStillborn(job: Job, ledger: JobLedger, reason: String, now: Date) throws -> JobRun {
-        let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: job.trigger.kind,
+    static func recordStillborn(job: Job, ledger: JobLedger, reason: String, triggerKind: String,
+                                now: Date) throws -> JobRun {
+        let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: triggerKind,
                          startedAt: now, status: .interrupted)
         try ledger.begin(run: run)
         try ledger.finish(runId: run.id, status: .interrupted, outcome: nil,
@@ -693,12 +783,65 @@ actor JobRunner {
     }
 }
 
-/// Whether the deadline got there first. Set by the watchdog before it cancels the turn and read
-/// after the turn returns, so the run reports the timeout rather than the silence cancelling it
-/// left behind. An actor because the two are different tasks by construction.
-private actor DeadlineFlag {
-    private(set) var value = false
-    func fire() { value = true }
+/// Which of the two racers gets to say how a run ended. The turn returning and the deadline
+/// arriving are concurrent by construction, so the decision is a single claim rather than a flag:
+/// the winner owns it, and the loser does nothing at all. An actor because the two are different
+/// tasks — and because "read it, then decide" across a suspension is the race this replaces.
+actor DeadlineFlag {
+    private var claimed = false
+
+    /// `true` for exactly one caller, ever.
+    func claim() -> Bool {
+        guard !claimed else { return false }
+        claimed = true
+        return true
+    }
+}
+
+/// What woke a job, carried whole through `fire`'s loop (§4). A string reason could not: a held
+/// fire re-entered as "queued" and a hand-started one as "manual", so by the time the retry ladder
+/// asked whether the filesystem was the input, the answer had been thrown away (R7).
+indirect enum FireOrigin: Equatable, Sendable {
+    /// A cadence came due. `kind` is the job's trigger kind, so a polled job's row still reads
+    /// "poll" instead of flattening to "schedule" — the column is queried.
+    case cadence(kind: String)
+    case watcher(paths: [String])
+    /// `/jobs run`, or anything else a person started by hand.
+    case manual
+    /// A fire the `queue` policy held while the previous run finished, standing in for the fire
+    /// that was actually held.
+    case queued(from: FireOrigin)
+
+    /// The ordinary scheduled fire.
+    static let schedule = FireOrigin.cadence(kind: "schedule")
+
+    /// What the `job_runs` row records.
+    var triggerKind: String {
+        switch self {
+        case .cadence(let kind): return kind
+        case .watcher: return Trigger.fsEventKind
+        case .manual: return "manual"
+        case .queued: return "queued"
+        }
+    }
+
+    /// The fire this one stands in for: itself, unless it is a held re-fire.
+    var root: FireOrigin {
+        if case .queued(let from) = self { return from.root }
+        return self
+    }
+
+    /// The paths the filesystem handed this fire — the held re-fire of a watch fire carries them
+    /// too, which is the whole reason the origin is kept rather than the reason string.
+    var paths: [String] {
+        if case .watcher(let paths) = root { return paths }
+        return []
+    }
+
+    var isWatcher: Bool {
+        if case .watcher = root { return true }
+        return false
+    }
 }
 
 /// The numbers one fire is judged against: the job's own policy where it set one, the global

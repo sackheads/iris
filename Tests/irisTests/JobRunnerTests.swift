@@ -165,7 +165,7 @@ struct JobRunnerTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { firedAt },
                                config: config)
 
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
 
         // A conversation of its own, hidden from the sidebar.
         let background = try #require(state.conversations.first { $0.isBackground })
@@ -218,7 +218,7 @@ struct JobRunnerTests {
         #expect(client.callCount == 1, "one fire is one turn")
 
         // A second fire is a second transcript, not a second turn in the first one.
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
         #expect(state.conversations.filter { $0.isBackground }.count == 2)
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 2)
     }
@@ -232,7 +232,7 @@ struct JobRunnerTests {
         defer { teardown() }
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config)
 
-        await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/a.swift", "/tmp/b.swift"])
+        await runner.fire(job: job, origin: .watcher(paths: ["/tmp/a.swift", "/tmp/b.swift"]))
 
 
         let background = try #require(state.conversations.first { $0.isBackground })
@@ -283,7 +283,7 @@ struct JobRunnerTests {
         defer { teardown() }
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config)
 
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
 
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(run.status == .blockedOnApproval)
@@ -312,7 +312,7 @@ struct JobRunnerTests {
         defer { teardown() }
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config)
 
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
 
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(run.status == .failed)
@@ -341,7 +341,7 @@ struct JobRunnerTests {
         let runner = JobRunner(state: state, engine: engine!, ledger: store.ledger, config: config)
         engine = nil
 
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
 
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(run.status == .interrupted)
@@ -364,7 +364,7 @@ struct JobRunnerTests {
         defer { teardown() }
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config)
 
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
 
         let destination = try #require(state.conversations.first { $0.id == userConversation })
         #expect(destination.messages.filter { $0.role == .event }.count == 1)
@@ -379,7 +379,7 @@ struct JobRunnerTests {
         try store.ledger.upsert(job)
         let at = Date(timeIntervalSince1970: 1_700_000_500)
 
-        try JobRunner.recordSkip(job: job, ledger: store.ledger, now: at)
+        try JobRunner.recordSkip(job: job, ledger: store.ledger, triggerKind: "schedule", now: at)
 
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(run.status == .interrupted)

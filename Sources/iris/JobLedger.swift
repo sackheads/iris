@@ -2,6 +2,15 @@ import Foundation
 import GRDB
 import os
 
+/// The two figures admission decides on. A protocol only so the failure has a seam: a read that
+/// throws used to be swallowed into zero, which opens the breaker and both budgets at once on a
+/// job that may be far past either, and a test cannot make a real SQLite read fail while leaving
+/// the writes that record the refusal working.
+protocol JobUsageReading: Sendable {
+    func usage(jobId: UUID, now: Date, calendar: Calendar) throws -> JobUsage
+    func tokensToday(jobId: UUID?, calendar: Calendar, now: Date) throws -> Int
+}
+
 /// Jobs' half of the agency ledger (#187 deliverable 1): the `jobs` table, read and written
 /// through the conversation store's own writer so a job and the conversation it produces commit
 /// against one database. Scalar `Job` fields are columns — the scheduler queries `enabled` and
@@ -12,7 +21,7 @@ import os
 /// a newer build, a hand-edited row) is skipped rather than failing the whole listing, so one bad
 /// job cannot stop every other job from running. `unreadableJobCount` reports how many the last
 /// `jobs()` call skipped.
-final class JobLedger: Sendable {
+final class JobLedger: JobUsageReading, Sendable {
     private let writer: any DatabaseWriter
     private let skippedCount = OSAllocatedUnfairLock(initialState: 0)
 
@@ -286,7 +295,8 @@ extension JobLedger {
 
     /// Persists (or clears, with `nil`) the exact call this run failed closed on, so the card can
     /// show every argument and "Approve and run" can dispatch it. Throws
-    /// `JobLedgerError.unknownRun` for an id that is not in the table.
+    /// `JobLedgerError.unknownRun` for an id that is not in the table. Nothing blocks a run on an
+    /// approval yet; this is the stored shape, and PR B is the first writer.
     func setBlockedCall(runId: UUID, _ call: BlockedCall?) throws {
         let json = try call.map { try Self.encodeBlockedCall($0) }
         try writer.write { db in
@@ -300,7 +310,7 @@ extension JobLedger {
     /// claim and owns running the call; `false` means it was already approved (or the row is gone).
     /// The `approvedAt IS NULL` guard is in the `UPDATE` itself rather than a read-then-write, so
     /// two clicks on the same card — or two processes — cannot both see it unapproved and run the
-    /// call twice.
+    /// call twice. Nothing claims one yet: PR B's "Approve and run" is the first caller.
     func markApproved(runId: UUID, at: Date) throws -> Bool {
         try writer.write { db in
             try db.execute(sql: "UPDATE job_runs SET approvedAt = ? WHERE id = ? AND approvedAt IS NULL",
@@ -310,7 +320,8 @@ extension JobLedger {
     }
 
     /// Records what this run's gate saw, for the next run to compare against. Throws
-    /// `JobLedgerError.unknownRun` for an id that is not in the table.
+    /// `JobLedgerError.unknownRun` for an id that is not in the table. Nothing evaluates a gate
+    /// yet (see `Gate`), so nothing writes one either: PR C is the first.
     func setGateSignal(runId: UUID, _ signal: String?) throws {
         try writer.write { db in
             try db.execute(sql: "UPDATE job_runs SET gateSignal = ? WHERE id = ?",
@@ -478,7 +489,8 @@ extension JobLedger {
         }
     }
 
-    /// The newest gate signal this job recorded, or `nil` if it has never recorded one. Rows with
+    /// The newest gate signal this job recorded, or `nil` if it has never recorded one — which is
+    /// every job today: PR C's gate evaluation is the first thing to ask. Rows with
     /// no signal are skipped rather than answering `nil`: a gate that errored or a run that
     /// predates the gate writes nothing, and the question being asked is "what did we last see?",
     /// which such a row does not answer.

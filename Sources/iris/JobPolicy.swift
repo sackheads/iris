@@ -28,6 +28,8 @@ struct JobPolicy: Codable, Equatable, Sendable {
     }
 
     var overlap: Overlap = .skip
+    /// Nothing replays a missed occurrence yet; this is the stored shape. PR D's wake handling is
+    /// the first thing to read it.
     var catchUp: CatchUp = .coalesce
     var runTimeoutSeconds: Int = 600
     /// `nil` = the global default from `ConfigManager`, not "unlimited".

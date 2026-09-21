@@ -93,8 +93,9 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// conversation event cards are delivered to is the first user of this.
     var isPinned: Bool = false
     /// #187 deliverable 3 — the profile of the job whose run this background conversation holds.
-    /// The runner stamps it when it opens the conversation; the engine's tool-list builder reads it
-    /// to narrow a `readOnly` run's tool surface. `nil` on every conversation that is not a job run.
+    /// Stored only: nothing writes it and nothing reads it yet. PR B is what stamps it when the
+    /// runner opens the conversation and narrows a `readOnly` run's tool surface from it. `nil` on
+    /// every conversation that is not a job run.
     var jobProfile: JobProfile?
     var goalContract: GoalContract? = nil
     var lastGoalCompletionReport: JSONValue? = nil
@@ -2729,13 +2730,23 @@ class AppState {
                     emitCommandOutput("'\(job.name)' is disabled.", format: .markdown, to: convId)
                     return
                 }
+                // Said before anything is attempted, because admission only answers when the fire
+                // is over — and a run can take minutes. Silence in between reads as a command that
+                // did nothing.
+                emitCommandOutput("Starting **\(job.name)** …", format: .markdown, to: convId)
                 // Through `fire`, not `run`: a hand-started fire meets the same overlap, breaker
                 // and budget checks a scheduled one does (§4) — and what it says is what admission
                 // decided, reported when the fire is over rather than promised before it starts.
                 let engine = self.engine
                 Task { [weak self] in
-                    guard let runner = await engine?.jobRunner() else { return }
-                    let admission = await runner.fire(job: job, reason: "manual")
+                    guard let runner = await engine?.jobRunner() else {
+                        // No engine means no runner and no turn: the app has not finished wiring
+                        // itself up (or is shutting down). Saying so beats the line above being
+                        // the last word on a fire that never started.
+                        self?.emitCommandOutput("Jobs are not available yet.", format: .markdown, to: convId)
+                        return
+                    }
+                    let admission = await runner.fire(job: job, origin: .manual)
                     guard let self else { return }
                     guard let admission else {
                         self.emitCommandOutput("'\(job.name)' is no longer in the jobs table.",
@@ -2776,8 +2787,13 @@ class AppState {
                 // card they are still reading.
                 let runCount = try ledger.runCount(jobId: job.id)
                 try ledger.delete(jobId: job.id)
-                // A watch job's FSEvents stream would otherwise keep firing for a job that is gone.
-                Task { await WatcherManager.shared.reload() }
+                // A watch job's FSEvents stream would otherwise keep firing for a job that is gone,
+                // and the runner would otherwise keep the origin of a fire it held for it.
+                let engine = self.engine
+                Task {
+                    await WatcherManager.shared.reload()
+                    await engine?.jobRunner()?.forget(jobId: job.id)
+                }
                 emitCommandOutput("Deleted **\(job.name)** and its \(runCount) run(s). Transcripts are left for retention to clear.",
                                   format: .markdown, to: convId)
             } catch {

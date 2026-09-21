@@ -181,10 +181,14 @@ enum Trigger: Codable, Equatable, Sendable {
     case fsEvent(FSWatch)
     case poll(PollSpec)
 
+    /// The `triggerKind` column's value for a filesystem watch. Spelled once: the runner decides
+    /// whether a run's input was the filesystem's by comparing against it.
+    static let fsEventKind = "fsEvent"
+
     var kind: String {
         switch self {
         case .schedule: return "schedule"
-        case .fsEvent: return "fsEvent"
+        case .fsEvent: return Self.fsEventKind
         case .poll: return "poll"
         }
     }

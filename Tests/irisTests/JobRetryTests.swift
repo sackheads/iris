@@ -113,7 +113,7 @@ struct JobRetryTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { firedAt },
                                config: config, activity: RecordingActivity())
 
-        await runner.fire(job: j, reason: "schedule")
+        await runner.fire(job: j, origin: .schedule)
 
         let stored = try #require(try store.ledger.job(id: j.id))
         #expect(stored.retryAttempt == 1)
@@ -136,7 +136,7 @@ struct JobRetryTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { firedAt },
                                config: config, activity: RecordingActivity())
 
-        await runner.fire(job: j, reason: "schedule")
+        await runner.fire(job: j, origin: .schedule)
 
         let stored = try #require(try store.ledger.job(id: j.id))
         #expect(stored.pausedReason == JobRunner.retriesExhaustedReason)
@@ -156,7 +156,7 @@ struct JobRetryTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
                                activity: RecordingActivity())
 
-        await runner.fire(job: j, reason: "fsEvent", changedPaths: ["/tmp/in/a.txt"])
+        await runner.fire(job: j, origin: .watcher(paths: ["/tmp/in/a.txt"]))
 
         let stored = try #require(try store.ledger.job(id: j.id))
         #expect(stored.retryAttempt == 0)
@@ -175,7 +175,7 @@ struct JobRetryTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
                                activity: RecordingActivity())
 
-        await runner.fire(job: j, reason: "schedule")
+        await runner.fire(job: j, origin: .schedule)
 
         #expect(try store.ledger.job(id: j.id)?.retryAttempt == 0)
         #expect(try store.ledger.runs(jobId: j.id, limit: 1).first?.status == .completed)
@@ -193,7 +193,7 @@ struct JobRetryTests {
                                now: { Date(timeIntervalSince1970: 1_700_000_000) },
                                config: config, activity: RecordingActivity())
 
-        await runner.fire(job: j, reason: "schedule")
+        await runner.fire(job: j, origin: .schedule)
 
         let stored = try #require(try store.ledger.job(id: j.id))
         #expect(stored.retryAttempt == 0)
@@ -279,6 +279,30 @@ struct JobRetryTests {
         #expect(app.conversations.filter { $0.isBackground }.isEmpty)
     }
 
+    @Test("/jobs run says it is starting straight away, then what admission decided")
+    func runCommandSaysItIsStartingFirst() async throws {
+        // A job whose own policy trips the breaker on this fire, so admission refuses it before
+        // any model call — and nothing here touches the global settings to arrange that.
+        var j = job(name: "thrasher")
+        j.policy.maxRunsPerHour = 1
+        let (app, id) = makeApp(with: [j])
+        let previous = JobRun(jobId: j.id, jobName: j.name, triggerKind: "schedule",
+                              startedAt: Date().addingTimeInterval(-60),
+                              transcriptConversationId: UUID())
+        try app.store.ledger.begin(run: previous)
+        try app.store.ledger.finish(runId: previous.id, status: .completed, outcome: "did a thing",
+                                    failureReason: nil, blockedTool: nil, tokens: TokenUsage(),
+                                    finishedAt: Date().addingTimeInterval(-59))
+
+        app.sendMessage("/jobs run thrasher")
+
+        #expect(output(app, id).contains("Starting **thrasher** …"),
+                "a run takes as long as it takes; silence until then reads as a command that did nothing")
+        await waitFor("admission to report back") {
+            output(app, id).contains("**thrasher** was not started: \(JobRunner.breakerReason(count: 1))")
+        }
+    }
+
     // MARK: The sleep assertion
 
     /// A client that parks inside the model call until the test lets it go, so the assertion's
@@ -325,7 +349,7 @@ struct JobRetryTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
                                activity: activity)
 
-        let fire = Task { await runner.fire(job: j, reason: "schedule") }
+        let fire = Task { await runner.fire(job: j, origin: .schedule) }
         await waitFor("the turn to reach the model") { client.callCount == 1 }
         #expect(activity.events == [.begin("Iris job pr-sweep")],
                 "the assertion is held while the turn is in flight")
@@ -349,7 +373,7 @@ struct JobRetryTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
                                activity: activity)
 
-        await runner.fire(job: j, reason: "schedule")
+        await runner.fire(job: j, origin: .schedule)
 
         #expect(client.callCount == 1, "and it was never released")
         let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
@@ -359,5 +383,97 @@ struct JobRetryTests {
                 "the assertion went back at the deadline, exactly once")
         let card = try #require(self.card(state))
         #expect(card.outcome?.contains(TurnBudget.timeExceeded) == true)
+    }
+
+    @Test("the turn and the deadline race for one claim, and exactly one of them wins it")
+    func theEndingIsClaimedOnce() async {
+        let ending = DeadlineFlag()
+        #expect(await ending.claim() == true)
+        #expect(await ending.claim() == false, "the loser gets no say in how the run ended")
+        #expect(await ending.claim() == false)
+    }
+
+    @Test("a turn that came back on its own is never written up as a timeout, whatever the watchdog does")
+    func aTurnThatFinishedIsNotATimeout() async throws {
+        // The watchdog used to set the timeout flag unconditionally, so a turn that returned in
+        // the moments around the deadline was recorded `failed` / "budget: time exceeded" with a
+        // perfectly good reply sitting in its transcript. The claim makes it one decision: this
+        // turn returns first, so the deadline behind it has nothing left to say.
+        let client = GatedClient(response: textResponse("tick"))
+        let (store, state, engine) = try harness([], client: client)
+        let j = job(timeoutSeconds: 2)
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let activity = RecordingActivity()
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               activity: activity)
+
+        let fire = Task { await runner.fire(job: j, origin: .schedule) }
+        await waitFor("the turn to reach the model") { client.callCount == 1 }
+        // Late in the window, so the watchdog is awake and armed behind the turn rather than
+        // nowhere near it — but far enough inside it that a loaded machine cannot invert the two.
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        client.release()
+        await fire.value
+
+        let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
+        #expect(run.status == .completed)
+        #expect(run.failureReason == nil, "got: \(run.failureReason ?? "nil")")
+        #expect(run.outcome == "tick")
+        #expect(activity.events == [.begin("Iris job pr-sweep"), .end], "and the assertion went back once")
+    }
+
+    // MARK: What the fire was, after it is over (R7)
+
+    @Test("a hand-started fire of a watch job does not retry: it never had paths to retry with")
+    func manualFireOfAWatchJobDoesNotRetry() async throws {
+        let (store, state, engine) = try harness([textResponse("")])
+        let j = Job(name: "inbox", prompt: "Sort it.", trigger: .fsEvent(FSWatch(path: "/tmp/in")))
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               activity: RecordingActivity())
+
+        await runner.fire(job: j, origin: .manual)
+
+        let stored = try #require(try store.ledger.job(id: j.id))
+        #expect(stored.retryAttempt == 0, "a retry minutes later would run the prompt with no paths")
+        #expect(stored.nextFireAt == nil)
+        let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
+        #expect(run.status == .failed)
+        #expect(run.triggerKind == "manual", "the row says what the fire was, not how the job is configured")
+    }
+
+    @Test("a held re-fire of a watch fire does not retry either: it is still that watch fire")
+    func queuedReFireOfAWatchFireDoesNotRetry() async throws {
+        let gate = JobSchedulerTests.Gate()
+        let client = JobAdmissionTests.GatedClient(gate: gate, response: textResponse(""))
+        let (store, state, engine) = try harness([], client: client)
+        var j = Job(name: "inbox", prompt: "Sort it.", trigger: .fsEvent(FSWatch(path: "/tmp/in")))
+        j.policy.overlap = .queue
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               activity: RecordingActivity())
+
+        let first = Task { await runner.fire(job: j, origin: .watcher(paths: ["/tmp/in/a.txt"])) }
+        await gate.waitForEntry()
+        await runner.fire(job: j, origin: .watcher(paths: ["/tmp/in/b.txt"]))
+        await gate.open()
+        await first.value
+
+        let runs = try store.ledger.runs(jobId: j.id, limit: 10)
+        #expect(runs.count == 2, "the held fire ran")
+        #expect(runs.allSatisfy { $0.status == .failed })
+        let stored = try #require(try store.ledger.job(id: j.id))
+        #expect(stored.retryAttempt == 0, "re-entering as \"queued\" must not lose what woke the job")
+        #expect(stored.pausedReason == nil)
+        // And it carried the paths, which is the other half of the same carry.
+        let queued = try #require(runs.first { $0.triggerKind == "queued" })
+        let transcript = try #require(state.conversations.first { $0.id == queued.transcriptConversationId })
+        #expect((transcript.history.first?.parts.compactMap(\.text).joined() ?? "").contains("/tmp/in/b.txt"))
     }
 }

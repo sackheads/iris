@@ -135,9 +135,10 @@ struct TurnBudgetTests {
             .last { $0.role == .agent }?.content == "all done")
     }
 
-    @Test("a message that arrived mid-turn is not stranded by the budget stop")
-    func theBudgetStopDrainsWhatArrived() async throws {
-        let (_, state, engine, _, conversation) = try harness([probeRound(total: 40), textRound("done")])
+    @Test("the budget stop consumes queued steers into history and starts no follow-up turn (R8)")
+    func theBudgetStopDrainsWhatArrivedAndStartsNothing() async throws {
+        let (_, state, engine, client, conversation) = try harness([probeRound(total: 40),
+                                                                    textRound("done")])
         state.enqueuePendingUserMessage(text: "actually, stop after this", attachments: [],
                                         for: conversation)
 
@@ -152,6 +153,10 @@ struct TurnBudgetTests {
         #expect(state.pendingUserMessageCount(for: conversation) == 0)
         let history = state.conversations.first { $0.id == conversation }?.history ?? []
         #expect(history.contains { $0.parts.contains { $0.text?.contains("actually, stop after this") == true } })
+        // And the steer buys nothing back: the run has spent its budget, so the message is
+        // transcript, not a reason to call the model again. Left queued it would be, in a run's
+        // own hidden conversation, a turn nobody budgeted.
+        #expect(client.callCount == 0, "the deadline was already past; no round ran")
     }
 
     // MARK: Through a run
@@ -170,7 +175,7 @@ struct TurnBudgetTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
                                activity: RecordingActivity())
 
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
 
         #expect(client.callCount == 1)
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)

@@ -199,6 +199,21 @@ struct JobAdmissionTests {
                 == JobLimits(maxRunsPerHour: 9, dailyTokens: 8, globalDailyTokens: 90_000,
                              perRunTokens: 7, runTimeoutSeconds: 30),
                 "the global daily budget is the only one a job cannot raise for itself")
+
+        // Zero is not "no timeout" the way a zero token budget is: a turn nothing can end is the
+        // failure the deadline exists for, so a hand-written zero takes the global default.
+        let noTimeout = job(policy: JobPolicy(runTimeoutSeconds: 0))
+        #expect(JobLimits.resolve(job: noTimeout, config: config).runTimeoutSeconds == 120)
+        let negativeTimeout = job(policy: JobPolicy(runTimeoutSeconds: -1))
+        #expect(JobLimits.resolve(job: negativeTimeout, config: config).runTimeoutSeconds == 120)
+
+        // The known cost of reading "the job set it" as "it is not the struct's default":
+        // a policy that deliberately pins 600 s is indistinguishable from one that never asked,
+        // so the global stepper moves it anyway. The alternative — an optional column — is a
+        // migration, and nothing yet lets a person pin a per-job timeout at all.
+        let pinnedToTheDefault = job(policy: JobPolicy(runTimeoutSeconds: JobPolicy().runTimeoutSeconds))
+        #expect(JobLimits.resolve(job: pinnedToTheDefault, config: config).runTimeoutSeconds == 120,
+                "an explicit 600 reads as unset")
     }
 
     @Test("an unset settings key resolves to the spec's default, not zero")
@@ -224,9 +239,9 @@ struct JobAdmissionTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
                                config: config, protectionEnabled: false)
 
-        let first = Task { await runner.fire(job: job, reason: "schedule") }
+        let first = Task { await runner.fire(job: job, origin: .schedule) }
         await gate.waitForEntry()
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
         await gate.open()
         await first.value
 
@@ -255,10 +270,10 @@ struct JobAdmissionTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
                                config: config, protectionEnabled: false)
 
-        let first = Task { await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/a"]) }
+        let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/a"])) }
         await gate.waitForEntry()
-        await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/b"])
-        await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/c"])
+        await runner.fire(job: job, origin: .watcher(paths: ["/tmp/b"]))
+        await runner.fire(job: job, origin: .watcher(paths: ["/tmp/c"]))
         await gate.open()
         await first.value
 
@@ -283,7 +298,7 @@ struct JobAdmissionTests {
                                config: config, protectionEnabled: false)
 
         for path in ["/tmp/a", "/tmp/b", "/tmp/c"] {
-            await runner.fire(job: stale, reason: "fsEvent", changedPaths: [path])
+            await runner.fire(job: stale, origin: .watcher(paths: [path]))
         }
 
         #expect(client.callCount == 0)
@@ -302,7 +317,7 @@ struct JobAdmissionTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
                                config: config, protectionEnabled: false)
 
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
 
         #expect(client.callCount == 0)
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).isEmpty)
@@ -321,11 +336,11 @@ struct JobAdmissionTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
                                config: config, protectionEnabled: false)
 
-        let first = Task { await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/first"]) }
+        let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/first"])) }
         await gate.waitForEntry()
         // Two triggers while it runs: the policy keeps one, never two.
-        await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/second"])
-        await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/third"])
+        await runner.fire(job: job, origin: .watcher(paths: ["/tmp/second"]))
+        await runner.fire(job: job, origin: .watcher(paths: ["/tmp/third"]))
         #expect(try store.ledger.job(id: job.id)?.queuedFire != nil, "the pending trigger is durable")
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1, "and it writes no row")
         await gate.open()
@@ -344,6 +359,43 @@ struct JobAdmissionTests {
         #expect(prompt.contains("/tmp/third"), "the latest burst's paths travel with the held fire")
     }
 
+    @Test("a job switched off the queue policy mid-run drops the fire it was holding, column and all")
+    func switchingAwayFromQueueClearsTheHeldFire() async throws {
+        let gate = JobSchedulerTests.Gate()
+        let client = GatedClient(gate: gate, response: textResponse("tick"))
+        let (store, state, engine) = try harness(client: client)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        var job = self.job(name: "flipper", overlap: .queue)
+        job.trigger = .fsEvent(FSWatch(path: "/tmp/flip"))
+        try store.ledger.upsert(job)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               config: config, protectionEnabled: false)
+
+        let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/flip/a"])) }
+        await gate.waitForEntry()
+        await runner.fire(job: job, origin: .watcher(paths: ["/tmp/flip/b"]))
+        #expect(try store.ledger.job(id: job.id)?.queuedFire != nil)
+        // The user (or a tool) switches the policy while the run is still going.
+        var flipped = try #require(try store.ledger.job(id: job.id))
+        flipped.policy.overlap = .skip
+        try store.ledger.upsert(flipped)
+        await gate.open()
+        await first.value
+
+        #expect(client.callCount == 1, "the held fire is abandoned, not deferred")
+        #expect(try store.ledger.job(id: job.id)?.queuedFire == nil,
+                "and the column goes with it, or `/jobs` shows a fire nothing will take")
+
+        // Switched back, the job starts empty rather than inheriting the abandoned trigger.
+        var back = try #require(try store.ledger.job(id: job.id))
+        back.policy.overlap = .queue
+        try store.ledger.upsert(back)
+        await runner.fire(job: back, origin: .schedule)
+        #expect(client.callCount == 2, "this fire runs; nothing was held for it")
+        #expect(try store.ledger.job(id: job.id)?.queuedFire == nil)
+    }
+
     @Test("a paused job's fire does nothing at all: no run, no row, no card")
     func pausedFireIsDroppedSilently() async throws {
         let (store, state, engine, client) = try harness([textResponse("tick")])
@@ -354,7 +406,7 @@ struct JobAdmissionTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
                                config: config, protectionEnabled: false)
 
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
 
         #expect(client.callCount == 0)
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).isEmpty)
@@ -378,7 +430,7 @@ struct JobAdmissionTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
                                config: config, protectionEnabled: false)
 
-        let admission = await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/watched/a"])
+        let admission = await runner.fire(job: job, origin: .watcher(paths: ["/tmp/watched/a"]))
 
         #expect(admission == .dropDisabled)
         #expect(client.callCount == 0)
@@ -402,12 +454,12 @@ struct JobAdmissionTests {
 
         // One run inside the hour is still under the limit.
         try recordRun(store.ledger, job: job, at: now.addingTimeInterval(-600), tokens: 10)
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
         #expect(client.callCount == 1, "the second run of the hour is allowed")
         #expect(try store.ledger.job(id: job.id)?.pausedReason == nil)
 
         // The third is the one over the line.
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
         #expect(client.callCount == 1, "no turn happened")
         let paused = try #require(try store.ledger.job(id: job.id))
         #expect(paused.pausedReason == "breaker: 2 runs in the last hour")
@@ -435,12 +487,12 @@ struct JobAdmissionTests {
         try store.ledger.upsert(job)
         // A `.skip` job that overlapped itself all morning: rows, but no runs.
         for offset in [-900.0, -600.0, -300.0] {
-            try JobRunner.recordSkip(job: job, ledger: store.ledger, now: now.addingTimeInterval(offset))
+            try JobRunner.recordSkip(job: job, ledger: store.ledger, triggerKind: "schedule", now: now.addingTimeInterval(offset))
         }
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
                                now: { now }, config: config, protectionEnabled: false)
 
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
 
         #expect(client.callCount == 1, "three skips are not three runs")
         #expect(try store.ledger.job(id: job.id)?.pausedReason == nil)
@@ -457,14 +509,14 @@ struct JobAdmissionTests {
         try store.ledger.upsert(job)
         let reason = JobRunner.breakerReason(count: 1)
         try JobRunner.recordStillborn(job: job, ledger: store.ledger, reason: reason,
-                                      now: now.addingTimeInterval(-300))
+                                      triggerKind: "schedule", now: now.addingTimeInterval(-300))
         try store.ledger.setPaused(jobId: job.id, reason: reason)
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
                                now: { now }, config: config, protectionEnabled: false)
 
         // What `/jobs resume` does.
         try store.ledger.setPaused(jobId: job.id, reason: nil)
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
 
         #expect(client.callCount == 1, "a resumed job runs; its pause row is not a run")
         #expect(try store.ledger.job(id: job.id)?.pausedReason == nil)
@@ -483,7 +535,7 @@ struct JobAdmissionTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
                                now: { now }, config: config, protectionEnabled: false)
 
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
 
         #expect(client.callCount == 1)
         #expect(try store.ledger.job(id: job.id)?.pausedReason == nil)
@@ -503,7 +555,7 @@ struct JobAdmissionTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
                                now: { now }, config: config, protectionEnabled: false)
 
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
 
         #expect(client.callCount == 0)
         let paused = try #require(try store.ledger.job(id: job.id))
@@ -531,7 +583,7 @@ struct JobAdmissionTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
                                now: { now }, config: config, protectionEnabled: false)
 
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
 
         #expect(client.callCount == 0)
         #expect(try store.ledger.job(id: job.id)?.pausedReason
@@ -552,7 +604,7 @@ struct JobAdmissionTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
                                now: { now }, config: config, protectionEnabled: false)
 
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
         #expect(client.callCount == 1)
         #expect(try store.ledger.job(id: job.id)?.lastRunAt == now, "the run stamps it")
 
@@ -560,7 +612,7 @@ struct JobAdmissionTests {
         let later = now.addingTimeInterval(60)
         let refuser = JobRunner(state: state, engine: engine, ledger: store.ledger,
                                 now: { later }, config: config, protectionEnabled: false)
-        await refuser.fire(job: job, reason: "schedule")
+        await refuser.fire(job: job, origin: .schedule)
         #expect(client.callCount == 1)
         #expect(try store.ledger.job(id: job.id)?.pausedReason != nil)
         #expect(try store.ledger.job(id: job.id)?.lastRunAt == now, "a refusal is not a run")
@@ -581,9 +633,65 @@ struct JobAdmissionTests {
                                now: { now }, calendar: calendar, config: config,
                                protectionEnabled: false)
 
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
 
         #expect(client.callCount == 1, "the spend was before local midnight")
         #expect(try store.ledger.job(id: job.id)?.pausedReason == nil)
+    }
+
+    // MARK: fire — a ledger that cannot answer
+
+    /// A usage read that always fails. Only the read: the writes that record the refusal still go
+    /// to the real ledger, which is the half of the behaviour under test.
+    private struct UnreadableUsage: JobUsageReading {
+        struct Failure: Error, CustomStringConvertible { var description: String { "database is locked" } }
+        func usage(jobId: UUID, now: Date, calendar: Calendar) throws -> JobUsage { throw Failure() }
+        func tokensToday(jobId: UUID?, calendar: Calendar, now: Date) throws -> Int { throw Failure() }
+    }
+
+    @Test("a usage read that throws skips the fire and writes why — it does not open the breaker")
+    func unreadableUsageSkipsTheFire() async throws {
+        let (store, state, engine, client) = try harness([textResponse("tick")])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let job = self.job(name: "unreadable")
+        try store.ledger.upsert(job)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { now },
+                               config: config, protectionEnabled: false,
+                               usageSource: UnreadableUsage())
+
+        let admission = await runner.fire(job: job, origin: .schedule)
+
+        #expect(client.callCount == 0, "swallowed, the zero it used to read would have let this run")
+        #expect(admission == .dropUnavailable(reason: "admission unavailable: database is locked"))
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.status == .interrupted)
+        #expect(run.failureReason == "admission unavailable: database is locked")
+        #expect(run.transcriptConversationId == nil)
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == nil,
+                "a transient read error is not worth a pause only a person can undo")
+    }
+
+    @Test("a refused hand-started fire writes a row that says manual, not the job's trigger")
+    func aRefusedManualFireSaysManual() async throws {
+        let (store, state, engine, client) = try harness([textResponse("tick")])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        config.jobMaxRunsPerHour = 1
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        var job = self.job(name: "watched")
+        job.trigger = .fsEvent(FSWatch(path: "/tmp/watched"))
+        try store.ledger.upsert(job)
+        try recordRun(store.ledger, job: job, at: now.addingTimeInterval(-60), tokens: 10)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { now },
+                               config: config, protectionEnabled: false)
+
+        await runner.fire(job: job, origin: .manual)
+
+        #expect(client.callCount == 0)
+        let refusal = try #require(try store.ledger.runs(jobId: job.id, limit: 10)
+            .first { $0.failureReason == JobRunner.breakerReason(count: 1) })
+        #expect(refusal.triggerKind == "manual")
     }
 }
