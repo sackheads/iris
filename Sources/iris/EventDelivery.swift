@@ -17,6 +17,15 @@ import Foundation
 /// up at its next model round (`AppState.takePendingEventLines`, drained by `IrisEngine` at the
 /// same boundary it takes steers, and flushed by `endEngineTurn` if the turn ends first).
 extension AppState {
+    /// The one shape an event line takes in history, spelled in one place: a plain `user` entry.
+    /// Three sites build it — delivery to an idle conversation, the engine's drain at the steer
+    /// boundary, and the flush when a turn ends — and they must agree, because the model reads
+    /// them as one stream. `nonisolated` so the engine can build the value off the main actor and
+    /// hop only for the append, as the steer path does.
+    nonisolated static func eventLineContent(_ line: String) -> Content {
+        Content(role: "user", parts: [Part(text: line)])
+    }
+
     /// Appends the card to `destinationId`'s transcript now and routes its history line per the
     /// in-flight rule. Starts no turn, in either branch.
     ///
@@ -37,8 +46,7 @@ extension AppState {
         if hasTurnInFlight(for: destinationId) {
             enqueueEventLine(safeLine, for: destinationId)
         } else {
-            appendContentToHistory(for: destinationId,
-                                   content: Content(role: "user", parts: [Part(text: safeLine)]))
+            appendContentToHistory(for: destinationId, content: Self.eventLineContent(safeLine))
         }
     }
 }

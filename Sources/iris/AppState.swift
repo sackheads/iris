@@ -475,8 +475,7 @@ class AppState {
     /// or some arrival starts one — sees what happened while it was away.
     private func flushPendingEventLines(for conversationId: UUID) {
         for line in takePendingEventLines(for: conversationId) {
-            appendContentToHistory(for: conversationId,
-                                   content: Content(role: "user", parts: [Part(text: line)]))
+            appendContentToHistory(for: conversationId, content: Self.eventLineContent(line))
         }
     }
 
@@ -681,7 +680,15 @@ class AppState {
             guard let self else { return }
             self.activeTasks[id] = nil
             self.endThinking()
-            if let conversationId { self.drainPendingUserMessages(for: conversationId) }
+            // Both queues, in the same order as `endEngineTurn` (#187 §8.3, fix round 1). This is
+            // the OTHER end of a turn: `hasTurnInFlight` is true while a tracked task is alive,
+            // engine turn or not, so a card delivered after the task's engine turn already ended
+            // — or during a task that never started one — is queued here and had nothing left to
+            // flush it. Event lines first, so a turn the drain starts carries the news.
+            if let conversationId {
+                self.flushPendingEventLines(for: conversationId)
+                self.drainPendingUserMessages(for: conversationId)
+            }
         }
         activeTasks[id] = (conversationId, task)
     }

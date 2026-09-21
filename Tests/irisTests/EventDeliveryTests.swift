@@ -176,6 +176,60 @@ struct EventDeliveryTests {
         #expect(conv(app, id).history.count == 1)
     }
 
+    /// How many history entries carry `needle`, so "it landed" and "it landed once" are the same
+    /// assertion.
+    private func historyHits(_ app: AppState, _ id: UUID, _ needle: String) -> Int {
+        conv(app, id).history.filter { c in c.parts.contains { ($0.text ?? "").contains(needle) } }.count
+    }
+
+    /// Fix round 1. A turn has two ends, not one: `withEngineTurn` releases the engine turn count,
+    /// and only afterwards does `runThinkingTask`'s completion clear `activeTasks` — and
+    /// `hasTurnInFlight` is true for either. A card delivered in that shadow is queued by
+    /// `deliverEvent` and had nothing left to flush it, because `runThinkingTask` drained the
+    /// user-message inbox and not the event queue.
+    ///
+    /// Reproduced with two tracked UI tasks on one conversation: a `/rename` turn started while
+    /// the first turn is held. The rename turn finishes while the first is still in flight, so
+    /// `endEngineTurn`'s count never reaches zero and the completing task is the only thing that
+    /// can flush. Both turns are single-round and the card is delivered after both rounds have
+    /// passed their drain point, so no model round can quietly do the flush's job instead.
+    @Test("a completing UI task flushes the queue even while another turn is still in flight")
+    func trackedTaskCompletionFlushes() async {
+        let firstGate = EventGate()
+        let renameGate = EventGate()
+        let client = ScriptedStreamClient([
+            [.event(.textDelta("one")), .block { await firstGate.wait() }, .event(.done(finishReason: nil))],
+            [.event(.textDelta("renamed")), .block { await renameGate.wait() }, .event(.done(finishReason: nil))]
+        ])
+        let app = AppState()
+        app.autoApproveTools = true
+        let id = UUID()
+        app.createNewConversation(id: id)
+        app.selectedConversationId = id
+        app.installEngine(IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                     retryDelays: [], streamResponses: true))
+
+        app.sendMessage("first")
+        #expect(await eventually { client.calls == 1 })
+        app.sendMessage("/rename")
+        #expect(await eventually { client.calls == 2 })
+
+        let c = card()
+        await app.deliverEvent(c, to: id)
+        #expect(historyHits(app, id, c.historyLine) == 0, "two turns are in flight; the line waits")
+
+        await renameGate.release()
+        #expect(await eventually { self.historyHits(app, id, c.historyLine) == 1 },
+                "the rename task completing must flush — the other turn keeps the engine count off zero")
+        #expect(app.hasTurnInFlight(for: id), "the first turn is still held, so this was not endEngineTurn's doing")
+
+        await firstGate.release()
+        #expect(await eventually { !app.isThinking })
+        #expect(historyHits(app, id, c.historyLine) == 1, "and the first turn's own end must not add a second copy")
+        #expect(client.calls == 2, "no delivery, and no flush, woke a model turn")
+        #expect(app.takePendingEventLines(for: id).isEmpty)
+    }
+
     // MARK: - Engine
 
     /// The ordering guarantee, end to end. A card delivered while a model round is in flight must

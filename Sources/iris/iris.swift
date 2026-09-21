@@ -1215,7 +1215,7 @@ actor IrisEngine {
                 let eventLines = await MainActor.run { localState?.takePendingEventLines(for: conversationId) ?? [] }
                 if !eventLines.isEmpty {
                     for line in eventLines {
-                        let content = Content(role: "user", parts: [Part(text: line)])
+                        let content = AppState.eventLineContent(line)
                         await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
                     }
                     history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
