@@ -63,6 +63,13 @@ happens:
 So the active predicate is not merely a tidy definition of "session". It is the mechanism that
 keeps the peer set small enough for the cost model and the safety model to hold.
 
+**That mechanism is currently manual**, which is its weak point: it works only as well as the user
+archives. A TTL-based auto-archive — a conversation untouched for long enough becomes archived on
+its own — would make the bound hold without depending on anyone's habits, and is the natural
+complement to this slice. It is deliberately not here: auto-archiving is a behaviour change to
+#182 that deserves its own argument about what "untouched" means and what it does to a paused goal.
+Tracked separately. §4's listing cap is what holds the line until then.
+
 Subagent conversations are excluded for the reason they are excluded everywhere else: they are
 scratch, deleted when their run ends, and already filtered out of persistence.
 
@@ -93,6 +100,16 @@ passes. `ConversationStoreTests.roundTrip` is the test that proves persistence.
 deliberately must not be overwritten by the agent advertising its current task, and an advertised
 description that says "drafting the D3 spec" is useful to a peer and wrong as a permanent title.
 Conflating them means one of the two is always stale.
+
+**The listing is capped, not merely expected to be small.** `list_sessions` returns at most
+**20** peers and says so when it truncates — `showing 20 of 34`. §3's bound keeps the realistic
+count low, but that bound rests on the user archiving things, which is a habit rather than a
+guarantee. A cap makes the context cost of a listing bounded by construction: the worst case is a
+known number of rows, not a function of how diligent the user has been.
+
+Ordering is most-recently-active first, so the truncated tail is the least likely to matter. A
+session that needs the full set can narrow by workspace, which is the gate the card exists to
+provide.
 
 **Workspace is part of the advertised identity, and costs nothing.** `Conversation.workspacePath`
 is already persisted, so `list_sessions` reports it without new state. It is the cheapest useful
@@ -257,6 +274,8 @@ Recorded here so the question is answered rather than re-asked.
 - A user-initiated turn resets the budget.
 - The three tools are absent with one conversation open and present with two — asserted on the
   declaration list, since this is what protects #133's win.
+- `list_sessions` truncates at the cap and reports the true total, so a large peer set cannot
+  silently become a large context payload.
 - The standing count line appears only when peers exist.
 
 ## 11. The larger arc
