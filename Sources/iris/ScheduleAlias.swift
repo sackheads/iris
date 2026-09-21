@@ -18,6 +18,7 @@ struct ScheduleAlias: Equatable, Sendable {
     enum Failure: Error, Equatable {
         case nothingSpecified
         case invalidWeekday([Int])
+        case invalidInterval(Int)
         case badCron(CronParseError)
         case badTimeZone(String)
         case conflicting
@@ -36,7 +37,7 @@ struct ScheduleAlias: Equatable, Sendable {
 
         if let intervalSeconds {
             if hasFields || cron != nil { return .failure(.conflicting) }
-            return intervalSeconds >= 1 ? .success(.interval(seconds: intervalSeconds)) : .failure(.nothingSpecified)
+            return intervalSeconds >= 1 ? .success(.interval(seconds: intervalSeconds)) : .failure(.invalidInterval(intervalSeconds))
         }
 
         if let cron {

@@ -224,7 +224,7 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        id = try container.decode(UUID.self, forKey: .id)
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
         prompt = try container.decodeIfPresent(String.self, forKey: .prompt) ?? ""
         trigger = try container.decode(Trigger.self, forKey: .trigger)

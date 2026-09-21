@@ -44,7 +44,7 @@ struct JobModelTests {
     func slug() {
         #expect(Job.slug(from: "Check the PR queue every morning!") == "check-the-pr-queue")
         #expect(Job.slug(from: "   ") == "job")
-        #expect(Job.slug(from: String(repeating: "abcdefghij ", count: 6)).count <= 32)
+        #expect(Job.slug(from: String(repeating: "abcdefghij ", count: 6)) == "abcdefghij-abcdefghij-abcdefghij")
     }
 
     @Test("interval schedule next fire is after + seconds")

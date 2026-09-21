@@ -33,6 +33,19 @@ struct ScheduleAliasTests {
         #expect(ScheduleAlias(hour: 9, intervalSeconds: 120).resolve(defaultTimeZone: tz) == .failure(.conflicting))
     }
 
+    @Test("intervalSeconds below 1 is an invalid interval, not 'nothing specified'")
+    func invalidInterval() {
+        #expect(ScheduleAlias(intervalSeconds: 0).resolve(defaultTimeZone: tz) == .failure(.invalidInterval(0)))
+        #expect(ScheduleAlias(intervalSeconds: -5).resolve(defaultTimeZone: tz) == .failure(.invalidInterval(-5)))
+    }
+
+    @Test("duplicate weekdays collapse: [2,2,3] hour 9 → '0 9 * * 1,2'")
+    func duplicateWeekdays() throws {
+        let s = try ScheduleAlias(hour: 9, weekdays: [2, 2, 3]).resolve(defaultTimeZone: tz).get()
+        guard case .cron(let c) = s else { Issue.record("expected cron"); return }
+        #expect(c.expression == "0 9 * * 1,2")
+    }
+
     @Test("explicit cron and timezone pass through; bad ones are reported")
     func explicit() {
         #expect(ScheduleAlias(cron: "*/5 * * * *", timeZone: "Asia/Tokyo").resolve(defaultTimeZone: tz)
