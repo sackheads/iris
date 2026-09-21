@@ -11,6 +11,7 @@ struct SlashCommandItem: Identifiable, Sendable, Equatable {
         SlashCommandItem(id: "stop", command: "/stop", usage: "/stop", description: "Cancel active goal mode or subagent tasks"),
         SlashCommandItem(id: "skills", command: "/skills", usage: "/skills [reload|show <name>|curate]", description: "List, reload, view, or curate registered skills"),
         SlashCommandItem(id: "bundle", command: "/bundle", usage: "/bundle [save <name> s1,s2|<name>]", description: "List, save, or activate skill bundles"),
+        SlashCommandItem(id: "jobs", command: "/jobs", usage: "/jobs [ack <run id>|delete <name>]", description: "List background jobs, acknowledge a failed run, or delete a job"),
         SlashCommandItem(id: "journey", command: "/journey", usage: "/journey", description: "View chronological learning journey timeline"),
         SlashCommandItem(id: "rules", command: "/rules", usage: "/rules [reload]", description: "View loaded system rules or force reload"),
         SlashCommandItem(id: "model", command: "/model", usage: "/model [fast|medium|heavy|<name>]", description: "View or switch active model for conversation"),

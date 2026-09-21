@@ -1074,6 +1074,19 @@ actor IrisEngine {
             ))
         }
 
+        // #187 §9, invariant 6: the job tools are declared in a pinned conversation and nowhere
+        // else. The Activity conversation is the one place a person is already reading about runs,
+        // so it is the one place the two declarations earn their prompt tokens; everywhere else
+        // they would be a standing cost for a question nobody asked. The gate itself is pure
+        // (`jobToolDeclarations`) so both answers are testable without a turn.
+        // `.main` only, and the ternary rather than an `if` around the hop for the same reason
+        // `peerCount` above uses one: a subagent/evaluator turn should not pay a MainActor hop for
+        // a value it can never act on (its own conversation is never the pinned one).
+        let isPinned = principal == .main ? await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId })?.isPinned == true
+        } : false
+        toolsList.append(contentsOf: Self.jobToolDeclarations(isPinned: isPinned))
+
         // Main-agent only. A subagent runs against a unit contract the PARENT authored (slice B3);
         // letting it amend its own definition of done is the self-authored-target problem the
         // evaluator exists to distrust. It matters concretely because B3 puts `oracleText()` in
@@ -1857,6 +1870,72 @@ actor IrisEngine {
                                            SessionCard(name: name, description: description))
             }
             result = "Card updated."
+        } else if functionCall.name == "list_jobs" || functionCall.name == "get_job_run" {
+            // Declaration gating stops a well-behaved model from being offered these; dispatch
+            // reads the function name alone, so the invariant ("in no other conversation") is
+            // enforced again here, where a forged call would otherwise have its effect — the same
+            // defense in depth the session tools use.
+            let (isPinned, store) = await MainActor.run { () -> (Bool, ConversationStore?) in
+                (localState?.conversations.first(where: { $0.id == conversationId })?.isPinned == true,
+                 localState?.store)
+            }
+            guard isPinned, let ledger = store?.ledger else {
+                result = "Refused — the job tools are only available in a pinned conversation."
+                return result
+            }
+            if functionCall.name == "list_jobs" {
+                do {
+                    let jobs = try ledger.jobs()
+                    // One query per job rather than one over the whole table: `runs(jobId:limit:)`
+                    // is the ledger's only newest-first-per-job read, and a jobs list is tens of
+                    // rows, not thousands.
+                    var lastStatuses: [UUID: String] = [:]
+                    for job in jobs {
+                        lastStatuses[job.id] = try ledger.runs(jobId: job.id, limit: 1).first?.status.rawValue
+                    }
+                    result = Self.jobsListJSON(jobs, lastStatuses: lastStatuses)
+                } catch {
+                    result = "Could not read the jobs: \(error)."
+                }
+            } else {
+                let requested = functionCall.args["run_id"]?.stringValue ?? ""
+                do {
+                    // The id a model has is usually the eight characters an event card printed, so
+                    // the same prefix matching `/jobs ack` uses applies here.
+                    let recent = try ledger.recentRuns(limit: JobsCommand.runLookupLimit)
+                    switch JobsCommand.matchRun(requested, in: recent) {
+                    case .none:
+                        result = "No run with that id."
+                    case .ambiguous:
+                        result = "More than one run starts with that id — use the full id."
+                    case .found(let runId):
+                        guard let run = try ledger.run(id: runId) else {
+                            result = "No run with that id."
+                            return result
+                        }
+                        let raw = await MainActor.run { () -> String? in
+                            guard let transcriptId = run.transcriptConversationId,
+                                  let conv = localState?.conversations.first(where: { $0.id == transcriptId }),
+                                  let last = conv.messages.last(where: { $0.role == .agent })
+                            else { return nil }
+                            return String(last.content.prefix(Self.jobRunTranscriptExcerpt))
+                        }
+                        // The one field here a model wrote. This branch returns directly, so it
+                        // never passes through `executeToolWithHooks`'s guard call — same reason
+                        // `search_memory` sanitizes inline.
+                        var message: String?
+                        if let raw {
+                            message = await InjectionGuard.sanitize(
+                                PromptInjectionGuard.sanitizeUntrustedInput(raw),
+                                contextTag: "tool_output_get_job_run", maxTier: .tier3_canary,
+                                protectionEnabled: protectionEnabled)
+                        }
+                        result = Self.jobRunJSON(run, lastAgentMessage: message)
+                    }
+                } catch {
+                    result = "Could not read the run: \(error)."
+                }
+            }
         } else if functionCall.name == "rename_conversation", let newTitle = functionCall.args["title"]?.stringValue {
             await MainActor.run { localState?.renameConversation(id: conversationId, newTitle: newTitle) }
             result = "Conversation renamed to '\(newTitle)'."
@@ -2390,6 +2469,90 @@ actor IrisEngine {
     func recordCommandDuration(id: UUID, elapsed: TimeInterval) async {
         let localState = state
         await MainActor.run { localState?.commandDurations[id] = elapsed }
+    }
+}
+
+// MARK: - Job tools (#187 §9)
+
+/// `list_jobs` and `get_job_run`, and the JSON they answer with. The declarations are a pure
+/// function of the gate rather than two `append`s inside the turn builder so the invariant they
+/// carry — that no conversation but a pinned one is charged for them — is testable without
+/// driving a turn against a model.
+extension IrisEngine {
+    /// The two job tools when `isPinned`, nothing otherwise. Appended verbatim by the per-turn
+    /// tool-list builder.
+    nonisolated static func jobToolDeclarations(isPinned: Bool) -> [FunctionDeclaration] {
+        guard isPinned else { return [] }
+        return [
+            FunctionDeclaration(
+                name: "list_jobs",
+                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, and how the last run ended. Use it to answer what is scheduled, or to find the job behind a run you are being asked about.",
+                parameters: Schema(type: "OBJECT", properties: [:], required: [])),
+            FunctionDeclaration(
+                name: "get_job_run",
+                description: "Read back one background job run: how it ended, what it cost, and the last thing the run itself said. Use it when the user asks about a run an event card mentioned — the card names the run by the first eight characters of its id, which is enough.",
+                parameters: Schema(type: "OBJECT", properties: [
+                    "run_id": Schema(type: "STRING", description: "The run's id, or the first eight or more characters of it as an event card shows.")
+                ], required: ["run_id"])),
+        ]
+    }
+
+    /// `list_jobs`'s body: one object per job, in the ledger's order. JSON rather than prose
+    /// because the model's next move is usually `get_job_run`, and a name it has to re-derive from
+    /// a sentence is a name it can get wrong.
+    nonisolated static func jobsListJSON(_ jobs: [Job], lastStatuses: [UUID: String]) -> String {
+        let iso = ISO8601DateFormatter()
+        let rows: [[String: Any]] = jobs.map { job in
+            [
+                "name": job.name,
+                "trigger": job.trigger.summary,
+                "enabled": job.enabled,
+                "nextFireAt": job.nextFireAt.map { iso.string(from: $0) } ?? NSNull(),
+                "lastStatus": lastStatuses[job.id] ?? NSNull(),
+            ]
+        }
+        return jsonString(rows) ?? "[]"
+    }
+
+    /// `get_job_run`'s body: every ledger column, plus the transcript's last agent message when
+    /// there still is a transcript. The message is the one field written by a model rather than by
+    /// the harness, so the caller hands it in already sanitized.
+    nonisolated static func jobRunJSON(_ run: JobRun, lastAgentMessage: String?) -> String {
+        let iso = ISO8601DateFormatter()
+        let row: [String: Any] = [
+            "id": run.id.uuidString,
+            "jobId": run.jobId.uuidString,
+            "jobName": run.jobName,
+            "triggerKind": run.triggerKind,
+            "startedAt": iso.string(from: run.startedAt),
+            "finishedAt": run.finishedAt.map { iso.string(from: $0) } ?? NSNull(),
+            "status": run.status.rawValue,
+            "outcome": run.outcome ?? NSNull(),
+            "failureReason": run.failureReason ?? NSNull(),
+            "blockedTool": run.blockedTool ?? NSNull(),
+            "promptTokens": run.promptTokens,
+            "candidateTokens": run.candidateTokens,
+            "totalTokens": run.totalTokens,
+            "costMicros": run.costMicros ?? NSNull(),
+            "gateSignal": run.gateSignal ?? NSNull(),
+            "transcriptConversationId": run.transcriptConversationId?.uuidString ?? NSNull(),
+            "acknowledgedAt": run.acknowledgedAt.map { iso.string(from: $0) } ?? NSNull(),
+            "lastAgentMessage": lastAgentMessage ?? NSNull(),
+        ]
+        return jsonString(row) ?? "{}"
+    }
+
+    /// The first `jobRunTranscriptExcerpt` characters of a run transcript's last agent message —
+    /// what the run actually said, before the guard sees it. `nil` when the transcript is gone
+    /// (retention) or the run never spoke.
+    static let jobRunTranscriptExcerpt = 2_000
+
+    private nonisolated static func jsonString(_ object: Any) -> String? {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object,
+                                                     options: [.sortedKeys, .withoutEscapingSlashes])
+        else { return nil }
+        return String(decoding: data, as: UTF8.self)
     }
 }
 

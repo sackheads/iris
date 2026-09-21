@@ -133,16 +133,9 @@ struct EventCard: Codable, Equatable, Sendable {
     }
 
     /// `completed` / `blocked on approval` / … — the status as a card shows it, with
-    /// `blockedOnApproval` spelled out rather than camel-cased.
-    var statusText: String {
-        switch status {
-        case .running: return "running"
-        case .completed: return "completed"
-        case .failed: return "failed"
-        case .blockedOnApproval: return "blocked on approval"
-        case .interrupted: return "interrupted"
-        }
-    }
+    /// `blockedOnApproval` spelled out rather than camel-cased. `/jobs` prints the same words for
+    /// the same run, which is why the spelling lives on the status itself.
+    var statusText: String { status.text }
 
     /// `statusText` plus the tool an approval was wanted for, when there is one.
     var statusDetail: String {

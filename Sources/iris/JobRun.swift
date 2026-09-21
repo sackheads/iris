@@ -61,3 +61,18 @@ struct JobRun: Identifiable, Equatable, Sendable {
         self.acknowledgedAt = nil
     }
 }
+
+extension JobRun.Status {
+    /// How a person is told about this status: `blocked on approval` rather than the camel-cased
+    /// raw value. Shared by the event card and `/jobs`, so a run reads the same wherever it is
+    /// shown.
+    var text: String {
+        switch self {
+        case .running: return "running"
+        case .completed: return "completed"
+        case .failed: return "failed"
+        case .blockedOnApproval: return "blocked on approval"
+        case .interrupted: return "interrupted"
+        }
+    }
+}

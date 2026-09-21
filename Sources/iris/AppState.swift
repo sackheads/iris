@@ -1282,6 +1282,9 @@ class AppState {
         } else if trimmed == "/bundle" || trimmed.hasPrefix("/bundle ") {
             handleBundleCommand(trimmed, convId: convId)
             return
+        } else if trimmed == "/jobs" || trimmed.hasPrefix("/jobs ") {
+            handleJobsCommand(trimmed, convId: convId)
+            return
         } else if trimmed == "/journey" {
             handleJourneyCommand(convId: convId)
             return
@@ -2589,6 +2592,70 @@ class AppState {
                     body += "• **\(b.name)**: \(b.skillNames.joined(separator: ", "))\n"
                 }
                 emitCommandOutput(body, format: .markdown, to: convId)
+            }
+        }
+    }
+
+    /// `/jobs` (#187 §9). Works in every conversation, pinned or not, and never starts a turn:
+    /// everything it says comes from the ledger through `JobsCommand`'s pure rendering. The
+    /// ledger calls are synchronous, so the answer is in the transcript before this returns —
+    /// only the watcher reload after a delete is deferred.
+    private func handleJobsCommand(_ trimmed: String, convId: UUID) {
+        let ledger = store.ledger
+        switch JobsCommand.parse(trimmed) {
+        case .usage:
+            emitCommandOutput(JobsCommand.usageText, format: .markdown, to: convId)
+
+        case .list:
+            do {
+                let jobs = try ledger.jobs()
+                var lastRuns: [UUID: JobRun] = [:]
+                for job in jobs { lastRuns[job.id] = try ledger.runs(jobId: job.id, limit: 1).first }
+                // Read after `jobs()`: that call is what publishes the skipped-row count.
+                let body = JobsCommand.render(jobs: jobs, lastRuns: lastRuns,
+                                              unacknowledged: try ledger.unacknowledgedFailures(),
+                                              unreadableJobs: ledger.unreadableJobCount, now: Date())
+                emitCommandOutput(body, format: .markdown, to: convId)
+            } catch {
+                emitCommandOutput("Could not read the jobs: \(error).", format: .markdown, to: convId)
+            }
+
+        case .ack(let runId):
+            do {
+                switch JobsCommand.matchRun(runId, in: try ledger.recentRuns(limit: JobsCommand.runLookupLimit)) {
+                case .none:
+                    emitCommandOutput("No run matching '\(runId)'.", format: .markdown, to: convId)
+                case .ambiguous:
+                    emitCommandOutput("Ambiguous run id prefix.", format: .markdown, to: convId)
+                case .found(let id):
+                    try ledger.acknowledge(runId: id, at: Date())
+                    let short = id.uuidString.lowercased().prefix(8)
+                    emitCommandOutput("Acknowledged run \(short).", format: .markdown, to: convId)
+                }
+            } catch {
+                emitCommandOutput("Could not acknowledge that run: \(error).", format: .markdown, to: convId)
+            }
+
+        case .delete(let name):
+            do {
+                guard let job = try ledger.job(named: name) else {
+                    emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
+                    return
+                }
+                // The runs go with the job (the `job_runs` foreign key cascades); their transcripts
+                // do not — those are ordinary conversations, and retention clears them on its own
+                // schedule rather than this command deleting a person's evidence out from under a
+                // card they are still reading.
+                // Unlimited, unlike the id lookup: this number is told to a person as what they
+                // are about to lose, so a capped read would quietly understate it.
+                let runCount = try ledger.runs(jobId: job.id, limit: Int.max).count
+                try ledger.delete(jobId: job.id)
+                // A watch job's FSEvents stream would otherwise keep firing for a job that is gone.
+                Task { await WatcherManager.shared.reload() }
+                emitCommandOutput("Deleted **\(job.name)** and its \(runCount) run(s). Transcripts are left for retention to clear.",
+                                  format: .markdown, to: convId)
+            } catch {
+                emitCommandOutput("Could not delete that job: \(error).", format: .markdown, to: convId)
             }
         }
     }
