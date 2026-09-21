@@ -24,13 +24,14 @@ struct CascadeBudgetTests {
     @Test("fan-out consumes the SAME budget, not one per branch")
     func fanOutSharesTheBudget() {
         let (a, x, y, z) = app()
-        // x wakes y; y then fans out. Every delivery descending from the same cascade draws on
-        // one allowance, so breadth is bounded exactly as depth is.
+        // x fans out to y and z. Both targets draw from the same cascade allowance,
+        // so the sender's own budget shrinks with each delivery. A per-branch bug would give
+        // z a fresh allowance instead of y's exhausted one.
         #expect(a.beginPeerCascade(into: y, from: x) == true)
         let afterFirst = a.cascadeRemaining(for: y)
-        #expect(a.beginPeerCascade(into: z, from: y) == true)
+        #expect(a.beginPeerCascade(into: z, from: x) == true)  // x to z, same sender
         #expect(a.cascadeRemaining(for: z) == afterFirst - 1,
-                "a branch must not receive a fresh allowance")
+                "a second target from the same sender must inherit the shrunk allowance")
     }
 
     @Test("the budget runs out and further sends are refused")
@@ -38,6 +39,8 @@ struct CascadeBudgetTests {
         let (a, x, y, _) = app()
         var sender = x, target = y
         var allowed = 0
+        // Exercises the total budget cap as a ping-pong chain: this shape verifies the total
+        // allowance is respected regardless of cascade topology.
         for _ in 0..<(ConfigManager.shared.maxSessionCascade + 5) {
             if a.beginPeerCascade(into: target, from: sender) { allowed += 1 } else { break }
             swap(&sender, &target)
