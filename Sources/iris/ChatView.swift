@@ -203,7 +203,7 @@ struct ChatView: View {
                                 Group {
                                     switch item {
                                     case .single(let message):
-                                        MessageView(message: message)
+                                        MessageView(message: message, state: state)
                                     case .systemGroup(_, let messages):
                                         SystemGroupView(messages: messages, appState: state)
                                     }
@@ -271,7 +271,7 @@ struct ChatView: View {
                             var text = ""
                             let asMarkdown = ConfigManager.shared.copyChatsAsMarkdown
                             for msg in selectedMessages {
-                                let roleName = msg.role == .user ? "You" : (msg.role == .system ? "System" : "Iris")
+                                let roleName = msg.exportRoleName
                                 if asMarkdown {
                                     text += "### \(roleName)\n"
                                     if msg.role == .system {
@@ -664,7 +664,7 @@ struct ChatView: View {
         
         var markdown = "# \(conv.title)\n\n"
         for msg in conv.messages {
-            let roleName = msg.role == .user ? "You" : (msg.role == .system ? "System" : "Iris")
+            let roleName = msg.exportRoleName
             markdown += "### \(roleName)\n"
             if msg.role == .system {
                 let line = LLMErrorMessage.parse(msg.content)?.headline ?? msg.content
@@ -710,7 +710,7 @@ struct ChatView: View {
         
         var text = ""
         for msg in selectedMessages {
-            let roleName = msg.role == .user ? "You" : (msg.role == .system ? "System" : "Iris")
+            let roleName = msg.exportRoleName
             if asMarkdown {
                 text += "### \(roleName)\n"
                 if msg.role == .system {
@@ -848,7 +848,11 @@ struct ChatView: View {
 
 struct MessageView: View {
     let message: ChatMessage
-    
+    /// Only read by the `.event` branch, to resolve an event card's "View run" target. Every call
+    /// site has an `AppState` in scope; it is a stored property rather than an environment value
+    /// because `AppState` is passed explicitly everywhere else in this file.
+    var state: AppState
+
     var body: some View {
         HStack(alignment: .top) {
             if message.role == .user {
@@ -863,8 +867,9 @@ struct MessageView: View {
                     }
                     .font(.caption.bold())
                     .foregroundColor(.secondary)
-                } else if message.role != .command {
-                    // .command output is deliberately unlabeled (not attributed to Iris).
+                } else if message.role != .command, message.role != .event {
+                    // .command output is deliberately unlabeled (not attributed to Iris), and so
+                    // is an .event card — it is a one-line notification, not a turn by anyone.
                     Text(message.role == .user ? "You" : "Iris")
                         .font(.caption.bold())
                         .foregroundColor(.secondary)
@@ -900,6 +905,17 @@ struct MessageView: View {
                                 .cornerRadius(0, corners: [.bottomRight])
                                 .shadow(color: Color.irisIndigo.opacity(0.25), radius: 3, x: 0, y: 2)
                         }
+                    }
+                } else if message.role == .event {
+                    if let card = EventCard.decode(message.content) {
+                        EventCardView(card: card, onViewRun: viewRunAction(for: card))
+                    } else {
+                        // A card written by a newer build, or a hand-edited row: show the raw
+                        // content as plain text rather than running it through Markdown.
+                        Text(message.content)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
                     }
                 } else {
                     // Agent messages render via MarkdownUI. We deliberately do NOT apply
@@ -938,21 +954,31 @@ struct MessageView: View {
         }
     }
     
+    /// The "View run" action for a card, or nil when there is no transcript to open — the run
+    /// recorded none, or the conversation it recorded has since been pruned. Setting the id on
+    /// `AppState` (rather than presenting a sheet from here) keeps one sheet with two openers:
+    /// the session strip owns the `.sheet`, on a view that stays mounted while it is up.
+    private func viewRunAction(for card: EventCard) -> (() -> Void)? {
+        guard let convId = card.transcriptConversationId,
+              state.conversations.contains(where: { $0.id == convId }) else { return nil }
+        return { state.transcriptSheetConversationId = convId }
+    }
+
     private var backgroundColor: Color {
         switch message.role {
         case .user: return Color.accentColor
         case .agent, .command: return Color(NSColor.controlBackgroundColor)
-        case .system: return Color(NSColor.windowBackgroundColor).opacity(0.8)
+        case .system, .event: return Color(NSColor.windowBackgroundColor).opacity(0.8)
         }
     }
 
     private var textColor: Color {
         switch message.role {
         case .user: return .white
-        case .agent, .system, .command: return .primary
+        case .agent, .system, .command, .event: return .primary
         }
     }
-    
+
 }
 
 struct SystemGroupView: View {

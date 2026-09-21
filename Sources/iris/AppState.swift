@@ -7,6 +7,9 @@ enum ChatRole: String, Codable, Sendable, Equatable {
     case system
     /// Deterministic slash-command output rendered as Markdown, not attributed to Iris.
     case command
+    /// A background job run's outcome (#187), carrying an `EventCard` as JSON in its content and
+    /// drawn as a one-line card. Never wakes a model turn, never indexed for search.
+    case event
 }
 
 struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
@@ -236,6 +239,13 @@ class AppState {
     var sessions: [SessionSummary] = []
     /// How long a `.finished` entry lingers in `sessions` before the sweep drops it.
     static let sessionLingerWindow: TimeInterval = 60
+    /// The conversation whose read-only transcript sheet is open, or nil. Transient UI state kept
+    /// here — not on `Conversation`, not persisted — because there are two openers for the one
+    /// sheet: a session-strip row (#217/#19) and an event card's "View run" (#187). The `.sheet`
+    /// itself stays attached to `SessionStripView`'s outer `Group`, which is always mounted; a
+    /// second `.sheet` on `MessageView` would be torn down whenever the message row it is attached
+    /// to scrolls out of the lazy stack.
+    var transcriptSheetConversationId: UUID?
     var subagentWriteLedger: [UUID: [String]] = [:]
     var pendingApprovals: [ToolApprovalRequest] = []
     var availableUpdate: ReleaseInfo?
