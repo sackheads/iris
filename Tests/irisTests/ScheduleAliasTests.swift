@@ -67,4 +67,12 @@ struct ScheduleAliasTests {
         let s = try ScheduleAlias(minute: 0, hour: 9, weekdays: [2, 3, 4, 5, 6]).resolve(defaultTimeZone: tz).get()
         #expect(s.next(after: friday) == cal.date(from: DateComponents(year: 2026, month: 9, day: 21, hour: 9)))
     }
+
+    @Test("alias next fire equals the old semantics: Saturday 10:00 → Monday 09:00")
+    func parityWithOldWeekdaysFromSaturday() throws {
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(identifier: tz)!
+        let saturday = cal.date(from: DateComponents(year: 2026, month: 9, day: 19, hour: 10))!
+        let s = try ScheduleAlias(minute: 0, hour: 9, weekdays: [2, 3, 4, 5, 6]).resolve(defaultTimeZone: tz).get()
+        #expect(s.next(after: saturday) == cal.date(from: DateComponents(year: 2026, month: 9, day: 21, hour: 9)))
+    }
 }
