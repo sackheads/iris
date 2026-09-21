@@ -190,7 +190,7 @@ final class JobLedger: Sendable {
     func run(id: UUID) throws -> JobRun?
     func runs(jobId: UUID, limit: Int) throws -> [JobRun]
     func acknowledge(runId: UUID, at: Date) throws
-    func prune(now: Date, rowRetention: TimeInterval, transcriptsPerJob: Int) throws -> PruneResult
+    func prune(now: Date, rowRetention: TimeInterval, transcriptsPerJob: Int) throws -> PruneDecision
 }
 ```
 
