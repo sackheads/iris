@@ -271,7 +271,21 @@ actor MCPManager {
         }
         return declarations
     }
-    
+
+    /// The prefixed names of the MCP tools whose server annotated them `readOnlyHint: true` — the
+    /// only MCP tools a `readOnly` job run may call (#187 §0.2). A server that says nothing about
+    /// a tool is not making a claim this harness can act on, so that tool is denied rather than
+    /// assumed harmless; see `JobProfile.readOnlyDenies`.
+    func readOnlyToolNames() -> Set<String> {
+        var names: Set<String> = []
+        for (serverName, server) in servers {
+            for tool in server.availableTools where tool.annotations.readOnlyHint == true {
+                names.insert("\(serverName)\(JobProfile.mcpNameSeparator)\(tool.name)")
+            }
+        }
+        return names
+    }
+
     func callTool(name: String, args: [String: JSONValue]) async -> String {
         let parts = name.components(separatedBy: "___")
         guard parts.count == 2, let serverName = parts.first, let toolName = parts.last else {

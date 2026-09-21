@@ -109,13 +109,25 @@ Monday-only job nobody asked for.
 
 ## Profiles
 
-Every job has a profile, `readOnly` or `mutating`. `readOnly` is the default and, right now, the
-only one `schedule_job` will create — asking for `profile: mutating` is refused with a message
-saying it arrives with deliverable 3. The runner already honours the profile — a `mutating` job's
-run conversation is pinned to the `apple/container` sandbox — but the model around it (the waiver,
-the declared mounts, the budget) is not built, which is why the tool will not create one. A
-`readOnly` run leaves the sandbox choice alone, so it follows the per-workspace default rather than
-being pinned to the host.
+Every job has a profile, `readOnly` or `mutating`, and `readOnly` is the default: a job created
+without one cannot change anything.
+
+A `readOnly` run does not see the tools it may not call. The run's turn is built without
+`write_file`, the skill-editing tools, `schedule_job`, `register_directory_watcher`,
+`send_to_session`, the delegation tools, any MCP tool whose server did not mark it read-only, and
+`run_command` when it would run on the host rather than in the container. Reading, searching,
+memory and web search stay. Declaration is only the cheap half: a call that reaches the dispatcher
+anyway — a stale declaration, a forged name — is refused there too, recorded as the whole call
+(name, arguments, working directory) on the run's ledger row, and the run finishes
+`blocked on approval` with a card naming the tool. The model is told the call was denied in the
+same words a call nobody was there to approve gets.
+
+A `mutating` job keeps the whole tool surface and always runs in the `apple/container` VM — that is
+what pays for the wider surface, so `schedule_job` refuses to create one when that runtime is not
+installed rather than quietly falling back to the host. Everything outside the user's allowlist
+still fails closed inside it: unattended means unattended whatever the profile. A `readOnly` run
+leaves the sandbox choice alone, so it follows the per-workspace default rather than being pinned
+to the host.
 
 ## What happens on sleep
 

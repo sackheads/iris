@@ -17,11 +17,17 @@ struct ScheduleJobArgumentsTests {
         #expect(a.alias.cron == "*/5 * * * *" && a.alias.timeZone == "Asia/Tokyo" && a.name == "Five Min")
     }
 
-    @Test("missing prompt and mutating profile are refused with a message")
+    @Test("missing prompt, and a mutating profile with nowhere safe to run it, are refused")
     func refusals() {
         #expect(ScheduleJobArguments.parse(["hour": .int(9)]) == .failure("schedule_job needs a prompt."))
+        // Creatable since D3 — but only where the container runtime it always runs in exists.
+        // Injected, so the answer does not depend on what this machine has installed.
         let a = try? ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9), "profile": .string("mutating")]).get()
-        #expect(a?.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: []) == .failure("mutating jobs arrive with deliverable 3; create the job without a profile."))
+        #expect(a?.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: [], runtimeAvailable: false)
+                == .failure(ToolMessage(ScheduleJobArguments.noRuntimeForMutating)))
+        let made = try? a?.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: [],
+                                   runtimeAvailable: true).get()
+        #expect(made?.profile == .mutating)
     }
 
     @Test("name is slugged and made unique against existing names")

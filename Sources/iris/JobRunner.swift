@@ -461,7 +461,10 @@ actor JobRunner {
         let status = overran ? .failed : Self.status(messages: turn.messages, denials: turn.denials,
                                                      softStopped: Self.softStopped(in: turn.messages))
         let outcome = Self.outcome(from: turn.messages)
-        let blockedTool = overran ? nil : turn.denials.first?.toolName
+        // The whole call, not just its name: the card renders every argument and "Approve and
+        // run" re-dispatches exactly this (§6). Only the first — a run has one ending.
+        let blockedCall = overran ? nil : turn.denials.first
+        let blockedTool = blockedCall?.toolName
         let failureReason = overran ? TurnBudget.timeExceeded
             : Self.failureReason(status: status, messages: turn.messages, blockedTool: blockedTool)
         do {
@@ -471,6 +474,12 @@ actor JobRunner {
                               tokens: turn.tokens, finishedAt: finishedAt)
         } catch {
             print("[JobRunner] could not close the run for \(job.name): \(error)")
+        }
+        if let blockedCall {
+            // After `finish`, and separately from it: the row has to exist, and a blocked call
+            // that fails to store still leaves a correctly-closed `blockedOnApproval` row behind.
+            do { try ledger.setBlockedCall(runId: run.id, blockedCall) }
+            catch { print("[JobRunner] could not store the blocked call for \(job.name): \(error)") }
         }
 
         // Decided before the card is built, because what happens to the schedule next is part of
@@ -587,6 +596,11 @@ actor JobRunner {
         let title = "\(job.name) · \(ISO8601DateFormatter().string(from: startedAt))"
         return await MainActor.run { () -> UUID in
             let id = state.createNewConversation(isBackground: true, title: title)
+            // What the turn is allowed to do: the tool-list builder narrows a `readOnly` run's
+            // declarations by this, and the dispatcher fails closed on what it still gets asked
+            // for (§4). Stamped for both profiles — nil means "not a job run at all", which is
+            // the unnarrowed surface.
+            state.setJobProfile(for: id, job.profile)
             // `.mutating` is the only profile that asks for a container. `.readOnly` leaves the
             // field nil deliberately: nil means "fall through to the per-workspace/global
             // default", which is not the same as pinning this run to the host (§9).
@@ -603,7 +617,7 @@ actor JobRunner {
     /// What the finished turn left behind. `nil` when the app state went away while it ran.
     private struct TurnResult {
         let messages: [ChatMessage]
-        let denials: [BlockedToolCall]
+        let denials: [BlockedCall]
         let tokens: TokenUsage
     }
 
@@ -696,7 +710,7 @@ actor JobRunner {
     /// reached the end with nothing said is a failure too: a hook that blocked the turn, a
     /// cancelled engine or a conversation deleted mid-run all land here, and reporting any of them
     /// as `completed` would put a green card on a run that did nothing.
-    static func status(messages: [ChatMessage], denials: [BlockedToolCall], softStopped: Bool) -> JobRun.Status {
+    static func status(messages: [ChatMessage], denials: [BlockedCall], softStopped: Bool) -> JobRun.Status {
         if !denials.isEmpty { return .blockedOnApproval }
         if llmErrorHeadline(in: messages) != nil { return .failed }
         if softStopped { return .failed }

@@ -1,12 +1,48 @@
 import Foundation
 
-/// Whether a job's turns are meant to run with tool access limited to read-only operations
-/// (`readOnly`) or may also mutate the filesystem/network/other state (`mutating`). Stored and
-/// refused on (`schedule_job` declines `mutating`) now; nothing narrows the tool surface of a
-/// `readOnly` job's turn yet, because deliverable 3 owns gates, budgets and approvals.
+/// Whether a job's turns run with tool access limited to read-only operations (`readOnly`, the
+/// default) or may also mutate the filesystem/network/other state (`mutating`). The runner stamps
+/// it on the run's hidden conversation; the engine's tool-list builder narrows a `readOnly` run's
+/// declarations by it and the dispatcher fails closed on anything it still gets asked for (#187
+/// deliverable 3, spec §0.2 and §4). A `mutating` job always runs in the `apple/container` VM, so
+/// it is only creatable when that runtime is installed.
 enum JobProfile: String, Codable, Sendable {
     case readOnly
     case mutating
+}
+
+extension JobProfile {
+    /// Tools a read-only run may not call (spec §0.2). Names are tool names as declared.
+    ///
+    /// `delegate_task` is the spec's name for delegation and `edit_file` a tool this build does
+    /// not have: both are listed anyway so the denial arrives with the tool rather than after it.
+    /// `run_command` is deliberately absent — whether it writes depends on where it runs, which
+    /// `readOnlyDenies` decides.
+    static let readOnlyDenied: Set<String> = [
+        "write_file", "edit_file", "create_skill", "update_skill", "delete_skill",
+        "schedule_job", "register_directory_watcher", "send_to_session",
+        "delegate_task", "delegate_milestone", "invoke_subagent",
+    ]
+
+    /// What `MCPManager` joins a server name and a tool name with.
+    static let mcpNameSeparator = "___"
+
+    static func isMCPTool(_ toolName: String) -> Bool { toolName.contains(mcpNameSeparator) }
+
+    /// Whether a `readOnly` run may not call `toolName`.
+    ///
+    /// - Parameters:
+    ///   - sandboxedRunCommand: whether a `run_command` in this conversation would run in the
+    ///     container. On the host it writes to the user's machine, so it is denied there (§0.2).
+    ///   - readOnlyMCPTools: the prefixed names of MCP tools whose server annotated them
+    ///     `readOnlyHint: true`. Every other MCP tool is denied: an unannotated tool is one the
+    ///     harness knows nothing about, and an unattended run is the wrong place to guess.
+    static func readOnlyDenies(_ toolName: String, sandboxedRunCommand: Bool,
+                               readOnlyMCPTools: Set<String>) -> Bool {
+        if toolName == "run_command" { return !sandboxedRunCommand }
+        if isMCPTool(toolName) { return !readOnlyMCPTools.contains(toolName) }
+        return readOnlyDenied.contains(toolName)
+    }
 }
 
 /// A filesystem watch trigger on `path`. `quietWindowSeconds` is the window a burst of edits is

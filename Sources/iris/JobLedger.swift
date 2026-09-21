@@ -295,8 +295,9 @@ extension JobLedger {
 
     /// Persists (or clears, with `nil`) the exact call this run failed closed on, so the card can
     /// show every argument and "Approve and run" can dispatch it. Throws
-    /// `JobLedgerError.unknownRun` for an id that is not in the table. Nothing blocks a run on an
-    /// approval yet; this is the stored shape, and PR B is the first writer.
+    /// `JobLedgerError.unknownRun` for an id that is not in the table. `JobRunner` writes one when
+    /// a run ends `blockedOnApproval`, whether nobody was there to approve the call or the job's
+    /// `readOnly` profile forbade it outright.
     func setBlockedCall(runId: UUID, _ call: BlockedCall?) throws {
         let json = try call.map { try Self.encodeBlockedCall($0) }
         try writer.write { db in
@@ -310,7 +311,7 @@ extension JobLedger {
     /// claim and owns running the call; `false` means it was already approved (or the row is gone).
     /// The `approvedAt IS NULL` guard is in the `UPDATE` itself rather than a read-then-write, so
     /// two clicks on the same card — or two processes — cannot both see it unapproved and run the
-    /// call twice. Nothing claims one yet: PR B's "Approve and run" is the first caller.
+    /// call twice. Nothing claims one yet: "Approve and run" is the first caller.
     func markApproved(runId: UUID, at: Date) throws -> Bool {
         try writer.write { db in
             try db.execute(sql: "UPDATE job_runs SET approvedAt = ? WHERE id = ? AND approvedAt IS NULL",

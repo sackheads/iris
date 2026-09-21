@@ -55,12 +55,17 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// Builds the job to store, or the sentence explaining why there is none. `existingNames` is
     /// every job name already in the ledger, so a second "check the PR queue" becomes
     /// `check-the-pr-queue-2` instead of colliding with the first on the ledger's UNIQUE index.
-    func makeJob(defaultTimeZone: String, createdIn: UUID?, existingNames: Set<String>) -> Result<Job, ToolMessage> {
-        // D3 owns budgets and approvals; until then a job that may write is a job nobody is
-        // watching, so the tool declines rather than quietly downgrading what was asked for.
-        if profile?.lowercased() == JobProfile.mutating.rawValue.lowercased() {
-            return .failure("mutating jobs arrive with deliverable 3; create the job without a profile.")
-        }
+    /// `runtimeAvailable` is whether the `apple/container` runtime is installed, injected so the
+    /// refusal can be tested on a machine either way. A `mutating` job always runs in that VM
+    /// (spec §0.2), so without it there is nowhere safe to run one and the tool says so rather
+    /// than creating a job that would fall back to the host.
+    func makeJob(defaultTimeZone: String, createdIn: UUID?, existingNames: Set<String>,
+                 runtimeAvailable: Bool = SandboxingManager.shared.isContainerInstalled) -> Result<Job, ToolMessage> {
+        // Anything that is not the word `mutating` reads as read-only, including a value this
+        // build does not recognize: the narrow surface is the safe guess, and a refusal over a
+        // spelling would cost a retry to arrive at the same job.
+        let wantsMutating = profile?.lowercased() == JobProfile.mutating.rawValue.lowercased()
+        if wantsMutating, !runtimeAvailable { return .failure(ToolMessage(Self.noRuntimeForMutating)) }
         switch alias.resolve(defaultTimeZone: defaultTimeZone) {
         case .failure(let failure):
             return .failure(Self.message(for: failure))
@@ -69,9 +74,14 @@ struct ScheduleJobArguments: Equatable, Sendable {
                 name: Self.uniqueName(Job.slug(from: name ?? prompt), existing: existingNames),
                 prompt: prompt,
                 trigger: .schedule(schedule),
+                profile: wantsMutating ? .mutating : .readOnly,
                 createdInConversationId: createdIn))
         }
     }
+
+    /// The refusal a `mutating` job gets on a machine with no container runtime. Spelled once: the
+    /// test that pins the sentence and the tool that returns it read the same string.
+    static let noRuntimeForMutating = "A mutating job always runs in the apple/container VM, and that runtime is not installed. Install it in Settings → Sandboxing, or create the job read-only."
 
     /// `base`, or `base-2`, `base-3`, … — the first form not already taken.
     static func uniqueName(_ base: String, existing: Set<String>) -> String {

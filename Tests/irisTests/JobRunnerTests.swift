@@ -43,8 +43,8 @@ struct JobRunnerTests {
         })
     }
 
-    private func denial(_ tool: String) -> BlockedToolCall {
-        BlockedToolCall(toolName: tool, details: "whatever", at: Date())
+    private func denial(_ tool: String) -> BlockedCall {
+        BlockedCall(toolName: tool, args: ["command": .string("whatever")])
     }
 
     // MARK: outcome

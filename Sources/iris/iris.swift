@@ -830,6 +830,17 @@ actor IrisEngine {
         }
     }
 
+    /// Whether a `run_command` in this conversation would run in the container, asked without a
+    /// call in hand: the read-only declaration gate (#187 §0.2) needs the answer before the model
+    /// has proposed anything, and `resolveUseSandbox`'s missing-runtime warning belongs to a real
+    /// call, not to the building of a tool list.
+    private func runCommandIsSandboxed(conversationId: UUID, workspacePath: String?) async -> Bool {
+        if case .sandboxed = await sandboxDecision(conversationId: conversationId, workspacePath: workspacePath) {
+            return true
+        }
+        return false
+    }
+
     /// Whether command hooks fired during this conversation's turn should run sandboxed. Follows
     /// the agent's sandbox policy (subagents always sandboxed; main agent per its resolution),
     /// independent of any specific tool. No warn side effect — run_command already surfaces it.
@@ -966,11 +977,12 @@ actor IrisEngine {
             currentSystemPrompt.parts[0].text = textPart + "\n\n# Mid-Term Fact Store Memory (JIT Context)\n" + factString
         }
 
-        // Read once for the three gates below that all ask about this conversation: whether it is
-        // an unattended run, and whether it has a goal to complete.
-        let (isUnattended, hasActiveGoal) = await MainActor.run { () -> (Bool, Bool) in
+        // Read once for the gates below that all ask about this conversation: whether it is an
+        // unattended run, whether it has a goal to complete, and what a job run of it may do.
+        let (isUnattended, hasActiveGoal, jobProfile) = await MainActor.run { () -> (Bool, Bool, JobProfile?) in
             let conversation = localState?.conversations.first(where: { $0.id == conversationId })
-            return (conversation?.isBackground == true, conversation?.activeGoal != nil)
+            return (conversation?.isBackground == true, conversation?.activeGoal != nil,
+                    conversation?.jobProfile)
         }
 
         // #185 §6: computed once per turn and reused below for the session-tools declaration
@@ -1026,7 +1038,7 @@ actor IrisEngine {
         if !isUnattended {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; a job that was due while the app was asleep runs once on wake. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; a job that was due while the app was asleep runs once on wake. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so. A job is read-only unless you say otherwise: a read-only fire can read, search and run sandboxed commands, but cannot write files, change skills, schedule work, message another session, delegate, or run a command on the host. Pass profile 'mutating' when the job must change something; those fires always run in the apple/container VM and need that runtime installed. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -1040,7 +1052,8 @@ actor IrisEngine {
                     "month": Schema(type: "INTEGER", description: "Cron month (1-12)"),
                     "weekday": Schema(type: "INTEGER", description: "Cron weekday (1=Sunday, 2=Monday, ..., 7=Saturday)"),
                     "weekdays": Schema(type: "ARRAY", description: "Cron weekdays, 1=Sunday … 7=Saturday; e.g. [2,3,4,5,6] for Monday–Friday. Prefer this over five separate jobs.", items: Schema(type: "INTEGER")),
-                    "intervalSeconds": Schema(type: "INTEGER", description: "Simple recurring interval in seconds (e.g. 3600 for every hour)")
+                    "intervalSeconds": Schema(type: "INTEGER", description: "Simple recurring interval in seconds (e.g. 3600 for every hour)"),
+                    "profile": Schema(type: "STRING", description: "'readOnly' (default) or 'mutating'. Use 'mutating' only when the job's work must change something; it runs sandboxed and is refused when the container runtime is not installed.")
                 ],
                 required: ["prompt"]
             )
@@ -1288,6 +1301,22 @@ actor IrisEngine {
                     required: ["criterion_id", "reason"]
                 )
             ))
+        }
+
+        // #187 §0.2, §4 "Read-only narrowing": a readOnly job's run is not shown the tools its
+        // profile forbids. Undeclared is the cheap half — it costs the run no prompt tokens and
+        // never tempts the model — and `executeFunctionCall` refuses a denied name anyway, which
+        // is the half that holds against a stale declaration or a forged call (invariant 6).
+        if jobProfile == .readOnly {
+            let sandboxed = await runCommandIsSandboxed(conversationId: conversationId,
+                                                        workspacePath: workspacePath)
+            // Only pay the hop when there is an MCP tool in the list to judge.
+            let readOnlyMCP = toolsList.contains { JobProfile.isMCPTool($0.name) }
+                ? await MCPManager.shared.readOnlyToolNames() : []
+            toolsList.removeAll {
+                JobProfile.readOnlyDenies($0.name, sandboxedRunCommand: sandboxed,
+                                          readOnlyMCPTools: readOnlyMCP)
+            }
         }
 
         // Offer an optional `intent` on every tool so the model can attach a one-line
@@ -1996,6 +2025,37 @@ actor IrisEngine {
         }
     }
 
+    /// The result a call denied by the conversation's job profile returns to the model, or nil
+    /// when the profile allows it (and for every conversation that is not a `readOnly` job run).
+    ///
+    /// The denial is recorded as the whole call, so the run's card can show what was refused and
+    /// "Approve and run" has something to re-dispatch (§6), and the model is told in the same
+    /// words an unapprovable call gets: a refusal it can work around is more useful to it than a
+    /// distinction it cannot act on.
+    private func profileRefusal(for functionCall: FunctionCall, conversationId: UUID,
+                                workspacePath: String?) async -> String? {
+        let localState = state
+        let profile = await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId })?.jobProfile
+        }
+        guard profile == .readOnly else { return nil }
+        let sandboxed = functionCall.name == "run_command"
+            ? await resolveUseSandbox(toolName: "run_command", conversationId: conversationId,
+                                      workspacePath: workspacePath)
+            : false
+        let readOnlyMCP = JobProfile.isMCPTool(functionCall.name)
+            ? await MCPManager.shared.readOnlyToolNames() : []
+        guard JobProfile.readOnlyDenies(functionCall.name, sandboxedRunCommand: sandboxed,
+                                        readOnlyMCPTools: readOnlyMCP) else { return nil }
+        let call = BlockedCall(toolName: functionCall.name, args: functionCall.args,
+                               cwd: workspacePath, reason: .profile)
+        await MainActor.run { localState?.recordBackgroundDenial(call: call, in: conversationId) }
+        return Self.deniedToolResult
+    }
+
+    /// What the model is told when a tool call was refused — by a human, or by the run's profile.
+    static let deniedToolResult = "User denied permission to execute this tool. You must ask the user for clarification or suggest an alternative."
+
     private func executeFunctionCall(_ functionCall: FunctionCall, conversationId: UUID, workspacePath: String?, restrictToGoalComplete: Bool = false) async -> String {
         let localState = state
         var result = ""
@@ -2006,7 +2066,15 @@ actor IrisEngine {
         if Self.jobCreationTools.contains(functionCall.name) {
             if await isUnattendedRun(conversationId) { return Self.unattendedJobCreationRefusal }
         }
-        
+
+        // #187 §0.2, §4: a readOnly job run fails closed on a tool its profile denies, before any
+        // of the branches below can act on it. Declaration gating above only stops a model that
+        // plays by the rules; this is the point that has an effect.
+        if let refusal = await profileRefusal(for: functionCall, conversationId: conversationId,
+                                              workspacePath: workspacePath) {
+            return refusal
+        }
+
         if functionCall.name == "set_workspace", let path = functionCall.args["path"]?.stringValue {
             let currentWorkspace = path
             
@@ -2535,14 +2603,15 @@ actor IrisEngine {
             let useSandbox = await resolveUseSandbox(toolName: functionCall.name, conversationId: conversationId, workspacePath: workspacePath)
             if needsApproval {
                 let approved = await localState?.requestApproval(
-                    toolName: functionCall.name, details: details, workspace: workspacePath,
+                    toolName: functionCall.name, details: details, args: functionCall.args,
+                    workspace: workspacePath,
                     conversationId: conversationId, origin: approvalOrigin, inSandbox: useSandbox,
                     callerRole: principal == .evaluator ? .evaluator : .agent,
                     allowedCommands: evaluatorChecks) ?? false
                 if approved {
                     result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox)
                 } else {
-                    result = "User denied permission to execute this tool. You must ask the user for clarification or suggest an alternative."
+                    result = Self.deniedToolResult
                 }
             } else {
                 result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox)
