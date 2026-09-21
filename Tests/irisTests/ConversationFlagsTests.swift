@@ -60,6 +60,46 @@ struct ConversationFlagsTests {
         #expect(try app.store.metaValue(forKey: AppState.activityConversationMetaKey) == id1.uuidString)
     }
 
+    /// Seeds a store with conversations in the given order, so `position` (and therefore the
+    /// launch-selection "last row" rule) follows the array.
+    private func seeded(_ convs: [Conversation]) throws -> ConversationStore {
+        let store = try ConversationStore.inMemory()
+        for conv in convs {
+            var cs = ChangeSet(); cs.created = true; cs.metadata = true
+            try store.apply([ConversationWrite(id: conv.id, snapshot: conv, changes: cs)])
+        }
+        return store
+    }
+
+    @Test("launch never opens in a background conversation, even when it is the newest row")
+    @MainActor func launchSkipsBackground() throws {
+        let plain = Conversation(id: UUID(), title: "plain")
+        var bg = Conversation(id: UUID(), title: "bg"); bg.isBackground = true
+        let app = AppState(store: try seeded([plain, bg]))   // background persisted LAST
+        #expect(app.selectedConversationId == plain.id)
+    }
+
+    @Test("launch with only background conversations persisted creates and selects a new one")
+    @MainActor func launchWithOnlyBackground() throws {
+        var bg = Conversation(id: UUID(), title: "bg"); bg.isBackground = true
+        let app = AppState(store: try seeded([bg]))
+        let selected = app.selectedConversationId
+        #expect(selected != nil && selected != bg.id)
+        #expect(app.conversations.first { $0.id == selected }?.isBackground == false)
+        #expect(app.conversations.count == 2)   // the background one is loaded, not replaced
+    }
+
+    @Test("deleting the selected conversation never lands the selection on a background one")
+    @MainActor func deleteSkipsBackground() throws {
+        let keep = Conversation(id: UUID(), title: "keep")
+        let doomed = Conversation(id: UUID(), title: "doomed")
+        var bg = Conversation(id: UUID(), title: "bg"); bg.isBackground = true
+        let app = AppState(store: try seeded([keep, doomed, bg]))
+        app.selectedConversationId = doomed.id
+        app.deleteConversation(doomed.id)
+        #expect(app.selectedConversationId == keep.id)
+    }
+
     @Test("/clear refuses a pinned conversation and leaves its messages alone")
     @MainActor func clearRefused() {
         let app = AppState()

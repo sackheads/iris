@@ -7,14 +7,16 @@ import Foundation
 /// `ORDER BY position`), except that pinned conversations are lifted to the front as a stable
 /// partition — pinned in their original relative order, then everything else in theirs.
 enum SidebarOrdering {
-    /// The main list: neither a subagent scratch thread, nor a background job run, nor archived.
+    /// The main list: neither a subagent scratch thread, nor a background job run, nor archived —
+    /// `Conversation.isSelectable`, the same predicate the launch/delete/archive selection sites
+    /// use, so the sidebar and the selection can never disagree about what exists.
     static func visible(_ all: [Conversation]) -> [Conversation] {
-        let shown = all.filter { !$0.isSubagent && !$0.isBackground && !$0.isArchived }
+        let shown = all.filter(\.isSelectable)
         return shown.filter(\.isPinned) + shown.filter { !$0.isPinned }
     }
 
     /// The collapsed "Archived" section (#182), with the same subagent/background exclusions.
     static func archived(_ all: [Conversation]) -> [Conversation] {
-        all.filter { !$0.isSubagent && !$0.isBackground && $0.isArchived }
+        all.filter { $0.isUserFacing && $0.isArchived }
     }
 }

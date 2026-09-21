@@ -164,6 +164,19 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         if let gc = goalContract { goalContract = gc.normalizedLadder() }
     }
     
+    /// #187 — a conversation the user can see in the sidebar at all: not a subagent/evaluator
+    /// scratch thread, not a background job run. Archived ones still qualify; they live in the
+    /// collapsed section (#182).
+    ///
+    /// Extracted so the "pick some conversation" sites cannot drift apart again as flags are
+    /// added: every one of them (launch selection, the post-delete re-point, the two
+    /// "is there anywhere left to type?" checks, and both sidebar sections) goes through this
+    /// or `isSelectable` below rather than spelling the flags out.
+    var isUserFacing: Bool { !isSubagent && !isBackground }
+
+    /// A conversation the app may point the selection at unprompted: user-facing and not archived.
+    var isSelectable: Bool { isUserFacing && !isArchived }
+
     // Equality is identity ON PURPOSE: selection state and `Hashable` use in sets need "is this
     // the same conversation", not "does every field currently match". Consequence: a SwiftUI view
     // must never take a `Conversation` value as its only changing input — two values comparing
@@ -440,7 +453,10 @@ class AppState {
         self.store = store
         self.engine = IrisEngine(state: self)
         loadConversations()
-        if conversations.isEmpty {
+        // `selectedConversationId == nil` covers more than an empty store: #187's background job
+        // conversations are loaded but never selected, so a store holding nothing else still has
+        // to open in a fresh conversation.
+        if conversations.isEmpty || selectedConversationId == nil {
             createNewConversation()
         }
         // Every launch notice below goes through `appendLaunchNotice`, which persists it like any
@@ -1085,13 +1101,13 @@ class AppState {
         // `sendMessage` routes by `selectedConversationId`, so the next message would go into a
         // restricted, soon-to-be-deleted conversation (#167).
         if selectedConversationId == id {
-            selectedConversationId = conversations.last(where: { !$0.isSubagent && !$0.isArchived })?.id
+            selectedConversationId = conversations.last(where: { $0.isSelectable })?.id
         }
         markChanged(id, .deleted)
         // Counts active only: deleting your last active conversation puts the user in a new empty
         // one, not in the archive. There is deliberately no archived fallback above — this check
         // would immediately supersede it (#182 §5).
-        if !conversations.contains(where: { !$0.isSubagent && !$0.isArchived }) {
+        if !conversations.contains(where: { $0.isSelectable }) {
             createNewConversation()
         }
     }
@@ -1137,7 +1153,7 @@ class AppState {
         // Archiving your only active conversation would leave nowhere to type. §6.1's refusal is
         // what makes this safe: the replacement can never inherit a running goal, because a
         // conversation with one cannot be archived at all.
-        if !conversations.contains(where: { !$0.isSubagent && !$0.isArchived }) {
+        if !conversations.contains(where: { $0.isSelectable }) {
             createNewConversation()   // selects itself
         }
         return nil
@@ -2336,8 +2352,11 @@ class AppState {
     /// archived one — which would open every launch inside the collapsed section. Prefer the last
     /// active conversation; fall back to an archived one only when there is nothing else, in which
     /// case §6.2 un-archives it on the first thing sent.
+    ///
+    /// #187: nil when every persisted conversation is a background job run — those are never
+    /// selected, not even as a last resort, so `init` creates a fresh one to open in instead.
     nonisolated static func selectLaunchConversation(_ loaded: [Conversation]) -> Conversation? {
-        loaded.last(where: { !$0.isArchived }) ?? loaded.last
+        loaded.last(where: { $0.isSelectable }) ?? loaded.last(where: { $0.isUserFacing })
     }
 
     private func loadConversations() {
