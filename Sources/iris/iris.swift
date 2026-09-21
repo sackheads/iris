@@ -155,6 +155,13 @@ actor IrisEngine {
     /// session calling itself `User` or `Scheduler` would be choosing its own trust level.
     nonisolated static let peerSource = "peer_session"
 
+    /// The label a peer message wears wherever it reaches the model through the #172
+    /// pending-message queue: the mid-turn steer-consumption loop below, and
+    /// `AppState.startTurn`'s drain path (round 3 — a queued peer entry whose target's turn
+    /// ended before it was consumed as a steer). One constant so the two paths cannot drift into
+    /// different wording for the same "not user-authored" claim.
+    nonisolated static let peerMidTaskLabel = "Peer message (mid-task)"
+
     /// Delivers one peer message (#185 §5). Attribution is harness-supplied, from the sending
     /// conversation's id — a model-supplied "from" is never trusted and never reaches the label.
     ///
@@ -989,7 +996,7 @@ actor IrisEngine {
                         // #185 §5.0 (round 2 fix): "User (mid-task):" is the system's highest
                         // trust label. A peer delivery queued through the busy path must never
                         // wear it — the model must not be told a peer's words are the user's own.
-                        let label = steer.isPeer ? "Peer message (mid-task)" : "User (mid-task)"
+                        let label = steer.isPeer ? Self.peerMidTaskLabel : "User (mid-task)"
                         let content = Content(role: "user", parts: [Part(text: "\(label): \(steerText)")])
                         await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
                     }

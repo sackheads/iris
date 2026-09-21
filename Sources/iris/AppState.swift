@@ -329,17 +329,24 @@ class AppState {
     /// guard is what keeps the new turn from overlapping a still-running one, since both sources
     /// can fire for the same turn. The entries are removed from the inbox *before* `startTurn`,
     /// and `startTurn` only schedules a `Task`, so a re-entrant call cannot replay them.
+    ///
+    /// Round 3 (#185 §7): the join stops at an origin change, not just at the first attachment —
+    /// a peer entry must never merge into one turn with a user entry, since the merged turn would
+    /// need to carry one `isPeer` value for text that is not homogeneously one or the other.
     private func drainPendingUserMessages(for conversationId: UUID) {
         guard !hasTurnInFlight(for: conversationId),
               var queue = pendingUserMessages[conversationId], !queue.isEmpty else { return }
+        let leadIsPeer = queue[0].isPeer
         var texts: [String] = []
-        while let first = queue.first, first.attachments.isEmpty {
+        while let first = queue.first, first.attachments.isEmpty, first.isPeer == leadIsPeer {
             texts.append(first.text)
             queue.removeFirst()
         }
-        let next = texts.isEmpty ? queue.removeFirst() : PendingUserMessage(text: texts.joined(separator: "\n\n"), attachments: [])
+        let next = texts.isEmpty
+            ? queue.removeFirst()
+            : PendingUserMessage(text: texts.joined(separator: "\n\n"), attachments: [], isPeer: leadIsPeer)
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
-        startTurn(text: next.text, attachments: next.attachments, in: conversationId)
+        startTurn(text: next.text, attachments: next.attachments, in: conversationId, isPeer: next.isPeer)
     }
 
     /// Empties the inbox and returns how many messages were dropped (Stop, /stop, deletion).
@@ -1009,16 +1016,25 @@ class AppState {
 
     /// Runs one user message as a turn: attachment processing, the engine call, and the
     /// reflection/rename triggers. The user bubble is already in the chat.
-    private func startTurn(text: String, attachments: [FileAttachment], in convId: UUID) {
+    ///
+    /// `isPeer` (round 3, #185 §7): true only when `drainPendingUserMessages` is starting a
+    /// drained PEER entry, not a person typing. The comment on `clearCascade` below is "a person
+    /// typing starts a fresh cascade" — a drained peer entry is not that, and clearing here
+    /// unconditionally was a cascade-cap bypass by timing: queue a peer message behind a busy
+    /// target, let the target's turn end, and the drain used to hand the target's cascade a full
+    /// fresh budget regardless of how much the cascade had already spent.
+    private func startTurn(text: String, attachments: [FileAttachment], in convId: UUID, isPeer: Bool = false) {
         // #185 §7: a person typing starts a fresh cascade. Deliberately here and not in
         // `runThinkingTask`, which also carries the `/goal` draft kickoff and every goal resume —
         // machine-initiated continuations that would hand a cascade a new budget on each resume.
-        clearCascade(for: convId)
+        if !isPeer {
+            clearCascade(for: convId)
+        }
 
         if let idx = conversations.firstIndex(where: { $0.id == convId }) {
             conversations[idx].messageCountSinceReflection += 1
             markChanged(convId, .metadata)
-            
+
             let userMessagesCount = conversations[idx].messages.filter { $0.role == .user }.count
             let shouldRename = userMessagesCount == 3 && conversations[idx].messageCountSinceReflection == 3
             let shouldReflect = conversations[idx].messageCountSinceReflection >= 30
@@ -1028,8 +1044,13 @@ class AppState {
             }
 
             let attachmentsToProcess = attachments
-            let rawContent = text
-            
+            // Round 3: a drained peer entry must keep the same non-user label the mid-turn steer
+            // path uses (#185 §5.0, round 2) — reusing `IrisEngine.peerMidTaskLabel` rather than a
+            // third, parallel wording for the same "not user-authored" claim. `text` here already
+            // carries the peer framing and was already sanitised when it was enqueued
+            // (`deliverPeerMessage`'s busy branch); this only adds the outer label.
+            let rawContent = isPeer ? "\(IrisEngine.peerMidTaskLabel): \(text)" : text
+
             runThinkingTask(conversationId: convId) { [self] in
                 var promptForEngine = rawContent
                 var inlineParts: [Part] = []

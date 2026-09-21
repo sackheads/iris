@@ -156,4 +156,67 @@ struct PeerDeliveryTests {
         #expect(historyText.contains("Peer message (mid-task):"),
                 "the peer entry must still reach history, just under its own label")
     }
+
+    /// A single-round script with no tool call, so the round ends completely (no second round to
+    /// consume the queue as a mid-turn steer) once the gate releases — the queued peer message is
+    /// still sitting in the inbox when the turn ends, so `endEngineTurn`/the task completion hook
+    /// drains it into a brand-new turn via `startTurn` (#185 §7, round 3).
+    private func singleRoundClient(_ gate: PeerDeliveryGate) -> ScriptedStreamClient {
+        ScriptedStreamClient([
+            [.event(.textDelta("hi")), .block { await gate.wait() }, .event(.done(finishReason: nil))]
+        ])
+    }
+
+    @Test("a drained peer entry does not reset the target's cascade budget")
+    func drainedPeerDoesNotResetCascade() async {
+        let gate = PeerDeliveryGate()
+        let client = singleRoundClient(gate)
+        let (app, engine, sender, target) = busyTarget(client)
+
+        app.sendMessage("start a turn")
+        #expect(await eventually { client.calls == 1 })
+        #expect(app.hasTurnInFlight(for: target))
+
+        // Simulates what a real send_to_session would do (beginPeerCascade, wired by a later
+        // task): the target is already mid-cascade with a reduced budget when the peer message
+        // arrives, set here directly since this task does not call beginPeerCascade itself.
+        let otherSender = UUID()
+        app.createNewConversation(id: otherSender)
+        _ = app.beginPeerCascade(into: target, from: otherSender)
+        let before = app.cascadeRemaining(for: target)
+        #expect(before < ConfigManager.shared.maxSessionCascade)
+
+        await engine.deliverPeerMessage("from a peer, queued behind a busy turn", from: sender, senderName: "peer", to: target)
+        await gate.release()
+        #expect(await eventually { client.calls == 2 && !app.isThinking })
+
+        #expect(app.cascadeRemaining(for: target) == before,
+                "a drained PEER entry is not a person typing; startTurn's clearCascade must not fire for it (#185 §7)")
+    }
+
+    @Test("a drained peer entry is not presented to the model as user-authored")
+    func drainedPeerIsNotUserLabeled() async {
+        let gate = PeerDeliveryGate()
+        let client = singleRoundClient(gate)
+        let (app, engine, sender, target) = busyTarget(client)
+
+        app.sendMessage("start a turn")
+        #expect(await eventually { client.calls == 1 })
+        #expect(app.hasTurnInFlight(for: target))
+
+        await engine.deliverPeerMessage("do the thing", from: sender, senderName: "peer", to: target)
+        await gate.release()
+        #expect(await eventually { client.calls == 2 && !app.isThinking })
+
+        // Find the drained turn's own entry rather than assuming it is the last user-role entry:
+        // the empty-candidate follow-up the engine appends after an unscripted round (no more
+        // script steps remain once the drain starts its own turn) is a later user-role entry.
+        let drainedText = app.conversations.first { $0.id == target }!.history
+            .first { ($0.parts.first?.text ?? "").contains("Request from another session") }?
+            .parts.first?.text ?? ""
+        #expect(drainedText.hasPrefix("Peer message (mid-task):"),
+                "a drained peer entry must keep the same non-user label the steer path uses (round 2), not run unlabelled")
+        #expect(!drainedText.hasPrefix("do the thing"),
+                "raw peer text must never become the literal turn content with no attribution at all")
+    }
 }
