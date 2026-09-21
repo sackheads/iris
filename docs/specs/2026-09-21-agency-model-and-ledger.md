@@ -440,9 +440,18 @@ Each is "what — why — cost if wrong".
 
 ## 15. Relationship to #185
 
-A background run conversation is not a session in #185's sense: it never advertises a card and is
-excluded from `list_sessions` exactly as subagents are (#185 §3). The Activity conversation is an
-ordinary conversation and may be a peer. #185 slice 1 landed as #247 while this spec was being written. Nothing here touches
+A background run conversation is not a session in #185's sense, in both directions: it never
+advertises a card and is excluded from `list_sessions` exactly as subagents are (#185 §3), and it
+may not message sessions either — the session tools are not declared for it and `send_to_session`
+is refused at dispatch (review finding on #253: a run could otherwise start an attended turn in a
+user-facing conversation and launder a gated action through it). A run's only output channel is
+its card. The Activity conversation is an ordinary conversation and may be a peer.
+
+Two directories under `~/.iris` are write-protected from the auto-allow for every caller, attended
+or not: `config/` (the permissions file, hook settings) and `plugins/` (a plugin can spawn an MCP
+command at next launch). A background run additionally gets no write access under `~/.iris` at all
+through the auto-allow; only an explicit rule can grant it a write, and no rule may target the
+protected directories. `rules/` stays writable: it persists prompt text, not code. #185 slice 1 landed as #247 while this spec was being written. Nothing here touches
 `drainPendingUserMessages`, `takePendingSteers`, `deliverPeerMessage`, or the session card; the
 `pendingEventLines` drain is a sibling call at the steer boundary, and `JobScheduler`'s wiring in
 `IrisEngine.start()` sits beside, not inside, the peer-delivery code.
