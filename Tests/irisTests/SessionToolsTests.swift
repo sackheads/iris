@@ -63,4 +63,34 @@ struct SessionToolsTests {
         }
         for n in names { #expect(declared.contains(n)) }
     }
+
+    /// #185 §9: "a subagent attempting a send is refused as 'not a session' ... can neither
+    /// originate nor extend a cascade." Declaration gating (above) only stops a well-behaved
+    /// model from being offered the tool — dispatch reads `functionCall.name` alone, so a forged
+    /// call must be refused where it would otherwise act (#185 review round 2, M2). Scripts the
+    /// call directly rather than relying on the model to emit an undeclared tool.
+    @Test("a subagent's forged send_to_session call is refused by the handler, not just undeclared")
+    func subagentSendIsRefusedByHandler() async {
+        let app = AppState(); app.conversations.removeAll()
+        let subagentId = UUID(), target = UUID()
+        app.createNewConversation(id: subagentId, isSubagent: true)
+        app.createNewConversation(id: target)
+
+        let call = FunctionCall(name: "send_to_session",
+                                args: ["session_id": .string(target.uuidString), "message": .string("do it")],
+                                id: "c1")
+        let first = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))],
+                                   usageMetadata: nil)
+        let final = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))],
+                                   usageMetadata: nil)
+        let client = FakeLLMClient(responses: [first, final])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .subagent, client: client, sessionPeerCount: 1)
+        await engine.processInput("go", source: "UI", conversationId: subagentId)
+
+        #expect(app.cascadeRemaining(for: target) == ConfigManager.shared.maxSessionCascade,
+                "a refused send must never debit a cascade budget it is not allowed to extend")
+        let targetHistory = app.conversations.first { $0.id == target }?.history ?? []
+        #expect(targetHistory.isEmpty,
+                "declaration gating is not the only enforcement — a forged call must not deliver")
+    }
 }

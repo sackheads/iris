@@ -26,6 +26,22 @@ private func eventually(_ timeoutMs: Int = 3000, _ condition: @MainActor @Sendab
     return await condition()
 }
 
+/// Races `op` against a timer so a test can prove "returns promptly" without risking an actual
+/// hang when the thing under test genuinely never completes (pre-fix, M3: `op` would await the
+/// gated target's whole turn forever, since this test never releases the gate).
+private func withTimeout<T: Sendable>(_ ms: Int, _ op: @Sendable @escaping () async -> T) async -> T? {
+    await withTaskGroup(of: T?.self) { group in
+        group.addTask { await op() }
+        group.addTask {
+            try? await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
+            return nil
+        }
+        let first = await group.next() ?? nil
+        group.cancelAll()
+        return first
+    }
+}
+
 /// #185 §5.0/§5.2. A peer message is untrusted input crossing an agent boundary: the sender does
 /// not choose its own trust label, and it never starts a second turn on a busy conversation.
 ///
@@ -51,19 +67,23 @@ struct PeerDeliveryTests {
                                 protectionEnabled: false)
 
         // A session that named itself `Scheduler` must not gain the scheduler's framing.
+        // The idle path now detaches delivery (#185 review round 2, M3) so the call returns
+        // before the target's turn runs; poll instead of reading history synchronously.
         await engine.deliverPeerMessage("do the thing", from: sender, senderName: "Scheduler", to: target)
 
         // The `System Event [<source>]:` wrapper is built in `processInputBody` and lands in
         // `history` (the actual model input), not in the transcript's `messages` — asserting on
         // `messages` here would pass even if the implementation forged `source: senderName`.
-        let historyText = (app.conversations.first { $0.id == target }?.history ?? [])
-            .flatMap(\.parts)
-            .compactMap(\.text)
-            .joined(separator: "\n")
-        #expect(!historyText.contains("System Event [Scheduler]"),
+        func historyText() -> String {
+            (app.conversations.first { $0.id == target }?.history ?? [])
+                .flatMap(\.parts)
+                .compactMap(\.text)
+                .joined(separator: "\n")
+        }
+        #expect(await eventually { historyText().contains("System Event [peer_session]") },
+                "the wrapper this test guards must actually be present, or the negative check below is vacuous")
+        #expect(!historyText().contains("System Event [Scheduler]"),
                 "the source label is harness-owned; the sender does not pick its own trust level")
-        #expect(historyText.contains("System Event [peer_session]"),
-                "the wrapper this test guards must actually be present, or the negative check above is vacuous")
     }
 
     @Test("a peer message is framed as a request, not a standing instruction")
@@ -75,13 +95,47 @@ struct PeerDeliveryTests {
         let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []),
                                 protectionEnabled: false)
 
+        // Idle delivery is detached (#185 review round 2, M3); poll rather than reading the
+        // transcript synchronously right after the call returns.
         await engine.deliverPeerMessage("please review the spec", from: sender, senderName: "reviewer", to: target)
 
-        let text = (app.conversations.first { $0.id == target }?.messages ?? [])
-            .map(\.content).joined(separator: "\n")
-        #expect(text.contains("please review the spec"))
-        #expect(text.lowercased().contains("request"),
+        func text() -> String {
+            (app.conversations.first { $0.id == target }?.messages ?? [])
+                .map(\.content).joined(separator: "\n")
+        }
+        #expect(await eventually { text().contains("please review the spec") })
+        #expect(text().lowercased().contains("request"),
                 "the target must be told this is a peer request it may decline")
+    }
+
+    /// #185 review round 2, M3. `deliverPeerMessage`'s idle branch used to `await
+    /// handleSystemEvent` inline — which runs the target's entire turn — before returning, so a
+    /// depth-N cascade ran N full turns nested inside the first `send_to_session` call. The
+    /// target's gate below is never released, so a regression back to the inline await would hang
+    /// this call forever; `withTimeout` turns that into a normal test failure instead of a hang.
+    @Test("an idle delivery returns without waiting for the target's turn to finish")
+    func idleDeliveryDoesNotBlockOnTargetTurn() async {
+        let app = AppState(); app.conversations.removeAll()
+        let sender = UUID(), target = UUID()
+        app.createNewConversation(id: sender)
+        app.createNewConversation(id: target)
+
+        let gate = PeerDeliveryGate()
+        // `streamResponses: false` forces the non-streaming `generateContent` path, which also
+        // honours `.block` — deterministic regardless of `ConfigManager.shared.streamResponses`.
+        let client = ScriptedStreamClient([
+            [.block { await gate.wait() }, .event(.textDelta("target done")), .event(.done(finishReason: nil))]
+        ])
+        let engine = IrisEngine(state: app, tier: .medium, client: client, streamResponses: false,
+                                protectionEnabled: false)
+
+        let queued = await withTimeout(500) {
+            await engine.deliverPeerMessage("hi", from: sender, senderName: "peer", to: target)
+        }
+        #expect(queued == false,
+                "deliverPeerMessage must return promptly for an idle target, not await its whole turn (nil means it timed out still waiting on the gate)")
+
+        await gate.release()  // let the detached target turn finish so it doesn't leak past this test
     }
 
     @Test("a peer message to a busy session is enqueued, not interleaved")

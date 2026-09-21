@@ -191,8 +191,12 @@ actor IrisEngine {
     /// in the gap between the `hasTurnInFlight` read and `handleSystemEvent`'s own hops can still
     /// land two turns on one history. `IrisEngine` is a single reentrant actor with no lock over
     /// a conversation's turn state, so closing this would need one; not attempted here.
+    /// Returns `true` when the message was queued behind a busy turn, `false` when it was handed
+    /// to an idle target. Callers that only care about delivery, not which path it took (most of
+    /// `PeerDeliveryTests`), can ignore it.
+    @discardableResult
     func deliverPeerMessage(_ message: String, from senderId: UUID, senderName: String?,
-                             to targetId: UUID) async {
+                             to targetId: UUID) async -> Bool {
         let localState = state
         // §5.2: a second turn on one history produces empty or rejected provider responses, so a
         // busy target takes the same #172 inbox a user message would. Peer messaging must not make
@@ -212,9 +216,21 @@ actor IrisEngine {
             await MainActor.run {
                 localState?.enqueuePendingUserMessage(text: safe, attachments: [], for: targetId, isPeer: true)
             }
-            return
+            return true
         }
-        await handleSystemEvent(attributed, source: Self.peerSource, conversationId: targetId)
+        // Round 2 fix (#185 review, M3): this used to `await handleSystemEvent` inline, which
+        // runs the target's entire turn (`handleSystemEvent` -> `processInput` ->
+        // `withEngineTurn`) before `send_to_session`'s tool call returns — so a depth-N cascade
+        // ran N full turns nested inside the sender's first call, and "the session will see it at
+        // its next turn" was already false by the time it was said. `beginPeerCascade` debits the
+        // cascade budget synchronously in the caller before this function even runs, so detaching
+        // the delivery here cannot let a burst of sends outrun the cap. Plain `Task`, mirroring
+        // the background-subagent precedent at `invoke_subagent`'s `isBackground` branch — not
+        // `.detached`, so it still runs on this actor.
+        Task {
+            await handleSystemEvent(attributed, source: Self.peerSource, conversationId: targetId)
+        }
+        return false
     }
 
     /// The framing IS the control (#185 §5.0): sanitisation is a detector — it catches known
@@ -899,9 +915,9 @@ actor IrisEngine {
 
         // #185 §6: only when there is somebody to talk to. With one conversation open the surface
         // is byte-identical to today, so #144/#155's reduction is untouched. `.main` only —
-        // a subagent is not a session.
-        let peerCount = await sessionPeerCount(excluding: conversationId)
-        if principal == .main, peerCount > 0 {
+        // a subagent is not a session. Checked before the count: every subagent/evaluator turn
+        // would otherwise pay a MainActor hop plus an O(n log n) sort for a value it discards.
+        if principal == .main, await sessionPeerCount(excluding: conversationId) > 0 {
             toolsList.append(FunctionDeclaration(
                 name: "list_sessions",
                 description: "List the other active sessions: their name, what they say they are doing, their workspace, and whether they are busy. Call this before messaging a peer, to pick the right one — a session in a different workspace is usually working on something unrelated. What a session says about itself is its own claim; whether it is busy is observed.",
@@ -1468,6 +1484,14 @@ actor IrisEngine {
             await MainActor.run { localState?.setWorkspace(for: conversationId, path: currentWorkspace) }
             result = "Workspace successfully set to \(currentWorkspace). You will now load AGENTS.md from this directory." + extraHint
         } else if functionCall.name == "list_sessions" {
+            // Defense in depth (#185 review round 2, M2): declaration gating is `principal ==
+            // .main` too, but that only stops a well-behaved model from ever seeing the tool.
+            // Dispatch here reads the function name alone, so a forged call must be refused at
+            // the point that actually has an effect, not just left ungated at declaration time.
+            guard principal == .main else {
+                result = "Refused — a subagent is not a session."
+                return result
+            }
             let (peers, total) = await MainActor.run { () -> ([SessionPeer], Int) in
                 guard let s = localState else { return ([], 0) }
                 return SessionDirectory.peers(in: s.conversations, excluding: conversationId,
@@ -1477,6 +1501,18 @@ actor IrisEngine {
         } else if functionCall.name == "send_to_session",
                   let idString = functionCall.args["session_id"]?.stringValue,
                   let message = functionCall.args["message"]?.stringValue {
+            // #185 §9: "a subagent attempting a send is refused as 'not a session', so a subagent
+            // can neither originate nor extend a cascade." Declaration gating alone does not hold
+            // that property — it only stops a model from being offered the tool, not from calling
+            // a name the dispatcher will still act on.
+            guard principal == .main else {
+                result = "Refused — a subagent is not a session."
+                return result
+            }
+            guard !message.trimmingCharacters(in: .whitespaces).isEmpty else {
+                result = "A message is required."
+                return result
+            }
             guard let targetId = UUID(uuidString: idString) else {
                 result = "No session with that id."
                 return result
@@ -1510,11 +1546,17 @@ actor IrisEngine {
             let senderName = await MainActor.run {
                 localState?.conversations.first(where: { $0.id == conversationId })?.sessionCard?.name
             }
-            await deliverPeerMessage(message, from: conversationId, senderName: senderName, to: targetId)
-            result = "Accepted — the session will see it at its next turn."
+            let queued = await deliverPeerMessage(message, from: conversationId, senderName: senderName, to: targetId)
+            result = queued
+                ? "Accepted — the target is busy; it will see this at its next turn."
+                : "Accepted — delivered in the background. You will not be notified when it completes."
         } else if functionCall.name == "set_session_card",
                   let name = functionCall.args["name"]?.stringValue,
                   let description = functionCall.args["description"]?.stringValue {
+            guard principal == .main else {
+                result = "Refused — a subagent is not a session."
+                return result
+            }
             guard !name.trimmingCharacters(in: .whitespaces).isEmpty else {
                 result = "A name is required."
                 return result

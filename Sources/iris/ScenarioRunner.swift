@@ -117,7 +117,11 @@ enum ScenarioRunner {
         // so this detaches; endSession is idempotent).
         defer { Task { await SandboxSessionManager.shared.endSession(conversationId) } }
 
-        let engine = IrisEngine(state: state, tier: scenario.tier, client: client)
+        // `AppState.init` auto-creates a conversation and this run adds its own above, so the
+        // real peer count here is always >= 1 — the #185 session tools would land on every
+        // perf-scenario turn and shift the #129/#144 declaration-size baselines this runner
+        // exists to measure. Pin it off, matching `ToolSurfaceTrimTests`.
+        let engine = IrisEngine(state: state, tier: scenario.tier, client: client, sessionPeerCount: 0)
 
         // Collect this run's finished turn profiles via a task-local sink scoped to the turn loop.
         let collector = TurnCollector()
