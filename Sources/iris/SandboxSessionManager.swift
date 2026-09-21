@@ -7,7 +7,15 @@ import Foundation
 actor SandboxSessionManager {
     static let namePrefix = "iris-"
 
-    struct Session { let name: String; var mountedWorkspace: String?; var lastUsed: Date }
+    struct Session {
+        let name: String
+        var mountedWorkspace: String?
+        /// Every mount the container was created with, workspace included. A container's mounts
+        /// are fixed at create time, so a call asking for a different set gets a different
+        /// container — the same rule as a changed workspace, which is now one case of it.
+        var mounts: [String]
+        var lastUsed: Date
+    }
 
     private let runtime: ContainerRuntime
     private let image: @Sendable () -> String
@@ -37,11 +45,19 @@ actor SandboxSessionManager {
     setup (installs/builds) before relying on them.
     """
 
-    func run(command: String, conversationId id: UUID, workspace: String?) async -> String {
+    /// Runs one command in this conversation's container.
+    ///
+    /// `extraMounts` are mounted alongside the workspace, in `source[:target][:ro]` form; a call
+    /// that asks for a different set than the live container has gets a fresh container, because
+    /// mounts are fixed when a container is created. `timeoutSeconds` bounds the command itself —
+    /// past it the command is killed and the result reads exactly like a host timeout.
+    func run(command: String, conversationId id: UUID, workspace: String?,
+             extraMounts: [String] = [], timeoutSeconds: Int? = nil) async -> String {
         let wasLost = lostSessions.contains(id)
+        let mounts = Self.mountList(workspace: workspace, extra: extraMounts)
 
-        // Recreate if the workspace changed (agent-initiated — not a "loss").
-        if let s = sessions[id], s.mountedWorkspace != workspace {
+        // Recreate if the workspace or the mount list changed (agent-initiated — not a "loss").
+        if let s = sessions[id], s.mountedWorkspace != workspace || s.mounts != mounts {
             await runtime.remove(name: s.name)
             sessions[id] = nil
         }
@@ -50,29 +66,49 @@ actor SandboxSessionManager {
         // awaiting, so the reset notice fires correctly even when multiple callers race.
         let created = (sessions[id] == nil)
         if created {
-            do { try await ensureSession(id, workspace: workspace) }
+            do { try await ensureSession(id, workspace: workspace, mounts: mounts) }
             catch { return creationError(error) }
         }
 
         let workdir = workspace ?? "/"
         do {
-            let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command)
+            let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command,
+                                           timeoutSeconds: timeoutSeconds)
             sessions[id]?.lastUsed = Date()
             return decorate(format(r), notice: wasLost && created, for: id)
         } catch {
+            // A deadline is the command's answer, not a dead container. The session is intact and
+            // re-running would spend the same wall clock over again, so this one does not go down
+            // the self-heal path below — it is reported in the words the host path uses.
+            if case ContainerRuntimeError.timedOut(let elapsed) = error {
+                sessions[id]?.lastUsed = Date()
+                return ToolExecutor.commandTimedOutMessage(seconds: timeoutSeconds.map(Double.init) ?? elapsed)
+            }
             // Container likely died/was reaped: mark lost, recreate once, retry.
             lostSessions.insert(id)
             await runtime.remove(name: name(for: id))
             sessions[id] = nil
             do {
-                try await ensureSession(id, workspace: workspace)
-                let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command)
+                try await ensureSession(id, workspace: workspace, mounts: mounts)
+                let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command,
+                                               timeoutSeconds: timeoutSeconds)
                 sessions[id]?.lastUsed = Date()
                 return decorate(format(r), notice: true, for: id)
             } catch {
+                if case ContainerRuntimeError.timedOut(let elapsed) = error {
+                    sessions[id]?.lastUsed = Date()
+                    return ToolExecutor.commandTimedOutMessage(seconds: timeoutSeconds.map(Double.init) ?? elapsed)
+                }
                 return creationError(error)
             }
         }
+    }
+
+    /// The workspace mount (read-write — the agent edits the files it is working on) followed by
+    /// whatever the caller declared. Workspace first so the order a container is created with is
+    /// stable, which is what makes comparing two mount lists a reliable "same container" test.
+    static func mountList(workspace: String?, extra: [String]) -> [String] {
+        (workspace.map { ["\($0):\($0)"] } ?? []) + extra
     }
 
     func endSession(_ id: UUID) async {
@@ -100,37 +136,38 @@ actor SandboxSessionManager {
 
     /// Ensures a container exists for `id`, coalescing concurrent first-commands onto a single
     /// create so actor re-entrancy across the suspending `createDetached` can't spawn duplicates.
-    private func ensureSession(_ id: UUID, workspace: String?) async throws {
+    private func ensureSession(_ id: UUID, workspace: String?, mounts: [String]) async throws {
         if sessions[id] != nil { return }
         if let inflight = creating[id] {
             try await inflight.value
             return
         }
-        let task = Task<Void, Error> { [self] in try await create(id, workspace: workspace) }
+        let task = Task<Void, Error> { [self] in try await create(id, workspace: workspace, mounts: mounts) }
         creating[id] = task
         defer { creating[id] = nil }
         try await task.value
     }
 
-    private func create(_ id: UUID, workspace: String?) async throws {
-        let mount = workspace.map { "\($0):\($0)" }
+    private func create(_ id: UUID, workspace: String?, mounts: [String]) async throws {
         do {
             try await runtime.createDetached(name: name(for: id), image: image(),
-                                             mount: mount, workdir: workspace ?? "/")
+                                             mounts: mounts, workdir: workspace ?? "/")
         } catch {
             if case ContainerRuntimeError.createFailed(let msg) = error,
                ToolExecutor.sandboxSetupHint(for: msg) != nil {
                 let startResult = await SandboxingManager.shared.startContainerSystem()
                 if startResult.success {
                     try await runtime.createDetached(name: name(for: id), image: image(),
-                                                     mount: mount, workdir: workspace ?? "/")
-                    sessions[id] = Session(name: name(for: id), mountedWorkspace: workspace, lastUsed: Date())
+                                                     mounts: mounts, workdir: workspace ?? "/")
+                    sessions[id] = Session(name: name(for: id), mountedWorkspace: workspace,
+                                           mounts: mounts, lastUsed: Date())
                     return
                 }
             }
             throw error
         }
-        sessions[id] = Session(name: name(for: id), mountedWorkspace: workspace, lastUsed: Date())
+        sessions[id] = Session(name: name(for: id), mountedWorkspace: workspace,
+                               mounts: mounts, lastUsed: Date())
     }
 
     private func format(_ r: (stdout: String, stderr: String, exitCode: Int32)) -> String {
@@ -150,6 +187,9 @@ actor SandboxSessionManager {
         if case ContainerRuntimeError.createFailed(let msg) = error,
            let hint = ToolExecutor.sandboxSetupHint(for: msg) {
             return hint
+        }
+        if case ContainerRuntimeError.invalidMount(let entry, let reason) = error {
+            return "Error: the mount `\(entry)` cannot be used — \(reason)."
         }
         return "Error: could not start the sandbox container: \(error)"
     }

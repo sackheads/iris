@@ -357,6 +357,17 @@ The budget stop does not summarize — there is nothing left to spend on a summa
 you steered in mid-run is written to the transcript before the turn ends, without starting another
 turn.
 
+**One command inside the VM is bounded on its own**, by the number `run_command` was given —
+`timeout_seconds`, clamped to between 10 seconds and an hour, 10 minutes if it says nothing. That
+number used to be dropped the moment a command was routed to the container, so a sandboxed command
+had no bound at all while the model believed it had set one; it is honoured now. At the deadline
+the command is killed — politely first, then not — and the result reads exactly as it does on the
+host: `Error: command timed out after N seconds`. The container itself is left alone, because a
+deadline is the command's answer and not a sign of a dead container: the session, its installed
+packages and its files are all still there for the next command. This is a bound on a command, not
+on the run: a turn that spends its ten minutes on six timed-out commands still ends on the run's
+own deadline, above.
+
 **After a run**, a failure climbs the retry ladder: **1 minute, 5 minutes, 25 minutes**, and the
 fourth consecutive failure pauses the job ("failed 3 times; paused"). A run that finally works
 clears the ladder. A watch-driven fire never retries — its input was the paths the filesystem handed

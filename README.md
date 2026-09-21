@@ -82,7 +82,7 @@ guide with worked examples.
 
 ### Core Native Tools
 Iris provides some native primitives to the LLM:
-1.  `run_command`: Sandboxed execution of shell commands (runs in a lightweight Linux VM via `apple/container` if sandboxing is enabled). Host commands run with the user's login-shell PATH captured at launch, so pyenv/nvm/Homebrew shims resolve even though the command itself isn't run in a login shell.
+1.  `run_command`: Sandboxed execution of shell commands (runs in a lightweight Linux VM via `apple/container` if sandboxing is enabled). Host commands run with the user's login-shell PATH captured at launch, so pyenv/nvm/Homebrew shims resolve even though the command itself isn't run in a login shell. Its `timeout_seconds` (10 s to 1 h, 10 minutes by default) bounds the command in the VM exactly as it does on the host — the command is killed at the deadline and reported as timed out in the same words, and the container session survives it.
 2.  `read_file`: Reads arbitrary local text files.
 3.  `write_file`: Writes/modifies local files.
 4.  `schedule_job`: Creates a recurring job in the conversation database: a five-field `cron` expression with an optional IANA `timezone`, an `intervalSeconds` interval, or the loose `minute`/`hour`/`weekday`/`weekdays` fields (`[2,3,4,5,6]` for every weekday), plus an optional `profile` (`readOnly` by default, or `mutating` for a job that must change something). Jobs survive restarts. Each fire runs in the background and reports back with a card in Iris Activity.

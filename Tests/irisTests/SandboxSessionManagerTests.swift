@@ -8,19 +8,27 @@ final class MockRuntime: ContainerRuntime, @unchecked Sendable {
     private(set) var created: [String] = []
     private(set) var removed: [String] = []
     private(set) var execCount = 0
+    private var mountsPerCreate: [[String]] = []
+    private var execTimeouts: [Int?] = []
     var existing: [String] = []                 // returned by list()
     var execResult: (String, String, Int32) = ("ok", "", 0)
     var failNextExec = false                     // throw once, then succeed
+    var nextExecError: Error?                    // throw this once, then succeed
 
-    func createDetached(name: String, image: String, mount: String?, workdir: String) async throws {
+    func createDetached(name: String, image: String, mounts: [String], workdir: String) async throws {
         await Task.yield()
         try? await Task.sleep(nanoseconds: 10_000_000) // 10ms: let all concurrent callers park here before any completes
-        lock.withLock { created.append(name) }
+        lock.withLock { created.append(name); mountsPerCreate.append(mounts) }
     }
-    func exec(name: String, workdir: String, command: String) async throws -> (stdout: String, stderr: String, exitCode: Int32) {
-        let (fail, r) = lock.withLock { () -> (Bool, (String, String, Int32)) in
-            execCount += 1; let f = failNextExec; failNextExec = false; return (f, execResult)
+    func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws -> (stdout: String, stderr: String, exitCode: Int32) {
+        let (fail, scripted, r) = lock.withLock { () -> (Bool, Error?, (String, String, Int32)) in
+            execCount += 1
+            execTimeouts.append(timeoutSeconds)
+            let f = failNextExec; failNextExec = false
+            let e = nextExecError; nextExecError = nil
+            return (f, e, execResult)
         }
+        if let scripted { throw scripted }
         if fail { throw ContainerRuntimeError.launchFailed("boom") }
         return r
     }
@@ -29,6 +37,8 @@ final class MockRuntime: ContainerRuntime, @unchecked Sendable {
 
     var createdCount: Int { lock.withLock { created.count } }
     var removedNames: [String] { lock.withLock { removed } }
+    var createdMounts: [[String]] { lock.withLock { mountsPerCreate } }
+    var lastExecTimeout: Int? { lock.withLock { execTimeouts.last ?? nil } }
 }
 
 @Suite("SandboxSessionManager")
