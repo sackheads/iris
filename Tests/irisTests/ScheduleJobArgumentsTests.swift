@@ -21,7 +21,13 @@ struct ScheduleJobArgumentsTests {
     func refusals() {
         #expect(ScheduleJobArguments.parse(["hour": .int(9)]) == .failure("schedule_job needs a prompt."))
         let a = try? ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9), "profile": .string("mutating")]).get()
-        #expect(a?.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: []) == .failure("mutating jobs arrive with deliverable 3; create the job without a profile."))
+        #expect(a?.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: [])
+                == .failure(ScheduleJobArguments.mutatingUnavailable))
+        // The refusal has to leave the model somewhere to go, and it cannot send it to a milestone
+        // only the people building this can date (invariant 9).
+        let text = ScheduleJobArguments.mutatingUnavailable.text
+        #expect(text.contains("read-only") && text.contains("ask the user"))
+        #expect(!text.lowercased().contains("deliverable"))
     }
 
     @Test("name is slugged and made unique against existing names")

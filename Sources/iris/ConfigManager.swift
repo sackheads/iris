@@ -211,9 +211,19 @@ class ConfigManager: @unchecked Sendable {
     // MARK: Unattended jobs (#187 §0.1)
     //
     // The five global numbers a job's `JobPolicy` overrides per job. They are what an unattended
-    // run is allowed to cost when nobody set anything: sane, not final. A non-positive value means
-    // "no limit" to the runner, which is why `0` here reads back as the default rather than as an
-    // instantly-exhausted budget.
+    // run is allowed to cost when nobody set anything: sane, not final. A *stored* value of 0 —
+    // or, since nobody means "unlimited" by -1, anything below it — is "unset", and reads back as
+    // the default below rather than as an instantly-exhausted budget or an unbounded one.
+
+    /// The spec's figures (#187 §0.1), named because `JobLimits.resolve` falls back to them too:
+    /// a number nobody set, a stored 0 and a stored negative must all land on the same limit.
+    enum JobDefaults {
+        static let perRunTokenBudget = 200_000
+        static let dailyTokenBudget = 1_000_000
+        static let globalDailyTokenBudget = 3_000_000
+        static let maxRunsPerHour = 6
+        static let runTimeoutSeconds = 600
+    }
 
     /// Tokens one run may spend before its turn is stopped.
     var jobPerRunTokenBudget: Int {
@@ -411,17 +421,20 @@ class ConfigManager: @unchecked Sendable {
         let savedVibecopTO = store.integer(forKey: "VIBECOP_TIMEOUT_SECONDS")
         self.vibecopTimeoutSeconds = savedVibecopTO == 0 ? 5 : savedVibecopTO
 
-        // #187 §0.1. Unset (0) is the default, following the #208 pattern.
+        // #187 §0.1. Unset (0) is the default, following the #208 pattern — and so is a negative,
+        // which is a typo rather than a way to ask for no limit at all (a hand-edited plist, a
+        // stepper driven past zero). Reading -1 as "unbounded" would take the ceiling off the
+        // whole unattended system.
         let savedPerRun = store.integer(forKey: "JOB_PER_RUN_TOKEN_BUDGET")
-        self.jobPerRunTokenBudget = savedPerRun == 0 ? 200_000 : savedPerRun
+        self.jobPerRunTokenBudget = savedPerRun <= 0 ? JobDefaults.perRunTokenBudget : savedPerRun
         let savedDaily = store.integer(forKey: "JOB_DAILY_TOKEN_BUDGET")
-        self.jobDailyTokenBudget = savedDaily == 0 ? 1_000_000 : savedDaily
+        self.jobDailyTokenBudget = savedDaily <= 0 ? JobDefaults.dailyTokenBudget : savedDaily
         let savedGlobalDaily = store.integer(forKey: "JOB_GLOBAL_DAILY_TOKEN_BUDGET")
-        self.jobGlobalDailyTokenBudget = savedGlobalDaily == 0 ? 3_000_000 : savedGlobalDaily
+        self.jobGlobalDailyTokenBudget = savedGlobalDaily <= 0 ? JobDefaults.globalDailyTokenBudget : savedGlobalDaily
         let savedRunsPerHour = store.integer(forKey: "JOB_MAX_RUNS_PER_HOUR")
-        self.jobMaxRunsPerHour = savedRunsPerHour == 0 ? 6 : savedRunsPerHour
+        self.jobMaxRunsPerHour = savedRunsPerHour <= 0 ? JobDefaults.maxRunsPerHour : savedRunsPerHour
         let savedRunTimeout = store.integer(forKey: "JOB_RUN_TIMEOUT_SECONDS")
-        self.jobRunTimeoutSeconds = savedRunTimeout == 0 ? 600 : savedRunTimeout
+        self.jobRunTimeoutSeconds = savedRunTimeout <= 0 ? JobDefaults.runTimeoutSeconds : savedRunTimeout
 
         if store.object(forKey: "ENABLE_PROMPT_INJECTION_PROTECTION") != nil {
             self.enableAdvancedPromptInjectionProtection = store.bool(forKey: "ENABLE_PROMPT_INJECTION_PROTECTION")

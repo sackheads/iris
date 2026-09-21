@@ -118,9 +118,10 @@ actor JobRunner {
     /// outranks the budgets: a job thrashing its way through its allowance should say it is
     /// thrashing, which is the thing a person can act on.
     ///
-    /// A non-positive limit means "no limit". Nothing configured can produce one — `ConfigManager`
-    /// reads 0 back as the default — but a hand-written policy can, and a job that can never run
-    /// again is a worse reading of `maxRunsPerHour: 0` than an unbounded one.
+    /// A zero limit means "no limit": a job that can never run again is a worse reading of
+    /// `maxRunsPerHour: 0` than an unbounded one. Nothing configured produces one — `ConfigManager`
+    /// reads 0 back as the default — but a hand-written policy can. A *negative* one never reaches
+    /// here at all: `JobLimits.resolve` reads it as the typo it is and takes the default.
     static func admit(job: Job, inFlight: Bool, runsLastHour: Int,
                       tokensTodayJob: Int, tokensTodayAll: Int, limits: JobLimits) -> Admission {
         if job.pausedReason != nil { return .dropPaused }
@@ -932,11 +933,37 @@ struct JobLimits: Equatable, Sendable {
         // a hand-edited policy can.
         let overridden = policy.runTimeoutSeconds > 0
             && policy.runTimeoutSeconds != JobPolicy().runTimeoutSeconds
-        let timeout = overridden ? policy.runTimeoutSeconds : config.jobRunTimeoutSeconds
-        return JobLimits(maxRunsPerHour: policy.maxRunsPerHour ?? config.jobMaxRunsPerHour,
-                         dailyTokens: policy.dailyTokenBudget ?? config.jobDailyTokenBudget,
-                         globalDailyTokens: config.jobGlobalDailyTokenBudget,
-                         perRunTokens: policy.perRunTokenBudget ?? config.jobPerRunTokenBudget,
-                         runTimeoutSeconds: timeout)
+        let timeout = overridden ? policy.runTimeoutSeconds
+            : global(config.jobRunTimeoutSeconds, default: ConfigManager.JobDefaults.runTimeoutSeconds)
+        return JobLimits(
+            maxRunsPerHour: limit(policy.maxRunsPerHour, global: config.jobMaxRunsPerHour,
+                                  default: ConfigManager.JobDefaults.maxRunsPerHour),
+            dailyTokens: limit(policy.dailyTokenBudget, global: config.jobDailyTokenBudget,
+                               default: ConfigManager.JobDefaults.dailyTokenBudget),
+            globalDailyTokens: global(config.jobGlobalDailyTokenBudget,
+                                      default: ConfigManager.JobDefaults.globalDailyTokenBudget),
+            perRunTokens: limit(policy.perRunTokenBudget, global: config.jobPerRunTokenBudget,
+                                default: ConfigManager.JobDefaults.perRunTokenBudget),
+            runTimeoutSeconds: timeout)
+    }
+
+    /// A per-job override where the job set a usable one, the global number otherwise.
+    ///
+    /// A *negative* override is not an override. Zero is kept, and does mean "unlimited" for the
+    /// token budgets and the breaker (see the note above) — but nobody writes -1 to mean
+    /// unlimited, so it reads as the typo it is and takes the default exactly as an absent value
+    /// does. Reading it the other way would silently take a job's ceiling off, which is the one
+    /// direction these numbers must never fail in.
+    private static func limit(_ override: Int?, global value: Int, default fallback: Int) -> Int {
+        if let override, override >= 0 { return override }
+        return global(value, default: fallback)
+    }
+
+    /// The global number, or the spec's figure when nothing usable is stored. `ConfigManager`
+    /// already reads a non-positive key back as the default; this is the same reading applied to
+    /// a value set after launch, so one settings write cannot leave the whole unattended system
+    /// unbounded for the rest of the session.
+    private static func global(_ value: Int, default fallback: Int) -> Int {
+        value > 0 ? value : fallback
     }
 }

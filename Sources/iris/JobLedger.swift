@@ -494,10 +494,11 @@ extension JobLedger {
             """, arguments: [dayStart, dayEnd]) ?? 0
     }
 
-    /// Both of a job's live figures in one call — what `/jobs` and `list_jobs` print beside the
-    /// budgets, and what a budget or breaker pause card names (spec §9). Nothing but the two
-    /// queries above: the numbers a person reads are the same ones admission decides on, rather
-    /// than a second, drifting accounting.
+    /// Both of a job's live figures in one call: what admission decides on, and what a budget or
+    /// breaker pause names on the row, the reason and the card (spec §9). Nothing but the two
+    /// queries above, so when `/jobs` and `list_jobs` grow the columns for them (the last PR of
+    /// this deliverable — today neither prints a running total), the numbers a person reads will
+    /// be the ones admission decided on rather than a second, drifting accounting.
     ///
     /// One `read`, so both figures come from one snapshot: a run finishing between two separate
     /// reads would otherwise let a card print a token total that the run count it sits beside does
@@ -709,7 +710,8 @@ private struct RowReader {
 }
 
 /// What one job has spent and how hard it has been running (#187 deliverable 3, spec §9): the two
-/// figures admission decides on, and the same two `/jobs` and `list_jobs` print.
+/// figures admission decides on, and the two `/jobs` and `list_jobs` are to print once they have
+/// columns for them (the last PR of this deliverable).
 struct JobUsage: Equatable, Sendable {
     let tokensToday: Int
     let runsLastHour: Int
