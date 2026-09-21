@@ -108,7 +108,18 @@ or more ticks — fires once when the scheduler next looks, and its next fire is
 that moment. It does not replay every tick it missed. At most three jobs start firing per tick;
 any others due in the same tick wait for the next one.
 
-A cadence that overlaps its own still-running fire is skipped rather than started a second time.
+A cadence that overlaps its own still-running fire is skipped rather than started a second time,
+and the skip is recorded as an `interrupted` run so `/jobs` can show it. A watch fire for a job
+that is already running is dropped instead, with no row at all: a single save can deliver a dozen
+filesystem events, and a row apiece would bury the ledger. Coalescing them into one run after a
+quiet window is deliverable 4's job.
+
+## Job creation is never unattended
+
+Only a conversation with a person in it can create a job. `schedule_job` and
+`register_directory_watcher` are not offered to a background run at all, and are refused if one
+calls them anyway: a run that could schedule another run would be growing its own footprint with
+nobody having asked. A run that thinks a job is warranted says so, and you create it.
 
 ## Where a fire goes
 

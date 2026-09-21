@@ -35,13 +35,19 @@ actor JobRunner {
     private weak var engine: IrisEngine?
     private let ledger: JobLedger
     private let now: @Sendable () -> Date
+    private let protectionEnabled: Bool?
+    /// The jobs with a run in flight right now. Every fire goes through `run`, so one set here is
+    /// the whole overlap story, whatever woke the job.
+    private var inFlight: Set<UUID> = []
 
     init(state: AppState, engine: IrisEngine, ledger: JobLedger,
-         now: @escaping @Sendable () -> Date = Date.init) {
+         now: @escaping @Sendable () -> Date = Date.init,
+         protectionEnabled: Bool? = nil) {
         self.state = state
         self.engine = engine
         self.ledger = ledger
         self.now = now
+        self.protectionEnabled = protectionEnabled
     }
 
     /// Creates the background conversation, records the run, runs the turn, closes the row and
@@ -49,6 +55,15 @@ actor JobRunner {
     /// the run is still accounted for in the ledger rather than surfacing to a caller with no one
     /// to tell.
     func run(job: Job, reason: String, changedPaths: [String] = []) async {
+        // One guard for every fire. A watch is the case that needs it: FSEvents delivers a burst
+        // for a single save, and each event used to start its own run of the same job. A fire that
+        // arrives while the job is running is dropped SILENTLY — a row per dropped event would
+        // spam the ledger far worse than the overlap it recorded, and a scheduled fire still gets
+        // the scheduler's one skip row per cadence. D3's policy work turns this into a real quiet
+        // window; until then, dropping is the conservative half.
+        guard inFlight.insert(job.id).inserted else { return }
+        defer { inFlight.remove(job.id) }
+
         let startedAt = now()
         guard let conversationId = await openConversation(for: job, at: startedAt) else {
             print("[JobRunner] not running \(job.name): \(Self.releasedReason)")
@@ -72,8 +87,9 @@ actor JobRunner {
             await closeInterrupted(run: run, conversationId: conversationId, at: now())
             return
         }
-        await engine.processInput(Self.prompt(job: job, changedPaths: changedPaths),
-                                  source: "job:\(job.name)", conversationId: conversationId)
+        let prompt = await Self.prompt(job: job, changedPaths: changedPaths,
+                                       protectionEnabled: protectionEnabled)
+        await engine.processInput(prompt, source: "job:\(job.name)", conversationId: conversationId)
         let finishedAt = now()
 
         guard let turn = await readTurn(conversationId: conversationId) else {
@@ -182,11 +198,23 @@ actor JobRunner {
         await state.deliverEvent(card, to: destination)
     }
 
-    /// The job's prompt, plus the paths that woke it when a watch did. Listed rather than
-    /// interpolated into a sentence so a long burst reads as data, not as instructions.
-    static func prompt(job: Job, changedPaths: [String]) -> String {
+    /// The job's prompt, plus the paths that woke it when a watch did.
+    ///
+    /// The job's own prompt is trusted — the user (or the agent on their behalf) wrote it. The
+    /// paths are not: a filename is chosen by whoever can write into the watched directory, and
+    /// D1 put every fire through `handleSystemEvent`, which sanitized it. So each path goes
+    /// through the structural pass and the whole block through the tiered guard, arriving wrapped
+    /// in `<untrusted_context>` after the instructions rather than concatenated into them.
+    static func prompt(job: Job, changedPaths: [String], protectionEnabled: Bool? = nil) async -> String {
         guard !changedPaths.isEmpty else { return job.prompt }
-        return job.prompt + "\n\nChanged paths:\n" + changedPaths.map { "- \($0)" }.joined(separator: "\n")
+        let listed = changedPaths
+            .map { "- " + PromptInjectionGuard.sanitizeUntrustedInput($0) }
+            .joined(separator: "\n")
+        let block = await InjectionGuard.sanitize("Changed paths:\n" + listed,
+                                                  contextTag: "fs_event_paths",
+                                                  maxTier: .tier3_canary,
+                                                  protectionEnabled: protectionEnabled)
+        return job.prompt + "\n\n" + block
     }
 
     /// The first line of the last thing the agent said, capped at 200 characters — the one line a

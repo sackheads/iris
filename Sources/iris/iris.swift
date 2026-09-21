@@ -395,10 +395,11 @@ actor IrisEngine {
         await MCPManager.shared.setPluginConfigs(pluginConfigs)
         await MCPManager.shared.startServers()
         // Straight to the runner, NOT through `JobScheduler`: a watch fire has no cadence to
-        // advance and no `firing` entry, so two bursts a second apart start two runs of the same
-        // job. Deliberate until deliverable 4, which owns `FSWatch.quietWindowSeconds` — routing
-        // this through the scheduler's overlap skip today would coalesce nothing and write one
-        // `interrupted` ledger row per file event in a burst, which is noisier than the overlap.
+        // advance and no `firing` entry, and routing it through the scheduler's overlap skip would
+        // write one `interrupted` ledger row per file event in a burst — noisier than the overlap
+        // itself. Overlap is handled where every fire passes: `JobRunner.run` keeps its own
+        // in-flight set and drops a watch fire for a job already running, silently and without a
+        // row. Deliverable 4 owns `FSWatch.quietWindowSeconds` and turns that into coalescing.
         await WatcherManager.shared.setCallback { [weak self] job, paths in
             guard let runner = await self?.jobRunner() else { return }
             await runner.run(job: job, reason: "fsEvent", changedPaths: paths)
@@ -852,7 +853,17 @@ actor IrisEngine {
             currentSystemPrompt.parts[0].text = textPart + "\n\n\(peerCount) other session\(peerCount == 1 ? " is" : "s are") active."
         }
 
+        // No unattended job creation (the agency epic's standing ruling): a background run may
+        // not write itself a cadence or a watch, so the two tools that do are not declared to it
+        // at all — undeclared costs it nothing, and `executeFunctionCall` refuses the call anyway.
+        // Read in the same hop as the goal gate below, which needs the same conversation.
+        let (isUnattended, hasActiveGoal) = await MainActor.run { () -> (Bool, Bool) in
+            let conversation = localState?.conversations.first(where: { $0.id == conversationId })
+            return (conversation?.isBackground == true, conversation?.activeGoal != nil)
+        }
+
         var toolsList = await executor.getTools()
+        if isUnattended { toolsList.removeAll { Self.jobCreationTools.contains($0.name) } }
         // Add set_workspace tool dynamically
         toolsList.append(FunctionDeclaration(
             name: "set_workspace",
@@ -885,6 +896,7 @@ actor IrisEngine {
         
         toolsList.append(SubagentManager.toolDeclaration())
         
+        if !isUnattended {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
             description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; a job that was due while the app was asleep runs once on wake. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
@@ -906,6 +918,7 @@ actor IrisEngine {
                 required: ["prompt"]
             )
         ))
+        }
         
         toolsList.append(FunctionDeclaration(
             name: "save_fact",
@@ -954,9 +967,6 @@ actor IrisEngine {
         // goal-completion panel over an ordinary conversation and fire an unrequested reflection
         // turn (#84). The soft-stop turn is the exception: it clears the goal first and then needs
         // this tool as its only way out (see the `restrictToGoalComplete` filter below).
-        let hasActiveGoal = await MainActor.run {
-            localState?.conversations.first(where: { $0.id == conversationId })?.activeGoal != nil
-        }
         if hasActiveGoal || restrictToGoalComplete {
         toolsList.append(FunctionDeclaration(
             name: "goal_complete",
@@ -1746,10 +1756,20 @@ actor IrisEngine {
         if let jobRunnerInstance { return jobRunnerInstance }
         guard let state else { return nil }
         let ledger = await MainActor.run { state.store.ledger }
-        let runner = JobRunner(state: state, engine: self, ledger: ledger)
+        let runner = JobRunner(state: state, engine: self, ledger: ledger,
+                               protectionEnabled: protectionEnabled)
         jobRunnerInstance = runner
         return runner
     }
+
+    /// The two tools that create a job. A background run is offered neither and refused both:
+    /// "no unattended job creation" is an epic-level ruling, and a run that could schedule another
+    /// run is a run that grows its own footprint with nobody asked.
+    static let jobCreationTools: Set<String> = ["schedule_job", "register_directory_watcher"]
+
+    /// What the dispatcher tells a background run that reached for one anyway.
+    static let unattendedJobCreationRefusal =
+        "A background run cannot create jobs or watches; describe what you want and the user can create it."
 
     /// The failure reason written onto runs that were still `running` when the app came up: the
     /// last process died in the middle of them and nothing will ever finish them.
@@ -1828,6 +1848,16 @@ actor IrisEngine {
     private func executeFunctionCall(_ functionCall: FunctionCall, conversationId: UUID, workspacePath: String?, restrictToGoalComplete: Bool = false) async -> String {
         let localState = state
         var result = ""
+
+        // The epic's standing ruling: no unattended job creation. Neither tool is declared to a
+        // background turn (see `buildRequest`), but declaration gating only stops a well-behaved
+        // model — the refusal has to live at the point that would actually write the row.
+        if Self.jobCreationTools.contains(functionCall.name) {
+            let unattended = await MainActor.run {
+                localState?.conversations.first(where: { $0.id == conversationId })?.isBackground == true
+            }
+            if unattended { return Self.unattendedJobCreationRefusal }
+        }
         
         if functionCall.name == "set_workspace", let path = functionCall.args["path"]?.stringValue {
             let currentWorkspace = path
