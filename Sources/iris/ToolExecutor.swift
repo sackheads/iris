@@ -3,6 +3,13 @@ import Foundation
 struct ToolExecutor {
     static let shared = ToolExecutor()
 
+    /// How `register_directory_watcher` reaches the jobs table. The executor is a value type
+    /// built long before the conversation store opens, so the engine hands it a closure at
+    /// `start()` rather than a ledger at construction. nil — the case for `ToolExecutor.shared`
+    /// and for the plugin auth runner's throwaway executor — means the tool declines instead of
+    /// silently registering a watch nothing will ever run.
+    var ledgerProvider: (@Sendable () async -> JobLedger?)?
+
     /// Merges the captured login-shell PATH (`loginPath`) ahead of `base`'s own `PATH`, so host
     /// `run_command` invocations see pyenv/nvm/Homebrew shims that only `.zprofile`/`.zshrc` set up
     /// (#69) without spawning a login shell per command (which prints profile banners and can have
@@ -60,7 +67,7 @@ struct ToolExecutor {
         ),
         FunctionDeclaration(
             name: "register_directory_watcher",
-            description: "Watch a directory for file changes and execute instructions when files are modified. Use this when the user asks you to monitor a folder.",
+            description: "Watch a directory for file changes. This creates a job that persists across restarts and runs your instructions in the background whenever files under the path are modified. Use this when the user asks you to monitor a folder.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -152,9 +159,7 @@ struct ToolExecutor {
             return await writeFile(path, content: content, cwd: cwd)
         case "register_directory_watcher":
             guard let path = args["path"]?.stringValue, let instructions = args["instructions"]?.stringValue else { return "Error: Missing path or instructions" }
-            let watchPath = Self.resolvePath(path, cwd: cwd)
-            await WatcherManager.shared.addRule(path: watchPath, instructions: instructions)
-            return "Successfully registered watcher for \(watchPath). You will be notified automatically when files change."
+            return await registerWatcher(path: Self.resolvePath(path, cwd: cwd), instructions: instructions, conversationId: conversationId)
         case "search_web":
             guard let query = args["query"]?.stringValue else { return "Error: Missing query" }
             return await searchWeb(query: query)
@@ -187,6 +192,27 @@ struct ToolExecutor {
         }
     }
     
+    /// Stores a `.fsEvent` job for `path` and restarts the watch set. The job is named after the
+    /// directory being watched rather than the instructions, because that is what a user scanning
+    /// the jobs list is looking for.
+    private func registerWatcher(path: String, instructions: String, conversationId: UUID?) async -> String {
+        guard let ledger = await ledgerProvider?() else { return "Jobs are not available yet." }
+        do {
+            let existing = Set(try ledger.jobs().map(\.name))
+            let base = Job.slug(from: URL(fileURLWithPath: path).lastPathComponent)
+            let job = Job(
+                name: ScheduleJobArguments.uniqueName(base, existing: existing),
+                prompt: instructions,
+                trigger: .fsEvent(FSWatch(path: path, quietWindowSeconds: 3)),
+                createdInConversationId: conversationId)
+            try ledger.upsert(job)
+            await WatcherManager.shared.reload()
+            return "Watching \(path) as job '\(job.name)'. It runs in the background when files change; you will be notified automatically."
+        } catch {
+            return "Could not save the watcher job."
+        }
+    }
+
     private func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false, timeoutSeconds: Double = 600) async -> String {
         if useSandbox, let conversationId {
             guard SandboxingManager.shared.isContainerInstalled else {

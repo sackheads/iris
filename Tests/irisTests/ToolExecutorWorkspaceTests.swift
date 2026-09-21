@@ -44,8 +44,13 @@ struct ToolExecutorWorkspaceTests {
     }
 
     @Test("register_directory_watcher with a relative path resolves against the bound workspace")
-    func relativeWatcherResolvesToWorkspace() async {
-        let result = await ToolExecutor.shared.execute(
+    func relativeWatcherResolvesToWorkspace() async throws {
+        // The tool now writes a job, so it needs a ledger to write into (nil declines instead).
+        let store = try ConversationStore.inMemory()
+        var executor = ToolExecutor()
+        executor.ledgerProvider = { store.ledger }
+
+        let result = await executor.execute(
             name: "register_directory_watcher",
             args: ["path": .string("src"), "instructions": .string("note changes")],
             cwd: "/ws"
@@ -53,5 +58,16 @@ struct ToolExecutorWorkspaceTests {
         // The confirmation echoes the resolved path — under the workspace, not the process cwd.
         #expect(result.contains("/ws/src"))
         #expect(!result.contains(FileManager.default.currentDirectoryPath + "/src"))
+        // And the job it stored watches that same resolved path.
+        #expect(try store.ledger.jobs().first?.trigger == .fsEvent(FSWatch(path: "/ws/src", quietWindowSeconds: 3)))
+    }
+
+    @Test("register_directory_watcher declines when no ledger is wired up")
+    func watcherWithoutLedger() async {
+        let result = await ToolExecutor().execute(
+            name: "register_directory_watcher",
+            args: ["path": .string("/ws/src"), "instructions": .string("note changes")]
+        )
+        #expect(result == "Jobs are not available yet.")
     }
 }

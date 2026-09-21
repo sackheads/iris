@@ -1,80 +1,83 @@
 import Foundation
 
-struct WatcherRule: Codable, Identifiable {
-    var id = UUID()
-    var path: String
-    var instructions: String
-}
-
+/// Runs the filesystem half of the job ledger: one `FileWatcher` per enabled `.fsEvent` job.
+///
+/// The watch list used to be its own array of rules in `UserDefaults`, invisible to the
+/// scheduler and to the UI. It is now just a query over the jobs table — `reload()` is the only
+/// way watchers change, so creating, disabling, or deleting a watch job is a ledger write plus a
+/// reload rather than a second store to keep in step.
 actor WatcherManager {
-    static let shared = WatcherManager()
-    
-    private var rules: [WatcherRule] = []
+    /// The app-wide manager. Built without a ledger because the store is not open yet when this
+    /// initializer runs; `IrisEngine.start()` calls `configure(ledger:)` before its first
+    /// `reload()`. Tests construct their own with `init(ledger:)` instead.
+    static let shared = WatcherManager(ledger: nil)
+
+    private var ledger: JobLedger?
     private var activeWatchers: [UUID: FileWatcher] = [:]
-    private var onEventCallback: ((String, String) async -> Void)?
-    
-    init() {
-        if let data = IrisDefaults.store.data(forKey: "WATCHER_RULES"),
-           let decoded = try? JSONDecoder().decode([WatcherRule].self, from: data) {
-            self.rules = decoded
-        }
+    private var watchTasks: [UUID: Task<Void, Never>] = [:]
+    private var onEventCallback: (@Sendable (Job, [String]) async -> Void)?
+
+    init(ledger: JobLedger?) {
+        self.ledger = ledger
     }
-    
-    func setCallback(_ callback: @escaping @Sendable (String, String) async -> Void) {
+
+    /// Points the manager at the conversation store's ledger. Separate from the initializer so
+    /// `shared` can exist before the store does.
+    func configure(ledger: JobLedger) {
+        self.ledger = ledger
+    }
+
+    /// The jobs currently being watched. Used by the tests and by anything that wants to know
+    /// whether a reload took effect.
+    var activeJobIds: [UUID] { Array(activeWatchers.keys) }
+
+    func setCallback(_ callback: @escaping @Sendable (Job, [String]) async -> Void) {
         self.onEventCallback = callback
     }
-    
-    func addRule(path: String, instructions: String) {
-        // Prevent duplicate paths
-        if let existingIndex = rules.firstIndex(where: { $0.path == path }) {
-            let id = rules[existingIndex].id
-            activeWatchers[id]?.stop()
-            activeWatchers.removeValue(forKey: id)
-            rules.remove(at: existingIndex)
-        }
-        
-        let rule = WatcherRule(path: path, instructions: instructions)
-        rules.append(rule)
-        saveRules()
-        startWatcher(for: rule)
-    }
-    
-    func removeRule(id: UUID) {
-        rules.removeAll { $0.id == id }
-        if let watcher = activeWatchers[id] {
-            watcher.stop()
-            activeWatchers.removeValue(forKey: id)
-        }
-        saveRules()
-    }
-    
 
-    private func saveRules() {
-        if let data = try? JSONEncoder().encode(rules) {
-            IrisDefaults.store.set(data, forKey: "WATCHER_RULES")
+    /// Rebuilds the watch set from the ledger: stop everything, then start one watcher per enabled
+    /// `.fsEvent` job. Stopping first — rather than diffing — keeps a job whose path or enabled
+    /// flag changed from needing a special case; FSEvents streams are cheap to recreate.
+    func reload() async {
+        stopAll()
+        guard let ledger else { return }
+        let jobs: [Job]
+        do {
+            jobs = try ledger.jobs()
+        } catch {
+            print("[WatcherManager] could not read jobs: \(error)")
+            return
+        }
+        for job in jobs where job.enabled {
+            guard case .fsEvent(let watch) = job.trigger else { continue }
+            startWatcher(for: job, path: watch.path)
         }
     }
-    
-    func startAll() {
-        for rule in rules {
-            startWatcher(for: rule)
-        }
+
+    /// Stops every watcher and forgets it. Idempotent, so a test can call it in a `defer` after
+    /// having already torn down.
+    func stopAll() {
+        for task in watchTasks.values { task.cancel() }
+        watchTasks.removeAll()
+        for watcher in activeWatchers.values { watcher.stop() }
+        activeWatchers.removeAll()
     }
-    
-    private func startWatcher(for rule: WatcherRule) {
-        if activeWatchers[rule.id] != nil { return }
-        
+
+    private func startWatcher(for job: Job, path: String) {
+        if activeWatchers[job.id] != nil { return }
+
         let watcher = FileWatcher()
-        activeWatchers[rule.id] = watcher
-        
-        Task {
-            let events = watcher.watch(paths: [rule.path])
-            for await eventPaths in events {
-                let pathsString = eventPaths.joined(separator: ", ")
-                let message = "System Event: Files modified at \(pathsString).\nYour standing instructions for this event are: \(rule.instructions)\nAnalyze the event and take action silently or acknowledge it if necessary."
-                
-                await onEventCallback?(message, "FileWatcher")
+        activeWatchers[job.id] = watcher
+
+        watchTasks[job.id] = Task { [weak self] in
+            for await eventPaths in watcher.watch(paths: [path]) {
+                if Task.isCancelled { return }
+                await self?.deliver(job: job, paths: eventPaths)
             }
         }
+    }
+
+    private func deliver(job: Job, paths: [String]) async {
+        await onEventCallback?(job, paths)
     }
 }
