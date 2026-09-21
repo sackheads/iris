@@ -325,6 +325,9 @@ extension JobLedger {
     /// A deleted row's transcript goes with it unless a surviving row still names the same
     /// conversation, which today's writers never do; the check is there so a future one cannot
     /// pull a transcript out from under a run that is still listed.
+    ///
+    /// The order `runs` arrives in does not matter: everything is decided against `startedAt` with
+    /// the run id breaking ties, and both returned arrays come back oldest first.
     static func pruneDecision(runs: [JobRun], now: Date, rowRetention: TimeInterval,
                               transcriptsPerJob: Int) -> PruneDecision {
         let cutoff = now.addingTimeInterval(-rowRetention)
@@ -332,32 +335,33 @@ extension JobLedger {
             (run.status == .failed || run.status == .blockedOnApproval) && run.acknowledgedAt == nil
         }
 
-        let deletedRunIds = Set(runs.filter { $0.startedAt < cutoff && !isOpenFailure($0) }.map(\.id))
+        // Oldest first, ties broken by id, so the decision is a function of the rows alone: two
+        // callers that fetched the same runs in different orders get the same arrays back.
+        let ordered = runs.sorted { ($0.startedAt, $0.id.uuidString) < ($1.startedAt, $1.id.uuidString) }
+        let deletedRunIds = Set(ordered.filter { $0.startedAt < cutoff && !isOpenFailure($0) }.map(\.id))
 
         // Runs whose transcript is no longer worth keeping: the row is going away, or the run has
         // fallen out of its job's newest `transcriptsPerJob`.
-        var doomedRunIds = Set(runs.filter { deletedRunIds.contains($0.id) }
-            .filter { $0.transcriptConversationId != nil }.map(\.id))
-        let withTranscripts = runs.enumerated().filter { $0.element.transcriptConversationId != nil }
-        for (_, jobRuns) in Dictionary(grouping: withTranscripts, by: { $0.element.jobId }) {
-            let newestFirst = jobRuns.sorted {
-                ($0.element.startedAt, $0.offset) > ($1.element.startedAt, $1.offset)
-            }
-            for (_, run) in newestFirst.dropFirst(max(0, transcriptsPerJob)) where !isOpenFailure(run) {
+        var doomedRunIds = Set(ordered
+            .filter { deletedRunIds.contains($0.id) && $0.transcriptConversationId != nil }.map(\.id))
+        let withTranscripts = ordered.filter { $0.transcriptConversationId != nil }
+        for (_, jobRuns) in Dictionary(grouping: withTranscripts, by: \.jobId) {
+            let newestFirst = jobRuns.reversed()
+            for run in newestFirst.dropFirst(max(0, transcriptsPerJob)) where !isOpenFailure(run) {
                 doomedRunIds.insert(run.id)
             }
         }
-        let stillReferenced = Set(runs.filter { !doomedRunIds.contains($0.id) }
+        let stillReferenced = Set(ordered.filter { !doomedRunIds.contains($0.id) }
             .compactMap(\.transcriptConversationId))
 
         var deleteTranscriptIds: [UUID] = []
         var seen = Set<UUID>()
-        for run in runs {
+        for run in ordered {
             guard doomedRunIds.contains(run.id), let transcript = run.transcriptConversationId,
                   !stillReferenced.contains(transcript), seen.insert(transcript).inserted else { continue }
             deleteTranscriptIds.append(transcript)
         }
-        return PruneDecision(deleteRunIds: runs.filter { deletedRunIds.contains($0.id) }.map(\.id),
+        return PruneDecision(deleteRunIds: ordered.filter { deletedRunIds.contains($0.id) }.map(\.id),
                              deleteTranscriptIds: deleteTranscriptIds)
     }
 
@@ -371,8 +375,10 @@ extension JobLedger {
             let decision = Self.pruneDecision(runs: Self.decodeRuns(rows), now: now,
                                               rowRetention: rowRetention,
                                               transcriptsPerJob: transcriptsPerJob)
-            for id in decision.deleteRunIds {
-                try db.execute(sql: "DELETE FROM job_runs WHERE id = ?", arguments: [id.uuidString])
+            if !decision.deleteRunIds.isEmpty {
+                let placeholders = databaseQuestionMarks(count: decision.deleteRunIds.count)
+                try db.execute(sql: "DELETE FROM job_runs WHERE id IN (\(placeholders))",
+                               arguments: StatementArguments(decision.deleteRunIds.map(\.uuidString)))
             }
             return decision
         }

@@ -42,14 +42,18 @@ struct JobRunLedgerTests {
         let job = try seedJob(store, "j")
         let run = makeRun(job, at: t0)
         try store.ledger.begin(run: run)
+        // First and last characters differ, so a suffix would fail this as loudly as no truncation.
+        let long = "A" + String(repeating: "x", count: 298) + "Z"
         try store.ledger.finish(
-            runId: run.id, status: .completed, outcome: String(repeating: "x", count: 300),
+            runId: run.id, status: .completed, outcome: long,
             failureReason: nil, blockedTool: nil,
             tokens: TokenUsage(promptTokenCount: 3, candidatesTokenCount: 4, totalTokenCount: 7),
             finishedAt: t0.addingTimeInterval(60))
         let back = try #require(try store.ledger.run(id: run.id))
         #expect(back.status == .completed)
         #expect(back.outcome?.count == 200)
+        #expect(back.outcome?.hasPrefix("A") == true)
+        #expect(back.outcome?.hasSuffix("Z") == false)
         #expect(back.finishedAt == t0.addingTimeInterval(60))
         #expect(back.promptTokens == 3 && back.candidateTokens == 4 && back.totalTokens == 7)
         #expect(back.startedAt == t0 && back.jobName == "j")
@@ -68,6 +72,23 @@ struct JobRunLedgerTests {
         #expect(back.status == .blockedOnApproval)
         #expect(back.failureReason == "needs approval" && back.blockedTool == "run_command")
         #expect(back.outcome == nil)
+    }
+
+    @Test("finish leaves the transcript id and an acknowledgement alone")
+    func finishPreservesUntouchedColumns() throws {
+        let store = try ConversationStore.inMemory()
+        let job = try seedJob(store, "j")
+        let transcript = UUID()
+        let run = makeRun(job, at: t0, status: .failed, transcript: transcript)
+        try store.ledger.begin(run: run)
+        try store.ledger.acknowledge(runId: run.id, at: t0.addingTimeInterval(30))
+        try store.ledger.finish(runId: run.id, status: .failed, outcome: "tried",
+                                failureReason: "boom", blockedTool: nil, tokens: TokenUsage(),
+                                finishedAt: t0.addingTimeInterval(60))
+        let back = try #require(try store.ledger.run(id: run.id))
+        #expect(back.transcriptConversationId == transcript)
+        #expect(back.acknowledgedAt == t0.addingTimeInterval(30))
+        #expect(back.failureReason == "boom")
     }
 
     @Test("finish on an id that is not in the table throws unknownRun")
@@ -256,6 +277,78 @@ struct JobRunLedgerTests {
                                                rowRetention: ninetyDays, transcriptsPerJob: 20)
         #expect(decision.deleteRunIds == [old.id])
         #expect(decision.deleteTranscriptIds.isEmpty)
+    }
+
+    @Test("the decision does not depend on the order the runs arrive in")
+    func pruneDecisionOrderIndependent() throws {
+        let a = UUID()
+        let b = UUID()
+        var runs: [JobRun] = []
+        for i in 0..<6 {
+            for job in [a, b] {
+                var run = JobRun(jobId: job, jobName: "j", triggerKind: "schedule",
+                                 startedAt: t0.addingTimeInterval(-Double(i) * 24 * 3600 - 91 * 24 * 3600),
+                                 status: i == 1 ? .failed : .completed,
+                                 transcriptConversationId: UUID())
+                if i == 1 { run.acknowledgedAt = nil } else { run.acknowledgedAt = t0 }
+                runs.append(run)
+            }
+        }
+        // Two runs of the same job start in the same instant, so only the id can break the tie.
+        runs.append(JobRun(jobId: a, jobName: "j", triggerKind: "schedule", startedAt: t0,
+                           status: .completed, transcriptConversationId: UUID()))
+        runs.append(JobRun(jobId: a, jobName: "j", triggerKind: "schedule", startedAt: t0,
+                           status: .completed, transcriptConversationId: UUID()))
+        func decide(_ input: [JobRun]) -> JobLedger.PruneDecision {
+            JobLedger.pruneDecision(runs: input, now: t0, rowRetention: ninetyDays,
+                                    transcriptsPerJob: 3)
+        }
+        let forward = decide(runs)
+        #expect(decide(runs.reversed()) == forward)
+        #expect(decide(runs.shuffled()) == forward)
+        #expect(!forward.deleteRunIds.isEmpty && !forward.deleteTranscriptIds.isEmpty)
+    }
+
+    @Test("a row exactly at the cutoff is kept: retention is strictly older than")
+    func pruneDecisionBoundary() throws {
+        let job = UUID()
+        let atCutoff = oldRun(job, ageDays: 90, status: .completed, transcript: UUID())
+        let justPast = oldRun(job, ageDays: 90.001, status: .completed)
+        let decision = JobLedger.pruneDecision(runs: [atCutoff, justPast], now: t0,
+                                               rowRetention: ninetyDays, transcriptsPerJob: 20)
+        #expect(decision.deleteRunIds == [justPast.id])
+        #expect(decision.deleteTranscriptIds.isEmpty)
+    }
+
+    @Test("transcriptsPerJob of zero marks every transcript but an unacknowledged failure's")
+    func pruneDecisionZeroCap() throws {
+        let job = UUID()
+        let done = oldRun(job, ageDays: 1, status: .completed, transcript: UUID())
+        let acked = oldRun(job, ageDays: 2, status: .failed, acknowledged: true, transcript: UUID())
+        let open = oldRun(job, ageDays: 3, status: .failed, transcript: UUID())
+        let blocked = oldRun(job, ageDays: 4, status: .blockedOnApproval, transcript: UUID())
+        let decision = JobLedger.pruneDecision(runs: [done, acked, open, blocked], now: t0,
+                                               rowRetention: ninetyDays, transcriptsPerJob: 0)
+        #expect(decision.deleteRunIds.isEmpty)
+        #expect(Set(decision.deleteTranscriptIds)
+            == Set([done, acked].compactMap(\.transcriptConversationId)))
+    }
+
+    @Test("an unacknowledged failure past retention and past the cap keeps both its row and its transcript")
+    func pruneDecisionOpenFailureExemptFromBoth() throws {
+        let job = UUID()
+        let open = oldRun(job, ageDays: 200, status: .failed, transcript: UUID())
+        var runs = [open]
+        for i in 0..<5 {
+            runs.append(oldRun(job, ageDays: Double(i), status: .completed, transcript: UUID()))
+        }
+        let decision = JobLedger.pruneDecision(runs: runs, now: t0, rowRetention: ninetyDays,
+                                               transcriptsPerJob: 2)
+        #expect(!decision.deleteRunIds.contains(open.id))
+        #expect(!decision.deleteTranscriptIds.contains(open.transcriptConversationId!))
+        // The three completed runs below the cap still lose their transcripts, rows intact.
+        #expect(decision.deleteRunIds.isEmpty)
+        #expect(decision.deleteTranscriptIds.count == 3)
     }
 
     // MARK: prune
