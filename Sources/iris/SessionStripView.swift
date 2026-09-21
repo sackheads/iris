@@ -82,7 +82,14 @@ struct SessionStripView: View {
             set: { presented in if !presented { transcriptSessionId = nil } }
         )) {
             if let id = transcriptSessionId {
-                SubagentTranscriptSheet(state: state, sessionId: id)
+                // macOS 15+ can track the content's ideal size after presentation; earlier systems
+                // keep the first layout's size, which `TranscriptSizing`'s estimate covers.
+                if #available(macOS 15, *) {
+                    SubagentTranscriptSheet(state: state, sessionId: id)
+                        .presentationSizing(.fitted)
+                } else {
+                    SubagentTranscriptSheet(state: state, sessionId: id)
+                }
             }
         }
     }
@@ -203,21 +210,6 @@ private func statusGlyph(_ phase: SessionSummary.Phase) -> some View {
     }
 }
 
-/// Reports the transcript content's natural height up to `SubagentTranscriptSheet`, so the sheet
-/// can size itself to content instead of always opening at a fixed height that leaves a lot of
-/// empty gray space under a short transcript (fix round 1 follow-up).
-private struct TranscriptContentHeightKey: PreferenceKey {
-    // A computed property, not stored: Swift 6 strict concurrency flags a stored `static var` as
-    // non-concurrency-safe mutable global state even though `PreferenceKey` only ever reads it.
-    static var defaultValue: CGFloat { 0 }
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
-/// #19's "dedicated way to browse subagent logs": a read-only transcript for one subagent/
-/// evaluator conversation. Never shown for the main row (`SessionStripView` never sets
-/// `transcriptSessionId` for it).
 private struct SubagentTranscriptSheet: View {
     var state: AppState
     let sessionId: UUID
@@ -225,19 +217,24 @@ private struct SubagentTranscriptSheet: View {
     @State private var contentHeight: CGFloat = 0
     @State private var scrollPassScheduled = false
 
-    /// A rough header-row + divider allowance added to the measured content height. Precision
-    /// doesn't matter here — it only widens or narrows the sheet by a few points — so this stays a
-    /// constant rather than a second measured value.
-    private static let chromeHeight: CGFloat = 60
-    private static let minSheetHeight: CGFloat = 160
-    private static let maxSheetHeight: CGFloat = 640
+    private static let idealWidth: CGFloat = 560
 
     private var conversation: Conversation? { state.conversations.first { $0.id == sessionId } }
     private var role: String {
         state.sessions.first { $0.id == sessionId }?.role ?? conversation?.title ?? "Session"
     }
+    /// The window is sized from this on the first layout pass, before any `GeometryReader` has
+    /// reported, so until a measurement exists it comes from `TranscriptSizing`'s text estimate.
+    /// On macOS 15+ `.presentationSizing(.fitted)` lets the measured value take over afterwards.
     private var sheetHeight: CGFloat {
-        min(max(contentHeight + Self.chromeHeight, Self.minSheetHeight), Self.maxSheetHeight)
+        let content: CGFloat
+        if contentHeight > 0 {
+            content = contentHeight
+        } else {
+            let rows = (conversation?.messages ?? []).map { (role: $0.role, content: $0.content) }
+            content = TranscriptSizing.estimatedContentHeight(messages: rows, width: Self.idealWidth)
+        }
+        return TranscriptSizing.sheetHeight(forContent: content)
     }
 
     var body: some View {
@@ -257,7 +254,9 @@ private struct SubagentTranscriptSheet: View {
             if let conversation, !conversation.messages.isEmpty {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 8) {
+                        // A plain VStack, not lazy: the height preference below has to cover the
+                        // whole transcript, and a subagent log is short enough to lay out eagerly.
+                        VStack(alignment: .leading, spacing: 8) {
                             ForEach(conversation.messages) { message in
                                 MessageView(message: message)
                             }
@@ -266,13 +265,10 @@ private struct SubagentTranscriptSheet: View {
                             Color.clear.frame(height: 1).id("transcriptBottom")
                         }
                         .padding()
-                        .background(
-                            GeometryReader { geo in
-                                Color.clear.preference(key: TranscriptContentHeightKey.self, value: geo.size.height)
-                            }
-                        )
+                        // Measured after the first layout; the window can only act on it where
+                        // `presentationSizing(.fitted)` is available (see the sheet call site).
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
                     }
-                    .onPreferenceChange(TranscriptContentHeightKey.self) { contentHeight = $0 }
                     .onAppear { scrollToBottom(proxy) }
                     // A live subagent's transcript should show the newest content, not the header,
                     // as more messages stream in while the sheet is open.
@@ -287,8 +283,9 @@ private struct SubagentTranscriptSheet: View {
                 Spacer()
             }
         }
-        .frame(minWidth: 480, idealWidth: 560,
-               minHeight: Self.minSheetHeight, idealHeight: sheetHeight, maxHeight: Self.maxSheetHeight)
+        .frame(minWidth: 480, idealWidth: Self.idealWidth,
+               minHeight: TranscriptSizing.minSheetHeight, idealHeight: sheetHeight,
+               maxHeight: TranscriptSizing.maxSheetHeight)
     }
 
     /// Deferred a run loop turn (mirrors `ChatView.scrollAfterUpdate`) so the anchor is laid out
