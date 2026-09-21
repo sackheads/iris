@@ -375,6 +375,11 @@ class AppState {
             // which is what makes it safe to drop this eagerly rather than only on delete.
             mainStartTimeByConversation[conversationId] = nil
             mainPhaseByConversation[conversationId] = nil
+            // #187 §8.3: before the drain, not after. Anything the ending turn did not read is
+            // put into history here — where it costs no turn — so that if the drain does start a
+            // queued user turn, that turn's request already carries the news. Appending only, on
+            // purpose: an event card is never itself a reason to call the model.
+            flushPendingEventLines(for: conversationId)
             drainPendingUserMessages(for: conversationId)
         }
     }
@@ -439,6 +444,40 @@ class AppState {
             : PendingUserMessage(text: texts.joined(separator: "\n\n"), attachments: [], isPeer: leadIsPeer)
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
         startTurn(text: next.text, attachments: next.attachments, in: conversationId, isPeer: next.isPeer)
+    }
+
+    // MARK: - Pending event lines (#187 §8.3)
+
+    /// The model-facing lines of event cards (`EventCard.historyLine`, already sanitised) that
+    /// were delivered while their destination had a turn in flight, waiting for that turn to read
+    /// them. Deliberately NOT `pendingUserMessages`: that inbox is drained by
+    /// `drainPendingUserMessages`, which *starts a turn* for whatever is left in it, and an event
+    /// card must never wake the model — a job finishing is news, not a request. This queue is
+    /// drained by the engine at the same model-round boundary it takes steers, and anything still
+    /// in it when the turn ends is appended straight to history by `endEngineTurn`.
+    private var pendingEventLines: [UUID: [String]] = [:]
+
+    func enqueueEventLine(_ text: String, for conversationId: UUID) {
+        pendingEventLines[conversationId, default: []].append(text)
+    }
+
+    /// Everything queued, in arrival order, removed from the queue. The engine calls this at
+    /// every model round (after `takePendingSteers`, so a steer the user typed is read before
+    /// harness news that landed in the same window) and `endEngineTurn` calls it once more.
+    func takePendingEventLines(for conversationId: UUID) -> [String] {
+        let lines = pendingEventLines[conversationId] ?? []
+        pendingEventLines[conversationId] = nil
+        return lines
+    }
+
+    /// Appends each queued line to history as its own `user` entry. Used at turn end, where there
+    /// is no round left to read them: they sit in history so the *next* turn — whenever the user
+    /// or some arrival starts one — sees what happened while it was away.
+    private func flushPendingEventLines(for conversationId: UUID) {
+        for line in takePendingEventLines(for: conversationId) {
+            appendContentToHistory(for: conversationId,
+                                   content: Content(role: "user", parts: [Part(text: line)]))
+        }
     }
 
     /// Empties the inbox and returns how many messages were dropped (Stop, /stop, deletion).
@@ -1116,6 +1155,10 @@ class AppState {
         // leave a stale entry behind forever.
         mainStartTimeByConversation[id] = nil
         mainPhaseByConversation[id] = nil
+        // Same reasoning for the event queue (#187 §8.3): a card delivered to a conversation that
+        // is then deleted has nowhere to land, and its line must not sit in the dictionary
+        // forever waiting for a turn that can never run.
+        _ = takePendingEventLines(for: id)
         conversations.removeAll { $0.id == id }
         // Re-point at what the sidebar actually renders (`ChatView` lists non-subagent
         // conversations). Picking `conversations.last` could land the selection on a subagent or

@@ -1206,6 +1206,22 @@ actor IrisEngine {
                     request.contents = history
                 }
 
+                // Event cards delivered while this turn was running (#187 §8.3). Same boundary as
+                // the steers above and deliberately after them: a card is harness news, a steer is
+                // the user changing course, and the user's words are read first when both landed
+                // in the same window. No BeforeAgent hook — that hook exists to inspect what a
+                // human or a peer said, and this text is the harness's own sentence about a job
+                // this harness ran. The line is already sanitised by `deliverEvent`.
+                let eventLines = await MainActor.run { localState?.takePendingEventLines(for: conversationId) ?? [] }
+                if !eventLines.isEmpty {
+                    for line in eventLines {
+                        let content = Content(role: "user", parts: [Part(text: line)])
+                        await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
+                    }
+                    history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
+                    request.contents = history
+                }
+
                 let beforeModelDecision = await HookManager.shared.fireBeforeModel(request: request, useSandbox: hooksSandbox)
                 if case .block(let reason) = beforeModelDecision {
                     await pushToUI(role: .system, text: "Hook BeforeModel blocked execution: \(reason)", conversationId: conversationId)
