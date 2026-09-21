@@ -126,6 +126,17 @@ struct IrisPaths: Sendable {
         return resolved == mem || resolved.hasPrefix(mem + "/")
     }
 
+    /// True if `rawPath` resolves to a location inside `configDir` — permissions.json, the hook
+    /// definitions and the plugin config. Writes there are what turn one allowed call into every
+    /// later one, so `PermissionManager` never auto-allows them (#187). Same tilde-expansion and
+    /// `..`-resolution as `isUnderMemory`, for the same reason.
+    func isUnderConfigDir(_ rawPath: String) -> Bool {
+        let expanded = (rawPath as NSString).expandingTildeInPath
+        let resolved = URL(fileURLWithPath: expanded).standardizedFileURL.path
+        let config = configDir.standardizedFileURL.path
+        return resolved == config || resolved.hasPrefix(config + "/")
+    }
+
     /// True if `rawPath` resolves to a location inside `root` (`~/.iris`).
     /// Tilde-expands and standardizes the path (resolving `..`) first.
     func isUnderIrisDir(_ rawPath: String) -> Bool {

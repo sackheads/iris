@@ -239,6 +239,9 @@ class AppState {
     /// approving, so a headless run pays what a real `run_command` pays. The verdict is never
     /// acted on: a benchmark measures the cost, it does not block on it (#135).
     var vibecopUnderAutoApprove = false
+    /// The deterministic allowlist every approval consults. Injectable so a test can point it at
+    /// a temp `IrisPaths` instead of the machine's real `~/.iris/config/permissions.json`.
+    var permissions: PermissionManager = .shared
     var commandStartTimes: [UUID: Date] = [:]
     var commandDurations: [UUID: TimeInterval] = [:]
     /// Subagent/evaluator sessions only — the main session is synthesised by `visibleSessions`,
@@ -2092,7 +2095,8 @@ class AppState {
         // (a call it already permits never needed a human, so it runs); everything else is denied
         // and recorded for Task 6's ledger, without ever consulting Vibecop or a human.
         if let id = conversationId, conversations.first(where: { $0.id == id })?.isBackground == true {
-            if PermissionManager.shared.isAllowed(toolName: toolName, details: details, workspace: workspace) {
+            if permissions.isAllowed(toolName: toolName, details: details, workspace: workspace,
+                                     isBackground: true) {
                 return true
             }
             backgroundDenials[id, default: []].append(BlockedToolCall(toolName: toolName, details: details, at: Date()))
@@ -2108,7 +2112,7 @@ class AppState {
             return true
         }
         // Fast path: deterministic permissions.
-        if PermissionManager.shared.isAllowed(toolName: toolName, details: details, workspace: workspace) {
+        if permissions.isAllowed(toolName: toolName, details: details, workspace: workspace) {
             return true
         }
 
@@ -2204,13 +2208,13 @@ class AppState {
         case .deny:
             approved = false
         case .alwaysAllowGlobal:
-            PermissionManager.shared.allowGlobally(toolName: pending.toolName, details: pending.details)
+            permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
             approved = true
         case .alwaysAllowProject:
             if let workspace = pending.workspace {
-                PermissionManager.shared.allowInProject(toolName: pending.toolName, details: pending.details, workspace: workspace)
+                permissions.allowInProject(toolName: pending.toolName, details: pending.details, workspace: workspace)
             } else {
-                PermissionManager.shared.allowGlobally(toolName: pending.toolName, details: pending.details)
+                permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
             }
             approved = true
         }
