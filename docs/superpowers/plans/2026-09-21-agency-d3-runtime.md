@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
-> **Status:** DRAFT against a PROPOSED spec. Do not execute until `docs/specs/2026-09-21-agency-runtime.md` §0 has been decided; tasks marked **[§0.n]** change if that decision changes. Written 2026-09-21 overnight.
+> **Status:** READY — spec §0 decided 2026-09-21 morning (all recommendations accepted, plus an observability requirement: budget/breaker/retry figures in `/jobs`, `list_jobs`, and pause cards — folded into Task 2 (queries), Task 3 (cards) and Task 10 (rendering)). Written 2026-09-21 overnight.
 
 **Goal:** Make unattended jobs safe over time: policies on the job (overlap, catch-up, retry, budgets, timeout) enforced by the runner; a persisted blocked call that a card can approve and run; gates that decide whether a run is needed; `iris --run-job` to measure a job before trusting it.
 
@@ -125,7 +125,7 @@ static func retryDecision(status: JobRun.Status, attempt: Int, retryEnabled: Boo
 
 ### Task 10: Settings, `/jobs` forms, docs
 
-**Files:** Modify `Sources/iris/SettingsView.swift` (five steppers in Advanced, #208 pattern), `Sources/iris/JobsCommand.swift` (policy column; `pause`/`resume`/`run` usage text), `README.md`, `docs/jobs.md` (policies, budgets, breaker, retry, gates, Approve and run, `--run-job`, the read-only denylist), `docs/agency/agency.md` (deliverable 3 landed), the spec status line.
+**Files:** Modify `Sources/iris/SettingsView.swift` (five steppers in Advanced, #208 pattern), `Sources/iris/JobsCommand.swift` (policy column; `pause`/`resume`/`run` usage text; per-job `tokens today used / budget (pct%)`, `runs last hour n / max`, `retry k/3`, and a global daily footer — spec §9; tested in `JobsCommandTests` with fixed figures), `Sources/iris/iris.swift` (`list_jobs` carries the same numbers), `README.md`, `docs/jobs.md` (policies, budgets, breaker, retry, gates, Approve and run, `--run-job`, the read-only denylist), `docs/agency/agency.md` (deliverable 3 landed), the spec status line.
 
 - [ ] Falsify the docs first (grep for "not built yet", "deliverable 3", "read-only" claims); rewrite; `swift build`; full suite; commit `docs(jobs): policies, budgets, gates, Approve and run, and --run-job; deliverable 3 landed (#187)`.
 
