@@ -19,11 +19,20 @@ public final class CoreMLEvaluator: @unchecked Sendable {
     /// the problem (#237). A task-local is visible only inside the `withValue` body and the
     /// tasks it spawns, so two suites can hold different models at once without racing.
     /// Production never sets it.
-    @TaskLocal public static var scopedModel: CoreMLModelProtocol?
+    ///
+    /// Wrapped rather than a bare optional so a scope can say "explicitly no model" — which is a
+    /// different thing from "no scope set", and is what the fail-open tests need.
+    public struct ScopedModel: Sendable {
+        let model: CoreMLModelProtocol?
+        public init(_ model: CoreMLModelProtocol?) { self.model = model }
+    }
+    @TaskLocal public static var scopedModel: ScopedModel?
 
-    /// The task-scoped model when one is set, otherwise the installed one.
+    /// The task-scoped model when a scope is active — including when that scope says none —
+    /// otherwise the installed one.
     private var effectiveModel: CoreMLModelProtocol? {
-        Self.scopedModel ?? lock.withLock { model }
+        if let scoped = Self.scopedModel { return scoped.model }
+        return lock.withLock { model }
     }
 
     private init() {}
