@@ -203,6 +203,14 @@ struct ToolApprovalRequest: Identifiable {
     let continuation: CheckedContinuation<Bool, Never>
 }
 
+/// A tool call denied without a human because it ran in a background conversation (#187). Recorded
+/// per-conversation so Task 6's ledger can surface `blockedOnApproval` for the run.
+struct BlockedToolCall: Equatable, Sendable {
+    let toolName: String
+    let details: String
+    let at: Date
+}
+
 @MainActor
 @Observable
 class AppState {
@@ -248,6 +256,10 @@ class AppState {
     var transcriptSheetConversationId: UUID?
     var subagentWriteLedger: [UUID: [String]] = [:]
     var pendingApprovals: [ToolApprovalRequest] = []
+    /// Fail-closed denials recorded for background (unattended) conversations (#187) — never
+    /// enqueued in `pendingApprovals`, since nobody is watching to resolve them. Task 6's ledger
+    /// drains this per run via `takeBackgroundDenials(for:)` to mark it `blockedOnApproval`.
+    private(set) var backgroundDenials: [UUID: [BlockedToolCall]] = [:]
     var availableUpdate: ReleaseInfo?
     var isCheckingForUpdates = false
     var updateCheckStatusMessage: String?
@@ -2010,6 +2022,14 @@ class AppState {
                          conversationId: UUID? = nil, origin: String = "Main agent",
                          inSandbox: Bool = false, callerRole: VibecopCallerRole = .agent,
                          allowedCommands: [String] = [], vibecopEnabled: Bool? = nil) async -> Bool {
+        // Fail closed for background (unattended) conversations, before every other path —
+        // including `autoApproveTools` — since nobody is watching to see the approval dialog and a
+        // gated tool must never run unattended (#187). Recorded for Task 6's ledger, never enqueued.
+        if let id = conversationId, conversations.first(where: { $0.id == id })?.isBackground == true {
+            backgroundDenials[id, default: []].append(BlockedToolCall(toolName: toolName, details: details, at: Date()))
+            appendMessage(role: .system, content: String(format: Self.unattendedDenialNotice, toolName), to: id)
+            return false
+        }
         // Headless drivers auto-approve so a scenario run never blocks on a human or a local model.
         if autoApproveTools {
             if vibecopUnderAutoApprove {
@@ -2090,6 +2110,19 @@ class AppState {
         let matching = pendingApprovals.filter { $0.conversationId == conversationId }
         pendingApprovals.removeAll { $0.conversationId == conversationId }
         for req in matching { req.continuation.resume(returning: false) }
+    }
+
+    /// The `.system` transcript line `requestApproval` appends for a background conversation's
+    /// fail-closed denial, formatted with the tool name.
+    static let unattendedDenialNotice = "Not run: `%@` needs approval, and this is an unattended run."
+
+    /// Returns and clears the recorded fail-closed denials for a background conversation (#187).
+    /// Task 6's ledger drains this per run to mark it `blockedOnApproval`.
+    @discardableResult
+    func takeBackgroundDenials(for conversationId: UUID) -> [BlockedToolCall] {
+        let denials = backgroundDenials[conversationId] ?? []
+        backgroundDenials.removeValue(forKey: conversationId)
+        return denials
     }
 
     func resolveApproval(_ resolution: ApprovalResolution) {
