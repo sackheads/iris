@@ -127,10 +127,13 @@ struct GoalWorkspacesSection: View {
         confirmingDelete = nil
         do {
             let outcome = try state.deleteWorkspace(entry)
-            if case .refusedActiveGoal(let title) = outcome {
-                actionError = "\(title)'s goal is still active; stop it before deleting this workspace."
-            } else {
+            switch outcome {
+            case .trashed:
                 actionError = nil
+            case .refusedActiveGoal(let title):
+                actionError = "\(title)'s goal is still active; stop it before deleting this workspace."
+            case .refusedOutsideRoot:
+                actionError = "Could not delete \(entry.name): it is no longer inside the workspaces folder."
             }
         } catch {
             actionError = "Could not delete \(entry.name): \(error.localizedDescription)"
@@ -138,15 +141,48 @@ struct GoalWorkspacesSection: View {
         refresh()
     }
 
+    /// Re-scans against LIVE `state.conversations` immediately before deleting anything: the
+    /// `entries` snapshot this section renders from is only as fresh as the last appear/Refresh, so
+    /// a workspace a new or renamed goal adopted in the meantime must not be trashed just because
+    /// it still reads as an orphan in that stale snapshot (review finding, round 1).
     private func deleteAllOrphans() {
         confirmingDeleteAllOrphans = false
-        var failure: String?
-        for entry in entries where entry.isOrphan {
-            do { try state.deleteWorkspace(entry) } catch {
-                failure = "Could not delete \(entry.name): \(error.localizedDescription)"
+        let candidateURLs = Set(entries.filter(\.isOrphan).map(\.url))
+        guard !candidateURLs.isEmpty else { return }
+
+        let liveConversations = state.conversations.map {
+            (id: $0.id, title: $0.title, workspacePath: $0.workspacePath, activeGoal: $0.activeGoal)
+        }
+        let liveEntries = WorkspaceInventory.scan(root: IrisPaths.default.workspacesDir, conversations: liveConversations)
+        let liveByURL = Dictionary(uniqueKeysWithValues: liveEntries.map { ($0.url, $0) })
+
+        var trashedCount = 0
+        var failedNames: [String] = []
+        var adoptedNames: [String] = []
+
+        for url in candidateURLs {
+            guard let liveEntry = liveByURL[url] else { continue } // vanished since the snapshot; nothing to do
+            guard liveEntry.isOrphan else {
+                adoptedNames.append(liveEntry.name)
+                continue
+            }
+            do {
+                if case .trashed = try state.deleteWorkspace(liveEntry) {
+                    trashedCount += 1
+                } else {
+                    // Shouldn't happen for a confirmed orphan straight out of `liveEntries`, but
+                    // don't silently swallow a refusal if it ever does.
+                    failedNames.append(liveEntry.name)
+                }
+            } catch {
+                failedNames.append(liveEntry.name)
             }
         }
-        actionError = failure
+
+        var summary = "\(trashedCount) of \(candidateURLs.count) moved to the Trash"
+        if !failedNames.isEmpty { summary += "; failed: \(failedNames.joined(separator: ", "))" }
+        if !adoptedNames.isEmpty { summary += "; skipped (no longer orphaned): \(adoptedNames.joined(separator: ", "))" }
+        actionError = (failedNames.isEmpty && adoptedNames.isEmpty) ? nil : summary
         refresh()
     }
 }

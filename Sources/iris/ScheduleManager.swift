@@ -59,6 +59,13 @@ struct ScheduledJob: Codable, Identifiable {
 
     /// `weekdays` if non-empty, else `weekday` lifted into a single-element array; filtered to
     /// 1...7 and de-duplicated, preserving first-seen order. Nil if neither field yields a day.
+    ///
+    /// The tool handler already drops out-of-range values before they ever reach a stored job, so
+    /// this is a decode-time-only concern in practice — but if `weekdays` is present and every one
+    /// of its entries is out of range, this returns nil rather than silently keeping something.
+    /// `calculateNextFireDate`'s `effectiveWeekdays?.first ?? weekday` then falls through to the
+    /// legacy `weekday` field when present — a deliberate fallback, not a bug, since a job written
+    /// before `weekdays` existed must keep firing on its original day.
     var effectiveWeekdays: [Int]? {
         let candidate: [Int]
         if let weekdays, !weekdays.isEmpty {

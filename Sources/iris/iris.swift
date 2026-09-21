@@ -1315,9 +1315,9 @@ actor IrisEngine {
             let day = Int(functionCall.args["day"]?.stringValue ?? "")
             let month = Int(functionCall.args["month"]?.stringValue ?? "")
             let weekday = Int(functionCall.args["weekday"]?.stringValue ?? "")
-            let weekdays: [Int]? = {
-                guard case .array(let items) = functionCall.args["weekdays"] else { return nil }
-                let parsed = items.compactMap { item -> Int? in
+            let parsedWeekdays: [Int] = {
+                guard case .array(let items) = functionCall.args["weekdays"] else { return [] }
+                return items.compactMap { item -> Int? in
                     switch item {
                     case .int(let i): return i
                     case .double(let d): return Int(d)
@@ -1325,8 +1325,12 @@ actor IrisEngine {
                     default: return nil
                     }
                 }
-                return parsed.isEmpty ? nil : parsed
             }()
+            // Only 1...7 is a valid weekday; out-of-range values are dropped rather than stored,
+            // and named back to the model so a typo'd cron field doesn't silently do less than asked.
+            let validWeekdays = parsedWeekdays.filter { (1...7).contains($0) }
+            let droppedWeekdays = parsedWeekdays.filter { !(1...7).contains($0) }
+            let weekdays: [Int]? = validWeekdays.isEmpty ? nil : validWeekdays
             let intervalSeconds = Int(functionCall.args["intervalSeconds"]?.stringValue ?? "")
 
             ScheduleManager.shared.schedule(
@@ -1341,6 +1345,9 @@ actor IrisEngine {
                 intervalSeconds: intervalSeconds
             )
             result = "Job scheduled successfully. It will fire in the background."
+            if !droppedWeekdays.isEmpty {
+                result += " Ignored invalid weekday value\(droppedWeekdays.count == 1 ? "" : "s") (must be 1-7, 1=Sunday): \(droppedWeekdays.map(String.init).joined(separator: ", "))."
+            }
         } else if functionCall.name == "save_fact", let content = functionCall.args["content"]?.stringValue {
             let category = functionCall.args["category"]?.stringValue ?? "general"
             let entity = functionCall.args["entity"]?.stringValue

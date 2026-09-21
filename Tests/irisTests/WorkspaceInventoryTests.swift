@@ -76,6 +76,30 @@ struct WorkspaceInventoryTests {
         #expect(entry.ownerConversationId == nil)
     }
 
+    @Test("re-scanning after a workspace is adopted removes it from the orphan set")
+    func rescanExcludesAdoptedWorkspaceFromOrphans() throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workspace = root.appendingPathComponent("will-be-adopted")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+
+        // First scan: no conversation points at it yet, so it's an orphan.
+        let initial = WorkspaceInventory.scan(root: root, conversations: [])
+        #expect(initial.first(where: { $0.name == "will-be-adopted" })?.isOrphan == true)
+
+        // A conversation adopts the workspace between the first scan and a re-scan (e.g. the user
+        // started a new goal and it bound here). `deleteAllOrphans` re-scans live immediately
+        // before deleting for exactly this reason (review finding, round 1).
+        let ownerId = UUID()
+        let liveConversations: [(id: UUID, title: String, workspacePath: String?, activeGoal: String?)] = [
+            (ownerId, "Adopter", workspace.path, nil)
+        ]
+        let rescanned = WorkspaceInventory.scan(root: root, conversations: liveConversations)
+        let orphanNames = Set(rescanned.filter(\.isOrphan).map(\.name))
+        #expect(!orphanNames.contains("will-be-adopted"))
+        #expect(rescanned.first(where: { $0.name == "will-be-adopted" })?.ownerConversationId == ownerId)
+    }
+
     @Test("directorySize sums a small tree")
     func directorySizeSumsTree() throws {
         let root = try makeTempRoot()
@@ -88,6 +112,26 @@ struct WorkspaceInventoryTests {
 
         let size = WorkspaceInventory.directorySize(root)
         #expect(size >= 3000, "expected at least the raw byte count of both files (allocation can round up, never down)")
+    }
+}
+
+/// #126 review finding, round 1: the temp roots used above are never under `$HOME`, so the
+/// tilde-path assertion in `scanMatchesOwnerAcrossPathVariants` silently skips itself. Exercise
+/// `standardizedPath` directly instead, independent of where the test happens to run.
+@Suite("WorkspaceInventory.standardizedPath")
+struct StandardizedPathTests {
+    @Test("tilde-expands, strips a trailing slash, and resolves .. segments to the same path")
+    func normalizesEquivalentVariants() {
+        let home = NSHomeDirectory()
+        let canonical = "\(home)/.iris/workspaces/foo"
+        let tildeForm = "~/.iris/workspaces/foo"
+        let trailingSlash = "\(home)/.iris/workspaces/foo/"
+        let dotDotForm = "\(home)/.iris/workspaces/bar/../foo"
+
+        let expected = WorkspaceInventory.standardizedPath(canonical)
+        #expect(WorkspaceInventory.standardizedPath(tildeForm) == expected)
+        #expect(WorkspaceInventory.standardizedPath(trailingSlash) == expected)
+        #expect(WorkspaceInventory.standardizedPath(dotDotForm) == expected)
     }
 }
 
@@ -132,9 +176,68 @@ struct AppStateDeleteWorkspaceTests {
                                     sizeBytes: nil, ownerConversationId: convId, ownerTitle: "Working goal",
                                     ownerHasActiveGoal: true)
 
-        let outcome = try app.deleteWorkspace(entry, trash: moveAside)
+        let outcome = try app.deleteWorkspace(entry, workspacesRoot: root, trash: moveAside)
         #expect(outcome == .refusedActiveGoal(title: "Working goal"))
         #expect(FileManager.default.fileExists(atPath: workspace.path), "the directory must not be touched on refusal")
+    }
+
+    @Test("a goal started after the snapshot still blocks deletion (live re-check, not the stale entry)")
+    func refusesWhenGoalStartsAfterSnapshot() throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workspace = root.appendingPathComponent("became-active")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+
+        let app = try makeApp()
+        let convId = UUID()
+        app.createNewConversation(id: convId)
+        if let idx = app.conversations.firstIndex(where: { $0.id == convId }) {
+            app.conversations[idx].title = "Newly working"
+            app.conversations[idx].workspacePath = workspace.path
+        }
+
+        // A snapshot taken while no goal was active yet — exactly what a Settings row rendered
+        // before the goal started would carry.
+        let staleEntry = WorkspaceEntry(url: workspace, name: workspace.lastPathComponent, modifiedAt: nil,
+                                         sizeBytes: nil, ownerConversationId: convId, ownerTitle: "Newly working",
+                                         ownerHasActiveGoal: false)
+
+        // A goal starts on that conversation AFTER the snapshot, before the delete call arrives.
+        if let idx = app.conversations.firstIndex(where: { $0.id == convId }) {
+            app.conversations[idx].activeGoal = "ship it"
+        }
+
+        let outcome = try app.deleteWorkspace(staleEntry, workspacesRoot: root, trash: moveAside)
+        #expect(outcome == .refusedActiveGoal(title: "Newly working"))
+        #expect(FileManager.default.fileExists(atPath: workspace.path), "must not be deleted once the goal is live-active, regardless of the stale snapshot")
+    }
+
+    @Test("a workspace adopted after the snapshot still gets owner bookkeeping, even though the snapshot said orphan")
+    func adoptedWorkspaceGetsBookkeepingDespiteStaleOrphanSnapshot() throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workspace = root.appendingPathComponent("adopted")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+
+        let app = try makeApp()
+        let convId = UUID()
+        app.createNewConversation(id: convId)
+        // No workspacePath yet at snapshot time — this entry legitimately scanned as an orphan.
+        let orphanSnapshot = WorkspaceEntry(url: workspace, name: workspace.lastPathComponent, modifiedAt: nil,
+                                             sizeBytes: nil, ownerConversationId: nil, ownerTitle: nil,
+                                             ownerHasActiveGoal: false)
+
+        // A conversation adopts the workspace after the snapshot but before delete is called.
+        if let idx = app.conversations.firstIndex(where: { $0.id == convId }) {
+            app.conversations[idx].title = "Adopter"
+            app.conversations[idx].workspacePath = workspace.path
+        }
+
+        let outcome = try app.deleteWorkspace(orphanSnapshot, workspacesRoot: root, trash: moveAside)
+        #expect(outcome == .trashed(workspace))
+        let owner = app.conversations.first(where: { $0.id == convId })
+        #expect(owner?.workspacePath == nil)
+        #expect(owner?.messages.last?.content == "Workspace \(workspace.path) was deleted from Settings")
     }
 
     @Test("a successful delete trashes the directory, clears workspacePath, and appends a system line")
@@ -157,7 +260,7 @@ struct AppStateDeleteWorkspaceTests {
                                     sizeBytes: nil, ownerConversationId: convId, ownerTitle: "Done goal",
                                     ownerHasActiveGoal: false)
 
-        let outcome = try app.deleteWorkspace(entry, trash: moveAside)
+        let outcome = try app.deleteWorkspace(entry, workspacesRoot: root, trash: moveAside)
         #expect(outcome == .trashed(workspace))
         #expect(!FileManager.default.fileExists(atPath: workspace.path), "the directory must be gone from its original location")
 
@@ -182,8 +285,56 @@ struct AppStateDeleteWorkspaceTests {
                                     sizeBytes: nil, ownerConversationId: nil, ownerTitle: nil,
                                     ownerHasActiveGoal: false)
 
-        let outcome = try app.deleteWorkspace(entry, trash: moveAside)
+        let outcome = try app.deleteWorkspace(entry, workspacesRoot: root, trash: moveAside)
         #expect(outcome == .trashed(workspace))
         #expect(!FileManager.default.fileExists(atPath: workspace.path))
+    }
+
+    @Test("deletion is refused when the entry's parent is not the workspaces root")
+    func refusesOutsideRoot() throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let outsideParent = root.appendingPathComponent("not-the-root")
+        try FileManager.default.createDirectory(at: outsideParent, withIntermediateDirectories: true)
+        let elsewhere = outsideParent.appendingPathComponent("elsewhere-workspace")
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+
+        let app = try makeApp()
+        let entry = WorkspaceEntry(url: elsewhere, name: elsewhere.lastPathComponent, modifiedAt: nil,
+                                    sizeBytes: nil, ownerConversationId: nil, ownerTitle: nil, ownerHasActiveGoal: false)
+
+        // workspacesRoot is `root`, but `elsewhere`'s parent is `outsideParent`, not `root`: a
+        // hand-built or stale entry must not be able to trash a path outside the boundary.
+        let outcome = try app.deleteWorkspace(entry, workspacesRoot: root, trash: moveAside)
+        #expect(outcome == .refusedOutsideRoot)
+        #expect(FileManager.default.fileExists(atPath: elsewhere.path))
+    }
+
+    @Test("deletion is refused when the entry IS the workspaces root itself, not a child of it")
+    func refusesTheRootItself() throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = try makeApp()
+        let entry = WorkspaceEntry(url: root, name: root.lastPathComponent, modifiedAt: nil,
+                                    sizeBytes: nil, ownerConversationId: nil, ownerTitle: nil, ownerHasActiveGoal: false)
+
+        let outcome = try app.deleteWorkspace(entry, workspacesRoot: root, trash: moveAside)
+        #expect(outcome == .refusedOutsideRoot)
+        #expect(FileManager.default.fileExists(atPath: root.path))
+    }
+
+    @Test("a workspace directly under the given root deletes normally")
+    func deletesWhenDirectlyUnderRoot() throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workspace = root.appendingPathComponent("directly-under-root")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+
+        let app = try makeApp()
+        let entry = WorkspaceEntry(url: workspace, name: workspace.lastPathComponent, modifiedAt: nil,
+                                    sizeBytes: nil, ownerConversationId: nil, ownerTitle: nil, ownerHasActiveGoal: false)
+
+        let outcome = try app.deleteWorkspace(entry, workspacesRoot: root, trash: moveAside)
+        #expect(outcome == .trashed(workspace))
     }
 }

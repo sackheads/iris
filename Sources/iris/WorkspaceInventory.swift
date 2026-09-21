@@ -25,6 +25,9 @@ struct WorkspaceEntry: Identifiable, Equatable, Sendable {
 enum WorkspaceDeletion: Equatable {
     case trashed(URL)
     case refusedActiveGoal(title: String)
+    /// The entry's parent is not `workspacesRoot` itself — a hand-built or stale `WorkspaceEntry`
+    /// must never be able to trash a directory outside the eligibility boundary (review finding).
+    case refusedOutsideRoot
 }
 
 enum WorkspaceInventory {
@@ -85,9 +88,12 @@ enum WorkspaceInventory {
         return total
     }
 
-    /// Tilde-expands, strips a trailing separator, and standardizes so `~/.iris/workspaces/foo`,
-    /// `/Users/x/.iris/workspaces/foo/`, and the plain resolved path all compare equal.
-    private static func standardizedPath(_ path: String) -> String {
+    /// Tilde-expands, strips a trailing separator, resolves `..` segments, and standardizes so
+    /// `~/.iris/workspaces/foo`, `/Users/x/.iris/workspaces/foo/`, `.../workspaces/bar/../foo`, and
+    /// the plain resolved path all compare equal. Internal (not private) so `AppState.deleteWorkspace`
+    /// can match a live conversation's `workspacePath` against an entry's URL the same way `scan`
+    /// matches an owner, and so it can be unit-tested directly.
+    static func standardizedPath(_ path: String) -> String {
         var expanded = (path as NSString).expandingTildeInPath
         if expanded.count > 1, expanded.hasSuffix("/") { expanded.removeLast() }
         return URL(fileURLWithPath: expanded).standardizedFileURL.path

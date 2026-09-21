@@ -638,25 +638,47 @@ class AppState {
     /// Deletes a goal workspace listed by `WorkspaceInventory.scan` (#126, Settings → Advanced).
     ///
     /// Refuses while the owning conversation's goal is still active (ruling 3: the goal is using
-    /// it) — the caller is expected to show `reason` and disable the row rather than call this at
-    /// all, but the check is repeated here so a stale UI snapshot can't slip a delete through.
+    /// it). This is a LIVE re-check, not the entry's snapshot: `entry.ownerConversationId` and
+    /// `.ownerHasActiveGoal` reflect whenever the caller last scanned, and a goal can start — or a
+    /// different conversation can adopt the same workspace path — between that scan and this call
+    /// (review finding, round 1). Both the refusal and the bookkeeping below therefore look up the
+    /// CURRENT owner by matching `workspacePath` against `entry.url`, never trusting the snapshot's
+    /// owner fields for anything but what the UI displays before the user acts.
+    ///
+    /// Also refuses anything whose parent directory is not exactly `workspacesRoot`: a hand-built
+    /// or stale `WorkspaceEntry` must never be able to trash a path outside the eligibility
+    /// boundary, regardless of what fields it carries.
+    ///
     /// Otherwise the directory is moved to the Trash, never `removeItem`d, so a mistake is
-    /// recoverable; the owning conversation (if any) has its `workspacePath` cleared and gets a
-    /// system line, so nothing is left pointing at a directory that is gone.
+    /// recoverable; the live owning conversation (if any) has its `workspacePath` cleared and gets
+    /// a system line, so nothing is left pointing at a directory that is gone.
     ///
     /// `trash` is injectable so a test whose sandbox can't reach the real Trash can substitute a
-    /// plain move.
+    /// plain move; `workspacesRoot` is injectable so a test can use a temp root.
     @discardableResult
-    func deleteWorkspace(_ entry: WorkspaceEntry, trash: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0) }) throws -> WorkspaceDeletion {
-        if entry.ownerHasActiveGoal, let ownerId = entry.ownerConversationId,
-           let idx = conversations.firstIndex(where: { $0.id == ownerId }) {
+    func deleteWorkspace(
+        _ entry: WorkspaceEntry,
+        workspacesRoot: URL = IrisPaths.default.workspacesDir,
+        trash: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0) }
+    ) throws -> WorkspaceDeletion {
+        guard entry.url.deletingLastPathComponent().standardizedFileURL == workspacesRoot.standardizedFileURL else {
+            return .refusedOutsideRoot
+        }
+
+        let entryPath = WorkspaceInventory.standardizedPath(entry.url.path)
+        let liveOwnerIdx = conversations.firstIndex(where: { conv in
+            guard let path = conv.workspacePath, !path.isEmpty else { return false }
+            return WorkspaceInventory.standardizedPath(path) == entryPath
+        })
+
+        if let idx = liveOwnerIdx, conversations[idx].activeGoal != nil {
             return .refusedActiveGoal(title: conversations[idx].title)
         }
 
         try trash(entry.url)
 
-        if let ownerId = entry.ownerConversationId,
-           let idx = conversations.firstIndex(where: { $0.id == ownerId }) {
+        if let idx = liveOwnerIdx {
+            let ownerId = conversations[idx].id
             conversations[idx].workspacePath = nil
             markChanged(ownerId, .metadata)
             appendMessage(role: .system, content: "Workspace \(entry.url.path) was deleted from Settings", to: ownerId)
