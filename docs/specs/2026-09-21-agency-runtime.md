@@ -1,0 +1,143 @@
+# Agency: Runtime (deliverable 3 of #187) — Design
+
+**Status:** APPROVED IN PRINCIPLE 2026-09-21 (morning review; §0 records the decisions); nothing here is implemented.
+**Issue:** #187 (`docs/agency/agency.md` deliverable 3)
+**Builds on:** #249 (job model and ledger spec), #252 (deliverable 1), #253 (deliverable 2). Facts about the code as it stands after #253: `.superpowers/briefs/agency-d3-facts.md` in the main checkout.
+**Does not touch:** the quiet window and self-write filter (D4), the pinned main conversation's briefing and read tools (D5), native surfaces (D6).
+
+## 0. Decisions (settled 2026-09-21 morning)
+
+Each was proposed with a recommendation; the author's answer is recorded in bold.
+
+1. **Numeric defaults.** Per-run token budget 200,000; per-job daily budget 1,000,000; global daily background budget 3,000,000; breaker 6 runs per job per hour; retry backoff 1 m, 5 m, 25 m then pause; per-run wall-clock timeout 10 minutes; `replay` catch-up cap 5. All become `ConfigManager` keys with Settings → Advanced steppers, so the defaults only have to be sane, not final. **Accepted, on two conditions: every number is tweakable (globally in Settings and per job in `JobPolicy`), and usage is observable** — `/jobs` shows each job's tokens today against its budget and the global figure ("620k / 1M (62%)"), the breaker count for the last hour, and the retry attempt; `list_jobs` carries the same numbers; a budget or breaker pause card states the figure that tripped it. §9 is amended accordingly.
+2. **What a read-only run may not call.** Recommendation: deny `write_file`, `edit_file`, `create_skill`, `schedule_job`, `register_directory_watcher`, `send_to_session`, `delegate_task`/`invoke_subagent`, any MCP tool not marked read-only, and `run_command` on the host; allow `run_command` only when sandboxed. Everything else (read, search, list, memory search, web search) stays. A denied call fails closed exactly like an approval would (§7 of the D1/D2 spec), so the ledger shows it. **Accepted.** For the record, the non-read-only run exists: a job created with `profile: mutating` keeps the full tool surface, always runs in the `apple/container` VM, and still fails closed on anything outside the user's allowlist; it is creatable in this slice (§4).
+3. **"Approve and run" scope.** Recommendation: approving re-dispatches exactly the one tool call that was blocked (its persisted name and arguments), as its own tracked run in the destination conversation, and posts a follow-up card. It does not resume the model or continue the job's turn. If you want "approve and let the job finish", that is a model turn with the approval pre-granted and is a bigger, riskier design; I recommend against it in this slice. **Accepted.**
+4. **Gate substrate.** Recommendation: built-in gates only need no container; a script gate requires the `apple/container` runtime and is refused at creation when it is not installed. The runtime API grows a timeout and a mount list (today: one mount, no timeout), which is a prerequisite task, not a nice-to-have. **Accepted.**
+5. **`iris --run-job`** opens your real store and uses the real model client, with approvals fail-closed, exactly like a scheduled fire. It prints the ledger row. Recommendation: yes, with a `--dry-run` that evaluates only the gate. **Accepted.** What it is for: measuring a job before trusting it — the epic's "nothing lands unmeasured": run a new job or gate on demand and read its ledger row (tokens, status, gate signal) without waiting for its schedule; feed the eval harness a gate's false-positive rate over many runs; and debug a misbehaving job from a terminal with the same fail-closed rules it has unattended. It is a measurement and debugging tool, not a way to run jobs in production.
+
+## 1. Overview
+
+Deliverables 1 and 2 made a job a real thing: stored, scheduled, run in a hidden conversation, recorded, reported as a card. What they left out is everything that keeps an unattended system honest over time: a job must not spend without limit, must not run concurrently with itself or thrash after a failure, must stop cleanly when it needs a human, must not wake a sleeping machine into a stampede, and must be measurable before it is trusted. That is this deliverable. Its shape is a set of **policies on the job** (`JobPolicy`), a **guard in the runner** that enforces them before, during and after a run, a **persisted blocked call** that a card can approve, **gates** that decide whether a run is even needed, and a **headless entry** to run one job on demand.
+
+## 2. Scope
+
+In: `JobPolicy` (overlap, catch-up, retry, budgets, timeout); the runner's in-flight tracking covering both scheduled and watcher fires; `queue`; breaker; per-run, per-job-daily and global-daily token budgets; retry with backoff and pause; sleep assertion during a run; read-only tool-surface narrowing; the persisted blocked call and "Approve and run"; gates (built-in and script) and the `.poll` trigger becoming creatable; `mutating` jobs becoming creatable; `iris --run-job`; the Settings steppers for the numbers; docs.
+
+Out: quiet window, self-write filter, D5, D6, cost in currency (the `costMicros` column stays NULL), a job editor UI beyond the steppers.
+
+## 3. The policy on a job
+
+```swift
+struct JobPolicy: Codable, Equatable, Sendable {
+    enum Overlap: String, Codable, Sendable { case skip, queue }          // default skip
+    enum CatchUp: Codable, Equatable, Sendable { case coalesce, skip, replay(cap: Int) }   // default coalesce
+    var overlap: Overlap = .skip
+    var catchUp: CatchUp = .coalesce
+    var runTimeoutSeconds: Int = 600
+    var perRunTokenBudget: Int? = nil          // nil = the global default from ConfigManager
+    var dailyTokenBudget: Int? = nil           // per job per day; nil = global default
+    var maxRunsPerHour: Int? = nil             // breaker; nil = global default
+    var retry: Bool = true                      // failed runs retry with backoff
+    init(from decoder: Decoder) throws          // decodeIfPresent everywhere (invariant 1)
+}
+// Job gains:
+var policy: JobPolicy = JobPolicy()
+var retryAttempt: Int = 0                       // 0 = not retrying; reset on a completed run
+var queuedFire: Date? = nil                     // overlap .queue: one pending trigger, never more
+```
+
+Stored as one `policy TEXT` JSON column plus `retryAttempt INTEGER NOT NULL DEFAULT 0` and `queuedFire DATETIME` on `jobs`, migration `v10_job_policy` (additive; NULL policy decodes as the default). `schedule_job` gains optional `overlap`, `catch_up` (`coalesce|skip|replay:N`), `timeout_seconds`, `profile` (now accepting `mutating`); `/jobs` shows the policy in the table's trigger column when it is not the default.
+
+## 4. The runner enforces the policy
+
+`JobRunner` becomes the single gate for every fire, scheduled or watcher-driven; `JobScheduler`'s `firing` set is removed in favour of the runner's own `inFlight: Set<UUID>` so a watcher burst is covered too (this closes D2's deferral, ruling D2-R9).
+
+**Before a run** (`JobRunner.admit(job:reason:now:) -> Admission`), in this order, each producing a ledger row and a card where noted:
+1. Paused (`pausedReason != nil`) → dropped silently (the pause card already went out).
+2. In flight → `overlap == .skip`: one `interrupted` row "skipped: previous run still in progress" (as D2); `.queue`: set `queuedFire = now` if nil, no row; when the running run finishes the runner fires once more for the queued trigger.
+3. Breaker: runs started in the last hour ≥ `maxRunsPerHour` → pause with reason `"breaker: N runs in the last hour"`, one `interrupted` row, card.
+4. Daily budgets: today's `totalTokens` for the job ≥ its daily budget, or today's total across all jobs ≥ the global budget → pause with reason `"daily token budget reached (<job|global>)"`, one row, card. "Today" is the local calendar day.
+5. Gate (§7): built-in or script check; `gateSignal` recorded on the row; a `.poll` job whose gate says "unchanged" ends here with a `completed` row, outcome "gate: no change", **no card** (cards are for things that happened) — the row is still in `/jobs`.
+
+**During a run:** the engine gets a per-turn budget. `processInput` gains `turnBudget: TurnBudget?` (`maxTokens`, `deadline`); the model-round loop checks it before each model call and, when exceeded, ends the turn through the existing soft-stop path with the reason `"budget: <tokens|time> exceeded"`. The runner passes `perRunTokenBudget` and `now + runTimeoutSeconds`. The run's row then finishes `failed` with that reason. Around the whole run the runner holds `ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled], reason: "Iris job <name>")` and ends it when the run finishes or the deadline passes, whichever is first — the deadline is what caps the assertion.
+
+**Read-only narrowing:** the engine's tool-list builder takes the conversation's job profile (the runner stamps `Conversation.jobProfile: JobProfile?` on the background conversation; nullable column in v10) and omits the §0.2 denylist for `readOnly`; any call that still reaches a denied tool (a stale declaration, an MCP tool) fails closed like an approval and is recorded as a `BlockedToolCall` with `reason: .profile`. A `mutating` job's conversation is sandboxed (already enforced) and its allowlist is the user's normal one — no waiver mechanism in this slice.
+
+**After a run:**
+- `completed` → `retryAttempt = 0`; if `queuedFire != nil`, clear it and fire again.
+- `failed` (LLM error, soft stop, no reply, budget) with `retry` on → `retryAttempt += 1`; attempt 1–3 set `nextFireAt = now + backoff[attempt]` (1 m, 5 m, 25 m) and the card says "retrying in …"; attempt 4 → pause with reason `"failed 3 times; paused"`, card. `blockedOnApproval` never retries (a human is needed).
+- `interrupted` (app quit mid-run) → no retry; the launch sweep already marks it.
+- Every pause writes `pausedReason` and a card; `/jobs resume <name>` clears `pausedReason` and `retryAttempt` and recomputes the next fire (a new `/jobs` form; also `/jobs pause <name>`).
+
+## 5. Catch-up after sleep
+
+`JobScheduler.tick()` on wake (and on any tick where a schedule job's `nextFireAt` is more than one cadence in the past) applies the job's `catchUp`:
+- `coalesce` (default): today's behaviour — one fire now, reschedule from now.
+- `skip`: no fire; `nextFireAt` = the first occurrence strictly in the future.
+- `replay(cap)`: fire once per missed occurrence up to `cap`, one at a time through the runner's admission (so overlap and budgets still apply), then reschedule from the last replayed slot. Missed occurrences beyond the cap are dropped and counted on the first card as "N earlier occurrences skipped".
+`maxFiresPerTick` stays as the global stampede bound.
+
+## 6. The persisted blocked call and "Approve and run"
+
+D2 records only the blocked tool's name. This slice persists the call:
+
+```swift
+struct BlockedCall: Codable, Equatable, Sendable {
+    let toolName: String
+    let args: [String: JSONValue]     // exactly what the model sent
+    let cwd: String?
+    let reason: Reason                 // .approval | .profile
+    let at: Date
+}
+```
+`job_runs` gains `blockedCall TEXT` (JSON, v10); `EventCard` gains `blockedCall: BlockedCall?` and, when present, **renders the full call** — tool name and every argument (a command, a path, a URL, a body preview cut to 500 characters), never just the name — beside an **Approve and run** button and a **Dismiss** that acknowledges the row. An approval given without sight of the payload is worse than no button. **Vibecop still runs** on the persisted call when the card is built, and its verdict and reason are shown beside the button; a human click overrides a `DENY`, it does not skip the evaluation. (Review correction: the first draft skipped Vibecop "because the human approved".) `requestApproval`'s background branch and the profile denial both record the full call (the engine has `args` at the call site; `AppState.recordBackgroundDenial(call:)` replaces the name-only record).
+
+**Approve and run** (`JobRunner.runApproved(runId:)`): loads the row and its `BlockedCall`; refuses if the job is deleted or the call was already run (`approvedAt` column, v10); creates a new ledger row (`triggerKind = "approval"`, `parentRunId` column, v10) and a fresh hidden conversation titled `"<job> · approved <tool>"`; executes the single call through `IrisEngine.executeApprovedCall(_:conversationId:)` — a new internal entry that runs `executeToolWithHooks` with the approval **pre-granted for this call only** (a one-shot `approvedCalls: Set<UUID>` on `AppState` checked first in `requestApproval`), appends the tool result to that conversation as a system message, and finishes the row `completed` or `failed` with the result's first line as the outcome; then delivers a follow-up card to the same destination. The one-shot `approvedCalls` entry is consumed on read, not on completion, so a duplicated or retried dispatch cannot reuse it. The action runs with the job's sandbox setting; a `mutating` job's approved call therefore runs in the container.
+
+This is deliberately not "resume the job": the original turn is over, and the model's plan after the blocked call is unknowable. The card's outcome tells the user what the approved call did; if they want the job to continue, the next scheduled fire will.
+
+## 7. Gates
+
+```swift
+enum Gate: Codable, Equatable, Sendable {
+    case urlChanged(url: String)                    // HEAD: ETag / Last-Modified / Content-Length changed since last signal
+    case pathChanged(path: String)                  // mtime or size-and-hash of a file, or the newest mtime under a directory, changed
+    case script(command: String, mounts: [String], timeoutSeconds: Int)   // signal by stdout token, not exit code (below)
+}
+struct PollSpec { var schedule: Schedule; var gate: Gate }   // was `gate: String`; lenient decode maps an old string to .script(command:, mounts: [], timeoutSeconds: 60)
+```
+- Built-in gates run on the host with no model and no container; they read, never write. Their signal (the ETag, the mtime, the hash) is stored in `job_runs.gateSignal` and compared with the previous row's.
+- A script gate runs in the `apple/container` VM through `SandboxSessionManager` with the declared `mounts` (read-only bind mounts) and `timeoutSeconds`. **The verdict is a token on stdout's last line — `CHANGED` or `UNCHANGED` — not the exit code.** Exit codes are ambiguous here: `diff -q` returns 0 for identical and `grep -q` returns 0 for found, so any exit-code convention makes a plausible model-written gate fire every tick or never. A non-zero exit, a timeout, or a last line that is neither token is an error signal; three consecutive errors pause the job (reason `"gate failing"`). The rest of stdout (first 4,000 characters) is the gate's payload, passed through `InjectionGuard` under tag `gate_output`, and included in the run's prompt as untrusted context when the gate says `CHANGED`. `schedule_job`'s description states the token convention verbatim.
+- A gate script is reviewed once, at creation or edit, and then runs on every tick unattended for as long as the job exists. It is the only model-written code in the system that executes repeatedly with no further review; the sandbox, the read-only mounts and the timeout are the mitigation, and the spec says so here so nobody widens them casually.
+- Creating or editing a script gate (`schedule_job` with `gate_script`) is reviewed once by Vibecop (`toolName: "run_command"`, `details: <script>`, `inSandbox: true`); `DENY` refuses creation with the reason; `ESCALATE` asks the user in the creating conversation (the normal dialog — this is attended, the user is typing). Script gates are refused when the container runtime is not installed.
+- **Prerequisite:** `ContainerRuntime.createDetached` and `SandboxSessionManager.run` grow `mounts: [String]` and `timeoutSeconds: Int?`; the host-side `run_command` timeout that is currently dropped on the sandboxed branch starts being honoured too (a bug fix in its own right).
+
+`.poll` jobs become creatable: `schedule_job` with `gate_url`, `gate_path`, or `gate_script` (+ `gate_mounts`, `gate_timeout_seconds`) plus a schedule. `.schedule` jobs may also carry a gate (`PollSpec` is then just "schedule + gate"; the `Trigger.poll` case stays for clarity).
+
+## 8. `iris --run-job`
+
+`iris --run-job <id-or-name> [--dry-run] [--json]`: parsed in `main.swift` before the SwiftUI app starts; opens the **real** store (`ConversationStore.onDisk(at: IrisPaths.default.conversationsDB)`) with a real `LLMClient`, `autoApproveTools = false`, no `HeadlessMode`, no volatile defaults (so approvals fail closed exactly as unattended); refuses if the GUI app is running (a lock file beside the store, released on exit): GRDB's WAL would survive two writers, but `AppState` holds conversation state in memory and a CLI write behind a live app would desync the UI — so the CLI refuses rather than races. Runs `JobRunner.run` (or only the gate with `--dry-run`), waits for it, prints the ledger row (and the gate signal) as text or JSON, exits 0 for `completed`, 2 for `failed`/`blockedOnApproval`, 3 for a gate "unchanged", 1 for usage/lookup errors. The card is delivered like any run, so the Activity conversation shows it next time the app opens.
+
+## 9. Settings, commands, and observability
+
+Observability (§0.1): `/jobs` shows per job `tokens today <used> / <budget> (<pct>%)`, `runs last hour <n> / <max>`, and `retry <attempt>/3` when non-zero, plus a footer line with the global daily figure; the same numbers appear in `list_jobs`; every budget or breaker pause card names the figure that tripped it. The queries are the ledger sums already required for admission, so this costs nothing extra.
+
+Settings → Advanced gains steppers for the five global numbers in §0.1 (`ConfigManager` keys `JOB_PER_RUN_TOKEN_BUDGET`, `JOB_DAILY_TOKEN_BUDGET`, `JOB_GLOBAL_DAILY_TOKEN_BUDGET`, `JOB_MAX_RUNS_PER_HOUR`, `JOB_RUN_TIMEOUT_SECONDS`), following the #208 pattern. `/jobs` gains `pause <name>`, `resume <name>`, and `run <name>` (fires now through admission, in-app). `list_jobs` includes `pausedReason` and the policy; `get_job_run` includes `gateSignal` and `blockedCall`.
+
+## 10. Testing (headless, Swift Testing)
+
+- Pure: `JobPolicy` lenient decode; admission order (paused → in flight → breaker → budgets → gate) as a table-driven test over a fake ledger; backoff table; catch-up arithmetic for all three modes with a fixed clock; built-in gate comparisons (ETag change, mtime change, hash change, no change); denylist membership.
+- Ledger: `runsStarted(jobId:since:)`, `tokensToday(jobId:)`, `tokensToday()` with local-day boundaries (fixed calendar); v9→v10 migration fixture; `BlockedCall` round trip; `approvedAt`/`parentRunId`.
+- Engine-level (D2's `JobRunnerTests` harness): a scripted run that exceeds the per-run budget ends via the soft-stop path with the budget reason; a failed run schedules a retry and the card says so; a fourth failure pauses; overlap `queue` fires once more after the run; a watcher-driven fire while in flight is skipped through the runner (regression for D2-R9); the breaker pauses on the seventh run in an hour; a read-only run calling `write_file` is blocked with `reason: .profile` and the card names it; "Approve and run" executes exactly the persisted call once, refuses a second approval, and posts a follow-up card; the sleep assertion is taken and released (inject the activity API behind a protocol).
+- Gate: script gate through a fake `ContainerRuntime` (the protocol seam already exists) asserting mounts, timeout, exit-code mapping, and `InjectionGuard` tagging; built-in gates against temp files and a local `URLProtocol` stub.
+- `--run-job`: a test-only entry that takes an injected store and client, asserting exit codes and the JSON shape; the lock-file refusal.
+- On-screen (by you, with the app): a one-minute job with a `write_file` prompt in read-only profile → card names the blocked call → Approve and run → second card with the file written; `/jobs pause`/`resume`.
+
+## 11. Rulings made in this proposal (for §0 you decide the numbers; these are structure)
+
+1. Overlap tracking moves from the scheduler to the runner so watcher fires are covered — cost if wrong: the scheduler loses a little locality; the alternative leaves watch jobs able to overlap themselves.
+2. Budgets are enforced from ledger sums, not an in-memory counter — cost if wrong: one extra query per admission; the alternative loses state across launches.
+3. "Approve and run" re-dispatches the persisted call and never resumes the model — cost if wrong: a job whose plan needed the call's result does not continue until its next fire.
+4. A gate "unchanged" writes a row but no card — cost if wrong: a quiet job is only visible in `/jobs`; the alternative floods the Activity conversation every cadence.
+5. `--run-job` refuses while the GUI is running — cost if wrong: you quit the app to measure a job; the alternative risks two writers on the store.
+6. One additive migration `v10_job_policy` holds every new column — cost if wrong: none; additive.
