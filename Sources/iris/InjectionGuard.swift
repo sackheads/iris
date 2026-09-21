@@ -34,6 +34,15 @@ public struct InjectionGuard {
     /// site treats it exactly like `safe` for wrapping and caching (earlier tiers already ran).
     enum TierVerdict { case safe, malicious, error, skipped }
 
+    /// The tier verdict for one payload, *before* the `<untrusted_context>` wrapper is applied
+    /// (#235). `sanitize` is `classify` + wrapping; callers that score many small payloads and
+    /// re-assemble them themselves — `SearchResultFilter`, scoring one search result at a time —
+    /// need the verdict without a wrapper per item.
+    enum GuardOutcome: Equatable, Sendable {
+        case passed(clean: String)      // tier-1-normalized text, unwrapped
+        case blocked(marker: String)    // the tier-2 or tier-3 block marker, unwrapped
+    }
+
     /// Tier-2/3 verdicts are memoized per content for the process lifetime (#130): the static
     /// `USER.md` / `AGENTS.md` were paying a tier-3 cloud round trip on every turn. Bounded LRU;
     /// keyed on the content and everything that decides the verdict (see `cacheKey`).
@@ -42,19 +51,19 @@ public struct InjectionGuard {
 
     private final class SanitizationCache: @unchecked Sendable {
         private let lock = NSLock()
-        private var entries: [String: String] = [:]
+        private var entries: [String: GuardOutcome] = [:]
         private var order: [String] = []   // least recently used first
         private let capacity: Int
         init(capacity: Int) { self.capacity = capacity }
 
-        func get(_ key: String) -> String? {
+        func get(_ key: String) -> GuardOutcome? {
             lock.lock(); defer { lock.unlock() }
             guard let value = entries[key] else { return nil }
             if let i = order.firstIndex(of: key) { order.remove(at: i); order.append(key) }
             return value
         }
 
-        func set(_ key: String, _ value: String) {
+        func set(_ key: String, _ value: GuardOutcome) {
             lock.lock(); defer { lock.unlock() }
             if entries.updateValue(value, forKey: key) == nil {
                 order.append(key)
@@ -197,6 +206,25 @@ public struct InjectionGuard {
                                 protectionEnabled: Bool? = nil,
                                 tier2ModelsDir: URL? = nil,
                                 tier3ModelsDir: URL? = nil) async -> String {
+        let source = sanitizeSourceLabel(contextTag)
+        switch await classify(rawInput, contextTag: contextTag, maxTier: maxTier,
+                              protectionEnabled: protectionEnabled,
+                              tier2ModelsDir: tier2ModelsDir, tier3ModelsDir: tier3ModelsDir) {
+        case .passed(let clean): return wrap(clean, source: source)
+        case .blocked(let marker): return wrapBlocked(marker, source: source)
+        }
+    }
+
+    /// The same tier pipeline without the `<untrusted_context>` wrapper (#235). `sanitize` is
+    /// exactly this plus `wrap`/`wrapBlocked`; all tiering, caching and fail-closed behaviour
+    /// lives here. Per-item callers (`SearchResultFilter`) use it so ten search results are scored
+    /// as ten prompts instead of one concatenated blob — the whole-output shape scored 0.94+ and
+    /// blocked every result. Parameters are `sanitize`'s; see its doc comment for each seam.
+    static func classify(_ rawInput: String, contextTag: String = "",
+                         maxTier: SanitizationTier = .tier1_structural,
+                         protectionEnabled: Bool? = nil,
+                         tier2ModelsDir: URL? = nil,
+                         tier3ModelsDir: URL? = nil) async -> GuardOutcome {
         let __turnID = PerformanceProfiler.currentTurnID
         let __start = MonotonicClock.nowMs()
         defer {
@@ -218,14 +246,14 @@ public struct InjectionGuard {
         let clean = measureSpanSync("guard.tier1") { executeTier1(rawInput) }
 
         if maxTier == .tier1_structural {
-            return wrap(clean, source: source)
+            return .passed(clean: clean)
         }
 
         // Headless `--bench` runs skip the model-backed tiers: the aux models aren't provisioned
         // and would only add nondeterministic latency to a benchmark. Tier 1 structural
         // sanitization still applies. In-process flag by design — see HeadlessMode.
         if HeadlessMode.isEnabled {
-            return wrap(clean, source: source)
+            return .passed(clean: clean)
         }
 
         let key = cacheKey(clean: clean, source: source, maxTier: maxTier, protectionEnabled: protectionEnabled,
@@ -236,12 +264,12 @@ public struct InjectionGuard {
         }
 
         // Tier 2: Local Token-Classification (CoreML/ONNX) — evaluates the unwrapped content.
-        let tier2 = await measureSpan("guard.tier2") { await executeTier2CoreML(clean, protectionEnabled: protectionEnabled, provisioning: tier2ProvisioningResult) }
+        let tier2 = await measureSpan("guard.tier2") { await executeTier2CoreML(clean, protectionEnabled: protectionEnabled, provisioning: tier2ProvisioningResult, source: source) }
         switch tier2 {
         case .error:
-            return wrapBlocked("[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]", source: source)
+            return .blocked(marker: "[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]")
         case .malicious:
-            let blocked = wrapBlocked("[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]", source: source)
+            let blocked = GuardOutcome.blocked(marker: "[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]")
             cache.set(key, blocked)
             return blocked
         case .safe, .skipped:
@@ -253,18 +281,18 @@ public struct InjectionGuard {
         }
 
         if maxTier == .tier2_coreML {
-            let wrapped = wrap(clean, source: source)
-            cache.set(key, wrapped)
-            return wrapped
+            let passed = GuardOutcome.passed(clean: clean)
+            cache.set(key, passed)
+            return passed
         }
 
         // Tier 3: Behavioral Canary Probe — also evaluates the unwrapped content.
         let tier3 = await measureSpan("guard.tier3") { await executeTier3Canary(clean, protectionEnabled: protectionEnabled, provisioning: tier3ProvisioningResult) }
         switch tier3 {
         case .error:
-            return wrapBlocked("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]", source: source)
+            return .blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]")
         case .malicious:
-            let blocked = wrapBlocked("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]", source: source)
+            let blocked = GuardOutcome.blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]")
             cache.set(key, blocked)
             return blocked
         case .safe, .skipped:
@@ -274,9 +302,9 @@ public struct InjectionGuard {
             // "tiers 1/2 are cheap enough to redo" was not true. What makes this safe is that
             // `provisioning` (computed once above) is now part of the cache key: the moment the
             // model file appears on disk, the key changes and the stale skip can never be served.
-            let wrapped = wrap(clean, source: source)
-            cache.set(key, wrapped)
-            return wrapped
+            let passed = GuardOutcome.passed(clean: clean)
+            cache.set(key, passed)
+            return passed
         }
     }
 
@@ -316,7 +344,10 @@ public struct InjectionGuard {
         String(raw.filter { $0 != "\"" && $0 != "<" && $0 != ">" && !$0.isNewline })
     }
     
-    private static func executeTier2CoreML(_ input: String, protectionEnabled: Bool? = nil, provisioning: Tier2Provisioning) async -> TierVerdict {
+    /// `source` is the provenance label only so the flagged log line can name it — a flat 0.9
+    /// threshold across every source is what makes false positives hard to attribute (#235);
+    /// per-source thresholds are #238.
+    private static func executeTier2CoreML(_ input: String, protectionEnabled: Bool? = nil, provisioning: Tier2Provisioning, source: String) async -> TierVerdict {
         guard protectionEnabled ?? ConfigManager.shared.enableAdvancedPromptInjectionProtection else {
             return .safe
         }
@@ -365,7 +396,7 @@ public struct InjectionGuard {
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier2, modelName: "CoreML", durationMs: durationMs, success: true)
 
             if probability > 0.9 {
-                print("[InjectionGuard] Tier 2 CoreML flagged injection with probability: \(probability)")
+                print("[InjectionGuard] Tier 2 CoreML flagged injection (source: \(source)) with probability: \(probability)")
                 return .malicious
             }
             return .safe
