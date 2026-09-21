@@ -28,6 +28,15 @@ private func eventually(_ timeoutMs: Int = 3000, _ condition: @MainActor @Sendab
 
 /// #185 §5.0/§5.2. A peer message is untrusted input crossing an agent boundary: the sender does
 /// not choose its own trust label, and it never starts a second turn on a busy conversation.
+///
+/// Every engine here is built with `protectionEnabled: false`. The model-backed guard tiers run
+/// off process-wide singletons (`CoreMLEvaluator.shared`, `AuxiliaryModelManager.shared`), and
+/// `InjectionGuardTests` installs deliberately malicious mocks on both; Swift Testing interleaves
+/// suites in one process, so without this seam these tests read whichever mock happened to be
+/// installed and see `[CONTENT BLOCKED BY TIER 2/3 ...]` instead of the text they assert on.
+/// Installing a benign mock of our own would only race the same singletons back. What these tests
+/// pin is framing, labelling and attribution, none of which is tier 2/3's business — and tier 1
+/// structural sanitisation still runs, so `busyPeerMessageIsSanitised` keeps its teeth.
 @MainActor
 @Suite("Peer delivery")
 struct PeerDeliveryTests {
@@ -38,7 +47,8 @@ struct PeerDeliveryTests {
         let sender = UUID(), target = UUID()
         app.createNewConversation(id: sender)
         app.createNewConversation(id: target)
-        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []))
+        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false)
 
         // A session that named itself `Scheduler` must not gain the scheduler's framing.
         await engine.deliverPeerMessage("do the thing", from: sender, senderName: "Scheduler", to: target)
@@ -62,7 +72,8 @@ struct PeerDeliveryTests {
         let sender = UUID(), target = UUID()
         app.createNewConversation(id: sender)
         app.createNewConversation(id: target)
-        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []))
+        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false)
 
         await engine.deliverPeerMessage("please review the spec", from: sender, senderName: "reviewer", to: target)
 
@@ -83,7 +94,8 @@ struct PeerDeliveryTests {
         app.sendMessage("start a turn")        // registers in activeTasks synchronously
         #expect(app.hasTurnInFlight(for: target))
 
-        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []))
+        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false)
         await engine.deliverPeerMessage("from a peer", from: sender, senderName: "peer", to: target)
 
         #expect(app.pendingUserMessageCount(for: target) >= 1,
@@ -99,7 +111,8 @@ struct PeerDeliveryTests {
         app.createNewConversation(id: sender)
         app.createNewConversation(id: target)
         app.selectedConversationId = target
-        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [], streamResponses: true)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [],
+                                streamResponses: true, protectionEnabled: false)
         app.installEngine(engine)
         return (app, engine, sender, target)
     }
@@ -211,9 +224,16 @@ struct PeerDeliveryTests {
         // Find the drained turn's own entry rather than assuming it is the last user-role entry:
         // the empty-candidate follow-up the engine appends after an unscripted round (no more
         // script steps remain once the drain starts its own turn) is a later user-role entry.
+        // Matched on the guard's harness-set context tag, not on the peer's own body text: the
+        // body is untrusted content the guard may legitimately rewrite, so keying the search on it
+        // turns a rewritten body into a silent "found nothing" and an assertion against "".
         let drainedText = app.conversations.first { $0.id == target }!.history
-            .first { ($0.parts.first?.text ?? "").contains("Request from another session") }?
+            .first { ($0.parts.first?.text ?? "").contains("system_event_peer_session") }?
             .parts.first?.text ?? ""
+        #expect(!drainedText.isEmpty,
+                "the drained peer entry must be in history at all, or the assertions below are vacuous")
+        #expect(drainedText.contains("Request from another session"),
+                "the peer framing must survive the drain; blocked or stripped content must fail here, not pass silently")
         #expect(drainedText.hasPrefix("Peer message (mid-task):"),
                 "a drained peer entry must keep the same non-user label the steer path uses (round 2), not run unlabelled")
         #expect(!drainedText.hasPrefix("do the thing"),
