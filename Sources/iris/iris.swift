@@ -915,7 +915,7 @@ actor IrisEngine {
                 }
                 
                 await MainActor.run {
-                    localState?.updateSubagentStatus(id: conversationId, status: "Thinking...")
+                    localState?.updateSessionPhase(conversationId, .thinking)
                 }
                 // Measure at the seam so every client (real, fake, future) is attributed
                 // uniformly, and the span includes engine-side call overhead. Each attempt is
@@ -948,10 +948,11 @@ actor IrisEngine {
                         returnedToolCalls: response.candidates?.first?.content?.parts.contains { $0.functionCall != nil } ?? false,
                         firstTokenMs: streamed ? outcome.firstTokenMs : nil))
                 modelRound += 1
-                await MainActor.run {
-                    localState?.updateSubagentStatus(id: conversationId, status: "Executing...")
-                }
-                
+                // No coarse "Executing..." mark here any more: this fires on every model round
+                // whether or not it actually returned a tool call. The session strip's `.executing`
+                // phase (with the tool name + detail) is now set at the point a tool call is
+                // actually about to run, in `executeToolWithHooks` below.
+
                 let afterModelDecision = await HookManager.shared.fireAfterModel(response: response, useSandbox: hooksSandbox)
                 if case .block(let reason) = afterModelDecision {
                     _ = await streamer.settle()
@@ -1688,6 +1689,15 @@ actor IrisEngine {
     private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool) async -> String {
         var execArgs: [String: JSONValue] = args
 
+        // Session strip activity (#217/#19): the detail is derived from the tool's own arguments
+        // by a pure mapping, never model-written free text, before anything about the call (hooks,
+        // sandbox, sanitization) can change what's shown.
+        if let conversationId {
+            let localState = state
+            let detail = SessionActivity.detail(tool: name, args: execArgs)
+            await MainActor.run { localState?.updateSessionPhase(conversationId, .executing(tool: name, detail: detail)) }
+        }
+
         // Command hooks run in the agent's environment (per principal policy), independent of this
         // specific tool's own host/sandbox routing.
         let hooksSandbox = conversationId == nil ? false : await hooksUseSandbox(conversationId: conversationId!, workspacePath: cwd)
@@ -1786,7 +1796,7 @@ actor IrisEngine {
                 guard let self else { return }
                 await self.pushToUI(role: .agent, text: text, conversationId: conversationId, id: id)
                 let localState = await self.state
-                await MainActor.run { localState?.updateSubagentStatus(id: conversationId, status: "Responding...") }
+                await MainActor.run { localState?.updateSessionPhase(conversationId, .responding) }
             },
             update: { [weak self] id, text, isFinal in
                 await self?.updateStreamedMessage(id: id, content: text, isFinal: isFinal, conversationId: conversationId)
