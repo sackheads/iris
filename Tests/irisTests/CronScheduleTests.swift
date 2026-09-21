@@ -71,9 +71,28 @@ struct CronScheduleTests {
         #expect(next == Self.date(2026, 9, 16, 9, 0, tz: tokyo))
     }
 
-    @Test("gives up after 366 days")
+    @Test("gives up when the expression can never match")
     func giveUp() {
         #expect(Self.cron("0 0 30 2 *").next(after: Self.date(2026, 9, 16, 0, 0)) == nil)
+    }
+
+    @Test("DST fall back: neither pass through the repeated hour yields a fire at or before the start")
+    func dstFallBackRepeatedHour() {
+        // 2026-11-01 01:30 PDT — the FIRST of the two passes America/Los_Angeles makes through
+        // 01:00-02:00 that morning. Built from its UTC epoch, because the wall-clock components
+        // name both passes and going through them is exactly what this pins.
+        let after = Date(timeIntervalSince1970: 1_793_521_800)          // 2026-11-01T08:30:00Z
+        let next = Self.cron("*/15 * * * *").next(after: after)
+        #expect(next.map { $0 > after } == true)
+        #expect(next == Date(timeIntervalSince1970: 1_793_522_700))     // 08:45Z = 01:45 PDT
+
+        // And from the SECOND pass, whose wall clock reads 01:30 too. Flooring through
+        // wall-clock components resolved that back to the first pass and handed back a fire an
+        // hour in the past; flooring the instant itself cannot.
+        let afterPST = Date(timeIntervalSince1970: 1_793_525_400)       // 2026-11-01T09:30:00Z
+        let nextPST = Self.cron("*/15 * * * *").next(after: afterPST)
+        #expect(nextPST.map { $0 > afterPST } == true)
+        #expect(nextPST == Date(timeIntervalSince1970: 1_793_526_300))  // 09:45Z = 01:45 PST
     }
 
     @Test("decodes with defaults when fields are absent")

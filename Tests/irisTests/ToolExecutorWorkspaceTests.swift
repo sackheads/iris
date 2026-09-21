@@ -76,18 +76,25 @@ struct ToolExecutorWorkspaceTests {
         var executor = ToolExecutor()
         executor.jobToolsProvider = { JobTools(ledger: store.ledger, watchers: watchers) }
         let args: [String: JSONValue] = ["path": .string(tmp.path), "instructions": .string("first")]
+        let firstConversation = UUID()
+        let secondConversation = UUID()
 
-        _ = await executor.execute(name: "register_directory_watcher", args: args)
+        _ = await executor.execute(name: "register_directory_watcher", args: args,
+                                   conversationId: firstConversation)
         let firstJob = try #require(try store.ledger.jobs().first)
+        #expect(firstJob.createdInConversationId == firstConversation)
         let second = await executor.execute(
             name: "register_directory_watcher",
-            args: ["path": .string(tmp.path), "instructions": .string("second")])
+            args: ["path": .string(tmp.path), "instructions": .string("second")],
+            conversationId: secondConversation)
 
         let jobs = try store.ledger.jobs()
         #expect(jobs.count == 1)                      // one directory, one job
         #expect(jobs.first?.id == firstJob.id)        // the same job, rewritten
         #expect(jobs.first?.name == firstJob.name)
         #expect(jobs.first?.prompt == "second")       // with the latest standing instructions
+        // and firing into the conversation the latest registration was made from, not the first.
+        #expect(jobs.first?.createdInConversationId == secondConversation)
         #expect(second.contains(tmp.path))
         #expect(await watchers.activeJobIds.count == 1)
         await watchers.stopAll()

@@ -1,14 +1,17 @@
 import Foundation
 
-/// Whether a job's turns run with tool access limited to read-only operations (`readOnly`) or may
-/// also mutate the filesystem/network/other state (`mutating`).
+/// Whether a job's turns are meant to run with tool access limited to read-only operations
+/// (`readOnly`) or may also mutate the filesystem/network/other state (`mutating`). Stored and
+/// refused on (`schedule_job` declines `mutating`) now; nothing narrows the tool surface of a
+/// `readOnly` job's turn yet, because deliverable 3 owns gates, budgets and approvals.
 enum JobProfile: String, Codable, Sendable {
     case readOnly
     case mutating
 }
 
-/// A filesystem watch trigger: fires after `path` has been quiet (no writes observed) for
-/// `quietWindowSeconds`, to coalesce bursts of edits into a single job run.
+/// A filesystem watch trigger on `path`. `quietWindowSeconds` is the window a burst of edits is
+/// meant to be coalesced into one run over: stored now, enforced by deliverable 4 — deliverable
+/// 1's watcher fires on the events it sees.
 struct FSWatch: Codable, Equatable, Sendable {
     var path: String
     var quietWindowSeconds: Int
@@ -28,7 +31,8 @@ struct FSWatch: Codable, Equatable, Sendable {
 }
 
 /// A polled trigger: on `schedule`'s cadence, runs `gate` (a shell command) and only fires the job
-/// when it exits zero.
+/// when it exits zero. Stored and scheduled on its cadence today, but nothing runs the gate and no
+/// tool creates one: polls are not creatable until deliverable 3 (gates).
 struct PollSpec: Codable, Equatable, Sendable {
     var schedule: Schedule
     var gate: String
@@ -180,6 +184,7 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
     var prompt: String
     var trigger: Trigger
     var profile: JobProfile
+    /// Where a fire's event card is delivered — used by event-card delivery, deliverable 2.
     var destinationConversationId: UUID?
     var createdInConversationId: UUID?
     var createdAt: Date

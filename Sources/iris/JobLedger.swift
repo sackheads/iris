@@ -20,6 +20,7 @@ final class JobLedger: Sendable {
     }
 
     /// How many rows the most recent `jobs()` call could not decode. Reset by each `jobs()` call.
+    /// Read by `/jobs`, deliverable 2.
     var unreadableJobCount: Int { skippedCount.withLock { $0 } }
 
     // MARK: Writes

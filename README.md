@@ -85,7 +85,7 @@ Iris provides some native primitives to the LLM:
 1.  `run_command`: Sandboxed execution of shell commands (runs in a lightweight Linux VM via `apple/container` if sandboxing is enabled). Host commands run with the user's login-shell PATH captured at launch, so pyenv/nvm/Homebrew shims resolve even though the command itself isn't run in a login shell.
 2.  `read_file`: Reads arbitrary local text files.
 3.  `write_file`: Writes/modifies local files.
-4.  `schedule_job`: Creates a recurring job in the conversation database: a five-field `cron` expression with an optional IANA `timezone`, an `intervalSeconds` interval, or the loose `minute`/`hour`/`weekday`/`weekdays` fields (`[2,3,4,5,6]` for every weekday). Jobs survive restarts and run read-only.
+4.  `schedule_job`: Creates a recurring job in the conversation database: a five-field `cron` expression with an optional IANA `timezone`, an `intervalSeconds` interval, or the loose `minute`/`hour`/`weekday`/`weekdays` fields (`[2,3,4,5,6]` for every weekday). Jobs survive restarts.
 5.  `set_workspace`: Automatically binds the active conversation to a project path.
 6.  `reflect`: Internal tool allowing the agent to write down its reasoning, plans, and self-evaluations during complex loops.
 7.  `goal_complete`: Escapes an active autonomous `/goal` loop.

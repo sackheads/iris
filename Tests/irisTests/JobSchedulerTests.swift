@@ -70,7 +70,7 @@ struct JobSchedulerTests {
         #expect(Set(fired.names) == ["a", "b", "c", "d"])
     }
 
-    @Test("a cron job with no match in a year is paused with a reason")
+    @Test("a cron job whose expression can never match again is paused with a reason")
     func pausesUnmatchable() async throws {
         let store = try ConversationStore.inMemory()
         let now = Date(timeIntervalSince1970: 1_000_000)
@@ -79,7 +79,7 @@ struct JobSchedulerTests {
         try store.ledger.upsert(job)
         _ = await s.tick()
         let back = try store.ledger.job(named: "never")!
-        #expect(back.pausedReason == "no matching time in the next year" && back.nextFireAt == nil)
+        #expect(back.pausedReason == "no matching time in the next four years" && back.nextFireAt == nil)
     }
 
     @Test("schedule(_:) computes the first fire for a cron job")

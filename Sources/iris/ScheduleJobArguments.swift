@@ -59,7 +59,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
         // D3 owns budgets and approvals; until then a job that may write is a job nobody is
         // watching, so the tool declines rather than quietly downgrading what was asked for.
         if profile?.lowercased() == JobProfile.mutating.rawValue.lowercased() {
-            return .failure("mutating jobs arrive with deliverable 3; create the job without a profile to run it read-only.")
+            return .failure("mutating jobs arrive with deliverable 3; create the job without a profile.")
         }
         switch alias.resolve(defaultTimeZone: defaultTimeZone) {
         case .failure(let failure):

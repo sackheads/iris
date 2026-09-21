@@ -21,7 +21,7 @@ struct ScheduleJobArgumentsTests {
     func refusals() {
         #expect(ScheduleJobArguments.parse(["hour": .int(9)]) == .failure("schedule_job needs a prompt."))
         let a = try? ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9), "profile": .string("mutating")]).get()
-        #expect(a?.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: []) == .failure("mutating jobs arrive with deliverable 3; create the job without a profile to run it read-only."))
+        #expect(a?.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: []) == .failure("mutating jobs arrive with deliverable 3; create the job without a profile."))
     }
 
     @Test("name is slugged and made unique against existing names")
@@ -76,6 +76,6 @@ struct ScheduleJobArgumentsTests {
                        trigger: .schedule(.cron(CronSchedule(expression: "0 0 30 2 *", timeZone: "UTC"))))
         dead.pausedReason = JobScheduler.unmatchableReason
         #expect(ScheduleJobArguments.resultSentence(for: dead)
-                == "Saved 'leap' but it will never fire: no matching time in the next year.")
+                == "Saved 'leap' but it will never fire: no matching time in the next four years.")
     }
 }

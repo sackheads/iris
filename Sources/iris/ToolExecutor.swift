@@ -210,9 +210,10 @@ struct ToolExecutor {
     /// directory being watched rather than the instructions, because that is what a user scanning
     /// the jobs list is looking for.
     ///
-    /// Re-registering a path already watched rewrites that job's instructions in place rather than
-    /// adding a second one: the model re-states a standing instruction often (a new turn, a
-    /// rephrasing), and two jobs on one directory means two watchers and two turns per save.
+    /// Re-registering a path already watched rewrites that job's instructions and destination in
+    /// place rather than adding a second one: the model re-states a standing instruction often (a
+    /// new turn, a rephrasing), and two jobs on one directory means two watchers and two turns per
+    /// save.
     private func registerWatcher(path: String, instructions: String, conversationId: UUID?) async -> String {
         guard let tools = await jobToolsProvider?() else { return "Jobs are not available yet." }
         do {
@@ -223,9 +224,12 @@ struct ToolExecutor {
                 return watch.path == path
             }
             if var existing = jobs.first(where: watchesPath) {
-                // An explicit "watch this" is also a request for it to be on.
+                // An explicit "watch this" is also a request for it to be on, and for the fires
+                // to land where it was asked for — the latest registration wins the destination
+                // the same way it wins the instructions.
                 existing.prompt = instructions
                 existing.enabled = true
+                existing.createdInConversationId = conversationId
                 job = existing
             } else {
                 job = Job(

@@ -124,11 +124,15 @@ struct CronSchedule: Codable, Equatable, Sendable {
         var cal = base
         cal.timeZone = tz
 
-        // Truncate to the start of the current minute by reconstructing from components rather
-        // than `date(bySetting:value:of:)`, which searches forward for the next occurrence of a
-        // component value and would over-skip when `date` has nonzero seconds.
-        let minuteComponents = cal.dateComponents([.year, .month, .day, .hour, .minute], from: date)
-        let flooredToMinute = cal.date(from: minuteComponents) ?? date
+        // Truncate to the start of the current minute on the instant itself. Not
+        // `date(bySetting:value:of:)`, which searches forward for the next occurrence of a
+        // component value and would over-skip when `date` has nonzero seconds — and not a
+        // round trip through wall-clock components either: on a DST fall-back day two instants
+        // an hour apart share one local time, and rebuilding from components collapses both
+        // onto the first, so a `date` inside the second pass would come back an hour early and
+        // the search would return a fire at or before it.
+        let epoch = date.timeIntervalSince1970
+        let flooredToMinute = Date(timeIntervalSince1970: epoch - epoch.truncatingRemainder(dividingBy: 60))
         var t = flooredToMinute.addingTimeInterval(60)
         let limit = date.addingTimeInterval(TimeInterval(Self.maxLookaheadDays) * 86_400)
 

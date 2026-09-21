@@ -153,8 +153,9 @@ actor IrisEngine {
         guard let activeId = targetId else { return }
 
         // #182 §6.2: every non-user arrival lands here — the scheduler, subagent post-backs, and
-        // the watcher (which passes no id and so targets whatever is selected). Stating the rule
-        // at this choke point covers all of them and cannot go stale when a fourth is added.
+        // the watcher, which now passes its job's `createdInConversationId` and only falls back to
+        // whatever is selected when the job has none. Stating the rule at this choke point covers
+        // all of them and cannot go stale when a fourth is added.
         let wasArchived = await MainActor.run { localState?.unarchiveConversation(activeId) ?? false }
 
         // Sanitize incoming system events (especially those from subagents) to prevent injection
@@ -380,16 +381,7 @@ actor IrisEngine {
         let schedulerState = state
         let jobLedger = await MainActor.run(resultType: JobLedger?.self, body: { schedulerState?.store.ledger })
         if let ledger = jobLedger {
-            let scheduler = JobScheduler(ledger: ledger)
-            await scheduler.setFireHandler { [weak self] job, _ in
-                // Deliverable 1: unchanged behaviour — a fire is a system event in the job's
-                // creating conversation, or the selected one. Deliverable 2 replaces this with
-                // the background JobRunner.
-                await self?.handleSystemEvent("Scheduled Job Triggered: \(job.prompt)", source: "Scheduler",
-                                              conversationId: job.createdInConversationId)
-            }
-            await scheduler.start()
-            self.jobScheduler = scheduler
+            await adoptJobScheduler(ledger: ledger)
         }
 
         await PluginManager.shared.loadAll()
@@ -881,7 +873,7 @@ actor IrisEngine {
         
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; a job that was due while the app was asleep runs once on wake. Jobs run read-only. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; a job that was due while the app was asleep runs once on wake. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -1598,6 +1590,36 @@ actor IrisEngine {
             }
         }
         return "Could not save the job."
+    }
+
+    /// Brings up the ledger-backed scheduler this engine fires jobs through. Split out of
+    /// `start()`, which also loads plugins, MCP servers and watchers, so the scheduler half can
+    /// be driven on its own.
+    ///
+    /// Reuses the scheduler this engine already has rather than building a second: `start()` runs
+    /// from `AppState.start()`, which `onAppear` can call more than once, and a `schedule_job`
+    /// before it may already have built one for writes. A fresh one each time would leave the
+    /// previous polling loop running with nothing holding a reference to stop it.
+    /// `JobScheduler.start()` cancels its own previous loop, so re-adopting stays one loop.
+    @discardableResult
+    func adoptJobScheduler(ledger: JobLedger) async -> JobScheduler {
+        let scheduler = jobScheduler ?? JobScheduler(ledger: ledger)
+        await scheduler.setFireHandler(fireHandler())
+        await scheduler.start()
+        jobScheduler = scheduler
+        return scheduler
+    }
+
+    /// What a due job does, as `start()` wires it into the scheduler. Deliverable 1: a fire is a
+    /// system event in the job's creating conversation, or the selected one if it has none, and a
+    /// fire is a normal turn with the full tool surface. Deliverable 2 replaces this with the
+    /// background JobRunner. Factored out of `start()` so a test can drive one real fire through
+    /// the engine without also starting the polling loop.
+    func fireHandler() -> JobScheduler.FireHandler {
+        { [weak self] job, _ in
+            await self?.handleSystemEvent("Scheduled Job Triggered: \(job.prompt)", source: "Scheduler",
+                                          conversationId: job.createdInConversationId)
+        }
     }
 
     /// The scheduler `schedule_job` writes through: the one `start()` built, or one made here over

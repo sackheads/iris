@@ -20,7 +20,7 @@ actor JobScheduler {
     /// The `pausedReason` written for a cadence whose `next(after:)` finds nothing inside
     /// `CronSchedule`'s lookahead — a job that can never run again (`0 0 30 2 *`) must stop being
     /// due every tick forever, and the user needs to be told why it went quiet.
-    static let unmatchableReason = "no matching time in the next year"
+    static let unmatchableReason = "no matching time in the next four years"
 
     private let ledger: JobLedger
     private let now: @Sendable () -> Date
