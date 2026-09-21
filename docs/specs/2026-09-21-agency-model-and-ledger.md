@@ -123,8 +123,13 @@ exists in the model so the ledger and the card can name it; creating one is refu
 jobs arrive with deliverable 3". When it does arrive, a mutating job always runs sandboxed; the
 policy is recorded here so nothing in D1/D2 assumes otherwise.
 
-In a read-only run the tool surface is the normal one. What makes it read-only is §7: any tool call
-that would need an approval fails closed instead of asking.
+In a read-only run of this slice the tool surface is the normal one, and §7's fail-closed approvals
+are the only enforcement — which is weaker than the name suggests: only `run_command`,
+`read_file` and `write_file` reach the approval path today, so `create_skill`, `update_soul`,
+`update_memory`, `save_fact`, `set_workspace` and their kin run ungated. The real read-only
+profile — tools omitted from the declaration and failed closed at dispatch, per the denylist in
+`docs/specs/2026-09-21-agency-runtime.md` §0.2 — is deliverable 3's. Until then "read-only" means
+"cannot pass an approval gate unattended", no more.
 
 ## 4. Storage: migration `v9_jobs`
 
@@ -316,8 +321,11 @@ A card never wakes a model turn. The destination's model context still has to kn
 the next time the user talks there, so delivery also appends one `Content` to the destination's
 `history`: role `user`, text `[Event] job <name> <status>: <outcome> (run <short id>)`. It is
 labelled as an event and passes `InjectionGuard` under tag `event_card`, tier 1 only: every field
-in it is harness-written except `outcome`, which is model-written by the run and is truncated to
-one line, so it gets the same treatment as the session strip's activity text.
+in it is harness-written or harness-normalised except `outcome` — `<name>` arrives through
+`schedule_job`'s arguments and is model-supplied, but `Job.slug(from:)` reduces it to an
+`[a-z0-9-]` allowlist of at most 32 characters, so no delimiter survives — and `outcome` is
+model-written by the run, truncated to one line, so it gets the same treatment as the session
+strip's activity text.
 
 If the destination has a turn in flight, the history line is **not** appended immediately: a
 `user` entry landing between a function call and its response corrupts the request. It goes into a
