@@ -38,12 +38,23 @@ enum BinaryResolver {
     }
 
     /// Resolution order: absolute/relative path as given > search dirs.
-    static func resolve(command: String, searchDirs: [String]? = nil) -> String? {
+    ///
+    /// `relativeTo` is the directory a relative command resolves against. It defaults to the
+    /// process working directory, which is what a shell would do — but taking it as a parameter
+    /// means a test can exercise relative resolution without calling
+    /// `changeCurrentDirectoryPath`, which is process-global and raced every other suite running
+    /// in parallel (#242).
+    static func resolve(command: String, searchDirs: [String]? = nil,
+                        relativeTo base: String = FileManager.default.currentDirectoryPath) -> String? {
         let fm = FileManager.default
         let expanded = (command as NSString).expandingTildeInPath
         if expanded.contains("/") {
-            guard fm.isExecutableFile(atPath: expanded) else { return nil }
-            return URL(fileURLWithPath: expanded).standardizedFileURL.path
+            // An absolute `expanded` ignores the base, which is the behaviour we want.
+            let path = URL(fileURLWithPath: expanded,
+                           relativeTo: URL(fileURLWithPath: base, isDirectory: true))
+                .standardizedFileURL.path
+            guard fm.isExecutableFile(atPath: path) else { return nil }
+            return path
         }
         for dir in searchDirs ?? defaultSearchDirs() {
             let candidate = "\(dir)/\(expanded)"
