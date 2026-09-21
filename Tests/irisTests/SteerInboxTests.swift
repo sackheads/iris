@@ -66,8 +66,10 @@ struct SteerInboxTests {
         app.enqueuePendingUserMessage(text: "b", attachments: [], for: id)
         app.enqueuePendingUserMessage(text: "c", attachments: [sampleAttachment], for: id)
         app.enqueuePendingUserMessage(text: "d", attachments: [], for: id)
-        #expect(app.takePendingSteers(for: id) == ["a", "b"])
-        #expect(app.takePendingSteers(for: id) == [])
+        let taken = app.takePendingSteers(for: id)
+        #expect(taken.map(\.text) == ["a", "b"])
+        #expect(taken.allSatisfy { !$0.isPeer }, "an ordinary enqueue must never be mistaken for a peer delivery")
+        #expect(app.takePendingSteers(for: id).isEmpty)
         #expect(app.pendingUserMessageCount(for: id) == 2)
     }
 

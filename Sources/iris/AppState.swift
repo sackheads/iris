@@ -58,6 +58,15 @@ struct TokenUsage: Codable, Equatable, Sendable {
     }
 }
 
+/// A2A-shaped identity a session advertises to its peers (#185 §4). Distinct from `title`, which
+/// is the user's name for the chat: the card is what the agent is doing *now* and changes as the
+/// work changes, where a title the user set deliberately should not.
+struct SessionCard: Codable, Equatable, Sendable {
+    var name: String
+    var description: String
+    var updatedAt: Date = Date()
+}
+
 struct Conversation: Identifiable, Codable, Hashable, Sendable {
     var id = UUID()
     var title: String
@@ -84,6 +93,16 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// checkpoints went starts to matter.
     var checkpointHistory: [CheckpointOutcome] = []
 
+    /// #185 -- what this session advertises to peers. Nil until the session describes itself.
+    var sessionCard: SessionCard?
+
+    /// #185 -- surfaced from the store column of the same name (`ConversationStore.swift`), which
+    /// every upsert already writes with `Date()`. Was write-only in memory before this: no
+    /// property decoded it back, so it existed only as an ORDER BY clause the search path used.
+    /// A later task orders the peer listing on it, hence the default rather than an optional --
+    /// "no recency signal yet" isn't a state that peer ordering should have to handle.
+    var updatedAt: Date = Date()
+
     init(id: UUID = UUID(), title: String, messages: [ChatMessage] = [], workspacePath: String? = nil, history: [Content] = [], tokenUsage: TokenUsage = TokenUsage(), activeGoal: String? = nil, messageCountSinceReflection: Int = 0, goalContract: GoalContract? = nil) {
         self.id = id
         self.title = title
@@ -97,7 +116,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -120,6 +139,10 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         // Invariant 1: a conversation persisted before D3 has no such key, and a throw here fails
         // the whole [Conversation] decode and drops every conversation.
         checkpointHistory = try container.decodeIfPresent([CheckpointOutcome].self, forKey: .checkpointHistory) ?? []
+        // Same invariant-1 shape as every other optional above: a legacy conversation has no
+        // sessionCard key at all, and a missing key must decode as "uncarded", not throw.
+        sessionCard = try container.decodeIfPresent(SessionCard.self, forKey: .sessionCard)
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         // Migration: a legacy conversation that had a goal (activeGoal) but no contract is
         // upgraded to a locked single-qualitative-criterion contract so in-flight goals survive.
         if goalContract == nil, let legacy = activeGoal {
@@ -244,6 +267,16 @@ class AppState {
     struct PendingUserMessage: Sendable {
         let text: String
         let attachments: [FileAttachment]
+        /// True only for a peer delivery (#185 §5) queued through `IrisEngine.deliverPeerMessage`'s
+        /// busy path. Defaults false so every pre-existing caller — the user's own `sendMessage`,
+        /// and every test that builds one directly — is unaffected. `takePendingSteers` carries
+        /// this through so the consumer never renders a peer entry under the user's own label.
+        let isPeer: Bool
+        init(text: String, attachments: [FileAttachment], isPeer: Bool = false) {
+            self.text = text
+            self.attachments = attachments
+            self.isPeer = isPeer
+        }
     }
     private var pendingUserMessages: [UUID: [PendingUserMessage]] = [:]
 
@@ -254,6 +287,18 @@ class AppState {
     /// flag: two turns can overlap on one conversation and the first to finish must not clear
     /// the second's.
     private var engineTurnCounts: [UUID: Int] = [:]
+
+    /// #185 §7 — which cascade a conversation's current turn belongs to. Absent means "not in a
+    /// cascade", i.e. a full budget.
+    ///
+    /// Two dictionaries, not one, because the allowance is a property of the CASCADE and the
+    /// membership is a property of the conversation. Holding `(id, remaining)` per conversation
+    /// looked equivalent and was not: every delivery copied the count into both sender and target,
+    /// after which the two drifted independently and each branch effectively got its own budget —
+    /// 2^N - 1 peer-woken turns from one user action at binary fan-out, which is exactly the F^N
+    /// §7 exists to forbid (whole-branch review, C1).
+    private var cascadeOf: [UUID: UUID] = [:]      // conversation -> the cascade it belongs to
+    private var cascadeBudget: [UUID: Int] = [:]   // cascade -> what is left of its allowance
 
     /// Called from `IrisEngine.processInput`'s own begin/end pair, which brackets every turn the
     /// engine runs — UI-initiated ones included, so a UI turn is counted by both sources.
@@ -302,21 +347,23 @@ class AppState {
         return activeTasks.values.contains { $0.conversationId == conversationId }
     }
 
-    func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID) {
-        pendingUserMessages[conversationId, default: []].append(PendingUserMessage(text: text, attachments: attachments))
+    func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID, isPeer: Bool = false) {
+        pendingUserMessages[conversationId, default: []].append(PendingUserMessage(text: text, attachments: attachments, isPeer: isPeer))
     }
 
     func pendingUserMessageCount(for conversationId: UUID) -> Int {
         pendingUserMessages[conversationId]?.count ?? 0
     }
 
-    /// The leading text-only entries, removed from the inbox, in arrival order. Stops at the first
-    /// entry with attachments so order is preserved. The engine calls this at every model round.
-    func takePendingSteers(for conversationId: UUID) -> [String] {
+    /// The leading text-only entries, removed from the inbox, in arrival order, paired with
+    /// whether each is a peer delivery (#185 §5) rather than something the user typed — the
+    /// engine must not present a peer entry under the user's own label. Stops at the first entry
+    /// with attachments so order is preserved. The engine calls this at every model round.
+    func takePendingSteers(for conversationId: UUID) -> [(text: String, isPeer: Bool)] {
         var queue = pendingUserMessages[conversationId] ?? []
-        var taken: [String] = []
+        var taken: [(text: String, isPeer: Bool)] = []
         while let first = queue.first, first.attachments.isEmpty {
-            taken.append(first.text)
+            taken.append((text: first.text, isPeer: first.isPeer))
             queue.removeFirst()
         }
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
@@ -329,17 +376,24 @@ class AppState {
     /// guard is what keeps the new turn from overlapping a still-running one, since both sources
     /// can fire for the same turn. The entries are removed from the inbox *before* `startTurn`,
     /// and `startTurn` only schedules a `Task`, so a re-entrant call cannot replay them.
+    ///
+    /// Round 3 (#185 §7): the join stops at an origin change, not just at the first attachment —
+    /// a peer entry must never merge into one turn with a user entry, since the merged turn would
+    /// need to carry one `isPeer` value for text that is not homogeneously one or the other.
     private func drainPendingUserMessages(for conversationId: UUID) {
         guard !hasTurnInFlight(for: conversationId),
               var queue = pendingUserMessages[conversationId], !queue.isEmpty else { return }
+        let leadIsPeer = queue[0].isPeer
         var texts: [String] = []
-        while let first = queue.first, first.attachments.isEmpty {
+        while let first = queue.first, first.attachments.isEmpty, first.isPeer == leadIsPeer {
             texts.append(first.text)
             queue.removeFirst()
         }
-        let next = texts.isEmpty ? queue.removeFirst() : PendingUserMessage(text: texts.joined(separator: "\n\n"), attachments: [])
+        let next = texts.isEmpty
+            ? queue.removeFirst()
+            : PendingUserMessage(text: texts.joined(separator: "\n\n"), attachments: [], isPeer: leadIsPeer)
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
-        startTurn(text: next.text, attachments: next.attachments, in: conversationId)
+        startTurn(text: next.text, attachments: next.attachments, in: conversationId, isPeer: next.isPeer)
     }
 
     /// Empties the inbox and returns how many messages were dropped (Stop, /stop, deletion).
@@ -725,6 +779,14 @@ class AppState {
         }
     }
 
+    /// #185 §6.3 — a session's self-description to its peers, written by `set_session_card`.
+    /// Advertised, not authoritative: `SessionDirectory.peers` never reads this for `isBusy`.
+    func setSessionCard(for conversationId: UUID, _ card: SessionCard) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
+        conversations[idx].sessionCard = card
+        markChanged(conversationId, .metadata)
+    }
+
     /// Bind a contracted goal's workspace at lock (#68), creating it when it does not exist.
     ///
     /// Returns the bound path, or nil when nothing could be bound — creation failing is not fatal:
@@ -909,8 +971,49 @@ class AppState {
         }
     }
 
+    func cascadeRemaining(for conversationId: UUID) -> Int {
+        guard let cascadeId = cascadeOf[conversationId],
+              let remaining = cascadeBudget[cascadeId] else { return ConfigManager.shared.maxSessionCascade }
+        return remaining
+    }
+
+    /// Records a peer delivery. Returns false when the sender's cascade is spent, in which case
+    /// nothing is delivered and the sender is told why (§5.3).
+    ///
+    /// The allowance travels with the CASCADE, not the branch: a sender fanning out to three peers
+    /// spends three of ONE budget, and so does a chain that walks away from it. One decrement of
+    /// one counter per delivery, read back through `cascadeOf` by every member — a per-branch
+    /// limit, or a per-conversation copy of a shared number, would still permit F^N turns.
+    @discardableResult
+    func beginPeerCascade(into targetId: UUID, from senderId: UUID) -> Bool {
+        // A sender not yet in a cascade starts one; its first delivery is what mints the id.
+        let cascadeId = cascadeOf[senderId] ?? UUID()
+        let remaining = cascadeBudget[cascadeId] ?? ConfigManager.shared.maxSessionCascade
+        guard remaining > 0 else { return false }
+        cascadeBudget[cascadeId] = remaining - 1
+        // Both ends are now in this cascade, reading the single counter above.
+        cascadeOf[senderId] = cascadeId
+        cascadeOf[targetId] = cascadeId
+        return true
+    }
+
+    /// A person typing begins a fresh cascade — the budget exists to bound unattended machine
+    /// chatter, not to ration a conversation the user is steering (§7).
+    ///
+    /// Drops this conversation's MEMBERSHIP only. It must not touch the shared counter: sibling
+    /// branches of the same cascade are still unattended machine chatter and keep their remaining
+    /// allowance (§7, "sibling branches keep their own remaining allowance").
+    func clearCascade(for conversationId: UUID) {
+        guard let cascadeId = cascadeOf.removeValue(forKey: conversationId) else { return }
+        // The counter outlives its last member otherwise: nothing else removes budget entries, so
+        // a long session would accumulate one per cascade it ever ran.
+        if !cascadeOf.values.contains(cascadeId) { cascadeBudget[cascadeId] = nil }
+    }
+
     func deleteConversation(_ id: UUID) {
         cancelTasks(for: id)
+        clearCascade(for: id)   // a deleted conversation is in no cascade; also prunes a spent budget
+
         Task { await SandboxSessionManager.shared.endSession(id) }
         purgeCommandTimings(forMessagesIn: id)   // before the messages go — they are the keys
         // Fix round 1 follow-up (#217/#19): mirrors `endEngineTurn`'s cleanup — a deleted
@@ -1132,11 +1235,25 @@ class AppState {
 
     /// Runs one user message as a turn: attachment processing, the engine call, and the
     /// reflection/rename triggers. The user bubble is already in the chat.
-    private func startTurn(text: String, attachments: [FileAttachment], in convId: UUID) {
+    ///
+    /// `isPeer` (round 3, #185 §7): true only when `drainPendingUserMessages` is starting a
+    /// drained PEER entry, not a person typing. The comment on `clearCascade` below is "a person
+    /// typing starts a fresh cascade" — a drained peer entry is not that, and clearing here
+    /// unconditionally was a cascade-cap bypass by timing: queue a peer message behind a busy
+    /// target, let the target's turn end, and the drain used to hand the target's cascade a full
+    /// fresh budget regardless of how much the cascade had already spent.
+    private func startTurn(text: String, attachments: [FileAttachment], in convId: UUID, isPeer: Bool = false) {
+        // #185 §7: a person typing starts a fresh cascade. Deliberately here and not in
+        // `runThinkingTask`, which also carries the `/goal` draft kickoff and every goal resume —
+        // machine-initiated continuations that would hand a cascade a new budget on each resume.
+        if !isPeer {
+            clearCascade(for: convId)
+        }
+
         if let idx = conversations.firstIndex(where: { $0.id == convId }) {
             conversations[idx].messageCountSinceReflection += 1
             markChanged(convId, .metadata)
-            
+
             let userMessagesCount = conversations[idx].messages.filter { $0.role == .user }.count
             let shouldRename = userMessagesCount == 3 && conversations[idx].messageCountSinceReflection == 3
             let shouldReflect = conversations[idx].messageCountSinceReflection >= 30
@@ -1146,8 +1263,13 @@ class AppState {
             }
 
             let attachmentsToProcess = attachments
-            let rawContent = text
-            
+            // Round 3: a drained peer entry must keep the same non-user label the mid-turn steer
+            // path uses (#185 §5.0, round 2) — reusing `IrisEngine.peerMidTaskLabel` rather than a
+            // third, parallel wording for the same "not user-authored" claim. `text` here already
+            // carries the peer framing and was already sanitised when it was enqueued
+            // (`deliverPeerMessage`'s busy branch); this only adds the outer label.
+            let rawContent = isPeer ? "\(IrisEngine.peerMidTaskLabel): \(text)" : text
+
             runThinkingTask(conversationId: convId) { [self] in
                 var promptForEngine = rawContent
                 var inlineParts: [Part] = []
@@ -1993,9 +2115,22 @@ class AppState {
     static let saveMaxWait: TimeInterval = 2.0
 
     /// Records one change and schedules a flush with the #62 debounce and max-wait.
+    ///
+    /// Also stamps `updatedAt` in memory (#185 §4, whole-branch review M3). The store column has
+    /// always been written on upsert, but nothing wrote the field back onto the live object, so
+    /// the in-memory value meant "when this was loaded or created" and the peer listing's
+    /// most-recently-active ordering was frozen at launch: a session working all day never moved,
+    /// and any conversation created later outranked every one loaded at startup. This is the one
+    /// place every persisted mutation already passes through, which is exactly what makes it the
+    /// right signal for "touched". Set directly on the element — routing it back through
+    /// `markChanged` would recurse without end.
     func markChanged(_ id: UUID, _ change: ConversationChange) {
-        pendingChanges[id, default: ChangeSet()].add(change)
         let now = Date()
+        // Not on `.deleted`: there is nothing left to stamp, and the row is on its way out.
+        if change != .deleted, let idx = conversations.firstIndex(where: { $0.id == id }) {
+            conversations[idx].updatedAt = now
+        }
+        pendingChanges[id, default: ChangeSet()].add(change)
         let dirtySince = firstDirtyAt ?? now
         firstDirtyAt = dirtySince
 

@@ -336,6 +336,12 @@ final class ConversationStore: Sendable {
                 t.add(column: "isArchived", .boolean)
             }
         }
+        // #185. Nullable: NULL reads back as nil, so every existing conversation loads uncarded.
+        m.registerMigration("v8_session_card") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "sessionCard", .text)
+            }
+        }
         return m
     }
 
@@ -529,6 +535,11 @@ final class ConversationStore: Sendable {
 
     private static func upsertMetadata(_ c: Conversation, exists: Bool, db: Database, encoder: JSONEncoder) throws {
         let now = Date()
+        // The column takes the conversation's own `updatedAt`, not the write clock. Now that
+        // `markChanged` advances the field when a conversation is touched (#185 §4), a batch of
+        // several dirty conversations flushed together would otherwise all land on the same
+        // instant and come back from a restart ordered by flush order rather than by activity.
+        let touched = c.updatedAt
         let tokenUsage = try json(c.tokenUsage, encoder)
         let contract = try c.goalContract.map { try json($0, encoder) }
         let result = try c.subagentResult.map { try json($0, encoder) }
@@ -538,26 +549,28 @@ final class ConversationStore: Sendable {
         // NULL when absent (the overwhelming majority of rows), like `checkpointHistory` (#191).
         let evaluation = try c.lastGoalEvaluation.map { try json($0, encoder) }
         let report = try c.lastGoalCompletionReport.map { try json($0, encoder) }
+        // NULL when absent, like `goalContract` a few lines above (#185).
+        let card = try c.sessionCard.map { try json($0, encoder) }
         if exists {
             try db.execute(sql: """
                 UPDATE conversations SET title = ?, updatedAt = ?, workspacePath = ?, activeGoal = ?,
                     messageCountSinceReflection = ?, goalIterationCount = ?, mainAgentSandbox = ?,
                     tokenUsage = ?, goalContract = ?, subagentResult = ?, checkpointHistory = ?,
-                    lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?
+                    lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?, sessionCard = ?
                 WHERE id = ?
-                """, arguments: [c.title, now, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
+                """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
-                                 history, evaluation, report, c.isArchived, c.id.uuidString])
+                                 history, evaluation, report, c.isArchived, card, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
                 INSERT INTO conversations (id, position, title, createdAt, updatedAt, workspacePath, activeGoal,
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
-                    subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, arguments: [c.id.uuidString, position, c.title, now, now, c.workspacePath, c.activeGoal,
+                    subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived, sessionCard)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
-                                 tokenUsage, contract, result, history, evaluation, report, c.isArchived])
+                                 tokenUsage, contract, result, history, evaluation, report, c.isArchived, card])
         }
     }
 
@@ -788,6 +801,29 @@ final class ConversationStore: Sendable {
                 case .unconvertible:
                     print("WARNING: unreadable isArchived for conversation \(id); defaulting to active")
                     c.isArchived = false
+                }
+
+                // #185 -- surfaced, not just written: `updatedAt` has been a store column since v1
+                // but nothing decoded it back into `Conversation` until now. `Date`'s own
+                // `fromDatabaseValue` (unlike the trapping typed row subscript, #189) returns nil
+                // rather than crashing on a garbled value, so a damaged timestamp defaults instead
+                // of costing the conversation.
+                let updatedAtValue: DatabaseValue = row["updatedAt"]
+                c.updatedAt = Date.fromDatabaseValue(updatedAtValue) ?? Date()
+
+                // An unreadable identity must not cost the user a conversation (#185 §6.1). Same
+                // policy as `checkpointHistory`, opposite of `goalContract`: read directly through
+                // `readTextValue` rather than the `text()` closure above, whose `.invalid` case is
+                // fatal to the whole row -- here even non-UTF8 bytes degrade to "uncarded" plus a
+                // reported loss, never a dropped conversation.
+                switch Self.readTextValue(row, "sessionCard") {
+                case .null:
+                    break
+                case .invalid:
+                    out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable sessionCard: invalid encoding"))
+                case .text(let s):
+                    do { c.sessionCard = try decoder.decode(SessionCard.self, from: Data(s.utf8)) }
+                    catch { out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable sessionCard: \(error)")) }
                 }
 
                 // Per-conversation, so the bulk breaker below can throw the lot away.

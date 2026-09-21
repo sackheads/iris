@@ -2,7 +2,7 @@
 
 **Status:** proposed, awaiting review (written overnight 2026-09-21 under a pre-agreed decision set; every ruling made without the author of #187 is listed in §14)
 **Issue:** #187 (`docs/agency/agency.md` is the epic; this spec is its first two deliverables)
-**Builds on:** #163 (conversation store), #182 (archiving), #172/#173 (mid-turn steering), #217 (session strip), #156 (weekdays, superseded here)
+**Builds on:** #163 (conversation store), #182 (archiving), #172/#173 (mid-turn steering), #217 (session strip), #247 (sessions slice 1: migration v8), #156 (weekdays, superseded here)
 **Does not touch:** #185 (peer sessions), deliverables 3–6 of the epic
 
 ## 1. Overview
@@ -37,7 +37,7 @@ main conversation's briefing and read tools, notifications, status item, URL sch
 Settings surface for jobs. Cost calculation (§6.3).
 
 **No import.** Nobody has real jobs or watcher rules. The old keys `iris_scheduled_jobs` and
-`WATCHER_RULES` are deleted from `UserDefaults` on first launch of a build containing migration v8.
+`WATCHER_RULES` are deleted from `UserDefaults` on first launch of a build containing migration v9.
 
 ## 3. The job
 
@@ -126,9 +126,9 @@ policy is recorded here so nothing in D1/D2 assumes otherwise.
 In a read-only run the tool surface is the normal one. What makes it read-only is §7: any tool call
 that would need an approval fails closed instead of asking.
 
-## 4. Storage: migration `v8_jobs`
+## 4. Storage: migration `v9_jobs`
 
-Both tables live in the conversation database, registered as one migration after `v7_archive`:
+Both tables live in the conversation database, registered as one migration after `v8_session_card` (#185 slice 1, #247):
 
 ```sql
 CREATE TABLE jobs (
@@ -322,7 +322,7 @@ one line, so it gets the same treatment as the session strip's activity text.
 If the destination has a turn in flight, the history line is **not** appended immediately: a
 `user` entry landing between a function call and its response corrupts the request. It goes into a
 per-conversation `pendingEventLines` queue that the engine drains at the same point it takes steers
-(`takePendingSteers`, iris.swift:892), which is a safe boundary. Leftovers at turn end are appended
+(`takePendingSteers`), which is a safe boundary. Since #247 that queue also carries peer arrivals with an `isPeer` flag; event lines stay a separate queue because they must never start a turn. Leftovers at turn end are appended
 directly, without starting a turn; `drainPendingUserMessages` never sees them. The UI message is
 appended immediately in both cases.
 
@@ -374,7 +374,7 @@ All Swift Testing, none touching `~/.iris`, `ConfigManager.shared`, or the netwo
 - **Aliases:** every combination the old handler accepted → same next fire as its cron translation,
   including `weekdays: [2,3,4,5,6]` → `MON-FRI` from a Friday and a Saturday.
 - **Ledger:** in-memory store: upsert/rename uniqueness, due-job query at a boundary, begin/finish
-  round trip with tokens, `runs(limit:)` ordering, `acknowledge`, a v7 fixture migrating to v8 with
+  round trip with tokens, `runs(limit:)` ordering, `acknowledge`, a v8 fixture migrating to v9 with
   its conversations intact and both new columns reading false, a job row with unreadable JSON
   skipped and counted.
 - **Prune:** the pure decision: retention boundary, unacknowledged failure exemption, per-job
@@ -434,6 +434,7 @@ Each is "what — why — cost if wrong".
 
 A background run conversation is not a session in #185's sense: it never advertises a card and is
 excluded from `list_sessions` exactly as subagents are (#185 §3). The Activity conversation is an
-ordinary conversation and may be a peer. Nothing here touches `drainPendingUserMessages`,
-`takePendingSteers`, or the session card; the `pendingEventLines` drain is a sibling call at the
-same point and whichever PR lands second resolves the two-line conflict.
+ordinary conversation and may be a peer. #185 slice 1 landed as #247 while this spec was being written. Nothing here touches
+`drainPendingUserMessages`, `takePendingSteers`, `deliverPeerMessage`, or the session card; the
+`pendingEventLines` drain is a sibling call at the steer boundary, and `JobScheduler`'s wiring in
+`IrisEngine.start()` sits beside, not inside, the peer-delivery code.
