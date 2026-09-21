@@ -15,11 +15,18 @@ enum SearchResultFilter {
         let withheld: Int
     }
 
-    /// What the classifier sees for one result: the title, a newline, the snippet. The URL is
-    /// never scored — a query string full of tracking parameters looks like an injection to a
-    /// token classifier and carries no prose to judge.
+    /// What the classifier sees for one result: the title, a newline, the snippet, tier-1
+    /// normalized. The URL is never scored — a query string full of tracking parameters looks
+    /// like an injection to a token classifier and carries no prose to judge.
+    ///
+    /// `PromptInjectionGuard.sanitizeUntrustedInput` runs here, on the joined text, for the same
+    /// reason the whole-output path runs it before scoring: without the NFKC fold and the
+    /// control-character strip, a zero-width character or a homoglyph in a snippet is enough to
+    /// walk a real injection past the classifier. Joined rather than per-field so a pattern
+    /// straddling the newline is caught too. The stored result keeps its original title, url and
+    /// snippet — normalization is what gets *scored*, not what gets returned.
     static func scoringText(title: String, snippet: String) -> String {
-        "\(title)\n\(snippet)"
+        PromptInjectionGuard.sanitizeUntrustedInput("\(title)\n\(snippet)")
     }
 
     /// Scores each result and re-serializes the survivors.
@@ -31,12 +38,7 @@ enum SearchResultFilter {
     /// `allowed` is called once per result with `scoringText`; returning false withholds it.
     /// Results are scored sequentially, in order: the guard's verdict cache and its latency
     /// metrics both assume serialized calls, so this must not become a task group.
-    ///
-    /// `isolation` is the caller's actor (defaulted, never passed explicitly): scoring runs on the
-    /// engine actor that owns the tool call, so `allowed` may capture actor state without being
-    /// `@Sendable` and nothing here hops off that actor.
-    static func filter(_ raw: String, isolation: isolated (any Actor)? = #isolation,
-                       allowed: (String) async -> Bool) async -> Outcome? {
+    static func filter(_ raw: String, allowed: @Sendable (String) async -> Bool) async -> Outcome? {
         guard let parsed = try? JSONSerialization.jsonObject(with: Data(raw.utf8)),
               let array = parsed as? [Any] else { return nil }
 
@@ -69,9 +71,11 @@ enum SearchResultFilter {
         return Outcome(json: json + note, kept: survivors.count, withheld: withheld)
     }
 
-    /// Matches the script's own `json.dumps(..., indent=2)` shape so the model sees the same
-    /// formatting whether or not anything was withheld. `JSONSerialization` pretty-prints an
-    /// empty array as `[\n\n]`, which is noise; emit the literal instead.
+    /// Deterministic pretty-printed JSON with sorted keys and unescaped slashes, carrying the same
+    /// three fields the scraper emits. Not byte-identical to the script's `json.dumps(indent=2)`
+    /// — key order is alphabetical here, and non-ASCII stays raw UTF-8 where Python escapes it.
+    /// `JSONSerialization` pretty-prints an empty array as `[\n\n]`, which is noise; emit the
+    /// literal instead.
     private static func serialize(_ results: [[String: String]]) -> String? {
         guard !results.isEmpty else { return "[]" }
         guard let data = try? JSONSerialization.data(withJSONObject: results,

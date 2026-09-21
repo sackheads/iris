@@ -11,6 +11,4 @@ struct BlockedResultTracker: Sendable {
         consecutive = blocked ? consecutive + 1 : 0
         return consecutive
     }
-
-    mutating func reset() { consecutive = 0 }
 }

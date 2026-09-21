@@ -26,14 +26,4 @@ struct BlockedResultTrackerTests {
         // The next block starts a fresh run rather than resuming the old one.
         #expect(tracker.record(blocked: true) == 1)
     }
-
-    @Test("reset() clears the run")
-    func explicitReset() {
-        var tracker = BlockedResultTracker()
-        _ = tracker.record(blocked: true)
-        _ = tracker.record(blocked: true)
-        tracker.reset()
-        #expect(tracker.consecutive == 0)
-        #expect(tracker.record(blocked: true) == 1)
-    }
 }

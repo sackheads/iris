@@ -296,11 +296,20 @@ What is scored now (`Sources/iris/SearchResultFilter.swift`):
 - Each result is classified on its own, sequentially, through `InjectionGuard.classify` — the
   non-wrapping entry point, so nothing is `<untrusted_context>`-wrapped before the classifier
   sees it (the ordering invariant below still holds).
-- The text scored for one result is its **title, a newline, its snippet**. The URL is never
-  scored: a query string of tracking parameters carries no prose to judge and reads as noise
-  to a token classifier.
-- Survivors are re-serialized as a JSON array in the original order, in the same
-  `indent=2`-style shape the Python scraper emits, and get Tier 1 plus one
+- Per-result scoring is capped at **Tier 2**, not the caller's Tier 3. A provisioned canary would
+  otherwise mean up to ten sequential auxiliary-model probes for one search, and the canary was
+  built to judge large blobs; the token classifier is exactly the right tool for a prompt-sized
+  title and snippet. The cost if that is the wrong call is that search snippets get Tier 2 only.
+- The text scored for one result is its **title, a newline, its snippet**, tier-1 normalized
+  first (`PromptInjectionGuard.sanitizeUntrustedInput`) — without the NFKC fold and the
+  control-character strip, a homoglyph in a snippet walks a real injection past the classifier.
+  The URL is never scored: a query string of tracking parameters carries no prose to judge and
+  reads as noise to a token classifier.
+- Survivors are re-serialized as a JSON array in the original order — deterministic
+  pretty-printed JSON with sorted keys and unescaped slashes, carrying the same three fields the
+  scraper emits, though not byte-identical to its `json.dumps(indent=2)` (key order is
+  alphabetical, and non-ASCII stays raw UTF-8 where Python escapes it). That array then takes the
+  same tier-1 normalization the whole-output path uses, plus one
   `<untrusted_context source="tool_output_search_web">` wrapper. The reassembled array is
   **not** re-scored — that would reintroduce exactly the aggregate false positive this split
   removes.

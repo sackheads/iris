@@ -1774,17 +1774,25 @@ actor IrisEngine {
 
         if name == "search_web",
            let outcome = await SearchResultFilter.filter(result, allowed: { text in
+               // Capped at tier 2 rather than the caller's tier 3: a provisioned canary would mean
+               // up to ten sequential auxiliary-model probes for one search, and the canary was
+               // built to judge large blobs, while the token classifier is exactly the tool for a
+               // prompt-sized title and snippet. If that is the wrong call, the cost is that
+               // search snippets get tier 2 only.
                if case .passed = await InjectionGuard.classify(text, contextTag: "tool_output_search_web_result",
-                                                               maxTier: maxTier, protectionEnabled: protectionEnabled) {
+                                                               maxTier: .tier2_coreML, protectionEnabled: protectionEnabled) {
                    return true
                }
                return false
            }) {
-            // Tier 1 and one wrapper over the survivors. Tiers 2/3 already ran per result, so the
-            // reassembled array is deliberately not scored a second time — re-scoring it would
-            // reintroduce exactly the aggregate false positive this split exists to remove.
+            // Tier 1 and one wrapper over the survivors — the same normalization the whole-output
+            // path below applies, then `InjectionGuard`'s own structural pass. Tiers 2/3 already
+            // ran per result, so the reassembled array is deliberately not scored a second time:
+            // re-scoring it would reintroduce exactly the aggregate false positive this split
+            // exists to remove.
             fullyBlockedSearch = outcome.withheld > 0 && outcome.kept == 0
-            sanitizedResult = await InjectionGuard.sanitize(outcome.json, contextTag: "tool_output_search_web",
+            let structuralSafeJSON = PromptInjectionGuard.sanitizeUntrustedInput(outcome.json)
+            sanitizedResult = await InjectionGuard.sanitize(structuralSafeJSON, contextTag: "tool_output_search_web",
                                                             maxTier: .tier1_structural, protectionEnabled: protectionEnabled)
         } else {
             // Tier 1 Sanitization: Apply structural isolation to prevent prompt injection from tool outputs
