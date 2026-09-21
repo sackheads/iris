@@ -21,6 +21,18 @@ struct SessionStripView: View {
     /// scrolls instead of growing without limit (invariant 8's spirit — nothing unbounded in the
     /// composer stack).
     private static let rowHeight: CGFloat = 22
+    /// Rows shown before the list scrolls (invariant 8: nothing unbounded in the composer stack).
+    private static let maxVisibleRows = 6
+
+    private func expandedRows(_ sessions: [SessionSummary]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(sessions) { session in
+                SessionRowView(state: state, sessionId: session.id, isMain: session.kind == .main) {
+                    transcriptSessionId = session.id
+                }
+            }
+        }
+    }
 
     var body: some View {
         // Fix round 1, item 8: `state.visibleSessions` rebuilds the synthesised main row (a couple
@@ -44,16 +56,17 @@ struct SessionStripView: View {
             if !isHidden {
                 VStack(alignment: .leading, spacing: 2) {
                     if showExpanded {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 4) {
-                                ForEach(sessions) { session in
-                                    SessionRowView(state: state, sessionId: session.id, isMain: session.kind == .main) {
-                                        transcriptSessionId = session.id
-                                    }
-                                }
+                        // A ScrollView is greedy — it takes its whole height cap even for two rows,
+                        // leaving a block of empty space under the composer — so the rows only go
+                        // inside one once there are more of them than the cap shows.
+                        if sessions.count > Self.maxVisibleRows {
+                            ScrollView {
+                                expandedRows(sessions)
                             }
+                            .frame(maxHeight: Self.rowHeight * CGFloat(Self.maxVisibleRows))
+                        } else {
+                            expandedRows(sessions)
                         }
-                        .frame(maxHeight: Self.rowHeight * 6)
                     } else if !otherSessions.isEmpty, let main = mainSession {
                         // Manually collapsed with background work still going: summarize rather
                         // than hide (`● main · idle · 2 subagents running`), so the badge isn't
