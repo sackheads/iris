@@ -8,6 +8,9 @@ struct SessionSummary: Identifiable, Hashable, Sendable {
         case main
         case subagent
         case evaluator
+        /// A background job run (#187): its conversation is hidden from the sidebar, so the strip
+        /// is the only place it is visible while it is in flight.
+        case job
     }
     /// `detail` is derived from the tool call's own arguments by `SessionActivity.detail(tool:args:)`.
     /// Those arguments are model-written (a `run_command` command, a `search_memory` query), so this
@@ -190,10 +193,14 @@ enum SessionActivity {
         // part of the strip.
         let subagents = running.filter { $0.kind == .subagent }.count
         let evaluators = running.filter { $0.kind == .evaluator }.count
+        // #187: a job run's conversation is hidden, so if the collapsed line did not count it the
+        // strip would show a badge with nothing behind it while the run was the only thing going.
+        let jobs = running.filter { $0.kind == .job }.count
         let finished = sessions.count - running.count
         var parts: [String] = []
         if subagents > 0 { parts.append("\(subagents) subagent\(subagents == 1 ? "" : "s") running") }
         if evaluators > 0 { parts.append("\(evaluators) evaluator\(evaluators == 1 ? "" : "s") running") }
+        if jobs > 0 { parts.append("\(jobs) job\(jobs == 1 ? "" : "s") running") }
         if finished > 0 { parts.append("\(finished) finished") }
         return parts.joined(separator: ", ")
     }

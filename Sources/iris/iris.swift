@@ -52,6 +52,10 @@ actor IrisEngine {
     /// stores through it so a job created mid-conversation gets its first fire computed by the
     /// same code the polling loop uses.
     private(set) var jobScheduler: JobScheduler?
+    /// Built lazily by `jobRunner()`; see there.
+    private var jobRunnerInstance: JobRunner?
+    /// Whether this launch has already swept runs left `running` by the previous one.
+    private var closedInterruptedRuns = false
 
     // We need to keep a weak reference to the state or pass it in.
     // Since AppState owns IrisEngine, we can pass it when we start or process.
@@ -381,7 +385,17 @@ actor IrisEngine {
         let schedulerState = state
         let jobLedger = await MainActor.run(resultType: JobLedger?.self, body: { schedulerState?.store.ledger })
         if let ledger = jobLedger {
-            await adoptJobScheduler(ledger: ledger)
+            // Before the scheduler starts, so a run this process is about to begin is never
+            // mistaken for one the last process died in.
+            closeInterruptedRuns(ledger: ledger)
+            let scheduler = await adoptJobScheduler(ledger: ledger)
+            await scheduler.setOnSkip { job in
+                do {
+                    try JobRunner.recordSkip(job: job, ledger: ledger, now: Date())
+                } catch {
+                    print("[JobRunner] could not record the skipped run for \(job.name): \(error)")
+                }
+            }
         }
 
         await PluginManager.shared.loadAll()
@@ -389,11 +403,8 @@ actor IrisEngine {
         await MCPManager.shared.setPluginConfigs(pluginConfigs)
         await MCPManager.shared.startServers()
         await WatcherManager.shared.setCallback { [weak self] job, paths in
-            guard let self = self else { return }
-            await self.handleSystemEvent(
-                WatcherManager.eventMessage(job: job, paths: paths),
-                source: "FileWatcher",
-                conversationId: job.createdInConversationId)
+            guard let runner = await self?.jobRunner() else { return }
+            await runner.run(job: job, reason: "fsEvent", changedPaths: paths)
         }
 
         if let ledger = jobLedger {
@@ -613,6 +624,12 @@ actor IrisEngine {
         repromptTasks[conversationId] = nil
     }
 
+    /// The tail of the `.system` line a soft stop posts. Shared rather than copied because
+    /// `JobRunner` reads it back out of a background run's transcript to decide the run failed
+    /// (#187 §6.2) — two spellings of this sentence would mean a cut-short run reported as a clean
+    /// completion, with nothing to say otherwise.
+    static let softStopMarker = "Summarizing and stopping."
+
     /// Graceful stop for a responsive-but-stuck goal loop: clear the reprompt, instruct the model
     /// to summarize and call goal_complete, and clear the goal so the loop cannot continue.
     private func softStopWithSummary(conversationId: UUID, reason: String) async {
@@ -635,7 +652,7 @@ actor IrisEngine {
             return
         }
 
-        await pushToUI(role: .system, text: "[\(approvalOrigin)] \(reason) Summarizing and stopping.", conversationId: conversationId)
+        await pushToUI(role: .system, text: "[\(approvalOrigin)] \(reason) \(Self.softStopMarker)", conversationId: conversationId)
         await processInput(
             "You have reached a stopping condition (\(reason)). Summarize what you accomplished and what is blocking you, then call `goal_complete` with that summary. Do not take any other action.",
             source: "System", conversationId: conversationId, restrictToGoalComplete: true)
@@ -1626,15 +1643,49 @@ actor IrisEngine {
         return scheduler
     }
 
-    /// What a due job does, as `start()` wires it into the scheduler. Deliverable 1: a fire is a
-    /// system event in the job's creating conversation, or the selected one if it has none, and a
-    /// fire is a normal turn with the full tool surface. Deliverable 2 replaces this with the
-    /// background JobRunner. Factored out of `start()` so a test can drive one real fire through
+    /// What a due job does, as `start()` wires it into the scheduler: a turn in a background
+    /// conversation of its own, recorded in `job_runs` and reported as an event card (#187 §6).
+    /// Deliverable 1 fired a system event into the conversation the job was created in, which put
+    /// unattended work in front of the user mid-sentence and parked gated tools on a dialog nobody
+    /// was there to answer. Factored out of `start()` so a test can drive one real fire through
     /// the engine without also starting the polling loop.
     func fireHandler() -> JobScheduler.FireHandler {
-        { [weak self] job, _ in
-            await self?.handleSystemEvent("Scheduled Job Triggered: \(job.prompt)", source: "Scheduler",
-                                          conversationId: job.createdInConversationId)
+        { [weak self] job, reason in
+            guard let runner = await self?.jobRunner() else { return }
+            await runner.run(job: job, reason: reason)
+        }
+    }
+
+    /// The runner every fire goes through, built on first use and kept: one per engine, so two
+    /// jobs firing in the same tick share it (it is an actor, and `run` holds no cross-run state).
+    /// `nil` only for an engine whose `AppState` has gone away.
+    func jobRunner() async -> JobRunner? {
+        if let jobRunnerInstance { return jobRunnerInstance }
+        guard let state else { return nil }
+        let ledger = await MainActor.run { state.store.ledger }
+        let runner = JobRunner(state: state, engine: self, ledger: ledger)
+        jobRunnerInstance = runner
+        return runner
+    }
+
+    /// The failure reason written onto runs that were still `running` when the app came up: the
+    /// last process died in the middle of them and nothing will ever finish them.
+    static let interruptedByQuitReason = "app was not running"
+
+    /// Closes out those runs, once per launch, and says how many there were. Once per launch
+    /// matters: `AppState.start()` is called from `onAppear` and can run more than once, and a
+    /// second sweep would mark a run that is happening right now as interrupted.
+    @discardableResult
+    func closeInterruptedRuns(ledger: JobLedger, at: Date = Date()) -> Int {
+        guard !closedInterruptedRuns else { return 0 }
+        closedInterruptedRuns = true
+        do {
+            let closed = try ledger.closeRunningRuns(reason: Self.interruptedByQuitReason, at: at)
+            if closed > 0 { print("[JobRunner] closed \(closed) run(s) the last session died in the middle of") }
+            return closed
+        } catch {
+            print("[JobRunner] could not close interrupted runs: \(error)")
+            return 0
         }
     }
 

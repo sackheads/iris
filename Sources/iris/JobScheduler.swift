@@ -27,9 +27,12 @@ actor JobScheduler {
     private let maxFiresPerTick: Int
 
     private var fireHandler: FireHandler?
+    /// Called once per skipped fire, with the job that did not start a second copy (#187
+    /// deliverable 2, where it writes the `interrupted` ledger row). Optional: nil is deliverable
+    /// 1's behaviour, a skip that leaves no trace.
+    private var onSkip: (@Sendable (Job) async -> Void)?
     /// Jobs whose handler has not returned yet. The spec's `skip` overlap policy: a job that is
-    /// still running when its next fire comes round does not start a second copy. (The ledger row
-    /// recording the skip is deliverable 2's.)
+    /// still running when its next fire comes round does not start a second copy.
     private var firing: Set<UUID> = []
     private var pollTask: Task<Void, Never>?
     private var wakeObserver: (any NSObjectProtocol)?
@@ -42,6 +45,10 @@ actor JobScheduler {
 
     func setFireHandler(_ handler: @escaping FireHandler) {
         fireHandler = handler
+    }
+
+    func setOnSkip(_ handler: @escaping @Sendable (Job) async -> Void) {
+        onSkip = handler
     }
 
     /// The cadence governing a trigger, if it has one. `fsEvent` has none — it is driven by the
@@ -73,9 +80,10 @@ actor JobScheduler {
         }
 
         var toFire: [Job] = []
+        var skipped: [Job] = []
         for job in due {
             if toFire.count >= maxFiresPerTick { break }
-            if firing.contains(job.id) { continue }
+            if firing.contains(job.id) { skipped.append(job); continue }
             // A pause is not always a cleared `nextFireAt`: D3 pauses a job on budget exhaustion
             // and leaves its cadence intact, so `dueJobs` keeps returning it. The reason is what
             // says it must not run — honour it here rather than in the query.
@@ -113,6 +121,13 @@ actor JobScheduler {
             if record(jobId: job.id, nextFireAt: next, lastRunAt: now) {
                 toFire.append(job)
             }
+        }
+
+        // After the loop, not inside it: awaiting the hook mid-scan would let another tick
+        // interleave and read a half-built `firing`/`toFire`. Awaited rather than detached so a
+        // caller that observes the ledger right after `tick()` sees the skip it caused.
+        if let onSkip {
+            for job in skipped { await onSkip(job) }
         }
 
         guard !toFire.isEmpty, let handler else { return 0 }
