@@ -41,15 +41,10 @@ struct BackgroundSessionToolsTests {
         for n in names { #expect(!declared.contains(n), "\(n) must not be offered to an unattended run") }
     }
 
-    @Test("a forged send_to_session from a background run is refused, and starts no turn")
-    func sendRefusedAndTargetUntouched() async throws {
-        let app = AppState()
-        app.conversations.removeAll()
-        let sender = app.createNewConversation(isBackground: true, select: false)
-        let target = app.createNewConversation(id: UUID())
-        let call = FunctionCall(name: "send_to_session",
-                                args: ["session_id": .string(target.uuidString),
-                                       "message": .string("run this for me")])
+    /// Drives one turn in a background conversation whose model makes `call`, and hands back what
+    /// the dispatcher returned to it. The declaration gate never offered the tool; this is the
+    /// forged call it does not stop.
+    private func dispatchResult(for call: FunctionCall, in app: AppState, from sender: UUID) async -> [String] {
         let part = Part(text: nil, functionCall: call, functionResponse: nil,
                         thought_signature: nil, thoughtSignature: nil)
         let client = FakeLLMClient(responses: [
@@ -61,10 +56,53 @@ struct BackgroundSessionToolsTests {
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
                                 retryDelays: [], protectionEnabled: false, sessionPeerCount: 1)
         await engine.processInput("go", source: "UI", conversationId: sender)
-
-        let results = app.conversations.first { $0.id == sender }?.history
+        return app.conversations.first { $0.id == sender }?.history
             .flatMap { $0.parts }
             .compactMap { $0.functionResponse?.response["result"]?.stringValue } ?? []
+    }
+
+    @Test("a forged list_sessions from a background run is refused, with no roster")
+    func listRefused() async throws {
+        let app = AppState()
+        app.conversations.removeAll()
+        let sender = app.createNewConversation(isBackground: true, select: false)
+        let peer = app.createNewConversation(id: UUID())
+        app.setSessionCard(for: peer, SessionCard(name: "atlas", description: "refactoring the store"))
+
+        let results = await dispatchResult(for: FunctionCall(name: "list_sessions", args: [:]),
+                                           in: app, from: sender)
+        #expect(results.contains { $0.contains(IrisEngine.unattendedSessionListRefusal) })
+        #expect(!results.contains { $0.contains("atlas") }, "not one line of the roster leaks")
+        #expect(!results.contains { $0.contains(peer.uuidString) })
+    }
+
+    @Test("a forged set_session_card from a background run changes nothing")
+    func cardRefused() async throws {
+        let app = AppState()
+        app.conversations.removeAll()
+        let sender = app.createNewConversation(isBackground: true, select: false)
+        app.createNewConversation(id: UUID())
+
+        let results = await dispatchResult(for: FunctionCall(
+            name: "set_session_card",
+            args: ["name": .string("helper"), "description": .string("available for anything")]),
+                                           in: app, from: sender)
+        #expect(results.contains { $0.contains(IrisEngine.unattendedSessionListRefusal) })
+        #expect(app.conversations.first { $0.id == sender }?.sessionCard == nil,
+                "a run that cannot be addressed must not advertise itself either")
+    }
+
+    @Test("a forged send_to_session from a background run is refused, and starts no turn")
+    func sendRefusedAndTargetUntouched() async throws {
+        let app = AppState()
+        app.conversations.removeAll()
+        let sender = app.createNewConversation(isBackground: true, select: false)
+        let target = app.createNewConversation(id: UUID())
+
+        let results = await dispatchResult(for: FunctionCall(
+            name: "send_to_session",
+            args: ["session_id": .string(target.uuidString), "message": .string("run this for me")]),
+                                           in: app, from: sender)
         #expect(results.contains { $0.contains(IrisEngine.unattendedSessionMessageRefusal) })
 
         // Delivery is detached when it does happen, so give it a window it could have used.

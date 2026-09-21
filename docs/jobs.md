@@ -208,9 +208,11 @@ carve-out at all: it reads its own memory freely, but anything it writes needs a
 and no rule can hand it a protected directory.
 
 A background run cannot message other sessions either. `list_sessions`, `send_to_session` and
-`set_session_card` are not offered to it and a send is refused, because delivering a message starts
-a real turn in an attended conversation — which would run the work under *that* conversation's
-approval path. A run reports through its card; it does not ask a peer to act for it.
+`set_session_card` are not offered to it, and all three are refused if called anyway: delivering a
+message starts a real turn in an attended conversation — which would run the work under *that*
+conversation's approval path — and the roster is how a sender picks its target. A run reports
+through its card; it does not ask a peer to act for it, and it does not advertise itself to peers
+that cannot reach it.
 
 ## `/jobs`
 

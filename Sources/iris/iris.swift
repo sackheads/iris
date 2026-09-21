@@ -1068,7 +1068,8 @@ actor IrisEngine {
         // `peerCount` is zero for a background run by construction above, so this gate also holds
         // "a background run is not a session": it may not list peers, message them, or advertise
         // itself. A send would start a real turn in an attended conversation, which runs under
-        // that conversation's approval path — the laundering `invoke_subagent` used to allow.
+        // that conversation's approval path — the laundering `invoke_subagent` used to allow. All
+        // three are refused at dispatch as well, since a forged call never passes this gate.
         if principal == .main, peerCount > 0 {
             toolsList.append(FunctionDeclaration(
                 name: "list_sessions",
@@ -1774,6 +1775,11 @@ actor IrisEngine {
     /// run is a run that grows its own footprint with nobody asked.
     static let jobCreationTools: Set<String> = ["schedule_job", "register_directory_watcher"]
 
+    /// What the dispatcher tells a background run that tried to read the peer roster or advertise
+    /// itself to it. Same reason as the send refusal: it is not a session in either direction.
+    static let unattendedSessionListRefusal =
+        "A background run cannot list or advertise sessions; its result is delivered as a card."
+
     /// What the dispatcher tells a background run that tried to message a peer. Its result
     /// reaches a person through its event card; borrowing an attended session's approval path is
     /// not a second delivery channel.
@@ -1858,6 +1864,16 @@ actor IrisEngine {
         }
     }
 
+    /// Whether `conversationId` is a background (unattended) run. The dispatch-side half of the
+    /// gates below: declaration gating only stops a model that plays by the rules, and a forged
+    /// call reaches the dispatcher by name alone.
+    private func isUnattendedRun(_ conversationId: UUID) async -> Bool {
+        let localState = state
+        return await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId })?.isBackground == true
+        }
+    }
+
     private func executeFunctionCall(_ functionCall: FunctionCall, conversationId: UUID, workspacePath: String?, restrictToGoalComplete: Bool = false) async -> String {
         let localState = state
         var result = ""
@@ -1866,10 +1882,7 @@ actor IrisEngine {
         // background turn (see `buildRequest`), but declaration gating only stops a well-behaved
         // model — the refusal has to live at the point that would actually write the row.
         if Self.jobCreationTools.contains(functionCall.name) {
-            let unattended = await MainActor.run {
-                localState?.conversations.first(where: { $0.id == conversationId })?.isBackground == true
-            }
-            if unattended { return Self.unattendedJobCreationRefusal }
+            if await isUnattendedRun(conversationId) { return Self.unattendedJobCreationRefusal }
         }
         
         if functionCall.name == "set_workspace", let path = functionCall.args["path"]?.stringValue {
@@ -1897,6 +1910,13 @@ actor IrisEngine {
                 result = "Refused — a subagent is not a session."
                 return result
             }
+            // And a background run is not a session either, in either direction (#187): reading
+            // the roster is how a send would pick its target, so refusing it here is the same
+            // property as the send refusal below, not a separate courtesy.
+            guard !(await isUnattendedRun(conversationId)) else {
+                result = Self.unattendedSessionListRefusal
+                return result
+            }
             let (peers, total) = await MainActor.run { () -> ([SessionPeer], Int) in
                 guard let s = localState else { return ([], 0) }
                 return SessionDirectory.peers(in: s.conversations, excluding: conversationId,
@@ -1918,10 +1938,7 @@ actor IrisEngine {
             // background conversation, but a background SENDER was not — and delivery starts a
             // real turn in a user-facing conversation, under that conversation's attended
             // approval path. An unattended run does not get to have a peer do its gated work.
-            let senderIsUnattended = await MainActor.run {
-                localState?.conversations.first(where: { $0.id == conversationId })?.isBackground == true
-            }
-            guard !senderIsUnattended else {
+            guard !(await isUnattendedRun(conversationId)) else {
                 result = Self.unattendedSessionMessageRefusal
                 return result
             }
@@ -1974,6 +1991,11 @@ actor IrisEngine {
                   let description = functionCall.args["description"]?.stringValue {
             guard principal == .main else {
                 result = "Refused — a subagent is not a session."
+                return result
+            }
+            // A run nobody can list or address has nothing to advertise to.
+            guard !(await isUnattendedRun(conversationId)) else {
+                result = Self.unattendedSessionListRefusal
                 return result
             }
             guard !name.trimmingCharacters(in: .whitespaces).isEmpty else {
