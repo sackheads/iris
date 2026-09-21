@@ -230,7 +230,9 @@ struct JobRunnerTests {
         try store.ledger.upsert(job)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config)
+        // A mutating fire needs a VM to run in (§0.2, R12), and a test process has sandboxing off.
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               sandboxAvailable: { true })
 
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/a.swift", "/tmp/b.swift"]))
 
@@ -277,11 +279,15 @@ struct JobRunnerTests {
             callResponse("run_command", ["command": .string(command)]),
             textResponse("I could not do that."),
         ], autoApprove: false)
-        let job = self.job(name: "needs-hands", prompt: "Clean up.")
+        // `mutating`, so the call reaches the approval path at all: a read-only run is refused
+        // `run_command` outside the container by its profile, which is a different test (#187
+        // §0.2, `JobProfileTests`). This one is about the call nobody is there to approve.
+        let job = self.job(name: "needs-hands", prompt: "Clean up.", profile: .mutating)
         try store.ledger.upsert(job)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               sandboxAvailable: { true })
 
         await runner.fire(job: job, origin: .schedule)
 

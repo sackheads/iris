@@ -5,23 +5,36 @@ import Foundation
 /// it on the run's hidden conversation; the engine's tool-list builder narrows a `readOnly` run's
 /// declarations by it and the dispatcher fails closed on anything it still gets asked for (#187
 /// deliverable 3, spec §0.2 and §4). A `mutating` job always runs in the `apple/container` VM, so
-/// it is only creatable when that runtime is installed.
+/// it is refused both at creation and at every fire when that VM is unavailable — see
+/// `SandboxPolicy.mutatingJobCanRun`.
 enum JobProfile: String, Codable, Sendable {
     case readOnly
     case mutating
 }
 
 extension JobProfile {
-    /// Tools a read-only run may not call (spec §0.2). Names are tool names as declared.
+    /// The whole native tool surface of a `readOnly` run (spec §0.2, ruling R11). An allowlist,
+    /// like `EvaluatorToolset.allowedNames` and for the same reason: a denylist's default answer
+    /// is "allowed", so every tool anyone adds later joins the read-only surface silently. The
+    /// first draft of this was a denylist written from the spec's sentence, and it left
+    /// `update_soul`, `update_memory`, `update_user_profile` and `save_fact` — which write files
+    /// under `~/.iris` and the shared fact store, with no approval path to catch them — on the
+    /// surface of a run the docs said could not change anything.
     ///
-    /// `delegate_task` is the spec's name for delegation and `edit_file` a tool this build does
-    /// not have: both are listed anyway so the denial arrives with the tool rather than after it.
-    /// `run_command` is deliberately absent — whether it writes depends on where it runs, which
-    /// `readOnlyDenies` decides.
-    static let readOnlyDenied: Set<String> = [
-        "write_file", "edit_file", "create_skill", "update_skill", "delete_skill",
-        "schedule_job", "register_directory_watcher", "send_to_session",
-        "delegate_task", "delegate_milestone", "invoke_subagent",
+    /// Adding a name here is a deliberate decision about a tool that changes nothing outside the
+    /// run's own conversation, and `JobProfileTests` pins the resulting surface as a set so the
+    /// decision cannot be made by accident.
+    ///
+    /// Two tools are judged dynamically rather than listed: `run_command` (allowed only in the
+    /// container) and MCP tools (allowed only where the server annotated them read-only). Notably
+    /// absent: `set_workspace`, because a workspace is what gives a sandboxed `run_command` a
+    /// read-write bind mount — a read-only run that could set one could write to the host through
+    /// the sandbox it is confined to.
+    static let readOnlyAllowed: Set<String> = [
+        "read_file", "search_web", "search_memory", "reflect",
+        "list_jobs", "get_job_run",
+        "google_tasks_list_tasklists", "google_tasks_list_tasks", "google_calendar_list_events",
+        "google_docs_get", "google_drive_search", "google_sheets_get", "gmail_list_unread",
     ]
 
     /// What `MCPManager` joins a server name and a tool name with.
@@ -35,13 +48,15 @@ extension JobProfile {
     ///   - sandboxedRunCommand: whether a `run_command` in this conversation would run in the
     ///     container. On the host it writes to the user's machine, so it is denied there (§0.2).
     ///   - readOnlyMCPTools: the prefixed names of MCP tools whose server annotated them
-    ///     `readOnlyHint: true`. Every other MCP tool is denied: an unannotated tool is one the
-    ///     harness knows nothing about, and an unattended run is the wrong place to guess.
+    ///     `readOnlyHint: true`. That annotation is the server's own claim, not something this
+    ///     harness verifies — it is the only signal the protocol offers. Every other MCP tool is
+    ///     denied: a tool that says nothing about itself is one nobody can vouch for, and an
+    ///     unattended run is the wrong place to guess.
     static func readOnlyDenies(_ toolName: String, sandboxedRunCommand: Bool,
                                readOnlyMCPTools: Set<String>) -> Bool {
         if toolName == "run_command" { return !sandboxedRunCommand }
         if isMCPTool(toolName) { return !readOnlyMCPTools.contains(toolName) }
-        return readOnlyDenied.contains(toolName)
+        return !readOnlyAllowed.contains(toolName)
     }
 }
 

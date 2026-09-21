@@ -23,10 +23,10 @@ struct ScheduleJobArgumentsTests {
         // Creatable since D3 — but only where the container runtime it always runs in exists.
         // Injected, so the answer does not depend on what this machine has installed.
         let a = try? ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9), "profile": .string("mutating")]).get()
-        #expect(a?.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: [], runtimeAvailable: false)
+        #expect(a?.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: [], sandboxAvailable: false)
                 == .failure(ToolMessage(ScheduleJobArguments.noRuntimeForMutating)))
         let made = try? a?.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: [],
-                                   runtimeAvailable: true).get()
+                                   sandboxAvailable: true).get()
         #expect(made?.profile == .mutating)
     }
 

@@ -109,25 +109,46 @@ Monday-only job nobody asked for.
 
 ## Profiles
 
-Every job has a profile, `readOnly` or `mutating`, and `readOnly` is the default: a job created
-without one cannot change anything.
+Every job has a profile, `readOnly` or `mutating`, and `readOnly` is the default.
 
-A `readOnly` run does not see the tools it may not call. The run's turn is built without
-`write_file`, the skill-editing tools, `schedule_job`, `register_directory_watcher`,
-`send_to_session`, the delegation tools, any MCP tool whose server did not mark it read-only, and
-`run_command` when it would run on the host rather than in the container. Reading, searching,
-memory and web search stay. Declaration is only the cheap half: a call that reaches the dispatcher
-anyway — a stale declaration, a forged name — is refused there too, recorded as the whole call
-(name, arguments, working directory) on the run's ledger row, and the run finishes
-`blocked on approval` with a card naming the tool. The model is told the call was denied in the
-same words a call nobody was there to approve gets.
+**A read-only run's tool surface is an allowlist, not a denylist.** `JobProfile.readOnlyAllowed`
+names every tool such a run may call — today `read_file`, `search_web`, `search_memory`, `reflect`,
+the two job-reading tools, and the Google read tools (list, get, search) — and everything else is
+refused, including every tool added to Iris after this was written. That direction is deliberate: a
+denylist's default answer is "allowed", and the first draft of this gate was a denylist that let a
+read-only run rewrite `SOUL.md`, `USER.md`, `memory.md` and the fact store because nobody had
+thought to name those four tools. Widening the surface is now a one-line decision with a test to
+change, rather than something that happens by omission.
+
+Two tools are judged per run rather than listed. `run_command` is available only when it resolves
+to the container; on the host it is refused. An MCP tool is available only when its server
+annotated it `readOnlyHint` — that is the server's own claim, not something Iris verifies, but it
+is the only signal the protocol offers, and a tool that says nothing about itself is denied rather
+than assumed harmless. `set_workspace` is deliberately *not* on the list: a workspace is what gives
+a sandboxed `run_command` a read-write bind mount of that directory, so a read-only run that could
+set one could write to the host through the very sandbox that is meant to contain it. Which is also
+the honest statement of the `run_command` guarantee — a sandboxed command cannot write to the host
+*because a job run's conversation has no workspace and therefore no mount*, not because the mount
+is read-only. Anyone who gives job runs a workspace has to come back to this paragraph.
+
+Declaration is only the cheap half. A call that reaches the dispatcher anyway — a stale
+declaration, a forged name — is refused there too, recorded as the whole call (name, arguments,
+working directory) on the run's ledger row, and the run finishes `blocked on approval` with a card
+naming the tool. The model is told the job is read-only and to report what it found rather than
+look for another way, and the turn ends on the first such refusal: no approval is coming and no
+other tool would do the same thing, so another model round could only spend the run's budget
+arriving at the same answer.
 
 A `mutating` job keeps the whole tool surface and always runs in the `apple/container` VM — that is
-what pays for the wider surface, so `schedule_job` refuses to create one when that runtime is not
-installed rather than quietly falling back to the host. Everything outside the user's allowlist
-still fails closed inside it: unattended means unattended whatever the profile. A `readOnly` run
-leaves the sandbox choice alone, so it follows the per-workspace default rather than being pinned
-to the host.
+what pays for the wider surface. "Always" is enforced twice: `schedule_job` refuses to create one
+unless the VM is available (the runtime installed *and* sandboxing switched on — with the master
+switch off, the sandbox resolution returns the host however the conversation is pinned), and the
+runner asks the same question again at every fire. A fire with no VM to run in is refused before
+the turn starts: a `failed` run with the reason `sandbox unavailable`, a card, and the usual retry
+ladder. It is never run on the host instead. Everything outside the user's allowlist still fails
+closed inside the VM: unattended means unattended whatever the profile. A `readOnly` run leaves the
+sandbox choice alone, so it follows the per-workspace default rather than being pinned to the
+host.
 
 ## What happens on sleep
 

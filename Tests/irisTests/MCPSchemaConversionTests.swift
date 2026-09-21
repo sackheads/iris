@@ -97,4 +97,22 @@ struct MCPSchemaConversionTests {
         #expect(schema.items?.properties?["ids"]?.items?.type == "STRING")
         #expect(schema.arrayItemsViolations(path: "tool.rows").isEmpty)
     }
+
+    // MARK: Read-only annotations (#187 §0.2)
+
+    /// The join and the annotation read, as a pure function over what a server reported, because
+    /// the actor's `servers` map has no fixture to build. `readOnlyToolNames()` is this plus the
+    /// map, so the rule a read-only job run depends on is testable without a live MCP server.
+    @Test("only a tool its server annotated read-only is named read-only")
+    func readOnlyNamesFromAnnotations() {
+        let names = MCPManager.readOnlyToolNames(in: [
+            ("github", "list_issues", true),
+            ("github", "create_issue", false),
+            ("notion", "append_block", nil),   // says nothing: not a claim we can act on
+        ])
+        #expect(names == ["github___list_issues"])
+        // And the join is the separator the declarations use, not a second spelling of it.
+        #expect(names.first?.contains(JobProfile.mcpNameSeparator) == true)
+        #expect(MCPManager.readOnlyToolNames(in: []).isEmpty)
+    }
 }

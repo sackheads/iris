@@ -769,7 +769,9 @@ actor IrisEngine {
         return added
     }
 
-    /// The budget stop (#187 §4): the turn ends here and now, with no further model call.
+    /// The stop with nothing left to say (#187 §4): the turn ends here and now, with no further
+    /// model call. Two callers — an exhausted budget, and a tool the run's read-only profile will
+    /// refuse however many times it is asked.
     ///
     /// Deliberately not `softStopWithSummary`, which is the *goal loop's* stop: that one re-enters
     /// `processInput` to ask for a summary, which is one more model call — exactly the thing an
@@ -777,7 +779,7 @@ actor IrisEngine {
     /// background run has neither a goal nor a callback for. The line therefore ends with
     /// `budgetStopMarker` rather than `softStopMarker`: `JobRunner` matches both, so the run still
     /// finishes `failed`, and nothing promises a summary that is not coming.
-    private func endTurnForBudget(conversationId: UUID, reason: String) async {
+    private func endTurnWithoutSummary(conversationId: UUID, reason: String) async {
         cancelReprompt(for: conversationId)
         loopDetectors[conversationId] = nil
         blockedResultTrackers[conversationId] = nil
@@ -787,6 +789,11 @@ actor IrisEngine {
         await MainActor.run { localState?.clearGoal(for: conversationId) }
         await pushToUI(role: .system, text: "[\(approvalOrigin)] \(reason). \(Self.budgetStopMarker)",
                        conversationId: conversationId)
+    }
+
+    /// Why a read-only run's turn ended, as the transcript records it.
+    static func profileStopReason(tool: String) -> String {
+        "`\(tool)` is not available to this read-only job"
     }
 
     private var approvalOrigin: String {
@@ -830,21 +837,15 @@ actor IrisEngine {
         }
     }
 
-    /// Whether a `run_command` in this conversation would run in the container, asked without a
-    /// call in hand: the read-only declaration gate (#187 §0.2) needs the answer before the model
-    /// has proposed anything, and `resolveUseSandbox`'s missing-runtime warning belongs to a real
-    /// call, not to the building of a tool list.
-    private func runCommandIsSandboxed(conversationId: UUID, workspacePath: String?) async -> Bool {
-        if case .sandboxed = await sandboxDecision(conversationId: conversationId, workspacePath: workspacePath) {
-            return true
-        }
-        return false
-    }
-
-    /// Whether command hooks fired during this conversation's turn should run sandboxed. Follows
-    /// the agent's sandbox policy (subagents always sandboxed; main agent per its resolution),
-    /// independent of any specific tool. No warn side effect — run_command already surfaces it.
-    private func hooksUseSandbox(conversationId: UUID, workspacePath: String?) async -> Bool {
+    /// Whether this conversation's turn runs sandboxed, with no side effect — the plain question,
+    /// asked by everything that needs the answer without a specific call in hand.
+    ///
+    /// Two callers, and both want it warning-free. Command hooks follow the agent's sandbox policy
+    /// (subagents always sandboxed; main agent per its resolution) independent of any one tool,
+    /// and `run_command` already surfaces the missing-runtime notice for itself. The read-only
+    /// declaration gate (#187 §0.2) asks before the model has proposed anything at all, so
+    /// `resolveUseSandbox`'s notice would be a warning about a call that does not exist.
+    private func isSandboxed(conversationId: UUID, workspacePath: String?) async -> Bool {
         if case .sandboxed = await sandboxDecision(conversationId: conversationId, workspacePath: workspacePath) {
             return true
         }
@@ -912,7 +913,7 @@ actor IrisEngine {
         // always sandboxed). Threaded into every hook fire below — never stored on the shared
         // HookManager, since main/subagent turns fire hooks concurrently.
         let hookWorkspace = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.workspacePath }
-        let hooksSandbox = await hooksUseSandbox(conversationId: conversationId, workspacePath: hookWorkspace)
+        let hooksSandbox = await isSandboxed(conversationId: conversationId, workspacePath: hookWorkspace)
 
         // BeforeAgent Hook
         let beforeAgentDecision = await HookManager.shared.fireBeforeAgent(input: text, useSandbox: hooksSandbox)
@@ -1308,8 +1309,8 @@ actor IrisEngine {
         // never tempts the model — and `executeFunctionCall` refuses a denied name anyway, which
         // is the half that holds against a stale declaration or a forged call (invariant 6).
         if jobProfile == .readOnly {
-            let sandboxed = await runCommandIsSandboxed(conversationId: conversationId,
-                                                        workspacePath: workspacePath)
+            let sandboxed = await isSandboxed(conversationId: conversationId,
+                                              workspacePath: workspacePath)
             // Only pay the hop when there is an MCP tool in the list to judge.
             let readOnlyMCP = toolsList.contains { JobProfile.isMCPTool($0.name) }
                 ? await MCPManager.shared.readOnlyToolNames() : []
@@ -1364,6 +1365,10 @@ actor IrisEngine {
         }
         var request = GeminiRequest(contents: history, systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
         
+        // Nothing from a previous turn decides this one: a turn cancelled mid-batch could leave a
+        // denial behind, and finding it here would end the next turn before it started.
+        profileDeniedThisTurn[conversationId] = nil
+
         var modelRound = 0
         var turnFinished = false
         // Why the loop stopped before the model replied, if it did; recorded in history below.
@@ -1377,6 +1382,18 @@ actor IrisEngine {
             // the first, so a deadline already passed when the turn starts costs nothing at all.
             // The conversation's accumulated usage is what is compared: a job's conversation is
             // fresh, so its total is this run's spend.
+            // A profile denial cannot become allowed later in this turn (#187 §0.2, F6): there is
+            // nobody to approve it and no other tool that would do the same thing, so another
+            // model round can only produce the same refusal — until the run's token budget or its
+            // deadline ends the turn instead, having spent the lot on one answer. End it here, on
+            // the same no-further-model-call path a budget stop takes.
+            if let refused = takeProfileDenial(for: conversationId) {
+                turnFinished = true
+                _ = await drainPendingInput(conversationId: conversationId, hooksSandbox: hooksSandbox)
+                await endTurnWithoutSummary(conversationId: conversationId,
+                                            reason: Self.profileStopReason(tool: refused))
+                break
+            }
             if let turnBudget {
                 let spent = await MainActor.run {
                     localState?.conversations.first(where: { $0.id == conversationId })?.tokenUsage.totalTokenCount ?? 0
@@ -1391,7 +1408,7 @@ actor IrisEngine {
                     // history keeps them in the transcript a person reads back from the card, and
                     // a mid-task message taken and dropped is gone without a trace.
                     _ = await drainPendingInput(conversationId: conversationId, hooksSandbox: hooksSandbox)
-                    await endTurnForBudget(conversationId: conversationId, reason: reason)
+                    await endTurnWithoutSummary(conversationId: conversationId, reason: reason)
                     break
                 }
             }
@@ -2015,33 +2032,22 @@ actor IrisEngine {
         }
     }
 
-    /// Whether `conversationId` is a background (unattended) run. The dispatch-side half of the
-    /// gates below: declaration gating only stops a model that plays by the rules, and a forged
-    /// call reaches the dispatcher by name alone.
-    private func isUnattendedRun(_ conversationId: UUID) async -> Bool {
-        let localState = state
-        return await MainActor.run {
-            localState?.conversations.first(where: { $0.id == conversationId })?.isBackground == true
-        }
-    }
-
     /// The result a call denied by the conversation's job profile returns to the model, or nil
     /// when the profile allows it (and for every conversation that is not a `readOnly` job run).
     ///
     /// The denial is recorded as the whole call, so the run's card can show what was refused and
-    /// "Approve and run" has something to re-dispatch (§6), and the model is told in the same
-    /// words an unapprovable call gets: a refusal it can work around is more useful to it than a
-    /// distinction it cannot act on.
+    /// "Approve and run" has something to re-dispatch (§6). The model gets its own sentence rather
+    /// than the human-denial one: there is no user to ask in an unattended run, and unlike an
+    /// approval this answer cannot change later in the turn. `profileDeniedThisTurn` carries that
+    /// last fact out to the model-round loop, which ends the turn instead of letting the model
+    /// spend its whole budget asking again.
     private func profileRefusal(for functionCall: FunctionCall, conversationId: UUID,
-                                workspacePath: String?) async -> String? {
-        let localState = state
-        let profile = await MainActor.run {
-            localState?.conversations.first(where: { $0.id == conversationId })?.jobProfile
-        }
+                                workspacePath: String?, profile: JobProfile?) async -> String? {
         guard profile == .readOnly else { return nil }
+        // The warning-free variant on purpose (the run may be on a machine with no runtime): a
+        // call that is about to be refused must not first tell the transcript it ran on the host.
         let sandboxed = functionCall.name == "run_command"
-            ? await resolveUseSandbox(toolName: "run_command", conversationId: conversationId,
-                                      workspacePath: workspacePath)
+            ? await isSandboxed(conversationId: conversationId, workspacePath: workspacePath)
             : false
         let readOnlyMCP = JobProfile.isMCPTool(functionCall.name)
             ? await MCPManager.shared.readOnlyToolNames() : []
@@ -2049,29 +2055,56 @@ actor IrisEngine {
                                         readOnlyMCPTools: readOnlyMCP) else { return nil }
         let call = BlockedCall(toolName: functionCall.name, args: functionCall.args,
                                cwd: workspacePath, reason: .profile)
+        let localState = state
         await MainActor.run { localState?.recordBackgroundDenial(call: call, in: conversationId) }
-        return Self.deniedToolResult
+        profileDeniedThisTurn[conversationId] = functionCall.name
+        return Self.profileDeniedToolResult(tool: functionCall.name)
     }
 
-    /// What the model is told when a tool call was refused — by a human, or by the run's profile.
+    /// What the model is told when a human (or the fail-closed background branch standing in for
+    /// one) refused a tool call.
     static let deniedToolResult = "User denied permission to execute this tool. You must ask the user for clarification or suggest an alternative."
+
+    /// What the model is told when the RUN's profile refused it. Deliberately not the sentence
+    /// above: "ask the user for clarification" is advice an unattended run cannot take, and
+    /// "suggest an alternative" invites the model to reach for the next mutating tool, which is
+    /// denied for the same reason. This one says the door is shut and what to do instead.
+    static func profileDeniedToolResult(tool: String) -> String {
+        "Not available: this job is read-only, so `\(tool)` cannot run in it — and nor can any other tool that changes something. Do not look for another way; report what you found and finish."
+    }
+
+    /// The tool a `.profile` denial refused this turn, per conversation. Set by `profileRefusal`
+    /// (actor-isolated, so the concurrent tool batch can write it safely), taken by the model-round
+    /// loop, which ends the turn on it.
+    private var profileDeniedThisTurn: [UUID: String] = [:]
+
+    private func takeProfileDenial(for conversationId: UUID) -> String? {
+        profileDeniedThisTurn.removeValue(forKey: conversationId)
+    }
 
     private func executeFunctionCall(_ functionCall: FunctionCall, conversationId: UUID, workspacePath: String?, restrictToGoalComplete: Bool = false) async -> String {
         let localState = state
         var result = ""
 
+        // One hop for both gates below (they ask the same conversation two questions), rather than
+        // one per tool call per gate: an ordinary chat pays this on every call and is neither.
+        let (isUnattended, jobProfile) = await MainActor.run { () -> (Bool, JobProfile?) in
+            let conversation = localState?.conversations.first(where: { $0.id == conversationId })
+            return (conversation?.isBackground == true, conversation?.jobProfile)
+        }
+
         // The epic's standing ruling: no unattended job creation. Neither tool is declared to a
         // background turn (see `buildRequest`), but declaration gating only stops a well-behaved
         // model — the refusal has to live at the point that would actually write the row.
-        if Self.jobCreationTools.contains(functionCall.name) {
-            if await isUnattendedRun(conversationId) { return Self.unattendedJobCreationRefusal }
+        if Self.jobCreationTools.contains(functionCall.name), isUnattended {
+            return Self.unattendedJobCreationRefusal
         }
 
         // #187 §0.2, §4: a readOnly job run fails closed on a tool its profile denies, before any
         // of the branches below can act on it. Declaration gating above only stops a model that
         // plays by the rules; this is the point that has an effect.
         if let refusal = await profileRefusal(for: functionCall, conversationId: conversationId,
-                                              workspacePath: workspacePath) {
+                                              workspacePath: workspacePath, profile: jobProfile) {
             return refusal
         }
 
@@ -2103,7 +2136,7 @@ actor IrisEngine {
             // And a background run is not a session either, in either direction (#187): reading
             // the roster is how a send would pick its target, so refusing it here is the same
             // property as the send refusal below, not a separate courtesy.
-            guard !(await isUnattendedRun(conversationId)) else {
+            guard !isUnattended else {
                 result = Self.unattendedSessionListRefusal
                 return result
             }
@@ -2128,7 +2161,7 @@ actor IrisEngine {
             // background conversation, but a background SENDER was not — and delivery starts a
             // real turn in a user-facing conversation, under that conversation's attended
             // approval path. An unattended run does not get to have a peer do its gated work.
-            guard !(await isUnattendedRun(conversationId)) else {
+            guard !isUnattended else {
                 result = Self.unattendedSessionMessageRefusal
                 return result
             }
@@ -2184,7 +2217,7 @@ actor IrisEngine {
                 return result
             }
             // A run nobody can list or address has nothing to advertise to.
-            guard !(await isUnattendedRun(conversationId)) else {
+            guard !isUnattended else {
                 result = Self.unattendedSessionListRefusal
                 return result
             }
@@ -2635,7 +2668,7 @@ actor IrisEngine {
 
         // Command hooks run in the agent's environment (per principal policy), independent of this
         // specific tool's own host/sandbox routing.
-        let hooksSandbox = conversationId == nil ? false : await hooksUseSandbox(conversationId: conversationId!, workspacePath: cwd)
+        let hooksSandbox = conversationId == nil ? false : await isSandboxed(conversationId: conversationId!, workspacePath: cwd)
 
         let beforeDecision = await HookManager.shared.fireBeforeTool(toolName: name, args: execArgs, useSandbox: hooksSandbox)
         if case .block(let reason) = beforeDecision {

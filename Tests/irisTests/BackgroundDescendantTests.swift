@@ -142,7 +142,8 @@ struct BackgroundDescendantTests {
             IrisDefaults.removeSuiteFile(named: suite, in: IrisDefaults.preferencesDirectory)
         }
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
-                               config: ConfigManager(store: defaults))
+                               config: ConfigManager(store: defaults),
+                               sandboxAvailable: { true })
 
         await runner.fire(job: job, origin: .schedule)
 

@@ -230,6 +230,27 @@ struct JobLedgerPolicyTests {
         #expect(try store.ledger.markApproved(runId: UUID(), at: t0) == false)
     }
 
+    @Test("markApproved refuses a call the profile denied, however the caller asks")
+    func markApprovedRefusesAProfileDenial() throws {
+        let store = try ConversationStore.inMemory()
+        let job = try seedJob(store, "j")
+        let run = makeRun(job, at: t0, status: .blockedOnApproval)
+        try store.ledger.begin(run: run)
+        try store.ledger.setBlockedCall(runId: run.id, BlockedCall(
+            toolName: "write_file", args: ["path": .string("/tmp/x")], reason: .profile, at: t0))
+
+        // Nothing can approve this into running: the job is read-only, so the answer does not
+        // depend on a human. The refusal lives at the data layer so a UI is not the only thing
+        // standing between a `.profile` row and a re-dispatch.
+        #expect(try store.ledger.markApproved(runId: run.id, at: t0) == false)
+        #expect(try store.ledger.run(id: run.id)?.approvedAt == nil)
+
+        // The same row with an approval-reason call is claimable as before.
+        try store.ledger.setBlockedCall(runId: run.id, BlockedCall(
+            toolName: "run_command", args: ["command": .string("ls")], reason: .approval, at: t0))
+        #expect(try store.ledger.markApproved(runId: run.id, at: t0) == true)
+    }
+
     @Test("parentRunId round-trips on a run")
     func parentRunId() throws {
         let store = try ConversationStore.inMemory()

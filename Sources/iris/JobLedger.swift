@@ -308,12 +308,23 @@ extension JobLedger {
     }
 
     /// Claims this run's blocked call for exactly one dispatch. `true` means the caller won the
-    /// claim and owns running the call; `false` means it was already approved (or the row is gone).
-    /// The `approvedAt IS NULL` guard is in the `UPDATE` itself rather than a read-then-write, so
-    /// two clicks on the same card — or two processes — cannot both see it unapproved and run the
-    /// call twice. Nothing claims one yet: "Approve and run" is the first caller.
+    /// claim and owns running the call; `false` means it was already approved, the row is gone, or
+    /// the call is one no approval can authorise. The `approvedAt IS NULL` guard is in the
+    /// `UPDATE` itself rather than a read-then-write, so two clicks on the same card — or two
+    /// processes — cannot both see it unapproved and run the call twice.
+    ///
+    /// A `.profile` blocked call is refused outright (R13): it was not refused for want of a human
+    /// but because the job is `readOnly`, and re-dispatching it would reopen the profile gate
+    /// through the ledger. The refusal lives here rather than only in whatever UI offers the
+    /// button, so a second caller cannot get it wrong.
     func markApproved(runId: UUID, at: Date) throws -> Bool {
         try writer.write { db in
+            let json = try String.fetchOne(db, sql: "SELECT blockedCall FROM job_runs WHERE id = ?",
+                                           arguments: [runId.uuidString])
+            if let json, let call = try? JSONDecoder().decode(BlockedCall.self, from: Data(json.utf8)),
+               call.reason == .profile {
+                return false
+            }
             try db.execute(sql: "UPDATE job_runs SET approvedAt = ? WHERE id = ? AND approvedAt IS NULL",
                            arguments: [at, runId.uuidString])
             return db.changesCount > 0

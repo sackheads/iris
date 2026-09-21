@@ -166,14 +166,17 @@ struct TurnBudgetTests {
         let (store, state, engine, client, _) = try harness([
             probeRound(total: 40), probeRound(total: 40), textRound("all done"),
         ])
+        // `mutating` (with a VM to run in): the budget is what must stop this run, so the probe
+        // tool has to reach the executor. A read-only run would refuse `noop_probe` as a tool
+        // outside its surface (#187 §0.2) and end the turn before the budget ever bit.
         var job = Job(name: "chatty", prompt: "Work forever.",
-                      trigger: .schedule(.interval(seconds: 60)))
+                      trigger: .schedule(.interval(seconds: 60)), profile: .mutating)
         job.policy.perRunTokenBudget = 30
         try store.ledger.upsert(job)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
-                               activity: RecordingActivity())
+                               activity: RecordingActivity(), sandboxAvailable: { true })
 
         await runner.fire(job: job, origin: .schedule)
 

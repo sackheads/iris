@@ -45,6 +45,11 @@ actor JobRunner {
     /// How a run keeps the Mac awake for its own duration (§4). Injected so a test can watch the
     /// begin/end pair instead of asserting on the machine's real power state.
     private let activity: any ActivityAPI
+    /// Whether a `mutating` job has the VM it is promised, asked afresh at every fire (§0.2, R12).
+    /// A creation-time check only describes the day the job was made: the user can uninstall the
+    /// runtime or turn sandboxing off at any point, and `SandboxPolicy.resolve` would then quietly
+    /// downgrade the run's pinned `.sandboxed` to the host. Injected so a test can pin the answer.
+    private let sandboxAvailable: @Sendable () -> Bool
     /// The jobs with a run in flight right now. Every fire goes through `fire`, so one set here is
     /// the whole overlap story, whatever woke the job.
     private var inFlight: Set<UUID> = []
@@ -58,7 +63,8 @@ actor JobRunner {
          config: ConfigManager = .shared,
          protectionEnabled: Bool? = nil,
          activity: any ActivityAPI = ProcessInfoActivity(),
-         usageSource: (any JobUsageReading)? = nil) {
+         usageSource: (any JobUsageReading)? = nil,
+         sandboxAvailable: (@Sendable () -> Bool)? = nil) {
         self.state = state
         self.engine = engine
         self.ledger = ledger
@@ -68,6 +74,7 @@ actor JobRunner {
         self.config = config
         self.protectionEnabled = protectionEnabled
         self.activity = activity
+        self.sandboxAvailable = sandboxAvailable ?? { SandboxPolicy.mutatingJobCanRun(config: config) }
     }
 
     // MARK: Admission (#187 §4)
@@ -400,6 +407,18 @@ actor JobRunner {
             print("[JobRunner] could not stamp the last run of \(job.name): \(error)")
         }
 
+        // R12: a mutating job runs in the container or not at all. The conversation is pinned
+        // `.sandboxed`, but a pin is an intent — with the runtime gone or sandboxing switched off
+        // since the job was created, `SandboxPolicy.resolve` downgrades it to the host silently,
+        // and an unattended run with the full tool surface on the host is the one outcome this
+        // profile exists to prevent. Refused like any other failure, so the card and the retry
+        // ladder say so.
+        if job.profile == .mutating, !sandboxAvailable() {
+            await closeFailed(run: run, job: job, origin: origin, conversationId: conversationId,
+                              reason: Self.sandboxUnavailableReason, at: now())
+            return
+        }
+
         guard let engine else {
             await closeInterrupted(run: run, conversationId: conversationId, at: now())
             return
@@ -466,7 +485,8 @@ actor JobRunner {
         let blockedCall = overran ? nil : turn.denials.first
         let blockedTool = blockedCall?.toolName
         let failureReason = overran ? TurnBudget.timeExceeded
-            : Self.failureReason(status: status, messages: turn.messages, blockedTool: blockedTool)
+            : Self.failureReason(status: status, messages: turn.messages, blockedTool: blockedTool,
+                                 blockedReason: blockedCall?.reason ?? .approval)
         do {
             // The conversation is fresh, so its accumulated `tokenUsage` IS this run's cost.
             try ledger.finish(runId: run.id, status: status, outcome: outcome,
@@ -634,6 +654,38 @@ actor JobRunner {
         }
     }
 
+    /// The failure reason a `mutating` fire with nowhere to run writes. Read back by `/jobs`.
+    static let sandboxUnavailableReason = "sandbox unavailable"
+
+    /// Closes a run that never started its turn, as a failure: the row, the retry ladder and the
+    /// card, exactly as the tail of `run` would have written them, minus everything that only a
+    /// finished turn has (an outcome, a token count, a blocked call). Separate from
+    /// `closeInterrupted`, which is not a failure and never retries.
+    private func closeFailed(run: JobRun, job: Job, origin: FireOrigin, conversationId: UUID,
+                             reason: String, at finishedAt: Date) async {
+        if let state {
+            await MainActor.run { _ = state.takeBackgroundDenials(for: conversationId) }
+        }
+        do {
+            try ledger.finish(runId: run.id, status: .failed, outcome: nil, failureReason: reason,
+                              blockedTool: nil, tokens: TokenUsage(), finishedAt: finishedAt)
+        } catch {
+            print("[JobRunner] could not close the refused run for \(job.name): \(error)")
+        }
+        let retry = Self.retryDecision(status: .failed, attempt: job.retryAttempt,
+                                       retryEnabled: job.policy.retry,
+                                       watcherFire: Self.isPathDriven(origin: origin, job: job),
+                                       now: finishedAt)
+        await apply(retry, job: job, status: .failed)
+        let card = EventCard(runId: run.id, jobId: job.id, jobName: job.name, status: .failed,
+                             outcome: Self.cardOutcome(reason, retry: retry, now: finishedAt),
+                             blockedTool: nil,
+                             startedAt: run.startedAt, finishedAt: finishedAt, totalTokens: 0,
+                             transcriptConversationId: conversationId)
+        await closeSession(conversationId, status: card.statusText)
+        await deliver(card, for: job)
+    }
+
     /// Closes a run whose app state disappeared under it: the same shape as the sweep at the next
     /// launch, because it is the same situation — nothing will ever finish this turn. No card:
     /// there is nowhere to deliver one to.
@@ -755,10 +807,16 @@ actor JobRunner {
     /// What the row records about why a run did not simply complete — and, when the run left no
     /// reply to show, what the card prints in its place.
     static func failureReason(status: JobRun.Status, messages: [ChatMessage],
-                              blockedTool: String?) -> String? {
+                              blockedTool: String?,
+                              blockedReason: BlockedCall.Reason = .approval) -> String? {
         switch status {
         case .blockedOnApproval:
-            return "needs approval: \(blockedTool ?? "a gated tool")"
+            let tool = blockedTool ?? "a gated tool"
+            // The two reasons read differently on purpose: one is waiting for a person, the other
+            // is waiting for a job that was never created to be able to do this at all.
+            return blockedReason == .profile
+                ? "not available to a read-only job: \(tool)"
+                : "needs approval: \(tool)"
         case .failed:
             return llmErrorHeadline(in: messages) ?? budgetStopReason(in: messages)
                 ?? softStopLine(in: messages) ?? noReplyReason
