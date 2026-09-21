@@ -128,6 +128,10 @@ struct JobAdmissionTests {
         let plain = job()
         let queueing = job(overlap: .queue)
         let paused = job(paused: "paused by hand")
+        var disabled = job()
+        disabled.enabled = false
+        var pausedAndDisabled = job(paused: "paused by hand")
+        pausedAndDisabled.enabled = false
 
         let cases: [(what: String, job: Job, inFlight: Bool, runs: Int, jobTokens: Int,
                      allTokens: Int, expected: JobRunner.Admission)] = [
@@ -135,6 +139,10 @@ struct JobAdmissionTests {
              paused, true, 9, 999, 9_999, .dropPaused),
             ("a paused job that is otherwise fine is still dropped",
              paused, false, 0, 0, 0, .dropPaused),
+            ("a disabled job is dropped the same way, whatever woke it",
+             disabled, false, 0, 0, 0, .dropDisabled),
+            ("the pause outranks the disable: it is the reason a person set",
+             pausedAndDisabled, false, 0, 0, 0, .dropPaused),
             ("in flight outranks the breaker: an overlap is not a run",
              plain, true, 9, 0, 0, .skipInFlight),
             ("in flight under the queue policy holds the trigger instead of dropping it",
@@ -354,6 +362,28 @@ struct JobAdmissionTests {
         let activity = state.conversations.first { $0.id == state.activityConversationId() }
         #expect(activity?.messages.filter { $0.role == .event }.isEmpty != false,
                 "the pause card already went out when it was paused")
+    }
+
+    @Test("a disabled job's fire does nothing either: the scheduler skips it, a watch does not")
+    func disabledFireIsDroppedSilently() async throws {
+        let (store, state, engine, client) = try harness([textResponse("tick")])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        // A watch fire never goes through the scheduler's `enabled` query, so this is the only
+        // thing standing between a disabled job and a run per saved file.
+        var job = Job(name: "switched-off", prompt: "Reply with just the word tick.",
+                      trigger: .fsEvent(FSWatch(path: "/tmp/watched")))
+        job.enabled = false
+        try store.ledger.upsert(job)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               config: config, protectionEnabled: false)
+
+        let admission = await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/watched/a"])
+
+        #expect(admission == .dropDisabled)
+        #expect(client.callCount == 0)
+        #expect(try store.ledger.runs(jobId: job.id, limit: 10).isEmpty)
+        #expect(state.conversations.filter { $0.isBackground }.isEmpty)
     }
 
     // MARK: fire — the breaker

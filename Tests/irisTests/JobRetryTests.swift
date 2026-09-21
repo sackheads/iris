@@ -60,30 +60,40 @@ struct JobRetryTests {
     @Test("three failures climb the ladder; the fourth pauses")
     func retryDecisionTable() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
-        #expect(JobRunner.retryDecision(status: .failed, attempt: 0, retryEnabled: true, now: now)
+        #expect(JobRunner.retryDecision(status: .failed, attempt: 0, retryEnabled: true, watcherFire: false, now: now)
                 == .retry(at: now.addingTimeInterval(60)))
-        #expect(JobRunner.retryDecision(status: .failed, attempt: 1, retryEnabled: true, now: now)
+        #expect(JobRunner.retryDecision(status: .failed, attempt: 1, retryEnabled: true, watcherFire: false, now: now)
                 == .retry(at: now.addingTimeInterval(300)))
-        #expect(JobRunner.retryDecision(status: .failed, attempt: 2, retryEnabled: true, now: now)
+        #expect(JobRunner.retryDecision(status: .failed, attempt: 2, retryEnabled: true, watcherFire: false, now: now)
                 == .retry(at: now.addingTimeInterval(1_500)))
-        #expect(JobRunner.retryDecision(status: .failed, attempt: 3, retryEnabled: true, now: now)
+        #expect(JobRunner.retryDecision(status: .failed, attempt: 3, retryEnabled: true, watcherFire: false, now: now)
                 == .pause(reason: JobRunner.retriesExhaustedReason))
-        #expect(JobRunner.retryDecision(status: .failed, attempt: 9, retryEnabled: true, now: now)
+        #expect(JobRunner.retryDecision(status: .failed, attempt: 9, retryEnabled: true, watcherFire: false, now: now)
                 == .pause(reason: JobRunner.retriesExhaustedReason))
     }
 
     @Test("retry off means a failure is reported once and left alone")
     func retryDisabled() {
         let now = Date()
-        #expect(JobRunner.retryDecision(status: .failed, attempt: 0, retryEnabled: false, now: now) == .none)
-        #expect(JobRunner.retryDecision(status: .failed, attempt: 3, retryEnabled: false, now: now) == .none)
+        #expect(JobRunner.retryDecision(status: .failed, attempt: 0, retryEnabled: false, watcherFire: false, now: now) == .none)
+        #expect(JobRunner.retryDecision(status: .failed, attempt: 3, retryEnabled: false, watcherFire: false, now: now) == .none)
+    }
+
+    @Test("a watch fire does not retry: the next save re-runs it with real paths")
+    func watcherFiresDoNotRetry() {
+        let now = Date()
+        #expect(JobRunner.retryDecision(status: .failed, attempt: 0, retryEnabled: true,
+                                        watcherFire: true, now: now) == .none)
+        #expect(JobRunner.retryDecision(status: .failed, attempt: 3, retryEnabled: true,
+                                        watcherFire: true, now: now) == .none,
+                "and it never reaches the pause at the end of the ladder either")
     }
 
     @Test("only a failure retries: an approval needs a human, and the other outcomes are not failures")
     func onlyFailuresRetry() {
         let now = Date()
         for status: JobRun.Status in [.completed, .blockedOnApproval, .interrupted, .running] {
-            #expect(JobRunner.retryDecision(status: status, attempt: 1, retryEnabled: true, now: now) == .none,
+            #expect(JobRunner.retryDecision(status: status, attempt: 1, retryEnabled: true, watcherFire: false, now: now) == .none,
                     "\(status) must not be retried")
         }
     }
@@ -133,6 +143,26 @@ struct JobRetryTests {
         let card = try #require(self.card(state))
         #expect(card.outcome?.contains(JobRunner.retriesExhaustedReason) == true,
                 "got: \(card.outcome ?? "nil")")
+    }
+
+    @Test("a failed watch fire leaves the schedule alone, ladder and all")
+    func watcherFailureDoesNotClimbTheLadder() async throws {
+        let (store, state, engine) = try harness([textResponse("")])
+        var j = Job(name: "inbox", prompt: "Sort it.", trigger: .fsEvent(FSWatch(path: "/tmp/in")))
+        j.retryAttempt = 0
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               activity: RecordingActivity())
+
+        await runner.fire(job: j, reason: "fsEvent", changedPaths: ["/tmp/in/a.txt"])
+
+        let stored = try #require(try store.ledger.job(id: j.id))
+        #expect(stored.retryAttempt == 0)
+        #expect(stored.nextFireAt == nil, "a watch has no cadence for a retry to move")
+        #expect(try store.ledger.runs(jobId: j.id, limit: 1).first?.status == .failed)
+        #expect(self.card(state)?.outcome?.contains("retrying") != true)
     }
 
     @Test("a run that finally works clears the ladder")
@@ -229,6 +259,26 @@ struct JobRetryTests {
         #expect(output(app, id).contains("No job named 'nightly'."))
     }
 
+    @Test("/jobs run refuses a paused or a disabled job, and names one that is not there")
+    func runCommandRefusals() {
+        var paused = job(name: "sleeping")
+        paused.pausedReason = JobRunner.retriesExhaustedReason
+        var off = job(name: "switched-off")
+        off.enabled = false
+        let (app, id) = makeApp(with: [paused, off])
+
+        app.sendMessage("/jobs run sleeping")
+        app.sendMessage("/jobs run switched-off")
+        app.sendMessage("/jobs run nightly")
+
+        let out = output(app, id)
+        #expect(out.contains("'sleeping' is paused (\(JobRunner.retriesExhaustedReason))"))
+        #expect(out.contains("'switched-off' is disabled."))
+        #expect(out.contains("No job named 'nightly'."))
+        // None of the three reached a runner, so none of them needed a model client.
+        #expect(app.conversations.filter { $0.isBackground }.isEmpty)
+    }
+
     // MARK: The sleep assertion
 
     /// A client that parks inside the model call until the test lets it go, so the assertion's
@@ -285,8 +335,10 @@ struct JobRetryTests {
         #expect(activity.events == [.begin("Iris job pr-sweep"), .end])
     }
 
-    @Test("a run that overruns its timeout gives the assertion back at the deadline")
-    func activityEndsAtTheDeadline() async throws {
+    @Test("a run that overruns its timeout is ended at the deadline, and the row says so")
+    func deadlineEndsTheRun() async throws {
+        // A client that never returns: the round-boundary budget check cannot reach a turn parked
+        // inside a model call, so the deadline has to cancel the turn itself.
         let client = GatedClient(response: textResponse("tick"))
         let (store, state, engine) = try harness([], client: client)
         let j = job(timeoutSeconds: 1)
@@ -297,14 +349,15 @@ struct JobRetryTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
                                activity: activity)
 
-        let fire = Task { await runner.fire(job: j, reason: "schedule") }
-        await waitFor("the deadline to give the assertion back") { activity.events.count == 2 }
-        #expect(activity.events == [.begin("Iris job pr-sweep"), .end])
-        #expect(client.callCount == 1, "the turn itself is still parked in the model call")
+        await runner.fire(job: j, reason: "schedule")
 
-        client.release()
-        await fire.value
+        #expect(client.callCount == 1, "and it was never released")
+        let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
+        #expect(run.status == .failed)
+        #expect(run.failureReason == TurnBudget.timeExceeded)
         #expect(activity.events == [.begin("Iris job pr-sweep"), .end],
-                "and ending it twice is not two ends")
+                "the assertion went back at the deadline, exactly once")
+        let card = try #require(self.card(state))
+        #expect(card.outcome?.contains(TurnBudget.timeExceeded) == true)
     }
 }

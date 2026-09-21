@@ -74,10 +74,26 @@ actor JobRunner {
     enum Admission: Equatable, Sendable {
         case run
         case dropPaused
+        case dropDisabled
         case skipInFlight
         case queued
         case pauseBreaker(count: Int)
         case pauseBudget(scope: String, used: Int, limit: Int)
+    }
+
+    /// Why a fire was not started, as a person reads it — `nil` for `.run`. `/jobs run` prints it:
+    /// a hand-started fire that admission refused must say so, or the command looks like it worked.
+    static func refusalText(_ admission: Admission) -> String? {
+        switch admission {
+        case .run: return nil
+        case .dropPaused: return "it is paused"
+        case .dropDisabled: return "it is disabled"
+        case .skipInFlight: return "a run is already in progress"
+        case .queued: return "a run is already in progress, so this fire is queued behind it"
+        case .pauseBreaker(let count): return breakerReason(count: count)
+        case .pauseBudget(let scope, let used, let limit):
+            return budgetReason(scope: scope, used: used, limit: limit)
+        }
     }
 
     /// The whole admission decision, as a pure function of the job and four numbers, so the order
@@ -96,6 +112,10 @@ actor JobRunner {
     static func admit(job: Job, inFlight: Bool, runsLastHour: Int,
                       tokensTodayJob: Int, tokensTodayAll: Int, limits: JobLimits) -> Admission {
         if job.pausedReason != nil { return .dropPaused }
+        // Same shape as a pause and for the same reason: `enabled == false` is already the answer,
+        // and the scheduler's query never selects one — but a watch fire and `/jobs run` do not
+        // come through that query, so the decision has to live here too.
+        if !job.enabled { return .dropDisabled }
         if inFlight { return job.policy.overlap == .queue ? .queued : .skipInFlight }
         if limits.maxRunsPerHour > 0, runsLastHour >= limits.maxRunsPerHour {
             return .pauseBreaker(count: runsLastHour)
@@ -143,25 +163,32 @@ actor JobRunner {
     ///
     /// The ledger reads are synchronous, so nothing suspends between reading `inFlight` and
     /// inserting into it: two fires arriving at once cannot both be admitted.
-    func fire(job: Job, reason: String, changedPaths: [String] = []) async {
+    /// Returns what admission decided about the fire the *caller* asked for — a held `queue` fire
+    /// that follows it does not change that answer — so `/jobs run` can say what happened instead
+    /// of claiming a run that never started. `nil` means there was no job left to fire: the row was
+    /// deleted out from under the trigger, or could not be read.
+    @discardableResult
+    func fire(job: Job, reason: String, changedPaths: [String] = []) async -> Admission? {
         var reason = reason
         var paths = changedPaths
+        var decided: Admission?
         // A loop, not recursion: the `queue` policy can hand this straight back a trigger, and a
         // busy job would otherwise grow one stack frame per held fire.
         while true {
             let current: Job
             do {
-                guard let stored = try ledger.job(id: job.id) else { return }
+                guard let stored = try ledger.job(id: job.id) else { return decided }
                 current = stored
             } catch {
                 print("[JobRunner] not firing \(job.name): could not read the job: \(error)")
-                return
+                return decided
             }
 
-            // `admit`'s first branch, taken before the two usage queries: a paused job is the
-            // commonest fire there is (a watch on a paused job sees every save), and it must cost
-            // nothing and leave nothing behind.
-            if current.pausedReason != nil { return }
+            // `admit`'s first two branches, taken before the two usage queries: a paused or
+            // disabled job is the commonest fire there is (a watch on one sees every save), and it
+            // must cost nothing and leave nothing behind.
+            if current.pausedReason != nil { return decided ?? .dropPaused }
+            if !current.enabled { return decided ?? .dropDisabled }
 
             let at = now()
             let limits = JobLimits.resolve(job: current, config: config)
@@ -169,29 +196,32 @@ actor JobRunner {
                 ?? JobUsage(tokensToday: 0, runsLastHour: 0)
             let tokensAll = (try? ledger.tokensToday(jobId: nil, calendar: calendar, now: at)) ?? 0
 
-            switch Self.admit(job: current, inFlight: inFlight.contains(current.id),
-                              runsLastHour: usage.runsLastHour, tokensTodayJob: usage.tokensToday,
-                              tokensTodayAll: tokensAll, limits: limits) {
-            case .dropPaused:
-                return
+            let admission = Self.admit(job: current, inFlight: inFlight.contains(current.id),
+                                       runsLastHour: usage.runsLastHour,
+                                       tokensTodayJob: usage.tokensToday,
+                                       tokensTodayAll: tokensAll, limits: limits)
+            if decided == nil { decided = admission }
+            switch admission {
+            case .dropPaused, .dropDisabled:
+                return decided
             case .skipInFlight:
-                guard !Self.isWatcherFire(reason: reason) else { return }
+                guard !Self.isWatcherFire(reason: reason) else { return decided }
                 do {
                     try Self.recordSkip(job: current, ledger: ledger, now: at)
                 } catch {
                     print("[JobRunner] could not record the skipped run for \(current.name): \(error)")
                 }
-                return
+                return decided
             case .queued:
                 hold(fire: at, for: current, paths: paths)
-                return
+                return decided
             case .pauseBreaker(let count):
                 await pause(job: current, reason: Self.breakerReason(count: count), at: at)
-                return
+                return decided
             case .pauseBudget(let scope, let used, let limit):
                 await pause(job: current,
                             reason: Self.budgetReason(scope: scope, used: used, limit: limit), at: at)
-                return
+                return decided
             case .run:
                 break
             }
@@ -200,7 +230,7 @@ actor JobRunner {
             await run(job: current, reason: reason, changedPaths: paths, limits: limits)
             inFlight.remove(current.id)
 
-            guard let held = takeQueuedFire(job: current) else { return }
+            guard let held = takeQueuedFire(job: current) else { return decided }
             reason = "queued"
             paths = held
         }
@@ -306,21 +336,35 @@ actor JobRunner {
         // The wall clock, not the injected `now`: this deadline bounds a turn that is happening
         // right now, so a test (or a replayed occurrence) that pins the ledger's clock to another
         // instant must not make every run time out before its first model call.
-        let deadline = Date().addingTimeInterval(TimeInterval(max(1, limits.runTimeoutSeconds)))
+        let deadline = Date().addingTimeInterval(TimeInterval(limits.runTimeoutSeconds))
         let budget = TurnBudget(maxTokens: limits.perRunTokens, deadline: deadline)
         // Stay awake for this run, and no longer: the watchdog gives the assertion back at the
         // deadline even when the turn overruns it, so a wedged run cannot hold the Mac awake for
         // the rest of the session. `ActivityHolder` ends once, whichever gets there first.
         let holder = ActivityHolder(api: activity, reason: "Iris job \(job.name)")
+        // The turn is a task of its own so the deadline can actually end it. The budget check at
+        // the top of each model round cannot: a turn parked inside a model call that never returns
+        // never reaches another round, which is exactly the run a timeout exists for.
+        let turnTask = Task { [weak engine] in
+            await engine?.processInput(prompt, source: "job:\(job.name)",
+                                       conversationId: conversationId, turnBudget: budget)
+        }
+        let timedOut = DeadlineFlag()
         let watchdog = Task.detached {
             let seconds = deadline.timeIntervalSinceNow
-            if seconds > 0 { try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
+            if seconds > 0 {
+                // Not `try?`: a cancelled sleep means the run finished first, and the two things
+                // below are the deadline's alone to do.
+                do { try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) } catch { return }
+            }
             await holder.end()
+            await timedOut.fire()
+            turnTask.cancel()
         }
-        await engine.processInput(prompt, source: "job:\(job.name)", conversationId: conversationId,
-                                  turnBudget: budget)
+        await turnTask.value
         watchdog.cancel()
         await holder.end()
+        let overran = await timedOut.value
         let finishedAt = now()
 
         guard let turn = await readTurn(conversationId: conversationId) else {
@@ -328,12 +372,15 @@ actor JobRunner {
             return
         }
 
-        let status = Self.status(messages: turn.messages, denials: turn.denials,
-                                 softStopped: Self.softStopped(in: turn.messages))
+        // A cancelled turn leaves a transcript that looks like silence, and `noReplyReason` would
+        // be a true sentence about the wrong thing. The deadline is why this run ended, so the row
+        // says so — this is the only place that knows.
+        let status = overran ? .failed : Self.status(messages: turn.messages, denials: turn.denials,
+                                                     softStopped: Self.softStopped(in: turn.messages))
         let outcome = Self.outcome(from: turn.messages)
-        let blockedTool = turn.denials.first?.toolName
-        let failureReason = Self.failureReason(status: status, messages: turn.messages,
-                                               blockedTool: blockedTool)
+        let blockedTool = overran ? nil : turn.denials.first?.toolName
+        let failureReason = overran ? TurnBudget.timeExceeded
+            : Self.failureReason(status: status, messages: turn.messages, blockedTool: blockedTool)
         do {
             // The conversation is fresh, so its accumulated `tokenUsage` IS this run's cost.
             try ledger.finish(runId: run.id, status: status, outcome: outcome,
@@ -347,7 +394,9 @@ actor JobRunner {
         // what the card has to say: "failed" and "failed, trying again in a minute" are different
         // news to someone who has to decide whether to go and look.
         let retry = Self.retryDecision(status: status, attempt: job.retryAttempt,
-                                       retryEnabled: job.policy.retry, now: finishedAt)
+                                       retryEnabled: job.policy.retry,
+                                       watcherFire: Self.isWatcherFire(reason: reason),
+                                       now: finishedAt)
         await apply(retry, job: job, status: status)
 
         let card = EventCard(runId: run.id, jobId: job.id, jobName: job.name, status: status,
@@ -385,9 +434,14 @@ actor JobRunner {
     /// needs a person (running it again would block again), `interrupted` was not the job's doing,
     /// and `completed` has nothing to try again — it is the caller that clears the ladder, because
     /// "no change" and "reset to zero" are the same decision here.
+    ///
+    /// A watch fire does not retry either, whatever its policy says. Its input is the paths the
+    /// filesystem handed it, and a retry minutes later would re-run the prompt without them — a
+    /// different run wearing the same name. The next save re-runs it with real paths, which is the
+    /// retry a watch actually has.
     static func retryDecision(status: JobRun.Status, attempt: Int, retryEnabled: Bool,
-                              now: Date) -> RetryDecision {
-        guard status == .failed, retryEnabled else { return .none }
+                              watcherFire: Bool, now: Date) -> RetryDecision {
+        guard status == .failed, retryEnabled, !watcherFire else { return .none }
         guard attempt < backoff.count else { return .pause(reason: retriesExhaustedReason) }
         return .retry(at: now.addingTimeInterval(backoff[attempt]))
     }
@@ -575,15 +629,30 @@ actor JobRunner {
             .flatMap { LLMErrorMessage.parse($0.content)?.headline }
     }
 
-    /// Whether the loop detector (or a blocked-result run) cut the turn short. The signal is the
-    /// `.system` line `IrisEngine.softStopWithSummary` posts, matched on the shared marker rather
-    /// than a copy of the sentence.
+    /// Whether the turn was cut short rather than ending on its own: the loop detector, a
+    /// blocked-result run, or an exhausted per-run budget. The signal is the `.system` line the
+    /// engine posts, matched on its shared marker rather than on a copy of the sentence — and on
+    /// either marker, because the budget stop deliberately does not claim to be summarizing
+    /// (`IrisEngine.budgetStopMarker`).
     static func softStopped(in messages: [ChatMessage]) -> Bool {
         softStopLine(in: messages) != nil
     }
 
     private static func softStopLine(in messages: [ChatMessage]) -> String? {
-        messages.last { $0.role == .system && $0.content.contains(IrisEngine.softStopMarker) }?.content
+        messages.last {
+            $0.role == .system
+                && ($0.content.contains(IrisEngine.softStopMarker)
+                    || $0.content.contains(IrisEngine.budgetStopMarker))
+        }?.content
+    }
+
+    /// The budget a stop line names, if that is what stopped the turn. The reason on its own, not
+    /// the whole line: the row and the card say "budget: tokens exceeded — retrying in 1 m", and
+    /// the origin prefix and the marker sentence are for the person reading the transcript.
+    static func budgetStopReason(in messages: [ChatMessage]) -> String? {
+        guard let line = softStopLine(in: messages), line.contains(IrisEngine.budgetStopMarker)
+        else { return nil }
+        return [TurnBudget.tokensExceeded, TurnBudget.timeExceeded].first { line.contains($0) }
     }
 
     /// What the row records about why a run did not simply complete — and, when the run left no
@@ -594,7 +663,8 @@ actor JobRunner {
         case .blockedOnApproval:
             return "needs approval: \(blockedTool ?? "a gated tool")"
         case .failed:
-            return llmErrorHeadline(in: messages) ?? softStopLine(in: messages) ?? noReplyReason
+            return llmErrorHeadline(in: messages) ?? budgetStopReason(in: messages)
+                ?? softStopLine(in: messages) ?? noReplyReason
         case .running, .completed, .interrupted:
             return nil
         }
@@ -623,6 +693,14 @@ actor JobRunner {
     }
 }
 
+/// Whether the deadline got there first. Set by the watchdog before it cancels the turn and read
+/// after the turn returns, so the run reports the timeout rather than the silence cancelling it
+/// left behind. An actor because the two are different tasks by construction.
+private actor DeadlineFlag {
+    private(set) var value = false
+    func fire() { value = true }
+}
+
 /// The numbers one fire is judged against: the job's own policy where it set one, the global
 /// `ConfigManager` defaults where it did not (§0.1). Resolved once per fire rather than read
 /// field by field, so a run and the card that reports it cannot disagree about what its budget was.
@@ -640,8 +718,15 @@ struct JobLimits: Equatable, Sendable {
         // `runTimeoutSeconds` is the one non-optional override on `JobPolicy`, so "the job set it"
         // has to be read as "it is not the struct's own default" — which is what lets the global
         // stepper still move every job that never asked for a timeout of its own.
-        let timeout = policy.runTimeoutSeconds == JobPolicy().runTimeoutSeconds
-            ? config.jobRunTimeoutSeconds : policy.runTimeoutSeconds
+        //
+        // Zero (or less) takes the global default too, and deliberately does NOT mean "no timeout"
+        // the way a zero token budget does: a budget bounds spend, which a person may reasonably
+        // want unbounded, while this bounds a turn that has stopped responding — and a run nothing
+        // can end is the failure the whole deliverable is about. Nothing configurable writes one;
+        // a hand-edited policy can.
+        let overridden = policy.runTimeoutSeconds > 0
+            && policy.runTimeoutSeconds != JobPolicy().runTimeoutSeconds
+        let timeout = overridden ? policy.runTimeoutSeconds : config.jobRunTimeoutSeconds
         return JobLimits(maxRunsPerHour: policy.maxRunsPerHour ?? config.jobMaxRunsPerHour,
                          dailyTokens: policy.dailyTokenBudget ?? config.jobDailyTokenBudget,
                          globalDailyTokens: config.jobGlobalDailyTokenBudget,

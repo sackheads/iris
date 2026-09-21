@@ -97,8 +97,8 @@ struct TurnBudgetTests {
 
         #expect(client.callCount == 0, "the budget is read before the call, not after it")
         let line = try #require(systemLines(state, conversation).last)
-        #expect(line.contains(TurnBudget.timeExceeded))
-        #expect(line.contains(IrisEngine.softStopMarker), "the runner reads this marker back")
+        #expect(line == "[Main agent] \(TurnBudget.timeExceeded). \(IrisEngine.budgetStopMarker)")
+        #expect(!line.contains("Summarizing"), "nothing promises a summary the stop does not produce")
         #expect(state.conversations.first { $0.id == conversation }?.messages.contains { $0.role == .agent } != true)
     }
 
@@ -115,7 +115,8 @@ struct TurnBudgetTests {
         #expect(client.callCount == 1, "round two is never asked for")
         let line = try #require(systemLines(state, conversation).last)
         #expect(line.contains(TurnBudget.tokensExceeded))
-        #expect(line.contains(IrisEngine.softStopMarker))
+        #expect(line.contains(IrisEngine.budgetStopMarker))
+        #expect(!line.contains("Summarizing"))
     }
 
     @Test("a turn inside its budget runs to its natural end")
@@ -132,6 +133,25 @@ struct TurnBudgetTests {
         #expect(systemLines(state, conversation).allSatisfy { !$0.contains(TurnBudget.tokensExceeded) })
         #expect(state.conversations.first { $0.id == conversation }?.messages
             .last { $0.role == .agent }?.content == "all done")
+    }
+
+    @Test("a message that arrived mid-turn is not stranded by the budget stop")
+    func theBudgetStopDrainsWhatArrived() async throws {
+        let (_, state, engine, _, conversation) = try harness([probeRound(total: 40), textRound("done")])
+        state.enqueuePendingUserMessage(text: "actually, stop after this", attachments: [],
+                                        for: conversation)
+
+        // A deadline already gone, so the stop is the only thing that ever drains the inbox: the
+        // round-boundary drain never runs at all.
+        await engine.processInput("do the thing", source: "job:test", conversationId: conversation,
+                                  turnBudget: TurnBudget(maxTokens: 0,
+                                                         deadline: Date().addingTimeInterval(-1)))
+
+        // Taken from the inbox AND written to history: taken and dropped is how a mid-task message
+        // disappears without a trace.
+        #expect(state.pendingUserMessageCount(for: conversation) == 0)
+        let history = state.conversations.first { $0.id == conversation }?.history ?? []
+        #expect(history.contains { $0.parts.contains { $0.text?.contains("actually, stop after this") == true } })
     }
 
     // MARK: Through a run
@@ -155,12 +175,15 @@ struct TurnBudgetTests {
         #expect(client.callCount == 1)
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(run.status == .failed)
-        #expect(run.failureReason?.contains(TurnBudget.tokensExceeded) == true)
+        #expect(run.failureReason == TurnBudget.tokensExceeded,
+                "the reason alone, not the whole transcript line")
         #expect(run.totalTokens == 40, "what it spent is on the row")
 
         let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
         let card = try #require(activity.messages.compactMap { EventCard.decode($0.content) }.first)
         #expect(card.status == .failed)
-        #expect(card.outcome?.contains(TurnBudget.tokensExceeded) == true)
+        #expect(card.outcome == "\(TurnBudget.tokensExceeded) — retrying in 1 m")
+        #expect(card.outcome?.contains("Summarizing") != true,
+                "a budget stop does not summarize, and the card must not say it did")
     }
 }

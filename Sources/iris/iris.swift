@@ -15,6 +15,9 @@ struct TurnBudget: Sendable, Equatable {
     /// nothing configurable produces one, but a hand-written policy can, and "this job may never
     /// make a single model call" is a worse reading of 0 than "unbounded".
     let maxTokens: Int
+    /// No such escape hatch here: there is always a deadline, because it is the only thing that
+    /// can end a turn that has stopped responding. `JobLimits.resolve` reads a zero timeout as the
+    /// global default rather than as "unbounded" for exactly that reason.
     let deadline: Date
 
     static let tokensExceeded = "budget: tokens exceeded"
@@ -673,6 +676,12 @@ actor IrisEngine {
     /// completion, with nothing to say otherwise.
     static let softStopMarker = "Summarizing and stopping."
 
+    /// The same signal for the stop that does NOT summarize (#187 §4). A budget stop cannot say
+    /// "summarizing": there is no allowance left for the model call a summary would take, and a
+    /// line that promises one is a line the transcript never keeps. `JobRunner` matches either
+    /// marker, so a run cut off by its budget still finishes `failed`.
+    static let budgetStopMarker = "Stopping without a summary."
+
     /// Graceful stop for a responsive-but-stuck goal loop: clear the reprompt, instruct the model
     /// to summarize and call goal_complete, and clear the goal so the loop cannot continue.
     private func softStopWithSummary(conversationId: UUID, reason: String) async {
@@ -710,15 +719,64 @@ actor IrisEngine {
         }
     }
 
+    /// Everything that arrived while the last round was running, into history, at a round
+    /// boundary: the user's mid-task messages first (#172), then the event lines for cards
+    /// delivered mid-turn (#187 §8.3). Returns whether anything was added, which is the caller's
+    /// cue to re-read the history it is about to send.
+    ///
+    /// The order is deliberate: a card is harness news and a steer is the user changing course, so
+    /// the user's words are read first when both landed in the same window. Steers go through the
+    /// BeforeAgent hook (a human or a peer wrote them); event lines do not (this harness wrote
+    /// them, and `deliverEvent` already sanitised them).
+    ///
+    /// A helper rather than two inline blocks because the turn can end at the round boundary as
+    /// well as continue through it — a budget stop, say — and whatever arrived has to reach the
+    /// transcript either way. Taking them and dropping them on the floor is how the user's
+    /// mid-task message disappears.
+    private func drainPendingInput(conversationId: UUID, hooksSandbox: Bool) async -> Bool {
+        let localState = state
+        var added = false
+
+        let steers = await MainActor.run { localState?.takePendingSteers(for: conversationId) ?? [] }
+        for steer in steers {
+            let decision = await HookManager.shared.fireBeforeAgent(input: steer.text, useSandbox: hooksSandbox)
+            var steerText = steer.text
+            if case .block(let reason) = decision {
+                await pushToUI(role: .system, text: "Hook blocked message: \(reason)", conversationId: conversationId)
+                continue
+            } else if case .proceed(let modifiedData) = decision, let data = modifiedData,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let modifiedInput = json["input"] as? String {
+                steerText = modifiedInput
+            }
+            // #185 §5.0 (round 2 fix): "User (mid-task):" is the system's highest trust label. A
+            // peer delivery queued through the busy path must never wear it — the model must not
+            // be told a peer's words are the user's own.
+            let label = steer.isPeer ? Self.peerMidTaskLabel : "User (mid-task)"
+            // Its own entry, not an extra part: the OpenAI translator would emit a text part
+            // before the tool messages.
+            let content = Content(role: "user", parts: [Part(text: "\(label): \(steerText)")])
+            await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
+            added = true
+        }
+
+        let eventLines = await MainActor.run { localState?.takePendingEventLines(for: conversationId) ?? [] }
+        for line in eventLines {
+            let content = AppState.eventLineContent(line)
+            await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
+            added = true
+        }
+        return added
+    }
+
     /// The budget stop (#187 §4): the turn ends here and now, with no further model call.
     ///
     /// Deliberately not `softStopWithSummary`, which is the *goal loop's* stop: that one re-enters
     /// `processInput` to ask for a summary, which is one more model call — exactly the thing an
     /// exhausted budget says there is no allowance for — and it asks for `goal_complete`, which a
-    /// background run has neither a goal nor a callback for. The line carries `softStopMarker` all
-    /// the same, because that marker is the signal `JobRunner` reads back out of the transcript to
-    /// finish the row `failed` with this reason (§6.2); a second spelling of it would report a run
-    /// that was cut off as a clean completion.
+    /// background run has neither a goal nor a callback for. The line therefore ends with
+    /// `budgetStopMarker` rather than `softStopMarker`: `JobRunner` matches both, so the run still
+    /// finishes `failed`, and nothing promises a summary that is not coming.
     private func endTurnForBudget(conversationId: UUID, reason: String) async {
         cancelReprompt(for: conversationId)
         loopDetectors[conversationId] = nil
@@ -727,7 +785,7 @@ actor IrisEngine {
         // spending past it either.
         let localState = state
         await MainActor.run { localState?.clearGoal(for: conversationId) }
-        await pushToUI(role: .system, text: "[\(approvalOrigin)] \(reason). \(Self.softStopMarker)",
+        await pushToUI(role: .system, text: "[\(approvalOrigin)] \(reason). \(Self.budgetStopMarker)",
                        conversationId: conversationId)
     }
 
@@ -1296,6 +1354,9 @@ actor IrisEngine {
                 }
                 if let reason = turnBudget.stopReason(tokensUsed: spent, now: Date()) {
                     turnFinished = true
+                    // Whatever arrived while the last round ran still belongs in the transcript:
+                    // the turn is ending, but a mid-task message taken and dropped is gone.
+                    _ = await drainPendingInput(conversationId: conversationId, hooksSandbox: hooksSandbox)
                     await endTurnForBudget(conversationId: conversationId, reason: reason)
                     break
                 }
@@ -1303,46 +1364,9 @@ actor IrisEngine {
             // One streamer per model round: it owns the agent row this round grows in place.
             let streamer = makeStreamer(conversationId: conversationId)
             do {
-                // Mid-task user messages (#172): whatever arrived since the last round joins the
-                // history as its own user entry, after the tool results, so the model sees it
-                // alongside them and can change course. Its own entry, not an extra part: the
-                // OpenAI translator would emit a text part before the tool messages.
-                let steers = await MainActor.run { localState?.takePendingSteers(for: conversationId) ?? [] }
-                if !steers.isEmpty {
-                    for steer in steers {
-                        let decision = await HookManager.shared.fireBeforeAgent(input: steer.text, useSandbox: hooksSandbox)
-                        var steerText = steer.text
-                        if case .block(let reason) = decision {
-                            await pushToUI(role: .system, text: "Hook blocked message: \(reason)", conversationId: conversationId)
-                            continue
-                        } else if case .proceed(let modifiedData) = decision, let data = modifiedData,
-                                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                                  let modifiedInput = json["input"] as? String {
-                            steerText = modifiedInput
-                        }
-                        // #185 §5.0 (round 2 fix): "User (mid-task):" is the system's highest
-                        // trust label. A peer delivery queued through the busy path must never
-                        // wear it — the model must not be told a peer's words are the user's own.
-                        let label = steer.isPeer ? Self.peerMidTaskLabel : "User (mid-task)"
-                        let content = Content(role: "user", parts: [Part(text: "\(label): \(steerText)")])
-                        await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
-                    }
-                    history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
-                    request.contents = history
-                }
-
-                // Event cards delivered while this turn was running (#187 §8.3). Same boundary as
-                // the steers above and deliberately after them: a card is harness news, a steer is
-                // the user changing course, and the user's words are read first when both landed
-                // in the same window. No BeforeAgent hook — that hook exists to inspect what a
-                // human or a peer said, and this text is the harness's own sentence about a job
-                // this harness ran. The line is already sanitised by `deliverEvent`.
-                let eventLines = await MainActor.run { localState?.takePendingEventLines(for: conversationId) ?? [] }
-                if !eventLines.isEmpty {
-                    for line in eventLines {
-                        let content = AppState.eventLineContent(line)
-                        await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
-                    }
+                // Mid-task user messages (#172) and then the event lines (#187 §8.3) — see
+                // `drainPendingInput`, which both this round and the budget stop above go through.
+                if await drainPendingInput(conversationId: conversationId, hooksSandbox: hooksSandbox) {
                     history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
                     request.contents = history
                 }

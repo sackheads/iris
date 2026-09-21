@@ -226,7 +226,7 @@ that cannot reach it.
 | `/jobs ack <run id>` | Marks a failed or blocked run as seen: it leaves the failure list, and it stops being exempt from retention. Takes a full id or the first eight or more characters of one, as a card prints it; an ambiguous prefix is refused rather than guessed |
 | `/jobs pause <name>` | Stops a job firing, with "paused by user" as the reason the table shows |
 | `/jobs resume <name>` | Clears the pause *and* the retry ladder, and recomputes the next fire from the job's own schedule |
-| `/jobs run <name>` | Fires the job now, through the same admission a scheduled fire meets (so an overlap, the breaker or an exhausted budget still refuses it). The result arrives as a card; a paused job is refused and says so |
+| `/jobs run <name>` | Fires the job now, through the same admission a scheduled fire meets, and reports what admission decided when the fire is over — an overlap, the breaker or an exhausted budget is named rather than reported as a run. The result itself arrives as a card. A paused or disabled job is refused up front |
 | `/jobs delete <name>` | Deletes a job and its ledger rows. Refused while a run is in flight. The transcripts are left for retention to clear, so a card you are still reading keeps working |
 
 ## The job tools

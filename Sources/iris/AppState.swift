@@ -2716,21 +2716,39 @@ class AppState {
                     emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
                     return
                 }
-                // Admission drops a paused job without a word, so saying it here is the difference
-                // between a command that did nothing and a command that looks like it worked.
+                // Admission drops a paused or disabled job without a word, and both are states the
+                // user has to undo before a hand-started fire can do anything. Saying so here —
+                // before anything is started — is the difference between a command that did
+                // nothing and a command that looks like it worked.
                 guard job.pausedReason == nil else {
                     emitCommandOutput("'\(job.name)' is paused (\(job.pausedReason ?? "")); `/jobs resume \(job.name)` first.",
                                       format: .markdown, to: convId)
                     return
                 }
-                emitCommandOutput("Firing **\(job.name)** now; the result arrives as a card.",
-                                  format: .markdown, to: convId)
+                guard job.enabled else {
+                    emitCommandOutput("'\(job.name)' is disabled.", format: .markdown, to: convId)
+                    return
+                }
                 // Through `fire`, not `run`: a hand-started fire meets the same overlap, breaker
-                // and budget checks a scheduled one does (§4).
+                // and budget checks a scheduled one does (§4) — and what it says is what admission
+                // decided, reported when the fire is over rather than promised before it starts.
                 let engine = self.engine
-                Task {
+                Task { [weak self] in
                     guard let runner = await engine?.jobRunner() else { return }
-                    await runner.fire(job: job, reason: "manual")
+                    let admission = await runner.fire(job: job, reason: "manual")
+                    guard let self else { return }
+                    guard let admission else {
+                        self.emitCommandOutput("'\(job.name)' is no longer in the jobs table.",
+                                               format: .markdown, to: convId)
+                        return
+                    }
+                    if let refusal = JobRunner.refusalText(admission) {
+                        self.emitCommandOutput("**\(job.name)** was not started: \(refusal).",
+                                               format: .markdown, to: convId)
+                    } else {
+                        self.emitCommandOutput("Fired **\(job.name)**; the result arrives as a card.",
+                                               format: .markdown, to: convId)
+                    }
                 }
             } catch {
                 emitCommandOutput("Could not run that job: \(error).", format: .markdown, to: convId)
