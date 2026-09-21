@@ -144,7 +144,15 @@ actor IrisEngine {
 
         // Sanitize incoming system events (especially those from subagents) to prevent injection
         let safeMessage = await sanitizeArrival(message, source: source)
+        await deliverSanitizedSystemEvent(safeMessage, source: source, conversationId: activeId, wasArchived: wasArchived)
+    }
 
+    /// The append-notice-and-drive-the-turn tail of `handleSystemEvent`, factored out so a caller
+    /// that has ALREADY run `sanitizeArrival` itself can hand off without a second sanitisation
+    /// pass. `deliverPeerMessage`'s idle path (#185 review round 3) is the one caller that needs
+    /// this: it sanitizes once, re-checks the target's busy state, and only then reaches here.
+    private func deliverSanitizedSystemEvent(_ safeMessage: String, source: String, conversationId: UUID, wasArchived: Bool) async {
+        let localState = state
         await MainActor.run {
             // #182 §6.2: an arrival lands with the user looking elsewhere, so the line that
             // reports the event also reports the row reappearing in the sidebar. Only when the
@@ -153,9 +161,9 @@ actor IrisEngine {
             // Selection deliberately does not move; resurfacing is not a reason to yank the user
             // out of what they are reading.
             let notice = wasArchived ? "Un-archived: work arrived from \(source).\n\n" : ""
-            localState?.appendMessage(role: .system, content: notice + safeMessage, to: activeId)
+            localState?.appendMessage(role: .system, content: notice + safeMessage, to: conversationId)
         }
-        await processInput(safeMessage, source: source, conversationId: activeId)
+        await processInput(safeMessage, source: source, conversationId: conversationId)
     }
 
     /// The structural guard, then the tier-3 injection guard, tagged by `source`. Factored out of
@@ -187,13 +195,13 @@ actor IrisEngine {
     /// (§5.1), self-send (§5.4), and the cascade budget (§7) before calling — `deliverPeerMessage`
     /// itself will happily deliver into an archived target or let a session message itself.
     ///
-    /// The busy check and the actual send below are not atomic: a turn that starts on `targetId`
-    /// in the gap between the `hasTurnInFlight` read and `handleSystemEvent`'s own hops can still
-    /// land two turns on one history. `IrisEngine` is a single reentrant actor with no lock over
-    /// a conversation's turn state, so closing this would need one; not attempted here.
-    /// Returns `true` when the message was queued behind a busy turn, `false` when it was handed
-    /// to an idle target. Callers that only care about delivery, not which path it took (most of
-    /// `PeerDeliveryTests`), can ignore it.
+    /// The busy check and the actual send are not atomic (round 3 narrowed this, it did not
+    /// close it — see below). `IrisEngine` is a single reentrant actor with no lock over a
+    /// conversation's turn state, so closing this fully would need one; not attempted here, and
+    /// it is filed as its own issue rather than done inside this fix round.
+    /// Returns `true` when the message was queued behind a busy turn (either check caught it),
+    /// `false` when it was handed to an idle target. Callers that only care about delivery, not
+    /// which path it took (most of `PeerDeliveryTests`), can ignore it.
     @discardableResult
     func deliverPeerMessage(_ message: String, from senderId: UUID, senderName: String?,
                              to targetId: UUID) async -> Bool {
@@ -218,6 +226,25 @@ actor IrisEngine {
             }
             return true
         }
+        // Idle at the first check. Sanitize now — the same helper the busy branch above uses —
+        // so the late re-check just below can hand off without a second sanitisation pass.
+        let safe = await sanitizeArrival(attributed, source: Self.peerSource)
+        // Round 3 fix (#185 review): `sanitizeArrival` runs tier-2 CoreML and tier-3
+        // auxiliary-model inference, which can hold this open for hundreds of milliseconds — far
+        // wider than "a few actor hops". A turn can start on `targetId` during that window, so
+        // re-check right before handoff and route to the same #172 inbox the busy branch above
+        // uses if it did. This NARROWS the TOCTOU between the first read and the actual send; it
+        // does not close it — the gap between THIS read and `withEngineTurn`'s own
+        // `beginEngineTurn` firing (inside `deliverSanitizedSystemEvent` -> `processInput`) is
+        // still open, and closing that needs the lock the type-level comment above declines to
+        // add here. Filed as a separate issue rather than fixed in this round.
+        let stillBusy = await MainActor.run { localState?.hasTurnInFlight(for: targetId) ?? false }
+        if stillBusy {
+            await MainActor.run {
+                localState?.enqueuePendingUserMessage(text: safe, attachments: [], for: targetId, isPeer: true)
+            }
+            return true
+        }
         // Round 2 fix (#185 review, M3): this used to `await handleSystemEvent` inline, which
         // runs the target's entire turn (`handleSystemEvent` -> `processInput` ->
         // `withEngineTurn`) before `send_to_session`'s tool call returns — so a depth-N cascade
@@ -226,9 +253,12 @@ actor IrisEngine {
         // cascade budget synchronously in the caller before this function even runs, so detaching
         // the delivery here cannot let a burst of sends outrun the cap. Plain `Task`, mirroring
         // the background-subagent precedent at `invoke_subagent`'s `isBackground` branch — not
-        // `.detached`, so it still runs on this actor.
+        // `.detached`, so it still runs on this actor. `deliverSanitizedSystemEvent`, not
+        // `handleSystemEvent`, because `safe` has already been through `sanitizeArrival` above —
+        // routing through `handleSystemEvent` again would sanitise it a second time.
         Task {
-            await handleSystemEvent(attributed, source: Self.peerSource, conversationId: targetId)
+            let wasArchived = await MainActor.run { localState?.unarchiveConversation(targetId) ?? false }
+            await self.deliverSanitizedSystemEvent(safe, source: Self.peerSource, conversationId: targetId, wasArchived: wasArchived)
         }
         return false
     }

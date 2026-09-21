@@ -113,6 +113,11 @@ struct PeerDeliveryTests {
     /// depth-N cascade ran N full turns nested inside the first `send_to_session` call. The
     /// target's gate below is never released, so a regression back to the inline await would hang
     /// this call forever; `withTimeout` turns that into a normal test failure instead of a hang.
+    /// Bound is 3s (matching this file's `eventually` default), not the tighter 500ms round 2
+    /// used: round 3 added a second `sanitizeArrival` pass to the idle path's fast return (the
+    /// late busy re-check), and under this suite's parallel test execution that occasionally ran
+    /// past 500ms with no gate involved at all — a false failure, not the hang this test guards
+    /// against. 3s stays trivially distinguishable from "forever" (the gate is never released).
     @Test("an idle delivery returns without waiting for the target's turn to finish")
     func idleDeliveryDoesNotBlockOnTargetTurn() async {
         let app = AppState(); app.conversations.removeAll()
@@ -129,7 +134,7 @@ struct PeerDeliveryTests {
         let engine = IrisEngine(state: app, tier: .medium, client: client, streamResponses: false,
                                 protectionEnabled: false)
 
-        let queued = await withTimeout(500) {
+        let queued = await withTimeout(3000) {
             await engine.deliverPeerMessage("hi", from: sender, senderName: "peer", to: target)
         }
         #expect(queued == false,
