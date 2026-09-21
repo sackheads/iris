@@ -123,8 +123,13 @@ exists in the model so the ledger and the card can name it; creating one is refu
 jobs arrive with deliverable 3". When it does arrive, a mutating job always runs sandboxed; the
 policy is recorded here so nothing in D1/D2 assumes otherwise.
 
-In a read-only run the tool surface is the normal one. What makes it read-only is §7: any tool call
-that would need an approval fails closed instead of asking.
+In a read-only run of this slice the tool surface is the normal one, and §7's fail-closed approvals
+are the only enforcement — which is weaker than the name suggests: only `run_command`,
+`read_file` and `write_file` reach the approval path today, so `create_skill`, `update_soul`,
+`update_memory`, `save_fact`, `set_workspace` and their kin run ungated. The real read-only
+profile — tools omitted from the declaration and failed closed at dispatch, per the denylist in
+`docs/specs/2026-09-21-agency-runtime.md` §0.2 — is deliverable 3's. Until then "read-only" means
+"cannot pass an approval gate unattended", no more.
 
 ## 4. Storage: migration `v9_jobs`
 
@@ -190,7 +195,7 @@ final class JobLedger: Sendable {
     func run(id: UUID) throws -> JobRun?
     func runs(jobId: UUID, limit: Int) throws -> [JobRun]
     func acknowledge(runId: UUID, at: Date) throws
-    func prune(now: Date, rowRetention: TimeInterval, transcriptsPerJob: Int) throws -> PruneResult
+    func prune(now: Date, rowRetention: TimeInterval, transcriptsPerJob: Int) throws -> PruneDecision
 }
 ```
 
@@ -316,8 +321,11 @@ A card never wakes a model turn. The destination's model context still has to kn
 the next time the user talks there, so delivery also appends one `Content` to the destination's
 `history`: role `user`, text `[Event] job <name> <status>: <outcome> (run <short id>)`. It is
 labelled as an event and passes `InjectionGuard` under tag `event_card`, tier 1 only: every field
-in it is harness-written except `outcome`, which is model-written by the run and is truncated to
-one line, so it gets the same treatment as the session strip's activity text.
+in it is harness-written or harness-normalised except `outcome` — `<name>` arrives through
+`schedule_job`'s arguments and is model-supplied, but `Job.slug(from:)` reduces it to an
+`[a-z0-9-]` allowlist of at most 32 characters, so no delimiter survives — and `outcome` is
+model-written by the run, truncated to one line, so it gets the same treatment as the session
+strip's activity text.
 
 If the destination has a turn in flight, the history line is **not** appended immediately: a
 `user` entry landing between a function call and its response corrupts the request. It goes into a
@@ -432,9 +440,18 @@ Each is "what — why — cost if wrong".
 
 ## 15. Relationship to #185
 
-A background run conversation is not a session in #185's sense: it never advertises a card and is
-excluded from `list_sessions` exactly as subagents are (#185 §3). The Activity conversation is an
-ordinary conversation and may be a peer. #185 slice 1 landed as #247 while this spec was being written. Nothing here touches
+A background run conversation is not a session in #185's sense, in both directions: it never
+advertises a card and is excluded from `list_sessions` exactly as subagents are (#185 §3), and it
+may not message sessions either — the session tools are not declared for it and `send_to_session`
+is refused at dispatch (review finding on #253: a run could otherwise start an attended turn in a
+user-facing conversation and launder a gated action through it). A run's only output channel is
+its card. The Activity conversation is an ordinary conversation and may be a peer.
+
+Two directories under `~/.iris` are write-protected from the auto-allow for every caller, attended
+or not: `config/` (the permissions file, hook settings) and `plugins/` (a plugin can spawn an MCP
+command at next launch). A background run additionally gets no write access under `~/.iris` at all
+through the auto-allow; only an explicit rule can grant it a write, and no rule may target the
+protected directories. `rules/` stays writable: it persists prompt text, not code. #185 slice 1 landed as #247 while this spec was being written. Nothing here touches
 `drainPendingUserMessages`, `takePendingSteers`, `deliverPeerMessage`, or the session card; the
 `pendingEventLines` drain is a sibling call at the steer boundary, and `JobScheduler`'s wiring in
 `IrisEngine.start()` sits beside, not inside, the peer-delivery code.

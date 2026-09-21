@@ -66,8 +66,28 @@ struct PerfSuite: Codable, Sendable {
 }
 
 enum PerfPaths {
-    /// Walk up from `start` to the first directory holding Package.swift; falls back to `start`.
-    static func repoRoot(from start: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)) -> URL {
+    /// The directory holding this source file, captured at compile time.
+    ///
+    /// The repo root is resolved from here rather than from the process working directory: the
+    /// working directory is process-global mutable state, `swift test` runs suites in parallel,
+    /// and a suite that calls `changeCurrentDirectoryPath` used to make every perf suite
+    /// intermittently resolve the root to `/` and fail on a fixture that was present all along
+    /// (#242, and the second of the two flakes in #160).
+    private static let sourceAnchor = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+
+    /// Walk up to the first directory holding Package.swift. `start` overrides the anchor.
+    static func repoRoot(from start: URL? = nil) -> URL {
+        if let start { return walkUp(from: start) }
+        // Tests and the perf CLI both run from a checkout, so the source tree is present.
+        let fromSource = walkUp(from: sourceAnchor)
+        if FileManager.default.fileExists(atPath: fromSource.appendingPathComponent("Package.swift").path) {
+            return fromSource
+        }
+        // A binary running without its sources beside it: the working directory is all we have.
+        return walkUp(from: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+    }
+
+    private static func walkUp(from start: URL) -> URL {
         var dir = start.standardizedFileURL
         while true {
             if FileManager.default.fileExists(atPath: dir.appendingPathComponent("Package.swift").path) { return dir }
