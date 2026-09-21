@@ -246,6 +246,14 @@ class AppState {
         // Clamped at zero rather than going negative: an unpaired end must not make the next
         // real turn invisible.
         engineTurnCounts[conversationId] = count > 1 ? count - 1 : nil
+        // An arrival turn — scheduler, watcher, subagent post-back — never passes through
+        // `runThinkingTask`, so without this the message a user typed while one was running is
+        // enqueued by `sendMessage` and then waits for some unrelated later UI turn to end
+        // (#172 + #182 §6.1). Only at zero: draining while another turn is still running on this
+        // conversation starts the interleaved turn the inbox exists to prevent. A UI turn is
+        // counted here *and* in `activeTasks`, so this call no-ops for it and `runThinkingTask`'s
+        // completion still does the draining.
+        if engineTurnCounts[conversationId] == nil { drainPendingUserMessages(for: conversationId) }
     }
 
     /// Both sources OR'd. `activeTasks` is what cancellation can reach; `engineTurnCounts` also
@@ -278,7 +286,10 @@ class AppState {
 
     /// Whatever a finished turn did not consume becomes the next turn: the leading text entries
     /// joined as one message, or the first attachment entry on its own. Runs when a tracked task
-    /// completes, so the new turn never overlaps the old one.
+    /// completes and when the last engine turn on the conversation ends; the `hasTurnInFlight`
+    /// guard is what keeps the new turn from overlapping a still-running one, since both sources
+    /// can fire for the same turn. The entries are removed from the inbox *before* `startTurn`,
+    /// and `startTurn` only schedules a `Task`, so a re-entrant call cannot replay them.
     private func drainPendingUserMessages(for conversationId: UUID) {
         guard !hasTurnInFlight(for: conversationId),
               var queue = pendingUserMessages[conversationId], !queue.isEmpty else { return }
