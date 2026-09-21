@@ -19,11 +19,19 @@ struct JobLedgerPolicyTests {
         return job
     }
 
+    /// A run that happened: it has a transcript, which is what `runsStarted` reads as "this row
+    /// was work". A refusal (a skip or a pause row) has none — see `makeRefusal`.
     func makeRun(_ job: Job, at: Date, status: JobRun.Status = .completed, tokens: Int = 0) -> JobRun {
         var run = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule", startedAt: at,
-                         status: status)
+                         status: status, transcriptConversationId: UUID())
         run.totalTokens = tokens
         return run
+    }
+
+    /// A row for a fire that never became a turn: no transcript, no tokens.
+    func makeRefusal(_ job: Job, at: Date) -> JobRun {
+        JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule", startedAt: at,
+               status: .interrupted)
     }
 
     /// A gregorian calendar pinned to one zone, so a local-day boundary is the same wherever the
@@ -116,6 +124,14 @@ struct JobLedgerPolicyTests {
         try store.ledger.begin(run: makeRun(b, at: t0))
         #expect(try store.ledger.runsStarted(jobId: a.id, since: t0) == 3)
         #expect(try store.ledger.runsStarted(jobId: a.id, since: t0.addingTimeInterval(61)) == 0)
+        #expect(try store.ledger.runsStarted(jobId: b.id, since: t0) == 1)
+
+        // A skip or a pause row is a fire that never became a turn, and the breaker counts work:
+        // counting them would have a `.skip` job's own overlaps, or the row recording a breaker
+        // pause, trip the breaker again the moment the job was resumed.
+        for offset in [0, 1, 2] {
+            try store.ledger.begin(run: makeRefusal(b, at: t0.addingTimeInterval(TimeInterval(offset))))
+        }
         #expect(try store.ledger.runsStarted(jobId: b.id, since: t0) == 1)
     }
 

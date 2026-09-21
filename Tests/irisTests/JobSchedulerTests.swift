@@ -61,6 +61,8 @@ struct JobSchedulerTests {
         #expect(await s.tick() == 1)
         #expect(fired.names == ["j"])
         #expect(try store.ledger.job(named: "j")?.nextFireAt == now.addingTimeInterval(300))
+        #expect(try store.ledger.job(named: "j")?.lastRunAt == nil,
+                "the scheduler hands the trigger over; the runner stamps lastRunAt if a turn starts")
         #expect(await s.tick() == 0)
     }
 

@@ -96,6 +96,18 @@ final class JobLedger: Sendable {
         }
     }
 
+    /// Stamps when a job last actually started a turn, without touching its cadence. The runner
+    /// writes it as a run begins: the scheduler hands a trigger over before it knows whether
+    /// admission will refuse it, so a refused fire must not move the field `/jobs` prints as "last
+    /// run". Throws `JobLedgerError.unknownJob` for an id that is not in the table.
+    func setLastRun(jobId: UUID, at: Date) throws {
+        try writer.write { db in
+            try db.execute(sql: "UPDATE jobs SET lastRunAt = ? WHERE id = ?",
+                           arguments: [at, jobId.uuidString])
+            guard db.changesCount > 0 else { throw JobLedgerError.unknownJob(jobId) }
+        }
+    }
+
     /// Records where a job is on the retry ladder and when the next attempt is due. One statement
     /// so a crash cannot leave an attempt counted with no fire scheduled, or the reverse. Throws
     /// `JobLedgerError.unknownJob` for an id that is not in the table.
@@ -400,15 +412,23 @@ extension JobLedger {
             arguments: [JobRun.Status.failed.rawValue, JobRun.Status.blockedOnApproval.rawValue])
     }
 
-    /// How many of this job's runs started at or after `since` — the breaker's question, asked
-    /// with `since = now - 1h`. Inclusive at the boundary, like `dueJobs`.
+    /// How many of this job's runs started a turn at or after `since` — the breaker's question,
+    /// asked with `since = now - 1h`. Inclusive at the boundary, like `dueJobs`.
+    ///
+    /// Only rows with a transcript count. A skip row and a pause row are runs that never happened
+    /// (`recordStillborn` writes them with no conversation), and counting them would have the
+    /// breaker trip on its own refusals: a `.skip` job overlapping itself six times, or a job
+    /// resumed by hand after a breaker pause, would be paused again by the rows that recorded the
+    /// pause. The breaker is a limit on work done, not on triggers received.
     func runsStarted(jobId: UUID, since: Date) throws -> Int {
         try writer.read { db in try Self.runsStarted(db, jobId: jobId, since: since) }
     }
 
     private static func runsStarted(_ db: Database, jobId: UUID, since: Date) throws -> Int {
-        try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM job_runs WHERE jobId = ? AND startedAt >= ?",
-                         arguments: [jobId.uuidString, since]) ?? 0
+        try Int.fetchOne(db, sql: """
+            SELECT COUNT(*) FROM job_runs
+            WHERE jobId = ? AND startedAt >= ? AND transcriptConversationId IS NOT NULL
+            """, arguments: [jobId.uuidString, since]) ?? 0
     }
 
     /// The tokens spent on runs that *started* during the local calendar day containing `now`, for
@@ -418,6 +438,12 @@ extension JobLedger {
     ///
     /// Attributed by start, not by finish: a run that began before midnight and ended after it
     /// belongs to the day it was admitted on, which is the day whose budget let it start.
+    ///
+    /// A run still in flight contributes nothing: `totalTokens` is written by `finish`, so a long
+    /// run's spend is invisible to the budget until it ends. Accepted for this slice — the per-run
+    /// budget is what bounds a single run (§4, "during a run"), and the day's total catches up the
+    /// moment it closes. It does mean a burst of concurrent runs can overshoot the daily figure by
+    /// up to one per-run budget apiece.
     func tokensToday(jobId: UUID?, calendar: Calendar, now: Date) throws -> Int {
         try writer.read { db in try Self.tokensToday(db, jobId: jobId, calendar: calendar, now: now) }
     }

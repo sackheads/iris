@@ -31,6 +31,18 @@ struct JobRunnerTests {
                        usageMetadata: nil)
     }
 
+    /// A settings store of this suite's own: `JobRunner` resolves a job's limits through a
+    /// `ConfigManager`, and the default is the process-global `shared` every parallel suite reads
+    /// (AGENTS invariant 7).
+    private func isolatedConfig() -> (ConfigManager, () -> Void) {
+        let name = "iris-jobrunner-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        return (ConfigManager(store: store), {
+            store.removePersistentDomain(forName: name)
+            IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
+        })
+    }
+
     private func denial(_ tool: String) -> BlockedToolCall {
         BlockedToolCall(toolName: tool, details: "whatever", at: Date())
     }
@@ -148,7 +160,10 @@ struct JobRunnerTests {
         let job = self.job()
         try store.ledger.upsert(job)
         let firedAt = Date(timeIntervalSince1970: 1_700_000_000)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { firedAt })
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { firedAt },
+                               config: config)
 
         await runner.fire(job: job, reason: "schedule")
 
@@ -213,7 +228,9 @@ struct JobRunnerTests {
         let (store, state, engine, _, _) = try harness([textResponse("done")])
         let job = self.job(name: "watch-src", prompt: "Review the change.", profile: .mutating)
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config)
 
         await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/a.swift", "/tmp/b.swift"])
 
@@ -262,7 +279,9 @@ struct JobRunnerTests {
         ], autoApprove: false)
         let job = self.job(name: "needs-hands", prompt: "Clean up.")
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config)
 
         await runner.fire(job: job, reason: "schedule")
 
@@ -289,7 +308,9 @@ struct JobRunnerTests {
         let (store, state, engine, _, _) = try harness([textResponse(" ")])
         let job = self.job(name: "says-nothing")
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config)
 
         await runner.fire(job: job, reason: "schedule")
 
@@ -313,7 +334,9 @@ struct JobRunnerTests {
         // dropping the only other reference is what "the app went away mid-run" looks like.
         var engine: IrisEngine? = IrisEngine(state: state, client: FakeLLMClient(responses: []),
                                              protectionEnabled: false, sessionPeerCount: 0)
-        let runner = JobRunner(state: state, engine: engine!, ledger: store.ledger)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine!, ledger: store.ledger, config: config)
         engine = nil
 
         await runner.fire(job: job, reason: "schedule")
@@ -335,7 +358,9 @@ struct JobRunnerTests {
         let (store, state, engine, _, userConversation) = try harness([textResponse("tick")])
         let job = self.job(destination: userConversation)
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config)
 
         await runner.fire(job: job, reason: "schedule")
 

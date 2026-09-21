@@ -146,11 +146,11 @@ actor JobScheduler {
     /// false when the row is gone or the cadence has no future match.
     ///
     /// Always before the handler, never after: a crash between the two loses a run instead of
-    /// repeating one. `lastRunAt` moves with it, because the scheduler no longer knows whether the
-    /// fire will become a run — admission is the runner's (§4), and a tick that reaches here has
-    /// handed the trigger over either way.
+    /// repeating one. `lastRunAt` is deliberately left alone — the scheduler no longer knows
+    /// whether this trigger will become a run (admission is the runner's, §4), so the runner
+    /// stamps it with `setLastRun` when a turn actually starts.
     private func advanceCadence(for job: Job, at now: Date) -> Bool {
-        let lastRunAt = now
+        let lastRunAt = job.lastRunAt
         // Cadence-less triggers (fsEvent) have no next occurrence to compute; clear the stray
         // nextFireAt that made this row due rather than pausing a job the filesystem drives.
         guard let cadence = Self.cadence(of: job.trigger) else {

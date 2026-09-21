@@ -50,8 +50,50 @@ struct JobAdmissionTests {
         return (ConfigManager(store: store), teardown)
     }
 
-    private func harness(_ responses: [GeminiResponse], latencyMs: Int = 0)
+    /// An LLM client whose FIRST call parks until the test opens the gate, so a run can be held
+    /// open at a known point instead of by sleeping next to a slow fake. Every later call returns
+    /// at once: what is being tested is what a second fire does while the first run is in flight.
+    final class GatedClient: LLMClientProtocol, @unchecked Sendable {
+        private let gate: JobSchedulerTests.Gate
+        private let response: GeminiResponse
+        private let lock = NSLock()
+        private var calls = 0
+
+        init(gate: JobSchedulerTests.Gate, response: GeminiResponse) {
+            self.gate = gate
+            self.response = response
+        }
+
+        /// Synchronous, so the lock is never held across a suspension (and never taken from an
+        /// async context, which the compiler refuses).
+        private func bump() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            calls += 1
+            return calls
+        }
+
+        var callCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return calls
+        }
+
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            if bump() == 1 { await gate.arriveAndWait() }
+            return response
+        }
+    }
+
+    private func harness(_ responses: [GeminiResponse])
         throws -> (ConversationStore, AppState, IrisEngine, FakeLLMClient) {
+        let client = FakeLLMClient(responses: responses)
+        let (store, state, engine) = try harness(client: client)
+        return (store, state, engine, client)
+    }
+
+    private func harness(client: any LLMClientProtocol)
+        throws -> (ConversationStore, AppState, IrisEngine) {
         let store = try ConversationStore.inMemory()
         let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         state.conversations.removeAll()
@@ -59,16 +101,17 @@ struct JobAdmissionTests {
         let userConversation = UUID()
         state.createNewConversation(id: userConversation)
         state.selectedConversationId = userConversation
-        let client = FakeLLMClient(responses: responses,
-                                   latency: .init(minMs: latencyMs, maxMs: latencyMs))
         let engine = IrisEngine(state: state, tier: .medium, client: client,
                                 protectionEnabled: false, sessionPeerCount: 0)
-        return (store, state, engine, client)
+        return (store, state, engine)
     }
 
-    /// A finished run already on the books, so the breaker and the budgets have something to count.
+    /// A finished run already on the books, so the breaker and the budgets have something to
+    /// count. It carries a transcript id because a real run always has one — that is exactly what
+    /// tells the breaker a row was work rather than a refusal.
     private func recordRun(_ ledger: JobLedger, job: Job, at: Date, tokens: Int) throws {
-        let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule", startedAt: at)
+        let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule", startedAt: at,
+                         transcriptConversationId: UUID())
         try ledger.begin(run: run)
         try ledger.finish(runId: run.id, status: .completed, outcome: "did a thing",
                           failureReason: nil, blockedTool: nil,
@@ -163,7 +206,9 @@ struct JobAdmissionTests {
 
     @Test("a scheduled fire that overlaps a run writes one interrupted row and starts nothing")
     func scheduledOverlapWritesOneSkipRow() async throws {
-        let (store, state, engine, client) = try harness([textResponse("tick")], latencyMs: 400)
+        let gate = JobSchedulerTests.Gate()
+        let client = GatedClient(gate: gate, response: textResponse("tick"))
+        let (store, state, engine) = try harness(client: client)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         let job = self.job(name: "slow")
@@ -172,8 +217,9 @@ struct JobAdmissionTests {
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, reason: "schedule") }
-        try await Task.sleep(nanoseconds: 100_000_000)
+        await gate.waitForEntry()
         await runner.fire(job: job, reason: "schedule")
+        await gate.open()
         await first.value
 
         #expect(client.callCount == 1, "one run, not two")
@@ -190,7 +236,9 @@ struct JobAdmissionTests {
     func watcherOverlapWritesNoRow() async throws {
         // D2's decision, kept: FSEvents delivers a burst per save, and one `interrupted` row per
         // event would spam the ledger far worse than the overlap it recorded.
-        let (store, state, engine, client) = try harness([textResponse("tick")], latencyMs: 400)
+        let gate = JobSchedulerTests.Gate()
+        let client = GatedClient(gate: gate, response: textResponse("tick"))
+        let (store, state, engine) = try harness(client: client)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         let job = Job(name: "watched", prompt: "Reply with just the word tick.",
@@ -200,9 +248,10 @@ struct JobAdmissionTests {
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/a"]) }
-        try await Task.sleep(nanoseconds: 100_000_000)
+        await gate.waitForEntry()
         await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/b"])
         await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/c"])
+        await gate.open()
         await first.value
 
         #expect(client.callCount == 1)
@@ -210,23 +259,68 @@ struct JobAdmissionTests {
                 "a dropped watch fire writes no row")
     }
 
-    @Test("the queue policy holds one fire and takes it when the run ends")
-    func queuedFireRunsOnceAfterTheRun() async throws {
-        let (store, state, engine, client) = try harness([textResponse("tick")], latencyMs: 400)
+    @Test("a paused job's watch burst decides on the stored row, not the copy the watcher captured")
+    func pausedWatchBurstWritesNothing() async throws {
+        // `WatcherManager` captures the `Job` when it starts the stream and hands that same copy
+        // to every event for the life of the watch. Deciding on it would re-admit a job paused
+        // since — a pause row and a card per saved file.
+        let (store, state, engine, client) = try harness([textResponse("tick")])
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let job = self.job(name: "queued-job", overlap: .queue)
+        let stale = Job(name: "watched", prompt: "Reply with just the word tick.",
+                        trigger: .fsEvent(FSWatch(path: "/tmp/watched")))
+        try store.ledger.upsert(stale)
+        try store.ledger.setPaused(jobId: stale.id, reason: "breaker: 6 runs in the last hour")
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               config: config, protectionEnabled: false)
+
+        for path in ["/tmp/a", "/tmp/b", "/tmp/c"] {
+            await runner.fire(job: stale, reason: "fsEvent", changedPaths: [path])
+        }
+
+        #expect(client.callCount == 0)
+        #expect(try store.ledger.runs(jobId: stale.id, limit: 10).isEmpty, "no rows for a paused job")
+        #expect(state.conversations.filter { $0.isBackground }.isEmpty)
+        let activity = state.conversations.first { $0.id == state.activityConversationId() }
+        #expect(activity?.messages.filter { $0.role == .event }.isEmpty != false, "and no cards")
+    }
+
+    @Test("a job deleted out from under a fire is dropped silently")
+    func deletedJobIsDropped() async throws {
+        let (store, state, engine, client) = try harness([textResponse("tick")])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let job = self.job(name: "gone")
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               config: config, protectionEnabled: false)
+
+        await runner.fire(job: job, reason: "schedule")
+
+        #expect(client.callCount == 0)
+        #expect(try store.ledger.runs(jobId: job.id, limit: 10).isEmpty)
+    }
+
+    @Test("the queue policy holds one fire, with the paths that woke it, and takes it when the run ends")
+    func queuedFireRunsOnceAfterTheRun() async throws {
+        let gate = JobSchedulerTests.Gate()
+        let client = GatedClient(gate: gate, response: textResponse("tick"))
+        let (store, state, engine) = try harness(client: client)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        var job = self.job(name: "queued-job", overlap: .queue)
+        job.trigger = .fsEvent(FSWatch(path: "/tmp/queued"))
         try store.ledger.upsert(job)
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
                                config: config, protectionEnabled: false)
 
-        let first = Task { await runner.fire(job: job, reason: "schedule") }
-        try await Task.sleep(nanoseconds: 100_000_000)
+        let first = Task { await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/first"]) }
+        await gate.waitForEntry()
         // Two triggers while it runs: the policy keeps one, never two.
-        await runner.fire(job: job, reason: "schedule")
-        await runner.fire(job: job, reason: "schedule")
+        await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/second"])
+        await runner.fire(job: job, reason: "fsEvent", changedPaths: ["/tmp/third"])
         #expect(try store.ledger.job(id: job.id)?.queuedFire != nil, "the pending trigger is durable")
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1, "and it writes no row")
+        await gate.open()
         await first.value
 
         let runs = try store.ledger.runs(jobId: job.id, limit: 10)
@@ -234,6 +328,12 @@ struct JobAdmissionTests {
         #expect(runs.contains { $0.triggerKind == "queued" })
         #expect(client.callCount == 2)
         #expect(try store.ledger.job(id: job.id)?.queuedFire == nil, "and the queue is empty again")
+
+        // The held fire kept what woke it: a run told only "something changed" cannot do the work.
+        let queued = try #require(runs.first { $0.triggerKind == "queued" })
+        let transcript = try #require(state.conversations.first { $0.id == queued.transcriptConversationId })
+        let prompt = transcript.history.first?.parts.compactMap(\.text).joined() ?? ""
+        #expect(prompt.contains("/tmp/third"), "the latest burst's paths travel with the held fire")
     }
 
     @Test("a paused job's fire does nothing at all: no run, no row, no card")
@@ -292,6 +392,52 @@ struct JobAdmissionTests {
         let pauseCard = try #require(cards.last)
         #expect(pauseCard.status == .interrupted)
         #expect(pauseCard.outcome == paused.pausedReason, "the card says the figure that tripped it")
+    }
+
+    @Test("skip rows do not count towards the breaker: refusals are not work")
+    func breakerIgnoresSkipRows() async throws {
+        let (store, state, engine, client) = try harness([textResponse("tick")])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        config.jobMaxRunsPerHour = 2
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let job = self.job(name: "overlapper")
+        try store.ledger.upsert(job)
+        // A `.skip` job that overlapped itself all morning: rows, but no runs.
+        for offset in [-900.0, -600.0, -300.0] {
+            try JobRunner.recordSkip(job: job, ledger: store.ledger, now: now.addingTimeInterval(offset))
+        }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               now: { now }, config: config, protectionEnabled: false)
+
+        await runner.fire(job: job, reason: "schedule")
+
+        #expect(client.callCount == 1, "three skips are not three runs")
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == nil)
+    }
+
+    @Test("the breaker's own pause row does not re-trip it the moment the job is resumed")
+    func breakerIgnoresItsOwnPauseRow() async throws {
+        let (store, state, engine, client) = try harness([textResponse("tick")])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        config.jobMaxRunsPerHour = 1
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let job = self.job(name: "resumed")
+        try store.ledger.upsert(job)
+        let reason = JobRunner.breakerReason(count: 1)
+        try JobRunner.recordStillborn(job: job, ledger: store.ledger, reason: reason,
+                                      now: now.addingTimeInterval(-300))
+        try store.ledger.setPaused(jobId: job.id, reason: reason)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               now: { now }, config: config, protectionEnabled: false)
+
+        // What `/jobs resume` does.
+        try store.ledger.setPaused(jobId: job.id, reason: nil)
+        await runner.fire(job: job, reason: "schedule")
+
+        #expect(client.callCount == 1, "a resumed job runs; its pause row is not a run")
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == nil)
     }
 
     @Test("an hour-old run is not counted by the breaker")
@@ -360,6 +506,34 @@ struct JobAdmissionTests {
         #expect(client.callCount == 0)
         #expect(try store.ledger.job(id: job.id)?.pausedReason
                 == "daily token budget reached (global): 1000 / 1000")
+    }
+
+    @Test("lastRunAt is stamped by a run that happens, and untouched by a fire that is refused")
+    func lastRunAtFollowsRunsNotTriggers() async throws {
+        // The scheduler advances the cadence before admission has decided anything, so it cannot
+        // be the one to stamp this: a refused fire would look like a run in `/jobs`.
+        let (store, state, engine, client) = try harness([textResponse("tick")])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        config.jobMaxRunsPerHour = 1
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let job = self.job(name: "stamped")
+        try store.ledger.upsert(job)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               now: { now }, config: config, protectionEnabled: false)
+
+        await runner.fire(job: job, reason: "schedule")
+        #expect(client.callCount == 1)
+        #expect(try store.ledger.job(id: job.id)?.lastRunAt == now, "the run stamps it")
+
+        // The next fire trips the breaker: refused, so the stamp must not move.
+        let later = now.addingTimeInterval(60)
+        let refuser = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                                now: { later }, config: config, protectionEnabled: false)
+        await refuser.fire(job: job, reason: "schedule")
+        #expect(client.callCount == 1)
+        #expect(try store.ledger.job(id: job.id)?.pausedReason != nil)
+        #expect(try store.ledger.job(id: job.id)?.lastRunAt == now, "a refusal is not a run")
     }
 
     @Test("yesterday's spend does not count against today")

@@ -43,6 +43,9 @@ actor JobRunner {
     /// The jobs with a run in flight right now. Every fire goes through `fire`, so one set here is
     /// the whole overlap story, whatever woke the job.
     private var inFlight: Set<UUID> = []
+    /// The changed paths belonging to a held (`policy.overlap == .queue`) fire, by job. In memory
+    /// on purpose: see `hold(fire:for:paths:)`.
+    private var queuedPaths: [UUID: [String]] = [:]
 
     init(state: AppState, engine: IrisEngine, ledger: JobLedger,
          now: @escaping @Sendable () -> Date = Date.init,
@@ -126,74 +129,113 @@ actor JobRunner {
     /// two bursts a second apart used to start two runs of the same job (D2-R9). Overlap is a
     /// property of the job, so it lives where every fire passes.
     ///
-    /// The ledger reads below are synchronous, so nothing suspends between reading `inFlight` and
+    /// Every decision is made on the row read back here, not on the `Job` the caller was handed.
+    /// A watcher fire carries the copy `WatcherManager.reload()` captured when the stream was
+    /// started, which can be minutes or days old: deciding on it would re-admit a job that has
+    /// since been paused — writing a pause row and a card per filesystem event — and would run a
+    /// prompt the user has edited since. A job deleted out from under a fire drops silently: there
+    /// is nothing left to run, record or report on.
+    ///
+    /// The ledger reads are synchronous, so nothing suspends between reading `inFlight` and
     /// inserting into it: two fires arriving at once cannot both be admitted.
     func fire(job: Job, reason: String, changedPaths: [String] = []) async {
-        let at = now()
-        let limits = JobLimits.resolve(job: job, config: config)
-        let usage = (try? ledger.usage(jobId: job.id, now: at, calendar: calendar))
-            ?? JobUsage(tokensToday: 0, runsLastHour: 0)
-        let tokensAll = (try? ledger.tokensToday(jobId: nil, calendar: calendar, now: at)) ?? 0
-
-        switch Self.admit(job: job, inFlight: inFlight.contains(job.id),
-                          runsLastHour: usage.runsLastHour, tokensTodayJob: usage.tokensToday,
-                          tokensTodayAll: tokensAll, limits: limits) {
-        case .dropPaused:
-            // Nothing: the card that paused it already went out, and a row per tick would bury it.
-            return
-        case .skipInFlight:
-            guard !Self.isWatcherFire(reason: reason) else { return }
+        var reason = reason
+        var paths = changedPaths
+        // A loop, not recursion: the `queue` policy can hand this straight back a trigger, and a
+        // busy job would otherwise grow one stack frame per held fire.
+        while true {
+            let current: Job
             do {
-                try Self.recordSkip(job: job, ledger: ledger, now: at)
+                guard let stored = try ledger.job(id: job.id) else { return }
+                current = stored
             } catch {
-                print("[JobRunner] could not record the skipped run for \(job.name): \(error)")
+                print("[JobRunner] not firing \(job.name): could not read the job: \(error)")
+                return
             }
-            return
-        case .queued:
-            // One held trigger, never a queue of them: a job that fell far behind should run once
-            // when it is free, not N times in a row.
-            do {
-                if try ledger.job(id: job.id)?.queuedFire == nil {
-                    try ledger.setQueuedFire(jobId: job.id, at: at)
+
+            // `admit`'s first branch, taken before the two usage queries: a paused job is the
+            // commonest fire there is (a watch on a paused job sees every save), and it must cost
+            // nothing and leave nothing behind.
+            if current.pausedReason != nil { return }
+
+            let at = now()
+            let limits = JobLimits.resolve(job: current, config: config)
+            let usage = (try? ledger.usage(jobId: current.id, now: at, calendar: calendar))
+                ?? JobUsage(tokensToday: 0, runsLastHour: 0)
+            let tokensAll = (try? ledger.tokensToday(jobId: nil, calendar: calendar, now: at)) ?? 0
+
+            switch Self.admit(job: current, inFlight: inFlight.contains(current.id),
+                              runsLastHour: usage.runsLastHour, tokensTodayJob: usage.tokensToday,
+                              tokensTodayAll: tokensAll, limits: limits) {
+            case .dropPaused:
+                return
+            case .skipInFlight:
+                guard !Self.isWatcherFire(reason: reason) else { return }
+                do {
+                    try Self.recordSkip(job: current, ledger: ledger, now: at)
+                } catch {
+                    print("[JobRunner] could not record the skipped run for \(current.name): \(error)")
                 }
-            } catch {
-                print("[JobRunner] could not queue a fire for \(job.name): \(error)")
+                return
+            case .queued:
+                hold(fire: at, for: current, paths: paths)
+                return
+            case .pauseBreaker(let count):
+                await pause(job: current, reason: Self.breakerReason(count: count), at: at)
+                return
+            case .pauseBudget(let scope, let used, let limit):
+                await pause(job: current,
+                            reason: Self.budgetReason(scope: scope, used: used, limit: limit), at: at)
+                return
+            case .run:
+                break
             }
-            return
-        case .pauseBreaker(let count):
-            await pause(job: job, reason: Self.breakerReason(count: count), at: at)
-            return
-        case .pauseBudget(let scope, let used, let limit):
-            await pause(job: job, reason: Self.budgetReason(scope: scope, used: used, limit: limit), at: at)
-            return
-        case .run:
-            break
+
+            inFlight.insert(current.id)
+            await run(job: current, reason: reason, changedPaths: paths)
+            inFlight.remove(current.id)
+
+            guard let held = takeQueuedFire(job: current) else { return }
+            reason = "queued"
+            paths = held
         }
-
-        inFlight.insert(job.id)
-        await run(job: job, reason: reason, changedPaths: changedPaths)
-        inFlight.remove(job.id)
-
-        await takeQueuedFire(job: job)
     }
 
-    /// Runs the one trigger held back while this job was busy, if there was one. Cleared before it
-    /// is taken, so a trigger arriving during *that* run is what refills the slot rather than this
-    /// one firing forever.
-    private func takeQueuedFire(job: Job) async {
-        // Only the `queue` policy can have left one, so every other job's run ends without a read.
-        guard job.policy.overlap == .queue else { return }
-        var queued = job
+    /// Remembers the one trigger held back while this job is busy. One, never a queue of them: a
+    /// job that fell far behind should run once when it is free, not N times in a row.
+    private func hold(fire at: Date, for job: Job, paths: [String]) {
+        // The paths are the runner's own, not a column: they are what a watch saw seconds ago, so
+        // they are worth carrying into the held fire but not worth surviving a restart — and a
+        // `queuedPaths` column would be a second thing to keep in step with `queuedFire`. The
+        // latest burst wins; an empty list (a scheduled fire) leaves whatever a watch left.
+        if !paths.isEmpty { queuedPaths[job.id] = paths }
         do {
-            guard let stored = try ledger.job(id: job.id), stored.queuedFire != nil else { return }
-            try ledger.setQueuedFire(jobId: job.id, at: nil)
-            queued = stored
+            guard job.queuedFire == nil else { return }
+            try ledger.setQueuedFire(jobId: job.id, at: at)
         } catch {
-            print("[JobRunner] could not take the queued fire for \(job.name): \(error)")
-            return
+            print("[JobRunner] could not queue a fire for \(job.name): \(error)")
         }
-        queued.queuedFire = nil
-        await fire(job: queued, reason: "queued")
+    }
+
+    /// The trigger held back while this job ran, cleared as it is taken — so a trigger arriving
+    /// during the *next* run is what refills the slot rather than this one firing forever. `nil`
+    /// when nothing was held; an empty array is a held fire that carried no paths.
+    private func takeQueuedFire(job: Job) -> [String]? {
+        let stored: Job?
+        do { stored = try ledger.job(id: job.id) } catch {
+            print("[JobRunner] could not take the queued fire for \(job.name): \(error)")
+            return nil
+        }
+        // The freshly read row's policy, not the snapshot's: a job switched to `skip` mid-run must
+        // not take a fire its policy no longer keeps, and one switched to `queue` must.
+        guard let stored, stored.policy.overlap == .queue, stored.queuedFire != nil else { return nil }
+        do {
+            try ledger.setQueuedFire(jobId: job.id, at: nil)
+        } catch {
+            print("[JobRunner] could not clear the queued fire for \(job.name): \(error)")
+            return nil
+        }
+        return queuedPaths.removeValue(forKey: job.id) ?? []
     }
 
     /// Stops a job, says why on the job itself, and tells the user once: the reason on a
@@ -240,6 +282,13 @@ actor JobRunner {
             print("[JobRunner] not running \(job.name): could not record the run: \(error)")
             await closeSession(conversationId, status: "not recorded")
             return
+        }
+        do {
+            // Here, not in the scheduler: this is the moment a turn actually starts, and the
+            // scheduler hands triggers over before admission has decided anything (§4).
+            try ledger.setLastRun(jobId: job.id, at: startedAt)
+        } catch {
+            print("[JobRunner] could not stamp the last run of \(job.name): \(error)")
         }
 
         guard let engine else {
