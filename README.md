@@ -82,7 +82,7 @@ guide with worked examples.
 
 ### Core Native Tools
 Iris provides some native primitives to the LLM:
-1.  `run_command`: Sandboxed execution of shell commands (runs in a lightweight Linux VM via `apple/container` if sandboxing is enabled).
+1.  `run_command`: Sandboxed execution of shell commands (runs in a lightweight Linux VM via `apple/container` if sandboxing is enabled). Host commands run with the user's login-shell PATH captured at launch, so pyenv/nvm/Homebrew shims resolve even though the command itself isn't run in a login shell.
 2.  `read_file`: Reads arbitrary local text files.
 3.  `write_file`: Writes/modifies local files.
 4.  `schedule_job`: Native API to register cron-like schedules (`minute`, `hour`, `weekday`) or `intervalSeconds`.
