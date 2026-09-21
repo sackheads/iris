@@ -15,7 +15,6 @@ import SwiftUI
 struct SessionStripView: View {
     var state: AppState
     @Binding var isExpanded: Bool
-    @State private var transcriptSessionId: UUID?
 
     /// Rough single-row height at `.caption` sizing; six of these bounds the expanded strip so it
     /// scrolls instead of growing without limit (invariant 8's spirit — nothing unbounded in the
@@ -28,7 +27,7 @@ struct SessionStripView: View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(sessions) { session in
                 SessionRowView(state: state, sessionId: session.id, isMain: session.kind == .main) {
-                    transcriptSessionId = session.id
+                    state.transcriptSheetConversationId = session.id
                 }
             }
         }
@@ -42,11 +41,13 @@ struct SessionStripView: View {
         let mainSession = sessions.first { $0.kind == .main }
         let otherSessions = sessions.filter { $0.kind != .main }
         // Hidden entirely when there is nothing to show — the common case — so the strip doesn't
-        // permanently occupy space below the composer. Fix round 1, item 7: NOT hidden while a
-        // transcript sheet is open, even if the row that opened it just swept away — hiding the
-        // strip unmounts this view and, with the `.sheet` modifier on it, yanks the open sheet
-        // out from under the user.
-        let isHidden = otherSessions.isEmpty && (mainSession?.phase ?? .idle) == .idle && transcriptSessionId == nil
+        // permanently occupy space below the composer. #187 fix round 1: this deliberately does
+        // NOT consider whether the transcript sheet is open. It used to, so that hiding the strip
+        // could never yank the open sheet away with it; but the sheet now has a second opener (an
+        // event card's "View run"), and keeping that term made opening a card's transcript pop an
+        // otherwise-idle strip into view under the composer. The `else` branch below keeps the
+        // sheet's host alive instead, which is what that term was really buying.
+        let isHidden = otherSessions.isEmpty && (mainSession?.phase ?? .idle) == .idle
         // Expanded whenever there's anything besides the main row to show, unless the user has
         // manually collapsed it (and it hasn't emptied out since). With no other sessions,
         // "expanded" vs. "collapsed" is moot — there's only ever the one main line either way.
@@ -80,6 +81,12 @@ struct SessionStripView: View {
                 .padding(.vertical, 6)
                 .background(.regularMaterial)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else {
+                // A zero-height placeholder, not nothing: the `.sheet` below hangs off this
+                // `Group`, and a presentation modifier whose content resolves to `EmptyView` has
+                // no host to present from. The enclosing stack is `VStack(spacing: 0)`
+                // (`ChatView`), so this costs exactly zero points of layout.
+                Color.clear.frame(height: 0)
             }
         }
         // Fix round 1, item 7: hoisted above the `isHidden` conditional (onto the `Group`, which
@@ -90,19 +97,24 @@ struct SessionStripView: View {
             // NEXT subagent/evaluator run starts expanded again, per the ruling above.
             if empty { isExpanded = true }
         }
+        // The one transcript sheet in the app, with two openers: a row of this strip, and an
+        // event card's "View run" (#187). Its presentation state lives on `AppState`
+        // (`transcriptSheetConversationId`) rather than in a `@State` here precisely because of
+        // the second opener — a card is a row in a lazy list, so a `.sheet` attached to it would
+        // be torn down the moment it scrolled out of view. This `Group` is always mounted.
         .sheet(isPresented: Binding(
-            get: { transcriptSessionId != nil },
-            set: { presented in if !presented { transcriptSessionId = nil } }
+            get: { state.transcriptSheetConversationId != nil },
+            set: { presented in if !presented { state.transcriptSheetConversationId = nil } }
         )) {
-            if let id = transcriptSessionId {
+            if let id = state.transcriptSheetConversationId {
                 // macOS 15+ can track the content's ideal size after presentation; earlier systems
                 // keep the first layout's size, which `TranscriptSizing`'s estimate covers.
                 if #available(macOS 15, *) {
-                    SubagentTranscriptSheet(state: state, sessionId: id)
+                    TranscriptSheet(state: state, sessionId: id)
                         .id(id)  // fresh @State (measured height) per session, not carried over
                         .presentationSizing(.fitted)
                 } else {
-                    SubagentTranscriptSheet(state: state, sessionId: id)
+                    TranscriptSheet(state: state, sessionId: id)
                         .id(id)
                 }
             }
@@ -225,10 +237,13 @@ private func statusGlyph(_ phase: SessionSummary.Phase) -> some View {
     }
 }
 
-/// #19's "dedicated way to browse subagent logs": a read-only transcript for one subagent/
-/// evaluator conversation. Never shown for the main row (`SessionStripView` never sets
-/// `transcriptSessionId` for it).
-private struct SubagentTranscriptSheet: View {
+/// #19's "dedicated way to browse subagent logs": a read-only transcript for one conversation.
+/// Never shown for the main row (`SessionStripView` never sets `transcriptSheetConversationId`
+/// for it).
+///
+/// Internal rather than file-private since #187: an event card's "View run" opens this same
+/// sheet for a background job run's transcript, so the name no longer says "Subagent".
+struct TranscriptSheet: View {
     var state: AppState
     let sessionId: UUID
     @Environment(\.dismiss) private var dismiss
@@ -276,7 +291,9 @@ private struct SubagentTranscriptSheet: View {
                         // whole transcript, and a subagent log is short enough to lay out eagerly.
                         VStack(alignment: .leading, spacing: 8) {
                             ForEach(conversation.messages) { message in
-                                MessageView(message: message)
+                                MessageView(message: message, state: state,
+                                            transcriptAvailable: EventCard.transcriptAvailable(
+                                                for: message, in: state.conversations))
                             }
                             // Scroll target for `scrollToBottom`, matching `ChatView`'s own
                             // "bottomAnchor" pattern rather than scrolling to a message id directly.
@@ -320,10 +337,9 @@ private struct SubagentTranscriptSheet: View {
 
     private func copyTranscript() {
         guard let conversation else { return }
-        let text = conversation.messages.map { message -> String in
-            let roleName = message.role == .user ? "You" : (message.role == .system ? "System" : "Iris")
-            return "\(roleName):\n\(message.content)"
-        }.joined(separator: "\n\n")
+        let text = conversation.messages
+            .map { $0.exportLine(format: .plainText) }
+            .joined(separator: "\n\n")
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)

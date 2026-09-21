@@ -126,6 +126,51 @@ struct IrisPaths: Sendable {
         return resolved == mem || resolved.hasPrefix(mem + "/")
     }
 
+    /// The directories a write into is a grant, not a file edit. `PermissionManager` never
+    /// auto-allows one (#187):
+    ///
+    /// - `config/` holds permissions.json itself, the hook definitions and the plugin config, and
+    ///   the allowlist is re-read on every call — one carved-out write there grants all the rest.
+    /// - `plugins/` is the same thing one step removed: a plugin with an `mcp` component spawns a
+    ///   command at the next launch, and `PluginState` defaults to enabled.
+    ///
+    /// `rules/` is deliberately NOT here: it is prompt persistence, which the guard already treats
+    /// as untrusted content, not a way to make something execute.
+    var protectedWriteDirs: [URL] { [configDir, pluginsDir] }
+
+    /// True if `rawPath` resolves to a location inside one of `protectedWriteDirs`.
+    ///
+    /// Canonical, not merely standardized: APFS is case-insensitive by default, so `~/.iris/CONFIG`
+    /// is the same directory as `~/.iris/config`, and a symlink planted in a writable directory
+    /// (`memory/cfg -> config`) is a legal path to a protected target. Both sides go through
+    /// `canonicalPath` and are compared case-insensitively. This is a DENY check only — never
+    /// reuse it to widen an allow, where resolving a symlink the other way would let a link
+    /// smuggle an outside path into the carve-out.
+    func isUnderProtectedWriteDir(_ rawPath: String) -> Bool {
+        let candidate = Self.canonicalPath(rawPath).lowercased()
+        return protectedWriteDirs.contains { dir in
+            let base = Self.canonicalPath(dir.path).lowercased()
+            return candidate == base || candidate.hasPrefix(base + "/")
+        }
+    }
+
+    /// Tilde-expanded, `..`-resolved, and with symlinks resolved on the deepest ancestor that
+    /// actually exists — the file being written usually does not yet, and `resolvingSymlinksInPath`
+    /// leaves a path alone when it cannot stat it.
+    static func canonicalPath(_ rawPath: String) -> String {
+        let expanded = (rawPath as NSString).expandingTildeInPath
+        var url = URL(fileURLWithPath: expanded).standardizedFileURL
+        let fm = FileManager.default
+        var missing: [String] = []
+        while !fm.fileExists(atPath: url.path), url.pathComponents.count > 1 {
+            missing.append(url.lastPathComponent)
+            url = url.deletingLastPathComponent()
+        }
+        var resolved = url.resolvingSymlinksInPath()
+        for component in missing.reversed() { resolved.appendPathComponent(component) }
+        return resolved.standardizedFileURL.path
+    }
+
     /// True if `rawPath` resolves to a location inside `root` (`~/.iris`).
     /// Tilde-expands and standardizes the path (resolving `..`) first.
     func isUnderIrisDir(_ rawPath: String) -> Bool {

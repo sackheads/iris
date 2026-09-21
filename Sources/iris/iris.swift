@@ -77,6 +77,10 @@ actor IrisEngine {
     /// stores through it so a job created mid-conversation gets its first fire computed by the
     /// same code the polling loop uses.
     private(set) var jobScheduler: JobScheduler?
+    /// Built lazily by `jobRunner()`; see there.
+    private var jobRunnerInstance: JobRunner?
+    /// Whether this launch has already swept runs left `running` by the previous one.
+    private var closedInterruptedRuns = false
 
     // We need to keep a weak reference to the state or pass it in.
     // Since AppState owns IrisEngine, we can pass it when we start or process.
@@ -169,10 +173,12 @@ actor IrisEngine {
         let targetId = await MainActor.run { conversationId ?? localState?.selectedConversationId }
         guard let activeId = targetId else { return }
 
-        // #182 §6.2: every non-user arrival lands here — the scheduler, subagent post-backs, and
-        // the watcher, which now passes its job's `createdInConversationId` and only falls back to
-        // whatever is selected when the job has none. Stating the rule at this choke point covers
-        // all of them and cannot go stale when a fourth is added.
+        // #182 §6.2: every non-user arrival that drives a turn lands here — subagent post-backs
+        // and peer messages. Stating the rule at this choke point covers all of them and cannot go
+        // stale when another is added. Job fires no longer arrive this way at all (#187
+        // deliverable 2): a run happens in its own background conversation and reports with an
+        // event card, and a card deliberately does not un-archive its destination — it starts no
+        // turn, so an archived conversation stays idle.
         let wasArchived = await MainActor.run { localState?.unarchiveConversation(activeId) ?? false }
 
         // Sanitize incoming system events (especially those from subagents) to prevent injection
@@ -408,7 +414,7 @@ actor IrisEngine {
         let schedulerState = state
         let jobLedger = await MainActor.run(resultType: JobLedger?.self, body: { schedulerState?.store.ledger })
         if let ledger = jobLedger {
-            await adoptJobScheduler(ledger: ledger)
+            await configureJobBookkeeping(ledger: ledger)
         }
 
         await PluginManager.shared.loadAll()
@@ -634,6 +640,12 @@ actor IrisEngine {
         repromptTasks[conversationId] = nil
     }
 
+    /// The tail of the `.system` line a soft stop posts. Shared rather than copied because
+    /// `JobRunner` reads it back out of a background run's transcript to decide the run failed
+    /// (#187 §6.2) — two spellings of this sentence would mean a cut-short run reported as a clean
+    /// completion, with nothing to say otherwise.
+    static let softStopMarker = "Summarizing and stopping."
+
     /// Graceful stop for a responsive-but-stuck goal loop: clear the reprompt, instruct the model
     /// to summarize and call goal_complete, and clear the goal so the loop cannot continue.
     private func softStopWithSummary(conversationId: UUID, reason: String) async {
@@ -656,7 +668,7 @@ actor IrisEngine {
             return
         }
 
-        await pushToUI(role: .system, text: "[\(approvalOrigin)] \(reason) Summarizing and stopping.", conversationId: conversationId)
+        await pushToUI(role: .system, text: "[\(approvalOrigin)] \(reason) \(Self.softStopMarker)", conversationId: conversationId)
         await processInput(
             "You have reached a stopping condition (\(reason)). Summarize what you accomplished and what is blocking you, then call `goal_complete` with that summary. Do not take any other action.",
             source: "System", conversationId: conversationId, restrictToGoalComplete: true)
@@ -848,11 +860,20 @@ actor IrisEngine {
             currentSystemPrompt.parts[0].text = textPart + "\n\n# Mid-Term Fact Store Memory (JIT Context)\n" + factString
         }
 
+        // Read once for the three gates below that all ask about this conversation: whether it is
+        // an unattended run, and whether it has a goal to complete.
+        let (isUnattended, hasActiveGoal) = await MainActor.run { () -> (Bool, Bool) in
+            let conversation = localState?.conversations.first(where: { $0.id == conversationId })
+            return (conversation?.isBackground == true, conversation?.activeGoal != nil)
+        }
+
         // #185 §6: computed once per turn and reused below for the session-tools declaration
         // gate — never call `sessionPeerCount` a second time there, that would reintroduce the
         // MainActor hop plus O(n log n) sort fix round 2 removed it for. `.main` only: a
-        // subagent/evaluator turn must not pay for a value it discards.
-        let peerCount = principal == .main ? await sessionPeerCount(excluding: conversationId) : 0
+        // subagent/evaluator turn must not pay for a value it discards. A background run is not a
+        // session either (see the declaration gate below), so it skips the count too — a roster it
+        // may not act on is prompt weight, and the hop is work for a value it discards.
+        let peerCount = (principal == .main && !isUnattended) ? await sessionPeerCount(excluding: conversationId) : 0
         if principal == .main, peerCount > 0, let textPart = currentSystemPrompt.parts.first?.text {
             // #185 §6: one line, never a roster. Detail is available on demand through
             // `list_sessions`; a per-peer list would grow with session count and churn every turn.
@@ -860,6 +881,10 @@ actor IrisEngine {
         }
 
         var toolsList = await executor.getTools()
+        // No unattended job creation (the agency epic's standing ruling): a background run may
+        // not write itself a cadence or a watch, so the two tools that do are not declared to it
+        // at all — undeclared costs it nothing, and `executeFunctionCall` refuses the call anyway.
+        if isUnattended { toolsList.removeAll { Self.jobCreationTools.contains($0.name) } }
         // Add set_workspace tool dynamically
         toolsList.append(FunctionDeclaration(
             name: "set_workspace",
@@ -892,9 +917,10 @@ actor IrisEngine {
         
         toolsList.append(SubagentManager.toolDeclaration())
         
+        if !isUnattended {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; a job that was due while the app was asleep runs once on wake. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; a job that was due while the app was asleep runs once on wake. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -913,6 +939,7 @@ actor IrisEngine {
                 required: ["prompt"]
             )
         ))
+        }
         
         toolsList.append(FunctionDeclaration(
             name: "save_fact",
@@ -961,9 +988,6 @@ actor IrisEngine {
         // goal-completion panel over an ordinary conversation and fire an unrequested reflection
         // turn (#84). The soft-stop turn is the exception: it clears the goal first and then needs
         // this tool as its only way out (see the `restrictToGoalComplete` filter below).
-        let hasActiveGoal = await MainActor.run {
-            localState?.conversations.first(where: { $0.id == conversationId })?.activeGoal != nil
-        }
         if hasActiveGoal || restrictToGoalComplete {
         toolsList.append(FunctionDeclaration(
             name: "goal_complete",
@@ -1059,6 +1083,11 @@ actor IrisEngine {
         // same way) for the system-prompt count line — reusing it here, rather than calling
         // `sessionPeerCount` again, is what keeps a subagent/evaluator turn from paying the
         // MainActor hop plus O(n log n) sort twice for a value it discards either way.
+        // `peerCount` is zero for a background run by construction above, so this gate also holds
+        // "a background run is not a session": it may not list peers, message them, or advertise
+        // itself. A send would start a real turn in an attended conversation, which runs under
+        // that conversation's approval path — the laundering `invoke_subagent` used to allow. All
+        // three are refused at dispatch as well, since a forged call never passes this gate.
         if principal == .main, peerCount > 0 {
             toolsList.append(FunctionDeclaration(
                 name: "list_sessions",
@@ -1067,7 +1096,7 @@ actor IrisEngine {
             ))
             toolsList.append(FunctionDeclaration(
                 name: "send_to_session",
-                description: "Send a message to another active session. It arrives as a request that session may decline, not an instruction it must follow. Use it to ask a peer working elsewhere for something only it can do. Archived sessions cannot be reached.",
+                description: "Send a message to another active session. It arrives as a request that session may decline, not an instruction it must follow. Use it to ask a peer working elsewhere for something only it can do. Archived sessions, and the hidden conversations background job runs use, cannot be reached.",
                 parameters: Schema(type: "OBJECT", properties: [
                     "session_id": Schema(type: "STRING", description: "The peer's session_id from list_sessions."),
                     "message": Schema(type: "STRING", description: "What to say. Include enough context to act on without seeing your conversation.")
@@ -1082,6 +1111,19 @@ actor IrisEngine {
                 ], required: ["name", "description"])
             ))
         }
+
+        // #187 §9, invariant 6: the job tools are declared in a pinned conversation and nowhere
+        // else. The Activity conversation is the one place a person is already reading about runs,
+        // so it is the one place the two declarations earn their prompt tokens; everywhere else
+        // they would be a standing cost for a question nobody asked. The gate itself is pure
+        // (`jobToolDeclarations`) so both answers are testable without a turn.
+        // `.main` only, and the ternary rather than an `if` around the hop for the same reason
+        // `peerCount` above uses one: a subagent/evaluator turn should not pay a MainActor hop for
+        // a value it can never act on (its own conversation is never the pinned one).
+        let isPinned = principal == .main ? await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId })?.isPinned == true
+        } : false
+        toolsList.append(contentsOf: Self.jobToolDeclarations(isPinned: isPinned))
 
         // Main-agent only. A subagent runs against a unit contract the PARENT authored (slice B3);
         // letting it amend its own definition of done is the self-authored-target problem the
@@ -1221,6 +1263,22 @@ actor IrisEngine {
                         // wear it — the model must not be told a peer's words are the user's own.
                         let label = steer.isPeer ? Self.peerMidTaskLabel : "User (mid-task)"
                         let content = Content(role: "user", parts: [Part(text: "\(label): \(steerText)")])
+                        await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
+                    }
+                    history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
+                    request.contents = history
+                }
+
+                // Event cards delivered while this turn was running (#187 §8.3). Same boundary as
+                // the steers above and deliberately after them: a card is harness news, a steer is
+                // the user changing course, and the user's words are read first when both landed
+                // in the same window. No BeforeAgent hook — that hook exists to inspect what a
+                // human or a peer said, and this text is the harness's own sentence about a job
+                // this harness ran. The line is already sanitised by `deliverEvent`.
+                let eventLines = await MainActor.run { localState?.takePendingEventLines(for: conversationId) ?? [] }
+                if !eventLines.isEmpty {
+                    for line in eventLines {
+                        let content = AppState.eventLineContent(line)
                         await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
                     }
                     history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
@@ -1613,6 +1671,76 @@ actor IrisEngine {
         return "Could not save the job."
     }
 
+    /// Everything launch does about job runs, in the order it has to happen (#187 §6, §10): close
+    /// out the runs the last process died inside — before the scheduler can start a new one, so a
+    /// run this process is about to begin is never mistaken for one of them — then bring the
+    /// scheduler up and give it somewhere to record an overlap skip. Split out of `start()`, which
+    /// also loads plugins and MCP servers, so it can be driven (and tested) on its own.
+    func configureJobBookkeeping(ledger: JobLedger) async {
+        closeInterruptedRuns(ledger: ledger)
+        // Both handlers are installed through `configure`, which runs before the polling loop
+        // does: installed after `start()`, the first tick could skip an overlapping job (or cross
+        // a day boundary) with no handler to record it.
+        _ = await adoptJobScheduler(ledger: ledger) { scheduler in
+            await scheduler.setOnSkip { job in
+                do {
+                    try JobRunner.recordSkip(job: job, ledger: ledger, now: Date())
+                } catch {
+                    print("[JobRunner] could not record the skipped run for \(job.name): \(error)")
+                }
+            }
+            // Retention runs at launch and once a day (§10). Both, not one: a Mac that is never
+            // restarted would never prune on launch alone, and a Mac restarted twice a day would
+            // never reach the daily hook. The launch pass is the explicit call below, so it
+            // happens now instead of at the next poll.
+            await scheduler.setOnDailyMaintenance { [weak self] in
+                await self?.applyRetention(ledger: ledger)
+            }
+        }
+        await applyRetention(ledger: ledger)
+    }
+
+    /// Ledger rows older than 90 days, and every job's transcripts beyond its 20 newest, go away —
+    /// except those belonging to a failure nobody has acknowledged (§10). `prune` deletes the rows
+    /// and hands back the conversations, which are the engine's to delete because they are
+    /// `AppState`'s.
+    ///
+    /// A transcript id is checked against the conversation it names before anything is deleted: the
+    /// ledger column has no foreign key and nothing stops a future writer (or a hand-edited row)
+    /// from pointing it at a conversation the user is reading. A prune must never be able to take
+    /// a user-facing conversation down with it, so only a `isBackground` one is deleted here.
+    func applyRetention(ledger: JobLedger) async {
+        let decision: JobLedger.PruneDecision
+        do {
+            decision = try ledger.prune(now: Date(), rowRetention: Self.runRowRetention,
+                                        transcriptsPerJob: Self.transcriptsPerJob)
+        } catch {
+            print("[JobLedger] could not prune run history: \(error)")
+            return
+        }
+        guard let state else { return }
+        var deletedTranscripts = 0
+        for id in decision.deleteTranscriptIds {
+            // Check and delete in the SAME hop: split across two, the conversation can stop being
+            // a background one (or be replaced by a user-facing one under that id) in between,
+            // and the second hop would then delete exactly what the first refused to.
+            let deleted = await MainActor.run { () -> Bool in
+                guard state.conversations.first(where: { $0.id == id })?.isBackground == true
+                else { return false }
+                state.deleteConversation(id)
+                return true
+            }
+            if deleted { deletedTranscripts += 1 }
+        }
+        if !decision.deleteRunIds.isEmpty || deletedTranscripts > 0 {
+            print("[JobLedger] retention: removed \(decision.deleteRunIds.count) run row(s) and \(deletedTranscripts) transcript(s)")
+        }
+    }
+
+    /// How long a `job_runs` row is kept, and how many transcripts a job keeps (§10).
+    static let runRowRetention: TimeInterval = 90 * 86_400
+    static let transcriptsPerJob = 20
+
     /// Brings up the ledger-backed scheduler this engine fires jobs through. Split out of
     /// `start()`, which also loads plugins, MCP servers and watchers, so the scheduler half can
     /// be driven on its own.
@@ -1623,35 +1751,98 @@ actor IrisEngine {
     /// previous polling loop running with nothing holding a reference to stop it.
     /// `JobScheduler.start()` cancels its own previous loop, so re-adopting stays one loop.
     @discardableResult
-    func adoptJobScheduler(ledger: JobLedger) async -> JobScheduler {
+    func adoptJobScheduler(ledger: JobLedger,
+                           configure: (JobScheduler) async -> Void = { _ in }) async -> JobScheduler {
         let scheduler = jobScheduler ?? JobScheduler(ledger: ledger)
         await scheduler.setFireHandler(fireHandler())
+        // Every handler goes on before the loop can tick even once.
+        await configure(scheduler)
         await scheduler.start()
         jobScheduler = scheduler
         return scheduler
     }
 
-    /// What a due job does, as `start()` wires it into the scheduler. Deliverable 1: a fire is a
-    /// system event in the job's creating conversation, or the selected one if it has none, and a
-    /// fire is a normal turn with the full tool surface. Deliverable 2 replaces this with the
-    /// background JobRunner. Factored out of `start()` so a test can drive one real fire through
+    /// What a due job does, as `start()` wires it into the scheduler: a turn in a background
+    /// conversation of its own, recorded in `job_runs` and reported as an event card (#187 §6).
+    /// Deliverable 1 fired a system event into the conversation the job was created in, which put
+    /// unattended work in front of the user mid-sentence and parked gated tools on a dialog nobody
+    /// was there to answer. Factored out of `start()` so a test can drive one real fire through
     /// the engine without also starting the polling loop.
     func fireHandler() -> JobScheduler.FireHandler {
-        { [weak self] job, _ in
-            await self?.handleSystemEvent("Scheduled Job Triggered: \(job.prompt)", source: "Scheduler",
-                                          conversationId: job.createdInConversationId)
+        { [weak self] job, reason in
+            guard let runner = await self?.jobRunner() else { return }
+            await runner.run(job: job, reason: reason)
+        }
+    }
+
+    /// The runner every fire goes through, built on first use and kept: one per engine, so two
+    /// jobs firing in the same tick share it (it is an actor, and `run` holds no cross-run state).
+    /// `nil` only for an engine whose `AppState` has gone away.
+    func jobRunner() async -> JobRunner? {
+        if let jobRunnerInstance { return jobRunnerInstance }
+        guard let state else { return nil }
+        let ledger = await MainActor.run { state.store.ledger }
+        let runner = JobRunner(state: state, engine: self, ledger: ledger,
+                               protectionEnabled: protectionEnabled)
+        jobRunnerInstance = runner
+        return runner
+    }
+
+    /// The two tools that create a job. A background run is offered neither and refused both:
+    /// "no unattended job creation" is an epic-level ruling, and a run that could schedule another
+    /// run is a run that grows its own footprint with nobody asked.
+    static let jobCreationTools: Set<String> = ["schedule_job", "register_directory_watcher"]
+
+    /// What the dispatcher tells a background run that tried to read the peer roster or advertise
+    /// itself to it. Same reason as the send refusal: it is not a session in either direction.
+    static let unattendedSessionListRefusal =
+        "A background run cannot list or advertise sessions; its result is delivered as a card."
+
+    /// What the dispatcher tells a background run that tried to message a peer. Its result
+    /// reaches a person through its event card; borrowing an attended session's approval path is
+    /// not a second delivery channel.
+    static let unattendedSessionMessageRefusal =
+        "A background run cannot message sessions; its result is delivered as a card."
+
+    /// What the dispatcher tells a background run that reached for one anyway.
+    static let unattendedJobCreationRefusal =
+        "A background run cannot create jobs or watches; describe what you want and the user can create it."
+
+    /// The failure reason written onto runs that were still `running` when the app came up: the
+    /// last process died in the middle of them and nothing will ever finish them.
+    static let interruptedByQuitReason = "app was not running"
+
+    /// Closes out those runs, once per launch, and says how many there were. Once per launch
+    /// matters: `AppState.start()` is called from `onAppear` and can run more than once, and a
+    /// second sweep would mark a run that is happening right now as interrupted.
+    @discardableResult
+    func closeInterruptedRuns(ledger: JobLedger, at: Date = Date()) -> Int {
+        guard !closedInterruptedRuns else { return 0 }
+        closedInterruptedRuns = true
+        do {
+            let closed = try ledger.closeRunningRuns(reason: Self.interruptedByQuitReason, at: at)
+            if closed > 0 { print("[JobRunner] closed \(closed) run(s) the last session died in the middle of") }
+            return closed
+        } catch {
+            print("[JobRunner] could not close interrupted runs: \(error)")
+            return 0
         }
     }
 
     /// What one watch fire does, as `start()` wires it into `WatcherManager.shared`. Factored out
     /// for the same reason `fireHandler()` was: the job tools hand this to a manager an unstarted
     /// engine adopts (`JobTools.watcherCallback`), and the two paths must install one definition.
+    ///
+    /// Straight to the runner, NOT through `JobScheduler`: a watch fire has no cadence to advance
+    /// and no `firing` entry, and routing it through the scheduler's overlap skip would write one
+    /// `interrupted` ledger row per file event in a burst — noisier than the overlap itself.
+    /// Overlap is handled where every fire passes: `JobRunner.run` keeps its own in-flight set and
+    /// drops a watch fire for a job already running, silently and without a row. Deliverable 4
+    /// owns `FSWatch.quietWindowSeconds` and turns that into coalescing.
     func watcherCallback() -> @Sendable (Job, [String]) async -> Void {
         { [weak self] job, paths in
-            await self?.handleSystemEvent(
-                WatcherManager.eventMessage(job: job, paths: paths),
-                source: "FileWatcher",
-                conversationId: job.createdInConversationId)
+            guard let runner = await self?.jobRunner() else { return }
+            await runner.run(job: job, reason: "fsEvent", changedPaths: paths)
         }
     }
 
@@ -1708,9 +1899,26 @@ actor IrisEngine {
         }
     }
 
+    /// Whether `conversationId` is a background (unattended) run. The dispatch-side half of the
+    /// gates below: declaration gating only stops a model that plays by the rules, and a forged
+    /// call reaches the dispatcher by name alone.
+    private func isUnattendedRun(_ conversationId: UUID) async -> Bool {
+        let localState = state
+        return await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId })?.isBackground == true
+        }
+    }
+
     private func executeFunctionCall(_ functionCall: FunctionCall, conversationId: UUID, workspacePath: String?, restrictToGoalComplete: Bool = false) async -> String {
         let localState = state
         var result = ""
+
+        // The epic's standing ruling: no unattended job creation. Neither tool is declared to a
+        // background turn (see `buildRequest`), but declaration gating only stops a well-behaved
+        // model — the refusal has to live at the point that would actually write the row.
+        if Self.jobCreationTools.contains(functionCall.name) {
+            if await isUnattendedRun(conversationId) { return Self.unattendedJobCreationRefusal }
+        }
         
         if functionCall.name == "set_workspace", let path = functionCall.args["path"]?.stringValue {
             let currentWorkspace = path
@@ -1737,6 +1945,13 @@ actor IrisEngine {
                 result = "Refused — a subagent is not a session."
                 return result
             }
+            // And a background run is not a session either, in either direction (#187): reading
+            // the roster is how a send would pick its target, so refusing it here is the same
+            // property as the send refusal below, not a separate courtesy.
+            guard !(await isUnattendedRun(conversationId)) else {
+                result = Self.unattendedSessionListRefusal
+                return result
+            }
             let (peers, total) = await MainActor.run { () -> ([SessionPeer], Int) in
                 guard let s = localState else { return ([], 0) }
                 return SessionDirectory.peers(in: s.conversations, excluding: conversationId,
@@ -1754,6 +1969,14 @@ actor IrisEngine {
                 result = "Refused — a subagent is not a session."
                 return result
             }
+            // Same property on the sender side (#187): the target is already refused when IT is a
+            // background conversation, but a background SENDER was not — and delivery starts a
+            // real turn in a user-facing conversation, under that conversation's attended
+            // approval path. An unattended run does not get to have a peer do its gated work.
+            guard !(await isUnattendedRun(conversationId)) else {
+                result = Self.unattendedSessionMessageRefusal
+                return result
+            }
             guard !message.trimmingCharacters(in: .whitespaces).isEmpty else {
                 result = "A message is required."
                 return result
@@ -1769,7 +1992,10 @@ actor IrisEngine {
             let target = await MainActor.run { () -> (exists: Bool, archived: Bool) in
                 guard let c = localState?.conversations.first(where: { $0.id == targetId })
                 else { return (false, false) }
-                return (true, c.isArchived || c.isSubagent)
+                // A background run is refused like an archived session: it is not a peer in
+                // `list_sessions` either, and a message delivered into it would land in a
+                // transcript nobody reads and retention will prune (#187).
+                return (true, c.isArchived || c.isSubagent || c.isBackground)
             }
             guard target.exists else {
                 result = "No session with that id."
@@ -1802,6 +2028,11 @@ actor IrisEngine {
                 result = "Refused — a subagent is not a session."
                 return result
             }
+            // A run nobody can list or address has nothing to advertise to.
+            guard !(await isUnattendedRun(conversationId)) else {
+                result = Self.unattendedSessionListRefusal
+                return result
+            }
             guard !name.trimmingCharacters(in: .whitespaces).isEmpty else {
                 result = "A name is required."
                 return result
@@ -1811,6 +2042,80 @@ actor IrisEngine {
                                            SessionCard(name: name, description: description))
             }
             result = "Card updated."
+        } else if functionCall.name == "list_jobs" || functionCall.name == "get_job_run" {
+            // Declaration gating stops a well-behaved model from being offered these; dispatch
+            // reads the function name alone, so the invariant ("in no other conversation") is
+            // enforced again here, where a forged call would otherwise have its effect — the same
+            // defense in depth the session tools use.
+            let (isPinned, store) = await MainActor.run { () -> (Bool, ConversationStore?) in
+                (localState?.conversations.first(where: { $0.id == conversationId })?.isPinned == true,
+                 localState?.store)
+            }
+            guard isPinned, let ledger = store?.ledger else {
+                result = "Refused — the job tools are only available in a pinned conversation."
+                return result
+            }
+            if functionCall.name == "list_jobs" {
+                do {
+                    let jobs = try ledger.jobs()
+                    // One query per job rather than one over the whole table: `runs(jobId:limit:)`
+                    // is the ledger's only newest-first-per-job read, and a jobs list is tens of
+                    // rows, not thousands.
+                    var lastStatuses: [UUID: String] = [:]
+                    for job in jobs {
+                        lastStatuses[job.id] = try ledger.runs(jobId: job.id, limit: 1).first?.status.rawValue
+                    }
+                    // Read after `jobs()` — that call is what publishes the skipped-row count —
+                    // and reported, so the model's account of what is scheduled matches `/jobs`'s
+                    // rather than silently omitting the same rows.
+                    result = Self.jobsListJSON(jobs, lastStatuses: lastStatuses,
+                                               unreadableJobs: ledger.unreadableJobCount)
+                } catch {
+                    result = "Could not read the jobs: \(error)."
+                }
+            } else {
+                let requested = functionCall.args["run_id"]?.stringValue ?? ""
+                do {
+                    // The id a model has is usually the eight characters an event card printed, so
+                    // this is the same resolver `/jobs ack` uses — a full id by primary key, a
+                    // prefix by prefix query, neither bounded by a recency window.
+                    switch try JobsCommand.resolveRun(requested, in: ledger) {
+                    case .none:
+                        result = "No run with that id."
+                    case .ambiguous:
+                        result = "More than one run starts with that id — use the full id."
+                    case .found(let runId):
+                        guard let run = try ledger.run(id: runId) else {
+                            result = "No run with that id."
+                            return result
+                        }
+                        let raw = await MainActor.run { () -> String? in
+                            guard let transcriptId = run.transcriptConversationId,
+                                  let conv = localState?.conversations.first(where: { $0.id == transcriptId }),
+                                  let last = conv.messages.last(where: { $0.role == .agent })
+                            else { return nil }
+                            return String(last.content.prefix(Self.jobRunTranscriptExcerpt))
+                        }
+                        // Everything a model wrote goes through the guard. This branch returns
+                        // directly, so it never passes through `executeToolWithHooks`'s guard
+                        // call — same reason `search_memory` sanitizes inline. `outcome` and
+                        // `failureReason` are one-liners a previous run's model produced, so tier
+                        // 1's structural pass and the `<untrusted_context>` wrapper are the whole
+                        // of what they need; the transcript excerpt is long enough to be worth the
+                        // classifiers. (`jobName` is left verbatim: it is the handle the model must
+                        // quote back to `/jobs` and `list_jobs`, and it is rendered escaped
+                        // everywhere a person reads it.)
+                        let message = await guardedJobRunField(raw, maxTier: .tier3_canary)
+                        let outcome = await guardedJobRunField(run.outcome, maxTier: .tier1_structural)
+                        let failureReason = await guardedJobRunField(run.failureReason,
+                                                                     maxTier: .tier1_structural)
+                        result = Self.jobRunJSON(run, outcome: outcome, failureReason: failureReason,
+                                                 lastAgentMessage: message)
+                    }
+                } catch {
+                    result = "Could not read the run: \(error)."
+                }
+            }
         } else if functionCall.name == "rename_conversation", let newTitle = functionCall.args["title"]?.stringValue {
             await MainActor.run { localState?.renameConversation(id: conversationId, newTitle: newTitle) }
             result = "Conversation renamed to '\(newTitle)'."
@@ -2344,6 +2649,104 @@ actor IrisEngine {
     func recordCommandDuration(id: UUID, elapsed: TimeInterval) async {
         let localState = state
         await MainActor.run { localState?.commandDurations[id] = elapsed }
+    }
+}
+
+// MARK: - Job tools (#187 §9)
+
+/// `list_jobs` and `get_job_run`, and the JSON they answer with. The declarations are a pure
+/// function of the gate rather than two `append`s inside the turn builder so the invariant they
+/// carry — that no conversation but a pinned one is charged for them — is testable without
+/// driving a turn against a model.
+extension IrisEngine {
+    /// The two job tools when `isPinned`, nothing otherwise. Appended verbatim by the per-turn
+    /// tool-list builder.
+    nonisolated static func jobToolDeclarations(isPinned: Bool) -> [FunctionDeclaration] {
+        guard isPinned else { return [] }
+        return [
+            FunctionDeclaration(
+                name: "list_jobs",
+                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, and how the last run ended, plus `unreadableJobs` — how many stored jobs could not be read at all. Use it to answer what is scheduled, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
+                parameters: Schema(type: "OBJECT", properties: [:], required: [])),
+            FunctionDeclaration(
+                name: "get_job_run",
+                description: "Read back one background job run: how it ended, what it cost, and the last thing the run itself said. Use it when the user asks about a run an event card mentioned — the card names the run by the first eight characters of its id, which is enough.",
+                parameters: Schema(type: "OBJECT", properties: [
+                    "run_id": Schema(type: "STRING", description: "The run's id, or the first eight or more characters of it as an event card shows.")
+                ], required: ["run_id"])),
+        ]
+    }
+
+    /// `list_jobs`'s body: one object per job, in the ledger's order, wrapped with the count of
+    /// job rows the ledger could not decode. JSON rather than prose because the model's next move
+    /// is usually `get_job_run`, and a name it has to re-derive from a sentence is a name it can
+    /// get wrong; wrapped rather than a bare array so a model reading this cannot report "you have
+    /// two jobs" when `/jobs` says two jobs and a row it could not read.
+    nonisolated static func jobsListJSON(_ jobs: [Job], lastStatuses: [UUID: String],
+                                         unreadableJobs: Int) -> String {
+        let iso = ISO8601DateFormatter()
+        let rows: [[String: Any]] = jobs.map { job in
+            [
+                "name": job.name,
+                "trigger": job.trigger.summary,
+                "enabled": job.enabled,
+                "nextFireAt": job.nextFireAt.map { iso.string(from: $0) } ?? NSNull(),
+                "lastStatus": lastStatuses[job.id] ?? NSNull(),
+            ]
+        }
+        return jsonString(["jobs": rows, "unreadableJobs": unreadableJobs]) ?? "{\"jobs\":[],\"unreadableJobs\":0}"
+    }
+
+    /// `get_job_run`'s body: every ledger column, plus the transcript's last agent message when
+    /// there still is a transcript. `outcome`, `failureReason` and the message are the fields a
+    /// model wrote rather than the harness, so the caller hands all three in already guarded.
+    nonisolated static func jobRunJSON(_ run: JobRun, outcome: String?, failureReason: String?,
+                                       lastAgentMessage: String?) -> String {
+        let iso = ISO8601DateFormatter()
+        let row: [String: Any] = [
+            "id": run.id.uuidString,
+            "jobId": run.jobId.uuidString,
+            "jobName": run.jobName,
+            "triggerKind": run.triggerKind,
+            "startedAt": iso.string(from: run.startedAt),
+            "finishedAt": run.finishedAt.map { iso.string(from: $0) } ?? NSNull(),
+            "status": run.status.rawValue,
+            "outcome": outcome ?? NSNull(),
+            "failureReason": failureReason ?? NSNull(),
+            "blockedTool": run.blockedTool ?? NSNull(),
+            "promptTokens": run.promptTokens,
+            "candidateTokens": run.candidateTokens,
+            "totalTokens": run.totalTokens,
+            "costMicros": run.costMicros ?? NSNull(),
+            "gateSignal": run.gateSignal ?? NSNull(),
+            "transcriptConversationId": run.transcriptConversationId?.uuidString ?? NSNull(),
+            "acknowledgedAt": run.acknowledgedAt.map { iso.string(from: $0) } ?? NSNull(),
+            "lastAgentMessage": lastAgentMessage ?? NSNull(),
+        ]
+        return jsonString(row) ?? "{}"
+    }
+
+    /// One model-written field of a run, guarded before it is put in front of another model:
+    /// normalized, then wrapped as `tool_output_get_job_run` at `maxTier`. `nil` and empty stay
+    /// `nil` — an absent field should read as absent, not as an empty untrusted wrapper.
+    func guardedJobRunField(_ raw: String?, maxTier: InjectionGuard.SanitizationTier) async -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        return await InjectionGuard.sanitize(PromptInjectionGuard.sanitizeUntrustedInput(raw),
+                                             contextTag: "tool_output_get_job_run", maxTier: maxTier,
+                                             protectionEnabled: protectionEnabled)
+    }
+
+    /// The first `jobRunTranscriptExcerpt` characters of a run transcript's last agent message —
+    /// what the run actually said, before the guard sees it. `nil` when the transcript is gone
+    /// (retention) or the run never spoke.
+    static let jobRunTranscriptExcerpt = 2_000
+
+    private nonisolated static func jsonString(_ object: Any) -> String? {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object,
+                                                     options: [.sortedKeys, .withoutEscapingSlashes])
+        else { return nil }
+        return String(decoding: data, as: UTF8.self)
     }
 }
 

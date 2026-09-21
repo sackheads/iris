@@ -88,7 +88,7 @@ struct ToolExecutor {
         ),
         FunctionDeclaration(
             name: "register_directory_watcher",
-            description: "Watch a directory for file changes. This creates a job that persists across restarts and runs your instructions in the background whenever files under the path are modified. Use this when the user asks you to monitor a folder.",
+            description: "Watch a directory for file changes. This creates a job that persists across restarts and runs your instructions in the background whenever files under the path are modified. Each run happens in a hidden conversation of its own and reports one card into the pinned 'Iris Activity' conversation rather than interrupting this one; nobody is there to approve a gated tool, so a run whose work needs approval stops and says so. Use this when the user asks you to monitor a folder.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [

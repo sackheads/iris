@@ -18,8 +18,11 @@ enum SessionDirectory {
 
     static func peers(in conversations: [Conversation], excluding selfId: UUID,
                       busy: (UUID) -> Bool) -> (peers: [SessionPeer], total: Int) {
+        // `isUserFacing` rather than `!isSubagent`: a job run's conversation is a background one
+        // (#187) — hidden from the sidebar, fail-closed on every gated tool, and with nobody
+        // reading it. Listing it would advertise an address `send_to_session` then refuses.
         let active = conversations.filter {
-            $0.id != selfId && !$0.isArchived && !$0.isSubagent
+            $0.id != selfId && !$0.isArchived && $0.isUserFacing
         }
         // Most-recently-active first, keyed on the conversation — not `card.updatedAt`, which
         // would rank a session that re-describes itself above one actually doing work.

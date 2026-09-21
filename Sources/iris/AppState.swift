@@ -7,6 +7,9 @@ enum ChatRole: String, Codable, Sendable, Equatable {
     case system
     /// Deterministic slash-command output rendered as Markdown, not attributed to Iris.
     case command
+    /// A background job run's outcome (#187), carrying an `EventCard` as JSON in its content and
+    /// drawn as a one-line card. Never wakes a model turn, never indexed for search.
+    case event
 }
 
 struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
@@ -83,6 +86,12 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// unlike `isSubagent`, which has no column because subagent conversations are filtered out of
     /// persistence entirely.
     var isArchived: Bool = false
+    /// #187 — a conversation a scheduled job runs in: never shown in the sidebar, never selected,
+    /// but persisted and searchable so a finished run's transcript can be opened from its card.
+    var isBackground: Bool = false
+    /// #187 — sorted to the top of the sidebar and refused by `/clear`. The "Iris Activity"
+    /// conversation event cards are delivered to is the first user of this.
+    var isPinned: Bool = false
     var goalContract: GoalContract? = nil
     var lastGoalCompletionReport: JSONValue? = nil
     var lastGoalEvaluation: GoalEvaluation? = nil
@@ -116,7 +125,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -132,6 +141,10 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         mainAgentSandbox = try container.decodeIfPresent(SandboxPref.self, forKey: .mainAgentSandbox)
         isSubagent = try container.decodeIfPresent(Bool.self, forKey: .isSubagent) ?? false
         isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
+        // Invariant 1, same as `isArchived`: every conversation persisted before #187 lacks both
+        // keys, and a throw here would fail the whole decode.
+        isBackground = try container.decodeIfPresent(Bool.self, forKey: .isBackground) ?? false
+        isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         goalContract = try container.decodeIfPresent(GoalContract.self, forKey: .goalContract)
         lastGoalCompletionReport = try container.decodeIfPresent(JSONValue.self, forKey: .lastGoalCompletionReport)
         lastGoalEvaluation = try container.decodeIfPresent(GoalEvaluation.self, forKey: .lastGoalEvaluation)
@@ -154,6 +167,19 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         if let gc = goalContract { goalContract = gc.normalizedLadder() }
     }
     
+    /// #187 — a conversation the user can see in the sidebar at all: not a subagent/evaluator
+    /// scratch thread, not a background job run. Archived ones still qualify; they live in the
+    /// collapsed section (#182).
+    ///
+    /// Extracted so the "pick some conversation" sites cannot drift apart again as flags are
+    /// added: every one of them (launch selection, the post-delete re-point, the two
+    /// "is there anywhere left to type?" checks, and both sidebar sections) goes through this
+    /// or `isSelectable` below rather than spelling the flags out.
+    var isUserFacing: Bool { !isSubagent && !isBackground }
+
+    /// A conversation the app may point the selection at unprompted: user-facing and not archived.
+    var isSelectable: Bool { isUserFacing && !isArchived }
+
     // Equality is identity ON PURPOSE: selection state and `Hashable` use in sets need "is this
     // the same conversation", not "does every field currently match". Consequence: a SwiftUI view
     // must never take a `Conversation` value as its only changing input — two values comparing
@@ -175,6 +201,14 @@ struct ToolApprovalRequest: Identifiable {
     let conversationId: UUID?
     let origin: String
     let continuation: CheckedContinuation<Bool, Never>
+}
+
+/// A tool call denied without a human because it ran in a background conversation (#187). Recorded
+/// per-conversation so Task 6's ledger can surface `blockedOnApproval` for the run.
+struct BlockedToolCall: Equatable, Sendable {
+    let toolName: String
+    let details: String
+    let at: Date
 }
 
 @MainActor
@@ -205,6 +239,9 @@ class AppState {
     /// approving, so a headless run pays what a real `run_command` pays. The verdict is never
     /// acted on: a benchmark measures the cost, it does not block on it (#135).
     var vibecopUnderAutoApprove = false
+    /// The deterministic allowlist every approval consults. Injectable so a test can point it at
+    /// a temp `IrisPaths` instead of the machine's real `~/.iris/config/permissions.json`.
+    var permissions: PermissionManager = .shared
     var commandStartTimes: [UUID: Date] = [:]
     var commandDurations: [UUID: TimeInterval] = [:]
     /// Subagent/evaluator sessions only — the main session is synthesised by `visibleSessions`,
@@ -213,8 +250,25 @@ class AppState {
     var sessions: [SessionSummary] = []
     /// How long a `.finished` entry lingers in `sessions` before the sweep drops it.
     static let sessionLingerWindow: TimeInterval = 60
+    /// The conversation whose read-only transcript sheet is open, or nil. Transient UI state kept
+    /// here — not on `Conversation`, not persisted — because there are two openers for the one
+    /// sheet: a session-strip row (#217/#19) and an event card's "View run" (#187). The `.sheet`
+    /// itself stays attached to `SessionStripView`'s outer `Group`, which is always mounted; a
+    /// second `.sheet` on `MessageView` would be torn down whenever the message row it is attached
+    /// to scrolls out of the lazy stack.
+    var transcriptSheetConversationId: UUID?
     var subagentWriteLedger: [UUID: [String]] = [:]
     var pendingApprovals: [ToolApprovalRequest] = []
+    /// Fail-closed denials recorded for background (unattended) conversations (#187) — never
+    /// enqueued in `pendingApprovals`, since nobody is watching to resolve them. Task 6's ledger
+    /// drains this per run via `takeBackgroundDenials(for:)` to mark it `blockedOnApproval`.
+    private(set) var backgroundDenials: [UUID: [BlockedToolCall]] = [:]
+    /// Which background run a spawned conversation belongs to. A subagent or an evaluator
+    /// descended from an unattended run is unattended too, and what it was refused is the RUN's
+    /// denial: the ledger row and the event card belong to the job, not to the scratch
+    /// conversation the run delegated into (and which is often deleted before anyone could drain
+    /// it). Entries are dropped when the run they belong to is drained.
+    private var backgroundRunAncestor: [UUID: UUID] = [:]
     var availableUpdate: ReleaseInfo?
     var isCheckingForUpdates = false
     var updateCheckStatusMessage: String?
@@ -330,6 +384,11 @@ class AppState {
             // which is what makes it safe to drop this eagerly rather than only on delete.
             mainStartTimeByConversation[conversationId] = nil
             mainPhaseByConversation[conversationId] = nil
+            // #187 §8.3: before the drain, not after. Anything the ending turn did not read is
+            // put into history here — where it costs no turn — so that if the drain does start a
+            // queued user turn, that turn's request already carries the news. Appending only, on
+            // purpose: an event card is never itself a reason to call the model.
+            flushPendingEventLines(for: conversationId)
             drainPendingUserMessages(for: conversationId)
         }
     }
@@ -396,6 +455,39 @@ class AppState {
         startTurn(text: next.text, attachments: next.attachments, in: conversationId, isPeer: next.isPeer)
     }
 
+    // MARK: - Pending event lines (#187 §8.3)
+
+    /// The model-facing lines of event cards (`EventCard.historyLine`, already sanitised) that
+    /// were delivered while their destination had a turn in flight, waiting for that turn to read
+    /// them. Deliberately NOT `pendingUserMessages`: that inbox is drained by
+    /// `drainPendingUserMessages`, which *starts a turn* for whatever is left in it, and an event
+    /// card must never wake the model — a job finishing is news, not a request. This queue is
+    /// drained by the engine at the same model-round boundary it takes steers, and anything still
+    /// in it when the turn ends is appended straight to history by `endEngineTurn`.
+    private var pendingEventLines: [UUID: [String]] = [:]
+
+    func enqueueEventLine(_ text: String, for conversationId: UUID) {
+        pendingEventLines[conversationId, default: []].append(text)
+    }
+
+    /// Everything queued, in arrival order, removed from the queue. The engine calls this at
+    /// every model round (after `takePendingSteers`, so a steer the user typed is read before
+    /// harness news that landed in the same window) and `endEngineTurn` calls it once more.
+    func takePendingEventLines(for conversationId: UUID) -> [String] {
+        let lines = pendingEventLines[conversationId] ?? []
+        pendingEventLines[conversationId] = nil
+        return lines
+    }
+
+    /// Appends each queued line to history as its own `user` entry. Used at turn end, where there
+    /// is no round left to read them: they sit in history so the *next* turn — whenever the user
+    /// or some arrival starts one — sees what happened while it was away.
+    private func flushPendingEventLines(for conversationId: UUID) {
+        for line in takePendingEventLines(for: conversationId) {
+            appendContentToHistory(for: conversationId, content: Self.eventLineContent(line))
+        }
+    }
+
     /// Empties the inbox and returns how many messages were dropped (Stop, /stop, deletion).
     @discardableResult
     private func discardPendingUserMessages(for conversationId: UUID) -> Int {
@@ -430,7 +522,10 @@ class AppState {
         self.store = store
         self.engine = IrisEngine(state: self)
         loadConversations()
-        if conversations.isEmpty {
+        // `selectedConversationId == nil` covers more than an empty store: #187's background job
+        // conversations are loaded but never selected, so a store holding nothing else still has
+        // to open in a fresh conversation.
+        if conversations.isEmpty || selectedConversationId == nil {
             createNewConversation()
         }
         // Every launch notice below goes through `appendLaunchNotice`, which persists it like any
@@ -548,6 +643,16 @@ class AppState {
             pendingScrollTarget = nil
             return
         }
+        // A background run's transcript is out of the sidebar, read-only, and refuses anything
+        // sent to it (#187); selecting one would put that dead end in the main pane. The
+        // read-only sheet the session strip already owns is the right surface for it — same for a
+        // subagent log, hence `isUserFacing` and not `isBackground`. Archived is deliberately not
+        // part of this: an archived hit selects like any other (#182 §11).
+        guard conversation.isUserFacing else {
+            pendingScrollTarget = nil
+            transcriptSheetConversationId = hit.conversationId
+            return
+        }
         selectedConversationId = hit.conversationId
         guard hit.ordinal >= 0, hit.ordinal < conversation.messages.count else {
             pendingScrollTarget = nil
@@ -594,7 +699,15 @@ class AppState {
             guard let self else { return }
             self.activeTasks[id] = nil
             self.endThinking()
-            if let conversationId { self.drainPendingUserMessages(for: conversationId) }
+            // Both queues, in the same order as `endEngineTurn` (#187 §8.3, fix round 1). This is
+            // the OTHER end of a turn: `hasTurnInFlight` is true while a tracked task is alive,
+            // engine turn or not, so a card delivered after the task's engine turn already ended
+            // — or during a task that never started one — is queued here and had nothing left to
+            // flush it. Event lines first, so a turn the drain starts carries the news.
+            if let conversationId {
+                self.flushPendingEventLines(for: conversationId)
+                self.drainPendingUserMessages(for: conversationId)
+            }
         }
         activeTasks[id] = (conversationId, task)
     }
@@ -624,11 +737,17 @@ class AppState {
         appendMessage(role: .system, content: notice, to: convId)
     }
     
-    func createNewConversation(id: UUID = UUID(), isSubagent: Bool = false) {
-        var newConv = Conversation(id: id, title: "New Conversation")
+    /// `select` nil means the default rule — select the new conversation unless it is a subagent
+    /// scratch thread or a background job run (#187), neither of which the user is looking at.
+    /// Pass `false` explicitly to create a conversation without disturbing the selection.
+    @discardableResult
+    func createNewConversation(id: UUID = UUID(), isSubagent: Bool = false, isBackground: Bool = false,
+                               title: String? = nil, select: Bool? = nil) -> UUID {
+        var newConv = Conversation(id: id, title: title ?? "New Conversation")
         newConv.isSubagent = isSubagent
+        newConv.isBackground = isBackground
         conversations.append(newConv)
-        if !isSubagent {
+        if select ?? (!isSubagent && !isBackground) {
             selectedConversationId = newConv.id
         }
         markChanged(newConv.id, .created)
@@ -636,6 +755,47 @@ class AppState {
         Task {
             _ = await HookManager.shared.fireSessionStart(conversationId: newConv.id)
         }
+        return newConv.id
+    }
+
+    /// #187 — the pinned conversation event cards are delivered to.
+    static let activityConversationTitle = "Iris Activity"
+    /// The `meta` key its id is recorded under, so it survives a relaunch and is never created
+    /// twice. Deliberately not "the conversation titled Iris Activity": the user may rename it.
+    static let activityConversationMetaKey = "activity_conversation_id"
+
+    /// Returns the Activity conversation's id, creating it (pinned, unselected) and recording it
+    /// in `meta` on first use. Stable across calls and across launches; if the recorded id names a
+    /// conversation that no longer exists (deleted by hand), a fresh one is created and recorded.
+    func activityConversationId() -> UUID {
+        if let raw = try? store.metaValue(forKey: Self.activityConversationMetaKey),
+           let existing = UUID(uuidString: raw),
+           conversations.contains(where: { $0.id == existing }) {
+            return existing
+        }
+        let id = createNewConversation(title: Self.activityConversationTitle, select: false)
+        if let idx = conversations.firstIndex(where: { $0.id == id }) {
+            conversations[idx].isPinned = true
+            markChanged(id, .metadata)
+        }
+        try? store.setMetaValue(id.uuidString, forKey: Self.activityConversationMetaKey)
+        return id
+    }
+
+    /// Why `/clear` will not empty a conversation. nil means it may (#187).
+    enum ClearRefusal: Equatable {
+        case pinned
+
+        var reason: String {
+            switch self {
+            case .pinned: return "This conversation is pinned and cannot be cleared."
+            }
+        }
+    }
+
+    func clearRefusal(for conversationId: UUID) -> ClearRefusal? {
+        guard let conv = conversations.first(where: { $0.id == conversationId }) else { return nil }
+        return conv.isPinned ? .pinned : nil
     }
     
     func updateConversationTitle(id: UUID, title: String) {
@@ -645,14 +805,15 @@ class AppState {
         }
     }
     
-    /// `kind` defaults to `.subagent`; `GoalEvaluator` passes `.evaluator` so the strip and the
-    /// toolbar badge can tell an independent grader run apart from a delegated unit of work.
+    /// `kind` defaults to `.subagent`; `GoalEvaluator` passes `.evaluator` and `JobRunner` passes
+    /// `.job` (#187), so the strip and the toolbar badge can tell an independent grader run, a
+    /// background job run and a delegated unit of work apart.
     func registerSubagent(id: UUID, role: String, kind: SessionSummary.Kind = .subagent) {
         sessions.append(SessionSummary(id: id, kind: kind, role: role, startTime: Date(),
                                         phase: .thinking, lastActivity: nil))
     }
 
-    /// A subagent/evaluator run ended: mark it `.finished` rather than removing it outright, so
+    /// A subagent/evaluator/job run ended: mark it `.finished` rather than removing it outright, so
     /// the strip's transcript sheet still has a row to click on right after the run ends. It
     /// lingers for `sessionLingerWindow` — a sweep dropped after that always clears it even if
     /// nothing else touches `sessions` in the meantime. The write ledger is cleared unconditionally
@@ -686,11 +847,11 @@ class AppState {
         }
     }
 
-    /// The strip's data source: the synthesised main session first, then every subagent/evaluator
-    /// entry. `sessions` only ever holds those two kinds (`registerSubagent` is the sole writer and
-    /// takes a non-main `kind`); the filter is belt-and-braces. The synthesised row's id can't
-    /// collide with a subagent's either: `createNewConversation` never selects a subagent
-    /// conversation, so `selectedConversationId` is never a subagent id.
+    /// The strip's data source: the synthesised main session first, then every subagent, evaluator
+    /// and background job-run entry. `sessions` only ever holds non-main kinds (`registerSubagent`
+    /// is the sole writer and takes a non-main `kind`); the filter is belt-and-braces. The
+    /// synthesised row's id can't collide with one of them either: `createNewConversation` never
+    /// selects a subagent or background conversation, so `selectedConversationId` is never one.
     var visibleSessions: [SessionSummary] {
         // A stable fallback id, not a fresh `UUID()`, so the synthesised row's identity doesn't
         // change on every access (breaking `ForEach` diffing) on the practically-never-hit path
@@ -1021,6 +1182,10 @@ class AppState {
         // leave a stale entry behind forever.
         mainStartTimeByConversation[id] = nil
         mainPhaseByConversation[id] = nil
+        // Same reasoning for the event queue (#187 §8.3): a card delivered to a conversation that
+        // is then deleted has nowhere to land, and its line must not sit in the dictionary
+        // forever waiting for a turn that can never run.
+        _ = takePendingEventLines(for: id)
         conversations.removeAll { $0.id == id }
         // Re-point at what the sidebar actually renders (`ChatView` lists non-subagent
         // conversations). Picking `conversations.last` could land the selection on a subagent or
@@ -1028,13 +1193,13 @@ class AppState {
         // `sendMessage` routes by `selectedConversationId`, so the next message would go into a
         // restricted, soon-to-be-deleted conversation (#167).
         if selectedConversationId == id {
-            selectedConversationId = conversations.last(where: { !$0.isSubagent && !$0.isArchived })?.id
+            selectedConversationId = conversations.last(where: { $0.isSelectable })?.id
         }
         markChanged(id, .deleted)
         // Counts active only: deleting your last active conversation puts the user in a new empty
         // one, not in the archive. There is deliberately no archived fallback above — this check
         // would immediately supersede it (#182 §5).
-        if !conversations.contains(where: { !$0.isSubagent && !$0.isArchived }) {
+        if !conversations.contains(where: { $0.isSelectable }) {
             createNewConversation()
         }
     }
@@ -1080,7 +1245,7 @@ class AppState {
         // Archiving your only active conversation would leave nowhere to type. §6.1's refusal is
         // what makes this safe: the replacement can never inherit a running goal, because a
         // conversation with one cannot be archived at all.
-        if !conversations.contains(where: { !$0.isSubagent && !$0.isArchived }) {
+        if !conversations.contains(where: { $0.isSelectable }) {
             createNewConversation()   // selects itself
         }
         return nil
@@ -1135,6 +1300,9 @@ class AppState {
             return
         } else if trimmed == "/bundle" || trimmed.hasPrefix("/bundle ") {
             handleBundleCommand(trimmed, convId: convId)
+            return
+        } else if trimmed == "/jobs" || trimmed.hasPrefix("/jobs ") {
+            handleJobsCommand(trimmed, convId: convId)
             return
         } else if trimmed == "/journey" {
             handleJourneyCommand(convId: convId)
@@ -1927,6 +2095,21 @@ class AppState {
                          conversationId: UUID? = nil, origin: String = "Main agent",
                          inSandbox: Bool = false, callerRole: VibecopCallerRole = .agent,
                          allowedCommands: [String] = [], vibecopEnabled: Bool? = nil) async -> Bool {
+        // Fail closed for background (unattended) conversations, before every other path —
+        // including `autoApproveTools` — since nobody is watching to see the approval dialog and a
+        // gated tool must never run unattended (#187). The deterministic allowlist still applies
+        // (a call it already permits never needed a human, so it runs); everything else is denied
+        // and recorded for Task 6's ledger, without ever consulting Vibecop or a human.
+        if let id = conversationId, conversations.first(where: { $0.id == id })?.isBackground == true {
+            if permissions.isAllowed(toolName: toolName, details: details, workspace: workspace,
+                                     isBackground: true) {
+                return true
+            }
+            backgroundDenials[backgroundRunRoot(of: id), default: []]
+                .append(BlockedToolCall(toolName: toolName, details: details, at: Date()))
+            appendMessage(role: .system, content: String(format: Self.unattendedDenialNotice, toolName), to: id)
+            return false
+        }
         // Headless drivers auto-approve so a scenario run never blocks on a human or a local model.
         if autoApproveTools {
             if vibecopUnderAutoApprove {
@@ -1936,7 +2119,7 @@ class AppState {
             return true
         }
         // Fast path: deterministic permissions.
-        if PermissionManager.shared.isAllowed(toolName: toolName, details: details, workspace: workspace) {
+        if permissions.isAllowed(toolName: toolName, details: details, workspace: workspace) {
             return true
         }
 
@@ -2009,6 +2192,32 @@ class AppState {
         for req in matching { req.continuation.resume(returning: false) }
     }
 
+    /// The `.system` transcript line `requestApproval` appends for a background conversation's
+    /// fail-closed denial, formatted with the tool name.
+    static let unattendedDenialNotice = "Not run: `%@` needs approval, and this is an unattended run."
+
+    /// Returns and clears the recorded fail-closed denials for a background conversation (#187).
+    /// Task 6's ledger drains this per run to mark it `blockedOnApproval`.
+    @discardableResult
+    func takeBackgroundDenials(for conversationId: UUID) -> [BlockedToolCall] {
+        let denials = backgroundDenials[conversationId] ?? []
+        backgroundDenials.removeValue(forKey: conversationId)
+        // The run is over, so nothing it spawned can be refused anything more.
+        backgroundRunAncestor = backgroundRunAncestor.filter { $0.value != conversationId }
+        return denials
+    }
+
+    /// Records that `child` (a subagent or evaluator conversation) belongs to the background run
+    /// `parent` is part of, so a denial anywhere in the tree is drained with the run.
+    func linkBackgroundDescendant(_ child: UUID, of parent: UUID) {
+        backgroundRunAncestor[child] = backgroundRunRoot(of: parent)
+    }
+
+    /// The background run `id` belongs to — itself when it is the run, or when nothing linked it.
+    private func backgroundRunRoot(of id: UUID) -> UUID {
+        backgroundRunAncestor[id] ?? id
+    }
+
     func resolveApproval(_ resolution: ApprovalResolution) {
         guard !pendingApprovals.isEmpty else { return }
         let pending = pendingApprovals.removeFirst()
@@ -2019,13 +2228,13 @@ class AppState {
         case .deny:
             approved = false
         case .alwaysAllowGlobal:
-            PermissionManager.shared.allowGlobally(toolName: pending.toolName, details: pending.details)
+            permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
             approved = true
         case .alwaysAllowProject:
             if let workspace = pending.workspace {
-                PermissionManager.shared.allowInProject(toolName: pending.toolName, details: pending.details, workspace: workspace)
+                permissions.allowInProject(toolName: pending.toolName, details: pending.details, workspace: workspace)
             } else {
-                PermissionManager.shared.allowGlobally(toolName: pending.toolName, details: pending.details)
+                permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
             }
             approved = true
         }
@@ -2279,8 +2488,11 @@ class AppState {
     /// archived one — which would open every launch inside the collapsed section. Prefer the last
     /// active conversation; fall back to an archived one only when there is nothing else, in which
     /// case §6.2 un-archives it on the first thing sent.
+    ///
+    /// #187: nil when every persisted conversation is a background job run — those are never
+    /// selected, not even as a last resort, so `init` creates a fresh one to open in instead.
     nonisolated static func selectLaunchConversation(_ loaded: [Conversation]) -> Conversation? {
-        loaded.last(where: { !$0.isArchived }) ?? loaded.last
+        loaded.last(where: { $0.isSelectable }) ?? loaded.last(where: { $0.isUserFacing })
     }
 
     private func loadConversations() {
@@ -2414,6 +2626,78 @@ class AppState {
                     body += "• **\(b.name)**: \(b.skillNames.joined(separator: ", "))\n"
                 }
                 emitCommandOutput(body, format: .markdown, to: convId)
+            }
+        }
+    }
+
+    /// `/jobs` (#187 §9). Works in every conversation, pinned or not, and never starts a turn:
+    /// everything it says comes from the ledger through `JobsCommand`'s pure rendering. The
+    /// ledger calls are synchronous, so the answer is in the transcript before this returns —
+    /// only the watcher reload after a delete is deferred.
+    private func handleJobsCommand(_ trimmed: String, convId: UUID) {
+        let ledger = store.ledger
+        switch JobsCommand.parse(trimmed) {
+        case .usage:
+            emitCommandOutput(JobsCommand.usageText, format: .markdown, to: convId)
+
+        case .list:
+            do {
+                let jobs = try ledger.jobs()
+                var lastRuns: [UUID: JobRun] = [:]
+                for job in jobs { lastRuns[job.id] = try ledger.runs(jobId: job.id, limit: 1).first }
+                // Read after `jobs()`: that call is what publishes the skipped-row count.
+                let body = JobsCommand.render(jobs: jobs, lastRuns: lastRuns,
+                                              unacknowledged: try ledger.unacknowledgedFailures(),
+                                              unreadableJobs: ledger.unreadableJobCount, now: Date())
+                emitCommandOutput(body, format: .markdown, to: convId)
+            } catch {
+                emitCommandOutput("Could not read the jobs: \(error).", format: .markdown, to: convId)
+            }
+
+        case .ack(let runId):
+            do {
+                switch try JobsCommand.resolveRun(runId, in: ledger) {
+                case .none:
+                    emitCommandOutput("No run matching '\(runId)'.", format: .markdown, to: convId)
+                case .ambiguous:
+                    emitCommandOutput("Ambiguous run id prefix.", format: .markdown, to: convId)
+                case .found(let id):
+                    try ledger.acknowledge(runId: id, at: Date())
+                    let short = id.uuidString.lowercased().prefix(8)
+                    emitCommandOutput("Acknowledged run \(short).", format: .markdown, to: convId)
+                }
+            } catch {
+                emitCommandOutput("Could not acknowledge that run: \(error).", format: .markdown, to: convId)
+            }
+
+        case .delete(let name):
+            do {
+                guard let job = try ledger.job(named: name) else {
+                    emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
+                    return
+                }
+                // A run in flight is writing into rows this would delete under it: the runner
+                // would then fail its `finish` with `unknownRun`, and the person would have
+                // deleted a job without being told anything about the work that was happening.
+                // Refusing is recoverable in a way that is not — the run ends on its own, or the
+                // next launch interrupts it (`closeRunningRuns`).
+                guard try ledger.runCount(jobId: job.id, status: .running) == 0 else {
+                    emitCommandOutput("'\(job.name)' is running; wait for it to finish or let it be interrupted at next launch.",
+                                      format: .markdown, to: convId)
+                    return
+                }
+                // The runs go with the job (the `job_runs` foreign key cascades); their transcripts
+                // do not — those are ordinary conversations, and retention clears them on its own
+                // schedule rather than this command deleting a person's evidence out from under a
+                // card they are still reading.
+                let runCount = try ledger.runCount(jobId: job.id)
+                try ledger.delete(jobId: job.id)
+                // A watch job's FSEvents stream would otherwise keep firing for a job that is gone.
+                Task { await WatcherManager.shared.reload() }
+                emitCommandOutput("Deleted **\(job.name)** and its \(runCount) run(s). Transcripts are left for retention to clear.",
+                                  format: .markdown, to: convId)
+            } catch {
+                emitCommandOutput("Could not delete that job: \(error).", format: .markdown, to: convId)
             }
         }
     }
@@ -2579,7 +2863,13 @@ class AppState {
         emitCommandOutput(body, format: .markdown, to: convId)
     }
 
-    private func handleClearCommand(convId: UUID) {
+    func handleClearCommand(convId: UUID) {
+        // #187 — a pinned conversation (the Activity log) keeps its history; `/clear` says so
+        // rather than silently doing nothing.
+        if let refusal = clearRefusal(for: convId) {
+            emitCommandOutput(refusal.reason, format: .system, to: convId)
+            return
+        }
         if let idx = conversations.firstIndex(where: { $0.id == convId }) {
             purgeCommandTimings(forMessagesIn: convId)   // before the messages go — they are the keys
             conversations[idx].messages.removeAll()

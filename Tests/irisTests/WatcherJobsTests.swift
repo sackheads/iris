@@ -63,8 +63,8 @@ struct WatcherJobsTests {
         await wm.stopAll()
     }
 
-    @Test("a fire hands over the job and its paths; the message is the watcher's standing text")
-    func firePath() async {
+    @Test("a fire hands over the job and its paths; the prompt is the job's own, plus what changed")
+    func firePath() async throws {
         let conversation = UUID()
         let job = Job(name: "notes", prompt: "Note what changed",
                       trigger: .fsEvent(FSWatch(path: "/tmp/notes")),
@@ -77,12 +77,16 @@ struct WatcherJobsTests {
 
         let fires = await recorder.fires
         #expect(fires.count == 1)
-        // The turn lands in the conversation that created the watch, not whatever is selected.
+        // The whole job travels, so the runner can name it, profile it and route its card.
         #expect(fires.first?.job.createdInConversationId == conversation)
-        #expect(fires.first.map { WatcherManager.eventMessage(job: $0.job, paths: $0.paths) } == """
-            System Event: Files modified at /tmp/notes/a.txt, /tmp/notes/b.txt.
-            Your standing instructions for this event are: Note what changed
-            Analyze the event and take action silently or acknowledge it if necessary.
-            """)
+        // #187 §6.1: the turn now runs in a background conversation of its own, over the job's own
+        // prompt — the watcher no longer writes a "System Event:" sentence around it. The paths
+        // that woke it follow as untrusted content (see JobRunnerTests).
+        let fire = try #require(fires.first)
+        let prompt = await JobRunner.prompt(job: fire.job, changedPaths: fire.paths,
+                                            protectionEnabled: false)
+        #expect(prompt.hasPrefix("Note what changed\n\n"))
+        #expect(prompt.contains("- /tmp/notes/a.txt\n- /tmp/notes/b.txt"))
+        #expect(prompt.contains("<untrusted_context"))
     }
 }

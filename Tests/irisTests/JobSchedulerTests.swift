@@ -168,6 +168,49 @@ struct JobSchedulerTests {
         #expect(await s.tick() == 0)
     }
 
+    /// A clock the test moves by hand, so a day passes because the test says so rather than
+    /// because it waited one.
+    final class MovableClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Date
+        init(_ value: Date) { self.value = value }
+        var now: Date { lock.lock(); defer { lock.unlock() }; return value }
+        func advance(by seconds: TimeInterval) { lock.lock(); value += seconds; lock.unlock() }
+    }
+
+    @Test("the daily maintenance hook does not fire at start, and fires once a day after that")
+    func dailyMaintenance() async throws {
+        let store = try ConversationStore.inMemory()
+        let clock = MovableClock(Date(timeIntervalSince1970: 1_700_000_000))
+        let s = JobScheduler(ledger: store.ledger, now: { clock.now })
+        let ran = Fired()
+        await s.setOnDailyMaintenance { ran.add("maintenance") }
+
+        // The first tick is day zero: launch-time retention is the engine's own explicit call, so
+        // firing here would run it twice within a second of each other.
+        await s.tick()
+        #expect(ran.names.isEmpty)
+
+        // Nothing in between, however many ticks there are.
+        for _ in 0..<3 {
+            clock.advance(by: 6 * 3600)
+            await s.tick()
+        }
+        #expect(ran.names.isEmpty, "18 hours in, still the same day")
+
+        clock.advance(by: 6 * 3600 + 1)
+        await s.tick()
+        #expect(ran.names == ["maintenance"])
+
+        // And the day restarts from the fire, not from the launch.
+        clock.advance(by: 23 * 3600)
+        await s.tick()
+        #expect(ran.names == ["maintenance"])
+        clock.advance(by: 3600 + 1)
+        await s.tick()
+        #expect(ran.names == ["maintenance", "maintenance"])
+    }
+
     @Test("legacy defaults keys are removed")
     func legacyKeys() {
         let name = "iris-tests-legacy-\(UUID().uuidString)"

@@ -31,16 +31,9 @@ actor WatcherManager {
     /// whether a reload took effect.
     var activeJobIds: [UUID] { Array(activeWatchers.keys) }
 
-    /// The system-event text a fire delivers. Unchanged from the pre-ledger watcher — the standing
-    /// instructions are the job's prompt now, but the model sees the same turn it always did.
-    static func eventMessage(job: Job, paths: [String]) -> String {
-        """
-        System Event: Files modified at \(paths.joined(separator: ", ")).
-        Your standing instructions for this event are: \(job.prompt)
-        Analyze the event and take action silently or acknowledge it if necessary.
-        """
-    }
-
+    /// Where a fire goes: the job that was watching and the paths that changed. `IrisEngine.start`
+    /// points this straight at `JobRunner.run`, which owns the run, the ledger row and the overlap
+    /// guard; the manager itself knows nothing about what a fire turns into.
     func setCallback(_ callback: @escaping @Sendable (Job, [String]) async -> Void) {
         self.onEventCallback = callback
     }

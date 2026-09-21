@@ -65,7 +65,7 @@ struct ChatView: View {
     @State private var composerShouldFocus = false
     
     private var archivedConversations: [Conversation] {
-        state.conversations.filter { !$0.isSubagent && $0.isArchived }
+        SidebarOrdering.archived(state.conversations)
     }
 
     /// The selected conversation's id, but only while that conversation is archived — nil
@@ -85,7 +85,7 @@ struct ChatView: View {
                     let trimmedQuery = sidebarQuery.trimmingCharacters(in: .whitespacesAndNewlines)
                     if trimmedQuery.isEmpty {
                         Section(header: Text("Conversations").font(.caption.weight(.bold)).foregroundColor(.secondary).padding(.bottom, 4)) {
-                            ForEach(state.conversations.filter { !$0.isSubagent && !$0.isArchived }) { conv in
+                            ForEach(SidebarOrdering.visible(state.conversations)) { conv in
                                 conversationRow(conv)
                             }
                         }
@@ -203,7 +203,9 @@ struct ChatView: View {
                                 Group {
                                     switch item {
                                     case .single(let message):
-                                        MessageView(message: message)
+                                        MessageView(message: message, state: state,
+                                                    transcriptAvailable: EventCard.transcriptAvailable(
+                                                        for: message, in: state.conversations))
                                     case .systemGroup(_, let messages):
                                         SystemGroupView(messages: messages, appState: state)
                                     }
@@ -268,21 +270,11 @@ struct ChatView: View {
                             
                             if selectedMessages.isEmpty { return [] }
                             
-                            var text = ""
-                            let asMarkdown = ConfigManager.shared.copyChatsAsMarkdown
-                            for msg in selectedMessages {
-                                let roleName = msg.role == .user ? "You" : (msg.role == .system ? "System" : "Iris")
-                                if asMarkdown {
-                                    text += "### \(roleName)\n"
-                                    if msg.role == .system {
-                                        text += "`\(msg.content)`\n\n"
-                                    } else {
-                                        text += "\(msg.content)\n\n"
-                                    }
-                                } else {
-                                    text += "\(roleName):\n\(msg.content)\n\n"
-                                }
-                            }
+                            let format: ChatMessage.ExportFormat =
+                                ConfigManager.shared.copyChatsAsMarkdown ? .markdown : .plainText
+                            let text = selectedMessages
+                                .map { $0.exportLine(format: format) }
+                                .joined(separator: "\n\n") + "\n\n"
                             return [NSItemProvider(object: text as NSString)]
                         }
                         .background(Color(NSColor.textBackgroundColor))
@@ -655,23 +647,23 @@ struct ChatView: View {
         guard !Task.isCancelled else { return }
         let hits = (try? state.store.searchConversations(query: trimmed, limit: 50)) ?? []
         guard !Task.isCancelled else { return }
-        sidebarSearchGroups = SidebarSearchResults.group(hits)
+        // A job run's transcript and a subagent log are out of the sidebar everywhere else
+        // (#187); the FTS index still carries them, so they must not come back in through
+        // Results. A hit whose conversation is not in memory at all is left alone — `reveal`
+        // already handles that miss.
+        let hidden = Set(state.conversations.filter { !$0.isUserFacing }.map(\.id))
+        sidebarSearchGroups = SidebarSearchResults.group(hits.filter { !hidden.contains($0.conversationId) })
         sidebarSearchedQuery = trimmed
     }
     
     private func exportConversation(id: UUID) {
         guard let conv = state.conversations.first(where: { $0.id == id }) else { return }
         
+        // `exportLine` carries the `.system` LLM-error headline substitution this loop used to do
+        // inline, plus the `.event` card's transcript line; see `ChatMessage.exportText`.
         var markdown = "# \(conv.title)\n\n"
         for msg in conv.messages {
-            let roleName = msg.role == .user ? "You" : (msg.role == .system ? "System" : "Iris")
-            markdown += "### \(roleName)\n"
-            if msg.role == .system {
-                let line = LLMErrorMessage.parse(msg.content)?.headline ?? msg.content
-                markdown += "`\(line)`\n\n"
-            } else {
-                markdown += "\(msg.content)\n\n"
-            }
+            markdown += msg.exportLine(format: .markdown) + "\n\n"
         }
         
         let panel = NSSavePanel()
@@ -708,20 +700,10 @@ struct ChatView: View {
         
         guard !selectedMessages.isEmpty else { return }
         
-        var text = ""
-        for msg in selectedMessages {
-            let roleName = msg.role == .user ? "You" : (msg.role == .system ? "System" : "Iris")
-            if asMarkdown {
-                text += "### \(roleName)\n"
-                if msg.role == .system {
-                    text += "`\(msg.content)`\n\n"
-                } else {
-                    text += "\(msg.content)\n\n"
-                }
-            } else {
-                text += "\(roleName):\n\(msg.content)\n\n"
-            }
-        }
+        let format: ChatMessage.ExportFormat = asMarkdown ? .markdown : .plainText
+        let text = selectedMessages
+            .map { $0.exportLine(format: format) }
+            .joined(separator: "\n\n") + "\n\n"
         
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
@@ -848,7 +830,16 @@ struct ChatView: View {
 
 struct MessageView: View {
     let message: ChatMessage
-    
+    /// Only *written* through by the `.event` branch, to open the transcript sheet. Every call
+    /// site has an `AppState` in scope; it is a stored property rather than an environment value
+    /// because `AppState` is passed explicitly everywhere else in this file. Nothing here reads
+    /// observable state off it — see `transcriptAvailable`.
+    var state: AppState
+    /// Whether this message's event card has a transcript to open, resolved by the list that owns
+    /// the message. Read from `state.conversations` in `body` instead, it would subscribe every
+    /// event row to the whole conversation array and re-render them on unrelated mutations.
+    var transcriptAvailable: Bool = false
+
     var body: some View {
         HStack(alignment: .top) {
             if message.role == .user {
@@ -863,8 +854,9 @@ struct MessageView: View {
                     }
                     .font(.caption.bold())
                     .foregroundColor(.secondary)
-                } else if message.role != .command {
-                    // .command output is deliberately unlabeled (not attributed to Iris).
+                } else if message.role != .command, message.role != .event {
+                    // .command output is deliberately unlabeled (not attributed to Iris), and so
+                    // is an .event card — it is a one-line notification, not a turn by anyone.
                     Text(message.role == .user ? "You" : "Iris")
                         .font(.caption.bold())
                         .foregroundColor(.secondary)
@@ -900,6 +892,17 @@ struct MessageView: View {
                                 .cornerRadius(0, corners: [.bottomRight])
                                 .shadow(color: Color.irisIndigo.opacity(0.25), radius: 3, x: 0, y: 2)
                         }
+                    }
+                } else if message.role == .event {
+                    if let card = EventCard.decode(message.content) {
+                        EventCardView(card: card, onViewRun: viewRunAction(for: card))
+                    } else {
+                        // A card written by a newer build, or a hand-edited row: show the raw
+                        // content as plain text rather than running it through Markdown.
+                        Text(message.content)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
                     }
                 } else {
                     // Agent messages render via MarkdownUI. We deliberately do NOT apply
@@ -938,21 +941,30 @@ struct MessageView: View {
         }
     }
     
+    /// The "View run" action for a card, or nil when there is no transcript to open — the run
+    /// recorded none, or the conversation it recorded has since been pruned. Setting the id on
+    /// `AppState` (rather than presenting a sheet from here) keeps one sheet with two openers:
+    /// the session strip owns the `.sheet`, on a view that stays mounted while it is up.
+    private func viewRunAction(for card: EventCard) -> (() -> Void)? {
+        guard transcriptAvailable, let convId = card.transcriptConversationId else { return nil }
+        return { state.transcriptSheetConversationId = convId }
+    }
+
     private var backgroundColor: Color {
         switch message.role {
         case .user: return Color.accentColor
         case .agent, .command: return Color(NSColor.controlBackgroundColor)
-        case .system: return Color(NSColor.windowBackgroundColor).opacity(0.8)
+        case .system, .event: return Color(NSColor.windowBackgroundColor).opacity(0.8)
         }
     }
 
     private var textColor: Color {
         switch message.role {
         case .user: return .white
-        case .agent, .system, .command: return .primary
+        case .agent, .system, .command, .event: return .primary
         }
     }
-    
+
 }
 
 struct SystemGroupView: View {

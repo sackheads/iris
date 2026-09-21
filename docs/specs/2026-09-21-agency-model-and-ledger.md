@@ -1,6 +1,6 @@
 # Agency: Job Model and Run Ledger (deliverables 1 and 2 of #187) — Design
 
-**Status:** proposed, awaiting review (written overnight 2026-09-21 under a pre-agreed decision set; every ruling made without the author of #187 is listed in §14)
+**Status:** implemented on branches `feat/agency-d1-job-model` (PR #252) and `feat/agency-d2-ledger-runs-cards` (PR pending) (written overnight 2026-09-21 under a pre-agreed decision set; every ruling made without the author of #187 is listed in §14)
 **Issue:** #187 (`docs/agency/agency.md` is the epic; this spec is its first two deliverables)
 **Builds on:** #163 (conversation store), #182 (archiving), #172/#173 (mid-turn steering), #217 (session strip), #247 (sessions slice 1: migration v8), #156 (weekdays, superseded here)
 **Does not touch:** #185 (peer sessions), deliverables 3–6 of the epic

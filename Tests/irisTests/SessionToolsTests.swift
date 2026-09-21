@@ -178,6 +178,32 @@ struct SessionToolsTests {
                 "a peer must not re-expand the address space on its own initiative")
     }
 
+    /// #187: a job run is not a session. Its conversation is hidden from the sidebar, nobody is
+    /// reading it, and every gated tool inside it fails closed — so it must be neither listable
+    /// nor addressable. Refused the same way an archived session is, rather than delivered into a
+    /// transcript that will be pruned.
+    @Test("a background run conversation is neither listed nor addressable")
+    func backgroundRunIsNotASession() async {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID(), peer = UUID()
+        app.createNewConversation(id: me)
+        app.createNewConversation(id: peer)
+        let run = app.createNewConversation(isBackground: true, title: "pr-sweep run", select: false)
+
+        let listing = await runToolCall(FunctionCall(name: "list_sessions", args: [:], id: "c1"),
+                                        on: app, as: me)
+        #expect(!listing.contains(run.uuidString), "a run's conversation must not be advertised")
+        #expect(listing.contains(peer.uuidString), "the real peer is still listed")
+
+        let app2 = AppState(); app2.conversations.removeAll()
+        app2.createNewConversation(id: me)
+        let run2 = app2.createNewConversation(isBackground: true, title: "pr-sweep run", select: false)
+        let result = await runToolCall(sendCall(to: run2), on: app2, as: me)
+        #expect(result.lowercased().contains("no longer active"))
+        #expect(app2.conversations.first { $0.id == run2 }?.history.isEmpty == true,
+                "a refused send delivers nothing into a run's transcript")
+    }
+
     @Test("a send to an unknown id is refused, not dropped")
     func unknownIdRefused() async {
         let app = AppState(); app.conversations.removeAll()

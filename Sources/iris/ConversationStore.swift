@@ -609,21 +609,25 @@ final class ConversationStore: Sendable {
                 UPDATE conversations SET title = ?, updatedAt = ?, workspacePath = ?, activeGoal = ?,
                     messageCountSinceReflection = ?, goalIterationCount = ?, mainAgentSandbox = ?,
                     tokenUsage = ?, goalContract = ?, subagentResult = ?, checkpointHistory = ?,
-                    lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?, sessionCard = ?
+                    lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?,
+                    isBackground = ?, isPinned = ?, sessionCard = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
-                                 history, evaluation, report, c.isArchived, card, c.id.uuidString])
+                                 history, evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
+                                 c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
                 INSERT INTO conversations (id, position, title, createdAt, updatedAt, workspacePath, activeGoal,
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
-                    subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived, sessionCard)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
+                    isBackground, isPinned, sessionCard)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
-                                 tokenUsage, contract, result, history, evaluation, report, c.isArchived, card])
+                                 tokenUsage, contract, result, history, evaluation, report, c.isArchived,
+                                 c.isBackground, c.isPinned, card])
         }
     }
 
@@ -854,6 +858,23 @@ final class ConversationStore: Sendable {
                 case .unconvertible:
                     print("WARNING: unreadable isArchived for conversation \(id); defaulting to active")
                     c.isArchived = false
+                }
+
+                // #187 — same policy as `isArchived` above: a garbled flag degrades to false
+                // (visible, foreground, unpinned) with a warning rather than costing the row.
+                switch Self.readBool(row, "isBackground") {
+                case .null: c.isBackground = false
+                case .value(let v): c.isBackground = v
+                case .unconvertible:
+                    print("WARNING: unreadable isBackground for conversation \(id); defaulting to foreground")
+                    c.isBackground = false
+                }
+                switch Self.readBool(row, "isPinned") {
+                case .null: c.isPinned = false
+                case .value(let v): c.isPinned = v
+                case .unconvertible:
+                    print("WARNING: unreadable isPinned for conversation \(id); defaulting to unpinned")
+                    c.isPinned = false
                 }
 
                 // #185 -- surfaced, not just written: `updatedAt` has been a store column since v1
@@ -1169,6 +1190,25 @@ extension ConversationStore {
             try db.execute(sql: "INSERT INTO meta (key, value) VALUES (?, ?)",
                            arguments: [Self.legacyImportDoneKey, ISO8601DateFormatter().string(from: Date())])
             return conversations.count - collided
+        }
+    }
+
+    /// Generic `meta` get by key — nil when the key has never been set. #187's
+    /// `activity_conversation_id` is the first caller; `legacyImportDoneKey` predates it and keeps
+    /// its own inline SQL because it is read and written inside the import transaction.
+    func metaValue(forKey key: String) throws -> String? {
+        try writer.read { db in
+            try String.fetchOne(db, sql: "SELECT value FROM meta WHERE key = ?", arguments: [key])
+        }
+    }
+
+    /// Generic `meta` set by key, overwriting any previous value.
+    func setMetaValue(_ value: String, forKey key: String) throws {
+        try writer.write { db in
+            try db.execute(sql: """
+                INSERT INTO meta (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """, arguments: [key, value])
         }
     }
 

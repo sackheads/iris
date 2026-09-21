@@ -39,7 +39,14 @@ final class SubagentManager: @unchecked Sendable {
         // 1. Create a new conversation for the subagent
         let subagentId = UUID()
         await MainActor.run {
-            appState.createNewConversation(id: subagentId, isSubagent: true)
+            // Fail-closed is inherited (#187). A subagent of an unattended run is created
+            // foreground-by-default no longer: that made delegation a way around the gate, since a
+            // foreground conversation falls through to auto-approval, Vibecop, or a modal dialog
+            // nobody is there to answer. Its denials are drained with the parent run.
+            let parentIsBackground = appState.conversations
+                .first(where: { $0.id == parentConversationId })?.isBackground == true
+            appState.createNewConversation(id: subagentId, isSubagent: true, isBackground: parentIsBackground)
+            if parentIsBackground { appState.linkBackgroundDescendant(subagentId, of: parentConversationId) }
             appState.updateConversationTitle(id: subagentId, title: "Subagent: \(role)")
             appState.registerSubagent(id: subagentId, role: role)
             // Delegation must not drop the workspace the parent is bound to. Without this the

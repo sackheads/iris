@@ -35,7 +35,12 @@ final class GoalEvaluator: Sendable {
 
         let evalId = UUID()
         await MainActor.run {
-            app.createNewConversation(id: evalId, isSubagent: true)
+            // Inherited from the work being graded: a grader run for an unattended run is itself
+            // unattended, and must fail closed on anything gated rather than raise a dialog or
+            // ask a local model (#187).
+            let originIsBackground = app.conversations.first(where: { $0.id == originId })?.isBackground == true
+            app.createNewConversation(id: evalId, isSubagent: true, isBackground: originIsBackground)
+            if originIsBackground { app.linkBackgroundDescendant(evalId, of: originId) }
             app.updateConversationTitle(id: evalId, title: "Evaluator")
             app.setWorkspace(for: evalId, path: workspaceDir)   // its run_command runs here
             app.registerSubagent(id: evalId, role: "evaluator", kind: .evaluator)
