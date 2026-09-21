@@ -17,7 +17,7 @@ enum SessionDirectory {
     static let listCap = 20
 
     static func peers(in conversations: [Conversation], excluding selfId: UUID,
-                      busy: (UUID) -> Bool, now: Date) -> (peers: [SessionPeer], total: Int) {
+                      busy: (UUID) -> Bool) -> (peers: [SessionPeer], total: Int) {
         let active = conversations.filter {
             $0.id != selfId && !$0.isArchived && !$0.isSubagent
         }

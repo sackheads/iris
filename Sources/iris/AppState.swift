@@ -638,6 +638,14 @@ class AppState {
         }
     }
 
+    /// #185 §6.3 — a session's self-description to its peers, written by `set_session_card`.
+    /// Advertised, not authoritative: `SessionDirectory.peers` never reads this for `isBusy`.
+    func setSessionCard(for conversationId: UUID, _ card: SessionCard) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
+        conversations[idx].sessionCard = card
+        markChanged(conversationId, .metadata)
+    }
+
     /// Bind a contracted goal's workspace at lock (#68), creating it when it does not exist.
     ///
     /// Returns the bound path, or nil when nothing could be bound — creation failing is not fatal:

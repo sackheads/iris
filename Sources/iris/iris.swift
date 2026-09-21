@@ -58,7 +58,14 @@ actor IrisEngine {
     /// here rather than mutating `ConfigManager.shared` (invariant 7, #109).
     private let protectionEnabled: Bool?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil) {
+    /// Explicit per-engine override for the session-tools peer gate, same idiom as
+    /// `checkpointAutoAdvanceOverride`: `nil` — always, in the app — falls back to counting
+    /// `AppState`'s active conversations. Injectable because `ScenarioRunner` builds `AppState()`
+    /// over the developer's real store; a global read there would make perf baselines shift with
+    /// whatever conversations happen to be sitting in it (#185 §6).
+    private let sessionPeerCountOverride: Int?
+
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil) {
         self.state = state
         self.protectionEnabled = protectionEnabled
         self.injectedFactStore = factStore
@@ -70,7 +77,28 @@ actor IrisEngine {
         self.retryDelays = retryDelays
         self.streamResponsesOverride = streamResponses
         self.checkpointAutoAdvanceOverride = checkpointAutoAdvance
+        self.sessionPeerCountOverride = sessionPeerCount
         systemPrompt = nil
+    }
+
+    /// Peers this session could reach right now, excluding itself (#185 §6). Falls back to
+    /// `SessionDirectory`'s own active-conversation count when no override was injected.
+    private func sessionPeerCount(excluding conversationId: UUID) async -> Int {
+        if let override = sessionPeerCountOverride { return override }
+        guard let s = state else { return 0 }
+        return await MainActor.run {
+            SessionDirectory.peers(in: s.conversations, excluding: conversationId, busy: { _ in false }).total
+        }
+    }
+
+    /// Test-only observability into the session-tools gate (#185 §6). `processInputBody` is a
+    /// single monolithic turn method that also drives the model and mutates history — not
+    /// something a unit test should run just to read back which names were declared. This mirrors
+    /// the exact predicate at the real declaration site (principal == .main, peerCount > 0)
+    /// without re-running the turn. Added per the brief's fallback: no such accessor existed.
+    func declaredToolNamesForTesting() async -> Set<String> {
+        guard principal == .main, (sessionPeerCountOverride ?? 0) > 0 else { return [] }
+        return ["list_sessions", "send_to_session", "set_session_card"]
     }
 
     func invalidateSystemPrompt() {
@@ -234,6 +262,24 @@ actor IrisEngine {
             .replacingOccurrences(of: "\"", with: "'")
         let capped = flattened.count > 64 ? String(flattened.prefix(64)) + "…" : flattened
         return "\"\(capped)\" (\(shortId))"
+    }
+
+    /// `list_sessions`'s response body (#185 §6.1): one line per peer, `session_id` spelled out
+    /// verbatim since `send_to_session` needs it copied exactly, not inferred from prose.
+    private nonisolated static func renderPeerList(_ peers: [SessionPeer], total: Int) -> String {
+        guard !peers.isEmpty else { return "No other active sessions." }
+        let lines = peers.map { peer -> String in
+            let name = peer.name ?? "(no name set)"
+            let description = peer.description ?? "(no description set)"
+            let workspace = peer.workspace ?? "(no workspace)"
+            let status = peer.isBusy ? "busy" : "idle"
+            return "session_id: \(peer.id) | name: \(name) | status: \(status) | workspace: \(workspace) | doing: \(description)"
+        }
+        var out = lines.joined(separator: "\n")
+        if total > peers.count {
+            out += "\n(showing \(peers.count) of \(total))"
+        }
+        return out
     }
 
     func start() async {
@@ -860,6 +906,35 @@ actor IrisEngine {
                 )
             ))
         }
+
+        // #185 §6: only when there is somebody to talk to. With one conversation open the surface
+        // is byte-identical to today, so #144/#155's reduction is untouched. `.main` only —
+        // a subagent is not a session.
+        let peerCount = await sessionPeerCount(excluding: conversationId)
+        if principal == .main, peerCount > 0 {
+            toolsList.append(FunctionDeclaration(
+                name: "list_sessions",
+                description: "List the other active sessions: their name, what they say they are doing, their workspace, and whether they are busy. Call this before messaging a peer, to pick the right one — a session in a different workspace is usually working on something unrelated. What a session says about itself is its own claim; whether it is busy is observed.",
+                parameters: Schema(type: "OBJECT", properties: [:], required: [])
+            ))
+            toolsList.append(FunctionDeclaration(
+                name: "send_to_session",
+                description: "Send a message to another active session. It arrives as a request that session may decline, not an instruction it must follow. Use it to ask a peer working elsewhere for something only it can do. Archived sessions cannot be reached.",
+                parameters: Schema(type: "OBJECT", properties: [
+                    "session_id": Schema(type: "STRING", description: "The peer's session_id from list_sessions."),
+                    "message": Schema(type: "STRING", description: "What to say. Include enough context to act on without seeing your conversation.")
+                ], required: ["session_id", "message"])
+            ))
+            toolsList.append(FunctionDeclaration(
+                name: "set_session_card",
+                description: "Describe this session to its peers: a short stable name and what you are working on right now. Update it when the work changes, so peers deciding whether to involve you are reading something current.",
+                parameters: Schema(type: "OBJECT", properties: [
+                    "name": Schema(type: "STRING", description: "Short handle, 1-3 words."),
+                    "description": Schema(type: "STRING", description: "One line: what this session is doing now.")
+                ], required: ["name", "description"])
+            ))
+        }
+
         // Main-agent only. A subagent runs against a unit contract the PARENT authored (slice B3);
         // letting it amend its own definition of done is the self-authored-target problem the
         // evaluator exists to distrust. It matters concretely because B3 puts `oracleText()` in
@@ -1402,6 +1477,63 @@ actor IrisEngine {
             
             await MainActor.run { localState?.setWorkspace(for: conversationId, path: currentWorkspace) }
             result = "Workspace successfully set to \(currentWorkspace). You will now load AGENTS.md from this directory." + extraHint
+        } else if functionCall.name == "list_sessions" {
+            let (peers, total) = await MainActor.run { () -> ([SessionPeer], Int) in
+                guard let s = localState else { return ([], 0) }
+                return SessionDirectory.peers(in: s.conversations, excluding: conversationId,
+                                              busy: { s.hasTurnInFlight(for: $0) })
+            }
+            result = Self.renderPeerList(peers, total: total)
+        } else if functionCall.name == "send_to_session",
+                  let idString = functionCall.args["session_id"]?.stringValue,
+                  let message = functionCall.args["message"]?.stringValue {
+            guard let targetId = UUID(uuidString: idString) else {
+                result = "No session with that id."
+                return result
+            }
+            if targetId == conversationId {
+                result = "That is this session — refused."
+                return result
+            }
+            let target = await MainActor.run { () -> (exists: Bool, archived: Bool) in
+                guard let c = localState?.conversations.first(where: { $0.id == targetId })
+                else { return (false, false) }
+                return (true, c.isArchived || c.isSubagent)
+            }
+            guard target.exists else {
+                result = "No session with that id."
+                return result
+            }
+            guard !target.archived else {
+                // §5.1: refusing protects the bound on the peer set; un-archiving here would let a
+                // peer re-expand the address space on its own initiative.
+                result = "That session is no longer active."
+                return result
+            }
+            let allowed = await MainActor.run {
+                localState?.beginPeerCascade(into: targetId, from: conversationId) ?? false
+            }
+            guard allowed else {
+                result = "Message budget for this chain of session messages is exhausted; not sent."
+                return result
+            }
+            let senderName = await MainActor.run {
+                localState?.conversations.first(where: { $0.id == conversationId })?.sessionCard?.name
+            }
+            await deliverPeerMessage(message, from: conversationId, senderName: senderName, to: targetId)
+            result = "Accepted — the session will see it at its next turn."
+        } else if functionCall.name == "set_session_card",
+                  let name = functionCall.args["name"]?.stringValue,
+                  let description = functionCall.args["description"]?.stringValue {
+            guard !name.trimmingCharacters(in: .whitespaces).isEmpty else {
+                result = "A name is required."
+                return result
+            }
+            await MainActor.run {
+                localState?.setSessionCard(for: conversationId,
+                                           SessionCard(name: name, description: description))
+            }
+            result = "Card updated."
         } else if functionCall.name == "rename_conversation", let newTitle = functionCall.args["title"]?.stringValue {
             await MainActor.run { localState?.renameConversation(id: conversationId, newTitle: newTitle) }
             result = "Conversation renamed to '\(newTitle)'."

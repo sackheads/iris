@@ -21,7 +21,7 @@ struct SessionDirectoryTests {
     func excludesArchivedAndSubagents() {
         let me = conv("me")
         let all = [me, conv("active"), conv("archived", archived: true), conv("scratch", subagent: true)]
-        let out = SessionDirectory.peers(in: all, excluding: me.id, busy: { _ in false }, now: Date())
+        let out = SessionDirectory.peers(in: all, excluding: me.id, busy: { _ in false })
         #expect(out.peers.count == 1)
         #expect(out.total == 1)
     }
@@ -29,7 +29,7 @@ struct SessionDirectoryTests {
     @Test("the caller is never its own peer")
     func excludesSelf() {
         let me = conv("me")
-        let out = SessionDirectory.peers(in: [me], excluding: me.id, busy: { _ in false }, now: Date())
+        let out = SessionDirectory.peers(in: [me], excluding: me.id, busy: { _ in false })
         #expect(out.peers.isEmpty)
     }
 
@@ -37,7 +37,7 @@ struct SessionDirectoryTests {
     func uncardedIsListed() {
         let me = conv("me")
         let other = conv("Untitled", workspace: "/tmp/w")
-        let out = SessionDirectory.peers(in: [me, other], excluding: me.id, busy: { _ in false }, now: Date())
+        let out = SessionDirectory.peers(in: [me, other], excluding: me.id, busy: { _ in false })
         let p = try! #require(out.peers.first)
         #expect(p.name == nil && p.description == nil)
         #expect(p.workspace == "/tmp/w", "workspace is the deterministic relevance gate, card or not")
@@ -47,7 +47,7 @@ struct SessionDirectoryTests {
     func capsAndReportsTotal() {
         let me = conv("me")
         let many = (0..<30).map { conv("c\($0)") }
-        let out = SessionDirectory.peers(in: [me] + many, excluding: me.id, busy: { _ in false }, now: Date())
+        let out = SessionDirectory.peers(in: [me] + many, excluding: me.id, busy: { _ in false })
         #expect(out.peers.count == SessionDirectory.listCap)
         #expect(out.total == 30, "a large peer set must not silently become a large context payload")
     }
@@ -61,7 +61,7 @@ struct SessionDirectoryTests {
         let chatty = conv("chatty", card: SessionCard(name: "chatty", description: "d", updatedAt: new),
                           updated: old)
         let busy = conv("busy", updated: new)
-        let out = SessionDirectory.peers(in: [me, chatty, busy], excluding: me.id, busy: { _ in false }, now: Date())
+        let out = SessionDirectory.peers(in: [me, chatty, busy], excluding: me.id, busy: { _ in false })
         #expect(out.peers.first?.id == busy.id)
     }
 
@@ -71,7 +71,7 @@ struct SessionDirectoryTests {
         // The card says idle; the harness says busy. A peer must not be able to misreport liveness.
         let liar = conv("liar", card: SessionCard(name: "liar", description: "idle, promise"))
         let out = SessionDirectory.peers(in: [me, liar], excluding: me.id,
-                                         busy: { $0 == liar.id }, now: Date())
+                                         busy: { $0 == liar.id })
         #expect(out.peers.first?.isBusy == true)
     }
 }
