@@ -83,54 +83,37 @@ actor JobScheduler {
         var skipped: [Job] = []
         for job in due {
             if toFire.count >= maxFiresPerTick { break }
-            if firing.contains(job.id) {
-                // Advance the cadence exactly as a fire does, and only then record the skip:
-                // leaving `nextFireAt` in the past would make every 10s tick re-skip the same
-                // still-running job, so one dropped trigger would write a ledger row a minute
-                // until the run finished. One dropped trigger, one row.
-                if record(jobId: job.id, nextFireAt: Self.cadence(of: job.trigger)?.next(after: now),
-                          lastRunAt: job.lastRunAt) {
-                    skipped.append(job)
-                }
-                continue
-            }
-            // A pause is not always a cleared `nextFireAt`: D3 pauses a job on budget exhaustion
-            // and leaves its cadence intact, so `dueJobs` keeps returning it. The reason is what
-            // says it must not run — honour it here rather than in the query.
+            // First, before the overlap check: a pause is not always a cleared `nextFireAt` (D3
+            // pauses a job on budget exhaustion and leaves its cadence intact, so `dueJobs` keeps
+            // returning it), and a job paused while its previous run is still going must not be
+            // logged as a skip or bumped along a cadence it is no longer following. The reason is
+            // what says it must not run — honour it here rather than in the query.
             if job.pausedReason != nil { continue }
 
-            // Cadence-less triggers (fsEvent) have no next occurrence to compute; clear the stray
-            // nextFireAt that made this row due rather than pausing a job the filesystem drives.
-            guard let cadence = Self.cadence(of: job.trigger) else {
-                guard handler != nil else { continue }
-                if record(jobId: job.id, nextFireAt: nil, lastRunAt: now) {
-                    toFire.append(job)
-                }
+            if firing.contains(job.id) {
+                // Advance the cadence exactly as a fire does — same helper, so the two cannot
+                // drift — and only then record the skip: leaving `nextFireAt` in the past would
+                // make every 10s poll re-skip the same still-running job, so one dropped trigger
+                // would write a ledger row a minute until the run finished. One trigger, one row.
+                if advanceCadence(for: job, at: now, ran: false) { skipped.append(job) }
                 continue
             }
 
-            guard let next = cadence.next(after: now) else {
-                // Not a fire, so this runs whether or not a handler is set: a cadence that can
-                // never match again is broken no matter who is listening, and leaving it due
-                // would have every tick recompute the same dead lookahead forever.
-                do {
-                    try ledger.setPaused(jobId: job.id, reason: Self.unmatchableReason)
-                    try ledger.setNextFire(jobId: job.id, at: nil, lastRunAt: job.lastRunAt)
-                } catch {
-                    print("[JobScheduler] could not pause job \(job.name): \(error)")
+            guard handler != nil else {
+                // Nothing to fire into: leave the job due rather than advancing past it, or every
+                // run that came due before the engine finished wiring itself up is silently
+                // consumed. A cadence that can never match again is the exception — that is not a
+                // fire, it is broken no matter who is listening, and leaving it due would have
+                // every tick recompute the same dead lookahead forever.
+                if let cadence = Self.cadence(of: job.trigger), cadence.next(after: now) == nil {
+                    pauseUnmatchable(job)
                 }
                 continue
             }
-
-            // Nothing to fire into: leave the job due rather than advancing past it, or every
-            // run that came due before the engine finished wiring itself up is silently consumed.
-            guard handler != nil else { continue }
 
             // Before the handler, never after: a crash between the two loses a run instead of
             // repeating one.
-            if record(jobId: job.id, nextFireAt: next, lastRunAt: now) {
-                toFire.append(job)
-            }
+            if advanceCadence(for: job, at: now, ran: true) { toFire.append(job) }
         }
 
         // After the loop, not inside it: awaiting the hook mid-scan would let another tick
@@ -153,6 +136,37 @@ actor JobScheduler {
             for await id in group { firing.remove(id) }
         }
         return toFire.count
+    }
+
+    /// Moves a job past the trigger being handled, and says whether it is still schedulable —
+    /// false when the row is gone or the cadence has no future match. The one place a fire and a
+    /// skip agree: both advance `nextFireAt`, and both pause a cadence that can never match again
+    /// with the same reason, so the two paths cannot drift apart.
+    ///
+    /// `ran` is what separates them. A skip ran nothing, so `lastRunAt` must not move — it is the
+    /// last time the job actually did something, and `/jobs` shows it.
+    private func advanceCadence(for job: Job, at now: Date, ran: Bool) -> Bool {
+        let lastRunAt = ran ? now : job.lastRunAt
+        // Cadence-less triggers (fsEvent) have no next occurrence to compute; clear the stray
+        // nextFireAt that made this row due rather than pausing a job the filesystem drives.
+        guard let cadence = Self.cadence(of: job.trigger) else {
+            return record(jobId: job.id, nextFireAt: nil, lastRunAt: lastRunAt)
+        }
+        guard let next = cadence.next(after: now) else {
+            pauseUnmatchable(job)
+            return false
+        }
+        return record(jobId: job.id, nextFireAt: next, lastRunAt: lastRunAt)
+    }
+
+    /// Stops a job whose cadence has no next occurrence from being due forever, and says why.
+    private func pauseUnmatchable(_ job: Job) {
+        do {
+            try ledger.setPaused(jobId: job.id, reason: Self.unmatchableReason)
+            try ledger.setNextFire(jobId: job.id, at: nil, lastRunAt: job.lastRunAt)
+        } catch {
+            print("[JobScheduler] could not pause job \(job.name): \(error)")
+        }
     }
 
     /// Writes a fire's bookkeeping. Returns false when the job has been deleted out from under the

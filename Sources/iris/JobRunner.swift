@@ -27,8 +27,10 @@ actor JobRunner {
 
     /// Weak, both of them: `AppState` owns the engine, the engine owns this runner for the life of
     /// the process, and a strong reference back either way is a cycle that keeps a whole app state
-    /// — conversations, store, sessions — alive forever. Every hop below re-reads them and bails
-    /// (closing the ledger row) rather than holding one across the turn.
+    /// — conversations, store, sessions — alive forever. Each hop below re-reads them and bails
+    /// (closing the ledger row) rather than keeping one. `state` is held only for the length of a
+    /// single main-actor hop; `engine` is held across `processInput`, because that call IS the
+    /// run and an engine deallocated halfway through its own turn is not a state worth surviving.
     private weak var state: AppState?
     private weak var engine: IrisEngine?
     private let ledger: JobLedger

@@ -395,6 +395,68 @@ struct JobRunnerTests {
         #expect(try store.ledger.job(named: "slow")?.nextFireAt == start.addingTimeInterval(121))
     }
 
+    @Test("a skipped job whose cron can never match again is paused, exactly as a fire would pause it")
+    func skipPausesAnUnmatchableCadence() async throws {
+        let store = try ConversationStore.inMemory()
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let scheduler = JobScheduler(ledger: store.ledger, now: { now })
+        let gate = JobSchedulerTests.Gate()
+        await scheduler.setFireHandler { _, _ in await gate.arriveAndWait() }
+        let ledger = store.ledger
+        await scheduler.setOnSkip { job in try? JobRunner.recordSkip(job: job, ledger: ledger, now: now) }
+        let job = Job(name: "goes-dead", prompt: "p", trigger: .schedule(.interval(seconds: 60)),
+                      nextFireAt: now.addingTimeInterval(-1))
+        try store.ledger.upsert(job)
+
+        let firing = Task { await scheduler.tick() }
+        await gate.waitForEntry()
+        // Its cadence is edited to one with no future match while the run is still going, and it
+        // comes due again: the skip path must pause it with the same reason a fire would, rather
+        // than clearing `nextFireAt` and leaving a job that looks merely idle.
+        var dead = job
+        dead.trigger = .schedule(.cron(CronSchedule(expression: "0 0 30 2 *", timeZone: "UTC")))
+        dead.nextFireAt = now.addingTimeInterval(-1)
+        try store.ledger.upsert(dead)
+        #expect(await scheduler.tick() == 0)
+        await gate.open()
+        _ = await firing.value
+
+        let back = try #require(try store.ledger.job(named: "goes-dead"))
+        #expect(back.pausedReason == JobScheduler.unmatchableReason)
+        #expect(back.nextFireAt == nil)
+        // No skip row: the dropped trigger is not the news here, the dead cadence is, and that is
+        // what `pausedReason` says. A skip row is for a job that is still on a schedule.
+        #expect(try store.ledger.runs(jobId: job.id, limit: 10).isEmpty)
+    }
+
+    @Test("a job paused mid-run is neither skip-logged nor bumped along its cadence")
+    func pausedJobInFlightIsNotSkipLogged() async throws {
+        let store = try ConversationStore.inMemory()
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let scheduler = JobScheduler(ledger: store.ledger, now: { now })
+        let gate = JobSchedulerTests.Gate()
+        await scheduler.setFireHandler { _, _ in await gate.arriveAndWait() }
+        let ledger = store.ledger
+        await scheduler.setOnSkip { job in try? JobRunner.recordSkip(job: job, ledger: ledger, now: now) }
+        let job = Job(name: "paused-mid-run", prompt: "p", trigger: .schedule(.interval(seconds: 60)),
+                      nextFireAt: now.addingTimeInterval(-1))
+        try store.ledger.upsert(job)
+
+        let firing = Task { await scheduler.tick() }
+        await gate.waitForEntry()
+        // Paused while its run is still going, and due again: it must not be treated as an
+        // overlap — no skip row, and its cleared cadence stays cleared.
+        try store.ledger.setPaused(jobId: job.id, reason: "out of budget")
+        try store.ledger.setNextFire(jobId: job.id, at: now.addingTimeInterval(-1), lastRunAt: now)
+        #expect(await scheduler.tick() == 0)
+        await gate.open()
+        _ = await firing.value
+
+        #expect(try store.ledger.runs(jobId: job.id, limit: 10).isEmpty, "a pause is not a skip")
+        #expect(try store.ledger.job(named: "paused-mid-run")?.nextFireAt == now.addingTimeInterval(-1),
+                "and its cadence was not bumped past the trigger it never took")
+    }
+
     @Test("launch bookkeeping closes interrupted runs and gives the scheduler somewhere to log a skip")
     func configureJobBookkeepingWiresBothHalves() async throws {
         let store = try ConversationStore.inMemory()
