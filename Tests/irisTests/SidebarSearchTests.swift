@@ -98,4 +98,28 @@ struct SidebarSearchTests {
         #expect(state.selectedConversationId == heronConv.id)
         #expect(state.pendingScrollTarget == heronMessages[winner.ordinal].id)
     }
+
+    /// #182 §11: the Results section replaces both sidebar sections while a query is active, so an
+    /// archived conversation is reachable by search. Revealing one must select it like any other —
+    /// the Archived group's auto-expand is what then makes the selected row visible.
+    @Test("a search hit on an archived conversation still reveals and selects it")
+    func revealArchivedConversation() throws {
+        let store = try ConversationStore.inMemory()
+        let messages = [ChatMessage(role: .user, content: "the shelved kubeconfig note")]
+        var conv = conversation(title: "shelved", messages)
+        conv.isArchived = true
+        try store.apply([created(conv)])
+
+        let state = AppState(store: store)
+        #expect(state.conversations.first { $0.id == conv.id }?.isArchived == true,
+                "the fixture only tests the reveal if the row really is archived")
+
+        let hit = try #require(try store.searchConversations(query: "kubeconfig", limit: 50).first)
+        state.reveal(hit: hit)
+
+        #expect(state.selectedConversationId == conv.id)
+        #expect(state.pendingScrollTarget == messages[hit.ordinal].id)
+        #expect(state.conversations.first { $0.id == conv.id }?.isArchived == true,
+                "revealing is reading, not work: it must not un-archive")
+    }
 }

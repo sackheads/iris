@@ -67,7 +67,8 @@ struct ConversationStoreTests {
     @Test("a conversation round-trips through the store with every stored field")
     func roundTrip() throws {
         let store = try ConversationStore.inMemory()
-        let c = Self.sample()
+        var c = Self.sample()
+        c.isArchived = true
         try store.apply([Self.created(c)])
         let loaded = try store.loadAll()
         #expect(loaded.skipped.isEmpty)
@@ -92,6 +93,9 @@ struct ConversationStoreTests {
         #expect(back.checkpointHistory.first?.milestoneIndex == 0)
         #expect(back.checkpointHistory.first?.evaluation?.criteria.first?.verdict == .met)
         #expect(back.checkpointHistory.first?.evaluation?.criteria.first?.evidence == "swift test exited 0")
+        // #182: archived state is a stored column, not just a Codable field. A JSON round-trip
+        // test would pass while the column did not exist and the flag was dropped on every load.
+        #expect(back.isArchived == true)
     }
 
     @Test("nil surfacing fields round-trip as SQL NULL, not JSON null")
@@ -496,6 +500,20 @@ struct ConversationStoreTests {
         #expect(loaded.skipped.count == 1 && loaded.skipped.first?.table == "conversations" && loaded.skipped.first?.conversationId == a.id)
     }
 
+    @Test("a garbled isArchived column does not crash the load; it defaults to active")
+    func garbledIsArchivedDefaultsToActive() throws {
+        // #182 round 1: GRDB's typed Row subscript force-tries the conversion and crashes the
+        // whole load on a non-NULL, non-0/1 value, rather than defaulting like the counter
+        // policy this is supposed to match (readInt's #189 trap, same shape here for Bool).
+        let store = try ConversationStore.inMemory()
+        let a = Self.sample(title: "a")
+        try store.apply([Self.created(a)])
+        try store.rawWrite("UPDATE conversations SET isArchived = X'FFFE' WHERE id = ?", arguments: [a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.conversations.map(\.title) == ["a"])
+        #expect(loaded.conversations.first?.isArchived == false)
+    }
+
     @Test("a conversations row whose tokenUsage JSON lacks a key loads with that field defaulted, not skipped")
     func tokenUsageMissingKeyStillLoads() throws {
         // #204: TokenUsage had no hand-written init(from:), so a stored row missing any of its
@@ -657,5 +675,15 @@ struct ConversationStoreTests {
         do { let s = try ConversationStore.onDisk(at: paths.conversationsDB); try s.apply([Self.created(c)]) }
         let again = try ConversationStore.onDisk(at: paths.conversationsDB)
         #expect(try again.loadAll().conversations.first?.id == c.id)
+    }
+
+    @Test("a conversation with no isArchived key decodes as active")
+    func legacyConversationDecodesActive() throws {
+        // Invariant 1: a synthesized decoder throws on a missing key and drops every conversation.
+        let legacy = """
+        {"id":"\(UUID().uuidString)","title":"old"}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(Conversation.self, from: legacy)
+        #expect(decoded.isArchived == false)
     }
 }

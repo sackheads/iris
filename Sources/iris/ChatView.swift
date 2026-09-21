@@ -17,6 +17,28 @@ struct ChatView: View {
     /// search-reveal target reliably win regardless of which handler happened to run first.
     @State private var scrollPassScheduled = false
     @State private var showSubagents = false
+    /// Whether the Archived disclosure group is open. The single source of truth: the group
+    /// binds to it directly, so the disclosure triangle always does what it looks like it does.
+    @State private var archivedExpanded = false
+
+    /// #182 §9: the group auto-expands when the selected conversation *becomes* one of its rows.
+    /// Two ways in, and both are a change of the same one value — "the selection, while it is
+    /// archived": the selection moves onto an archived row (search reveal, delete re-point,
+    /// launch fallback), or the selected conversation is archived where it stands (§8's
+    /// `/archive` and the context menu, which change no selection at all). A selected row nobody
+    /// can see is the hazard the same-list design exists to dissolve, so both have to open it.
+    ///
+    /// It is an expand, not a pin: toggling the disclosure triangle does not move the selection
+    /// and does not archive anything, so it changes nothing this rule reads and an explicit
+    /// collapse sticks until the next genuine trigger. Pulled out of the view so the rule is
+    /// testable; the `onChange` that applies it is not.
+    static func archivedGroupExpansion(current: Bool, archived: [Conversation],
+                                       previousArchivedSelection: UUID?, selection: UUID?) -> Bool {
+        guard let selection, selection != previousArchivedSelection,
+              archived.contains(where: { $0.id == selection }) else { return current }
+        return true
+    }
+
     @State private var showSetupWizard = false
     /// Sidebar conversation search (#183). `sidebarSearchGroups` is republished by the debounced
     /// `.task(id: sidebarQuery)` below rather than computed inline, because the store read it
@@ -37,6 +59,20 @@ struct ChatView: View {
     /// and resets it after making itself first responder.
     @State private var composerShouldFocus = false
     
+    private var archivedConversations: [Conversation] {
+        state.conversations.filter { !$0.isSubagent && $0.isArchived }
+    }
+
+    /// The selected conversation's id, but only while that conversation is archived — nil
+    /// otherwise. The single value `archivedGroupExpansion` keys on: it changes when the
+    /// selection moves into the group *and* when the selected conversation is archived in place,
+    /// and not when the user works the disclosure triangle.
+    private var archivedSelection: UUID? {
+        guard let id = state.selectedConversationId,
+              archivedConversations.contains(where: { $0.id == id }) else { return nil }
+        return id
+    }
+
     var body: some View {
         NavigationSplitView {
             VStack {
@@ -44,46 +80,22 @@ struct ChatView: View {
                     let trimmedQuery = sidebarQuery.trimmingCharacters(in: .whitespacesAndNewlines)
                     if trimmedQuery.isEmpty {
                         Section(header: Text("Conversations").font(.caption.weight(.bold)).foregroundColor(.secondary).padding(.bottom, 4)) {
-                            ForEach(state.conversations.filter { !$0.isSubagent }) { conv in
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(conv.title)
-                                            .font(.subheadline)
-                                            .lineLimit(1)
-                                        if let wp = conv.workspacePath {
-                                            Text(wp)
-                                                .font(.caption2)
-                                                .foregroundColor(.secondary)
-                                                .lineLimit(1)
-                                                .truncationMode(.middle)
-                                        }
-                                    }
-                                    Spacer()
+                            ForEach(state.conversations.filter { !$0.isSubagent && !$0.isArchived }) { conv in
+                                conversationRow(conv)
+                            }
+                        }
+
+                        let archived = archivedConversations
+                        if !archived.isEmpty {
+                            // A plain binding: the auto-expand is applied by the
+                            // `archivedSelection` `onChange` below, not by the getter, so a
+                            // collapse is never undone on the next render (#182 §9).
+                            DisclosureGroup(isExpanded: $archivedExpanded) {
+                                ForEach(archived) { conv in
+                                    conversationRow(conv)
                                 }
-                                .padding(.vertical, 2)
-                                .tag(conv.id)
-                                .contextMenu {
-                                    Button("Link to Workspace...") {
-                                        linkWorkspace(to: conv.id)
-                                    }
-                                    if !conv.isSubagent {
-                                        Toggle("Sandbox main agent", isOn: Binding(
-                                            get: { state.effectiveMainSandboxed(conv) },
-                                            set: { state.setMainAgentSandbox(for: conv.id, pref: $0 ? .sandboxed : .host) }
-                                        ))
-                                        .disabled(!ConfigManager.shared.enableSandboxing)
-                                    }
-                                    Button("Export to Markdown...") {
-                                        exportConversation(id: conv.id)
-                                    }
-                                    Divider()
-                                    Button(role: .destructive, action: {
-                                        state.deleteConversation(conv.id)
-                                    }) {
-                                        Text("Delete Conversation")
-                                        Image(systemName: "trash")
-                                    }
-                                }
+                            } label: {
+                                Text("Archived").font(.caption.weight(.bold)).foregroundColor(.secondary)
                             }
                         }
                     } else {
@@ -103,9 +115,20 @@ struct ChatView: View {
                             } else {
                                 ForEach(sidebarSearchGroups) { group in
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(group.title)
-                                            .font(.subheadline.weight(.semibold))
-                                            .lineLimit(1)
+                                        HStack(spacing: 4) {
+                                            Text(group.title)
+                                                .font(.subheadline.weight(.semibold))
+                                                .lineLimit(1)
+                                            // Results replaces both the Conversations and Archived
+                                            // sections while a query is active (#212), so this is the
+                                            // only place a hit's archive state is visible before the
+                                            // user clicks into it.
+                                            if state.conversations.first(where: { $0.id == group.conversationId })?.isArchived == true {
+                                                Text("Archived")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.tertiary)
+                                            }
+                                        }
                                         ForEach(group.hits, id: \.ordinal) { hit in
                                             Button(action: { state.reveal(hit: hit) }) {
                                                 HStack(alignment: .top, spacing: 6) {
@@ -131,6 +154,23 @@ struct ChatView: View {
                     }
                 }
                 .listStyle(.sidebar)
+                // Attached to the List rather than the group: the group only exists while
+                // something is archived, and the selection can land in it in the same pass that
+                // creates it. `onAppear` covers launch, where the restored selection never
+                // "changes" (#182 §9). Watching `archivedSelection` rather than the selection
+                // alone is what catches archiving the conversation you are looking at, which
+                // moves no selection and would otherwise leave you on a row inside a collapsed
+                // group.
+                .onAppear {
+                    archivedExpanded = Self.archivedGroupExpansion(
+                        current: archivedExpanded, archived: archivedConversations,
+                        previousArchivedSelection: nil, selection: state.selectedConversationId)
+                }
+                .onChange(of: archivedSelection) { old, _ in
+                    archivedExpanded = Self.archivedGroupExpansion(
+                        current: archivedExpanded, archived: archivedConversations,
+                        previousArchivedSelection: old, selection: state.selectedConversationId)
+                }
                 .searchable(text: $sidebarQuery, placement: .sidebar, prompt: "Search conversations")
                 .task(id: sidebarQuery) {
                     await runSidebarSearch()
@@ -458,6 +498,76 @@ struct ChatView: View {
         }
     }
     
+    /// Shared row body for both the Conversations and Archived sections, so archiving a
+    /// conversation moves it between sections without changing how it renders (#182).
+    @ViewBuilder
+    private func conversationRow(_ conv: Conversation) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(conv.title)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                if let wp = conv.workspacePath {
+                    Text(wp)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer()
+        }
+        .padding(.vertical, 2)
+        .tag(conv.id)
+        .contextMenu {
+            Button("Link to Workspace...") {
+                linkWorkspace(to: conv.id)
+            }
+            if !conv.isSubagent {
+                Toggle("Sandbox main agent", isOn: Binding(
+                    get: { state.effectiveMainSandboxed(conv) },
+                    set: { state.setMainAgentSandbox(for: conv.id, pref: $0 ? .sandboxed : .host) }
+                ))
+                .disabled(!ConfigManager.shared.enableSandboxing)
+            }
+            Button("Export to Markdown...") {
+                exportConversation(id: conv.id)
+            }
+            if conv.isArchived {
+                Button("Unarchive") { state.unarchiveConversation(conv.id) }
+            } else {
+                // The refusal lives in the disabled title (#182 §9.1). The title is computed
+                // when the menu is built, though, and a turn can start between that and the
+                // click, so the re-check writes the same system line `/archive` does rather
+                // than dropping its result on the floor.
+                let refusal = state.archiveRefusal(for: conv.id)
+                Button(refusal == nil ? "Archive" : "Archive (\(refusal!.reason))") {
+                    if let denied = state.archiveConversation(conv.id) {
+                        let line = "Cannot archive: \(denied.reason)."
+                        // The row right-clicked is usually *not* the conversation on screen, so
+                        // writing only into its transcript hides the refusal behind a click the
+                        // user has no reason to make. It goes where they are looking, and into
+                        // the refused conversation too so its own history records it.
+                        state.appendMessage(role: .system, content: line, to: conv.id)
+                        if let selected = state.selectedConversationId, selected != conv.id {
+                            state.appendMessage(role: .system,
+                                                content: "Cannot archive \"\(conv.title)\": \(denied.reason).",
+                                                to: selected)
+                        }
+                    }
+                }
+                .disabled(refusal != nil)
+            }
+            Divider()
+            Button(role: .destructive, action: {
+                state.deleteConversation(conv.id)
+            }) {
+                Text("Delete Conversation")
+                Image(systemName: "trash")
+            }
+        }
+    }
+
     private func linkWorkspace(to id: UUID) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true

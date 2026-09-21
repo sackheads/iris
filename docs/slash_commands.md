@@ -28,6 +28,8 @@ Iris supports in-app slash commands (`/-commands`) typed into the chat composer 
 | `/sandbox` | `/sandbox [status\|enable\|disable]` | Inspect or configure the subagent `apple/container` Linux VM runtime. |
 | `/new` | `/new` | Create a fresh conversation tab. |
 | `/clear` | `/clear` | Clear message history in the current active conversation. |
+| `/archive` | `/archive` | Move this conversation to the archive. Refused while a turn is running or a goal is active on it. |
+| `/unarchive` | `/unarchive` | Return this conversation to the active list. |
 | `/stop` | `/stop` | Cancel active goal mode or background subagent tasks. |
 | `/update` | `/update` | Query GitHub API for the latest Iris release updates. |
 

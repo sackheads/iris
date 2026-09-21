@@ -20,6 +20,8 @@ struct SlashCommandItem: Identifiable, Sendable, Equatable {
         SlashCommandItem(id: "tokens", command: "/tokens", usage: "/tokens", description: "Show token usage breakdown for active conversation"),
         SlashCommandItem(id: "new", command: "/new", usage: "/new", description: "Start a fresh conversation"),
         SlashCommandItem(id: "clear", command: "/clear", usage: "/clear", description: "Clear current conversation messages"),
+        SlashCommandItem(id: "archive", command: "/archive", usage: "/archive", description: "Move this conversation to the archive"),
+        SlashCommandItem(id: "unarchive", command: "/unarchive", usage: "/unarchive", description: "Return this conversation to the active list"),
         SlashCommandItem(id: "reflect", command: "/reflect", usage: "/reflect", description: "Trigger manual memory reflection and grooming"),
         SlashCommandItem(id: "vibecop", command: "/vibecop init", usage: "/vibecop init", description: "Initialize Vibecop Guardian rules for the workspace"),
         SlashCommandItem(id: "rename", command: "/rename", usage: "/rename", description: "Automatically rename current conversation"),

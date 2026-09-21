@@ -134,4 +134,42 @@ struct SteerInboxTests {
         try? await Task.sleep(nanoseconds: 100_000_000)
         #expect(client.calls == 1)
     }
+
+    /// #182 §6.1 widened `hasTurnInFlight` to see engine-started turns, so `sendMessage` now
+    /// queues behind an arrival — a scheduled job, a watcher event, a subagent post-back. An
+    /// arrival never runs through `runThinkingTask`, so the engine turn's own end hop is the only
+    /// thing that can hand the queue on; without it the bubble appears and is silently ignored.
+    @Test("a message typed during an arrival turn is drained when that turn ends")
+    func arrivalTurnDrainsQueue() async {
+        let gate = Gate()
+        let client = ScriptedStreamClient([
+            [.event(.textDelta("arrival")), .block { await gate.wait() }, .event(.done(finishReason: nil))],
+            [.event(.textDelta("answer")), .event(.done(finishReason: nil))]
+        ])
+        let app = AppState()
+        app.autoApproveTools = true
+        let id = UUID()
+        app.createNewConversation(id: id)
+        app.selectedConversationId = id
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], streamResponses: true)
+        app.installEngine(engine)
+
+        // The scheduler's path: straight into `processInput`, with no `activeTasks` entry.
+        let arrival = Task {
+            await engine.processInput("Scheduled Job Triggered: sweep", source: "Scheduler",
+                                      conversationId: id)
+        }
+        #expect(await eventually { client.calls == 1 })
+
+        app.sendMessage("what are you doing?")
+        #expect(app.pendingUserMessageCount(for: id) == 1, "the arrival turn is in flight, so it queues")
+        #expect(client.calls == 1)
+
+        await gate.release()
+        _ = await arrival.value
+        #expect(await eventually { client.calls == 2 && !app.isThinking })
+        #expect(app.pendingUserMessageCount(for: id) == 0, "the arrival's end hop drained it")
+        #expect(texts(app, id, .agent) == ["arrival", "answer"])
+    }
 }

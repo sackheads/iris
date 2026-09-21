@@ -118,13 +118,25 @@ actor IrisEngine {
         let localState = state
         let targetId = await MainActor.run { conversationId ?? localState?.selectedConversationId }
         guard let activeId = targetId else { return }
-        
+
+        // #182 §6.2: every non-user arrival lands here — the scheduler, subagent post-backs, and
+        // the watcher (which passes no id and so targets whatever is selected). Stating the rule
+        // at this choke point covers all of them and cannot go stale when a fourth is added.
+        let wasArchived = await MainActor.run { localState?.unarchiveConversation(activeId) ?? false }
+
         // Sanitize incoming system events (especially those from subagents) to prevent injection
         let structuralSafeEvent = PromptInjectionGuard.sanitizeUntrustedInput(message)
         let safeMessage = await InjectionGuard.sanitize(structuralSafeEvent, contextTag: "system_event_\(source)", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         
         await MainActor.run {
-            localState?.appendMessage(role: .system, content: safeMessage, to: activeId)
+            // #182 §6.2: an arrival lands with the user looking elsewhere, so the line that
+            // reports the event also reports the row reappearing in the sidebar. Only when the
+            // conversation actually moved — a never-archived one has nothing to announce — and
+            // only on the transcript line: the engine below still sees the event alone.
+            // Selection deliberately does not move; resurfacing is not a reason to yank the user
+            // out of what they are reading.
+            let notice = wasArchived ? "Un-archived: work arrived from \(source).\n\n" : ""
+            localState?.appendMessage(role: .system, content: notice + safeMessage, to: activeId)
         }
         await processInput(safeMessage, source: source, conversationId: activeId)
     }
@@ -441,18 +453,36 @@ actor IrisEngine {
         return false
     }
 
-    func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false) async {
-        // Own the thinking indicator for the whole turn via a balanced begin/end so that
-        // overlapping turns can't leave it stuck (centralized in AppState's reference count).
+    /// Runs `body` holding the thinking indicator and the conversation's engine-turn count, both
+    /// released on the way out. The indicator is a reference count so overlapping turns can't
+    /// leave it stuck; the turn count registers the turn against its conversation (#182 §6.1),
+    /// which is what "archived means idle" reads and what hands a queued user message on when it
+    /// reaches zero (#172). A leaked count would therefore mean a conversation that can never be
+    /// archived *and* whose inbox never drains — which is why the pair is a closure rather than
+    /// two statements a future early `return` could step between. `body` cannot throw, so the
+    /// release needs no `defer`.
+    private func withEngineTurn(_ conversationId: UUID, _ body: () async -> Void) async {
         let stateForThinking = state
-        await MainActor.run { stateForThinking?.beginThinking() }
-        let turnID = PerformanceProfiler.shared.beginTurn(label: input, source: source)
-        let turnStart = CFAbsoluteTimeGetCurrent()
-        await PerformanceProfiler.$currentTurnID.withValue(turnID) {
-            await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete)
+        await MainActor.run {
+            stateForThinking?.beginThinking()
+            stateForThinking?.beginEngineTurn(for: conversationId)
         }
-        PerformanceProfiler.shared.endTurn(turnID, totalMs: (CFAbsoluteTimeGetCurrent() - turnStart) * 1000.0)
-        await MainActor.run { stateForThinking?.endThinking() }
+        await body()
+        await MainActor.run {
+            stateForThinking?.endEngineTurn(for: conversationId)
+            stateForThinking?.endThinking()
+        }
+    }
+
+    func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false) async {
+        await withEngineTurn(conversationId) {
+            let turnID = PerformanceProfiler.shared.beginTurn(label: input, source: source)
+            let turnStart = CFAbsoluteTimeGetCurrent()
+            await PerformanceProfiler.$currentTurnID.withValue(turnID) {
+                await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete)
+            }
+            PerformanceProfiler.shared.endTurn(turnID, totalMs: (CFAbsoluteTimeGetCurrent() - turnStart) * 1000.0)
+        }
     }
 
     private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false) async {

@@ -70,6 +70,10 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     var goalIterationCount: Int = 0
     var mainAgentSandbox: SandboxPref? = nil
     var isSubagent: Bool = false
+    /// #182 — archived conversations leave the main sidebar list for a collapsed section. Durable,
+    /// unlike `isSubagent`, which has no column because subagent conversations are filtered out of
+    /// persistence entirely.
+    var isArchived: Bool = false
     var goalContract: GoalContract? = nil
     var lastGoalCompletionReport: JSONValue? = nil
     var lastGoalEvaluation: GoalEvaluation? = nil
@@ -93,7 +97,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory
     }
 
     init(from decoder: Decoder) throws {
@@ -108,6 +112,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         messageCountSinceReflection = try container.decodeIfPresent(Int.self, forKey: .messageCountSinceReflection) ?? 0
         mainAgentSandbox = try container.decodeIfPresent(SandboxPref.self, forKey: .mainAgentSandbox)
         isSubagent = try container.decodeIfPresent(Bool.self, forKey: .isSubagent) ?? false
+        isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
         goalContract = try container.decodeIfPresent(GoalContract.self, forKey: .goalContract)
         lastGoalCompletionReport = try container.decodeIfPresent(JSONValue.self, forKey: .lastGoalCompletionReport)
         lastGoalEvaluation = try container.decodeIfPresent(GoalEvaluation.self, forKey: .lastGoalEvaluation)
@@ -221,8 +226,41 @@ class AppState {
     }
     private var pendingUserMessages: [UUID: [PendingUserMessage]] = [:]
 
+    /// Turns the engine starts for itself. Arrivals — the scheduler, the watcher, subagent
+    /// post-backs — call `IrisEngine.processInput` directly and never create an `activeTasks`
+    /// entry, so `activeTasks` alone cannot see them and `archiveRefusal` would happily let the
+    /// user archive a conversation the agent is running tools in (#182 §6.1). A count, not a
+    /// flag: two turns can overlap on one conversation and the first to finish must not clear
+    /// the second's.
+    private var engineTurnCounts: [UUID: Int] = [:]
+
+    /// Called from `IrisEngine.processInput`'s own begin/end pair, which brackets every turn the
+    /// engine runs — UI-initiated ones included, so a UI turn is counted by both sources.
+    /// Double-counting is harmless; `hasTurnInFlight` only asks whether either is non-zero.
+    func beginEngineTurn(for conversationId: UUID) {
+        engineTurnCounts[conversationId, default: 0] += 1
+    }
+
+    func endEngineTurn(for conversationId: UUID) {
+        guard let count = engineTurnCounts[conversationId] else { return }
+        // Clamped at zero rather than going negative: an unpaired end must not make the next
+        // real turn invisible.
+        engineTurnCounts[conversationId] = count > 1 ? count - 1 : nil
+        // An arrival turn — scheduler, watcher, subagent post-back — never passes through
+        // `runThinkingTask`, so without this the message a user typed while one was running is
+        // enqueued by `sendMessage` and then waits for some unrelated later UI turn to end
+        // (#172 + #182 §6.1). Only at zero: draining while another turn is still running on this
+        // conversation starts the interleaved turn the inbox exists to prevent. A UI turn is
+        // counted here *and* in `activeTasks`, so this call no-ops for it and `runThinkingTask`'s
+        // completion still does the draining.
+        if engineTurnCounts[conversationId] == nil { drainPendingUserMessages(for: conversationId) }
+    }
+
+    /// Both sources OR'd. `activeTasks` is what cancellation can reach; `engineTurnCounts` also
+    /// covers the arrival path, which nothing tracks per conversation.
     func hasTurnInFlight(for conversationId: UUID) -> Bool {
-        activeTasks.values.contains { $0.conversationId == conversationId }
+        if (engineTurnCounts[conversationId] ?? 0) > 0 { return true }
+        return activeTasks.values.contains { $0.conversationId == conversationId }
     }
 
     func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID) {
@@ -248,7 +286,10 @@ class AppState {
 
     /// Whatever a finished turn did not consume becomes the next turn: the leading text entries
     /// joined as one message, or the first attachment entry on its own. Runs when a tracked task
-    /// completes, so the new turn never overlaps the old one.
+    /// completes and when the last engine turn on the conversation ends; the `hasTurnInFlight`
+    /// guard is what keeps the new turn from overlapping a still-running one, since both sources
+    /// can fire for the same turn. The entries are removed from the inbox *before* `startTurn`,
+    /// and `startTurn` only schedules a `Task`, so a re-entrant call cannot replay them.
     private func drainPendingUserMessages(for conversationId: UUID) {
         guard !hasTurnInFlight(for: conversationId),
               var queue = pendingUserMessages[conversationId], !queue.isEmpty else { return }
@@ -439,6 +480,13 @@ class AppState {
     /// Runs UI-initiated engine work while holding the thinking indicator and tracking the
     /// task so it can be cancelled. The `work` closure must not touch `isThinking` directly.
     private func runThinkingTask(conversationId: UUID?, _ work: @escaping @MainActor () async -> Void) {
+        // #182 §6.2: this is where a turn starts, so this is where "archived means idle" is
+        // enforced for user-initiated work. Stated per command or per call site it goes stale on
+        // the next one added — four already returned above `sendMessage`'s tail (`/goal`,
+        // `/reflect`, `/vibecop init`, `/rename`), and the goal kickoff and every resume start a
+        // turn without passing through `sendMessage` at all. Deterministic commands like `/tokens`
+        // never reach here, which is exactly why they still leave the archive alone.
+        if let conversationId { unarchiveConversation(conversationId) }
         let id = UUID()
         beginThinking()
         let task = Task { @MainActor [weak self] in
@@ -688,17 +736,76 @@ class AppState {
         // `sendMessage` routes by `selectedConversationId`, so the next message would go into a
         // restricted, soon-to-be-deleted conversation (#167).
         if selectedConversationId == id {
-            selectedConversationId = conversations.last(where: { !$0.isSubagent })?.id
+            selectedConversationId = conversations.last(where: { !$0.isSubagent && !$0.isArchived })?.id
         }
         markChanged(id, .deleted)
-        // Scratch conversations don't count: a list holding only those renders an empty sidebar,
-        // so the user still needs somewhere to land. The delete is recorded above either way —
-        // `createNewConversation` records its own change and must not swallow this one.
-        if !conversations.contains(where: { !$0.isSubagent }) {
+        // Counts active only: deleting your last active conversation puts the user in a new empty
+        // one, not in the archive. There is deliberately no archived fallback above — this check
+        // would immediately supersede it (#182 §5).
+        if !conversations.contains(where: { !$0.isSubagent && !$0.isArchived }) {
             createNewConversation()
         }
     }
-    
+
+    /// Why a conversation may not be archived. Archiving is list management, not control: it must
+    /// not quietly stop an agent, and a goal loop running inside a collapsed section is work
+    /// happening where nobody is looking (#182 §6.1).
+    enum ArchiveRefusal: Equatable {
+        /// A stale id — deleted, or never loaded. Distinguished from `nil` so `archiveConversation`
+        /// cannot report success for an archive it did not perform.
+        case noSuchConversation
+        case turnInFlight
+        case goalActive
+
+        var reason: String {
+            switch self {
+            case .noSuchConversation: return "that conversation no longer exists"
+            case .turnInFlight: return "a turn is still running"
+            case .goalActive: return "a goal is active — /stop it first"
+            }
+        }
+    }
+
+    /// nil means the conversation may be archived. The sidebar calls this to disable its menu item
+    /// with the reason, since a context-menu click has no channel for a system message.
+    func archiveRefusal(for conversationId: UUID) -> ArchiveRefusal? {
+        guard let conv = conversations.first(where: { $0.id == conversationId }) else {
+            return .noSuchConversation
+        }
+        if hasTurnInFlight(for: conversationId) { return .turnInFlight }
+        if conv.activeGoal != nil { return .goalActive }
+        return nil
+    }
+
+    @discardableResult
+    func archiveConversation(_ conversationId: UUID) -> ArchiveRefusal? {
+        if let refusal = archiveRefusal(for: conversationId) { return refusal }
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              !conversations[idx].isArchived else { return nil }
+        conversations[idx].isArchived = true
+        markChanged(conversationId, .metadata)
+
+        // Archiving your only active conversation would leave nowhere to type. §6.1's refusal is
+        // what makes this safe: the replacement can never inherit a running goal, because a
+        // conversation with one cannot be archived at all.
+        if !conversations.contains(where: { !$0.isSubagent && !$0.isArchived }) {
+            createNewConversation()   // selects itself
+        }
+        return nil
+    }
+
+    /// True when this call is what moved the conversation out of the archive. Callers that need to
+    /// report the move — `handleSystemEvent`'s arrival notice (#182 §6.2) — use it to stay silent
+    /// about conversations that were never archived.
+    @discardableResult
+    func unarchiveConversation(_ conversationId: UUID) -> Bool {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              conversations[idx].isArchived else { return false }
+        conversations[idx].isArchived = false
+        markChanged(conversationId, .metadata)
+        return true
+    }
+
     func start() {
         Task {
             await engine.start()
@@ -803,8 +910,26 @@ class AppState {
                 await engine.processInput(renamePrompt, source: "System", conversationId: convId)
             }
             return
+        } else if trimmed == "/archive" {
+            // Read before the call: a successful archive and an already-archived no-op both
+            // return nil, and a command that does nothing silently reads as a command that was
+            // not understood.
+            let alreadyArchived = conversations.first { $0.id == convId }?.isArchived == true
+            if let refusal = archiveConversation(convId) {
+                appendMessage(role: .system, content: "Cannot archive: \(refusal.reason).", to: convId)
+            } else if alreadyArchived {
+                appendMessage(role: .system, content: "Already archived.", to: convId)
+            }
+            return
+        } else if trimmed == "/unarchive" {
+            if !unarchiveConversation(convId) {
+                appendMessage(role: .system, content: "Not archived.", to: convId)
+            }
+            return
         }
 
+        // #182 §6.2's un-archive is not here: `runThinkingTask` carries it for every turn-starting
+        // path, this one included (via `startTurn`).
         appendMessage(role: .user, content: messageContent, attachments: attachments, to: convId)
 
         // A turn is already running on this conversation: the message steers it (text) or
@@ -1826,6 +1951,14 @@ class AppState {
     /// Set by `loadConversations()` when `store.loadAll()` itself threw (not a per-row skip).
     private var loadFailureHeadline: String? = nil
 
+    /// #182 §5. `position` is assigned at INSERT and never changed, so the last row may well be an
+    /// archived one — which would open every launch inside the collapsed section. Prefer the last
+    /// active conversation; fall back to an archived one only when there is nothing else, in which
+    /// case §6.2 un-archives it on the first thing sent.
+    nonisolated static func selectLaunchConversation(_ loaded: [Conversation]) -> Conversation? {
+        loaded.last(where: { !$0.isArchived }) ?? loaded.last
+    }
+
     private func loadConversations() {
         // One-time move off the UserDefaults blob (spec §6). Cheap when there is no key.
         let outcome = LegacyConversationBlob.migrateIfNeeded(into: store, defaults: IrisDefaults.store)
@@ -1839,7 +1972,7 @@ class AppState {
             loadedRepairFailed = result.repairFailed
             let loaded = Self.sanitizeLoaded(result.conversations)
             self.conversations = loaded
-            self.selectedConversationId = loaded.last?.id
+            self.selectedConversationId = Self.selectLaunchConversation(loaded)?.id
             // A whole-table corruption can be thousands of rows; one line each would bury
             // everything else in the log.
             let logCap = 10
