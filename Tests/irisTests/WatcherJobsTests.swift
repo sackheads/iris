@@ -27,6 +27,27 @@ struct WatcherJobsTests {
         await wm.stopAll()
     }
 
+    @Test("registering a watch on a manager that was never configured adopts the tools' ledger")
+    func reloadAdoptsLedgerWhenUnconfigured() async throws {
+        // `WatcherManager.shared` is only configured in `IrisEngine.start()`. An engine that never
+        // started — a subagent, a scenario run — still resolves job tools, and the watch it
+        // registers has to actually start watching rather than reload an empty nil ledger.
+        let store = try ConversationStore.inMemory()
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let wm = WatcherManager(ledger: nil)
+        var executor = ToolExecutor()
+        executor.jobToolsProvider = { JobTools(ledger: store.ledger, watchers: wm) }
+        let result = await executor.execute(
+            name: "register_directory_watcher",
+            args: ["path": .string(tmp.path), "instructions": .string("note changes")])
+        #expect(result.contains(tmp.path))
+        #expect(await wm.activeJobIds.count == 1)
+        await wm.stopAll()
+    }
+
     @Test("a fire hands over the job and its paths; the message is the watcher's standing text")
     func firePath() async {
         let conversation = UUID()

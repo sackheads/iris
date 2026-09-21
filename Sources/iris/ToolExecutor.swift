@@ -241,7 +241,7 @@ struct ToolExecutor {
                     createdInConversationId: conversationId)
             }
             try tools.ledger.upsert(job)
-            await tools.watchers.reload()
+            await tools.watchers.reload(adoptingIfUnconfigured: tools.ledger)
             return "Watching \(path) as job '\(job.name)'. It runs in the background when files change; you will be notified automatically."
         } catch {
             return "Could not save the watcher job."

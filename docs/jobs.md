@@ -5,6 +5,11 @@ A job is a stored instruction that runs without a conversation open: a recurring
 in the `jobs` table of `~/.iris/conversations.sqlite` — the same database every conversation lives
 in, not `UserDefaults`. Jobs survive an app restart.
 
+The two pre-ledger `UserDefaults` keys (`iris_scheduled_jobs` and `WATCHER_RULES`) are deleted on
+first launch of a build with migration v9, and whatever they held is dropped rather than imported:
+no install outside development ever had a real job in them. How many records went is logged once,
+so a machine that turns out to have had some is not silent about it.
+
 This document covers deliverable 1 of `#187` (see `docs/agency/agency.md` and
 `docs/specs/2026-09-21-agency-model-and-ledger.md`): the job model, the cron subset, the schedule
 aliases, and what happens on sleep. Run history, background run conversations, event cards, and
@@ -121,10 +126,15 @@ A cadence that overlaps its own still-running fire is skipped rather than starte
 
 A job firing posts a system event into the conversation it was created in (or the currently
 selected conversation, if it wasn't created in one) and starts a model turn there — the same
-behavior `schedule_job` and `register_directory_watcher` have always had. Deliverable 2 replaces
-this with a hidden background conversation, a run ledger (`job_runs`), and a compact event card
-delivered to a chosen destination conversation instead of interrupting whatever's open. Until then,
-a job posting into a conversation you're using will still show up as a message there.
+behavior `schedule_job` and `register_directory_watcher` have always had. It is an ordinary turn in
+an ordinary conversation, with nothing special about its permissions: a fire whose work needs
+approval raises the approval dialog and waits for you, exactly as if you had typed the prompt
+yourself. Deliverable 2 (`#253`, which ships alongside the model and scheduler in `#252`) moves the
+fire into a hidden background conversation with a run ledger (`job_runs`) and delivers a compact
+event card to a destination conversation instead of interrupting whatever's open; the background
+profile, the fail-closed gate and the proposal card that replace the approval dialog are
+deliverable 3. Until then, a job posting into a conversation you're using will show up as a message
+there, and can stop on a dialog nobody is sitting in front of.
 
 ## Not built yet (deliverable 2)
 

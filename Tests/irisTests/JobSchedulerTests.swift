@@ -178,4 +178,26 @@ struct JobSchedulerTests {
         JobScheduler.removeLegacyDefaults(from: defaults)
         #expect(defaults.data(forKey: "iris_scheduled_jobs") == nil && defaults.data(forKey: "WATCHER_RULES") == nil)
     }
+
+    @Test("what the legacy keys held is counted and logged once, and nothing is logged for nothing")
+    func legacyDropIsReported() {
+        let name = "iris-tests-legacy-log-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+
+        // No importer ships: the old records are dropped, so the count is the only trace left.
+        defaults.set(Data(#"[{"prompt":"a"},{"prompt":"b"},{"prompt":"c"}]"#.utf8), forKey: "iris_scheduled_jobs")
+        defaults.set(Data(#"[{"path":"/tmp/one","instructions":"i"}]"#.utf8), forKey: "WATCHER_RULES")
+        var lines: [String] = []
+        let dropped = JobScheduler.removeLegacyDefaults(from: defaults, log: { lines.append($0) })
+        #expect(dropped.jobs == 3 && dropped.watcherRules == 1)
+        #expect(lines.count == 1)
+        #expect(lines.first?.contains("3") == true && lines.first?.contains("1") == true)
+
+        // A store that never held them says nothing at all.
+        var quiet: [String] = []
+        let none = JobScheduler.removeLegacyDefaults(from: defaults, log: { quiet.append($0) })
+        #expect(none.jobs == 0 && none.watcherRules == 0)
+        #expect(quiet.isEmpty)
+    }
 }

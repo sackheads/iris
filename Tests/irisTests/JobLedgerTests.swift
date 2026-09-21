@@ -126,7 +126,7 @@ struct JobLedgerTests {
         #expect(try store.writer.read { db in try Int.fetchOne(db, sql: "SELECT count(*) FROM job_runs") } == 0)
     }
 
-    @Test("v8 database migrates to v9 with conversations intact and new columns reading false")
+    @Test("v8 database migrates to v9 with conversations intact and the new columns NULL on the old row")
     func migrateFromV8() throws {
         let queue = try DatabaseQueue()
         try ConversationStore.migrator.migrate(queue, upTo: "v8_session_card")

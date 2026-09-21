@@ -191,8 +191,28 @@ actor JobScheduler {
 
     /// Drops the two `UserDefaults` keys the pre-ledger scheduler and watcher persisted to, so a
     /// build that still reads them cannot resurrect a job the ledger does not know about.
-    static func removeLegacyDefaults(from store: UserDefaults) {
+    ///
+    /// Nothing is imported: no install outside development ever had a real job in these keys, so
+    /// an importer would be untested code carrying untested records. What was there is counted and
+    /// logged once on the way out, because after this call the only evidence it existed is the
+    /// line — and a machine that turns out to have had ten of them is worth knowing about.
+    @discardableResult
+    static func removeLegacyDefaults(from store: UserDefaults, log: (String) -> Void = { print($0) }) -> (jobs: Int, watcherRules: Int) {
+        let jobs = legacyRecordCount(store.data(forKey: "iris_scheduled_jobs"))
+        let rules = legacyRecordCount(store.data(forKey: "WATCHER_RULES"))
         store.removeObject(forKey: "iris_scheduled_jobs")
         store.removeObject(forKey: "WATCHER_RULES")
+        if jobs + rules > 0 {
+            log("[JobScheduler] dropped \(jobs) legacy scheduled job(s) and \(rules) legacy watcher rule(s) from UserDefaults; they are not imported — the jobs table is the only store now.")
+        }
+        return (jobs, rules)
+    }
+
+    /// The length of a legacy JSON array blob. Read as untyped JSON rather than through the old
+    /// `Codable` types, which no longer exist: a count does not need the fields, and a row the old
+    /// decoder would have rejected still counts as something the user lost.
+    private static func legacyRecordCount(_ data: Data?) -> Int {
+        guard let data, let array = try? JSONSerialization.jsonObject(with: data) as? [Any] else { return 0 }
+        return array.count
     }
 }
