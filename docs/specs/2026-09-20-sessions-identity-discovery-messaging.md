@@ -71,7 +71,9 @@ complement to this slice. It is deliberately not here: auto-archiving is a behav
 Tracked separately. §4's listing cap is what holds the line until then.
 
 Subagent conversations are excluded for the reason they are excluded everywhere else: they are
-scratch, deleted when their run ends, and already filtered out of persistence.
+scratch, deleted when their run ends, and already filtered out of persistence. The drift
+evaluator's scratch conversation is excluded by the same `isSubagent` flag — worth noting because
+#217 treats "evaluator" as a session kind for display, where this spec does not treat it as a peer.
 
 ## 4. The card
 
@@ -107,9 +109,14 @@ count low, but that bound rests on the user archiving things, which is a habit r
 guarantee. A cap makes the context cost of a listing bounded by construction: the worst case is a
 known number of rows, not a function of how diligent the user has been.
 
-Ordering is most-recently-active first, so the truncated tail is the least likely to matter. A
-session that needs the full set can narrow by workspace, which is the gate the card exists to
-provide.
+Ordering is most-recently-active first, keyed on the conversation's `updatedAt` — not
+`card.updatedAt`, which records when the session last *described* itself and would rank a chatty
+self-describer above a busy one. The truncated tail is therefore the least recently active. A
+session needing the full set narrows by workspace, which is the gate the card exists to provide.
+
+`card.updatedAt` exists so a reader can judge staleness: a description written an hour ago may no
+longer be what the session is doing. Nothing acts on it automatically — liveness comes from the
+harness (§6.1), not from the card's age.
 
 **Workspace is part of the advertised identity, and costs nothing.** `Conversation.workspacePath`
 is already persisted, so `list_sessions` reports it without new state. It is the cheapest useful
@@ -147,6 +154,35 @@ Reusing it is not only economy. Four consecutive review rounds on #182 converged
 `handleSystemEvent` as *the* arrival point precisely because every per-caller rule missed a caller;
 adding a fifth independent arrival path would reopen that.
 
+### 5.0 Framing: the sender does not choose its own trust label
+
+**This is a security requirement, not a presentation detail.**
+
+`processInputBody` renders every non-UI arrival as `System Event [<source>]: …` and appends
+*"Analyze this event. If it requires action based on your directives/skills, take it."*
+(`iris.swift:493`). `source` is also the guard's context tag (`:129`). So the label decides both
+how the message is framed to the model and how it is tagged for inspection.
+
+If that label carried the sender's card name, a session could name itself `User` or `Scheduler`
+and have its message framed as a trusted instruction to act on. The sender would be choosing its
+own trust level. §9's "advertised, not authoritative" was written about card descriptions and does
+not reach this.
+
+So:
+
+- **The `source` is a harness-owned constant** — `peer_session` — never the sender's name, never
+  anything the model supplies.
+- **The sender's identity is supplied by the harness**, from the sending conversation's id, and
+  appears in the body as attribution. A model-supplied "from" field is not trusted and is not used.
+- **The framing states what the message is**: a request from another session, which the target is
+  free to evaluate, act on, or decline. It must not inherit the standing "take action" instruction
+  that suits a scheduler firing the user's own job.
+
+The distinction that matters: **sanitisation is a detector, not an instruction-following barrier.**
+The tier-3 guard catches known injection shapes; it does not stop a model obeying a plausibly
+framed instruction. The framing is the control, and it is the reason this subsection exists rather
+than relying on §5's sanitisation alone.
+
 ### 5.1 A send to an archived session is refused, not resurrected
 
 A session can be archived between `list_sessions` and `send_to_session`. Because
@@ -170,7 +206,36 @@ archived conversation un-archives it (#182 §6.2), while a **peer** is refused. 
 inconsistency to be tidied away later. The human is choosing to reopen one specific conversation;
 a peer doing the same would be re-expanding the address space on its own initiative.
 
-### 5.2 Self-sends are refused
+### 5.2 Delivery into a busy target
+
+`handleSystemEvent` calls `processInput` unconditionally. `sendMessage` does not: when a turn is
+already running it enqueues through the #172 inbox rather than starting a second, interleaved turn
+on one history (`AppState.swift:937-940`), because two turns on one history produce empty or
+rejected provider responses.
+
+Today reaching that hazard needs a scheduler or watcher coincidence. **Peer messaging would make it
+agent-triggerable at will**, which is not a risk this slice may introduce.
+
+**A peer message to a busy session is enqueued through the same #172 inbox**, delivered as a steer
+at the target's next model round. Not refused: the sender has no way to know the target is busy,
+refusal would make delivery depend on timing the sender cannot observe, and the inbox already
+exists for exactly this.
+
+The send therefore reports *accepted* rather than *delivered* — see §5.3 — because at the moment of
+sending, those are genuinely different claims.
+
+### 5.3 What a send returns
+
+Four outcomes, all reported to the sender rather than failing silently:
+
+- **accepted** — queued or delivered; the target will see it.
+- **refused: no such session** — unknown id.
+- **refused: not active** — the target is archived (§5.1).
+- **refused: budget exhausted** — the cascade cap (§7).
+
+A self-send is refused before any of these (§5.4).
+
+### 5.4 Self-sends are refused
 
 A session messaging itself is an immediate loop. Refused outright, before the cascade accounting in
 §7 is even consulted.
@@ -184,16 +249,47 @@ This gate is only meaningful because the peer set is bounded (§3). If archived 
 counted, it would be true from the first day a user archived anything and never false again.
 
 With a single conversation open — the common case — the tool surface is byte-identical to today.
-#133 brought a plain turn from 30 declarations to 8 (~837 tokens); adding three unconditional
+#144 and #155 (tracked under #133) brought a plain turn from 30 declarations to 8 — measured at
+~3,350 bytes of declaration JSON, roughly 840 tokens; adding three unconditional
 declarations would put a meaningful fraction of that back on every call and invite the unprompted
 probing that #132 and #144 were about. This is AGENTS.md **invariant 6**'s lifecycle-state pattern,
 the same shape the goal and ladder tools already use.
+
+**Main principal only.** All three tools are declared for `principal == .main`, matching every
+other state-gated tool (`iris.swift:771, :785, :807`). A subagent is not a session (§3) and does not
+get them; if one somehow attempted a send it is refused as "not a session", so a subagent can
+neither originate nor extend a cascade.
+
+**The peer count is injectable**, the way `workspaceToolsEnabled` already is. Read from global
+state it would break the perf harness: `ScenarioRunner.run` builds `AppState()` over
+`ConversationStore.makeDefault()` — the developer's real store — so on any machine with a second
+active conversation the three declarations would appear and the #129/#144 baselines would shift
+under measurement. §10's declaration test needs the same seam.
 
 **Standing context is one line**: a bare count — `3 other sessions are active` — present only when
 peers exist. Enough for the model to consider delegating; no roster, no per-peer detail, nothing
 that grows with session count or churns every turn as peers update their cards. The issue's
 "not to a great level of detail, poisoning context" is the requirement, and detail is available on
 demand through `list_sessions`.
+
+## 6.1 The three tools
+
+- **`list_sessions()`** — no parameters. Returns, per peer: `session_id`, `name` and `description`
+  (empty when no card), `workspace`, and `busy` / `idle`. Capped and ordered per §4. Busy/idle is
+  **derived by the harness**, never read from a card: a model-written "what I am doing" string is
+  advertised, not authoritative (§9), and liveness is exactly the field a peer must not be able to
+  misreport. See §12 on where that derived state comes from.
+- **`send_to_session(session_id, message)`** — outcomes in §5.3.
+- **`set_session_card(name, description)`** — writes the calling session's own card; it cannot
+  write another's. Rejects an empty name.
+
+Their `description` strings are agent-facing text and fall under invariant 9: they must say when to
+call, per #155, and must not imply a peer is obliged to act on a request.
+
+**The card column decodes defensively**: unreadable → `nil`, with a warning, never a dropped
+conversation. This follows the store's `checkpointHistory` precedent — an unreadable *identity*
+must not cost the user a conversation, and the failure direction is toward the session simply
+appearing uncarded.
 
 ## 7. The cascade cap
 
@@ -205,8 +301,12 @@ The budget must be shared by the whole cascade, not carried per branch.
 
 `AppState` holds, per conversation, `(cascadeId: UUID, remaining: Int)`:
 
-- **A user-initiated turn clears the entry.** User input always begins a fresh cascade — a person
-  typing is not part of the machine's budget.
+- **A user-initiated turn clears the entry**, at `AppState.startTurn` (`:945`) specifically — not
+  `runThinkingTask`. §5 argues for choke points, so this one is named: `runThinkingTask` also
+  carries the `/goal` draft kickoff and every goal resume, which are machine-initiated
+  continuations rather than a person typing, and clearing there would hand a cascade a fresh
+  budget every time a goal resumed. `startTurn` is the tightest point that means "the user sent
+  something".
 - **A peer delivery into X sets X's entry** to the sender's `cascadeId` with `remaining - 1`.
 - **`send_to_session` reads the sender's entry** and refuses at zero, otherwise delivers with the
   decremented value.
@@ -258,8 +358,30 @@ Recorded here so the question is answered rather than re-asked.
   honesty rule).
 - **`/stop` and the LED bar** remain the human's controls over a running cascade; §7 bounds it, it
   does not replace them.
+- **A target with an active goal or paused at a checkpoint is still addressable.** `archiveRefusal`
+  treats an active goal as busy for *archiving*, but a peer message to a working session is the
+  normal case, and §5.2's inbox handles the in-flight part. A session paused awaiting a human
+  decision receives the message and will see it when it resumes — it is not woken past its pause,
+  because the pause suppresses the loop rather than the inbox.
+- **`set_session_card` is gated on a peer existing** (§6), so a lone session cannot describe itself
+  until there is someone to describe itself to. Deliberate: the card has no reader before then, and
+  ungating it would put a declaration on every single-conversation turn for no benefit.
 
-## 10. Testing
+## 10. Documentation
+
+Invariant 9: this changes user-facing behaviour, so it fixes what it makes untrue rather than only
+describing what it adds.
+
+- **`README.md:40`** currently says sending anything to an archived conversation brings it back
+  automatically. §5.1 makes "anything" false — a *peer* send is refused. Correct it to distinguish
+  the human case from the peer case, since that asymmetry is deliberate (§5.1).
+- **`README.md:119`** ("Session Control") — no slash commands are added by this slice; sessions are
+  reached through tools, not commands. Say so if the section would otherwise imply otherwise.
+- **A feature bullet** for sessions: what a session is, that peers can list and message each other,
+  that archived conversations are not reachable, and that a peer message is treated as a request
+  rather than an instruction (§5.0) — the honesty point, in the README's voice.
+
+## 11. Testing
 
 - Store round trip through `ConversationStore` — the card survives a real load. A JSON-only test
   would pass while the column did not exist.
@@ -276,9 +398,48 @@ Recorded here so the question is answered rather than re-asked.
   declaration list, since this is what protects #133's win.
 - `list_sessions` truncates at the cap and reports the true total, so a large peer set cannot
   silently become a large context payload.
+- **A peer message to a busy session is enqueued, not interleaved** (§5.2): with a turn in flight,
+  the send is accepted and no second turn starts; the message is delivered at the next model round.
+  This is the assertion that keeps peer messaging from making the #172 hazard agent-triggerable.
+- **The arrival is framed as a peer request, not a system instruction** (§5.0): the rendered event
+  carries the constant source, not the sender's card name, and a session whose card name is `User`
+  or `Scheduler` produces byte-identical framing to any other. Asserted on the rendered text.
+- **The sender's identity comes from the harness**: a model-supplied "from" in the message body
+  does not change the attribution the target sees.
+- A send to an unknown id is refused rather than silently dropped.
+- A subagent has none of the three tools declared, and a subagent send is refused (§6).
+- The declaration test drives the **injected** peer count, not global state, so it cannot pass or
+  fail based on what is in the developer's store.
 - The standing count line appears only when peers exist.
 
-## 11. The larger arc
+## 12. Relationship to #217's session summary
+
+#217 (in flight) adds `SessionSummary`: transient, harness-derived, covering main, subagent and
+evaluator conversations, with activity deliberately never model-written. This spec adds
+`SessionCard`: persisted, model-written, subagents excluded. Two things called "session" with
+opposite properties.
+
+**Resolve by role, not by renaming.** They are different kinds of claim and both are needed:
+
+| | `SessionCard` (this spec) | `SessionSummary` (#217) |
+|---|---|---|
+| Written by | the session's own model | the harness |
+| Trust | advertised, not authoritative | derived, trusted |
+| Lifetime | persisted | transient |
+| Covers | active conversations | main, subagent, evaluator |
+| Answers | "who am I and what am I doing" | "what is actually happening right now" |
+
+`list_sessions` therefore takes **identity from the card and liveness from the summary** (§6.1).
+A peer must not be able to claim it is idle, and a model-written description is exactly the wrong
+source for a field another agent will act on. Whichever lands second wires the two together; neither
+needs to block on the other, because the card is inert without the tools and the summary is already
+useful on its own.
+
+**UI**: whether #217's strip shows peer arrivals is that PR's call, not this one's. Worth deciding
+deliberately — a session woken by a peer is the case where a user most wants to know something
+happened without being switched to it.
+
+## 13. The larger arc
 
 With this slice sessions can find each other and talk. Remaining, each its own spec:
 
