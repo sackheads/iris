@@ -109,6 +109,11 @@ struct IrisPaths: Sendable {
     // models/ (resolved path unchanged from the old layout)
     var modelsDir: URL { root.appendingPathComponent("models") }
 
+    /// Goal workspaces created by `GoalWorkspace.resolve` (#68). Every directory directly under
+    /// here was created by Iris; this is the eligibility boundary the workspace inventory (#126)
+    /// uses to decide what it may ever list or delete.
+    var workspacesDir: URL { root.appendingPathComponent("workspaces") }
+
     /// True if `rawPath` resolves to a location inside `memoryDir` — used to treat reads of
     /// first-party memory content (SOUL, USER, skills, artifacts, library, ...) as trusted.
     /// Tilde-expands and standardizes the path (resolving `..`) first, so a traversal like

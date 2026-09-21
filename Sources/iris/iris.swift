@@ -606,7 +606,7 @@ actor IrisEngine {
         
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Use this whenever the user asks to be reminded of something or to have something done on a schedule, for example every weekday at 9 or every hour; the prompt is what Iris should do when it fires. Never use shell cron for this; no setup, files, or commands are needed, calling this tool is the whole job. The job persists across app restarts and catches up if the computer wakes from sleep. You MUST provide EITHER intervalSeconds OR one or more cron fields (minute, hour, day, month, weekday), but not both.",
+            description: "Use this whenever the user asks to be reminded of something or to have something done on a schedule, for example every weekday at 9 or every hour; the prompt is what Iris should do when it fires. Never use shell cron for this; no setup, files, or commands are needed, calling this tool is the whole job. The job persists across app restarts and catches up if the computer wakes from sleep. You MUST provide EITHER intervalSeconds OR one or more cron fields (minute, hour, day, month, weekday/weekdays), but not both. Example: every weekday at 9 → weekdays [2,3,4,5,6], hour 9, minute 0.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -616,6 +616,7 @@ actor IrisEngine {
                     "day": Schema(type: "INTEGER", description: "Cron day of month (1-31)"),
                     "month": Schema(type: "INTEGER", description: "Cron month (1-12)"),
                     "weekday": Schema(type: "INTEGER", description: "Cron weekday (1=Sunday, 2=Monday, ..., 7=Saturday)"),
+                    "weekdays": Schema(type: "ARRAY", description: "Cron weekdays, 1=Sunday … 7=Saturday; e.g. [2,3,4,5,6] for Monday–Friday. Prefer this over five separate jobs.", items: Schema(type: "INTEGER")),
                     "intervalSeconds": Schema(type: "INTEGER", description: "Simple recurring interval in seconds (e.g. 3600 for every hour)")
                 ],
                 required: ["prompt"]
@@ -1314,8 +1315,24 @@ actor IrisEngine {
             let day = Int(functionCall.args["day"]?.stringValue ?? "")
             let month = Int(functionCall.args["month"]?.stringValue ?? "")
             let weekday = Int(functionCall.args["weekday"]?.stringValue ?? "")
+            let parsedWeekdays: [Int] = {
+                guard case .array(let items) = functionCall.args["weekdays"] else { return [] }
+                return items.compactMap { item -> Int? in
+                    switch item {
+                    case .int(let i): return i
+                    case .double(let d): return Int(d)
+                    case .string(let s): return Int(s)
+                    default: return nil
+                    }
+                }
+            }()
+            // Only 1...7 is a valid weekday; out-of-range values are dropped rather than stored,
+            // and named back to the model so a typo'd cron field doesn't silently do less than asked.
+            let validWeekdays = parsedWeekdays.filter { (1...7).contains($0) }
+            let droppedWeekdays = parsedWeekdays.filter { !(1...7).contains($0) }
+            let weekdays: [Int]? = validWeekdays.isEmpty ? nil : validWeekdays
             let intervalSeconds = Int(functionCall.args["intervalSeconds"]?.stringValue ?? "")
-            
+
             ScheduleManager.shared.schedule(
                 conversationId: conversationId,
                 prompt: prompt,
@@ -1324,9 +1341,13 @@ actor IrisEngine {
                 day: day,
                 month: month,
                 weekday: weekday,
+                weekdays: weekdays,
                 intervalSeconds: intervalSeconds
             )
             result = "Job scheduled successfully. It will fire in the background."
+            if !droppedWeekdays.isEmpty {
+                result += " Ignored invalid weekday value\(droppedWeekdays.count == 1 ? "" : "s") (must be 1-7, 1=Sunday): \(droppedWeekdays.map(String.init).joined(separator: ", "))."
+            }
         } else if functionCall.name == "save_fact", let content = functionCall.args["content"]?.stringValue {
             let category = functionCall.args["category"]?.stringValue ?? "general"
             let entity = functionCall.args["entity"]?.stringValue

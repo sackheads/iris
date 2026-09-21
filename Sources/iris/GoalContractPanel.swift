@@ -252,7 +252,7 @@ struct GoalContractPanel: View {
             proposed: workspace.isEmpty ? nil : workspace,
             objective: objective,
             existingBinding: conversation.workspacePath,
-            workspacesRoot: IrisPaths.default.root.appendingPathComponent("workspaces").path,
+            workspacesRoot: IrisPaths.default.workspacesDir.path,
             directoryExists: { path in
                 var isDir: ObjCBool = false
                 return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
