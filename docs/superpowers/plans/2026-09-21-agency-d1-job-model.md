@@ -4,7 +4,7 @@
 
 **Goal:** Replace `ScheduledJob`/`ScheduleManager` and `WatcherRule` with one `Job` model stored in the conversation database, with a cron subset, a per-job time zone, and the two creation tools rewritten to produce jobs, while jobs keep firing exactly as they do today.
 
-**Architecture:** Pure value types (`Job`, `Trigger`, `CronSchedule`) in their own files; one GRDB migration `v8_jobs` that creates both `jobs` and `job_runs` and the two conversation columns (deliverable 2 fills `job_runs`); a `JobLedger` sharing the store's writer; a `JobScheduler` actor that polls the ledger for due jobs and hands them to a fire handler. In this deliverable the handler is today's `handleSystemEvent`, so behaviour is unchanged; deliverable 2 swaps it for the background runner.
+**Architecture:** Pure value types (`Job`, `Trigger`, `CronSchedule`) in their own files; one GRDB migration `v9_jobs` that creates both `jobs` and `job_runs` and the two conversation columns (deliverable 2 fills `job_runs`); a `JobLedger` sharing the store's writer; a `JobScheduler` actor that polls the ledger for due jobs and hands them to a fire handler. In this deliverable the handler is today's `handleSystemEvent`, so behaviour is unchanged; deliverable 2 swaps it for the background runner.
 
 **Tech Stack:** Swift 6 strict concurrency, GRDB (`DatabaseMigrator`, `db.create(table:)`), Foundation `Calendar`/`TimeZone`, Swift Testing.
 
@@ -17,7 +17,7 @@
 - Tool declarations and handlers stay in sync (`iris.swift` for `schedule_job`, `ToolExecutor.swift` for `register_directory_watcher`); a description that is no longer true is a bug (invariant 9).
 - Cron day-of-week is `0-6`, `0`=Sunday, `7` accepted as Sunday. Tool aliases `weekday`/`weekdays` are `1-7`, `1`=Sunday; `cronDay = weekday - 1`.
 - `CronSchedule.next(after:calendar:)` walks minute by minute from `after + 60 s` and returns nil after 366 days.
-- The `UserDefaults` keys `iris_scheduled_jobs` and `WATCHER_RULES` are removed on first launch after v8; nothing reads them.
+- The `UserDefaults` keys `iris_scheduled_jobs` and `WATCHER_RULES` are removed on first launch after v9; nothing reads them.
 - `swift test; echo exit=$?` = 0 and zero `with [1-9][0-9]* failures` lines before each commit. Conventional commits ending `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`. Never `git add` anything under `.superpowers/` or `.claude/`.
 
 ---
@@ -493,10 +493,10 @@ git commit -m "feat(jobs): Job and Trigger model with lenient decoding; schedule
 
 ---
 
-### Task 3: Migration `v8_jobs` and `JobLedger` (jobs half)
+### Task 3: Migration `v9_jobs` and `JobLedger` (jobs half)
 
 **Files:**
-- Modify: `Sources/iris/ConversationStore.swift` (migrator after `v7_archive` ~:334-339; `init(writer:path:)` ~:163; add `let ledger: JobLedger`)
+- Modify: `Sources/iris/ConversationStore.swift` (migrator after `v8_session_card`, the last registered migration; `init(writer:path:)` ~:163; add `let ledger: JobLedger`)
 - Create: `Sources/iris/JobLedger.swift`
 - Test: `Tests/irisTests/JobLedgerTests.swift`
 
@@ -587,10 +587,10 @@ struct JobLedgerTests {
         #expect(store.ledger.unreadableJobCount == 1)
     }
 
-    @Test("v7 database migrates to v8 with conversations intact and new columns reading false")
-    func migrateFromV7() throws {
+    @Test("v8 database migrates to v9 with conversations intact and new columns reading false")
+    func migrateFromV8() throws {
         let queue = try DatabaseQueue()
-        try ConversationStore.migrator.migrate(queue, upTo: "v7_archive")
+        try ConversationStore.migrator.migrate(queue, upTo: "v8_session_card")
         try queue.write { db in
             try db.execute(sql: "INSERT INTO conversations (id, position, title, createdAt, updatedAt, tokenUsage) VALUES (?, 0, 'old', ?, ?, '{}')",
                            arguments: [UUID().uuidString, Date(), Date()])
@@ -617,7 +617,7 @@ Migration, appended before `return m` in `ConversationStore.migrator`:
         // #187 deliverables 1–2: jobs and their run ledger live beside the conversations they
         // produce. Both tables are created here so deliverable 2 needs no second migration; the
         // two conversation columns are nullable so NULL reads back as false for every existing row.
-        m.registerMigration("v8_jobs") { db in
+        m.registerMigration("v9_jobs") { db in
             try db.create(table: "jobs") { t in
                 t.column("id", .text).primaryKey()
                 t.column("name", .text).notNull().unique()
@@ -669,7 +669,7 @@ Migration, appended before `return m` in `ConversationStore.migrator`:
 
 ```bash
 git add Sources/iris/ConversationStore.swift Sources/iris/JobLedger.swift Tests/irisTests/JobLedgerTests.swift
-git commit -m "feat(store): migration v8_jobs — jobs and job_runs tables, isBackground/isPinned columns; JobLedger (#187)"
+git commit -m "feat(store): migration v9_jobs — jobs and job_runs tables, isBackground/isPinned columns; JobLedger (#187)"
 ```
 
 ---
@@ -678,7 +678,7 @@ git commit -m "feat(store): migration v8_jobs — jobs and job_runs tables, isBa
 
 **Files:**
 - Create: `Sources/iris/JobScheduler.swift`
-- Modify: `Sources/iris/iris.swift:145-148` (start wiring), `Sources/iris/AppState.swift` (expose `store.ledger`; nothing else)
+- Modify: `Sources/iris/iris.swift` — `IrisEngine.start()` (the `ScheduleManager.shared.onJobFired` block; line numbers moved after #247, grep for it), `Sources/iris/AppState.swift` (expose `store.ledger`; nothing else)
 - Delete: `Sources/iris/ScheduleManager.swift`, `Tests/irisTests/ScheduledJobWeekdaysTests.swift`
 - Test: `Tests/irisTests/JobSchedulerTests.swift`
 
@@ -815,7 +815,7 @@ git commit -m "feat(jobs): JobScheduler polls the ledger for due jobs; ScheduleM
 ### Task 5: The two creation tools write jobs; watchers read jobs
 
 **Files:**
-- Modify: `Sources/iris/iris.swift:615-632` (declaration) and `:1330-1368` (handler); `Sources/iris/ToolExecutor.swift:61-72` (declaration), `:153-157` (handler); `Sources/iris/WatcherManager.swift` (rules come from the ledger)
+- Modify: `Sources/iris/iris.swift` — the `schedule_job` `FunctionDeclaration` and its handler (grep `"schedule_job"`; line numbers moved after #247); `Sources/iris/ToolExecutor.swift:61-72` (declaration), `:153-157` (handler); `Sources/iris/WatcherManager.swift` (rules come from the ledger)
 - Create: `Sources/iris/ScheduleJobArguments.swift`
 - Test: `Tests/irisTests/ScheduleJobArgumentsTests.swift`, `Tests/irisTests/WatcherJobsTests.swift`
 
@@ -912,7 +912,7 @@ struct WatcherJobsTests {
 
 `ScheduleJobArguments.parse`: `prompt` required (`.stringValue` non-empty); integers accepted from `.int`, `.double` (truncated), or numeric `.string`; `weekdays` from `.array` of the same; `name`, `cron`, `timezone`, `profile` as strings. `makeJob`: refuse `profile == "mutating"` with the exact message above; resolve the alias with `defaultTimeZone`; map `ScheduleAlias.Failure` to messages (`nothingSpecified` → "Give a schedule: cron, intervalSeconds, or hour/minute/weekdays."; `invalidWeekday(v)` → the message in the test; `badCron(e)` → "Cron expression rejected: \(e)"; `badTimeZone(z)` → "Unknown time zone '\(z)'."; `conflicting` → "Use one of: cron, intervalSeconds, or the hour/minute/day/month/weekday fields."); name = `Job.slug(from: name ?? prompt)` made unique with `-2`, `-3`, ….
 
-Handler in `iris.swift` (replacing 1330–1368):
+Handler in `iris.swift` (replacing the existing `schedule_job` branch):
 ```swift
         } else if functionCall.name == "schedule_job" {
             switch ScheduleJobArguments.parse(functionCall.args) {
