@@ -246,6 +246,16 @@ class AppState {
     struct PendingUserMessage: Sendable {
         let text: String
         let attachments: [FileAttachment]
+        /// True only for a peer delivery (#185 §5) queued through `IrisEngine.deliverPeerMessage`'s
+        /// busy path. Defaults false so every pre-existing caller — the user's own `sendMessage`,
+        /// and every test that builds one directly — is unaffected. `takePendingSteers` carries
+        /// this through so the consumer never renders a peer entry under the user's own label.
+        let isPeer: Bool
+        init(text: String, attachments: [FileAttachment], isPeer: Bool = false) {
+            self.text = text
+            self.attachments = attachments
+            self.isPeer = isPeer
+        }
     }
     private var pendingUserMessages: [UUID: [PendingUserMessage]] = [:]
 
@@ -290,21 +300,23 @@ class AppState {
         return activeTasks.values.contains { $0.conversationId == conversationId }
     }
 
-    func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID) {
-        pendingUserMessages[conversationId, default: []].append(PendingUserMessage(text: text, attachments: attachments))
+    func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID, isPeer: Bool = false) {
+        pendingUserMessages[conversationId, default: []].append(PendingUserMessage(text: text, attachments: attachments, isPeer: isPeer))
     }
 
     func pendingUserMessageCount(for conversationId: UUID) -> Int {
         pendingUserMessages[conversationId]?.count ?? 0
     }
 
-    /// The leading text-only entries, removed from the inbox, in arrival order. Stops at the first
-    /// entry with attachments so order is preserved. The engine calls this at every model round.
-    func takePendingSteers(for conversationId: UUID) -> [String] {
+    /// The leading text-only entries, removed from the inbox, in arrival order, paired with
+    /// whether each is a peer delivery (#185 §5) rather than something the user typed — the
+    /// engine must not present a peer entry under the user's own label. Stops at the first entry
+    /// with attachments so order is preserved. The engine calls this at every model round.
+    func takePendingSteers(for conversationId: UUID) -> [(text: String, isPeer: Bool)] {
         var queue = pendingUserMessages[conversationId] ?? []
-        var taken: [String] = []
+        var taken: [(text: String, isPeer: Bool)] = []
         while let first = queue.first, first.attachments.isEmpty {
-            taken.append(first.text)
+            taken.append((text: first.text, isPeer: first.isPeer))
             queue.removeFirst()
         }
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue

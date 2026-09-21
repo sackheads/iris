@@ -125,9 +125,8 @@ actor IrisEngine {
         let wasArchived = await MainActor.run { localState?.unarchiveConversation(activeId) ?? false }
 
         // Sanitize incoming system events (especially those from subagents) to prevent injection
-        let structuralSafeEvent = PromptInjectionGuard.sanitizeUntrustedInput(message)
-        let safeMessage = await InjectionGuard.sanitize(structuralSafeEvent, contextTag: "system_event_\(source)", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
-        
+        let safeMessage = await sanitizeArrival(message, source: source)
+
         await MainActor.run {
             // #182 §6.2: an arrival lands with the user looking elsewhere, so the line that
             // reports the event also reports the row reappearing in the sidebar. Only when the
@@ -139,6 +138,15 @@ actor IrisEngine {
             localState?.appendMessage(role: .system, content: notice + safeMessage, to: activeId)
         }
         await processInput(safeMessage, source: source, conversationId: activeId)
+    }
+
+    /// The structural guard, then the tier-3 injection guard, tagged by `source`. Factored out of
+    /// `handleSystemEvent` because `deliverPeerMessage`'s busy path bypasses `handleSystemEvent`
+    /// entirely (it enqueues instead of calling `processInput`) and must still run identical
+    /// sanitisation rather than a second, driftable copy of these two lines.
+    private func sanitizeArrival(_ message: String, source: String) async -> String {
+        let structuralSafeEvent = PromptInjectionGuard.sanitizeUntrustedInput(message)
+        return await InjectionGuard.sanitize(structuralSafeEvent, contextTag: "system_event_\(source)", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
     }
 
     /// #185 §5.0 — the label a peer message arrives under. A CONSTANT: `processInputBody` renders
@@ -167,8 +175,17 @@ actor IrisEngine {
         let busy = await MainActor.run { localState?.hasTurnInFlight(for: targetId) ?? false }
         let attributed = Self.framePeerMessage(message, senderName: senderName, senderId: senderId)
         if busy {
+            // Round 2 fix: the busy branch used to enqueue `attributed` straight into the #172
+            // inbox, skipping both sanitisation (only `handleSystemEvent` ran it, below) and any
+            // marker distinguishing this from a message the user typed. `takePendingSteers`'
+            // consumer renders queued text as `"User (mid-task): …"` — the system's highest trust
+            // label — so an unsanitised peer message to a busy target reached the model announced
+            // as the user's own words. Sanitise here with the identical helper `handleSystemEvent`
+            // uses, and mark the entry `isPeer` so the consumer (iris.swift, the steer loop) picks
+            // a label that does not claim user authorship.
+            let safe = await sanitizeArrival(attributed, source: Self.peerSource)
             await MainActor.run {
-                localState?.enqueuePendingUserMessage(text: attributed, attachments: [], for: targetId)
+                localState?.enqueuePendingUserMessage(text: safe, attachments: [], for: targetId, isPeer: true)
             }
             return
         }
@@ -959,8 +976,8 @@ actor IrisEngine {
                 let steers = await MainActor.run { localState?.takePendingSteers(for: conversationId) ?? [] }
                 if !steers.isEmpty {
                     for steer in steers {
-                        let decision = await HookManager.shared.fireBeforeAgent(input: steer, useSandbox: hooksSandbox)
-                        var steerText = steer
+                        let decision = await HookManager.shared.fireBeforeAgent(input: steer.text, useSandbox: hooksSandbox)
+                        var steerText = steer.text
                         if case .block(let reason) = decision {
                             await pushToUI(role: .system, text: "Hook blocked message: \(reason)", conversationId: conversationId)
                             continue
@@ -969,7 +986,11 @@ actor IrisEngine {
                                   let modifiedInput = json["input"] as? String {
                             steerText = modifiedInput
                         }
-                        let content = Content(role: "user", parts: [Part(text: "User (mid-task): \(steerText)")])
+                        // #185 §5.0 (round 2 fix): "User (mid-task):" is the system's highest
+                        // trust label. A peer delivery queued through the busy path must never
+                        // wear it — the model must not be told a peer's words are the user's own.
+                        let label = steer.isPeer ? "Peer message (mid-task)" : "User (mid-task)"
+                        let content = Content(role: "user", parts: [Part(text: "\(label): \(steerText)")])
                         await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
                     }
                     history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
