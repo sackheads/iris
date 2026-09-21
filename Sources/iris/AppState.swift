@@ -58,6 +58,15 @@ struct TokenUsage: Codable, Equatable, Sendable {
     }
 }
 
+/// A2A-shaped identity a session advertises to its peers (#185 §4). Distinct from `title`, which
+/// is the user's name for the chat: the card is what the agent is doing *now* and changes as the
+/// work changes, where a title the user set deliberately should not.
+struct SessionCard: Codable, Equatable, Sendable {
+    var name: String
+    var description: String
+    var updatedAt: Date = Date()
+}
+
 struct Conversation: Identifiable, Codable, Hashable, Sendable {
     var id = UUID()
     var title: String
@@ -84,6 +93,16 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// checkpoints went starts to matter.
     var checkpointHistory: [CheckpointOutcome] = []
 
+    /// #185 -- what this session advertises to peers. Nil until the session describes itself.
+    var sessionCard: SessionCard?
+
+    /// #185 -- surfaced from the store column of the same name (`ConversationStore.swift`), which
+    /// every upsert already writes with `Date()`. Was write-only in memory before this: no
+    /// property decoded it back, so it existed only as an ORDER BY clause the search path used.
+    /// A later task orders the peer listing on it, hence the default rather than an optional --
+    /// "no recency signal yet" isn't a state that peer ordering should have to handle.
+    var updatedAt: Date = Date()
+
     init(id: UUID = UUID(), title: String, messages: [ChatMessage] = [], workspacePath: String? = nil, history: [Content] = [], tokenUsage: TokenUsage = TokenUsage(), activeGoal: String? = nil, messageCountSinceReflection: Int = 0, goalContract: GoalContract? = nil) {
         self.id = id
         self.title = title
@@ -97,7 +116,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -120,6 +139,10 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         // Invariant 1: a conversation persisted before D3 has no such key, and a throw here fails
         // the whole [Conversation] decode and drops every conversation.
         checkpointHistory = try container.decodeIfPresent([CheckpointOutcome].self, forKey: .checkpointHistory) ?? []
+        // Same invariant-1 shape as every other optional above: a legacy conversation has no
+        // sessionCard key at all, and a missing key must decode as "uncarded", not throw.
+        sessionCard = try container.decodeIfPresent(SessionCard.self, forKey: .sessionCard)
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         // Migration: a legacy conversation that had a goal (activeGoal) but no contract is
         // upgraded to a locked single-qualitative-criterion contract so in-flight goals survive.
         if goalContract == nil, let legacy = activeGoal {
