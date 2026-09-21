@@ -60,6 +60,13 @@ actor JobScheduler {
 
     /// The cadence governing a trigger, if it has one. `fsEvent` has none — it is driven by the
     /// filesystem, not the clock — and a `poll` trigger's cadence is how often its gate is checked.
+    /// When a job with this trigger would next come due after `now` — `nil` for a watch, which has
+    /// no cadence, and for a cadence with no future occurrence. `/jobs resume` recomputes through
+    /// this so a job put back on its feet lands where the polling loop would have put it.
+    static func nextFire(for trigger: Trigger, after now: Date) -> Date? {
+        cadence(of: trigger)?.next(after: now)
+    }
+
     private static func cadence(of trigger: Trigger) -> Schedule? {
         switch trigger {
         case .schedule(let schedule): return schedule

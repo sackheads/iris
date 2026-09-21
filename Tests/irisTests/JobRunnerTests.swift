@@ -322,7 +322,9 @@ struct JobRunnerTests {
         let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
         let card = try #require(activity.messages.compactMap { EventCard.decode($0.content) }.first)
         #expect(card.status == .failed)
-        #expect(card.outcome == JobRunner.noReplyReason)
+        // The reason, then what happens to the schedule because of it (#187 §4): the job's default
+        // policy retries, so the card says when rather than leaving the reader to guess.
+        #expect(card.outcome == "\(JobRunner.noReplyReason) — retrying in 1 m")
     }
 
     @Test("a run whose app state went away closes its row rather than leaving it running")

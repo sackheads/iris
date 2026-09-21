@@ -224,6 +224,9 @@ that cannot reach it.
 | --- | --- |
 | `/jobs` | A table of every job — name, trigger, when it next fires (or why it is paused), how its last run ended — then one line per unacknowledged failure, with the first eight characters of the run's id |
 | `/jobs ack <run id>` | Marks a failed or blocked run as seen: it leaves the failure list, and it stops being exempt from retention. Takes a full id or the first eight or more characters of one, as a card prints it; an ambiguous prefix is refused rather than guessed |
+| `/jobs pause <name>` | Stops a job firing, with "paused by user" as the reason the table shows |
+| `/jobs resume <name>` | Clears the pause *and* the retry ladder, and recomputes the next fire from the job's own schedule |
+| `/jobs run <name>` | Fires the job now, through the same admission a scheduled fire meets (so an overlap, the breaker or an exhausted budget still refuses it). The result arrives as a card; a paused job is refused and says so |
 | `/jobs delete <name>` | Deletes a job and its ledger rows. Refused while a run is in flight. The transcripts are left for retention to clear, so a card you are still reading keeps working |
 
 ## The job tools

@@ -40,6 +40,9 @@ actor JobRunner {
     private let calendar: Calendar
     private let config: ConfigManager
     private let protectionEnabled: Bool?
+    /// How a run keeps the Mac awake for its own duration (§4). Injected so a test can watch the
+    /// begin/end pair instead of asserting on the machine's real power state.
+    private let activity: any ActivityAPI
     /// The jobs with a run in flight right now. Every fire goes through `fire`, so one set here is
     /// the whole overlap story, whatever woke the job.
     private var inFlight: Set<UUID> = []
@@ -51,7 +54,8 @@ actor JobRunner {
          now: @escaping @Sendable () -> Date = Date.init,
          calendar: Calendar = .current,
          config: ConfigManager = .shared,
-         protectionEnabled: Bool? = nil) {
+         protectionEnabled: Bool? = nil,
+         activity: any ActivityAPI = ProcessInfoActivity()) {
         self.state = state
         self.engine = engine
         self.ledger = ledger
@@ -59,6 +63,7 @@ actor JobRunner {
         self.calendar = calendar
         self.config = config
         self.protectionEnabled = protectionEnabled
+        self.activity = activity
     }
 
     // MARK: Admission (#187 §4)
@@ -192,7 +197,7 @@ actor JobRunner {
             }
 
             inFlight.insert(current.id)
-            await run(job: current, reason: reason, changedPaths: paths)
+            await run(job: current, reason: reason, changedPaths: paths, limits: limits)
             inFlight.remove(current.id)
 
             guard let held = takeQueuedFire(job: current) else { return }
@@ -264,7 +269,7 @@ actor JobRunner {
     /// to tell.
     ///
     /// Private: `fire` is the only way in, so nothing can start a run that skipped admission.
-    private func run(job: Job, reason: String, changedPaths: [String] = []) async {
+    private func run(job: Job, reason: String, changedPaths: [String] = [], limits: JobLimits) async {
         let startedAt = now()
         guard let conversationId = await openConversation(for: job, at: startedAt) else {
             print("[JobRunner] not running \(job.name): \(Self.releasedReason)")
@@ -297,7 +302,25 @@ actor JobRunner {
         }
         let prompt = await Self.prompt(job: job, changedPaths: changedPaths,
                                        protectionEnabled: protectionEnabled)
-        await engine.processInput(prompt, source: "job:\(job.name)", conversationId: conversationId)
+
+        // The wall clock, not the injected `now`: this deadline bounds a turn that is happening
+        // right now, so a test (or a replayed occurrence) that pins the ledger's clock to another
+        // instant must not make every run time out before its first model call.
+        let deadline = Date().addingTimeInterval(TimeInterval(max(1, limits.runTimeoutSeconds)))
+        let budget = TurnBudget(maxTokens: limits.perRunTokens, deadline: deadline)
+        // Stay awake for this run, and no longer: the watchdog gives the assertion back at the
+        // deadline even when the turn overruns it, so a wedged run cannot hold the Mac awake for
+        // the rest of the session. `ActivityHolder` ends once, whichever gets there first.
+        let holder = ActivityHolder(api: activity, reason: "Iris job \(job.name)")
+        let watchdog = Task.detached {
+            let seconds = deadline.timeIntervalSinceNow
+            if seconds > 0 { try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
+            await holder.end()
+        }
+        await engine.processInput(prompt, source: "job:\(job.name)", conversationId: conversationId,
+                                  turnBudget: budget)
+        watchdog.cancel()
+        await holder.end()
         let finishedAt = now()
 
         guard let turn = await readTurn(conversationId: conversationId) else {
@@ -320,15 +343,103 @@ actor JobRunner {
             print("[JobRunner] could not close the run for \(job.name): \(error)")
         }
 
+        // Decided before the card is built, because what happens to the schedule next is part of
+        // what the card has to say: "failed" and "failed, trying again in a minute" are different
+        // news to someone who has to decide whether to go and look.
+        let retry = Self.retryDecision(status: status, attempt: job.retryAttempt,
+                                       retryEnabled: job.policy.retry, now: finishedAt)
+        await apply(retry, job: job, status: status)
+
         let card = EventCard(runId: run.id, jobId: job.id, jobName: job.name, status: status,
                              // A card shows one line. With no reply to show, that line is why
                              // there is none (§6.2) — a blank failed card tells nobody anything.
-                             outcome: outcome ?? failureReason, blockedTool: blockedTool,
+                             outcome: Self.cardOutcome(outcome ?? failureReason, retry: retry,
+                                                       now: finishedAt),
+                             blockedTool: blockedTool,
                              startedAt: startedAt, finishedAt: finishedAt,
                              totalTokens: turn.tokens.totalTokenCount,
                              transcriptConversationId: conversationId)
         await closeSession(conversationId, status: card.statusText)
         await deliver(card, for: job)
+    }
+
+    // MARK: Retry and pause (#187 §4, "after a run")
+
+    /// The ladder a failing job climbs: one minute, five, twenty-five. Long enough that a provider
+    /// outage or a rate limit has a chance to clear between attempts, short enough that a job
+    /// whose next scheduled fire is hours away still gets a second chance today.
+    static let backoff: [TimeInterval] = [60, 300, 1_500]
+
+    /// The pause reason the run after the last rung writes. Three failures in a row is not a
+    /// transient failure any more, and a job that keeps failing keeps spending.
+    static let retriesExhaustedReason = "failed 3 times; paused"
+
+    /// What a finished run does to the job's schedule.
+    enum RetryDecision: Equatable, Sendable {
+        case none
+        case retry(at: Date)
+        case pause(reason: String)
+    }
+
+    /// Pure, so the whole ladder can be read at once. Only `failed` retries: `blockedOnApproval`
+    /// needs a person (running it again would block again), `interrupted` was not the job's doing,
+    /// and `completed` has nothing to try again — it is the caller that clears the ladder, because
+    /// "no change" and "reset to zero" are the same decision here.
+    static func retryDecision(status: JobRun.Status, attempt: Int, retryEnabled: Bool,
+                              now: Date) -> RetryDecision {
+        guard status == .failed, retryEnabled else { return .none }
+        guard attempt < backoff.count else { return .pause(reason: retriesExhaustedReason) }
+        return .retry(at: now.addingTimeInterval(backoff[attempt]))
+    }
+
+    /// Writes the decision to the job row. The next fire is moved to the retry instant rather than
+    /// left on the cadence: a job on a daily schedule that failed at 09:00 should try again at
+    /// 09:01, and the scheduler recomputes the ordinary cadence from the run after it.
+    private func apply(_ decision: RetryDecision, job: Job, status: JobRun.Status) async {
+        do {
+            switch decision {
+            case .none:
+                // A run that finally worked is off the ladder. Read back rather than reusing the
+                // snapshot's `nextFireAt`: the scheduler advanced the cadence before this fire.
+                guard status == .completed, job.retryAttempt > 0 else { return }
+                let stored = try ledger.job(id: job.id)
+                try ledger.setRetry(jobId: job.id, attempt: 0, nextFireAt: stored?.nextFireAt)
+            case .retry(let at):
+                try ledger.setRetry(jobId: job.id, attempt: job.retryAttempt + 1, nextFireAt: at)
+            case .pause(let reason):
+                // The attempt count is left where it is: `/jobs resume` clears both, and until
+                // then the table can say how the job got here.
+                try ledger.setPaused(jobId: job.id, reason: reason)
+            }
+        } catch {
+            print("[JobRunner] could not record the retry state of \(job.name): \(error)")
+        }
+    }
+
+    /// The card's one line, with what happens next on the end of it. A run that is going to be
+    /// tried again and one that has given up look identical otherwise, and the difference is the
+    /// whole question a person reading the card is asking.
+    static func cardOutcome(_ base: String?, retry: RetryDecision, now: Date) -> String? {
+        switch retry {
+        case .none:
+            return base
+        case .retry(let at):
+            return join(base, "retrying in \(retryDelayText(at.timeIntervalSince(now)))")
+        case .pause(let reason):
+            return join(base, reason)
+        }
+    }
+
+    private static func join(_ base: String?, _ tail: String) -> String {
+        guard let base, !base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return tail }
+        return base + " — " + tail
+    }
+
+    /// One unit, the way the next-fire column reads: "1 m", "25 m", "2 h".
+    static func retryDelayText(_ seconds: TimeInterval) -> String {
+        if seconds < 60 { return "\(max(0, Int(seconds.rounded()))) s" }
+        if seconds < 3_600 { return "\(Int((seconds / 60).rounded())) m" }
+        return "\(Int((seconds / 3_600).rounded())) h"
     }
 
     /// The run's own hidden conversation, registered in the session strip. `nil` when the app

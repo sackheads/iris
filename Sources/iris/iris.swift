@@ -2,6 +2,33 @@ import Foundation
 import SwiftUI
 import KeyboardShortcuts
 
+/// What one turn may spend before it is stopped (#187 §4). An unattended run has nobody watching
+/// it, so the two ways a turn runs away — rounds that keep spending tokens, and a turn that never
+/// comes back — are bounded here rather than left to the user noticing.
+///
+/// Both figures are absolute, not remaining: the tokens are the conversation's accumulated total
+/// (a job's conversation is fresh, so that total IS the run's cost) and the deadline is a wall
+/// clock instant, so nothing has to be decremented as the turn goes and a check that never runs
+/// cannot leave a stale allowance behind.
+struct TurnBudget: Sendable, Equatable {
+    /// Non-positive means no token limit, matching `JobRunner.admit`'s reading of the daily ones:
+    /// nothing configurable produces one, but a hand-written policy can, and "this job may never
+    /// make a single model call" is a worse reading of 0 than "unbounded".
+    let maxTokens: Int
+    let deadline: Date
+
+    static let tokensExceeded = "budget: tokens exceeded"
+    static let timeExceeded = "budget: time exceeded"
+
+    /// Why the turn must not make another model call, or `nil` to go ahead. Tokens are named
+    /// first when both are gone: a person can act on the figure that was spent.
+    func stopReason(tokensUsed: Int, now: Date) -> String? {
+        if maxTokens > 0, tokensUsed >= maxTokens { return Self.tokensExceeded }
+        if now >= deadline { return Self.timeExceeded }
+        return nil
+    }
+}
+
 actor IrisEngine {
     /// The reflection turn fired after a goal completes. Shared with `AppState`, which completes a
     /// goal whose last criteria the user judged — that path returns from this handler long before
@@ -683,6 +710,27 @@ actor IrisEngine {
         }
     }
 
+    /// The budget stop (#187 §4): the turn ends here and now, with no further model call.
+    ///
+    /// Deliberately not `softStopWithSummary`, which is the *goal loop's* stop: that one re-enters
+    /// `processInput` to ask for a summary, which is one more model call — exactly the thing an
+    /// exhausted budget says there is no allowance for — and it asks for `goal_complete`, which a
+    /// background run has neither a goal nor a callback for. The line carries `softStopMarker` all
+    /// the same, because that marker is the signal `JobRunner` reads back out of the transcript to
+    /// finish the row `failed` with this reason (§6.2); a second spelling of it would report a run
+    /// that was cut off as a clean completion.
+    private func endTurnForBudget(conversationId: UUID, reason: String) async {
+        cancelReprompt(for: conversationId)
+        loopDetectors[conversationId] = nil
+        blockedResultTrackers[conversationId] = nil
+        // No goal on a job run, but an attended turn given a budget must not be reprompted into
+        // spending past it either.
+        let localState = state
+        await MainActor.run { localState?.clearGoal(for: conversationId) }
+        await pushToUI(role: .system, text: "[\(approvalOrigin)] \(reason). \(Self.softStopMarker)",
+                       conversationId: conversationId)
+    }
+
     private var approvalOrigin: String {
         switch principal {
         case .main: return "Main agent"
@@ -755,18 +803,18 @@ actor IrisEngine {
         }
     }
 
-    func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false) async {
+    func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil) async {
         await withEngineTurn(conversationId) {
             let turnID = PerformanceProfiler.shared.beginTurn(label: input, source: source)
             let turnStart = CFAbsoluteTimeGetCurrent()
             await PerformanceProfiler.$currentTurnID.withValue(turnID) {
-                await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete)
+                await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, turnBudget: turnBudget)
             }
             PerformanceProfiler.shared.endTurn(turnID, totalMs: (CFAbsoluteTimeGetCurrent() - turnStart) * 1000.0)
         }
     }
 
-    private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false) async {
+    private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil) async {
         if source == "UI" {
             loopDetectors[conversationId] = nil
             blockedResultTrackers[conversationId] = nil
@@ -1238,6 +1286,20 @@ actor IrisEngine {
             // Cooperative cancellation: bail out at turn boundaries if this task was cancelled
             // (e.g. the conversation was deleted or the goal was stopped mid-turn).
             if Task.isCancelled { earlyEnd = Self.stoppedByUserReason; break }
+            // The per-run budget (#187 §4), read before the call this round would make — including
+            // the first, so a deadline already passed when the turn starts costs nothing at all.
+            // The conversation's accumulated usage is what is compared: a job's conversation is
+            // fresh, so its total is this run's spend.
+            if let turnBudget {
+                let spent = await MainActor.run {
+                    localState?.conversations.first(where: { $0.id == conversationId })?.tokenUsage.totalTokenCount ?? 0
+                }
+                if let reason = turnBudget.stopReason(tokensUsed: spent, now: Date()) {
+                    turnFinished = true
+                    await endTurnForBudget(conversationId: conversationId, reason: reason)
+                    break
+                }
+            }
             // One streamer per model round: it owns the agent row this round grows in place.
             let streamer = makeStreamer(conversationId: conversationId)
             do {
