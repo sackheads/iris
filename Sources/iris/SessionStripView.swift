@@ -86,9 +86,11 @@ struct SessionStripView: View {
                 // keep the first layout's size, which `TranscriptSizing`'s estimate covers.
                 if #available(macOS 15, *) {
                     SubagentTranscriptSheet(state: state, sessionId: id)
+                        .id(id)  // fresh @State (measured height) per session, not carried over
                         .presentationSizing(.fitted)
                 } else {
                     SubagentTranscriptSheet(state: state, sessionId: id)
+                        .id(id)
                 }
             }
         }
@@ -210,6 +212,9 @@ private func statusGlyph(_ phase: SessionSummary.Phase) -> some View {
     }
 }
 
+/// #19's "dedicated way to browse subagent logs": a read-only transcript for one subagent/
+/// evaluator conversation. Never shown for the main row (`SessionStripView` never sets
+/// `transcriptSessionId` for it).
 private struct SubagentTranscriptSheet: View {
     var state: AppState
     let sessionId: UUID
@@ -223,7 +228,7 @@ private struct SubagentTranscriptSheet: View {
     private var role: String {
         state.sessions.first { $0.id == sessionId }?.role ?? conversation?.title ?? "Session"
     }
-    /// The window is sized from this on the first layout pass, before any `GeometryReader` has
+    /// The window is sized from this on the first layout pass, before `onGeometryChange` has
     /// reported, so until a measurement exists it comes from `TranscriptSizing`'s text estimate.
     /// On macOS 15+ `.presentationSizing(.fitted)` lets the measured value take over afterwards.
     private var sheetHeight: CGFloat {
@@ -254,7 +259,7 @@ private struct SubagentTranscriptSheet: View {
             if let conversation, !conversation.messages.isEmpty {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        // A plain VStack, not lazy: the height preference below has to cover the
+                        // A plain VStack, not lazy: the `onGeometryChange` below has to cover the
                         // whole transcript, and a subagent log is short enough to lay out eagerly.
                         VStack(alignment: .leading, spacing: 8) {
                             ForEach(conversation.messages) { message in
