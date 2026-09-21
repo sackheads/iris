@@ -27,6 +27,11 @@ extension JobProfile {
     /// run's own conversation, and `JobProfileTests` pins the resulting surface as a set so the
     /// decision cannot be made by accident.
     ///
+    /// It is a ceiling, not the offer. `list_jobs` and `get_job_run` are declared only in a pinned
+    /// conversation (`IrisEngine.jobToolDeclarations(isPinned:)`) and a run's hidden conversation
+    /// never is, so they sit here without ever reaching a run's tool surface. That is deliberate:
+    /// the dispatcher's answer must not depend on how the declaration list happened to be built.
+    ///
     /// Two tools are judged dynamically rather than listed: `run_command` (allowed only in the
     /// container) and MCP tools (allowed only where the server annotated them read-only). Notably
     /// absent: `set_workspace`, because a workspace is what gives a sandboxed `run_command` a

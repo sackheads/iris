@@ -441,12 +441,12 @@ struct JobProfileTests {
         #expect(!IrisEngine.profileDeniedToolResult(tool: "write_file").contains("User denied"))
     }
 
-    // MARK: The predicate behind "always in the VM"
+    // MARK: The predicate behind "a mutating job's commands always run in the VM"
 
     @Test("a mutating job needs the runtime AND the master switch, not either alone")
     func mutatingJobCanRunNeedsBothHalves() {
         // Both call sites inject this in tests, so the production predicate — the whole of the
-        // "always runs in the container" claim — is only exercised here. `enableSandboxing` off
+        // "a mutating job's commands always run in the container" claim — is only exercised here. `enableSandboxing` off
         // is the half a denylist-shaped fix missed: `SandboxPolicy.resolve` returns `.host` on it
         // however the conversation is pinned.
         let onName = "iris-jobprofile-on-\(UUID().uuidString)"

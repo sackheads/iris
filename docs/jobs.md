@@ -114,7 +114,13 @@ Every job has a profile, `readOnly` or `mutating`, and `readOnly` is the default
 **A read-only run's tool surface is an allowlist, not a denylist.** `JobProfile.readOnlyAllowed`
 names every tool such a run may call — today `read_file`, `search_web`, `search_memory`, `reflect`,
 the two job-reading tools, and the Google read tools (list, get, search) — and everything else is
-refused, including every tool added to Iris after this was written. That direction is deliberate: a
+refused, including every tool added to Iris after this was written. The allowlist is a ceiling, not
+a promise: what a run is actually *offered* is the intersection of it with the declarations that
+conversation builds, and the two job-reading tools are declared only in a pinned conversation (see
+"The job tools" below) while a run's hidden conversation never is. So a read-only fire's surface
+today is `read_file`, `search_web`, `search_memory` and `reflect`, plus a sandboxed `run_command`
+and whatever read-only MCP tools are connected — it cannot read its own job records, and nothing
+here offers to widen that. That direction is deliberate: a
 denylist's default answer is "allowed", and the first draft of this gate was a denylist that let a
 read-only run rewrite `SOUL.md`, `USER.md`, `memory.md` and the fact store because nobody had
 thought to name those four tools. Widening the surface is now a one-line decision with a test to
@@ -295,6 +301,12 @@ came out of a background run — read-only or mutating — runs in the container
 VM to run it in the click is refused with `sandbox unavailable`, the claim is left unspent, and it
 is never run on the host instead. A click authorises the command; it does not authorise dropping
 the isolation.
+
+Precisely: *model-issued* commands. A hook is the other way a command leaves an unattended run, and
+it does not follow this rule — a `BeforeTool` or command hook runs under the hooks sandbox setting
+and executes on the host when no container resolves. That is deliberate rather than a gap: a hook is
+configuration the user wrote, in a file only the user edits, so it is not something an unattended
+model can reach for. The rule above is about what the model can issue.
 
 A refusal is said in the conversation the card is in — the job's destination, or Iris Activity —
 because a sentence in a conversation you do not have open is the same as silence.

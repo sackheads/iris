@@ -58,9 +58,11 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// `sandboxAvailable` is whether a `mutating` job would actually get the VM it is promised —
     /// the runtime installed AND sandboxing switched on, since `SandboxPolicy.resolve`
     /// short-circuits to the host when the master switch is off, however the conversation is
-    /// pinned. Injected so the refusal can be tested on a machine either way. A `mutating` job
-    /// always runs in that VM (spec §0.2), so without it there is nowhere safe to run one and the
-    /// tool says so rather than creating a job that would quietly fall back to the host.
+    /// pinned. Injected so the refusal can be tested on a machine either way. A `mutating` job's
+    /// *commands* always run in that VM (spec §0.2) — the rest of its tools run on the host behind
+    /// the user's allowlist, as in any run — so without the VM there is nowhere safe to run a
+    /// command and the tool says so rather than creating a job whose commands would quietly fall
+    /// back to the host.
     /// `JobRunner` asks the same question again at every fire: this one can only speak for today.
     func makeJob(defaultTimeZone: String, createdIn: UUID?, existingNames: Set<String>,
                  sandboxAvailable: Bool = SandboxPolicy.mutatingJobCanRun()) -> Result<Job, ToolMessage> {
