@@ -9,8 +9,8 @@ actor IrisEngine {
     static let goalCompletionSkillCheck = "System Event [Goal Completion Skill Check]: Evaluate the goal just completed. Did you execute a complex multi-step procedure, overcome non-obvious errors, or discover a reusable recipe? If so, call `create_skill` or `update_skill` now to save or patch it in your permanent skill library."
 
     let client: any LLMClientProtocol
-    /// A value-type copy, not the shared singleton's storage: `start()` gives this engine's copy
-    /// the ledger the job tools write through (`ToolExecutor.ledgerProvider`).
+    /// A value-type copy, not the shared singleton's storage: `init` gives this engine's copy the
+    /// closure the job tools resolve the ledger through (`ToolExecutor.jobToolsProvider`).
     var executor = ToolExecutor.shared
     let manager = SkillManager.shared
     /// The fact store this engine reads and writes. Injectable so a test drives the memory tools
@@ -86,6 +86,14 @@ actor IrisEngine {
         self.checkpointAutoAdvanceOverride = checkpointAutoAdvance
         self.sessionPeerCountOverride = sessionPeerCount
         systemPrompt = nil
+        // Resolved per call, not at `start()`: an engine that never starts — a subagent, an
+        // evaluator, a scenario run — otherwise answers "Jobs are not available yet." to a tool
+        // whose ledger is sitting right there on the state it was built with.
+        executor.jobToolsProvider = { [weak state] in
+            guard let ledger = await MainActor.run(resultType: JobLedger?.self, body: { state?.store.ledger })
+            else { return nil }
+            return JobTools(ledger: ledger, watchers: .shared)
+        }
     }
 
     /// Peers this session could reach right now, excluding itself (#185 §6). Falls back to
@@ -372,8 +380,6 @@ actor IrisEngine {
         let schedulerState = state
         let jobLedger = await MainActor.run(resultType: JobLedger?.self, body: { schedulerState?.store.ledger })
         if let ledger = jobLedger {
-            // `register_directory_watcher` writes through the same ledger the scheduler polls.
-            executor.ledgerProvider = { ledger }
             let scheduler = JobScheduler(ledger: ledger)
             await scheduler.setFireHandler { [weak self] job, _ in
                 // Deliverable 1: unchanged behaviour — a fire is a system event in the job's
@@ -393,7 +399,7 @@ actor IrisEngine {
         await WatcherManager.shared.setCallback { [weak self] job, paths in
             guard let self = self else { return }
             await self.handleSystemEvent(
-                "System Event: Files modified at \(paths.joined(separator: ", ")).\nYour standing instructions for this event are: \(job.prompt)\nAnalyze the event and take action silently or acknowledge it if necessary.",
+                WatcherManager.eventMessage(job: job, paths: paths),
                 source: "FileWatcher",
                 conversationId: job.createdInConversationId)
         }
@@ -1554,16 +1560,55 @@ actor IrisEngine {
         }
     }
     
-    /// A job's next fire, written for the model: minute precision in the zone the job's own
-    /// cadence is evaluated in (the user's, for an interval), with that zone named so "09:00" is
-    /// never ambiguous when the job was created with an explicit timezone.
-    static func formatFire(_ date: Date, zone: String?) -> String {
-        let timeZone = zone.flatMap(TimeZone.init(identifier:)) ?? .current
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd HH:mm"
-        formatter.timeZone = timeZone
-        return "\(formatter.string(from: date)) \(timeZone.identifier)"
+    /// The `schedule_job` handler. Every exit is one of the tool's sentences: a raw
+    /// `ScheduleAlias.Failure` or a Swift error description would read to the model as noise it
+    /// cannot act on.
+    private func scheduleJob(_ parsed: Result<ScheduleJobArguments, ToolMessage>, conversationId: UUID?) async -> String {
+        let args: ScheduleJobArguments
+        switch parsed {
+        case .failure(let message): return message.text
+        case .success(let parsedArgs): args = parsedArgs
+        }
+
+        // The ledger reference comes off the main actor; the query itself does not — `JobLedger`
+        // is Sendable, and a jobs listing has no business blocking the UI.
+        let localState = state
+        guard let ledger = await MainActor.run(resultType: JobLedger?.self, body: { localState?.store.ledger })
+        else { return "Jobs are not available yet." }
+        let scheduler = schedulerForJobWrites(ledger: ledger)
+
+        var taken = Set(((try? ledger.jobs()) ?? []).map(\.name))
+        // Two passes: the name check above is a read before a write, so another conversation (or
+        // another engine) can take the name in between and the UNIQUE index rejects the insert.
+        // One retry under the next suffix is enough to absorb that; a second failure is real.
+        for _ in 0..<2 {
+            switch args.makeJob(defaultTimeZone: TimeZone.current.identifier,
+                                createdIn: conversationId, existingNames: taken) {
+            case .failure(let message):
+                return message.text
+            case .success(let job):
+                do {
+                    // Stored through the scheduler, not the ledger, so the first fire is computed
+                    // by the code the polling loop uses — and a cadence that matches nothing comes
+                    // back paused rather than looking scheduled.
+                    return ScheduleJobArguments.resultSentence(for: try await scheduler.schedule(job))
+                } catch {
+                    taken.insert(job.name)
+                }
+            }
+        }
+        return "Could not save the job."
+    }
+
+    /// The scheduler `schedule_job` writes through: the one `start()` built, or one made here over
+    /// the same ledger for an engine that never started. The on-demand scheduler is deliberately
+    /// not `start()`ed — a subagent must not run a second polling loop; it only needs the first
+    /// fire computed and the row written, and the app-wide loop picks the job up from the ledger.
+    private func schedulerForJobWrites(ledger: JobLedger) -> JobScheduler {
+        if let jobScheduler { return jobScheduler }
+        let scheduler = JobScheduler(ledger: ledger)
+        jobScheduler = scheduler
+        return scheduler
     }
 
     /// Renders a fact-store failure as a sentence the model can act on rather than a raw error.
@@ -1722,38 +1767,7 @@ actor IrisEngine {
                 result = "Could not parse the proposed goal contract (missing objective?)."
             }
         } else if functionCall.name == "schedule_job" {
-            switch ScheduleJobArguments.parse(functionCall.args) {
-            case .failure(let message):
-                result = message
-            case .success(let args):
-                let existing: Set<String> = await MainActor.run {
-                    guard let ledger = localState?.store.ledger else { return [] }
-                    return Set(((try? ledger.jobs()) ?? []).map(\.name))
-                }
-                switch args.makeJob(defaultTimeZone: TimeZone.current.identifier,
-                                    createdIn: conversationId, existingNames: existing) {
-                case .failure(let message):
-                    result = message
-                case .success(let job):
-                    // Storing through the scheduler, not the ledger, so the first fire is computed
-                    // by the same code the polling loop uses — and so a cadence that matches
-                    // nothing comes back paused instead of looking scheduled.
-                    guard let jobScheduler else {
-                        result = "Jobs are not available yet."
-                        break
-                    }
-                    do {
-                        let stored = try await jobScheduler.schedule(job)
-                        if let next = stored.nextFireAt, stored.pausedReason == nil {
-                            result = "Scheduled '\(stored.name)' (\(stored.trigger.summary)). Next run: \(Self.formatFire(next, zone: stored.trigger.timeZoneIdentifier))."
-                        } else {
-                            result = "Saved '\(stored.name)' but it will never fire: \(stored.pausedReason ?? JobScheduler.unmatchableReason)."
-                        }
-                    } catch {
-                        result = "Could not save the job."
-                    }
-                }
-            }
+            result = await scheduleJob(ScheduleJobArguments.parse(functionCall.args), conversationId: conversationId)
         } else if functionCall.name == "save_fact", let content = functionCall.args["content"]?.stringValue {
             let category = functionCall.args["category"]?.stringValue ?? "general"
             let entity = functionCall.args["entity"]?.stringValue

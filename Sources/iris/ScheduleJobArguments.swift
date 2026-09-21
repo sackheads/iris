@@ -1,11 +1,18 @@
 import Foundation
 
-/// A tool result carried as a plain `String` — `ScheduleJobArguments` returns
-/// `Result<_, String>`, and `Result` requires its failure type to be an `Error`. The conformance
-/// is retroactive because the whole point of these failures is that they are already the sentence
-/// the model should read: wrapping them in an error type would mean unwrapping them again at
-/// every call site, and there is nothing to carry but the text.
-extension String: @retroactive Error {}
+/// A refusal the model is meant to read, carried as the failure half of a `Result`. It is a type
+/// rather than a bare `String` because `Result`'s failure must be an `Error`, and conforming
+/// `String` to `Error` module-wide to get that would make every string in the app throwable.
+/// `ExpressibleByStringInterpolation` keeps the construction sites reading like the sentences they
+/// are, here and in the tests that pin them.
+struct ToolMessage: Error, Equatable, Sendable, ExpressibleByStringInterpolation, CustomStringConvertible {
+    let text: String
+
+    init(_ text: String) { self.text = text }
+    init(stringLiteral value: String) { self.text = value }
+
+    var description: String { text }
+}
 
 /// Everything `schedule_job` accepts, parsed once into a shape the job machinery understands.
 ///
@@ -23,15 +30,20 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// Reads the tool call's arguments. The only hard requirement is a prompt: a schedule that
     /// resolves to nothing is `makeJob`'s refusal, not this one, so the caller can report the
     /// specific thing that was wrong with the cadence rather than "bad arguments".
-    static func parse(_ args: [String: JSONValue]) -> Result<ScheduleJobArguments, String> {
+    static func parse(_ args: [String: JSONValue]) -> Result<ScheduleJobArguments, ToolMessage> {
         guard let prompt = text(args["prompt"]) else { return .failure("schedule_job needs a prompt.") }
+        let weekdays: [Int]?
+        switch weekdayList(args["weekdays"]) {
+        case .failure(let message): return .failure(message)
+        case .success(let values): weekdays = values
+        }
         let alias = ScheduleAlias(
             minute: integer(args["minute"]),
             hour: integer(args["hour"]),
             day: integer(args["day"]),
             month: integer(args["month"]),
             weekday: integer(args["weekday"]),
-            weekdays: integers(args["weekdays"]),
+            weekdays: weekdays,
             intervalSeconds: integer(args["intervalSeconds"]),
             cron: text(args["cron"]),
             timeZone: text(args["timezone"])
@@ -43,7 +55,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// Builds the job to store, or the sentence explaining why there is none. `existingNames` is
     /// every job name already in the ledger, so a second "check the PR queue" becomes
     /// `check-the-pr-queue-2` instead of colliding with the first on the ledger's UNIQUE index.
-    func makeJob(defaultTimeZone: String, createdIn: UUID?, existingNames: Set<String>) -> Result<Job, String> {
+    func makeJob(defaultTimeZone: String, createdIn: UUID?, existingNames: Set<String>) -> Result<Job, ToolMessage> {
         // D3 owns budgets and approvals; until then a job that may write is a job nobody is
         // watching, so the tool declines rather than quietly downgrading what was asked for.
         if profile?.lowercased() == JobProfile.mutating.rawValue.lowercased() {
@@ -72,13 +84,12 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// Turns a resolution failure into something the model can act on. No case interpolates the
     /// raw `Failure` or a Swift error description: the model sees a sentence naming the field it
     /// got wrong and what a correct value looks like, because that is what it needs to retry.
-    static func message(for failure: ScheduleAlias.Failure) -> String {
+    static func message(for failure: ScheduleAlias.Failure) -> ToolMessage {
         switch failure {
         case .nothingSpecified:
             return "Give a schedule: cron, intervalSeconds, or hour/minute/weekdays."
         case .invalidWeekday(let values):
-            let list = values.map(String.init).joined(separator: ", ")
-            return "Invalid weekday value(s) \(list): use 1-7 with 1 = Sunday, or a cron expression."
+            return invalidWeekdayMessage(values.map(String.init))
         case .invalidInterval(let seconds):
             return "intervalSeconds must be at least 1 (got \(seconds))."
         case .badCron(let error):
@@ -88,6 +99,33 @@ struct ScheduleJobArguments: Equatable, Sendable {
         case .conflicting:
             return "Use one of: cron, intervalSeconds, or the hour/minute/day/month/weekday fields."
         }
+    }
+
+    /// The one weekday sentence, shared by the values `ScheduleAlias` rejected as out of range and
+    /// the ones that were never numbers to begin with.
+    static func invalidWeekdayMessage(_ values: [String]) -> ToolMessage {
+        ToolMessage("Invalid weekday value(s) \(values.joined(separator: ", ")): use 1-7 with 1 = Sunday, or a cron expression.")
+    }
+
+    /// The sentence a stored job's tool call returns. Pure, so both halves — the one that fires and
+    /// the one that never will — are testable without a scheduler or a database.
+    static func resultSentence(for stored: Job) -> String {
+        guard let next = stored.nextFireAt, stored.pausedReason == nil else {
+            return "Saved '\(stored.name)' but it will never fire: \(stored.pausedReason ?? JobScheduler.unmatchableReason)."
+        }
+        return "Scheduled '\(stored.name)' (\(stored.trigger.summary)). Next run: \(formatFire(next, zone: stored.trigger.timeZoneIdentifier))."
+    }
+
+    /// A job's next fire, written for the model: minute precision in the zone the job's own cadence
+    /// is evaluated in (the user's, for an interval), with that zone named so "09:00" is never
+    /// ambiguous when the job was created with an explicit timezone.
+    static func formatFire(_ date: Date, zone: String?) -> String {
+        let timeZone = zone.flatMap(TimeZone.init(identifier:)) ?? .current
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        formatter.timeZone = timeZone
+        return "\(formatter.string(from: date)) \(timeZone.identifier)"
     }
 
     private static func cronMessage(_ error: CronParseError) -> String {
@@ -121,21 +159,29 @@ struct ScheduleJobArguments: Equatable, Sendable {
 
     /// An integer from any of the three shapes a model sends one in. A fractional double is
     /// truncated: "every 1.5 minutes" is a cadence cron cannot express, and 1 is closer to the
-    /// request than a refusal.
+    /// request than a refusal. A double that no `Int` can hold (`1e30`) is unreadable rather than
+    /// a trap — `Int(_: Double)` crashes on those, and the value came from a model.
     private static func integer(_ value: JSONValue?) -> Int? {
         switch value {
         case .int(let int): return int
-        case .double(let double): return double.isFinite ? Int(double) : nil
+        case .double(let double): return double.isFinite ? Int(exactly: double.rounded(.towardZero)) : nil
         case .string(let string): return Int(string.trimmingCharacters(in: .whitespaces))
         default: return nil
         }
     }
 
-    /// The `weekdays` array, with anything unreadable dropped. An empty result is nil rather than
-    /// `[]` so it reads as "not specified" to `ScheduleAlias`.
-    private static func integers(_ value: JSONValue?) -> [Int]? {
-        guard case .array(let items) = value else { return nil }
-        let values = items.compactMap { integer($0) }
-        return values.isEmpty ? nil : values
+    /// The `weekdays` array. An element that is not a number is a refusal, not a silent drop:
+    /// dropping `["monday", "tuesday"]` would leave no weekday at all, and a cron with `*` for
+    /// day-of-week runs every day — far more than was asked for. Absent or empty reads as "not
+    /// specified", which is what `ScheduleAlias` expects.
+    private static func weekdayList(_ value: JSONValue?) -> Result<[Int]?, ToolMessage> {
+        guard case .array(let items) = value else { return .success(nil) }
+        var values: [Int] = []
+        var unreadable: [String] = []
+        for item in items {
+            if let int = integer(item) { values.append(int) } else { unreadable.append(item.stringValue) }
+        }
+        guard unreadable.isEmpty else { return .failure(invalidWeekdayMessage(unreadable)) }
+        return .success(values.isEmpty ? nil : values)
     }
 }

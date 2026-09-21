@@ -47,8 +47,9 @@ struct ToolExecutorWorkspaceTests {
     func relativeWatcherResolvesToWorkspace() async throws {
         // The tool now writes a job, so it needs a ledger to write into (nil declines instead).
         let store = try ConversationStore.inMemory()
+        let watchers = WatcherManager(ledger: store.ledger)
         var executor = ToolExecutor()
-        executor.ledgerProvider = { store.ledger }
+        executor.jobToolsProvider = { JobTools(ledger: store.ledger, watchers: watchers) }
 
         let result = await executor.execute(
             name: "register_directory_watcher",
@@ -60,6 +61,36 @@ struct ToolExecutorWorkspaceTests {
         #expect(!result.contains(FileManager.default.currentDirectoryPath + "/src"))
         // And the job it stored watches that same resolved path.
         #expect(try store.ledger.jobs().first?.trigger == .fsEvent(FSWatch(path: "/ws/src", quietWindowSeconds: 3)))
+        await watchers.stopAll()
+    }
+
+    @Test("registering the same directory twice rewrites the one job instead of doubling the watch")
+    func watcherReregistration() async throws {
+        let store = try ConversationStore.inMemory()
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-watch-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let watchers = WatcherManager(ledger: store.ledger)
+        var executor = ToolExecutor()
+        executor.jobToolsProvider = { JobTools(ledger: store.ledger, watchers: watchers) }
+        let args: [String: JSONValue] = ["path": .string(tmp.path), "instructions": .string("first")]
+
+        _ = await executor.execute(name: "register_directory_watcher", args: args)
+        let firstJob = try #require(try store.ledger.jobs().first)
+        let second = await executor.execute(
+            name: "register_directory_watcher",
+            args: ["path": .string(tmp.path), "instructions": .string("second")])
+
+        let jobs = try store.ledger.jobs()
+        #expect(jobs.count == 1)                      // one directory, one job
+        #expect(jobs.first?.id == firstJob.id)        // the same job, rewritten
+        #expect(jobs.first?.name == firstJob.name)
+        #expect(jobs.first?.prompt == "second")       // with the latest standing instructions
+        #expect(second.contains(tmp.path))
+        #expect(await watchers.activeJobIds.count == 1)
+        await watchers.stopAll()
     }
 
     @Test("register_directory_watcher declines when no ledger is wired up")

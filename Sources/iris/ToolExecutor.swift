@@ -1,14 +1,28 @@
 import Foundation
 
+/// What the job-creating tools need from the app: the ledger to write into, and the watcher
+/// manager to reload once the write lands. They travel together because a watch job that is
+/// stored but not reloaded does nothing until the next launch.
+struct JobTools: Sendable {
+    let ledger: JobLedger
+    let watchers: WatcherManager
+
+    init(ledger: JobLedger, watchers: WatcherManager) {
+        self.ledger = ledger
+        self.watchers = watchers
+    }
+}
+
 struct ToolExecutor {
     static let shared = ToolExecutor()
 
-    /// How `register_directory_watcher` reaches the jobs table. The executor is a value type
-    /// built long before the conversation store opens, so the engine hands it a closure at
-    /// `start()` rather than a ledger at construction. nil — the case for `ToolExecutor.shared`
-    /// and for the plugin auth runner's throwaway executor — means the tool declines instead of
-    /// silently registering a watch nothing will ever run.
-    var ledgerProvider: (@Sendable () async -> JobLedger?)?
+    /// How `register_directory_watcher` reaches the jobs table and the watchers running off it.
+    /// The executor is a value type built long before the conversation store opens, so the engine
+    /// hands it a closure that resolves both on demand rather than a ledger at construction — an
+    /// engine that never calls `start()` (a subagent, an evaluator, a scenario run) still gets a
+    /// working tool. nil — the case for `ToolExecutor.shared` and for the plugin auth runner's
+    /// throwaway executor — means the tool declines instead of registering a watch nothing runs.
+    var jobToolsProvider: (@Sendable () async -> JobTools?)?
 
     /// Merges the captured login-shell PATH (`loginPath`) ahead of `base`'s own `PATH`, so host
     /// `run_command` invocations see pyenv/nvm/Homebrew shims that only `.zprofile`/`.zshrc` set up
@@ -195,18 +209,35 @@ struct ToolExecutor {
     /// Stores a `.fsEvent` job for `path` and restarts the watch set. The job is named after the
     /// directory being watched rather than the instructions, because that is what a user scanning
     /// the jobs list is looking for.
+    ///
+    /// Re-registering a path already watched rewrites that job's instructions in place rather than
+    /// adding a second one: the model re-states a standing instruction often (a new turn, a
+    /// rephrasing), and two jobs on one directory means two watchers and two turns per save.
     private func registerWatcher(path: String, instructions: String, conversationId: UUID?) async -> String {
-        guard let ledger = await ledgerProvider?() else { return "Jobs are not available yet." }
+        guard let tools = await jobToolsProvider?() else { return "Jobs are not available yet." }
         do {
-            let existing = Set(try ledger.jobs().map(\.name))
-            let base = Job.slug(from: URL(fileURLWithPath: path).lastPathComponent)
-            let job = Job(
-                name: ScheduleJobArguments.uniqueName(base, existing: existing),
-                prompt: instructions,
-                trigger: .fsEvent(FSWatch(path: path, quietWindowSeconds: 3)),
-                createdInConversationId: conversationId)
-            try ledger.upsert(job)
-            await WatcherManager.shared.reload()
+            let jobs = try tools.ledger.jobs()
+            var job: Job
+            let watchesPath: (Job) -> Bool = { job in
+                guard case .fsEvent(let watch) = job.trigger else { return false }
+                return watch.path == path
+            }
+            if var existing = jobs.first(where: watchesPath) {
+                // An explicit "watch this" is also a request for it to be on.
+                existing.prompt = instructions
+                existing.enabled = true
+                job = existing
+            } else {
+                job = Job(
+                    name: ScheduleJobArguments.uniqueName(
+                        Job.slug(from: URL(fileURLWithPath: path).lastPathComponent),
+                        existing: Set(jobs.map(\.name))),
+                    prompt: instructions,
+                    trigger: .fsEvent(FSWatch(path: path, quietWindowSeconds: 3)),
+                    createdInConversationId: conversationId)
+            }
+            try tools.ledger.upsert(job)
+            await tools.watchers.reload()
             return "Watching \(path) as job '\(job.name)'. It runs in the background when files change; you will be notified automatically."
         } catch {
             return "Could not save the watcher job."
