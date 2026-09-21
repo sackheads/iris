@@ -51,6 +51,13 @@ public final class CoreMLEvaluator: @unchecked Sendable {
     }
     
     public func loadModelIfNeeded() async throws {
+        // A scope answers for itself: one holding a model needs no load, and one holding `nil`
+        // means "explicitly no model" and must not acquire one. Without this, a scoped-nil body
+        // makes `hasModelLoaded` false, falls through to the disk load below, and — on a machine
+        // where the bundle is present — ends at `setModel(liveModel)`, writing a live classifier
+        // into the PROCESS-GLOBAL slot that every unscoped path then reads. That is the leak this
+        // seam exists to close, so the check belongs ahead of the config read, not after it.
+        if Self.scopedModel != nil { return }
         if hasModelLoaded { return }
         let coreMLPathStr = ConfigManager.shared.promptGuardCoreMLModel
         if coreMLPathStr.isEmpty { return }

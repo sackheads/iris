@@ -11,7 +11,11 @@ import Foundation
 /// These pin the replacement: a model or engine set with `withValue` is visible to the real
 /// sanitize path inside that scope — including across a MainActor hop and into a child task,
 /// which is what an engine turn actually does — and invisible outside it.
-@Suite("guard test isolation (#237)")
+// `.serialized` because `scopedNone` is the one test left that writes the process-global model
+// (deliberately, to prove a nil scope beats an installed one) and `scopedNilDoesNotLoad` asserts
+// that global is clean. Ordering within this suite is enough: after the migration no OTHER suite
+// writes it, which is the whole point of the PR.
+@Suite("guard test isolation (#237)", .serialized)
 struct GuardTestIsolationTests {
     @Test("a scoped model is visible through the real sanitize path")
     func scopedVisible() async {
@@ -65,5 +69,22 @@ struct GuardTestIsolationTests {
         await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
             #expect(!CoreMLEvaluator.shared.hasModelLoaded)
         }
+    }
+
+    /// A scoped-nil body must not acquire a model. Pre-fix, `hasModelLoaded` was false inside the
+    /// scope, so `loadModelIfNeeded` ran the disk load and `setModel(liveModel)` installed a live
+    /// classifier into the process-global slot — visible to every unscoped path.
+    ///
+    /// Honest about its reach: this only *fails* on a machine where the guard bundle is actually
+    /// downloaded, because otherwise the config path is empty and the old code returned early too.
+    /// It cannot assert its way past that without a config seam `CoreMLEvaluator` does not have
+    /// (mutating `ConfigManager.shared` is invariant 7). It never passes falsely, and it is a real
+    /// regression guard on a provisioned machine, which is where the leak was found.
+    @Test("a scoped-nil body never installs a model into the global slot")
+    func scopedNilDoesNotLoad() async {
+        await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
+            try? await CoreMLEvaluator.shared.loadModelIfNeeded()
+        }
+        #expect(!CoreMLEvaluator.shared.hasModelLoaded, "a scoped-nil load leaked into the process-global model")
     }
 }

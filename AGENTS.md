@@ -87,7 +87,7 @@ docs/                     # design specs, plans, reviews, roadmaps
    - **`ConfigManager.shared`** — construct an isolated `ConfigManager(store:)` over your own `UserDefaults` suite and inject it, or pass injectable parameters (`protectionEnabled:`, `workspaceToolsEnabled:`). Its setters also *persist*, so a bad value used to outlive the process and poison the next run (#109). A bare `ConfigManager()` does not isolate you — it is a separate object over the same process-global store (#193).
    - **The guard tiers** — use the task-scoped seams, not the singletons: `CoreMLEvaluator.$scopedModel.withValue(.init(model))` and `AuxiliaryModelManager.$scopedEngines.withValue(["canary": engine])`. `.init(nil)` means *explicitly no model*, which is different from no scope. Before these existed, one suite's malicious-probability mock blocked another suite's content and the first diagnosis blamed `ConfigManager`, which no test touches (#237).
    - **The working directory** — `FileManager.changeCurrentDirectoryPath` moves the whole process. Pass the base in instead (`BinaryResolver.resolve(relativeTo:)`), and resolve repo-relative paths from `#filePath`, not from the cwd (`PerfPaths.repoRoot`) (#242, #160).
-   - **Still outstanding:** `PerformanceProfiler.shared` is read by four suites and only one is `.serialized` — and `.serialized` orders tests *within* a suite, never across them.
+   - **Still outstanding (#250):** `PerformanceProfiler.shared` is read by four suites and only one is `.serialized` — and `.serialized` orders tests *within* a suite, never across them.
 
    See **Build and test** above.
 
