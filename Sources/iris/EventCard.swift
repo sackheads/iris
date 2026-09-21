@@ -75,8 +75,16 @@ struct EventCard: Codable, Equatable, Sendable {
         jobName = try container.decodeIfPresent(String.self, forKey: .jobName) ?? "unknown"
         // Decoded through its raw value rather than as `JobRun.Status` directly: a status this
         // build does not know about degrades to `.completed` instead of throwing away the card.
-        let rawStatus = try container.decodeIfPresent(String.self, forKey: .status)
-        status = rawStatus.flatMap(JobRun.Status.init(rawValue:)) ?? .completed
+        // Decoded through its raw value rather than as `JobRun.Status` directly, and the two ways
+        // it can be missing are NOT the same: an absent key is an older card that predates the
+        // field, which was only ever written for a completed run; a present-but-unrecognised value
+        // is a status a newer build invented, and the one thing a card must not do is paint an
+        // unknown status green. Unknown degrades to `.interrupted` — grey, no claim of success.
+        if let rawStatus = try container.decodeIfPresent(String.self, forKey: .status) {
+            status = JobRun.Status(rawValue: rawStatus) ?? .interrupted
+        } else {
+            status = .completed
+        }
         outcome = try container.decodeIfPresent(String.self, forKey: .outcome)
         blockedTool = try container.decodeIfPresent(String.self, forKey: .blockedTool)
         let started = try container.decodeIfPresent(Date.self, forKey: .startedAt)
@@ -162,9 +170,9 @@ struct EventCard: Codable, Equatable, Sendable {
     /// its id, which is enough for `/jobs ack <run id>` to match on.
     var historyLine: String {
         let runPrefix = runId.uuidString.lowercased().prefix(8)
-        let body = (outcome?.isEmpty == false) ? " \(jobName) \(statusText): \(outcome!)"
-                                               : " \(jobName) \(statusText)"
-        return "[Event] job\(body) (run \(runPrefix))"
+        let head = "[Event] job \(jobName) \(statusText)"
+        guard let outcome, !outcome.isEmpty else { return "\(head) (run \(runPrefix))" }
+        return "\(head): \(outcome) (run \(runPrefix))"
     }
 }
 
@@ -183,10 +191,40 @@ extension ChatMessage {
         }
     }
 
-    /// The text those same paths print: an event card collapses to its one-line `transcriptLine`
-    /// rather than dumping its JSON, everything else is its content verbatim.
+    /// The text those same paths print — what this message *reads* as outside the app, which is
+    /// not always its stored content: an event card collapses to its one-line `transcriptLine`
+    /// rather than dumping its JSON, and an LLM-error system row to its headline rather than the
+    /// `[LLM_ERROR]`-prefixed JSON it is encoded as. Fix round 1: the Markdown export already did
+    /// the latter and the other three paths did not, which is exactly the kind of drift that put
+    /// four copies of the role ternary in the tree to begin with.
     var exportText: String {
-        guard role == .event else { return content }
-        return EventCard.decode(content)?.transcriptLine ?? content
+        switch role {
+        case .event: return EventCard.decode(content)?.transcriptLine ?? content
+        case .system: return LLMErrorMessage.parse(content)?.headline ?? content
+        case .user, .agent, .command: return content
+        }
+    }
+
+    /// How an export renders a message block. The Markdown form is what "Copy as Markdown" and
+    /// the `.md` export write; the plain form is what a plain copy and the transcript sheet write.
+    enum ExportFormat: Sendable {
+        case markdown
+        case plainText
+    }
+
+    /// One message as an export renders it, without a trailing separator — callers join blocks
+    /// with a blank line. Fix round 1: the four export paths shared only the role name, and each
+    /// still interpolated `content` directly, so an `.event` row exported as raw card JSON under
+    /// an "Event" heading. Whole-block, one definition, four call sites.
+    func exportLine(format: ExportFormat) -> String {
+        switch format {
+        case .markdown:
+            // `.system` and `.event` render as compact one-line cards in the transcript, so they
+            // export as inline code rather than as a paragraph of prose.
+            let body = (role == .system || role == .event) ? "`\(exportText)`" : exportText
+            return "### \(exportRoleName)\n\(body)"
+        case .plainText:
+            return "\(exportRoleName):\n\(exportText)"
+        }
     }
 }

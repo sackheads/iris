@@ -51,6 +51,39 @@ struct TranscriptSizingTests {
         #expect(long < 160)
     }
 
+    /// #187: an event row is stored as card JSON and drawn as one line of `transcriptLine`, so it
+    /// has to be sized from the line, not from the payload. `blockedTool` is padded here because
+    /// it is the one long field that does NOT appear in the transcript line — the JSON is over
+    /// 400 characters while the line it renders as stays short.
+    @Test("an event row is sized from its one-line card, not its JSON")
+    func eventRowSizedFromCard() {
+        let card = EventCard(runId: UUID(), jobId: UUID(), jobName: "pr-sweep",
+                             status: .blockedOnApproval, outcome: "swept 3 PRs",
+                             blockedTool: String(repeating: "x", count: 250),
+                             startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                             finishedAt: Date(timeIntervalSince1970: 1_700_000_075),
+                             totalTokens: 4_200, transcriptConversationId: UUID())
+        let json = card.encodedContent()
+        #expect(json.count > 400)
+
+        let asEvent = TranscriptSizing.estimatedContentHeight(
+            messages: [(role: ChatRole.event, content: json)], width: 560)
+        let asOneLine = TranscriptSizing.estimatedContentHeight(
+            messages: [(role: ChatRole.agent, content: card.transcriptLine)], width: 560)
+        let asRawJSON = TranscriptSizing.estimatedContentHeight(
+            messages: [(role: ChatRole.agent, content: json)], width: 560)
+
+        #expect(asEvent == asOneLine)
+        #expect(asEvent < asRawJSON)
+    }
+
+    @Test("an undecodable event row falls back to its raw content")
+    func eventRowFallback() {
+        let h = TranscriptSizing.estimatedContentHeight(
+            messages: [(role: ChatRole.event, content: "not a card")], width: 560)
+        #expect(h > TranscriptSizing.perMessageChrome)
+    }
+
     @Test("sheet height clamps content plus chrome into the allowed band")
     func clamp() {
         #expect(TranscriptSizing.sheetHeight(forContent: 0) == TranscriptSizing.minSheetHeight)

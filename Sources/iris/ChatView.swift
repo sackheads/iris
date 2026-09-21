@@ -268,21 +268,11 @@ struct ChatView: View {
                             
                             if selectedMessages.isEmpty { return [] }
                             
-                            var text = ""
-                            let asMarkdown = ConfigManager.shared.copyChatsAsMarkdown
-                            for msg in selectedMessages {
-                                let roleName = msg.exportRoleName
-                                if asMarkdown {
-                                    text += "### \(roleName)\n"
-                                    if msg.role == .system {
-                                        text += "`\(msg.content)`\n\n"
-                                    } else {
-                                        text += "\(msg.content)\n\n"
-                                    }
-                                } else {
-                                    text += "\(roleName):\n\(msg.content)\n\n"
-                                }
-                            }
+                            let format: ChatMessage.ExportFormat =
+                                ConfigManager.shared.copyChatsAsMarkdown ? .markdown : .plainText
+                            let text = selectedMessages
+                                .map { $0.exportLine(format: format) }
+                                .joined(separator: "\n\n") + "\n\n"
                             return [NSItemProvider(object: text as NSString)]
                         }
                         .background(Color(NSColor.textBackgroundColor))
@@ -662,16 +652,11 @@ struct ChatView: View {
     private func exportConversation(id: UUID) {
         guard let conv = state.conversations.first(where: { $0.id == id }) else { return }
         
+        // `exportLine` carries the `.system` LLM-error headline substitution this loop used to do
+        // inline, plus the `.event` card's transcript line; see `ChatMessage.exportText`.
         var markdown = "# \(conv.title)\n\n"
         for msg in conv.messages {
-            let roleName = msg.exportRoleName
-            markdown += "### \(roleName)\n"
-            if msg.role == .system {
-                let line = LLMErrorMessage.parse(msg.content)?.headline ?? msg.content
-                markdown += "`\(line)`\n\n"
-            } else {
-                markdown += "\(msg.content)\n\n"
-            }
+            markdown += msg.exportLine(format: .markdown) + "\n\n"
         }
         
         let panel = NSSavePanel()
@@ -708,20 +693,10 @@ struct ChatView: View {
         
         guard !selectedMessages.isEmpty else { return }
         
-        var text = ""
-        for msg in selectedMessages {
-            let roleName = msg.exportRoleName
-            if asMarkdown {
-                text += "### \(roleName)\n"
-                if msg.role == .system {
-                    text += "`\(msg.content)`\n\n"
-                } else {
-                    text += "\(msg.content)\n\n"
-                }
-            } else {
-                text += "\(roleName):\n\(msg.content)\n\n"
-            }
-        }
+        let format: ChatMessage.ExportFormat = asMarkdown ? .markdown : .plainText
+        let text = selectedMessages
+            .map { $0.exportLine(format: format) }
+            .joined(separator: "\n\n") + "\n\n"
         
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()

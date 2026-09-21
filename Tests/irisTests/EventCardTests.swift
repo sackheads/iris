@@ -73,14 +73,18 @@ struct EventCardTests {
         #expect(decoded?.totalTokens == 4_200)
     }
 
-    @Test("decode tolerates an unknown status rather than failing the whole card")
+    /// Fix round 1: an unrecognised status is NOT the same as an absent one. A value this build
+    /// does not know about came from a newer build and may well be a failure mode — degrading it
+    /// to `.completed` would paint it green and assert success the card cannot back up. It
+    /// degrades to `.interrupted` instead; only a wholly absent key means `.completed`.
+    @Test("an unknown status decodes as interrupted, never as completed")
     func unknownStatus() {
         let json = """
         {"kind":"job_run","runId":"\(UUID().uuidString)","jobId":"\(UUID().uuidString)",\
         "jobName":"pr-sweep","status":"vaporized","startedAt":"2023-11-14T22:13:20Z",\
         "finishedAt":"2023-11-14T22:14:35Z","totalTokens":0}
         """
-        #expect(EventCard.decode(json)?.status == .completed)
+        #expect(EventCard.decode(json)?.status == .interrupted)
     }
 
     @Test("transcriptLine is the copy/export one-liner")
@@ -147,6 +151,44 @@ struct EventCardTests {
     func exportTextUndecodable() {
         let message = ChatMessage(role: .event, content: "not a card")
         #expect(message.exportText == "not a card")
+    }
+
+    /// Fix round 1: the export paths shared only the role *name*, and each still interpolated
+    /// `content`, so an event row exported as raw JSON under an "Event" heading. These pin the
+    /// whole block the four paths now share.
+    @Test("an event message's export line is its transcript line, in both formats")
+    func exportLineEvent() {
+        let c = card()
+        let message = ChatMessage(role: .event, content: c.encodedContent())
+        #expect(message.exportLine(format: .plainText) == "Event:\n\(c.transcriptLine)")
+        #expect(message.exportLine(format: .markdown) == "### Event\n`\(c.transcriptLine)`")
+        #expect(!message.exportLine(format: .markdown).contains("\"runId\""))
+    }
+
+    @Test("a user message's export line is unchanged")
+    func exportLineUser() {
+        let message = ChatMessage(role: .user, content: "ship it")
+        #expect(message.exportLine(format: .plainText) == "You:\nship it")
+        #expect(message.exportLine(format: .markdown) == "### You\nship it")
+    }
+
+    @Test("an agent message's export line is unchanged")
+    func exportLineAgent() {
+        let message = ChatMessage(role: .agent, content: "Done.")
+        #expect(message.exportLine(format: .plainText) == "Iris:\nDone.")
+        #expect(message.exportLine(format: .markdown) == "### Iris\nDone.")
+    }
+
+    @Test("a system message's export line is inline code, with an LLM error shown as its headline")
+    func exportLineSystem() {
+        let plain = ChatMessage(role: .system, content: "$ ls")
+        #expect(plain.exportLine(format: .markdown) == "### System\n`$ ls`")
+        #expect(plain.exportLine(format: .plainText) == "System:\n$ ls")
+
+        let error = ChatMessage(role: .system, content: LLMErrorMessage.encode(
+            LLMErrorDisplay(headline: "The model call failed (429)", detail: "rate limited")))
+        #expect(error.exportText == "The model call failed (429)")
+        #expect(error.exportLine(format: .plainText) == "System:\nThe model call failed (429)")
     }
 
     @Test("copy/export role names are unchanged for the other four roles")

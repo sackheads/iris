@@ -41,12 +41,13 @@ struct SessionStripView: View {
         let mainSession = sessions.first { $0.kind == .main }
         let otherSessions = sessions.filter { $0.kind != .main }
         // Hidden entirely when there is nothing to show — the common case — so the strip doesn't
-        // permanently occupy space below the composer. Fix round 1, item 7: NOT hidden while a
-        // transcript sheet is open, even if the row that opened it just swept away — hiding the
-        // strip unmounts this view and, with the `.sheet` modifier on it, yanks the open sheet
-        // out from under the user.
+        // permanently occupy space below the composer. #187 fix round 1: this deliberately does
+        // NOT consider whether the transcript sheet is open. It used to, so that hiding the strip
+        // could never yank the open sheet away with it; but the sheet now has a second opener (an
+        // event card's "View run"), and keeping that term made opening a card's transcript pop an
+        // otherwise-idle strip into view under the composer. The `else` branch below keeps the
+        // sheet's host alive instead, which is what that term was really buying.
         let isHidden = otherSessions.isEmpty && (mainSession?.phase ?? .idle) == .idle
-            && state.transcriptSheetConversationId == nil
         // Expanded whenever there's anything besides the main row to show, unless the user has
         // manually collapsed it (and it hasn't emptied out since). With no other sessions,
         // "expanded" vs. "collapsed" is moot — there's only ever the one main line either way.
@@ -80,6 +81,12 @@ struct SessionStripView: View {
                 .padding(.vertical, 6)
                 .background(.regularMaterial)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else {
+                // A zero-height placeholder, not nothing: the `.sheet` below hangs off this
+                // `Group`, and a presentation modifier whose content resolves to `EmptyView` has
+                // no host to present from. The enclosing stack is `VStack(spacing: 0)`
+                // (`ChatView`), so this costs exactly zero points of layout.
+                Color.clear.frame(height: 0)
             }
         }
         // Fix round 1, item 7: hoisted above the `isHidden` conditional (onto the `Group`, which
@@ -328,9 +335,9 @@ struct TranscriptSheet: View {
 
     private func copyTranscript() {
         guard let conversation else { return }
-        let text = conversation.messages.map { message -> String in
-            return "\(message.exportRoleName):\n\(message.exportText)"
-        }.joined(separator: "\n\n")
+        let text = conversation.messages
+            .map { $0.exportLine(format: .plainText) }
+            .joined(separator: "\n\n")
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)

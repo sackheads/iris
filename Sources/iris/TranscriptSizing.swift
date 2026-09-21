@@ -38,12 +38,20 @@ enum TranscriptSizing {
         var total: CGFloat = 0
         for message in messages {
             let text: CGFloat
-            if message.role == .system {
+            switch message.role {
+            case .system:
                 // Capped rows only need enough text to reach the cap: measuring a full tool
                 // payload with Core Text and then discarding it is the expensive part.
                 text = min(textHeight(String(message.content.prefix(systemRowMeasuredPrefix)), width: textWidth),
                            systemRowTextCap)
-            } else {
+            case .event:
+                // #187: an event row is stored as card JSON but drawn as one line of
+                // `transcriptLine`, so sizing it from `content` would open the sheet several
+                // hundred points too tall for every run in the Activity conversation.
+                let line = EventCard.decode(message.content)?.transcriptLine ?? message.content
+                text = min(textHeight(String(line.prefix(systemRowMeasuredPrefix)), width: textWidth),
+                           systemRowTextCap)
+            case .user, .agent, .command:
                 text = textHeight(message.content, width: textWidth)
             }
             total += perMessageChrome + text
