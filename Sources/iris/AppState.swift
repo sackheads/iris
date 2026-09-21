@@ -2024,8 +2024,13 @@ class AppState {
                          allowedCommands: [String] = [], vibecopEnabled: Bool? = nil) async -> Bool {
         // Fail closed for background (unattended) conversations, before every other path —
         // including `autoApproveTools` — since nobody is watching to see the approval dialog and a
-        // gated tool must never run unattended (#187). Recorded for Task 6's ledger, never enqueued.
+        // gated tool must never run unattended (#187). The deterministic allowlist still applies
+        // (a call it already permits never needed a human, so it runs); everything else is denied
+        // and recorded for Task 6's ledger, without ever consulting Vibecop or a human.
         if let id = conversationId, conversations.first(where: { $0.id == id })?.isBackground == true {
+            if PermissionManager.shared.isAllowed(toolName: toolName, details: details, workspace: workspace) {
+                return true
+            }
             backgroundDenials[id, default: []].append(BlockedToolCall(toolName: toolName, details: details, at: Date()))
             appendMessage(role: .system, content: String(format: Self.unattendedDenialNotice, toolName), to: id)
             return false

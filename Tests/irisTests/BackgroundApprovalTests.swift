@@ -51,4 +51,34 @@ struct BackgroundApprovalTests {
         #expect(app.pendingApprovals.isEmpty)
         #expect(app.takeBackgroundDenials(for: cid).count == 1)
     }
+
+    @Test("a background conversation still runs a call the deterministic allowlist already permits")
+    func backgroundAllowlistedCallRuns() async {
+        let app = AppState()
+        let cid = app.createNewConversation(isBackground: true, select: false)
+        // Same fast path PermissionManagerTests pins: read_file under ~/.iris auto-approves,
+        // with no file written and no defaults mutated.
+        let memoryPath = IrisPaths.default.memoryDir.appendingPathComponent("SOUL.md").path
+
+        let approved = await app.requestApproval(toolName: "read_file", details: memoryPath,
+                                                 workspace: nil, conversationId: cid)
+        #expect(approved == true)
+        #expect(app.pendingApprovals.isEmpty)
+        #expect(app.takeBackgroundDenials(for: cid).isEmpty, "an allowlisted call must not be recorded as a denial")
+        #expect(app.conversations.first(where: { $0.id == cid })?.messages.isEmpty == true,
+                "an allowlisted call must not append a system notice")
+    }
+
+    @Test("the same call, not allowlisted, is still denied and recorded")
+    func backgroundNonAllowlistedCallDenied() async {
+        let app = AppState()
+        let cid = app.createNewConversation(isBackground: true, select: false)
+        let outsidePath = "/Users/bnaylor/other_secret.txt"
+
+        let approved = await app.requestApproval(toolName: "read_file", details: outsidePath,
+                                                 workspace: nil, conversationId: cid)
+        #expect(approved == false)
+        #expect(app.pendingApprovals.isEmpty)
+        #expect(app.takeBackgroundDenials(for: cid).count == 1)
+    }
 }
