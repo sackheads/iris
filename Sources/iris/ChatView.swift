@@ -17,8 +17,11 @@ struct ChatView: View {
     /// search-reveal target reliably win regardless of which handler happened to run first.
     @State private var scrollPassScheduled = false
     /// Toggled by the toolbar "cpu" badge; drives `SessionStripView`'s collapsed/expanded state.
-    /// Replaces the old `SubagentPopoverView` popover (#217 + #19). Not persisted.
-    @State private var sessionStripExpanded = false
+    /// Replaces the old `SubagentPopoverView` popover (#217 + #19). Not persisted. Starts `true`:
+    /// fix round 1's ruling is that the strip defaults to expanded whenever a subagent/evaluator
+    /// session exists (a manual collapse is remembered only until the strip empties out, at which
+    /// point `SessionStripView` resets this back to `true` itself).
+    @State private var sessionStripExpanded = true
     /// Whether the Archived disclosure group is open. The single source of truth: the group
     /// binds to it directly, so the disclosure triangle always does what it looks like it does.
     @State private var archivedExpanded = false

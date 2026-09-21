@@ -35,6 +35,16 @@ struct SessionSummary: Identifiable, Hashable, Sendable {
     let startTime: Date
     var phase: Phase
     var lastActivity: LastActivity?
+
+    /// `startTime` while there is something to time, `nil` while `.idle` — an idle main session
+    /// (the only kind that is ever `.idle`; subagents/evaluators start `.thinking`) has no turn in
+    /// progress to show an elapsed time for, and `AppState` clears its recorded start when it goes
+    /// idle. Fix round 1 (#217/#19): the row used to render a `Text(timerInterval:)` against a
+    /// stale/placeholder start regardless of phase.
+    var elapsedStartTime: Date? {
+        if case .idle = phase { return nil }
+        return startTime
+    }
 }
 
 extension SessionSummary {
@@ -60,14 +70,18 @@ enum SessionActivity {
         case "run_command":
             return truncate(stringArg(args, "command"))
         case "read_file", "write_file":
-            guard let path = stringArg(args, "path") else { return truncate(firstStringArg(args)) }
+            // Fix round 1 (#217/#19): no fallback to the generic allowlist here. `write_file` also
+            // carries a `content` argument, and — before this fix — a malformed call missing
+            // `path` fell through to the sorted-key fallback, which happily surfaced up to 60
+            // characters of file BODY on screen. No path, no detail.
+            guard let path = stringArg(args, "path") else { return nil }
             return truncate(lastTwoComponents(of: path))
         case "search_memory":
             return truncate(stringArg(args, "query"))
         case "invoke_subagent", "delegate_milestone":
             return truncate(stringArg(args, "role"))
         default:
-            return truncate(firstStringArg(args))
+            return truncate(firstAllowlistedArg(args))
         }
     }
 
@@ -76,12 +90,16 @@ enum SessionActivity {
         return nil
     }
 
-    /// The first string-valued argument, in a deterministic (sorted-key) order — `[String:
-    /// JSONValue]` has no stable iteration order, and a flaky fallback would make this
-    /// non-reproducible in tests and on screen.
-    private static func firstStringArg(_ args: [String: JSONValue]) -> String? {
-        for key in args.keys.sorted() {
-            if case .string(let s)? = args[key] { return s }
+    /// Fix round 1 (#217/#19): the fallback used to be "the first string-valued argument in sorted
+    /// key order", which put content-bearing keys like `body`/`content` in play whenever they
+    /// happened to sort first (`create_skill`/`update_skill`'s `body`; `gmail_send_email`'s `body`
+    /// sorting before `subject`). An explicit, ordered allowlist means an unrecognized tool can
+    /// only ever surface one of these — never a free-text payload a model wrote.
+    private static let fallbackKeyPriority = ["path", "query", "command", "role", "name", "title", "url", "subject", "id"]
+
+    private static func firstAllowlistedArg(_ args: [String: JSONValue]) -> String? {
+        for key in fallbackKeyPriority {
+            if let value = stringArg(args, key) { return value }
         }
         return nil
     }
@@ -104,8 +122,15 @@ enum SessionActivity {
         switch n {
         case ..<1_000:
             return "\(n)"
-        case ..<1_000_000:
+        case ..<999_500:
             return "\(trimmed(Double(n) / 1_000))k"
+        case ..<1_000_000:
+            // Fix round 1 (#217/#19): this range rounds up to 1.0M when expressed in k — without
+            // this case it showed as the nonsensical "1000k". It's forced to keep one decimal
+            // (rather than falling through to `trimmed`, which would collapse it to a bare "1M"
+            // indistinguishable from an exact million) specifically because it is NOT a clean
+            // million; the `default` case below still shows a bare "1M"/"2M" for one.
+            return String(format: "%.1fM", Double(n) / 1_000_000)
         default:
             return "\(trimmed(Double(n) / 1_000_000))M"
         }
@@ -119,12 +144,47 @@ enum SessionActivity {
         return String(format: "%.1f", rounded)
     }
 
-    /// A fixed elapsed duration for a finished row (a running row uses `Text(timerInterval:)`
-    /// instead, which ticks on its own).
+    /// `12s` / `1m 05s` / `1h 02m` — one format for both a running row (ticked via `TimelineView`,
+    /// fix round 1) and a finished row's fixed duration, so the strip never shows two different
+    /// elapsed-time styles side by side.
     static func formatElapsed(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds.rounded()))
-        let minutes = total / 60
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
         let secs = total % 60
-        return minutes > 0 ? "\(minutes)m \(String(format: "%02d", secs))s" : "\(secs)s"
+        if hours > 0 { return "\(hours)h \(String(format: "%02d", minutes))m" }
+        if minutes > 0 { return "\(minutes)m \(String(format: "%02d", secs))s" }
+        return "\(secs)s"
+    }
+
+    /// The activity text for a phase — shared by a session's own row and the collapsed
+    /// main-row summary, so both describe `.executing` etc. identically.
+    static func activityText(for phase: SessionSummary.Phase) -> String {
+        switch phase {
+        case .idle: return "idle"
+        case .thinking: return "thinking"
+        case .responding: return "responding"
+        case .executing(let tool, let detail):
+            guard let detail, !detail.isEmpty else { return tool }
+            return "\(tool) \(detail)"
+        case .finished(let status, _): return "finished · \(status)"
+        }
+    }
+
+    /// Fix round 1 (#217/#19): while the strip is collapsed but subagent/evaluator sessions exist,
+    /// the badge count used to be the ONLY sign of background work — exactly the visibility gap
+    /// #19 asked to close. This summarizes what the expanded rows would show: `"2 subagents
+    /// running"`, `"1 finished"`, or both joined, so the collapsed line still says something.
+    /// `sessions` here is non-main entries only (`AppState.sessions`).
+    static func collapsedSummary(for sessions: [SessionSummary]) -> String {
+        let running = sessions.filter {
+            if case .finished = $0.phase { return false }
+            return true
+        }.count
+        let finished = sessions.count - running
+        var parts: [String] = []
+        if running > 0 { parts.append("\(running) subagent\(running == 1 ? "" : "s") running") }
+        if finished > 0 { parts.append("\(finished) finished") }
+        return parts.joined(separator: ", ")
     }
 }

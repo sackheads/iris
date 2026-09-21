@@ -78,7 +78,7 @@ A per-conversation ledger on `AppState`:
 var subagentWriteLedger: [UUID: [String]] = [:]
 ```
 
-Appended when a `write_file` **succeeds** for a **subagent** conversation. `ToolExecutor.execute(...)` already receives `conversationId`, so the write path can record against it; scoping to subagent conversations keeps the main agent's writes from accumulating. `SubagentManager` drains the ledger into `filesWritten` (deduped, preserving first-write order) at termination and clears the entry in `removeSubagent`.
+Appended when a `write_file` **succeeds** for a **subagent** conversation. `ToolExecutor.execute(...)` already receives `conversationId`, so the write path can record against it; scoping to subagent conversations keeps the main agent's writes from accumulating. `SubagentManager` drains the ledger into `filesWritten` (deduped, preserving first-write order) at termination and clears the entry in `finishSession`.
 
 Scope is honest by construction (§2): only `write_file` is recorded, never `run_command` side effects.
 
@@ -117,7 +117,7 @@ For `failed` / `timedOut` / `cancelled`, the status line makes the failure **exp
 - Forced poll-cap path → `.timedOut`.
 - Cancel path → `.cancelled`.
 - Injected LLM error → `.failed`.
-- Ledger: a subagent that `write_file`s two paths yields `filesWritten` equal to those two, deduped; the ledger entry is cleared after `removeSubagent`.
+- Ledger: a subagent that `write_file`s two paths yields `filesWritten` equal to those two, deduped; the ledger entry is cleared after `finishSession`.
 - Regression: a main-agent `goal_complete` still clears the goal and fires its background grade with no `onSubagentComplete` invocation (no registered callback).
 
 ## 9. Interaction constraints (fixed, not a blank slate)

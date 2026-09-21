@@ -208,14 +208,23 @@ class AppState {
 
     /// Reference count of in-flight "thinking" work. `isThinking` is derived from this.
     private var thinkingCount = 0
-    /// When the main session's current run of turns started (0→1 on `thinkingCount`), for the
-    /// synthesised main row in `visibleSessions`. Cleared implicitly by being overwritten at the
-    /// next 0→1 transition; there is no "idle since" to show meanwhile.
-    private var mainSessionStartTime: Date?
-    /// The main conversation's current activity, set by `updateSessionPhase` alongside the
-    /// subagent/evaluator entries in `sessions`. Reset to `.idle` when `thinkingCount` returns to
-    /// zero so a stale `.executing`/`.responding` can't linger past the turn that set it.
-    private var mainPhase: SessionSummary.Phase = .idle
+    /// Fix round 1 (#217/#19), item 4: the synthesised main row used to be driven by ONE global
+    /// phase/start pair keyed on `selectedConversationId` at *render* time, but `beginThinking`/
+    /// `endThinking` are a single global counter shared by every engine (main, subagent,
+    /// evaluator) — a background subagent's turn bumped the same counter, so the main row stuck on
+    /// a stale phase while a subagent ran, and switching conversations mid-turn showed
+    /// conversation A's phase next to conversation B's tokens. Keyed by conversation id instead,
+    /// set in `beginEngineTurn`/`updateSessionPhase` (which run per-conversation already) and read
+    /// in `visibleSessions` for whichever conversation is currently selected. "Running" itself is
+    /// derived from `hasTurnInFlight(for:)`, not from a phase value, so a conversation with no
+    /// recorded phase yet (the brief instant between `beginEngineTurn` and the first
+    /// `updateSessionPhase` call) still reads as active rather than idle.
+    private var mainPhaseByConversation: [UUID: SessionSummary.Phase] = [:]
+    /// When each conversation's current run of turns began (0→1 on its own `engineTurnCounts`
+    /// entry). Not cleared on the way back to zero: `visibleSessions` only consults this while
+    /// `hasTurnInFlight` says the conversation is running, so a stale value from a past run is
+    /// simply never read until the next run overwrites it.
+    private var mainStartTimeByConversation: [UUID: Date] = [:]
     /// Tracked UI-initiated tasks so they can be cancelled (e.g. when a conversation is deleted).
     private var activeTasks: [UUID: (conversationId: UUID?, task: Task<Void, Never>)] = [:]
 
@@ -244,6 +253,9 @@ class AppState {
     /// engine runs — UI-initiated ones included, so a UI turn is counted by both sources.
     /// Double-counting is harmless; `hasTurnInFlight` only asks whether either is non-zero.
     func beginEngineTurn(for conversationId: UUID) {
+        if (engineTurnCounts[conversationId] ?? 0) == 0 {
+            mainStartTimeByConversation[conversationId] = Date()
+        }
         engineTurnCounts[conversationId, default: 0] += 1
     }
 
@@ -472,8 +484,14 @@ class AppState {
     // MARK: - Thinking state
 
     /// Acquire one unit of "thinking". Balanced by `endThinking()`.
+    ///
+    /// Fix round 1 (#217/#19), item 4: this used to also record the session strip's main-row start
+    /// time and phase, but `thinkingCount` is one global counter shared by every engine (main,
+    /// subagent, evaluator all call this), so a background subagent's turn corrupted the main
+    /// row's timing. That bookkeeping moved to `beginEngineTurn`/`endEngineTurn` and
+    /// `updateSessionPhase`, which are already per-conversation — this stays a plain reference
+    /// count for `isThinking`.
     func beginThinking() {
-        if thinkingCount == 0 { mainSessionStartTime = Date() }
         thinkingCount += 1
         isThinking = true
     }
@@ -482,7 +500,6 @@ class AppState {
     func endThinking() {
         thinkingCount = max(0, thinkingCount - 1)
         isThinking = thinkingCount > 0
-        if thinkingCount == 0 { mainPhase = .idle }
     }
 
     /// Runs UI-initiated engine work while holding the thinking indicator and tracking the
@@ -567,8 +584,16 @@ class AppState {
     /// here (as `removeSubagent` used to), independent of whether the session is still tracked.
     func finishSession(id: UUID, status: String) {
         if let idx = sessions.firstIndex(where: { $0.id == id }) {
-            sessions[idx].phase = .finished(status: status, at: Date())
-            scheduleSessionSweep()
+            // Fix round 1 (#217/#19), item 6: an evaluator's conversation is deleted by
+            // `GoalEvaluator` immediately after this call — there is no transcript left for the
+            // 60s linger to give a "browse it" row for, so a lingering evaluator entry was dead
+            // weight (and a stale badge count) with nothing behind it. Only a subagent lingers.
+            if sessions[idx].kind == .evaluator {
+                sessions.remove(at: idx)
+            } else {
+                sessions[idx].phase = .finished(status: status, at: Date())
+                scheduleSessionSweep()
+            }
         }
         subagentWriteLedger[id] = nil
     }
@@ -599,9 +624,17 @@ class AppState {
         // A stable fallback id, not a fresh `UUID()`, so the synthesised row's identity doesn't
         // change on every access (breaking `ForEach` diffing) on the practically-never-hit path
         // where nothing is selected.
-        let main = SessionSummary(id: selectedConversationId ?? Self.noSelectionSessionId, kind: .main,
-                                   role: "main", startTime: mainSessionStartTime ?? Date(),
-                                   phase: mainPhase, lastActivity: nil)
+        let mainId = selectedConversationId ?? Self.noSelectionSessionId
+        // Fix round 1, item 4: "running" comes from `hasTurnInFlight`, not from whether a phase
+        // happens to be recorded — so the brief window between `beginEngineTurn` and the first
+        // `updateSessionPhase` call still reads as active (defaulting to `.thinking`) instead of
+        // idle, and a conversation that finished its last turn reads `.idle` even if its last
+        // recorded phase was never explicitly cleared.
+        let isRunning = selectedConversationId.map(hasTurnInFlight(for:)) ?? false
+        let phase: SessionSummary.Phase = isRunning ? (mainPhaseByConversation[mainId] ?? .thinking) : .idle
+        let main = SessionSummary(id: mainId, kind: .main, role: "main",
+                                   startTime: mainStartTimeByConversation[mainId] ?? Date(),
+                                   phase: phase, lastActivity: nil)
         return [main] + sessions.filter { $0.kind != .main }
     }
     private static let noSelectionSessionId = UUID()
@@ -631,18 +664,31 @@ class AppState {
     }
 
     /// The engine calls this for every conversation it runs a turn on — the main conversation
-    /// included, which is why this also updates `mainPhase` rather than only looking in
-    /// `sessions`. Setting `.executing` also records `lastActivity` on `sessions` entries, so a
+    /// included, which is why this also updates `mainPhaseByConversation` rather than only looking
+    /// in `sessions`. Setting `.executing` also records `lastActivity` on `sessions` entries, so a
     /// test (or a future UI) can see what a subagent/evaluator last ran without racing the phase
     /// moving on to `.thinking`/`.responding`/`.finished`.
     func updateSessionPhase(_ id: UUID, _ phase: SessionSummary.Phase) {
         if let idx = sessions.firstIndex(where: { $0.id == id }) {
+            // Fix round 1 (#217/#19): `goal_complete` fires `onSubagentComplete` from inside the
+            // tool handler, `SubagentManager`'s poller sees it and calls `finishSession` within
+            // ~100ms — but the SAME engine turn that called `goal_complete` keeps running (its
+            // next model round, producing a closing text reply), and that round's own
+            // `.responding` update lands afterward and would silently resurrect a finished
+            // session. Once `.finished`, nothing may move it off that phase; only a fresh
+            // `registerSubagent`/`finishSession` may.
+            if case .finished = sessions[idx].phase { return }
             sessions[idx].phase = phase
             if case .executing(let tool, let detail) = phase {
                 sessions[idx].lastActivity = SessionSummary.LastActivity(tool: tool, detail: detail)
             }
-        } else if id == selectedConversationId {
-            mainPhase = phase
+        } else {
+            // Not a tracked subagent/evaluator: record it by conversation id regardless of
+            // whether this happens to be the SELECTED conversation right now (fix round 1, item
+            // 4) — `visibleSessions` looks this up for whichever conversation is selected AT READ
+            // TIME, so a background turn's phase is preserved even while the user is looking at a
+            // different conversation, and reselecting it later shows the right thing.
+            mainPhaseByConversation[id] = phase
         }
     }
     

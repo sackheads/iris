@@ -39,15 +39,40 @@ struct SessionActivityTests {
         #expect(SessionActivity.detail(tool: "delegate_milestone", args: ["role": .string("engineer")]) == "engineer")
     }
 
-    @Test("an unrecognized tool falls back to the first string-valued argument, deterministically")
+    @Test("an unrecognized tool falls back to the first allowlisted key present, not just any string arg")
     func fallback() {
-        #expect(SessionActivity.detail(tool: "some_new_tool", args: ["z_arg": .string("last"), "a_arg": .string("first")]) == "first")
+        // Neither key is on the allowlist: no detail, even though both are strings.
+        #expect(SessionActivity.detail(tool: "some_new_tool", args: ["z_arg": .string("last"), "a_arg": .string("first")]) == nil)
+        // "id" and "name" are both allowlisted; "name" comes first in priority order.
+        #expect(SessionActivity.detail(tool: "some_new_tool", args: ["id": .string("abc-123"), "name": .string("widget")]) == "widget")
     }
 
     @Test("a tool with no string argument has no detail")
     func noStringArg() {
         #expect(SessionActivity.detail(tool: "some_new_tool", args: ["count": .int(3)]) == nil)
         #expect(SessionActivity.detail(tool: "run_command", args: [:]) == nil)
+    }
+
+    @Test("fix round 1: write_file without a path has no detail — never falls back to file content")
+    func writeFileWithoutPath() {
+        let long = String(repeating: "SECRET BODY ", count: 10)
+        #expect(SessionActivity.detail(tool: "write_file", args: ["content": .string(long)]) == nil)
+        #expect(SessionActivity.detail(tool: "read_file", args: ["content": .string(long)]) == nil)
+    }
+
+    @Test("fix round 1: an email-send tool surfaces the subject, never the body")
+    func emailToolSurfacesSubjectNotBody() {
+        let detail = SessionActivity.detail(tool: "gmail_send_email", args: [
+            "body": .string("a very long email body that must never be shown here"),
+            "subject": .string("Q3 numbers")
+        ])
+        #expect(detail == "Q3 numbers")
+    }
+
+    @Test("fix round 1: a skill-authoring tool with only a body argument has no detail")
+    func skillToolWithOnlyBody() {
+        #expect(SessionActivity.detail(tool: "create_skill", args: ["body": .string("# Skill\n...")]) == nil)
+        #expect(SessionActivity.detail(tool: "update_skill", args: ["body": .string("# Skill\n...")]) == nil)
     }
 
     @Test("detail is truncated to 60 characters")
@@ -65,6 +90,32 @@ struct SessionActivityTests {
         #expect(SessionActivity.formatTokenCount(4_200) == "4.2k")
         #expect(SessionActivity.formatTokenCount(210_900) == "210.9k")
         #expect(SessionActivity.formatTokenCount(1_300_000) == "1.3M")
+    }
+
+    @Test("fix round 1: 999_999 tokens rounds up to 1.0M, not 1000k")
+    func tokenFormattingRoundsAtBoundary() {
+        #expect(SessionActivity.formatTokenCount(999_999) == "1.0M")
+        #expect(SessionActivity.formatTokenCount(999_499) == "999.5k")
+    }
+
+    @Test("fix round 1: elapsed-time formatting is shared by running and finished rows")
+    func elapsedFormatting() {
+        #expect(SessionActivity.formatElapsed(12) == "12s")
+        #expect(SessionActivity.formatElapsed(65) == "1m 05s")
+        #expect(SessionActivity.formatElapsed(3_720) == "1h 02m")
+    }
+
+    private static func session(_ phase: SessionSummary.Phase) -> SessionSummary {
+        SessionSummary(id: UUID(), kind: .subagent, role: "r", startTime: Date(), phase: phase, lastActivity: nil)
+    }
+
+    @Test("collapsed summary: fix round 1 — the collapsed main line summarizes background work")
+    func collapsedSummary() {
+        #expect(SessionActivity.collapsedSummary(for: []) == "")
+        #expect(SessionActivity.collapsedSummary(for: [Self.session(.thinking)]) == "1 subagent running")
+        #expect(SessionActivity.collapsedSummary(for: [Self.session(.thinking), Self.session(.executing(tool: "run_command", detail: nil))]) == "2 subagents running")
+        #expect(SessionActivity.collapsedSummary(for: [Self.session(.finished(status: "completed", at: Date()))]) == "1 finished")
+        #expect(SessionActivity.collapsedSummary(for: [Self.session(.thinking), Self.session(.finished(status: "failed", at: Date()))]) == "1 subagent running, 1 finished")
     }
 }
 
@@ -128,6 +179,45 @@ struct SessionTrackingTests {
         }
     }
 
+    /// Fix round 1, item 1: `goal_complete` fires the completion callback from inside the tool
+    /// handler while the SAME engine turn keeps running (its next round produces a closing text
+    /// reply), so a `.responding`/`.thinking` update can land AFTER `finishSession` already ran.
+    /// Once finished, nothing may move a session off that phase, and the sweep must still collect
+    /// it (i.e. the guard doesn't also block the sweep from seeing it as finished).
+    @Test("updateSessionPhase after finishSession is a no-op; the sweep still removes it")
+    func finishedSessionIgnoresLaterPhaseUpdates() {
+        let app = isolatedApp()
+        let id = UUID()
+        app.registerSubagent(id: id, role: "engineer")
+        app.finishSession(id: id, status: "completed")
+        app.updateSessionPhase(id, .responding)
+        let session = app.sessions.first { $0.id == id }
+        guard case .finished(let status, let at) = session?.phase else {
+            Issue.record("expected .finished to survive a later updateSessionPhase call")
+            return
+        }
+        #expect(status == "completed")
+        let swept = SessionSummary.sweep(app.sessions, now: at.addingTimeInterval(61), lingerWindow: 60)
+        #expect(swept.isEmpty)
+    }
+
+    /// Fix round 1, item 6: an evaluator's conversation is deleted by `GoalEvaluator` right after
+    /// `finishSession` — there's no transcript behind a lingering row, so it's removed immediately.
+    /// A subagent (not an evaluator) still lingers.
+    @Test("finishSession removes an evaluator session immediately, with no linger")
+    func evaluatorFinishHasNoLinger() {
+        let app = isolatedApp()
+        let evaluatorId = UUID(), subagentId = UUID()
+        app.registerSubagent(id: evaluatorId, role: "evaluator", kind: .evaluator)
+        app.registerSubagent(id: subagentId, role: "engineer")
+        app.finishSession(id: evaluatorId, status: "graded")
+        app.finishSession(id: subagentId, status: "completed")
+        #expect(app.sessions.contains { $0.id == evaluatorId } == false)
+        #expect(app.sessions.first { $0.id == subagentId }.map {
+            if case .finished = $0.phase { return true } else { return false }
+        } == true)
+    }
+
     @Test("visibleSessions puts the main session first and includes only subagent/evaluator kinds")
     func visibleSessionsOrdering() {
         let app = isolatedApp()
@@ -139,6 +229,61 @@ struct SessionTrackingTests {
         #expect(visible.first?.role == "main")
         #expect(Set(visible.dropFirst().map(\.id)) == [subagentId, evaluatorId])
         #expect(visible.dropFirst().allSatisfy { $0.kind == .subagent || $0.kind == .evaluator })
+    }
+
+    /// Fix round 1 (#217/#19), items 1 + 4: the main row's elapsed time rendered as a
+    /// multi-million-hour countdown, in part because timing was recorded on `beginThinking` — a
+    /// single global counter shared by every engine (main, subagent, evaluator) — rather than
+    /// per-conversation. It moved to `beginEngineTurn`/`endEngineTurn`, which already track a turn
+    /// per conversation id; "running" is derived from `hasTurnInFlight`, not a separately-tracked
+    /// idle flag. The `countsDown: false` / `TimelineView` half of the elapsed-time fix is a
+    /// SwiftUI-layer change with no unit test (AGENTS.md: no SwiftUI unit tests).
+    @Test("beginEngineTurn records a start on 0→1 only; a nested call does not overwrite it")
+    func beginEngineTurnRecordsStartOnce() {
+        let app = isolatedApp()
+        let id = app.selectedConversationId!
+        app.beginEngineTurn(for: id)
+        let firstStart = app.visibleSessions.first?.elapsedStartTime
+        #expect(firstStart != nil)
+        app.beginEngineTurn(for: id)   // nested — must not reset the start
+        #expect(app.visibleSessions.first?.elapsedStartTime == firstStart)
+        app.endEngineTurn(for: id)     // 2→1: still running, start still held
+        #expect(app.hasTurnInFlight(for: id))
+        #expect(app.visibleSessions.first?.elapsedStartTime == firstStart)
+        app.endEngineTurn(for: id)     // balance the nested begin above
+    }
+
+    @Test("endEngineTurn back to zero makes the main row idle (no elapsed time)")
+    func endEngineTurnGoesIdle() {
+        let app = isolatedApp()
+        let id = app.selectedConversationId!
+        app.beginEngineTurn(for: id)
+        #expect(app.visibleSessions.first?.elapsedStartTime != nil)
+        app.endEngineTurn(for: id)
+        #expect(app.hasTurnInFlight(for: id) == false)
+        #expect(app.visibleSessions.first?.elapsedStartTime == nil)
+    }
+
+    /// Fix round 1, item 4: two conversations, a turn running in A — selecting B must show B idle
+    /// (not A's stale phase), and reselecting A must still show A's own phase intact.
+    @Test("the main row reflects whichever conversation is selected, independently")
+    func mainRowIsPerSelectedConversation() {
+        let app = isolatedApp()
+        let a = UUID(), b = UUID()
+        app.createNewConversation(id: a)
+        app.createNewConversation(id: b)
+
+        app.selectedConversationId = a
+        app.beginEngineTurn(for: a)
+        app.updateSessionPhase(a, .executing(tool: "run_command", detail: "echo hi"))
+        #expect(app.visibleSessions.first?.phase == .executing(tool: "run_command", detail: "echo hi"))
+
+        app.selectedConversationId = b
+        #expect(app.visibleSessions.first?.phase == .idle)
+
+        app.selectedConversationId = a
+        #expect(app.visibleSessions.first?.phase == .executing(tool: "run_command", detail: "echo hi"))
+        app.endEngineTurn(for: a)
     }
 }
 
@@ -198,12 +343,16 @@ struct ExecuteToolSessionActivityTests {
         app.createNewConversation(id: id, isSubagent: true)
         app.registerSubagent(id: id, role: "engineer")
 
-        let call = FunctionCall(name: "run_command", args: ["command": .string("swift test")])
+        // Fix round 1: this actually executes (autoApproveTools bypasses the approval prompt), so
+        // the scripted command must be cheap — "swift test" here forked a NESTED `swift test` and
+        // took 639s, tripping the tool's own timeout. `echo hi` matches every other scripted
+        // run_command in this repo (ApprovalQueueTests, ScenarioTests, ScenarioRunnerTests, ...).
+        let call = FunctionCall(name: "run_command", args: ["command": .string("echo hi")])
         let client = FakeLLMClient(responses: [Self.response(call), Self.response(nil)])
         let engine = IrisEngine(state: app, tier: .medium, principal: .subagent, client: client)
         await engine.processInput("go", source: "System", conversationId: id)
 
         let session = app.sessions.first { $0.id == id }
-        #expect(session?.lastActivity == SessionSummary.LastActivity(tool: "run_command", detail: "swift test"))
+        #expect(session?.lastActivity == SessionSummary.LastActivity(tool: "run_command", detail: "echo hi"))
     }
 }
