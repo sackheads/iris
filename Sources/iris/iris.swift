@@ -1648,7 +1648,52 @@ actor IrisEngine {
                 print("[JobRunner] could not record the skipped run for \(job.name): \(error)")
             }
         }
+        // Retention runs at launch and once a day (§10). Both, not one: a Mac that is never
+        // restarted would never prune on launch alone, and a Mac restarted twice a day would
+        // never reach the daily hook. The launch pass is this explicit call rather than the
+        // hook's first fire, so it happens now instead of at the next poll.
+        await scheduler.setOnDailyMaintenance { [weak self] in
+            await self?.applyRetention(ledger: ledger)
+        }
+        await applyRetention(ledger: ledger)
     }
+
+    /// Ledger rows older than 90 days, and every job's transcripts beyond its 20 newest, go away —
+    /// except those belonging to a failure nobody has acknowledged (§10). `prune` deletes the rows
+    /// and hands back the conversations, which are the engine's to delete because they are
+    /// `AppState`'s.
+    ///
+    /// A transcript id is checked against the conversation it names before anything is deleted: the
+    /// ledger column has no foreign key and nothing stops a future writer (or a hand-edited row)
+    /// from pointing it at a conversation the user is reading. A prune must never be able to take
+    /// a user-facing conversation down with it, so only a `isBackground` one is deleted here.
+    func applyRetention(ledger: JobLedger) async {
+        let decision: JobLedger.PruneDecision
+        do {
+            decision = try ledger.prune(now: Date(), rowRetention: Self.runRowRetention,
+                                        transcriptsPerJob: Self.transcriptsPerJob)
+        } catch {
+            print("[JobLedger] could not prune run history: \(error)")
+            return
+        }
+        guard let state else { return }
+        var deletedTranscripts = 0
+        for id in decision.deleteTranscriptIds {
+            let deletable = await MainActor.run {
+                state.conversations.first(where: { $0.id == id })?.isBackground == true
+            }
+            guard deletable else { continue }
+            await MainActor.run { state.deleteConversation(id) }
+            deletedTranscripts += 1
+        }
+        if !decision.deleteRunIds.isEmpty || deletedTranscripts > 0 {
+            print("[JobLedger] retention: removed \(decision.deleteRunIds.count) run row(s) and \(deletedTranscripts) transcript(s)")
+        }
+    }
+
+    /// How long a `job_runs` row is kept, and how many transcripts a job keeps (§10).
+    static let runRowRetention: TimeInterval = 90 * 86_400
+    static let transcriptsPerJob = 20
 
     /// Brings up the ledger-backed scheduler this engine fires jobs through. Split out of
     /// `start()`, which also loads plugins, MCP servers and watchers, so the scheduler half can

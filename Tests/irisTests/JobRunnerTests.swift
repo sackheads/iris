@@ -465,8 +465,10 @@ struct JobRunnerTests {
                                 protectionEnabled: false, sessionPeerCount: 0)
         let job = self.job(name: "launch")
         try store.ledger.upsert(job)
+        // An hour ago, not a fixed epoch date: launch also prunes (§10), and a row from years
+        // ago would be closed as interrupted and then correctly deleted out from under this.
         let orphan = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule",
-                            startedAt: Date(timeIntervalSince1970: 1_700_000_000))
+                            startedAt: Date().addingTimeInterval(-3600))
         try store.ledger.begin(run: orphan)
 
         await engine.configureJobBookkeeping(ledger: store.ledger)

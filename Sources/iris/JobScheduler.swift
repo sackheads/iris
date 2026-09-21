@@ -34,6 +34,15 @@ actor JobScheduler {
     /// Jobs whose handler has not returned yet. The spec's `skip` overlap policy: a job that is
     /// still running when its next fire comes round does not start a second copy.
     private var firing: Set<UUID> = []
+    /// Called at most once every `maintenanceInterval`, from the same loop that polls for due jobs
+    /// (#187 §10: retention runs "at launch and once a day"). The loop is the only thing in the
+    /// app that already ticks forever, so a daily chore hangs off it rather than off a second
+    /// timer that would have to be started, stopped and woken in step with this one.
+    private var onDailyMaintenance: (@Sendable () async -> Void)?
+    /// When maintenance last ran, or the baseline a day is measured from. Set — without firing —
+    /// by `start()` and by the first tick, because launch-time maintenance is the engine's own
+    /// explicit call: firing here too would run the same prune twice within a second.
+    private var lastMaintenanceAt: Date?
     private var pollTask: Task<Void, Never>?
     private var wakeObserver: (any NSObjectProtocol)?
 
@@ -49,6 +58,15 @@ actor JobScheduler {
 
     func setOnSkip(_ handler: @escaping @Sendable (Job) async -> Void) {
         onSkip = handler
+    }
+
+    /// A day, as the maintenance hook counts one. Not a calendar day: nothing about retention
+    /// cares which side of midnight it runs on, and an elapsed-seconds comparison cannot be
+    /// skipped or repeated by a DST change.
+    static let maintenanceInterval: TimeInterval = 86_400
+
+    func setOnDailyMaintenance(_ handler: @escaping @Sendable () async -> Void) {
+        onDailyMaintenance = handler
     }
 
     /// The cadence governing a trigger, if it has one. `fsEvent` has none — it is driven by the
@@ -71,6 +89,7 @@ actor JobScheduler {
     func tick() async -> Int {
         let handler = fireHandler
         let now = self.now()
+        await runDailyMaintenanceIfDue(at: now)
         let due: [Job]
         do {
             due = try ledger.dueJobs(at: now)
@@ -138,6 +157,25 @@ actor JobScheduler {
         return toFire.count
     }
 
+    /// Runs the daily chore if a day has passed since the last one, from the top of the tick so a
+    /// ledger read that throws cannot cost the app its retention pass.
+    ///
+    /// `lastMaintenanceAt` moves *before* the hook is awaited: `tick()` is dispatched detached
+    /// from the poll loop, so a maintenance pass that outlasts the poll interval would otherwise
+    /// have the next tick start a second one on top of it.
+    private func runDailyMaintenanceIfDue(at now: Date) async {
+        guard let lastMaintenanceAt else {
+            // A scheduler that was never `start()`ed — a test, or a `schedule_job` write-only
+            // instance. Day zero begins now, and nothing fires: see the property's note.
+            self.lastMaintenanceAt = now
+            return
+        }
+        guard now.timeIntervalSince(lastMaintenanceAt) >= Self.maintenanceInterval,
+              let onDailyMaintenance else { return }
+        self.lastMaintenanceAt = now
+        await onDailyMaintenance()
+    }
+
     /// Moves a job past the trigger being handled, and says whether it is still schedulable —
     /// false when the row is gone or the cadence has no future match. The one place a fire and a
     /// skip agree: both advance `nextFireAt`, and both pause a cadence that can never match again
@@ -185,6 +223,9 @@ actor JobScheduler {
     /// rather than running two.
     func start(interval: TimeInterval = 10) {
         stop()
+        // Day zero for the maintenance hook. Launch-time retention is `configureJobBookkeeping`'s
+        // own explicit call — this only decides when the *next* one is due.
+        lastMaintenanceAt = now()
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 // Detached so one slow handler cannot stall the cadence of the poll itself.
