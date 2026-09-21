@@ -177,16 +177,20 @@ final class JobLedger: Sendable {
             nextFireAt: try r.read("nextFireAt", Date.self),
             lastRunAt: try r.read("lastRunAt", Date.self),
             pausedReason: try r.read("pausedReason", String.self),
-            policy: Self.policy(from: try r.read("policy", String.self)),
+            policy: Self.policy(from: row["policy"] as DatabaseValue?),
             retryAttempt: try r.read("retryAttempt", Int.self) ?? 0,
             queuedFire: try r.read("queuedFire", Date.self))
     }
 
-    /// A NULL column, and equally a policy this build cannot parse, reads as the default policy —
-    /// never as an unreadable row. Unlike `trigger`, a policy does not decide whether the job runs
-    /// at all, only what it is allowed to spend, and the defaults are the conservative answer.
-    private static func policy(from json: String?) -> JobPolicy {
-        guard let json, let decoded = try? JSONDecoder().decode(JobPolicy.self, from: Data(json.utf8)) else {
+    /// A NULL column, a value that is not even text, and text that will not parse all read as the
+    /// default policy — never as an unreadable row. Unlike `trigger`, a policy does not decide
+    /// whether the job runs at all, only what it is allowed to spend, and the defaults are the
+    /// conservative answer. Taken straight off the `DatabaseValue` rather than through
+    /// `RowReader.read`, which throws `unreadableRow` on a non-text value and would make exactly
+    /// the row this is here to save disappear.
+    private static func policy(from value: DatabaseValue?) -> JobPolicy {
+        guard let value, let json = String.fromDatabaseValue(value),
+              let decoded = try? JSONDecoder().decode(JobPolicy.self, from: Data(json.utf8)) else {
             return JobPolicy()
         }
         return decoded
@@ -393,10 +397,12 @@ extension JobLedger {
     /// How many of this job's runs started at or after `since` — the breaker's question, asked
     /// with `since = now - 1h`. Inclusive at the boundary, like `dueJobs`.
     func runsStarted(jobId: UUID, since: Date) throws -> Int {
-        try writer.read { db in
-            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM job_runs WHERE jobId = ? AND startedAt >= ?",
-                             arguments: [jobId.uuidString, since]) ?? 0
-        }
+        try writer.read { db in try Self.runsStarted(db, jobId: jobId, since: since) }
+    }
+
+    private static func runsStarted(_ db: Database, jobId: UUID, since: Date) throws -> Int {
+        try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM job_runs WHERE jobId = ? AND startedAt >= ?",
+                         arguments: [jobId.uuidString, since]) ?? 0
     }
 
     /// The tokens spent on runs that *started* during the local calendar day containing `now`, for
@@ -407,29 +413,37 @@ extension JobLedger {
     /// Attributed by start, not by finish: a run that began before midnight and ended after it
     /// belongs to the day it was admitted on, which is the day whose budget let it start.
     func tokensToday(jobId: UUID?, calendar: Calendar, now: Date) throws -> Int {
+        try writer.read { db in try Self.tokensToday(db, jobId: jobId, calendar: calendar, now: now) }
+    }
+
+    private static func tokensToday(_ db: Database, jobId: UUID?, calendar: Calendar, now: Date) throws -> Int {
         let dayStart = calendar.startOfDay(for: now)
         guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return 0 }
-        return try writer.read { db in
-            if let jobId {
-                return try Int.fetchOne(db, sql: """
-                    SELECT COALESCE(SUM(totalTokens), 0) FROM job_runs
-                    WHERE jobId = ? AND startedAt >= ? AND startedAt < ?
-                    """, arguments: [jobId.uuidString, dayStart, dayEnd]) ?? 0
-            }
+        if let jobId {
             return try Int.fetchOne(db, sql: """
                 SELECT COALESCE(SUM(totalTokens), 0) FROM job_runs
-                WHERE startedAt >= ? AND startedAt < ?
-                """, arguments: [dayStart, dayEnd]) ?? 0
+                WHERE jobId = ? AND startedAt >= ? AND startedAt < ?
+                """, arguments: [jobId.uuidString, dayStart, dayEnd]) ?? 0
         }
+        return try Int.fetchOne(db, sql: """
+            SELECT COALESCE(SUM(totalTokens), 0) FROM job_runs
+            WHERE startedAt >= ? AND startedAt < ?
+            """, arguments: [dayStart, dayEnd]) ?? 0
     }
 
     /// Both of a job's live figures in one call — what `/jobs` and `list_jobs` print beside the
     /// budgets, and what a budget or breaker pause card names (spec §9). Nothing but the two
     /// queries above: the numbers a person reads are the same ones admission decides on, rather
     /// than a second, drifting accounting.
+    ///
+    /// One `read`, so both figures come from one snapshot: a run finishing between two separate
+    /// reads would otherwise let a card print a token total that the run count it sits beside does
+    /// not include.
     func usage(jobId: UUID, now: Date, calendar: Calendar) throws -> JobUsage {
-        JobUsage(tokensToday: try tokensToday(jobId: jobId, calendar: calendar, now: now),
-                 runsLastHour: try runsStarted(jobId: jobId, since: now.addingTimeInterval(-3600)))
+        try writer.read { db in
+            JobUsage(tokensToday: try Self.tokensToday(db, jobId: jobId, calendar: calendar, now: now),
+                     runsLastHour: try Self.runsStarted(db, jobId: jobId, since: now.addingTimeInterval(-3600)))
+        }
     }
 
     /// The newest gate signal this job recorded, or `nil` if it has never recorded one. Rows with

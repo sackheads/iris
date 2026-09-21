@@ -58,11 +58,12 @@ struct JobLedgerPolicyTests {
         #expect(try store.ledger.job(named: "j") == job)
     }
 
-    @Test("a row with a NULL or unreadable policy reads back as the default policy")
+    @Test("a NULL, malformed or non-text policy column reads back as the default policy")
     func nullPolicy() throws {
         let store = try ConversationStore.inMemory()
         let encoder = JSONEncoder()
-        for (name, policy) in [("null", nil as String?), ("garbage", "{not json")] {
+        for (name, policy) in [("null", DatabaseValue.null), ("garbage", "{not json".databaseValue),
+                               ("nottext", 42.databaseValue)] {
             try store.writer.write { db in
                 try db.execute(sql: """
                     INSERT INTO jobs (id, name, prompt, triggerKind, trigger, createdAt, policy)
@@ -259,16 +260,20 @@ struct JobLedgerPolicyTests {
         let queue = try DatabaseQueue()
         try ConversationStore.migrator.migrate(queue, upTo: "v9_jobs")
 
-        let jobId = UUID(), runId = UUID(), convId = UUID()
-        let encoder = JSONEncoder()
-        let triggerJSON = String(decoding: try encoder.encode(Trigger.poll(
-            PollSpec(schedule: .interval(seconds: 300), gate: .script(command: "legacy", mounts: [],
-                                                                      timeoutSeconds: 60)))), as: UTF8.self)
+        let jobId = UUID(), badId = UUID(), runId = UUID(), convId = UUID()
+        // Exactly what deliverable 1 wrote: the gate is a bare command string inside the trigger
+        // JSON, not a tagged object.
+        let legacyTrigger = #"{"kind":"poll","poll":{"schedule":{"kind":"interval","seconds":300},"gate":"test -f /tmp/x"}}"#
+        // And a gate kind no build knows, to prove the lenient policy read did not make gate
+        // decoding lenient too.
+        let futureTrigger = #"{"kind":"poll","poll":{"schedule":{"kind":"interval","seconds":300},"gate":{"kind":"quantum"}}}"#
         try queue.write { db in
-            try db.execute(sql: """
-                INSERT INTO jobs (id, name, prompt, triggerKind, trigger, profile, createdAt, enabled)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, arguments: [jobId.uuidString, "old", "p", "poll", triggerJSON, "readOnly", t0, true])
+            for (id, name, trigger) in [(jobId, "old", legacyTrigger), (badId, "future", futureTrigger)] {
+                try db.execute(sql: """
+                    INSERT INTO jobs (id, name, prompt, triggerKind, trigger, profile, createdAt, enabled)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, arguments: [id.uuidString, name, "p", "poll", trigger, "readOnly", t0, true])
+            }
             try db.execute(sql: """
                 INSERT INTO job_runs (id, jobId, jobName, triggerKind, startedAt, status,
                                       promptTokens, candidateTokens, totalTokens)
@@ -284,8 +289,16 @@ struct JobLedgerPolicyTests {
         try ConversationStore.migrator.migrate(queue)
 
         let ledger = JobLedger(writer: queue)
-        let job = try #require(try ledger.jobs().first)
-        #expect(job.id == jobId && job.name == "old")
+        let jobs = try ledger.jobs()
+        // The legacy row loads, its bare string gate read as the script gate it always meant; the
+        // unknown gate kind is skipped and counted rather than guessed at.
+        #expect(jobs.map(\.name) == ["old"])
+        #expect(ledger.unreadableJobCount == 1)
+        let job = try #require(jobs.first)
+        #expect(job.id == jobId)
+        #expect(job.trigger == .poll(PollSpec(schedule: .interval(seconds: 300),
+                                              gate: .script(command: "test -f /tmp/x", mounts: [],
+                                                            timeoutSeconds: PollSpec.legacyGateTimeoutSeconds))))
         #expect(job.policy == JobPolicy() && job.retryAttempt == 0 && job.queuedFire == nil)
         let run = try #require(try ledger.run(id: runId))
         #expect(run.totalTokens == 3 && run.blockedCall == nil && run.approvedAt == nil && run.parentRunId == nil)
@@ -317,6 +330,35 @@ struct JobLedgerPolicyTests {
         var cs = ChangeSet(); cs.metadata = true
         try store.apply([ConversationWrite(id: run.id, snapshot: run, changes: cs)])
         #expect(try store.loadAll().conversations.first { $0.id == run.id }?.jobProfile == nil)
+    }
+
+    @Test("a jobProfile this build does not recognize narrows to readOnly; only NULL reads as nil")
+    func unrecognizedJobProfile() throws {
+        let store = try ConversationStore.inMemory()
+        let conv = Conversation(id: UUID(), title: "run")
+        var cs = ChangeSet(); cs.created = true; cs.metadata = true
+        try store.apply([ConversationWrite(id: conv.id, snapshot: conv, changes: cs)])
+
+        // nil is "not a job run", which is the *unnarrowed* tool surface: a stamped profile this
+        // build cannot read must not degrade to it.
+        try store.writer.write { db in
+            try db.execute(sql: "UPDATE conversations SET jobProfile = ? WHERE id = ?",
+                           arguments: ["omnipotent", conv.id.uuidString])
+        }
+        #expect(try store.loadAll().conversations.first { $0.id == conv.id }?.jobProfile == .readOnly)
+
+        // Not even text: same answer.
+        try store.writer.write { db in
+            try db.execute(sql: "UPDATE conversations SET jobProfile = ? WHERE id = ?",
+                           arguments: [7, conv.id.uuidString])
+        }
+        #expect(try store.loadAll().conversations.first { $0.id == conv.id }?.jobProfile == .readOnly)
+
+        try store.writer.write { db in
+            try db.execute(sql: "UPDATE conversations SET jobProfile = NULL WHERE id = ?",
+                           arguments: [conv.id.uuidString])
+        }
+        #expect(try store.loadAll().conversations.first { $0.id == conv.id }?.jobProfile == nil)
     }
 
     @Test("Conversation decodes with jobProfile nil when the key is absent")

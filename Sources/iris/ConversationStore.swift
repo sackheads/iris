@@ -898,15 +898,18 @@ final class ConversationStore: Sendable {
                     c.isPinned = false
                 }
 
-                // #187 deliverable 3 — same policy as the flags above: a profile this build does
-                // not recognize degrades to nil (not a job run, no narrowing) with a warning,
-                // rather than costing the user the conversation. The tool surface a stamped
-                // profile narrows is decided per turn, and a turn with no profile is the ordinary
-                // foreground one.
-                if let text = Self.readText(row, "jobProfile") {
-                    c.jobProfile = JobProfile(rawValue: text)
-                    if c.jobProfile == nil {
-                        print("WARNING: unreadable jobProfile '\(text)' for conversation \(id); ignoring")
+                // #187 deliverable 3 — degrades like the flags above rather than costing the
+                // conversation, but NOT to nil: nil means "not a job run", which is the unnarrowed
+                // tool surface, so a profile this build cannot read would fail *open* and the next
+                // metadata write would make that permanent. A stamped-but-unrecognized value
+                // therefore reads as `.readOnly`, the narrowest profile. Only SQL NULL is nil.
+                let profileValue: DatabaseValue? = row["jobProfile"]
+                if let profileValue, !profileValue.isNull {
+                    if let parsed = String.fromDatabaseValue(profileValue).flatMap(JobProfile.init(rawValue:)) {
+                        c.jobProfile = parsed
+                    } else {
+                        print("WARNING: unreadable jobProfile for conversation \(id); narrowing to readOnly")
+                        c.jobProfile = .readOnly
                     }
                 }
 
