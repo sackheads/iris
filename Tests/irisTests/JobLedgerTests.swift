@@ -63,6 +63,69 @@ struct JobLedgerTests {
         #expect(store.ledger.unreadableJobCount == 1)
     }
 
+    @Test("a row with an undecodable createdAt is skipped too, rather than sorting first at the epoch")
+    func unreadableDate() throws {
+        let store = try ConversationStore.inMemory()
+        try store.ledger.upsert(makeJob("good"))
+        try store.writer.write { db in
+            try db.execute(sql: "INSERT INTO jobs (id, name, prompt, triggerKind, trigger, createdAt) VALUES (?, ?, ?, ?, ?, ?)",
+                           arguments: [UUID().uuidString, "bad", "p", "schedule", "{\"kind\":\"schedule\",\"schedule\":{\"kind\":\"interval\",\"seconds\":60}}", "not-a-date"])
+        }
+        #expect(try store.ledger.jobs().map(\.name) == ["good"])
+        #expect(store.ledger.unreadableJobCount == 1)
+    }
+
+    @Test("only jobs() publishes the skip count: dueJobs and job(named:) leave it alone")
+    func countSurvivesOtherReads() throws {
+        let store = try ConversationStore.inMemory()
+        try store.ledger.upsert(makeJob("good", next: Date(timeIntervalSince1970: 1)))
+        try store.writer.write { db in
+            try db.execute(sql: "INSERT INTO jobs (id, name, prompt, triggerKind, trigger, createdAt) VALUES (?, ?, ?, ?, ?, ?)",
+                           arguments: [UUID().uuidString, "bad", "p", "schedule", "{\"kind\":\"telepathy\"}", Date()])
+        }
+        #expect(try store.ledger.jobs().count == 1)
+        #expect(store.ledger.unreadableJobCount == 1)
+        _ = try store.ledger.dueJobs(at: Date())
+        _ = try store.ledger.job(named: "good")
+        #expect(store.ledger.unreadableJobCount == 1)
+    }
+
+    @Test("renaming a job onto another job's name fails instead of replacing it")
+    func renameCollision() throws {
+        let store = try ConversationStore.inMemory()
+        var a = makeJob("a")
+        try store.ledger.upsert(a)
+        try store.ledger.upsert(makeJob("b"))
+        a.name = "b"
+        #expect(throws: (any Error).self) { try store.ledger.upsert(a) }
+        #expect(try store.ledger.jobs().map(\.name) == ["a", "b"])
+    }
+
+    @Test("setNextFire and setPaused throw for an id that is not in the table")
+    func unknownJob() throws {
+        let store = try ConversationStore.inMemory()
+        let missing = UUID()
+        #expect(throws: JobLedgerError.unknownJob(missing)) {
+            try store.ledger.setNextFire(jobId: missing, at: Date(), lastRunAt: nil)
+        }
+        #expect(throws: JobLedgerError.unknownJob(missing)) {
+            try store.ledger.setPaused(jobId: missing, reason: "why")
+        }
+    }
+
+    @Test("deleting a job cascades to its runs")
+    func deleteCascadesToRuns() throws {
+        let store = try ConversationStore.inMemory()
+        let j = makeJob("j")
+        try store.ledger.upsert(j)
+        try store.writer.write { db in
+            try db.execute(sql: "INSERT INTO job_runs (id, jobId, jobName, triggerKind, startedAt, status) VALUES (?, ?, ?, ?, ?, ?)",
+                           arguments: [UUID().uuidString, j.id.uuidString, j.name, "schedule", Date(), "running"])
+        }
+        try store.ledger.delete(jobId: j.id)
+        #expect(try store.writer.read { db in try Int.fetchOne(db, sql: "SELECT count(*) FROM job_runs") } == 0)
+    }
+
     @Test("v8 database migrates to v9 with conversations intact and new columns reading false")
     func migrateFromV8() throws {
         let queue = try DatabaseQueue()

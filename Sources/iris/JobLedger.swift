@@ -66,32 +66,43 @@ final class JobLedger: Sendable {
     }
 
     /// Records the outcome of a fire: when this job next runs and when it last ran. Leaves
-    /// everything else — prompt, trigger, paused reason — untouched.
+    /// everything else — prompt, trigger, paused reason — untouched. Throws
+    /// `JobLedgerError.unknownJob` if the job has been deleted out from under the caller, rather
+    /// than updating nothing and reporting success: a scheduler that keeps re-firing a job whose
+    /// row is gone should hear about it.
     func setNextFire(jobId: UUID, at: Date?, lastRunAt: Date?) throws {
         try writer.write { db in
             try db.execute(sql: "UPDATE jobs SET nextFireAt = ?, lastRunAt = ? WHERE id = ?",
                            arguments: [at, lastRunAt, jobId.uuidString])
+            guard db.changesCount > 0 else { throw JobLedgerError.unknownJob(jobId) }
         }
     }
 
-    /// Sets (or clears, with `nil`) the human-readable reason this job is not firing.
+    /// Sets (or clears, with `nil`) the human-readable reason this job is not firing. Throws
+    /// `JobLedgerError.unknownJob` for an id that is not in the table.
     func setPaused(jobId: UUID, reason: String?) throws {
         try writer.write { db in
             try db.execute(sql: "UPDATE jobs SET pausedReason = ? WHERE id = ?",
                            arguments: [reason, jobId.uuidString])
+            guard db.changesCount > 0 else { throw JobLedgerError.unknownJob(jobId) }
         }
     }
 
     // MARK: Reads
 
     /// Every job, enabled and disabled, oldest first. `rowid` breaks ties: two jobs created in the
-    /// same stored millisecond still list in the order they were inserted.
+    /// same stored millisecond still list in the order they were inserted. This is the only read
+    /// that publishes `unreadableJobCount`: the scheduler's `dueJobs` poll runs every few seconds
+    /// and must not overwrite what the listing reported to the UI.
     func jobs() throws -> [Job] {
-        try decodeAll(sql: "SELECT * FROM jobs ORDER BY createdAt, rowid", arguments: [])
+        let (jobs, skipped) = try decodeAll(sql: "SELECT * FROM jobs ORDER BY createdAt, rowid", arguments: [])
+        skippedCount.withLock { $0 = skipped }
+        if skipped > 0 { print("[JobLedger] skipped \(skipped) unreadable job row(s)") }
+        return jobs
     }
 
     func job(named name: String) throws -> Job? {
-        try decodeAll(sql: "SELECT * FROM jobs WHERE name = ?", arguments: [name]).first
+        try decodeAll(sql: "SELECT * FROM jobs WHERE name = ?", arguments: [name]).jobs.first
     }
 
     /// The enabled jobs whose `nextFireAt` has arrived, soonest first. Inclusive at `now`, so a job
@@ -103,46 +114,64 @@ final class JobLedger: Sendable {
                 WHERE enabled AND nextFireAt IS NOT NULL AND nextFireAt <= ?
                 ORDER BY nextFireAt, rowid
                 """,
-            arguments: [now])
+            arguments: [now]).jobs
     }
 
-    private func decodeAll(sql: String, arguments: StatementArguments) throws -> [Job] {
+    private func decodeAll(sql: String, arguments: StatementArguments) throws -> (jobs: [Job], skipped: Int) {
         let rows = try writer.read { db in try Row.fetchAll(db, sql: sql, arguments: arguments) }
         var jobs: [Job] = []
         var skipped = 0
         for row in rows {
             do { jobs.append(try Self.job(from: row)) } catch { skipped += 1 }
         }
-        let total = skipped
-        skippedCount.withLock { $0 = total }
-        if skipped > 0 { print("[JobLedger] skipped \(skipped) unreadable job row(s)") }
-        return jobs
+        return (jobs, skipped)
     }
 
+    /// Decodes one row, throwing `unreadableRow` for anything a `Job` cannot be built from. Every
+    /// column is read through `DatabaseValue` rather than GRDB's typed subscript, which traps on a
+    /// value it cannot convert — a hand-edited or newer-schema row must skip the job, never crash
+    /// the app. Identity and ordering fields (`id`, `name`, `trigger`, `createdAt`) are required:
+    /// a row missing one of them would otherwise masquerade as an unnamed job at the epoch.
     private static func job(from row: Row) throws -> Job {
-        guard let idString: String = row["id"], let id = UUID(uuidString: idString) else {
-            throw JobLedgerError.unreadableRow("bad id")
+        func read<T: DatabaseValueConvertible>(_ column: String, _ type: T.Type = T.self) throws -> T? {
+            guard let value = row[column] as DatabaseValue?, !value.isNull else { return nil }
+            guard let decoded = T.fromDatabaseValue(value) else {
+                throw JobLedgerError.unreadableRow("unreadable \(column)")
+            }
+            return decoded
         }
-        guard let triggerJSON: String = row["trigger"] else {
-            throw JobLedgerError.unreadableRow("missing trigger")
+        func required<T: DatabaseValueConvertible>(_ column: String, _ type: T.Type = T.self) throws -> T {
+            guard let value = try read(column, T.self) else {
+                throw JobLedgerError.unreadableRow("missing \(column)")
+            }
+            return value
         }
-        let trigger = try JSONDecoder().decode(Trigger.self, from: Data(triggerJSON.utf8))
+
+        guard let id = UUID(uuidString: try required("id", String.self)) else {
+            throw JobLedgerError.unreadableRow("unreadable id")
+        }
+        let trigger = try JSONDecoder().decode(
+            Trigger.self, from: Data(try required("trigger", String.self).utf8))
         return Job(
             id: id,
-            name: row["name"] ?? "",
-            prompt: row["prompt"] ?? "",
+            name: try required("name", String.self),
+            prompt: try read("prompt", String.self) ?? "",
             trigger: trigger,
-            profile: JobProfile(rawValue: row["profile"] ?? "") ?? .readOnly,
-            destinationConversationId: (row["destinationConversationId"] as String?).flatMap(UUID.init(uuidString:)),
-            createdInConversationId: (row["createdInConversationId"] as String?).flatMap(UUID.init(uuidString:)),
-            createdAt: row["createdAt"] ?? Date(timeIntervalSince1970: 0),
-            enabled: row["enabled"] ?? true,
-            nextFireAt: row["nextFireAt"],
-            lastRunAt: row["lastRunAt"],
-            pausedReason: row["pausedReason"])
+            profile: JobProfile(rawValue: try read("profile", String.self) ?? "") ?? .readOnly,
+            destinationConversationId: (try read("destinationConversationId", String.self)).flatMap(UUID.init(uuidString:)),
+            createdInConversationId: (try read("createdInConversationId", String.self)).flatMap(UUID.init(uuidString:)),
+            createdAt: try required("createdAt", Date.self),
+            enabled: try read("enabled", Bool.self) ?? true,
+            nextFireAt: try read("nextFireAt", Date.self),
+            lastRunAt: try read("lastRunAt", Date.self),
+            pausedReason: try read("pausedReason", String.self))
     }
 }
 
-enum JobLedgerError: Error {
+enum JobLedgerError: Error, Equatable {
+    /// A row that cannot be turned into a `Job`; the string names the offending column. Skipped by
+    /// `jobs()` and counted into `unreadableJobCount`, never surfaced to a caller.
     case unreadableRow(String)
+    /// An update named a job id that is not in the table.
+    case unknownJob(UUID)
 }
