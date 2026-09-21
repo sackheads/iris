@@ -60,6 +60,15 @@ struct JobPolicyTests {
         #expect(zeroes.maxRunsPerHour == 0)
     }
 
+    @Test("a negative replay cap decodes as the default, like every other number in a policy")
+    func negativeReplayCapDecodesAsTheDefault() throws {
+        let negative = try decoder.decode(JobPolicy.self, from: Data(#"{"catchUp":{"kind":"replay","cap":-2}}"#.utf8))
+        #expect(negative.catchUp == .replay(cap: JobPolicy.defaultReplayCap))
+        // Zero is a real answer here and is kept: replay nothing, drop the lot.
+        let none = try decoder.decode(JobPolicy.self, from: Data(#"{"catchUp":{"kind":"replay","cap":0}}"#.utf8))
+        #expect(none.catchUp == .replay(cap: 0))
+    }
+
     @Test("an unknown overlap decodes as skip rather than failing the row")
     func unknownOverlap() throws {
         let policy = try decoder.decode(JobPolicy.self, from: Data(#"{"overlap":"stampede"}"#.utf8))

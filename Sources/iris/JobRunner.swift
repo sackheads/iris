@@ -27,7 +27,7 @@ actor JobRunner {
     /// The longest the deadline watchdog sleeps before looking at the wall clock again. See the
     /// loop in `run()`: the sleep and the deadline are on different clocks, so the bound on how
     /// far a sleeping Mac can push a run past its timeout is this, not the timeout itself.
-    static let watchdogSlice: TimeInterval = 60
+    static let defaultWatchdogSlice: TimeInterval = 60
 
     /// Weak, both of them: `AppState` owns the engine, the engine owns this runner for the life of
     /// the process, and a strong reference back either way is a cycle that keeps a whole app state
@@ -46,6 +46,9 @@ actor JobRunner {
     private let calendar: Calendar
     private let config: ConfigManager
     private let protectionEnabled: Bool?
+    /// How long the deadline watchdog sleeps between looks at the wall clock. Injected only so a
+    /// test can drive the loop round more than once without waiting a minute to do it.
+    private let watchdogSlice: TimeInterval
     /// How a run keeps the Mac awake for its own duration (§4). Injected so a test can watch the
     /// begin/end pair instead of asserting on the machine's real power state.
     private let activity: any ActivityAPI
@@ -62,7 +65,8 @@ actor JobRunner {
          config: ConfigManager = .shared,
          protectionEnabled: Bool? = nil,
          activity: any ActivityAPI = ProcessInfoActivity(),
-         usageSource: (any JobUsageReading)? = nil) {
+         usageSource: (any JobUsageReading)? = nil,
+         watchdogSlice: TimeInterval = JobRunner.defaultWatchdogSlice) {
         self.state = state
         self.engine = engine
         self.ledger = ledger
@@ -72,6 +76,7 @@ actor JobRunner {
         self.config = config
         self.protectionEnabled = protectionEnabled
         self.activity = activity
+        self.watchdogSlice = watchdogSlice
     }
 
     // MARK: Admission (#187 §4)
@@ -430,11 +435,18 @@ actor JobRunner {
         // The turn is a task of its own so the deadline can actually end it. The budget check at
         // the top of each model round cannot: a turn parked inside a model call that never returns
         // never reaches another round, which is exactly the run a timeout exists for.
+        // The turn's claim on the thinking indicator and this conversation's engine-turn count,
+        // held here so the deadline can give it back for a turn that will not. `thinkingCount` is
+        // one global count: an abandoned turn that kept it would leave the spectrum lit and
+        // Escape appending "Interrupted." to whatever the user is reading, for the rest of the
+        // session.
+        let lifetime = TurnLifetime()
         let turnTask = Task { [weak engine, weak orphanState = state] in
             await engine?.processInput(prompt, source: "job:\(job.name)",
                                        conversationId: conversationId, turnBudget: budget,
                                        usageSink: LedgerUsageSink(ledger: ledger, runId: run.id,
-                                                                  jobName: job.name))
+                                                                  jobName: job.name),
+                                       lifetime: lifetime)
             // Claimed the instant the turn is back, before anything else can suspend: having won,
             // this run ended on its own terms and is never an overrun, whatever the watchdog does
             // next. A turn that lost — one the deadline already gave up on — claims nothing and
@@ -448,6 +460,7 @@ actor JobRunner {
             }
             return false
         }
+        let watchdogSlice = self.watchdogSlice
         let watchdog = Task.detached {
             // Sliced, and re-read from the wall clock every time round, because the two clocks
             // are not the same one: `Task.sleep` suspends on the machine's *suspending* clock,
@@ -461,7 +474,7 @@ actor JobRunner {
                 // Not `try?`: a cancelled sleep means the run finished first, and the two things
                 // below are the deadline's alone to do.
                 do {
-                    let slice = min(seconds, Self.watchdogSlice)
+                    let slice = min(seconds, watchdogSlice)
                     try await Task.sleep(nanoseconds: UInt64(slice * 1_000_000_000))
                 } catch { return }
             }
@@ -481,6 +494,10 @@ actor JobRunner {
         let overran = await ending.wait()
         watchdog.cancel()
         await holder.end()
+        // The indicator is the run's while the run is running, and this run is over. A turn that
+        // came back released it on its own way out, so this is a no-op then; a turn the deadline
+        // abandoned never will, so this is the only release it gets.
+        if overran { await lifetime.release() }
         let finishedAt = now()
 
         guard let turn = await readTurn(conversationId: conversationId) else {
@@ -865,6 +882,10 @@ actor DeadlineFlag {
     /// run closes its row and gives the job back.
     func wait() async -> Bool {
         if let ending { return ending }
+        // One waiter, and enforced where it is relied on: a second would overwrite the first
+        // continuation, which is never resumed again — a silent permanent hang, the exact failure
+        // this whole mechanism exists to remove.
+        precondition(waiter == nil, "DeadlineFlag has one waiter: the run that owns the ending")
         return await withCheckedContinuation { self.waiter = $0 }
     }
 }

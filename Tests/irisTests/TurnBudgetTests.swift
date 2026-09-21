@@ -100,6 +100,46 @@ struct TurnBudgetTests {
         #expect(budget.stopReason(tokensUsed: 10, now: Date()) == TurnBudget.tokensExceeded)
     }
 
+    // MARK: The turn's claim on the indicator
+
+    /// Counts how many times a lifetime handed its claim back.
+    private actor ReleaseCount {
+        private(set) var count = 0
+        func bump() { count += 1 }
+    }
+
+    @Test("a turn's claim on the indicator is given back exactly once, by whoever gets there first")
+    func turnLifetimeReleasesOnce() async {
+        let releases = ReleaseCount()
+        let lifetime = TurnLifetime()
+        await lifetime.arm { await releases.bump() }
+        #expect(await lifetime.isReleased == false)
+
+        await lifetime.release()
+        // The run gave up on the turn, and then the turn came back and released as well: the
+        // second one must do nothing. `endThinking` clamps at zero, so an extra release would not
+        // show up as a stuck indicator but as a *concurrent* turn's indicator going dark.
+        await lifetime.release()
+        await lifetime.release()
+
+        #expect(await releases.count == 1)
+        #expect(await lifetime.isReleased == true)
+    }
+
+    @Test("a lifetime released before the turn armed it hands the claim straight back")
+    func turnLifetimeReleasedBeforeArming() async {
+        // The deadline beating the turn to its own first line: a zero-length timeout, a machine
+        // under load. Arming must not store a claim nothing will ever take.
+        let releases = ReleaseCount()
+        let lifetime = TurnLifetime()
+        await lifetime.release()
+        await lifetime.arm { await releases.bump() }
+
+        #expect(await releases.count == 1, "armed into a released lifetime, so given back at once")
+        await lifetime.release()
+        #expect(await releases.count == 1)
+    }
+
     // MARK: In the turn
 
     @Test("a deadline already passed ends the turn before the first model call")

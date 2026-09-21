@@ -113,7 +113,11 @@ extension JobPolicy.CatchUp {
         case "skip":
             self = .skip
         case "replay":
-            self = .replay(cap: try c.decodeIfPresent(Int.self, forKey: .cap) ?? JobPolicy.defaultReplayCap)
+            // Clamped like the four limits above (R15): a negative cap is a typo, and the wake
+            // handling that will read this must not have to decide what "replay -1 occurrences"
+            // means. Zero is kept and is a real answer: replay nothing, drop the lot.
+            let cap = JobPolicy.notNegative(try c.decodeIfPresent(Int.self, forKey: .cap))
+            self = .replay(cap: cap ?? JobPolicy.defaultReplayCap)
         default:
             self = .coalesce
         }

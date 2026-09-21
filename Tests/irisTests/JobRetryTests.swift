@@ -448,6 +448,10 @@ struct JobRetryTests {
         #expect(run.failureReason == TurnBudget.timeExceeded)
         #expect(activity.events == [.begin("Iris job pr-sweep"), .end],
                 "and the Mac is not held awake by a turn nothing can end")
+        // M1: the thinking indicator is a global reference count, so an abandoned turn that kept
+        // its claim would leave the spectrum and the LED bar lit for the rest of the session, and
+        // Escape appending "Interrupted." to whatever conversation the user is actually reading.
+        #expect(state.isThinking == false, "the abandoned turn gave its indicator back")
 
         // The other half of the wedge: the job has to be firable again. A second fire admitted is
         // proof `inFlight` was given back.
@@ -458,6 +462,56 @@ struct JobRetryTests {
         #expect(runs.count == 2)
         #expect(runs.allSatisfy { $0.status == .failed && $0.failureReason == TurnBudget.timeExceeded })
         #expect(runs.allSatisfy { $0.finishedAt != nil })
+        #expect(state.isThinking == false, "two abandoned turns, two indicators given back")
+    }
+
+    @Test("a turn that comes back releases its indicator once, and the deadline cannot take it twice")
+    func aCooperativeTurnReleasesItsIndicatorExactlyOnce() async throws {
+        // The other half of M1. A release the run made as well as the turn would not show up as a
+        // stuck indicator but as a *missing* one: `endThinking` clamps at zero, so the extra
+        // decrement would take a concurrent real turn's indicator down with it.
+        let (store, state, engine) = try harness([textResponse("tick")])
+        let j = job()
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               activity: RecordingActivity())
+
+        // Held across the run: a second turn's claim, which nothing in this run may give back.
+        state.beginThinking()
+        await runner.fire(job: j, origin: .schedule)
+
+        #expect(try store.ledger.runs(jobId: j.id, limit: 1).first?.status == .completed)
+        #expect(state.isThinking == true, "the other turn is still thinking")
+        state.endThinking()
+        #expect(state.isThinking == false, "and its own release is the last one needed")
+    }
+
+    @Test("the watchdog re-reads the clock every slice, so a short slice still ends the run once")
+    func theWatchdogLoopsUntilTheDeadline() async throws {
+        // R17's loop had no test: every other deadline test takes its first slice and exits, so an
+        // inverted condition or a slice that never shrinks would spin unnoticed. A tenth of a
+        // second against a one-second timeout is about ten times round.
+        let client = WedgedClient(response: textResponse("too late"))
+        let (store, state, engine) = try harness([], client: client)
+        let j = job(timeoutSeconds: 1)
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let activity = RecordingActivity()
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               activity: activity, watchdogSlice: 0.1)
+        defer { client.releaseAll() }
+
+        await runner.fire(job: j, origin: .schedule)
+
+        let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
+        #expect(run.status == .failed)
+        #expect(run.failureReason == TurnBudget.timeExceeded)
+        #expect(activity.events == [.begin("Iris job pr-sweep"), .end],
+                "the loop ended the run exactly once, however many times it went round")
+        #expect(try store.ledger.runs(jobId: j.id, limit: 5).count == 1, "and only the one run")
     }
 
     @Test("the turn and the deadline race for one claim, and exactly one of them wins it")
