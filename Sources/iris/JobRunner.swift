@@ -430,7 +430,7 @@ actor JobRunner {
         // The turn is a task of its own so the deadline can actually end it. The budget check at
         // the top of each model round cannot: a turn parked inside a model call that never returns
         // never reaches another round, which is exactly the run a timeout exists for.
-        let turnTask = Task { [weak engine] in
+        let turnTask = Task { [weak engine, weak orphanState = state] in
             await engine?.processInput(prompt, source: "job:\(job.name)",
                                        conversationId: conversationId, turnBudget: budget,
                                        usageSink: LedgerUsageSink(ledger: ledger, runId: run.id,
@@ -439,7 +439,14 @@ actor JobRunner {
             // this run ended on its own terms and is never an overrun, whatever the watchdog does
             // next. A turn that lost — one the deadline already gave up on — claims nothing and
             // writes nothing: the row it would have written was closed at the deadline.
-            return await ending.claim(deadline: false)
+            if await ending.claim(deadline: false) { return true }
+            // Except this, which is not a record of the run but a bucket in `AppState`: a denial
+            // the orphan collected after `readTurn` drained would sit against a conversation
+            // nothing will ever read again. Same drain `closeInterrupted` does, same reason.
+            if let orphanState {
+                await MainActor.run { _ = orphanState.takeBackgroundDenials(for: conversationId) }
+            }
+            return false
         }
         let watchdog = Task.detached {
             // Sliced, and re-read from the wall clock every time round, because the two clocks
