@@ -8,7 +8,9 @@ in, not `UserDefaults`. Jobs survive an app restart.
 The two pre-ledger `UserDefaults` keys (`iris_scheduled_jobs` and `WATCHER_RULES`) are deleted on
 first launch of a build with migration v9, and whatever they held is dropped rather than imported:
 no install outside development ever had a real job in them. How many records went is logged once,
-so a machine that turns out to have had some is not silent about it.
+and if there were any the app posts a one-time notice into the open conversation saying what was
+dropped and to recreate it with `schedule_job` or `register_directory_watcher` — a console line is
+not something anyone running a Mac app reads.
 
 This document covers deliverable 1 of `#187` (see `docs/agency/agency.md` and
 `docs/specs/2026-09-21-agency-model-and-ledger.md`): the job model, the cron subset, the schedule

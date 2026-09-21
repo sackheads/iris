@@ -200,4 +200,23 @@ struct JobSchedulerTests {
         #expect(none.jobs == 0 && none.watcherRules == 0)
         #expect(quiet.isEmpty)
     }
+
+    @Test("the drop is a sentence the user sees, counted and pluralised, or nothing at all")
+    func legacyDropNoticeWording() throws {
+        // `removeLegacyDefaults` logs with `print`, which nobody running a macOS app reads. The
+        // records are gone either way, so the notice is the user's only evidence they existed.
+        #expect(JobScheduler.legacyDropNotice(jobs: 0, watcherRules: 0) == nil)
+
+        let jobsOnly = try #require(JobScheduler.legacyDropNotice(jobs: 2, watcherRules: 0))
+        #expect(jobsOnly.contains("2 scheduled jobs were dropped"))
+        #expect(!jobsOnly.contains("0 watcher rules"), "a count of nothing is not reported")
+        #expect(jobsOnly.contains("schedule_job"), "and it says how to get them back")
+
+        let rulesOnly = try #require(JobScheduler.legacyDropNotice(jobs: 0, watcherRules: 1))
+        #expect(rulesOnly.contains("1 watcher rule was dropped"))
+        #expect(!rulesOnly.contains("0 scheduled jobs"), "a count of nothing is not reported")
+
+        let both = try #require(JobScheduler.legacyDropNotice(jobs: 2, watcherRules: 1))
+        #expect(both.contains("2 scheduled jobs and 1 watcher rule were dropped"))
+    }
 }

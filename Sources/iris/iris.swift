@@ -394,7 +394,17 @@ actor IrisEngine {
     }
 
     func start() async {
-        JobScheduler.removeLegacyDefaults(from: IrisDefaults.store)
+        let droppedLegacy = JobScheduler.removeLegacyDefaults(from: IrisDefaults.store)
+        // The removal logs with `print`, which nobody running a Mac app reads: no importer ships,
+        // so this is the user's only notice that records they made are gone. Deduped by wording.
+        if let notice = JobScheduler.legacyDropNotice(jobs: droppedLegacy.jobs,
+                                                      watcherRules: droppedLegacy.watcherRules) {
+            let noticeState = state
+            await MainActor.run {
+                guard let s = noticeState, let target = s.selectedConversationId else { return }
+                s.appendLaunchNotice(notice, to: target)
+            }
+        }
         let schedulerState = state
         let jobLedger = await MainActor.run(resultType: JobLedger?.self, body: { schedulerState?.store.ledger })
         if let ledger = jobLedger {
