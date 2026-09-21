@@ -7,7 +7,11 @@ import Foundation
 /// With `vibecopUnderAutoApprove` the evaluation runs (and records its span) and the tool is
 /// approved regardless of the verdict: a benchmark measures the cost, it never blocks on it.
 @MainActor
-@Suite("Vibecop under headless auto-approve", .serialized)   // tests share the process-global mock engine
+// #237 made the mock engine task-scoped, so that is no longer why this is serialized. It still
+// is, for a different global: these tests read span counts off `PerformanceProfiler.shared`.
+// Note that `.serialized` only orders tests WITHIN this suite — three other suites touch the
+// same profiler and run in parallel with it. See the follow-up issue.
+@Suite("Vibecop under headless auto-approve", .serialized)
 struct VibecopUnderAutoApproveTests {
     /// Answers every Vibecop prompt with a fixed decision and counts how often it was asked.
     private final class CountingVibecop: AuxiliaryInferenceEngine, @unchecked Sendable {
