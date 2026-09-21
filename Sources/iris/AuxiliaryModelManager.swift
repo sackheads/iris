@@ -9,6 +9,15 @@ final class AuxiliaryModelManager: @unchecked Sendable {
     
     private let modelsDir: String
     private let registryPath: String
+
+    /// Engines scoped to the current task tree, by role, taking precedence over registered ones.
+    ///
+    /// `setMockEngine` writes process-global state and `swift test` runs suites in parallel, so a
+    /// suite that registered a hijacking canary decided tier 3's verdict for every other suite
+    /// sanitising at that moment — failing assertions against content that was never the problem
+    /// (#237). A task-local is visible only inside the `withValue` body and the tasks it spawns.
+    /// Production never sets it.
+    @TaskLocal static var scopedEngines: [String: AuxiliaryInferenceEngine]?
     
     init() {
         self.modelsDir = IrisPaths.default.modelsDir.path
@@ -20,6 +29,9 @@ final class AuxiliaryModelManager: @unchecked Sendable {
     }
     
     func getEngine(for role: String, config: AuxiliaryModelConfig) async throws -> AuxiliaryInferenceEngine {
+        // A task-scoped engine wins, and is never cached into `loadingTasks` — caching it would
+        // outlive the scope and put us back where #237 started.
+        if let scoped = Self.scopedEngines?[role] { return scoped }
         let task: Task<AuxiliaryInferenceEngine, Error> = lock.withLock {
             if let existing = loadingTasks[role] {
                 return existing
@@ -59,7 +71,8 @@ final class AuxiliaryModelManager: @unchecked Sendable {
     /// `InjectionGuard.executeTier3Canary` (#202 fix round 2) so a registered engine counts as
     /// provisioned regardless of what the filesystem says.
     func hasEngine(for role: String) -> Bool {
-        lock.withLock { loadingTasks[role] != nil }
+        if Self.scopedEngines?[role] != nil { return true }
+        return lock.withLock { loadingTasks[role] != nil }
     }
 
     func unloadEngine(for role: String) async {

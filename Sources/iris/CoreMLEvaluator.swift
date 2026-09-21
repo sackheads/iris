@@ -10,7 +10,31 @@ public final class CoreMLEvaluator: @unchecked Sendable {
     
     private var model: CoreMLModelProtocol?
     private let lock = NSLock()
-    
+
+    /// A model scoped to the current task tree, taking precedence over the installed one.
+    ///
+    /// `setModel` writes process-global state, and `swift test` runs suites in parallel, so a
+    /// suite that installed a malicious-probability mock decided the verdict for every other
+    /// suite sanitising at the same moment — assertions failed against content that was never
+    /// the problem (#237). A task-local is visible only inside the `withValue` body and the
+    /// tasks it spawns, so two suites can hold different models at once without racing.
+    /// Production never sets it.
+    ///
+    /// Wrapped rather than a bare optional so a scope can say "explicitly no model" — which is a
+    /// different thing from "no scope set", and is what the fail-open tests need.
+    public struct ScopedModel: Sendable {
+        let model: CoreMLModelProtocol?
+        public init(_ model: CoreMLModelProtocol?) { self.model = model }
+    }
+    @TaskLocal public static var scopedModel: ScopedModel?
+
+    /// The task-scoped model when a scope is active — including when that scope says none —
+    /// otherwise the installed one.
+    private var effectiveModel: CoreMLModelProtocol? {
+        if let scoped = Self.scopedModel { return scoped.model }
+        return lock.withLock { model }
+    }
+
     private init() {}
     
     /// `nil` clears the loaded model (#210 fix round 1) — the test seam for forcing
@@ -23,10 +47,17 @@ public final class CoreMLEvaluator: @unchecked Sendable {
     }
     
     public var hasModelLoaded: Bool {
-        lock.withLock { model != nil }
+        effectiveModel != nil
     }
     
     public func loadModelIfNeeded() async throws {
+        // A scope answers for itself: one holding a model needs no load, and one holding `nil`
+        // means "explicitly no model" and must not acquire one. Without this, a scoped-nil body
+        // makes `hasModelLoaded` false, falls through to the disk load below, and — on a machine
+        // where the bundle is present — ends at `setModel(liveModel)`, writing a live classifier
+        // into the PROCESS-GLOBAL slot that every unscoped path then reads. That is the leak this
+        // seam exists to close, so the check belongs ahead of the config read, not after it.
+        if Self.scopedModel != nil { return }
         if hasModelLoaded { return }
         let coreMLPathStr = ConfigManager.shared.promptGuardCoreMLModel
         if coreMLPathStr.isEmpty { return }
@@ -70,7 +101,7 @@ public final class CoreMLEvaluator: @unchecked Sendable {
     }
     
     public func evaluate(text: String) async throws -> Double {
-        let currentModel = lock.withLock { model }
+        let currentModel = effectiveModel
         guard let m = currentModel else {
             // If no model is loaded (e.g. BYOM not yet downloaded), we fail open (assume safe) 
             // so we don't break the user's workflow just because they haven't set up Tier 2 yet.

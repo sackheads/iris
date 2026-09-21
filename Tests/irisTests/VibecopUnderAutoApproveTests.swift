@@ -7,7 +7,11 @@ import Foundation
 /// With `vibecopUnderAutoApprove` the evaluation runs (and records its span) and the tool is
 /// approved regardless of the verdict: a benchmark measures the cost, it never blocks on it.
 @MainActor
-@Suite("Vibecop under headless auto-approve", .serialized)   // tests share the process-global mock engine
+// #237 made the mock engine task-scoped, so that is no longer why this is serialized. It still
+// is, for a different global: these tests read span counts off `PerformanceProfiler.shared`.
+// Note that `.serialized` only orders tests WITHIN this suite — three other suites touch the
+// same profiler and run in parallel with it. See the follow-up issue.
+@Suite("Vibecop under headless auto-approve", .serialized)
 struct VibecopUnderAutoApproveTests {
     /// Answers every Vibecop prompt with a fixed decision and counts how often it was asked.
     private final class CountingVibecop: AuxiliaryInferenceEngine, @unchecked Sendable {
@@ -41,40 +45,44 @@ struct VibecopUnderAutoApproveTests {
     @Test("auto-approve alone never consults Vibecop")
     func autoApproveSkipsVibecop() async {
         let engine = CountingVibecop(decision: "APPROVE")
-        AuxiliaryModelManager.shared.setMockEngine(engine, for: "vibecop")
-        let (ok, spans) = await approve(auto: true, measure: false, vibecopEnabled: true)
-        #expect(ok)
-        #expect(engine.calls == 0)
-        #expect(spans == 0)
+        await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": engine]) {
+            let (ok, spans) = await approve(auto: true, measure: false, vibecopEnabled: true)
+            #expect(ok)
+            #expect(engine.calls == 0)
+            #expect(spans == 0)
+        }
     }
 
     @Test("measuring auto-approve consults Vibecop once, records the span, and approves")
     func measuredAutoApproveConsultsVibecop() async {
         let engine = CountingVibecop(decision: "APPROVE")
-        AuxiliaryModelManager.shared.setMockEngine(engine, for: "vibecop")
-        let (ok, spans) = await approve(auto: true, measure: true, vibecopEnabled: true)
-        #expect(ok)
-        #expect(engine.calls == 1)
-        #expect(spans == 1)
+        await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": engine]) {
+            let (ok, spans) = await approve(auto: true, measure: true, vibecopEnabled: true)
+            #expect(ok)
+            #expect(engine.calls == 1)
+            #expect(spans == 1)
+        }
     }
 
     @Test("a DENY verdict is recorded but does not block a headless run")
     func denyStillApproves() async {
         let engine = CountingVibecop(decision: "DENY")
-        AuxiliaryModelManager.shared.setMockEngine(engine, for: "vibecop")
-        let (ok, _) = await approve(auto: true, measure: true, vibecopEnabled: true)
-        #expect(ok)
-        #expect(engine.calls == 1)
+        await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": engine]) {
+            let (ok, _) = await approve(auto: true, measure: true, vibecopEnabled: true)
+            #expect(ok)
+            #expect(engine.calls == 1)
+        }
     }
 
     @Test("with Vibecop disabled nothing is consulted even when measuring")
     func disabledVibecopIsNotConsulted() async {
         let engine = CountingVibecop(decision: "APPROVE")
-        AuxiliaryModelManager.shared.setMockEngine(engine, for: "vibecop")
-        let (ok, spans) = await approve(auto: true, measure: true, vibecopEnabled: false)
-        #expect(ok)
-        #expect(engine.calls == 0)
-        #expect(spans == 0)
+        await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": engine]) {
+            let (ok, spans) = await approve(auto: true, measure: true, vibecopEnabled: false)
+            #expect(ok)
+            #expect(engine.calls == 0)
+            #expect(spans == 0)
+        }
     }
 
     @Test("ScenarioRunner measures Vibecop unless guards are off")
