@@ -2721,12 +2721,18 @@ actor IrisEngine {
                 details = path
             }
             
-            let useSandbox = await resolveUseSandbox(toolName: functionCall.name, conversationId: conversationId, workspacePath: workspacePath)
             // R20: a command out of an unattended run is the container's or nobody's, whatever the
-            // profile and whatever the allowlist says. `resolveUseSandbox` answers `false` the
-            // moment the master switch is off or the runtime has gone, however the conversation is
-            // pinned, and the branch below would then hand the command to the host on the strength
-            // of an "Always allow" rule the user clicked in some attended chat months ago.
+            // profile and whatever the allowlist says. The resolution answers "host" the moment the
+            // master switch is off or the runtime has gone, however the conversation is pinned, and
+            // the branch below would then hand the command to the host on the strength of an
+            // "Always allow" rule the user clicked in some attended chat months ago.
+            //
+            // Asked through the warning-free `isSandboxed` and asked FIRST, before
+            // `resolveUseSandbox` below: that one announces "running on the host WITHOUT isolation"
+            // on its way to returning false, which is a false sentence about a call that is about
+            // to be refused, and it would stand in the run's transcript above the refusal. Same
+            // rule as the read-only profile gate, which asks the warning-free question for exactly
+            // this reason.
             //
             // `isUnattended`, not `jobProfile != nil`: a subagent the run delegated into inherits
             // `isBackground` but not the profile, and R20 covers what the run does through it. A
@@ -2735,12 +2741,15 @@ actor IrisEngine {
             //
             // Recorded as an `.approval` denial on purpose: the run ends `blockedOnApproval` with
             // the whole call on its card, and the click re-asks whether the VM is back.
-            if isUnattended, functionCall.name == "run_command", !useSandbox {
+            if isUnattended, functionCall.name == "run_command",
+               await !isSandboxed(conversationId: conversationId, workspacePath: workspacePath) {
                 let call = BlockedCall(toolName: functionCall.name, args: functionCall.args,
                                        cwd: workspacePath, reason: .approval)
                 await MainActor.run { localState?.recordBackgroundDenial(call: call, in: conversationId) }
                 return Self.sandboxUnavailableRefusal(tool: functionCall.name)
             }
+
+            let useSandbox = await resolveUseSandbox(toolName: functionCall.name, conversationId: conversationId, workspacePath: workspacePath)
             if needsApproval {
                 let approved = await localState?.requestApproval(
                     toolName: functionCall.name, details: details, args: functionCall.args,

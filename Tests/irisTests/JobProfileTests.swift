@@ -325,6 +325,13 @@ struct JobProfileTests {
         #expect(!FileManager.default.fileExists(atPath: marker),
                 "a background command with no container must not run on the host")
 
+        // And the transcript does not first announce a host run that never happens: the guard asks
+        // the warning-free predicate, so "running on the host WITHOUT isolation" — true of an
+        // attended chat, false of this — is never written above the refusal.
+        let background = try #require(app.conversations.first { $0.isBackground })
+        #expect(!background.messages.contains { $0.content.contains("WITHOUT isolation") },
+                "a refused call must not be preceded by a notice saying it ran on the host")
+
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(run.status == .blockedOnApproval)
         #expect(run.blockedTool == "run_command")
