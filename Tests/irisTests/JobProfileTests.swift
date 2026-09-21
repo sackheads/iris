@@ -40,6 +40,13 @@ struct JobProfileTests {
         })
     }
 
+    private func tempDirectory() throws -> URL {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("iris-jobprofile-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
     private func state() throws -> (ConversationStore, AppState) {
         let store = try ConversationStore.inMemory()
         let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
@@ -287,6 +294,82 @@ struct JobProfileTests {
                        store: store, state: app)
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(run.status == .completed)
+    }
+
+    @Test("a mutating run's command is refused when the VM goes, even with an Always allow rule")
+    func unattendedRunCommandNeverFallsBackToTheHost() async throws {
+        // R22/R20 on the ordinary fire path. Admission passes (`sandboxAvailable: { true }`), so
+        // the job is allowed to start and its conversation is pinned `.sandboxed`; the engine then
+        // resolves the host for `run_command` — a container runtime is not available to the test
+        // process, exactly as `readOnlyRunDeclaresExactlyTheAllowedSurface` above relies on — which
+        // is the mid-turn "the VM went away" case. The user's own "Always allow" rule for this
+        // exact command would otherwise be enough to run it on the host, unattended.
+        let (store, app) = try state()
+        let home = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let permissions = PermissionManager(paths: IrisPaths(root: home))
+        let marker = home.appendingPathComponent("ran-on-the-host").path
+        let command = "touch \(marker)"
+        permissions.allowGlobally(toolName: "run_command", details: command)
+        app.permissions = permissions
+
+        let client = FakeLLMClient(responses: [
+            callResponse("run_command", ["command": .string(command)]),
+            textResponse("I could not run that."),
+        ])
+        let job = self.job(name: "lost-its-vm", profile: .mutating)
+        // autoApprove off: the allowlist rule is what would have let this through.
+        try await fire(job, client: client, autoApprove: false, sandboxAvailable: true,
+                       store: store, state: app)
+
+        #expect(!FileManager.default.fileExists(atPath: marker),
+                "a background command with no container must not run on the host")
+
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.status == .blockedOnApproval)
+        #expect(run.blockedTool == "run_command")
+        #expect(run.failureReason == "needs approval: run_command")
+        let call = try #require(run.blockedCall)
+        // `.approval`, not `.profile`: the click re-asks whether the VM is back, which is the
+        // recovery path R20 names.
+        #expect(call.reason == .approval)
+        #expect(call.args["command"]?.stringValue == command)
+
+        let activity = try #require(app.conversations.first { $0.id == app.activityConversationId() })
+        let card = try #require(activity.messages.compactMap { EventCard.decode($0.content) }.first)
+        #expect(card.status == .blockedOnApproval)
+        #expect(card.blockedTool == "run_command")
+        #expect(card.blockedCall?.args["command"]?.stringValue == command)
+    }
+
+    @Test("an attended chat with the same Always allow rule still runs the command")
+    func anAttendedRunCommandIsUnaffected() async throws {
+        // The control for the rule above: it is keyed on the run being unattended, not on the
+        // command or the rule, so a person sitting in front of their own chat is not touched.
+        let (_, app) = try state()
+        let home = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let permissions = PermissionManager(paths: IrisPaths(root: home))
+        let marker = home.appendingPathComponent("ran-in-a-chat").path
+        let command = "touch \(marker)"
+        permissions.allowGlobally(toolName: "run_command", details: command)
+        app.permissions = permissions
+        app.autoApproveTools = false
+
+        let client = FakeLLMClient(responses: [
+            callResponse("run_command", ["command": .string(command)]),
+            textResponse("Done."),
+        ])
+        let engine = IrisEngine(state: app, tier: .medium, client: client,
+                                protectionEnabled: false, sessionPeerCount: 0)
+        let chat = app.createNewConversation(title: "mine")
+        app.selectedConversationId = chat
+
+        await engine.processInput("touch it", source: "test", conversationId: chat)
+
+        #expect(FileManager.default.fileExists(atPath: marker),
+                "an attended user's own allowlist rule still runs on the host")
+        #expect(app.takeBackgroundDenials(for: chat).isEmpty)
     }
 
     @Test("a profile denial ends the turn instead of being re-asked until the budget runs out")

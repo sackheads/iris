@@ -1133,7 +1133,7 @@ actor IrisEngine {
                     "weekday": Schema(type: "INTEGER", description: "Cron weekday (1=Sunday, 2=Monday, ..., 7=Saturday)"),
                     "weekdays": Schema(type: "ARRAY", description: "Cron weekdays, 1=Sunday … 7=Saturday; e.g. [2,3,4,5,6] for Monday–Friday. Prefer this over five separate jobs.", items: Schema(type: "INTEGER")),
                     "intervalSeconds": Schema(type: "INTEGER", description: "Simple recurring interval in seconds (e.g. 3600 for every hour)"),
-                    "profile": Schema(type: "STRING", description: "'readOnly' (default) or 'mutating'. Use 'mutating' only when the job's work must change something: it always runs in the container VM, needs the runtime installed and sandboxing switched on, and is re-checked at every fire.")
+                    "profile": Schema(type: "STRING", description: "'readOnly' (default) or 'mutating'. Use 'mutating' only when the job's work must change something: its commands always run in the container VM, so it needs the runtime installed and sandboxing switched on, and that is re-checked at every fire.")
                 ],
                 required: ["prompt"]
             )
@@ -2722,6 +2722,25 @@ actor IrisEngine {
             }
             
             let useSandbox = await resolveUseSandbox(toolName: functionCall.name, conversationId: conversationId, workspacePath: workspacePath)
+            // R20: a command out of an unattended run is the container's or nobody's, whatever the
+            // profile and whatever the allowlist says. `resolveUseSandbox` answers `false` the
+            // moment the master switch is off or the runtime has gone, however the conversation is
+            // pinned, and the branch below would then hand the command to the host on the strength
+            // of an "Always allow" rule the user clicked in some attended chat months ago.
+            //
+            // `isUnattended`, not `jobProfile != nil`: a subagent the run delegated into inherits
+            // `isBackground` but not the profile, and R20 covers what the run does through it. A
+            // `readOnly` run never reaches here for an unsandboxed `run_command` — its profile
+            // gate above refuses first — so nothing is recorded twice.
+            //
+            // Recorded as an `.approval` denial on purpose: the run ends `blockedOnApproval` with
+            // the whole call on its card, and the click re-asks whether the VM is back.
+            if isUnattended, functionCall.name == "run_command", !useSandbox {
+                let call = BlockedCall(toolName: functionCall.name, args: functionCall.args,
+                                       cwd: workspacePath, reason: .approval)
+                await MainActor.run { localState?.recordBackgroundDenial(call: call, in: conversationId) }
+                return Self.sandboxUnavailableRefusal(tool: functionCall.name)
+            }
             if needsApproval {
                 let approved = await localState?.requestApproval(
                     toolName: functionCall.name, details: details, args: functionCall.args,
@@ -2756,11 +2775,16 @@ actor IrisEngine {
     /// back. Guarding here as well would put an `<untrusted_context>` wrapper in the outcome the
     /// card shows a human.
     func executeApprovedCall(_ call: BlockedCall, conversationId: UUID) async -> String {
-        // R10 as a backstop. The card does not offer this and `JobRunner.runApproved` refuses it,
-        // but neither of those is on this path if something else ever calls in here: a write into
-        // `~/.iris/config` or `~/.iris/plugins` grants permission rather than editing a file, and
-        // no click makes it legal. Asked again after the hooks below, because a `BeforeTool` hook
-        // can rewrite the path this one read.
+        // R13 as a backstop. A `.profile` denial was not refused for want of a human — the job is
+        // `readOnly` — so no click widens it: the card hides the button, `JobRunner.runApproved`
+        // refuses the click and `JobLedger.markApproved` refuses the claim. This is the fourth
+        // door on the same room, for whatever calls in here next.
+        guard call.reason == .approval else {
+            return Self.profileNotApprovableRefusal(tool: call.toolName)
+        }
+        // R10, likewise. A write into `~/.iris/config` or `~/.iris/plugins` grants permission
+        // rather than editing a file, and no click makes it legal. Asked again after the hooks
+        // below, because a `BeforeTool` hook can rewrite the path this one read.
         let localState = state
         let permissions = await MainActor.run { localState?.permissions } ?? .shared
         guard !permissions.isProtectedWrite(call) else {
@@ -2787,9 +2811,17 @@ actor IrisEngine {
         "Not run: `\(tool)` would write into a protected directory (`~/.iris/config` or `~/.iris/plugins`), which an approval cannot authorise."
     }
 
-    /// What an approved command with no container to run in returns instead of running on the
-    /// host. Carries `JobRunner.sandboxUnavailableReason`'s words so a person seeing this on a
-    /// card and in `/jobs` reads the same phrase for the same thing.
+    /// What a call a read-only job's profile refused returns if it somehow reaches the
+    /// approved-call executor anyway. Also the run's outcome, so the card says why nothing
+    /// happened.
+    static func profileNotApprovableRefusal(tool: String) -> String {
+        "Not run: `\(tool)` was refused by a read-only job's profile, which an approval cannot widen."
+    }
+
+    /// What a command from an unattended run with no container to run in returns instead of
+    /// running on the host — the approved-call path and the ordinary fire both (R20). Carries
+    /// `JobRunner.sandboxUnavailableReason`'s words so a person seeing this on a card and in
+    /// `/jobs` reads the same phrase for the same thing.
     static func sandboxUnavailableRefusal(tool: String) -> String {
         "Not run: `\(tool)` from a background job runs in the container or not at all (sandbox unavailable)."
     }

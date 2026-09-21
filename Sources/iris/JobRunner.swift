@@ -758,9 +758,12 @@ actor JobRunner {
             return await refuse(Self.ledgerRefusal(error), for: job)
         }
 
-        let result = await withApprovedCall(in: conversationId, of: state) {
-            await engine.executeApprovedCall(call, conversationId: conversationId)
-        }
+        // Straight into the executor: `executeApprovedCall` runs the tool through the hook layer
+        // and never enters `AppState.requestApproval`, so the approval is given by construction
+        // rather than by a grant anyone has to remember to take back (#187 R21). The checks the
+        // gate would have made are made instead by this function above and by the executor's own
+        // R10/R13/R20 backstops.
+        let result = await engine.executeApprovedCall(call, conversationId: conversationId)
         let finishedAt = now()
         await MainActor.run {
             // The transcript "View run" opens: what was run, and what came back.
@@ -791,18 +794,6 @@ actor JobRunner {
         return .dispatched(runId: approved.id)
     }
 
-    /// Grants the one-shot approval for the length of `body` and takes it back however `body`
-    /// leaves. A closure rather than an insert/remove pair inline: an early `return` added inside
-    /// it later returns from the closure, so the take-back still runs — and the grant lives in a
-    /// conversation whose whole purpose is to be pre-authorised, which is not a thing to leak.
-    private func withApprovedCall(in conversationId: UUID, of state: AppState,
-                                  _ body: () async -> String) async -> String {
-        await MainActor.run { state.grantApprovedCall(conversationId) }
-        let result = await body()
-        await MainActor.run { state.consumeApprovedCall(conversationId) }
-        return result
-    }
-
     /// Says why a click did nothing, where the card the person clicked actually is — the job's
     /// destination conversation, or Activity when it has none (or when there is no job left to
     /// ask). Silence after a click reads as a broken button rather than a refused one, and a
@@ -824,7 +815,10 @@ actor JobRunner {
         return detail.isEmpty ? head : "\(head) — \(detail)"
     }
 
-    /// The first non-empty line of a tool result, which is what the row and the card show.
+    /// The first line of some text, trimmed and capped at 200 characters, or `nil` when there is
+    /// nothing to show. The one spelling of "what a row and a card display", shared by the turn
+    /// path (`outcome(from:)`, over the agent's last message) and the approved-call path (over the
+    /// tool result) so the two cannot drift into different truncations.
     static func firstLine(of result: String) -> String? {
         let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -1084,10 +1078,7 @@ actor JobRunner {
     /// failure: an empty bubble is no more of a reply than no bubble, so both land here.
     static func outcome(from messages: [ChatMessage]) -> String? {
         guard let last = messages.last(where: { $0.role == .agent }) else { return nil }
-        let text = last.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return nil }
-        let firstLine = text.split(separator: "\n", omittingEmptySubsequences: false).first.map(String.init) ?? text
-        return String(firstLine.trimmingCharacters(in: .whitespaces).prefix(200))
+        return firstLine(of: last.content)
     }
 
     /// Fail-closed precedence (§6.2). A denial outranks everything: it is the one outcome a person

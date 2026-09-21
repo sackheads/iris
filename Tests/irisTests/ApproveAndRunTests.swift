@@ -560,28 +560,6 @@ struct ApproveAndRunTests {
                 "and not in a conversation they may not have open")
     }
 
-    @Test("the one-shot grant does not outlive the call it was for")
-    func theGrantIsTakenBackAfterADispatch() async throws {
-        let dir = try tempDirectory()
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let (store, state, engine) = try harness()
-        let job = self.job(name: "writer")
-        try store.ledger.upsert(job)
-        let blocked = try blockedRun(BlockedCall(
-            toolName: "write_file",
-            args: ["path": .string(dir.appendingPathComponent("g.txt").path),
-                   "content": .string("g")], cwd: dir.path), job: job, ledger: store.ledger)
-        let (config, teardown) = isolatedConfig()
-        defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
-                               sandboxAvailable: { true })
-
-        _ = await runner.runApproved(runId: blocked.id)
-
-        #expect(state.approvedCalls.isEmpty,
-                "a conversation left pre-authorised would approve whatever asked next")
-    }
-
     @Test("two clicks racing each other still run the call once")
     func concurrentClicksRaceForOneClaim() async throws {
         let dir = try tempDirectory()
@@ -681,32 +659,68 @@ struct ApproveAndRunTests {
                                                      .appendingPathComponent("permissions.json").path))
     }
 
-    @Test("a granted approval is one-shot and never covers a protected write")
-    func approvedCallsEntryIsConsumedOnRead() async throws {
+    @Test("an approved call's own conversation still fails closed if anything asks in it again")
+    func theApprovedConversationIsNotLeftPreAuthorised() async throws {
+        // R21: there is no pre-granted-approval branch in `requestApproval` any more — the
+        // approved call is dispatched straight into `executeToolWithHooks`, so the conversation it
+        // runs in is an ordinary background one and a nested ask from inside it is refused like
+        // any other unattended call.
         let (_, state, _) = try harness()
         let home = try tempDirectory()
         defer { try? FileManager.default.removeItem(at: home) }
-        let paths = IrisPaths(root: home)
-        state.permissions = PermissionManager(paths: paths)
+        state.permissions = PermissionManager(paths: IrisPaths(root: home))
         let conversationId = state.createNewConversation(isBackground: true, title: "approved")
 
-        state.grantApprovedCall(conversationId)
         let command = "true --never-run-\(UUID().uuidString)"
-        #expect(await state.requestApproval(toolName: "run_command", details: command,
-                                            conversationId: conversationId))
-        #expect(state.approvedCalls.isEmpty, "consumed on read, not on completion")
-        // The second ask falls through to the fail-closed background branch.
         #expect(await state.requestApproval(toolName: "run_command", details: command,
                                             conversationId: conversationId) == false)
         #expect(state.firstBackgroundDenial(for: conversationId)?.toolName == "run_command")
+    }
 
-        // R10: the grant says who is asking, not what may be written.
-        state.grantApprovedCall(conversationId)
-        let target = paths.configDir.appendingPathComponent("permissions.json").path
-        #expect(await state.requestApproval(toolName: "write_file", details: target,
-                                            conversationId: conversationId) == false)
-        #expect(state.approvedCalls.isEmpty)
-        let conversation = try #require(state.conversations.first { $0.id == conversationId })
-        #expect(conversation.messages.contains { $0.content.contains("protected directory") })
+    @Test("the executor refuses a profile denial even if one reaches it")
+    func executorRefusesAProfileDenial() async throws {
+        // R13's fourth door: the card hides the button, `runApproved` refuses the click and
+        // `markApproved` refuses the claim — this is the backstop for whatever calls in next.
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (_, state, engine) = try harness()
+        let conversationId = state.createNewConversation(isBackground: true, title: "approved")
+        let target = dir.appendingPathComponent("profile.txt").path
+        let call = BlockedCall(toolName: "write_file",
+                               args: ["path": .string(target), "content": .string("no")],
+                               cwd: dir.path, reason: .profile)
+
+        let result = await engine.executeApprovedCall(call, conversationId: conversationId)
+
+        #expect(result == IrisEngine.profileNotApprovableRefusal(tool: "write_file"))
+        #expect(!FileManager.default.fileExists(atPath: target))
+    }
+
+    @Test("approving a blocked run also takes it out of the failure list")
+    func approvingAcknowledgesTheParentRow() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (store, state, engine) = try harness()
+        let job = self.job(name: "writer")
+        try store.ledger.upsert(job)
+        let blocked = try blockedRun(BlockedCall(
+            toolName: "write_file",
+            args: ["path": .string(dir.appendingPathComponent("ack.txt").path),
+                   "content": .string("ack")], cwd: dir.path), job: job, ledger: store.ledger)
+        #expect(try store.ledger.unacknowledgedFailures().map(\.id) == [blocked.id])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               sandboxAvailable: { true })
+
+        guard case .dispatched = await runner.runApproved(runId: blocked.id) else {
+            Issue.record("the approved call should have been dispatched")
+            return
+        }
+
+        let parent = try #require(try store.ledger.run(id: blocked.id))
+        #expect(parent.acknowledgedAt != nil, "approving is a stronger acknowledgement than Dismiss")
+        #expect(try store.ledger.unacknowledgedFailures().contains { $0.id == blocked.id } == false,
+                "an approved run that ran does not stay in /jobs's failure list")
     }
 }

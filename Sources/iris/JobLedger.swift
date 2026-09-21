@@ -342,6 +342,12 @@ extension JobLedger {
     /// `approvedAt` on a row with nothing to approve turns the one-shot into a wasted shot. The
     /// refusals live here rather than only in whatever UI offers the button, so a second caller
     /// cannot get them wrong.
+    ///
+    /// Winning the claim also acknowledges the row, in the same `UPDATE`: approving a blocked call
+    /// is a stronger "I have seen this" than Dismiss is, and without it an approved-and-executed
+    /// run would sit in `/jobs`'s failure list and stay exempt from retention forever, its card
+    /// still offering a button that now answers "it has already been approved once". `COALESCE`
+    /// so a row the user dismissed first keeps the time they dismissed it.
     func markApproved(runId: UUID, at: Date) throws -> Bool {
         try writer.write { db in
             let json = try String.fetchOne(db, sql: "SELECT blockedCall FROM job_runs WHERE id = ?",
@@ -349,8 +355,10 @@ extension JobLedger {
             guard let json else { return false }
             let call = try? JSONDecoder().decode(BlockedCall.self, from: Data(json.utf8))
             guard let call, call.reason != .profile else { return false }
-            try db.execute(sql: "UPDATE job_runs SET approvedAt = ? WHERE id = ? AND approvedAt IS NULL",
-                           arguments: [at, runId.uuidString])
+            try db.execute(sql: """
+                UPDATE job_runs SET approvedAt = ?, acknowledgedAt = COALESCE(acknowledgedAt, ?)
+                WHERE id = ? AND approvedAt IS NULL
+                """, arguments: [at, at, runId.uuidString])
             return db.changesCount > 0
         }
     }

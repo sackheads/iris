@@ -4,8 +4,10 @@ import Foundation
 /// default) or may also mutate the filesystem/network/other state (`mutating`). The runner stamps
 /// it on the run's hidden conversation; the engine's tool-list builder narrows a `readOnly` run's
 /// declarations by it and the dispatcher fails closed on anything it still gets asked for (#187
-/// deliverable 3, spec §0.2 and §4). A `mutating` job always runs in the `apple/container` VM, so
-/// it is refused both at creation and at every fire when that VM is unavailable — see
+/// deliverable 3, spec §0.2 and §4). A `mutating` job's *commands* always run in the
+/// `apple/container` VM — `run_command` is what the VM routes; `write_file` and the other native
+/// tools execute on the host behind the user's allowlist, as they do in any run — so it is refused
+/// both at creation and at every fire when that VM is unavailable; see
 /// `SandboxPolicy.mutatingJobCanRun`.
 enum JobProfile: String, Codable, Sendable {
     case readOnly

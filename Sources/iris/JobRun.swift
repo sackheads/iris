@@ -118,14 +118,17 @@ struct BlockedCall: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey { case toolName, args, cwd, reason, at }
 
-    /// Invariant 1 throughout, and an unrecognized `reason` reads as `.approval`: the conservative
-    /// guess, since an approval is the case that still needs a human either way.
+    /// Invariant 1 throughout, and an unrecognized `reason` reads as `.profile` — the fail-closed
+    /// direction, because `reason` is what three layers ask "can a click run this?" and `.profile`
+    /// is the answer none of them will act on (`EventCard.approvalRefusal` hides the button,
+    /// `JobLedger.markApproved` refuses the claim, `JobRunner.runApproved` refuses the click). A
+    /// reason a newer build wrote and this one cannot read is exactly the call not to offer.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         toolName = try c.decodeIfPresent(String.self, forKey: .toolName) ?? ""
         args = try c.decodeIfPresent([String: JSONValue].self, forKey: .args) ?? [:]
         cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
-        reason = Reason(rawValue: try c.decodeIfPresent(String.self, forKey: .reason) ?? "") ?? .approval
+        reason = Reason(rawValue: try c.decodeIfPresent(String.self, forKey: .reason) ?? "") ?? .profile
         at = try c.decodeIfPresent(Date.self, forKey: .at) ?? Date(timeIntervalSince1970: 0)
     }
 

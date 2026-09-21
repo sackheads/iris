@@ -82,11 +82,11 @@ struct ScheduleJobArguments: Equatable, Sendable {
         }
     }
 
-    /// The refusal a `mutating` job gets when the VM it would run in is unavailable — the runtime
-    /// is not installed, or sandboxing is switched off. One sentence for both causes, because
-    /// Settings → Sandboxing is where either is fixed. Spelled once: the test that pins it and the
-    /// tool that returns it read the same string.
-    static let noRuntimeForMutating = "A mutating job always runs in the apple/container VM, and that VM is not available: install the runtime and turn sandboxing on in Settings → Sandboxing, or create the job read-only."
+    /// The refusal a `mutating` job gets when the VM its commands would run in is unavailable —
+    /// the runtime is not installed, or sandboxing is switched off. One sentence for both causes,
+    /// because Settings → Sandboxing is where either is fixed. Spelled once: the test that pins it
+    /// and the tool that returns it read the same string.
+    static let noRuntimeForMutating = "A mutating job's commands always run in the apple/container VM, and that VM is not available: install the runtime and turn sandboxing on in Settings → Sandboxing, or create the job read-only."
 
     /// `base`, or `base-2`, `base-3`, … — the first form not already taken.
     static func uniqueName(_ base: String, existing: Set<String>) -> String {

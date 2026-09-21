@@ -265,30 +265,6 @@ class AppState {
     /// call is kept, not just its name: a card cannot ask anyone to approve a name, and "Approve
     /// and run" re-dispatches these arguments (spec §6).
     private(set) var backgroundDenials: [UUID: [BlockedCall]] = [:]
-    /// Conversations holding a *pre-granted* approval: one call a person clicked "Approve and run"
-    /// on, dispatched by `JobRunner.runApproved` into a hidden conversation of its very own (#187
-    /// §6). The grant is per conversation because that conversation exists to run exactly one
-    /// call, and it is consumed by the first read in `requestApproval` — not when the call
-    /// finishes — so a retried or duplicated dispatch cannot reuse it. The durable half of the
-    /// one-shot is the run's `approvedAt` column; this is only what gets the call past the
-    /// fail-closed background branch it would otherwise land in.
-    ///
-    /// `private(set)` with two verbs rather than a settable set: this is the one field in the app
-    /// whose contents mean "skip the approval gate", so it gets the narrowest door that still lets
-    /// the runner grant and take back a call across a main-actor hop.
-    private(set) var approvedCalls: Set<UUID> = []
-
-    /// Pre-grants the single call `JobRunner.runApproved` is about to dispatch into `conversationId`.
-    func grantApprovedCall(_ conversationId: UUID) {
-        approvedCalls.insert(conversationId)
-    }
-
-    /// Takes the grant back. `true` when there was one — which is how `requestApproval` consumes it
-    /// on read, and what makes a second ask in the same conversation fail closed like any other.
-    @discardableResult
-    func consumeApprovedCall(_ conversationId: UUID) -> Bool {
-        approvedCalls.remove(conversationId) != nil
-    }
     /// Which background run a spawned conversation belongs to. A subagent or an evaluator
     /// descended from an unattended run is unattended too, and what it was refused is the RUN's
     /// denial: the ledger row and the event card belong to the job, not to the scratch
@@ -2133,23 +2109,14 @@ class AppState {
                          conversationId: UUID? = nil, origin: String = "Main agent",
                          inSandbox: Bool = false, callerRole: VibecopCallerRole = .agent,
                          allowedCommands: [String] = [], vibecopEnabled: Bool? = nil) async -> Bool {
-        // A call a person already approved on an event card, dispatched into a conversation of its
-        // own (#187 §6). First, because that conversation is a background one and the branch below
-        // would otherwise refuse the very call the human just authorised. Taken as it is read, so
-        // the grant covers one call and no more — a second ask in the same conversation falls
-        // through and fails closed like any other unattended call.
-        if let id = conversationId, consumeApprovedCall(id) {
-            // R10: the click says a person vouches for this call; it does not make a write into
-            // `~/.iris/config` or `~/.iris/plugins` an ordinary file edit. Those directories are
-            // where permission itself is granted, so a write there would be the approval granting
-            // every later call whatever it asks for.
-            guard !permissions.isProtectedWrite(toolName: toolName, path: details) else {
-                appendMessage(role: .system,
-                              content: String(format: Self.protectedDenialNotice, toolName), to: id)
-                return false
-            }
-            return true
-        }
+        // No pre-granted-approval branch here, deliberately (#187 R21, 2026-09-21): a call a
+        // person clicked "Approve and run" on is dispatched by `IrisEngine.executeApprovedCall`,
+        // which runs the tool through the hook layer directly and never enters this function. The
+        // one-shot lives in the ledger (`approvedAt`), and the R10/R13/R20 checks that stand in
+        // for this gate live in `JobRunner.runApproved` and `executeApprovedCall`. Anything that
+        // does reach here from a background conversation fails closed below, including a second
+        // ask made from inside an approved call's own conversation.
+        //
         // Fail closed for background (unattended) conversations, before every other path —
         // including `autoApproveTools` — since nobody is watching to see the approval dialog and a
         // gated tool must never run unattended (#187). The deterministic allowlist still applies
@@ -2263,11 +2230,18 @@ class AppState {
     /// The card's "Dismiss": marks the run seen, which takes it out of `/jobs`'s failure list and
     /// off retention's exemption. The card itself stays in the transcript — it is a record of what
     /// happened, not a notification to be cleared.
+    ///
+    /// Off the main actor, like every other write to the store: the row is tiny and the button
+    /// would almost certainly not stutter on it, but a synchronous SQLite write in a view action
+    /// is the shape that eventually does.
     func dismissEventCard(runId: UUID) {
-        do {
-            try store.ledger.acknowledge(runId: runId, at: Date())
-        } catch {
-            print("[AppState] could not acknowledge run \(runId): \(error)")
+        let ledger = store.ledger
+        Task.detached {
+            do {
+                try ledger.acknowledge(runId: runId, at: Date())
+            } catch {
+                print("[AppState] could not acknowledge run \(runId): \(error)")
+            }
         }
     }
 
@@ -2302,13 +2276,6 @@ class AppState {
     /// from the approval notice because the two are not the same news: nobody can approve this one
     /// into running as it stands — the job would have to be created `mutating`.
     static let profileDenialNotice = "Not run: `%@` is not available to a read-only job."
-
-    /// The line an already-approved call gets when it turns out to target a protected directory
-    /// (#187 R10). Third of the three, and again a different piece of news: the person approving
-    /// it did everything right, and the answer is still no — a write into `config/` or `plugins/`
-    /// grants permission rather than editing a file, so nobody's click can authorise it.
-    static let protectedDenialNotice =
-        "Not run: `%@` would write into a protected directory, which an approval cannot authorise."
 
     /// Records a call a background run failed closed on, and says so in its transcript (#187 §6).
     /// The record is attributed to the background RUN, not to whatever subagent or evaluator the

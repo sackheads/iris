@@ -183,14 +183,17 @@ struct JobPolicyTests {
         #expect(call.toolName == "run_command")
         #expect(call.args.isEmpty)
         #expect(call.cwd == nil)
-        #expect(call.reason == .approval)
+        #expect(call.reason == .profile)
         #expect(call.at == Date(timeIntervalSince1970: 0))
     }
 
-    @Test("an unknown BlockedCall reason reads as approval")
+    @Test("an unreadable BlockedCall reason fails closed as a profile denial")
     func blockedCallUnknownReason() throws {
+        // `reason` is what three layers ask "can a click run this?" — the card, `markApproved` and
+        // `runApproved` — and `.profile` is the answer none of them acts on. A reason a newer
+        // build wrote is exactly the call this build must not offer a button for.
         let call = try decoder.decode(BlockedCall.self,
                                       from: Data(#"{"toolName":"t","reason":"telepathy"}"#.utf8))
-        #expect(call.reason == .approval)
+        #expect(call.reason == .profile)
     }
 }
