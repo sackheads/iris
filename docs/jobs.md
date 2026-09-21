@@ -40,6 +40,11 @@ Sunday; `7` is also accepted and also means Sunday, the standard cron convention
 `MON` or `JAN` are not accepted. Anything else is a parse error, returned to the model as a
 sentence naming the field and the bad token.
 
+Two forms are refused rather than guessed at: an empty list element (`1,,2`, or a trailing comma
+in `1-5,`), and a range that wraps past the end of the field (`22-2` — write `22-23,0-2` if the
+intent was "10 PM through 2 AM"). Both are typos far more often than intentions, and either
+reading of them silently schedules something other than what was asked for.
+
 If both day-of-month and day-of-week are restricted (neither is a bare `*`), a day matches when
 *either* condition is true — standard (Vixie) cron behavior, not AND.
 
@@ -72,7 +77,7 @@ expression once, at creation time, and only the translation is stored:
 | Old parameter | Cron field | Notes |
 | --- | --- | --- |
 | `minute` | minute | defaults to `0` if a schedule is otherwise specified without it |
-| `hour` | hour | defaults to `*` (every hour) if omitted |
+| `hour` | hour | omitted with `day`, `month`, `weekday` or `weekdays` set → `0` (midnight on those days); omitted with only `minute` given → `*` (every hour) |
 | `day` | day-of-month | defaults to `*` |
 | `month` | month | defaults to `*` |
 | `weekday` | day-of-week | `1`–`7`, `1` = Sunday (Foundation's numbering) → cron `0`–`6` by subtracting 1 |
@@ -85,8 +90,14 @@ Note the day-of-week numbering switch: the tool's `weekday`/`weekdays` use 1 = S
 what the tool has always accepted; cron's own day-of-week field uses 0 = Sunday. The alias layer
 does this translation so callers of the tool never see cron's numbering.
 
+`weekday: 2` on its own therefore means "midnight on Mondays", not "every hour on Mondays"; ask
+for an hour if you want one.
+
 Giving no schedule at all, giving conflicting forms (e.g. both `cron` and `hour`), or giving values
-out of range each return a specific refusal sentence rather than silently guessing.
+out of range each return a specific refusal sentence rather than silently guessing. A weekday
+outside `1-7`, or a `weekdays` element that is not a number, refuses the whole job: the older
+behaviour dropped the bad value and scheduled what was left, which turns `[2, "wednesday"]` into a
+Monday-only job nobody asked for.
 
 ## Profiles
 

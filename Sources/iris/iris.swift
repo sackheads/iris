@@ -882,7 +882,7 @@ actor IrisEngine {
                     "cron": Schema(type: "STRING", description: "Five-field cron expression: minute hour day-of-month month day-of-week, where day-of-week is 0=Sunday … 6=Saturday. Supports lists, ranges, and steps, e.g. '0 9 * * 1-5'."),
                     "timezone": Schema(type: "STRING", description: "IANA time zone the cron expression is evaluated in (e.g. America/Los_Angeles). Defaults to the user's current zone."),
                     "minute": Schema(type: "INTEGER", description: "Cron minute (0-59)"),
-                    "hour": Schema(type: "INTEGER", description: "Cron hour (0-23)"),
+                    "hour": Schema(type: "INTEGER", description: "Cron hour (0-23). Omitted alongside day/month/weekday/weekdays means midnight on those days; omitted with only minute given means every hour."),
                     "day": Schema(type: "INTEGER", description: "Cron day of month (1-31)"),
                     "month": Schema(type: "INTEGER", description: "Cron month (1-12)"),
                     "weekday": Schema(type: "INTEGER", description: "Cron weekday (1=Sunday, 2=Monday, ..., 7=Saturday)"),
