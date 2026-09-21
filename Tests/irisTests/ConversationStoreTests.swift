@@ -69,6 +69,7 @@ struct ConversationStoreTests {
         let store = try ConversationStore.inMemory()
         var c = Self.sample()
         c.isArchived = true
+        c.sessionCard = SessionCard(name: "spec-writer", description: "drafting the sessions spec")
         try store.apply([Self.created(c)])
         let loaded = try store.loadAll()
         #expect(loaded.skipped.isEmpty)
@@ -96,6 +97,36 @@ struct ConversationStoreTests {
         // #182: archived state is a stored column, not just a Codable field. A JSON round-trip
         // test would pass while the column did not exist and the flag was dropped on every load.
         #expect(back.isArchived == true)
+        // #185: the card is a stored column, not just a Codable field. A JSON round-trip test
+        // would pass while the column did not exist and the card was dropped on every load.
+        #expect(back.sessionCard?.name == "spec-writer")
+        #expect(back.sessionCard?.description == "drafting the sessions spec")
+    }
+
+    @Test("a conversation with no sessionCard key decodes as uncarded")
+    func legacyConversationHasNoCard() throws {
+        // Invariant 1: a synthesized decoder throws on a missing key and drops every conversation.
+        let legacy = """
+        {"id":"\(UUID().uuidString)","title":"old"}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(Conversation.self, from: legacy)
+        #expect(decoded.sessionCard == nil)
+    }
+
+    @Test("an unreadable sessionCard leaves the conversation loadable and uncarded")
+    func garbledCardIsNonFatal() throws {
+        // An unreadable *identity* must not cost the user a conversation: same policy as
+        // checkpointHistory (#182), opposite of goalContract. Failure direction is toward
+        // the session simply appearing uncarded.
+        let store = try ConversationStore.inMemory()
+        let c = Self.sample()
+        try store.apply([Self.created(c)])
+        try store.rawWrite("UPDATE conversations SET sessionCard = X'FFFE' WHERE id = ?", arguments: [c.id.uuidString])
+
+        let loaded = try store.loadAll()
+        let back = try #require(loaded.conversations.first { $0.id == c.id })
+        #expect(back.sessionCard == nil)
+        #expect(!loaded.skipped.isEmpty, "the loss is reported, not swallowed")
     }
 
     @Test("nil surfacing fields round-trip as SQL NULL, not JSON null")

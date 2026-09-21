@@ -52,6 +52,12 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(checkpointAutoAdvance, forKey: "CHECKPOINT_AUTO_ADVANCE") }
     }
 
+    /// #185 §7 — how many peer-woken turns one user action may cascade into, across the whole
+    /// cascade rather than per branch. The right number is empirical; 8 is a starting point.
+    var maxSessionCascade: Int {
+        didSet { store.set(maxSessionCascade, forKey: "MAX_SESSION_CASCADE") }
+    }
+
     var defaultEmojiSkinTone: Int {
         didSet { store.set(defaultEmojiSkinTone, forKey: "DEFAULT_EMOJI_SKIN_TONE") }
     }
@@ -257,6 +263,9 @@ class ConfigManager: @unchecked Sendable {
         } else {
             self.checkpointAutoAdvance = true
         }
+
+        let savedCascade = store.integer(forKey: "MAX_SESSION_CASCADE")
+        self.maxSessionCascade = savedCascade == 0 ? 8 : savedCascade
 
         self.defaultEmojiSkinTone = store.object(forKey: "DEFAULT_EMOJI_SKIN_TONE") as? Int ?? SkinTone.none.rawValue
         
