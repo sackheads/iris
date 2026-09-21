@@ -203,6 +203,18 @@ private func statusGlyph(_ phase: SessionSummary.Phase) -> some View {
     }
 }
 
+/// Reports the transcript content's natural height up to `SubagentTranscriptSheet`, so the sheet
+/// can size itself to content instead of always opening at a fixed height that leaves a lot of
+/// empty gray space under a short transcript (fix round 1 follow-up).
+private struct TranscriptContentHeightKey: PreferenceKey {
+    // A computed property, not stored: Swift 6 strict concurrency flags a stored `static var` as
+    // non-concurrency-safe mutable global state even though `PreferenceKey` only ever reads it.
+    static var defaultValue: CGFloat { 0 }
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 /// #19's "dedicated way to browse subagent logs": a read-only transcript for one subagent/
 /// evaluator conversation. Never shown for the main row (`SessionStripView` never sets
 /// `transcriptSessionId` for it).
@@ -210,14 +222,27 @@ private struct SubagentTranscriptSheet: View {
     var state: AppState
     let sessionId: UUID
     @Environment(\.dismiss) private var dismiss
+    @State private var contentHeight: CGFloat = 0
+    @State private var scrollPassScheduled = false
+
+    /// A rough header-row + divider allowance added to the measured content height. Precision
+    /// doesn't matter here — it only widens or narrows the sheet by a few points — so this stays a
+    /// constant rather than a second measured value.
+    private static let chromeHeight: CGFloat = 60
+    private static let minSheetHeight: CGFloat = 160
+    private static let maxSheetHeight: CGFloat = 640
 
     private var conversation: Conversation? { state.conversations.first { $0.id == sessionId } }
     private var role: String {
         state.sessions.first { $0.id == sessionId }?.role ?? conversation?.title ?? "Session"
     }
+    private var sheetHeight: CGFloat {
+        min(max(contentHeight + Self.chromeHeight, Self.minSheetHeight), Self.maxSheetHeight)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
+            // Pinned above the scroll area (a sibling of it, not inside it) — never scrolls away.
             HStack {
                 Text(role)
                     .font(.headline)
@@ -230,13 +255,28 @@ private struct SubagentTranscriptSheet: View {
             .padding()
             Divider()
             if let conversation, !conversation.messages.isEmpty {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        ForEach(conversation.messages) { message in
-                            MessageView(message: message)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            ForEach(conversation.messages) { message in
+                                MessageView(message: message)
+                            }
+                            // Scroll target for `scrollToBottom`, matching `ChatView`'s own
+                            // "bottomAnchor" pattern rather than scrolling to a message id directly.
+                            Color.clear.frame(height: 1).id("transcriptBottom")
                         }
+                        .padding()
+                        .background(
+                            GeometryReader { geo in
+                                Color.clear.preference(key: TranscriptContentHeightKey.self, value: geo.size.height)
+                            }
+                        )
                     }
-                    .padding()
+                    .onPreferenceChange(TranscriptContentHeightKey.self) { contentHeight = $0 }
+                    .onAppear { scrollToBottom(proxy) }
+                    // A live subagent's transcript should show the newest content, not the header,
+                    // as more messages stream in while the sheet is open.
+                    .onChange(of: conversation.messages.count) { _, _ in scrollToBottom(proxy) }
                 }
             } else {
                 Spacer()
@@ -247,7 +287,20 @@ private struct SubagentTranscriptSheet: View {
                 Spacer()
             }
         }
-        .frame(minWidth: 480, idealWidth: 560, minHeight: 360, idealHeight: 480)
+        .frame(minWidth: 480, idealWidth: 560,
+               minHeight: Self.minSheetHeight, idealHeight: sheetHeight, maxHeight: Self.maxSheetHeight)
+    }
+
+    /// Deferred a run loop turn (mirrors `ChatView.scrollAfterUpdate`) so the anchor is laid out
+    /// under the just-appended message before the scroll fires; the in-flight guard collapses a
+    /// burst of message-count changes (streamed deltas) into one pending scroll.
+    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        guard !scrollPassScheduled else { return }
+        scrollPassScheduled = true
+        DispatchQueue.main.async {
+            proxy.scrollTo("transcriptBottom", anchor: .bottom)
+            scrollPassScheduled = false
+        }
     }
 
     private func copyTranscript() {
