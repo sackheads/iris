@@ -48,6 +48,21 @@ archived, and one receiving work is un-archived. This adds a third that follows 
 — **an archived conversation is not discoverable and cannot be addressed**. No new mechanism; the
 same predicate.
 
+**Archiving is the only thing that bounds the peer set, and everything below depends on that.**
+A user accumulates conversations without limit; without the active predicate, every conversation
+they have ever had stays addressable forever. Three things in this spec fail at once if that
+happens:
+
+- `list_sessions` returns hundreds of entries — precisely the context poisoning the issue warns
+  against, at a scale no summarisation fixes.
+- The peer-exists gate (§6) becomes permanently true, so the three tools are declared on every turn
+  of every conversation. #133's win is simply gone.
+- The cascade cap (§7) weakens sharply, because a bounded budget spread over an unbounded set of
+  reachable targets is a much weaker guarantee than the same budget over a handful.
+
+So the active predicate is not merely a tidy definition of "session". It is the mechanism that
+keeps the peer set small enough for the cost model and the safety model to hold.
+
 Subagent conversations are excluded for the reason they are excluded everywhere else: they are
 scratch, deleted when their run ends, and already filtered out of persistence.
 
@@ -125,6 +140,19 @@ conversation back — contradicting §3 and the issue's own first sentence.
 can act on: *"that session is no longer active."* Not a silent drop: the sender asked a question
 and is owed an answer.
 
+**Why refusal rather than the simpler alternative.** Letting a send un-archive would be consistent
+with #182 §6.2 and would need no special case at all, which is a real argument for it. It is wrong
+anyway, and not mainly because it undoes a user's deliberate action: it is wrong because it
+destroys the bound from §3. If an archived conversation can be addressed, archiving stops bounding
+the peer set — a session could address anything the user ever created, and the reachable set grows
+without limit for the life of the install. The cost model in §6 and the cap in §7 both rest on that
+set staying small.
+
+The asymmetry this creates is deliberate and worth stating plainly: a **human** sending into an
+archived conversation un-archives it (#182 §6.2), while a **peer** is refused. That is not an
+inconsistency to be tidied away later. The human is choosing to reopen one specific conversation;
+a peer doing the same would be re-expanding the address space on its own initiative.
+
 ### 5.2 Self-sends are refused
 
 A session messaging itself is an immediate loop. Refused outright, before the cascade accounting in
@@ -134,6 +162,9 @@ A session messaging itself is an immediate loop. Refused outright, before the ca
 
 `list_sessions`, `send_to_session`, and `set_session_card` are declared **only when at least one
 other active session exists.**
+
+This gate is only meaningful because the peer set is bounded (§3). If archived conversations
+counted, it would be true from the first day a user archived anything and never false again.
 
 With a single conversation open — the common case — the tool surface is byte-identical to today.
 #133 brought a plain turn from 30 declarations to 8 (~837 tokens); adding three unconditional
