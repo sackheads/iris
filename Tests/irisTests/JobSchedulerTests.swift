@@ -7,6 +7,14 @@ struct JobSchedulerTests {
     final class Fired: @unchecked Sendable { var names: [String] = []; let lock = NSLock()
         func add(_ n: String) { lock.lock(); names.append(n); lock.unlock() } }
 
+    /// How many times a handler has been called, safely across the tick's task group.
+    final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        @discardableResult func next() -> Int { lock.lock(); defer { lock.unlock() }; n += 1; return n }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return n }
+    }
+
     /// A one-shot rendezvous: the handler signals it has started, then parks on a continuation
     /// until the test opens the gate. Lets a test hold a fire open and drive an overlapping tick.
     actor Gate {
@@ -53,6 +61,8 @@ struct JobSchedulerTests {
         #expect(await s.tick() == 1)
         #expect(fired.names == ["j"])
         #expect(try store.ledger.job(named: "j")?.nextFireAt == now.addingTimeInterval(300))
+        #expect(try store.ledger.job(named: "j")?.lastRunAt == nil,
+                "the scheduler hands the trigger over; the runner stamps lastRunAt if a turn starts")
         #expect(await s.tick() == 0)
     }
 
@@ -119,8 +129,12 @@ struct JobSchedulerTests {
         #expect(back.nextFireAt == due && back.lastRunAt == nil)
     }
 
-    @Test("a job still firing is skipped by an overlapping tick")
-    func skipsJobAlreadyFiring() async throws {
+    @Test("an overlapping tick still hands the job over: overlap is the runner's call, not the loop's")
+    func overlapIsNotTheSchedulersDecision() async throws {
+        // D3 §4: `JobScheduler` no longer keeps a `firing` set. It could never cover a watch fire,
+        // which never comes through here at all, so the in-flight check moved to `JobRunner.fire`
+        // — the one place every fire passes. What stays here is the cadence: the trigger is handed
+        // over, and what becomes of it (a run, a skip row, a queued fire) is admission's answer.
         let store = try ConversationStore.inMemory()
         let now = Date(timeIntervalSince1970: 1_000_000)
         let (s, fired) = scheduler(store, now: now)
@@ -135,13 +149,48 @@ struct JobSchedulerTests {
 
         let first = Task { await s.tick() }
         await gate.waitForEntry()
-        // The job is due again while its first run is still in flight: the `skip` overlap policy
-        // must not start a second copy.
         try store.ledger.setNextFire(jobId: job.id, at: now.addingTimeInterval(-1), lastRunAt: now)
-        #expect(await s.tick() == 0)
-        #expect(fired.names == ["slow"])
         await gate.open()
+        #expect(await s.tick() == 1)
+        #expect(fired.names == ["slow", "slow"])
         #expect(await first.value == 1)
+    }
+
+    @Test("a job whose handler is still running is handed over once per occurrence, not once per poll")
+    func cadenceBoundsTheTriggersWhileAHandlerRuns() async throws {
+        // The cadence advances before the handler is called, so the ten-second poll cannot keep
+        // finding the same due job while its run is going: one occurrence is one trigger, however
+        // many times the loop looks. This is what keeps a long run from writing a skip row a
+        // minute (the row itself is `JobRunner.fire`'s, see JobAdmissionTests).
+        let store = try ConversationStore.inMemory()
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        let clock = MovableClock(start)
+        let s = JobScheduler(ledger: store.ledger, now: { clock.now })
+        let calls = Counter()
+        let gate = Gate()
+        // Only the first handover parks: the whole question is how many more there are, and a
+        // second one that parked too would hang the poll driving this test rather than fail it.
+        await s.setFireHandler { _, _ in
+            if calls.next() == 1 { await gate.arriveAndWait() }
+        }
+        let job = Job(name: "slow", prompt: "p", trigger: .schedule(.interval(seconds: 60)),
+                      nextFireAt: start.addingTimeInterval(-1))
+        try store.ledger.upsert(job)
+
+        let firing = Task { await s.tick() }
+        await gate.waitForEntry()
+        // Three polls inside the same minute: only the first of them finds the job due.
+        var handovers = 0
+        for offset in [61.0, 71.0, 81.0] {
+            clock.advance(by: offset - clock.now.timeIntervalSince(start))
+            handovers += await s.tick()
+        }
+        await gate.open()
+        _ = await firing.value
+
+        #expect(handovers == 1, "one occurrence, one trigger")
+        #expect(calls.value == 2, "the held-open fire, and the one occurrence that came due")
+        #expect(try store.ledger.job(named: "slow")?.nextFireAt == start.addingTimeInterval(121))
     }
 
     @Test("a job deleted from inside another job's handler does not break the tick")

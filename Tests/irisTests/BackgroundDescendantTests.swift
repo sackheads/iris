@@ -129,9 +129,18 @@ struct BackgroundDescendantTests {
                                 protectionEnabled: false, sessionPeerCount: 0)
         let job = Job(name: "delegator", prompt: "Clean up.", trigger: .schedule(.interval(seconds: 60)))
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger)
+        // A settings store of this test's own: the runner resolves job limits through a
+        // `ConfigManager`, and the default is the process-global one (AGENTS invariant 7).
+        let suite = "iris-bgdescendant-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            IrisDefaults.removeSuiteFile(named: suite, in: IrisDefaults.preferencesDirectory)
+        }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               config: ConfigManager(store: defaults))
 
-        await runner.run(job: job, reason: "schedule")
+        await runner.fire(job: job, origin: .schedule)
 
         #expect(state.pendingApprovals.isEmpty, "an unattended run never parks on a dialog")
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)

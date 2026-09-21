@@ -208,6 +208,45 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(vibecopTimeoutSeconds, forKey: "VIBECOP_TIMEOUT_SECONDS") }
     }
 
+    // MARK: Unattended jobs (#187 §0.1)
+    //
+    // The five global numbers a job's `JobPolicy` overrides per job. They are what an unattended
+    // run is allowed to cost when nobody set anything: sane, not final. A *stored* value of 0 —
+    // or, since nobody means "unlimited" by -1, anything below it — is "unset", and reads back as
+    // the default below rather than as an instantly-exhausted budget or an unbounded one.
+
+    /// The spec's figures (#187 §0.1), named because `JobLimits.resolve` falls back to them too:
+    /// a number nobody set, a stored 0 and a stored negative must all land on the same limit.
+    enum JobDefaults {
+        static let perRunTokenBudget = 200_000
+        static let dailyTokenBudget = 1_000_000
+        static let globalDailyTokenBudget = 3_000_000
+        static let maxRunsPerHour = 6
+        static let runTimeoutSeconds = 600
+    }
+
+    /// Tokens one run may spend before its turn is stopped.
+    var jobPerRunTokenBudget: Int {
+        didSet { store.set(jobPerRunTokenBudget, forKey: "JOB_PER_RUN_TOKEN_BUDGET") }
+    }
+    /// Tokens one job may spend across the local calendar day before it pauses.
+    var jobDailyTokenBudget: Int {
+        didSet { store.set(jobDailyTokenBudget, forKey: "JOB_DAILY_TOKEN_BUDGET") }
+    }
+    /// Tokens every background run together may spend in a day. A job cannot raise this for
+    /// itself — it is the ceiling on the whole unattended system.
+    var jobGlobalDailyTokenBudget: Int {
+        didSet { store.set(jobGlobalDailyTokenBudget, forKey: "JOB_GLOBAL_DAILY_TOKEN_BUDGET") }
+    }
+    /// The breaker: this many runs of one job inside an hour pauses it.
+    var jobMaxRunsPerHour: Int {
+        didSet { store.set(jobMaxRunsPerHour, forKey: "JOB_MAX_RUNS_PER_HOUR") }
+    }
+    /// Wall-clock seconds one run may take.
+    var jobRunTimeoutSeconds: Int {
+        didSet { store.set(jobRunTimeoutSeconds, forKey: "JOB_RUN_TIMEOUT_SECONDS") }
+    }
+
     var enableAdvancedPromptInjectionProtection: Bool {
         didSet { store.set(enableAdvancedPromptInjectionProtection, forKey: "ENABLE_PROMPT_INJECTION_PROTECTION") }
     }
@@ -381,6 +420,21 @@ class ConfigManager: @unchecked Sendable {
         self.loopDetectionThreshold = savedLoop == 0 ? 5 : savedLoop
         let savedVibecopTO = store.integer(forKey: "VIBECOP_TIMEOUT_SECONDS")
         self.vibecopTimeoutSeconds = savedVibecopTO == 0 ? 5 : savedVibecopTO
+
+        // #187 §0.1. Unset (0) is the default, following the #208 pattern — and so is a negative,
+        // which is a typo rather than a way to ask for no limit at all (a hand-edited plist, a
+        // stepper driven past zero). Reading -1 as "unbounded" would take the ceiling off the
+        // whole unattended system.
+        let savedPerRun = store.integer(forKey: "JOB_PER_RUN_TOKEN_BUDGET")
+        self.jobPerRunTokenBudget = savedPerRun <= 0 ? JobDefaults.perRunTokenBudget : savedPerRun
+        let savedDaily = store.integer(forKey: "JOB_DAILY_TOKEN_BUDGET")
+        self.jobDailyTokenBudget = savedDaily <= 0 ? JobDefaults.dailyTokenBudget : savedDaily
+        let savedGlobalDaily = store.integer(forKey: "JOB_GLOBAL_DAILY_TOKEN_BUDGET")
+        self.jobGlobalDailyTokenBudget = savedGlobalDaily <= 0 ? JobDefaults.globalDailyTokenBudget : savedGlobalDaily
+        let savedRunsPerHour = store.integer(forKey: "JOB_MAX_RUNS_PER_HOUR")
+        self.jobMaxRunsPerHour = savedRunsPerHour <= 0 ? JobDefaults.maxRunsPerHour : savedRunsPerHour
+        let savedRunTimeout = store.integer(forKey: "JOB_RUN_TIMEOUT_SECONDS")
+        self.jobRunTimeoutSeconds = savedRunTimeout <= 0 ? JobDefaults.runTimeoutSeconds : savedRunTimeout
 
         if store.object(forKey: "ENABLE_PROMPT_INJECTION_PROTECTION") != nil {
             self.enableAdvancedPromptInjectionProtection = store.bool(forKey: "ENABLE_PROMPT_INJECTION_PROTECTION")

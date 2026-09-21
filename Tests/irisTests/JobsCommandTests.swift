@@ -53,6 +53,17 @@ struct JobsCommandTests {
         #expect(JobsCommand.parse("/jobs delete  nightly digest ") == .delete(name: "nightly digest"))
     }
 
+    @Test("pause, resume and run each take the rest of the line as the job name")
+    func parsePauseResumeRun() {
+        #expect(JobsCommand.parse("/jobs pause pr-sweep") == .pause(name: "pr-sweep"))
+        #expect(JobsCommand.parse("/jobs resume pr-sweep") == .resume(name: "pr-sweep"))
+        #expect(JobsCommand.parse("/jobs run pr-sweep") == .run(name: "pr-sweep"))
+        #expect(JobsCommand.parse("/jobs run  nightly digest ") == .run(name: "nightly digest"))
+        #expect(JobsCommand.parse("/jobs pause") == .usage)
+        #expect(JobsCommand.parse("/jobs resume  ") == .usage)
+        #expect(JobsCommand.parse("/jobs run") == .usage)
+    }
+
     @Test("an incomplete or unknown subcommand is a usage line, never a silent no-op")
     func parseUsage() {
         #expect(JobsCommand.parse("/jobs ack") == .usage)
@@ -65,9 +76,10 @@ struct JobsCommandTests {
         #expect(JobsCommand.parse("not a command") == .usage)
     }
 
-    @Test("the usage text names all three forms")
+    @Test("the usage text names every form")
     func usageTextSpellsEveryForm() {
-        #expect(JobsCommand.usageText == "Usage: /jobs · /jobs ack <run id> · /jobs delete <name>")
+        #expect(JobsCommand.usageText == "Usage: /jobs · /jobs ack <run id> · /jobs pause <name> · "
+                + "/jobs resume <name> · /jobs run <name> · /jobs delete <name>")
     }
 
     // MARK: matchRun
@@ -201,6 +213,20 @@ struct JobsCommandTests {
         let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
                                      unreadableJobs: 0, now: now)
         #expect(out.contains("| pr-sweep | every 60 s | in 2 h | never |"))
+    }
+
+    @Test("a job part-way up the retry ladder says where it is")
+    func renderRetryAttempt() {
+        let now = Date()
+        var j = job(nextFireAt: now.addingTimeInterval(300))
+        j.retryAttempt = 2
+        let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
+                                     unreadableJobs: 0, now: now)
+        #expect(out.contains("in 5 m · retry 2/3"))
+        // And a job that is not retrying says nothing about retries at all.
+        let clean = JobsCommand.render(jobs: [job(nextFireAt: now.addingTimeInterval(300))],
+                                       lastRuns: [:], unacknowledged: [], unreadableJobs: 0, now: now)
+        #expect(!clean.contains("retry"))
     }
 
     @Test("a paused job shows its reason in place of a next fire")

@@ -32,13 +32,24 @@ struct JobRun: Identifiable, Equatable, Sendable {
     var totalTokens: Int
     /// Reserved: nothing computes a cost yet (spec §6.3).
     var costMicros: Int64?
-    /// Reserved for deliverable 3's gates.
+    /// What the run's gate saw — an ETag, an mtime, a hash (#187 deliverable 3, spec §7). Compared
+    /// with the previous run's to decide whether anything changed; written by
+    /// `JobLedger.setGateSignal`, read back by `lastGateSignal`.
     var gateSignal: String?
     /// The background conversation this run's turn ran in. No foreign key: transcripts are pruned
     /// on their own schedule, so this can name a conversation that is already gone.
     var transcriptConversationId: UUID?
     /// When a person saw the failure. `nil` on a failed or blocked run means it is still open.
     var acknowledgedAt: Date?
+    /// The exact call this run failed closed on, persisted so the card can show every argument and
+    /// "Approve and run" can dispatch it (#187 deliverable 3). Set with `blockedOnApproval`.
+    var blockedCall: BlockedCall?
+    /// When `blockedCall` was approved and dispatched. Stamped once, atomically, so two clicks on
+    /// the same card cannot run the call twice.
+    var approvedAt: Date?
+    /// The run this one was dispatched from — set on the row an approved `blockedCall` runs as, so
+    /// the follow-up card can be traced back to the run that asked.
+    var parentRunId: UUID?
 
     init(id: UUID = UUID(), jobId: UUID, jobName: String, triggerKind: String, startedAt: Date,
          status: Status = .running, transcriptConversationId: UUID? = nil) {
@@ -59,6 +70,9 @@ struct JobRun: Identifiable, Equatable, Sendable {
         self.gateSignal = nil
         self.transcriptConversationId = transcriptConversationId
         self.acknowledgedAt = nil
+        self.blockedCall = nil
+        self.approvedAt = nil
+        self.parentRunId = nil
     }
 }
 
@@ -74,5 +88,44 @@ extension JobRun.Status {
         case .blockedOnApproval: return "blocked on approval"
         case .interrupted: return "interrupted"
         }
+    }
+}
+
+/// The one tool call a background run failed closed on (#187 deliverable 3, spec §6): stored on the
+/// run as JSON so the event card can render the whole call — the command, the path, the body — and
+/// a human can approve *that*, not just a tool name. D2 kept only the name, which is not enough to
+/// approve anything safely and not enough to re-dispatch it either.
+struct BlockedCall: Codable, Equatable, Sendable {
+    /// Why the call did not run: nobody was there to approve it, or the job's `readOnly` profile
+    /// forbids the tool outright.
+    enum Reason: String, Codable, Sendable { case approval, profile }
+
+    let toolName: String
+    /// Exactly what the model sent, unaltered — this is what gets re-dispatched on approval.
+    let args: [String: JSONValue]
+    let cwd: String?
+    let reason: Reason
+    let at: Date
+
+    init(toolName: String, args: [String: JSONValue] = [:], cwd: String? = nil,
+         reason: Reason = .approval, at: Date = Date()) {
+        self.toolName = toolName
+        self.args = args
+        self.cwd = cwd
+        self.reason = reason
+        self.at = at
+    }
+
+    private enum CodingKeys: String, CodingKey { case toolName, args, cwd, reason, at }
+
+    /// Invariant 1 throughout, and an unrecognized `reason` reads as `.approval`: the conservative
+    /// guess, since an approval is the case that still needs a human either way.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        toolName = try c.decodeIfPresent(String.self, forKey: .toolName) ?? ""
+        args = try c.decodeIfPresent([String: JSONValue].self, forKey: .args) ?? [:]
+        cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
+        reason = Reason(rawValue: try c.decodeIfPresent(String.self, forKey: .reason) ?? "") ?? .approval
+        at = try c.decodeIfPresent(Date.self, forKey: .at) ?? Date(timeIntervalSince1970: 0)
     }
 }

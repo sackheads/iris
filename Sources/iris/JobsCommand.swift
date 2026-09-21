@@ -12,10 +12,18 @@ import Foundation
 enum JobsCommand: Equatable {
     case list
     case ack(runId: String)
+    case pause(name: String)
+    case resume(name: String)
+    case run(name: String)
     case delete(name: String)
     case usage
 
-    static let usageText = "Usage: /jobs · /jobs ack <run id> · /jobs delete <name>"
+    static let usageText = "Usage: /jobs · /jobs ack <run id> · /jobs pause <name> · "
+        + "/jobs resume <name> · /jobs run <name> · /jobs delete <name>"
+
+    /// What `/jobs pause` writes, and what `/jobs` then prints in the Next column. Spelled once so
+    /// the command that clears it and the table that shows it cannot drift.
+    static let pausedByUserReason = "paused by user"
 
     /// The shortest run-id prefix `/jobs ack` will consider. Eight characters is what an event
     /// card prints (`EventCard.historyLine`), so it is the shortest id a person can actually have
@@ -25,10 +33,10 @@ enum JobsCommand: Equatable {
 
     // MARK: Parsing
 
-    /// `/jobs`, `/jobs ack <run id>`, `/jobs delete <name>`; anything else is `.usage`. A run id is
-    /// exactly one token — a second word means the user meant something the command cannot do, and
-    /// acting on the first token alone would be a guess. A job name, by contrast, is the rest of
-    /// the line: names come from `schedule_job` and may contain spaces.
+    /// `/jobs`, `/jobs ack <run id>`, `/jobs pause|resume|run|delete <name>`; anything else is
+    /// `.usage`. A run id is exactly one token — a second word means the user meant something the
+    /// command cannot do, and acting on the first token alone would be a guess. A job name, by
+    /// contrast, is the rest of the line: names come from `schedule_job` and may contain spaces.
     static func parse(_ text: String) -> JobsCommand {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed == "/jobs" || trimmed.hasPrefix("/jobs ") else { return .usage }
@@ -41,12 +49,22 @@ enum JobsCommand: Equatable {
             guard tokens.count == 1 else { return .usage }
             return .ack(runId: String(tokens[0]))
         }
-        if args == "delete" || args.hasPrefix("delete ") {
-            let rest = args.dropFirst(6).trimmingCharacters(in: .whitespacesAndNewlines)
-            return rest.isEmpty ? .usage : .delete(name: rest)
+        for (verb, form) in named {
+            guard args == verb || args.hasPrefix(verb + " ") else { continue }
+            let rest = args.dropFirst(verb.count).trimmingCharacters(in: .whitespacesAndNewlines)
+            return rest.isEmpty ? .usage : form(rest)
         }
         return .usage
     }
+
+    /// The forms that take a job name. A table rather than four near-identical branches, since the
+    /// only thing that differs between them is which case the name goes into.
+    private static let named: [(String, @Sendable (String) -> JobsCommand)] = [
+        ("pause", { .pause(name: $0) }),
+        ("resume", { .resume(name: $0) }),
+        ("run", { .run(name: $0) }),
+        ("delete", { .delete(name: $0) }),
+    ]
 
     // MARK: Run-id matching
 
@@ -145,13 +163,19 @@ enum JobsCommand: Equatable {
     }
 
     /// When this job fires next, as a person reads it. A paused job says why instead; a watch has
-    /// no cadence to report.
+    /// no cadence to report. A job part-way up the retry ladder says so beside its next fire (§9),
+    /// because "in 1 m" on a five-minute job is otherwise unexplained.
     static func nextText(for job: Job, now: Date) -> String {
         if let reason = job.pausedReason { return "paused: \(reason)" }
         if !job.enabled { return "disabled" }
-        if case .fsEvent = job.trigger { return "—" }
-        guard let next = job.nextFireAt else { return "—" }
-        return relative(from: now, to: next)
+        var text = "—"
+        if case .fsEvent = job.trigger {
+            text = "—"
+        } else if let next = job.nextFireAt {
+            text = relative(from: now, to: next)
+        }
+        guard job.retryAttempt > 0 else { return text }
+        return "\(text) · retry \(job.retryAttempt)/\(JobRunner.backoff.count)"
     }
 
     /// One unit, rounded down: "in 3 m" is read as "not for a few minutes", and a fire that is

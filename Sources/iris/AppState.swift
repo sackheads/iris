@@ -92,6 +92,11 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// #187 — sorted to the top of the sidebar and refused by `/clear`. The "Iris Activity"
     /// conversation event cards are delivered to is the first user of this.
     var isPinned: Bool = false
+    /// #187 deliverable 3 — the profile of the job whose run this background conversation holds.
+    /// Stored only: nothing writes it and nothing reads it yet. PR B is what stamps it when the
+    /// runner opens the conversation and narrows a `readOnly` run's tool surface from it. `nil` on
+    /// every conversation that is not a job run.
+    var jobProfile: JobProfile?
     var goalContract: GoalContract? = nil
     var lastGoalCompletionReport: JSONValue? = nil
     var lastGoalEvaluation: GoalEvaluation? = nil
@@ -125,7 +130,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -145,6 +150,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         // keys, and a throw here would fail the whole decode.
         isBackground = try container.decodeIfPresent(Bool.self, forKey: .isBackground) ?? false
         isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+        // Same invariant 1, and absent is the meaningful value: not a job run.
+        jobProfile = try container.decodeIfPresent(JobProfile.self, forKey: .jobProfile)
         goalContract = try container.decodeIfPresent(GoalContract.self, forKey: .goalContract)
         lastGoalCompletionReport = try container.decodeIfPresent(JSONValue.self, forKey: .lastGoalCompletionReport)
         lastGoalEvaluation = try container.decodeIfPresent(GoalEvaluation.self, forKey: .lastGoalEvaluation)
@@ -2670,6 +2677,94 @@ class AppState {
                 emitCommandOutput("Could not acknowledge that run: \(error).", format: .markdown, to: convId)
             }
 
+        case .pause(let name):
+            do {
+                guard let job = try ledger.job(named: name) else {
+                    emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
+                    return
+                }
+                try ledger.setPaused(jobId: job.id, reason: JobsCommand.pausedByUserReason)
+                emitCommandOutput("Paused **\(job.name)**. `/jobs resume \(job.name)` puts it back.",
+                                  format: .markdown, to: convId)
+            } catch {
+                emitCommandOutput("Could not pause that job: \(error).", format: .markdown, to: convId)
+            }
+
+        case .resume(let name):
+            do {
+                guard let job = try ledger.job(named: name) else {
+                    emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
+                    return
+                }
+                // Both fields, always: a job paused off the end of the retry ladder that kept its
+                // attempt count would pause again on its very next failure (§4).
+                let next = JobScheduler.nextFire(for: job.trigger, after: Date())
+                try ledger.setPaused(jobId: job.id, reason: nil)
+                try ledger.setRetry(jobId: job.id, attempt: 0, nextFireAt: next)
+                var resumed = job
+                resumed.pausedReason = nil
+                resumed.retryAttempt = 0
+                resumed.nextFireAt = next
+                emitCommandOutput("Resumed **\(job.name)** · next \(JobsCommand.nextText(for: resumed, now: Date())).",
+                                  format: .markdown, to: convId)
+            } catch {
+                emitCommandOutput("Could not resume that job: \(error).", format: .markdown, to: convId)
+            }
+
+        case .run(let name):
+            do {
+                guard let job = try ledger.job(named: name) else {
+                    emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
+                    return
+                }
+                // Admission drops a paused or disabled job without a word, and both are states the
+                // user has to undo before a hand-started fire can do anything. Saying so here —
+                // before anything is started — is the difference between a command that did
+                // nothing and a command that looks like it worked.
+                guard job.pausedReason == nil else {
+                    emitCommandOutput("'\(job.name)' is paused (\(job.pausedReason ?? "")); `/jobs resume \(job.name)` first.",
+                                      format: .markdown, to: convId)
+                    return
+                }
+                guard job.enabled else {
+                    emitCommandOutput("'\(job.name)' is disabled.", format: .markdown, to: convId)
+                    return
+                }
+                // Said before anything is attempted, because admission only answers when the fire
+                // is over — and a run can take minutes. Silence in between reads as a command that
+                // did nothing.
+                emitCommandOutput("Starting **\(job.name)** …", format: .markdown, to: convId)
+                // Through `fire`, not `run`: a hand-started fire meets the same overlap, breaker
+                // and budget checks a scheduled one does (§4) — and what it says is what admission
+                // decided, reported when the fire is over rather than promised before it starts.
+                let engine = self.engine
+                Task { [weak self] in
+                    guard let runner = await engine?.jobRunner() else {
+                        // No engine means no runner and no turn: the app has not finished wiring
+                        // itself up (or is shutting down). Saying so beats the line above being
+                        // the last word on a fire that never started.
+                        self?.emitCommandOutput("Jobs are not available yet.", format: .markdown, to: convId)
+                        return
+                    }
+                    let admission = await runner.fire(job: job, origin: .manual)
+                    guard let self else { return }
+                    guard let admission else {
+                        self.emitCommandOutput("'\(job.name)' is no longer in the jobs table.",
+                                               format: .markdown, to: convId)
+                        return
+                    }
+                    if let refusal = JobRunner.refusalText(admission) {
+                        self.emitCommandOutput("**\(job.name)** was not started: \(refusal).",
+                                               format: .markdown, to: convId)
+                    } else {
+                        self.emitCommandOutput("Fired **\(job.name)**; the result arrives as a card.",
+                                               format: .markdown, to: convId)
+                    }
+                }
+            } catch {
+                emitCommandOutput("Could not run that job: \(error).", format: .markdown, to: convId)
+            }
+
         case .delete(let name):
             do {
                 guard let job = try ledger.job(named: name) else {
@@ -2692,8 +2787,13 @@ class AppState {
                 // card they are still reading.
                 let runCount = try ledger.runCount(jobId: job.id)
                 try ledger.delete(jobId: job.id)
-                // A watch job's FSEvents stream would otherwise keep firing for a job that is gone.
-                Task { await WatcherManager.shared.reload() }
+                // A watch job's FSEvents stream would otherwise keep firing for a job that is gone,
+                // and the runner would otherwise keep the origin of a fire it held for it.
+                let engine = self.engine
+                Task {
+                    await WatcherManager.shared.reload()
+                    await engine?.jobRunner()?.forget(jobId: job.id)
+                }
                 emitCommandOutput("Deleted **\(job.name)** and its \(runCount) run(s). Transcripts are left for retention to clear.",
                                   format: .markdown, to: convId)
             } catch {

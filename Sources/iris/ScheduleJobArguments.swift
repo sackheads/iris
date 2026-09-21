@@ -56,10 +56,13 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// every job name already in the ledger, so a second "check the PR queue" becomes
     /// `check-the-pr-queue-2` instead of colliding with the first on the ledger's UNIQUE index.
     func makeJob(defaultTimeZone: String, createdIn: UUID?, existingNames: Set<String>) -> Result<Job, ToolMessage> {
-        // D3 owns budgets and approvals; until then a job that may write is a job nobody is
-        // watching, so the tool declines rather than quietly downgrading what was asked for.
+        // A job that may write is a job nobody is watching, and the sandbox and approval path it
+        // would need is not built yet, so the tool declines rather than quietly downgrading what
+        // was asked for. The refusal says what to do instead and names no milestone: a model has
+        // no idea what a deliverable is or when one lands, and this sentence is read on every
+        // refusal.
         if profile?.lowercased() == JobProfile.mutating.rawValue.lowercased() {
-            return .failure("mutating jobs arrive with deliverable 3; create the job without a profile.")
+            return .failure(Self.mutatingUnavailable)
         }
         switch alias.resolve(defaultTimeZone: defaultTimeZone) {
         case .failure(let failure):
@@ -72,6 +75,15 @@ struct ScheduleJobArguments: Equatable, Sendable {
                 createdInConversationId: createdIn))
         }
     }
+
+    /// Why a `mutating` job cannot be scheduled in this build, in the two forms the model can act
+    /// on: schedule it read-only, or hand the writing step back to the user.
+    static let mutatingUnavailable: ToolMessage =
+        """
+        The 'mutating' profile is not available in this build: a scheduled job cannot be given \
+        write access yet. Schedule the job as read-only (omit `profile`) so it can report what it \
+        finds, or ask the user to run the step that writes themselves.
+        """
 
     /// `base`, or `base-2`, `base-3`, … — the first form not already taken.
     static func uniqueName(_ base: String, existing: Set<String>) -> String {

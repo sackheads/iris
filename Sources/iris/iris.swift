@@ -2,6 +2,89 @@ import Foundation
 import SwiftUI
 import KeyboardShortcuts
 
+/// What one turn may spend before it is stopped (#187 §4). An unattended run has nobody watching
+/// it, so the two ways a turn runs away — rounds that keep spending tokens, and a turn that never
+/// comes back — are bounded here rather than left to the user noticing.
+///
+/// Both figures are absolute, not remaining: the tokens are the conversation's accumulated total
+/// (a job's conversation is fresh, so that total IS the run's cost) and the deadline is a wall
+/// clock instant, so nothing has to be decremented as the turn goes and a check that never runs
+/// cannot leave a stale allowance behind.
+struct TurnBudget: Sendable, Equatable {
+    /// Non-positive means no token limit, matching `JobRunner.admit`'s reading of the daily ones:
+    /// nothing configurable produces one, but a hand-written policy can, and "this job may never
+    /// make a single model call" is a worse reading of 0 than "unbounded".
+    let maxTokens: Int
+    /// No such escape hatch here: there is always a deadline, because it is the only thing that
+    /// can end a turn that has stopped responding. `JobLimits.resolve` reads a zero timeout as the
+    /// global default rather than as "unbounded" for exactly that reason.
+    let deadline: Date
+
+    static let tokensExceeded = "budget: tokens exceeded"
+    static let timeExceeded = "budget: time exceeded"
+
+    /// Why the turn must not make another model call, or `nil` to go ahead. Tokens are named
+    /// first when both are gone: a person can act on the figure that was spent.
+    func stopReason(tokensUsed: Int, now: Date) -> String? {
+        if maxTokens > 0, tokensUsed >= maxTokens { return Self.tokensExceeded }
+        if now >= deadline { return Self.timeExceeded }
+        return nil
+    }
+}
+
+/// Where a turn reports what it has spent so far, after every model round (#187 §4). A protocol
+/// rather than a ledger reference because the engine knows nothing about jobs: the only
+/// implementation writes the running total onto the run's row, so a run the app quit in the middle
+/// of leaves its spend behind on the row the next launch closes — and the day's budget counts it.
+/// Without it, `totalTokens` was written only by `finish`, and a run that never finished was free.
+protocol TurnUsageSink: Sendable {
+    /// The turn's accumulated usage, not this round's: absolute like everything else in
+    /// `TurnBudget`, so a report that never arrives cannot leave a half-counted row behind.
+    func record(_ tokens: TokenUsage) async
+}
+
+/// A turn's claim on the thinking indicator and its conversation's engine-turn count, given back
+/// exactly once: by the turn when it returns, or by whoever gave up waiting for it.
+///
+/// `withEngineTurn` used to take and release the pair around `await body()`, on the stated
+/// grounds that `body` cannot throw. A job run's deadline now makes "body never returns" a
+/// supported ending (`JobRunner.run`), and that reasoning does not cover it: `thinkingCount` is one
+/// global count, so a single abandoned turn leaves `isThinking` true for the life of the process —
+/// the spectrum and the LED bar lit, and Escape appending "Interrupted." to whatever conversation
+/// the user is actually reading.
+///
+/// The idempotency lives here rather than in `AppState`'s counters on purpose. `endThinking`
+/// clamps at zero, but an unmatched *extra* release would still take a concurrent real turn's
+/// indicator down with it, which is a worse bug than the one being fixed.
+actor TurnLifetime {
+    private var give: (@Sendable () async -> Void)?
+    private var released = false
+
+    /// Whether the pair has been given back. For tests and for a caller deciding whether there is
+    /// anything left to do.
+    var isReleased: Bool { released }
+
+    /// Installed by `withEngineTurn` once it holds the pair. A lifetime already released — the
+    /// deadline got there before the turn had begun — hands it straight back rather than storing
+    /// a claim nothing will ever take.
+    func arm(_ give: @escaping @Sendable () async -> Void) async {
+        guard !released else {
+            await give()
+            return
+        }
+        self.give = give
+    }
+
+    /// Gives the pair back if it is still held; a no-op every time after the first.
+    func release() async {
+        guard !released else { return }
+        released = true
+        let give = self.give
+        self.give = nil
+        await give?()
+    }
+}
+
 actor IrisEngine {
     /// The reflection turn fired after a goal completes. Shared with `AppState`, which completes a
     /// goal whose last criteria the user judged — that path returns from this handler long before
@@ -646,6 +729,12 @@ actor IrisEngine {
     /// completion, with nothing to say otherwise.
     static let softStopMarker = "Summarizing and stopping."
 
+    /// The same signal for the stop that does NOT summarize (#187 §4). A budget stop cannot say
+    /// "summarizing": there is no allowance left for the model call a summary would take, and a
+    /// line that promises one is a line the transcript never keeps. `JobRunner` matches either
+    /// marker, so a run cut off by its budget still finishes `failed`.
+    static let budgetStopMarker = "Stopping without a summary."
+
     /// Graceful stop for a responsive-but-stuck goal loop: clear the reprompt, instruct the model
     /// to summarize and call goal_complete, and clear the goal so the loop cannot continue.
     private func softStopWithSummary(conversationId: UUID, reason: String) async {
@@ -681,6 +770,76 @@ actor IrisEngine {
                 localState?.onSubagentComplete[conversationId] = nil
             }
         }
+    }
+
+    /// Everything that arrived while the last round was running, into history, at a round
+    /// boundary: the user's mid-task messages first (#172), then the event lines for cards
+    /// delivered mid-turn (#187 §8.3). Returns whether anything was added, which is the caller's
+    /// cue to re-read the history it is about to send.
+    ///
+    /// The order is deliberate: a card is harness news and a steer is the user changing course, so
+    /// the user's words are read first when both landed in the same window. Steers go through the
+    /// BeforeAgent hook (a human or a peer wrote them); event lines do not (this harness wrote
+    /// them, and `deliverEvent` already sanitised them).
+    ///
+    /// A helper rather than two inline blocks because the turn can end at the round boundary as
+    /// well as continue through it — a budget stop, say — and whatever arrived has to reach the
+    /// transcript either way. Taking them and dropping them on the floor is how the user's
+    /// mid-task message disappears.
+    private func drainPendingInput(conversationId: UUID, hooksSandbox: Bool) async -> Bool {
+        let localState = state
+        var added = false
+
+        let steers = await MainActor.run { localState?.takePendingSteers(for: conversationId) ?? [] }
+        for steer in steers {
+            let decision = await HookManager.shared.fireBeforeAgent(input: steer.text, useSandbox: hooksSandbox)
+            var steerText = steer.text
+            if case .block(let reason) = decision {
+                await pushToUI(role: .system, text: "Hook blocked message: \(reason)", conversationId: conversationId)
+                continue
+            } else if case .proceed(let modifiedData) = decision, let data = modifiedData,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let modifiedInput = json["input"] as? String {
+                steerText = modifiedInput
+            }
+            // #185 §5.0 (round 2 fix): "User (mid-task):" is the system's highest trust label. A
+            // peer delivery queued through the busy path must never wear it — the model must not
+            // be told a peer's words are the user's own.
+            let label = steer.isPeer ? Self.peerMidTaskLabel : "User (mid-task)"
+            // Its own entry, not an extra part: the OpenAI translator would emit a text part
+            // before the tool messages.
+            let content = Content(role: "user", parts: [Part(text: "\(label): \(steerText)")])
+            await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
+            added = true
+        }
+
+        let eventLines = await MainActor.run { localState?.takePendingEventLines(for: conversationId) ?? [] }
+        for line in eventLines {
+            let content = AppState.eventLineContent(line)
+            await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
+            added = true
+        }
+        return added
+    }
+
+    /// The budget stop (#187 §4): the turn ends here and now, with no further model call.
+    ///
+    /// Deliberately not `softStopWithSummary`, which is the *goal loop's* stop: that one re-enters
+    /// `processInput` to ask for a summary, which is one more model call — exactly the thing an
+    /// exhausted budget says there is no allowance for — and it asks for `goal_complete`, which a
+    /// background run has neither a goal nor a callback for. The line therefore ends with
+    /// `budgetStopMarker` rather than `softStopMarker`: `JobRunner` matches both, so the run still
+    /// finishes `failed`, and nothing promises a summary that is not coming.
+    private func endTurnForBudget(conversationId: UUID, reason: String) async {
+        cancelReprompt(for: conversationId)
+        loopDetectors[conversationId] = nil
+        blockedResultTrackers[conversationId] = nil
+        // No goal on a job run, but an attended turn given a budget must not be reprompted into
+        // spending past it either.
+        let localState = state
+        await MainActor.run { localState?.clearGoal(for: conversationId) }
+        await pushToUI(role: .system, text: "[\(approvalOrigin)] \(reason). \(Self.budgetStopMarker)",
+                       conversationId: conversationId)
     }
 
     private var approvalOrigin: String {
@@ -740,33 +899,45 @@ actor IrisEngine {
     /// which is what "archived means idle" reads and what hands a queued user message on when it
     /// reaches zero (#172). A leaked count would therefore mean a conversation that can never be
     /// archived *and* whose inbox never drains — which is why the pair is a closure rather than
-    /// two statements a future early `return` could step between. `body` cannot throw, so the
-    /// release needs no `defer`.
-    private func withEngineTurn(_ conversationId: UUID, _ body: () async -> Void) async {
+    /// two statements a future early `return` could step between.
+    ///
+    /// The release goes through a `TurnLifetime` rather than being two statements after `body()`,
+    /// because `body` not returning at all is now a supported ending: a job run's deadline
+    /// abandons a turn parked where cancellation is never checked, and hands the caller's
+    /// `lifetime` back itself. Either side may release; only the first one does anything.
+    private func withEngineTurn(_ conversationId: UUID, lifetime: TurnLifetime? = nil,
+                                _ body: () async -> Void) async {
         let stateForThinking = state
         await MainActor.run {
             stateForThinking?.beginThinking()
             stateForThinking?.beginEngineTurn(for: conversationId)
         }
-        await body()
-        await MainActor.run {
-            stateForThinking?.endEngineTurn(for: conversationId)
-            stateForThinking?.endThinking()
+        let lifetime = lifetime ?? TurnLifetime()
+        // Weak: a lifetime nobody ever releases (a wedged turn of a caller that passed none) must
+        // not be the thing keeping a whole app state alive.
+        await lifetime.arm { [weak stateForThinking] in
+            guard let stateForThinking else { return }
+            await MainActor.run {
+                stateForThinking.endEngineTurn(for: conversationId)
+                stateForThinking.endThinking()
+            }
         }
+        await body()
+        await lifetime.release()
     }
 
-    func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false) async {
-        await withEngineTurn(conversationId) {
+    func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil, lifetime: TurnLifetime? = nil) async {
+        await withEngineTurn(conversationId, lifetime: lifetime) {
             let turnID = PerformanceProfiler.shared.beginTurn(label: input, source: source)
             let turnStart = CFAbsoluteTimeGetCurrent()
             await PerformanceProfiler.$currentTurnID.withValue(turnID) {
-                await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete)
+                await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, turnBudget: turnBudget, usageSink: usageSink)
             }
             PerformanceProfiler.shared.endTurn(turnID, totalMs: (CFAbsoluteTimeGetCurrent() - turnStart) * 1000.0)
         }
     }
 
-    private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false) async {
+    private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil) async {
         if source == "UI" {
             loopDetectors[conversationId] = nil
             blockedResultTrackers[conversationId] = nil
@@ -1238,49 +1409,34 @@ actor IrisEngine {
             // Cooperative cancellation: bail out at turn boundaries if this task was cancelled
             // (e.g. the conversation was deleted or the goal was stopped mid-turn).
             if Task.isCancelled { earlyEnd = Self.stoppedByUserReason; break }
+            // The per-run budget (#187 §4), read before the call this round would make — including
+            // the first, so a deadline already passed when the turn starts costs nothing at all.
+            // The conversation's accumulated usage is what is compared: a job's conversation is
+            // fresh, so its total is this run's spend.
+            if let turnBudget {
+                let spent = await MainActor.run {
+                    localState?.conversations.first(where: { $0.id == conversationId })?.tokenUsage.totalTokenCount ?? 0
+                }
+                if let reason = turnBudget.stopReason(tokensUsed: spent, now: Date()) {
+                    turnFinished = true
+                    // The drain consumes queued steers into history and no follow-up turn starts
+                    // (R8). Both halves are deliberate. Leaving them queued would be worse than
+                    // losing them: this is a job run's own hidden conversation, so the next thing
+                    // to read that inbox would be a turn nobody budgeted and nobody is watching —
+                    // the run has already spent everything it was allowed. Taking them into
+                    // history keeps them in the transcript a person reads back from the card, and
+                    // a mid-task message taken and dropped is gone without a trace.
+                    _ = await drainPendingInput(conversationId: conversationId, hooksSandbox: hooksSandbox)
+                    await endTurnForBudget(conversationId: conversationId, reason: reason)
+                    break
+                }
+            }
             // One streamer per model round: it owns the agent row this round grows in place.
             let streamer = makeStreamer(conversationId: conversationId)
             do {
-                // Mid-task user messages (#172): whatever arrived since the last round joins the
-                // history as its own user entry, after the tool results, so the model sees it
-                // alongside them and can change course. Its own entry, not an extra part: the
-                // OpenAI translator would emit a text part before the tool messages.
-                let steers = await MainActor.run { localState?.takePendingSteers(for: conversationId) ?? [] }
-                if !steers.isEmpty {
-                    for steer in steers {
-                        let decision = await HookManager.shared.fireBeforeAgent(input: steer.text, useSandbox: hooksSandbox)
-                        var steerText = steer.text
-                        if case .block(let reason) = decision {
-                            await pushToUI(role: .system, text: "Hook blocked message: \(reason)", conversationId: conversationId)
-                            continue
-                        } else if case .proceed(let modifiedData) = decision, let data = modifiedData,
-                                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                                  let modifiedInput = json["input"] as? String {
-                            steerText = modifiedInput
-                        }
-                        // #185 §5.0 (round 2 fix): "User (mid-task):" is the system's highest
-                        // trust label. A peer delivery queued through the busy path must never
-                        // wear it — the model must not be told a peer's words are the user's own.
-                        let label = steer.isPeer ? Self.peerMidTaskLabel : "User (mid-task)"
-                        let content = Content(role: "user", parts: [Part(text: "\(label): \(steerText)")])
-                        await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
-                    }
-                    history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
-                    request.contents = history
-                }
-
-                // Event cards delivered while this turn was running (#187 §8.3). Same boundary as
-                // the steers above and deliberately after them: a card is harness news, a steer is
-                // the user changing course, and the user's words are read first when both landed
-                // in the same window. No BeforeAgent hook — that hook exists to inspect what a
-                // human or a peer said, and this text is the harness's own sentence about a job
-                // this harness ran. The line is already sanitised by `deliverEvent`.
-                let eventLines = await MainActor.run { localState?.takePendingEventLines(for: conversationId) ?? [] }
-                if !eventLines.isEmpty {
-                    for line in eventLines {
-                        let content = AppState.eventLineContent(line)
-                        await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
-                    }
+                // Mid-task user messages (#172) and then the event lines (#187 §8.3) — see
+                // `drainPendingInput`, which both this round and the budget stop above go through.
+                if await drainPendingInput(conversationId: conversationId, hooksSandbox: hooksSandbox) {
                     history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
                     request.contents = history
                 }
@@ -1372,11 +1528,16 @@ actor IrisEngine {
                 history = await MainActor.run {
                     localState?.conversations.first(where: { $0.id == conversationId })?.history ?? []
                 }
-                await MainActor.run { 
+                let spentSoFar = await MainActor.run { () -> TokenUsage in
                     if let usage = activeResponse.usageMetadata {
                         localState?.updateTokenUsage(for: conversationId, usage: usage)
                     }
+                    return localState?.conversations.first(where: { $0.id == conversationId })?.tokenUsage ?? TokenUsage()
                 }
+                // What the run has spent, on the run's own row, before the next round can start
+                // (#187 §4). A row only ever costed by its `finish` counts as zero against the
+                // day's budget when the app quits mid-turn and nothing ever finishes it.
+                if let usageSink { await usageSink.record(spentSoFar) }
                 
                 var hasFunctionCall = false
                 
@@ -1674,21 +1835,15 @@ actor IrisEngine {
     /// Everything launch does about job runs, in the order it has to happen (#187 §6, §10): close
     /// out the runs the last process died inside — before the scheduler can start a new one, so a
     /// run this process is about to begin is never mistaken for one of them — then bring the
-    /// scheduler up and give it somewhere to record an overlap skip. Split out of `start()`, which
-    /// also loads plugins and MCP servers, so it can be driven (and tested) on its own.
+    /// scheduler up, pointed at the runner every fire is admitted through. Split out of `start()`,
+    /// which also loads plugins and MCP servers, so it can be driven (and tested) on its own.
     func configureJobBookkeeping(ledger: JobLedger) async {
         closeInterruptedRuns(ledger: ledger)
-        // Both handlers are installed through `configure`, which runs before the polling loop
-        // does: installed after `start()`, the first tick could skip an overlapping job (or cross
-        // a day boundary) with no handler to record it.
+        // The handler is installed through `configure`, which runs before the polling loop does:
+        // installed after `start()`, the first tick could cross a day boundary with nothing to
+        // record it. Overlap needs no handler of its own any more — every fire goes through
+        // `JobRunner.fire`, which is where a skip row is written (§4).
         _ = await adoptJobScheduler(ledger: ledger) { scheduler in
-            await scheduler.setOnSkip { job in
-                do {
-                    try JobRunner.recordSkip(job: job, ledger: ledger, now: Date())
-                } catch {
-                    print("[JobRunner] could not record the skipped run for \(job.name): \(error)")
-                }
-            }
             // Retention runs at launch and once a day (§10). Both, not one: a Mac that is never
             // restarted would never prune on launch alone, and a Mac restarted twice a day would
             // never reach the daily hook. The launch pass is the explicit call below, so it
@@ -1771,7 +1926,9 @@ actor IrisEngine {
     func fireHandler() -> JobScheduler.FireHandler {
         { [weak self] job, reason in
             guard let runner = await self?.jobRunner() else { return }
-            await runner.run(job: job, reason: reason)
+            // `fire`, not `run`: the runner is the single admission point, so a due job meets the
+            // same overlap, breaker and budget checks a watch fire does (§4).
+            await runner.fire(job: job, origin: .cadence(kind: reason))
         }
     }
 
@@ -1833,16 +1990,16 @@ actor IrisEngine {
     /// for the same reason `fireHandler()` was: the job tools hand this to a manager an unstarted
     /// engine adopts (`JobTools.watcherCallback`), and the two paths must install one definition.
     ///
-    /// Straight to the runner, NOT through `JobScheduler`: a watch fire has no cadence to advance
-    /// and no `firing` entry, and routing it through the scheduler's overlap skip would write one
-    /// `interrupted` ledger row per file event in a burst — noisier than the overlap itself.
-    /// Overlap is handled where every fire passes: `JobRunner.run` keeps its own in-flight set and
-    /// drops a watch fire for a job already running, silently and without a row. Deliverable 4
-    /// owns `FSWatch.quietWindowSeconds` and turns that into coalescing.
+    /// Straight to the runner, NOT through `JobScheduler`: a watch fire has no cadence to advance.
+    /// It meets the same admission as a scheduled one all the same — `JobRunner.fire` is where
+    /// overlap, the breaker and the budgets are decided (§4) — and a watch fire that overlaps is
+    /// dropped without a row, because FSEvents delivers a burst per save and one `interrupted` row
+    /// per event would be noisier than the overlap itself. Deliverable 4 owns
+    /// `FSWatch.quietWindowSeconds` and turns that into coalescing.
     func watcherCallback() -> @Sendable (Job, [String]) async -> Void {
         { [weak self] job, paths in
             guard let runner = await self?.jobRunner() else { return }
-            await runner.run(job: job, reason: "fsEvent", changedPaths: paths)
+            await runner.fire(job: job, origin: .watcher(paths: paths))
         }
     }
 
