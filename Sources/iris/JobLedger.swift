@@ -128,44 +128,291 @@ final class JobLedger: Sendable {
         return (jobs, skipped)
     }
 
-    /// Decodes one row, throwing `unreadableRow` for anything a `Job` cannot be built from. Every
-    /// column is read through `DatabaseValue` rather than GRDB's typed subscript, which traps on a
-    /// value it cannot convert — a hand-edited or newer-schema row must skip the job, never crash
-    /// the app. Identity and ordering fields (`id`, `name`, `trigger`, `createdAt`) are required:
-    /// a row missing one of them would otherwise masquerade as an unnamed job at the epoch.
+    /// Decodes one row, throwing `unreadableRow` for anything a `Job` cannot be built from.
+    /// Identity and ordering fields (`id`, `name`, `trigger`, `createdAt`) are required: a row
+    /// missing one of them would otherwise masquerade as an unnamed job at the epoch.
     private static func job(from row: Row) throws -> Job {
-        func read<T: DatabaseValueConvertible>(_ column: String, _ type: T.Type = T.self) throws -> T? {
-            guard let value = row[column] as DatabaseValue?, !value.isNull else { return nil }
-            guard let decoded = T.fromDatabaseValue(value) else {
-                throw JobLedgerError.unreadableRow("unreadable \(column)")
-            }
-            return decoded
+        let r = RowReader(row: row)
+        let trigger = try JSONDecoder().decode(
+            Trigger.self, from: Data(try r.required("trigger", String.self).utf8))
+        return Job(
+            id: try r.requiredUUID("id"),
+            name: try r.required("name", String.self),
+            prompt: try r.read("prompt", String.self) ?? "",
+            trigger: trigger,
+            profile: JobProfile(rawValue: try r.read("profile", String.self) ?? "") ?? .readOnly,
+            destinationConversationId: try r.uuid("destinationConversationId"),
+            createdInConversationId: try r.uuid("createdInConversationId"),
+            createdAt: try r.required("createdAt", Date.self),
+            enabled: try r.read("enabled", Bool.self) ?? true,
+            nextFireAt: try r.read("nextFireAt", Date.self),
+            lastRunAt: try r.read("lastRunAt", Date.self),
+            pausedReason: try r.read("pausedReason", String.self))
+    }
+}
+
+// MARK: - Runs
+
+/// Runs' half of the agency ledger (#187 deliverable 2): the `job_runs` table. A run is inserted
+/// `running` by the background runner, closed once by `finish`, and read back by the event card,
+/// `get_job_run` and `/jobs`.
+///
+/// Reads are as lenient as the job reads above: a row that cannot be decoded is skipped rather
+/// than failing the listing, so one bad row cannot hide every other run. (A skipped row is also
+/// invisible to `prune`, which is the safe direction: it is never deleted by mistake.)
+extension JobLedger {
+    // MARK: Writes
+
+    /// Records a run that has just started. The `jobId` foreign key means a run cannot outlive its
+    /// job: deleting the job cascades its runs away.
+    func begin(run: JobRun) throws {
+        try writer.write { db in
+            try db.execute(sql: """
+                INSERT INTO job_runs (
+                    id, jobId, jobName, triggerKind, startedAt, finishedAt, status, outcome,
+                    failureReason, blockedTool, promptTokens, candidateTokens, totalTokens,
+                    costMicros, gateSignal, transcriptConversationId, acknowledgedAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, arguments: [
+                    run.id.uuidString, run.jobId.uuidString, run.jobName, run.triggerKind,
+                    run.startedAt, run.finishedAt, run.status.rawValue, run.outcome,
+                    run.failureReason, run.blockedTool, run.promptTokens, run.candidateTokens,
+                    run.totalTokens, run.costMicros, run.gateSignal,
+                    run.transcriptConversationId?.uuidString, run.acknowledgedAt,
+                ])
         }
-        func required<T: DatabaseValueConvertible>(_ column: String, _ type: T.Type = T.self) throws -> T {
-            guard let value = try read(column, T.self) else {
-                throw JobLedgerError.unreadableRow("missing \(column)")
-            }
-            return value
+    }
+
+    /// Closes a run: its terminal status, what came of it, and what it cost. `outcome` is one line
+    /// on a card, so it is truncated to 200 characters here rather than trusting every caller to
+    /// do it. Throws `JobLedgerError.unknownRun` when the row is gone (its job was deleted
+    /// mid-run), for the same reason `setNextFire` does: a runner writing into nothing should hear
+    /// about it.
+    func finish(runId: UUID, status: JobRun.Status, outcome: String?, failureReason: String?,
+                blockedTool: String?, tokens: TokenUsage, finishedAt: Date) throws {
+        let trimmed = outcome.map { String($0.prefix(200)) }
+        try writer.write { db in
+            try db.execute(sql: """
+                UPDATE job_runs SET
+                    status = ?, outcome = ?, failureReason = ?, blockedTool = ?,
+                    promptTokens = ?, candidateTokens = ?, totalTokens = ?, finishedAt = ?
+                WHERE id = ?
+                """, arguments: [
+                    status.rawValue, trimmed, failureReason, blockedTool,
+                    tokens.promptTokenCount, tokens.candidatesTokenCount, tokens.totalTokenCount,
+                    finishedAt, runId.uuidString,
+                ])
+            guard db.changesCount > 0 else { throw JobLedgerError.unknownRun(runId) }
+        }
+    }
+
+    /// Marks a failed or blocked run as seen, taking it out of `unacknowledgedFailures()` and out
+    /// of retention's exemption. Throws `JobLedgerError.unknownRun` for an id that is not in the
+    /// table.
+    func acknowledge(runId: UUID, at: Date) throws {
+        try writer.write { db in
+            try db.execute(sql: "UPDATE job_runs SET acknowledgedAt = ? WHERE id = ?",
+                           arguments: [at, runId.uuidString])
+            guard db.changesCount > 0 else { throw JobLedgerError.unknownRun(runId) }
+        }
+    }
+
+    /// Closes out every run still marked `running` — at launch, those are runs the last process
+    /// died in the middle of, and nothing will ever finish them. Returns how many were closed.
+    func closeRunningRuns(reason: String, at: Date) throws -> Int {
+        try writer.write { db in
+            try db.execute(sql: """
+                UPDATE job_runs SET status = ?, failureReason = ?, finishedAt = ? WHERE status = ?
+                """, arguments: [
+                    JobRun.Status.interrupted.rawValue, reason, at, JobRun.Status.running.rawValue,
+                ])
+            return db.changesCount
+        }
+    }
+
+    // MARK: Reads
+
+    func run(id: UUID) throws -> JobRun? {
+        try decodeRuns(sql: "SELECT * FROM job_runs WHERE id = ?", arguments: [id.uuidString]).first
+    }
+
+    /// One job's runs, newest first. `rowid` breaks ties so two runs that started in the same
+    /// stored millisecond still list in the order they were inserted.
+    func runs(jobId: UUID, limit: Int) throws -> [JobRun] {
+        try decodeRuns(
+            sql: "SELECT * FROM job_runs WHERE jobId = ? ORDER BY startedAt DESC, rowid DESC LIMIT ?",
+            arguments: [jobId.uuidString, limit])
+    }
+
+    /// Runs across every job, newest first: what `/jobs` and the activity listing show.
+    func recentRuns(limit: Int) throws -> [JobRun] {
+        try decodeRuns(sql: "SELECT * FROM job_runs ORDER BY startedAt DESC, rowid DESC LIMIT ?",
+                       arguments: [limit])
+    }
+
+    /// The runs still waiting on a person: failed or blocked and never acknowledged, oldest first
+    /// so the longest-ignored one leads.
+    func unacknowledgedFailures() throws -> [JobRun] {
+        try decodeRuns(
+            sql: """
+                SELECT * FROM job_runs
+                WHERE status IN (?, ?) AND acknowledgedAt IS NULL
+                ORDER BY startedAt, rowid
+                """,
+            arguments: [JobRun.Status.failed.rawValue, JobRun.Status.blockedOnApproval.rawValue])
+    }
+
+    private func decodeRuns(sql: String, arguments: StatementArguments) throws -> [JobRun] {
+        let rows = try writer.read { db in try Row.fetchAll(db, sql: sql, arguments: arguments) }
+        return Self.decodeRuns(rows)
+    }
+
+    private static func decodeRuns(_ rows: [Row]) -> [JobRun] {
+        var runs: [JobRun] = []
+        var skipped = 0
+        for row in rows {
+            do { runs.append(try Self.run(from: row)) } catch { skipped += 1 }
+        }
+        if skipped > 0 { print("[JobLedger] skipped \(skipped) unreadable job run row(s)") }
+        return runs
+    }
+
+    /// Decodes one row the same way `job(from:)` does — every column through `DatabaseValue`,
+    /// never the trapping typed subscript. `id`, `jobId`, `jobName`, `triggerKind`, `startedAt`
+    /// and a recognized `status` are required: without them there is no run to show.
+    private static func run(from row: Row) throws -> JobRun {
+        let r = RowReader(row: row)
+        let statusText = try r.required("status", String.self)
+        guard let status = JobRun.Status(rawValue: statusText) else {
+            throw JobLedgerError.unreadableRow("unreadable status")
+        }
+        var run = JobRun(
+            id: try r.requiredUUID("id"),
+            jobId: try r.requiredUUID("jobId"),
+            jobName: try r.required("jobName", String.self),
+            triggerKind: try r.required("triggerKind", String.self),
+            startedAt: try r.required("startedAt", Date.self),
+            status: status,
+            transcriptConversationId: try r.uuid("transcriptConversationId"))
+        run.finishedAt = try r.read("finishedAt", Date.self)
+        run.outcome = try r.read("outcome", String.self)
+        run.failureReason = try r.read("failureReason", String.self)
+        run.blockedTool = try r.read("blockedTool", String.self)
+        run.promptTokens = try r.read("promptTokens", Int.self) ?? 0
+        run.candidateTokens = try r.read("candidateTokens", Int.self) ?? 0
+        run.totalTokens = try r.read("totalTokens", Int.self) ?? 0
+        run.costMicros = try r.read("costMicros", Int64.self)
+        run.gateSignal = try r.read("gateSignal", String.self)
+        run.acknowledgedAt = try r.read("acknowledgedAt", Date.self)
+        return run
+    }
+
+    // MARK: Retention
+
+    /// What a prune would remove. Transcripts are conversation ids: `prune` deletes the `job_runs`
+    /// rows itself, and hands the transcripts to a caller that owns conversations.
+    struct PruneDecision: Equatable, Sendable {
+        let deleteRunIds: [UUID]
+        let deleteTranscriptIds: [UUID]
+    }
+
+    /// The retention rule (spec §10), kept pure so it can be reasoned about and tested without a
+    /// database: rows age out after `rowRetention`, and each job keeps only its `transcriptsPerJob`
+    /// newest transcripts. Both are overridden by the same exemption — a failed or blocked run
+    /// nobody has acknowledged keeps its row *and* its transcript, however old, because the
+    /// evidence is the point of the notification.
+    ///
+    /// A deleted row's transcript goes with it unless a surviving row still names the same
+    /// conversation, which today's writers never do; the check is there so a future one cannot
+    /// pull a transcript out from under a run that is still listed.
+    static func pruneDecision(runs: [JobRun], now: Date, rowRetention: TimeInterval,
+                              transcriptsPerJob: Int) -> PruneDecision {
+        let cutoff = now.addingTimeInterval(-rowRetention)
+        func isOpenFailure(_ run: JobRun) -> Bool {
+            (run.status == .failed || run.status == .blockedOnApproval) && run.acknowledgedAt == nil
         }
 
-        guard let id = UUID(uuidString: try required("id", String.self)) else {
-            throw JobLedgerError.unreadableRow("unreadable id")
+        let deletedRunIds = Set(runs.filter { $0.startedAt < cutoff && !isOpenFailure($0) }.map(\.id))
+
+        // Runs whose transcript is no longer worth keeping: the row is going away, or the run has
+        // fallen out of its job's newest `transcriptsPerJob`.
+        var doomedRunIds = Set(runs.filter { deletedRunIds.contains($0.id) }
+            .filter { $0.transcriptConversationId != nil }.map(\.id))
+        let withTranscripts = runs.enumerated().filter { $0.element.transcriptConversationId != nil }
+        for (_, jobRuns) in Dictionary(grouping: withTranscripts, by: { $0.element.jobId }) {
+            let newestFirst = jobRuns.sorted {
+                ($0.element.startedAt, $0.offset) > ($1.element.startedAt, $1.offset)
+            }
+            for (_, run) in newestFirst.dropFirst(max(0, transcriptsPerJob)) where !isOpenFailure(run) {
+                doomedRunIds.insert(run.id)
+            }
         }
-        let trigger = try JSONDecoder().decode(
-            Trigger.self, from: Data(try required("trigger", String.self).utf8))
-        return Job(
-            id: id,
-            name: try required("name", String.self),
-            prompt: try read("prompt", String.self) ?? "",
-            trigger: trigger,
-            profile: JobProfile(rawValue: try read("profile", String.self) ?? "") ?? .readOnly,
-            destinationConversationId: (try read("destinationConversationId", String.self)).flatMap(UUID.init(uuidString:)),
-            createdInConversationId: (try read("createdInConversationId", String.self)).flatMap(UUID.init(uuidString:)),
-            createdAt: try required("createdAt", Date.self),
-            enabled: try read("enabled", Bool.self) ?? true,
-            nextFireAt: try read("nextFireAt", Date.self),
-            lastRunAt: try read("lastRunAt", Date.self),
-            pausedReason: try read("pausedReason", String.self))
+        let stillReferenced = Set(runs.filter { !doomedRunIds.contains($0.id) }
+            .compactMap(\.transcriptConversationId))
+
+        var deleteTranscriptIds: [UUID] = []
+        var seen = Set<UUID>()
+        for run in runs {
+            guard doomedRunIds.contains(run.id), let transcript = run.transcriptConversationId,
+                  !stillReferenced.contains(transcript), seen.insert(transcript).inserted else { continue }
+            deleteTranscriptIds.append(transcript)
+        }
+        return PruneDecision(deleteRunIds: runs.filter { deletedRunIds.contains($0.id) }.map(\.id),
+                             deleteTranscriptIds: deleteTranscriptIds)
+    }
+
+    /// Applies `pruneDecision` to the table in one transaction and returns it. Only `job_runs`
+    /// rows are deleted here: the conversations named by `deleteTranscriptIds` belong to the
+    /// caller, which deletes them (and can survive a crash in between — the rows are gone, and the
+    /// orphaned transcripts are ordinary conversations).
+    func prune(now: Date, rowRetention: TimeInterval, transcriptsPerJob: Int) throws -> PruneDecision {
+        try writer.write { db in
+            let rows = try Row.fetchAll(db, sql: "SELECT * FROM job_runs ORDER BY startedAt, rowid")
+            let decision = Self.pruneDecision(runs: Self.decodeRuns(rows), now: now,
+                                              rowRetention: rowRetention,
+                                              transcriptsPerJob: transcriptsPerJob)
+            for id in decision.deleteRunIds {
+                try db.execute(sql: "DELETE FROM job_runs WHERE id = ?", arguments: [id.uuidString])
+            }
+            return decision
+        }
+    }
+}
+
+/// Reads a row's columns through `DatabaseValue` rather than GRDB's typed subscript, which traps
+/// on a value it cannot convert — a hand-edited or newer-schema row must skip the row, never crash
+/// the app.
+private struct RowReader {
+    let row: Row
+
+    func read<T: DatabaseValueConvertible>(_ column: String, _ type: T.Type = T.self) throws -> T? {
+        guard let value = row[column] as DatabaseValue?, !value.isNull else { return nil }
+        guard let decoded = T.fromDatabaseValue(value) else {
+            throw JobLedgerError.unreadableRow("unreadable \(column)")
+        }
+        return decoded
+    }
+
+    func required<T: DatabaseValueConvertible>(_ column: String, _ type: T.Type = T.self) throws -> T {
+        guard let value = try read(column, T.self) else {
+            throw JobLedgerError.unreadableRow("missing \(column)")
+        }
+        return value
+    }
+
+    /// An optional id column: absent *or* unparseable reads as `nil`, because a stale reference is
+    /// not worth dropping a whole row over.
+    func uuid(_ column: String) throws -> UUID? {
+        guard let text: String = try read(column, String.self) else { return nil }
+        return UUID(uuidString: text)
+    }
+
+    /// An id the row cannot be understood without.
+    func requiredUUID(_ column: String) throws -> UUID {
+        guard let id = UUID(uuidString: try required(column, String.self)) else {
+            throw JobLedgerError.unreadableRow("unreadable \(column)")
+        }
+        return id
     }
 }
 
@@ -175,4 +422,6 @@ enum JobLedgerError: Error, Equatable {
     case unreadableRow(String)
     /// An update named a job id that is not in the table.
     case unknownJob(UUID)
+    /// An update named a run id that is not in the table.
+    case unknownRun(UUID)
 }
