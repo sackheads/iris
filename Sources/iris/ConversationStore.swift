@@ -136,7 +136,10 @@ struct ConversationHit: Sendable, Equatable {
 /// one JSON row per message and per history entry. Every write is keyed by ordinal or id, so
 /// applying the same batch twice is harmless.
 final class ConversationStore: Sendable {
-    private let writer: any DatabaseWriter
+    /// Internal, not private: `JobLedger` (#187) shares this writer so a job row and the
+    /// conversation it produces commit against one database, and a store test can seed a raw
+    /// row that the typed API would refuse to write.
+    let writer: any DatabaseWriter
     private let failInjectionLock = NSLock()
     nonisolated(unsafe) private var _failInjection: (@Sendable (UUID) -> Bool)?
 
@@ -160,10 +163,14 @@ final class ConversationStore: Sendable {
     let path: URL?
     var isOnDisk: Bool { path != nil }
 
+    /// Scheduled and event-driven jobs (#187), on this store's writer and this store's schema.
+    let ledger: JobLedger
+
     private init(writer: any DatabaseWriter, path: URL?) throws {
         self.writer = writer
         self.path = path
         try Self.migrator.migrate(writer)
+        self.ledger = JobLedger(writer: writer)
     }
 
     static func inMemory() throws -> ConversationStore {
@@ -340,6 +347,52 @@ final class ConversationStore: Sendable {
         m.registerMigration("v8_session_card") { db in
             try db.alter(table: "conversations") { t in
                 t.add(column: "sessionCard", .text)
+            }
+        }
+        // #187 deliverables 1–2: jobs and their run ledger live beside the conversations they
+        // produce. Both tables are created here so deliverable 2 needs no second migration; the
+        // two conversation columns are nullable so NULL reads back as false for every existing row.
+        m.registerMigration("v9_jobs") { db in
+            try db.create(table: "jobs") { t in
+                t.column("id", .text).primaryKey()
+                t.column("name", .text).notNull().unique()
+                t.column("prompt", .text).notNull()
+                t.column("triggerKind", .text).notNull()
+                t.column("trigger", .text).notNull()
+                t.column("profile", .text).notNull().defaults(to: "readOnly")
+                t.column("destinationConversationId", .text)
+                t.column("createdInConversationId", .text)
+                t.column("createdAt", .datetime).notNull()
+                t.column("enabled", .boolean).notNull().defaults(to: true)
+                t.column("nextFireAt", .datetime)
+                t.column("lastRunAt", .datetime)
+                t.column("pausedReason", .text)
+            }
+            try db.create(index: "jobs_due", on: "jobs", columns: ["enabled", "nextFireAt"])
+            try db.create(table: "job_runs") { t in
+                t.column("id", .text).primaryKey()
+                t.column("jobId", .text).notNull().references("jobs", onDelete: .cascade)
+                t.column("jobName", .text).notNull()
+                t.column("triggerKind", .text).notNull()
+                t.column("startedAt", .datetime).notNull()
+                t.column("finishedAt", .datetime)
+                t.column("status", .text).notNull()
+                t.column("outcome", .text)
+                t.column("failureReason", .text)
+                t.column("blockedTool", .text)
+                t.column("promptTokens", .integer).notNull().defaults(to: 0)
+                t.column("candidateTokens", .integer).notNull().defaults(to: 0)
+                t.column("totalTokens", .integer).notNull().defaults(to: 0)
+                t.column("costMicros", .integer)
+                t.column("gateSignal", .text)
+                t.column("transcriptConversationId", .text)
+                t.column("acknowledgedAt", .datetime)
+            }
+            try db.create(index: "job_runs_by_job", on: "job_runs", columns: ["jobId", "startedAt"])
+            try db.create(index: "job_runs_open", on: "job_runs", columns: ["status", "acknowledgedAt"])
+            try db.alter(table: "conversations") { t in
+                t.add(column: "isBackground", .boolean)
+                t.add(column: "isPinned", .boolean)
             }
         }
         return m

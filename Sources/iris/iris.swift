@@ -9,7 +9,34 @@ actor IrisEngine {
     static let goalCompletionSkillCheck = "System Event [Goal Completion Skill Check]: Evaluate the goal just completed. Did you execute a complex multi-step procedure, overcome non-obvious errors, or discover a reusable recipe? If so, call `create_skill` or `update_skill` now to save or patch it in your permanent skill library."
 
     let client: any LLMClientProtocol
-    let executor = ToolExecutor.shared
+    /// A value-type copy of the shared executor, plus the closure the job tools resolve their
+    /// ledger and watcher callback through (`ToolExecutor.jobToolsProvider`). Built on read rather
+    /// than stored in `init`, because that closure captures `self` and an actor's nonisolated
+    /// initializer may not touch a stored property once `self` has escaped into one. Read twice a
+    /// turn — the tool list and each dispatched call.
+    var executor: ToolExecutor {
+        var executor = ToolExecutor.shared
+        executor.jobToolsProvider = jobToolsProvider()
+        return executor
+    }
+
+    /// How an engine that never called `start()` — a subagent, an evaluator, a scenario run —
+    /// still gets working job tools: both the ledger and the watch-fire callback are resolved per
+    /// call off this engine, rather than read from whatever `start()` happened to configure.
+    /// Resolved per call, not at `start()`: an engine that never starts otherwise answers "Jobs
+    /// are not available yet." to a tool whose ledger is sitting right there on its state.
+    private func jobToolsProvider() -> @Sendable () async -> JobTools? {
+        { [weak self, weak state] in
+            guard let self,
+                  let ledger = await MainActor.run(resultType: JobLedger?.self, body: { state?.store.ledger })
+            else { return nil }
+            // The fire callback travels with the ledger: `WatcherManager.shared` is handed both in
+            // `start()` or neither, so a watch registered through an unstarted engine would
+            // otherwise run a live FSEvents stream with nowhere to deliver to. Same closure
+            // `start()` installs.
+            return JobTools(ledger: ledger, watchers: .shared, watcherCallback: await self.watcherCallback())
+        }
+    }
     let manager = SkillManager.shared
     /// The fact store this engine reads and writes. Injectable so a test drives the memory tools
     /// against its own store. Resolved lazily: forcing `.shared` at construction would open the
@@ -45,6 +72,11 @@ actor IrisEngine {
 
     /// Conversations already shown the "no sandbox runtime" fallback notice (deduped).
     private var warnedNoRuntime: Set<UUID> = []
+
+    /// The ledger-backed scheduler this engine started, once `start()` has run. `schedule_job`
+    /// stores through it so a job created mid-conversation gets its first fire computed by the
+    /// same code the polling loop uses.
+    private(set) var jobScheduler: JobScheduler?
 
     // We need to keep a weak reference to the state or pass it in.
     // Since AppState owns IrisEngine, we can pass it when we start or process.
@@ -138,8 +170,9 @@ actor IrisEngine {
         guard let activeId = targetId else { return }
 
         // #182 §6.2: every non-user arrival lands here — the scheduler, subagent post-backs, and
-        // the watcher (which passes no id and so targets whatever is selected). Stating the rule
-        // at this choke point covers all of them and cannot go stale when a fourth is added.
+        // the watcher, which now passes its job's `createdInConversationId` and only falls back to
+        // whatever is selected when the job has none. Stating the rule at this choke point covers
+        // all of them and cannot go stale when a fourth is added.
         let wasArchived = await MainActor.run { localState?.unarchiveConversation(activeId) ?? false }
 
         // Sanitize incoming system events (especially those from subagents) to prevent injection
@@ -361,21 +394,33 @@ actor IrisEngine {
     }
 
     func start() async {
-        ScheduleManager.shared.onJobFired = { [weak self] prompt, convId in
-            await self?.handleSystemEvent("Scheduled Job Triggered: \(prompt)", source: "Scheduler", conversationId: convId)
+        let droppedLegacy = JobScheduler.removeLegacyDefaults(from: IrisDefaults.store)
+        // The removal logs with `print`, which nobody running a Mac app reads: no importer ships,
+        // so this is the user's only notice that records they made are gone. Deduped by wording.
+        if let notice = JobScheduler.legacyDropNotice(jobs: droppedLegacy.jobs,
+                                                      watcherRules: droppedLegacy.watcherRules) {
+            let noticeState = state
+            await MainActor.run {
+                guard let s = noticeState, let target = s.selectedConversationId else { return }
+                s.appendLaunchNotice(notice, to: target)
+            }
         }
-        ScheduleManager.shared.start()
-        
+        let schedulerState = state
+        let jobLedger = await MainActor.run(resultType: JobLedger?.self, body: { schedulerState?.store.ledger })
+        if let ledger = jobLedger {
+            await adoptJobScheduler(ledger: ledger)
+        }
+
         await PluginManager.shared.loadAll()
         let pluginConfigs = await PluginManager.shared.mcpConfigs()
         await MCPManager.shared.setPluginConfigs(pluginConfigs)
         await MCPManager.shared.startServers()
-        await WatcherManager.shared.setCallback { [weak self] message, source in
-            guard let self = self else { return }
-            await self.handleSystemEvent(message, source: source)
+        await WatcherManager.shared.setCallback(watcherCallback())
+
+        if let ledger = jobLedger {
+            await WatcherManager.shared.configure(ledger: ledger)
         }
-        
-        await WatcherManager.shared.startAll()
+        await WatcherManager.shared.reload()
 
         // Check whether Ollama is reachable when any auxiliary engine depends on it.
         // A silent failure here means Vibecop / PromptGuard timeouts with no user-visible cause.
@@ -849,13 +894,16 @@ actor IrisEngine {
         
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Use this whenever the user asks to be reminded of something or to have something done on a schedule, for example every weekday at 9 or every hour; the prompt is what Iris should do when it fires. Never use shell cron for this; no setup, files, or commands are needed, calling this tool is the whole job. The job persists across app restarts and catches up if the computer wakes from sleep. You MUST provide EITHER intervalSeconds OR one or more cron fields (minute, hour, day, month, weekday/weekdays), but not both. Example: every weekday at 9 → weekdays [2,3,4,5,6], hour 9, minute 0.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; a job that was due while the app was asleep runs once on wake. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
                     "prompt": Schema(type: "STRING", description: "What Iris should do when the job fires"),
+                    "name": Schema(type: "STRING", description: "Optional short name for the job; defaults to a slug of the prompt"),
+                    "cron": Schema(type: "STRING", description: "Five-field cron expression: minute hour day-of-month month day-of-week, where day-of-week is 0=Sunday … 6=Saturday. Supports lists, ranges, and steps, e.g. '0 9 * * 1-5'."),
+                    "timezone": Schema(type: "STRING", description: "IANA time zone the cron expression is evaluated in (e.g. America/Los_Angeles). Defaults to the user's current zone."),
                     "minute": Schema(type: "INTEGER", description: "Cron minute (0-59)"),
-                    "hour": Schema(type: "INTEGER", description: "Cron hour (0-23)"),
+                    "hour": Schema(type: "INTEGER", description: "Cron hour (0-23). Omitted alongside day/month/weekday/weekdays means midnight on those days; omitted with only minute given means every hour."),
                     "day": Schema(type: "INTEGER", description: "Cron day of month (1-31)"),
                     "month": Schema(type: "INTEGER", description: "Cron month (1-12)"),
                     "weekday": Schema(type: "INTEGER", description: "Cron weekday (1=Sunday, 2=Monday, ..., 7=Saturday)"),
@@ -1525,6 +1573,99 @@ actor IrisEngine {
         }
     }
     
+    /// The `schedule_job` handler. Every exit is one of the tool's sentences: a raw
+    /// `ScheduleAlias.Failure` or a Swift error description would read to the model as noise it
+    /// cannot act on.
+    private func scheduleJob(_ parsed: Result<ScheduleJobArguments, ToolMessage>, conversationId: UUID?) async -> String {
+        let args: ScheduleJobArguments
+        switch parsed {
+        case .failure(let message): return message.text
+        case .success(let parsedArgs): args = parsedArgs
+        }
+
+        // The ledger reference comes off the main actor; the query itself does not — `JobLedger`
+        // is Sendable, and a jobs listing has no business blocking the UI.
+        let localState = state
+        guard let ledger = await MainActor.run(resultType: JobLedger?.self, body: { localState?.store.ledger })
+        else { return "Jobs are not available yet." }
+        let scheduler = schedulerForJobWrites(ledger: ledger)
+
+        var taken = Set(((try? ledger.jobs()) ?? []).map(\.name))
+        // Two passes: the name check above is a read before a write, so another conversation (or
+        // another engine) can take the name in between and the UNIQUE index rejects the insert.
+        // One retry under the next suffix is enough to absorb that; a second failure is real.
+        for _ in 0..<2 {
+            switch args.makeJob(defaultTimeZone: TimeZone.current.identifier,
+                                createdIn: conversationId, existingNames: taken) {
+            case .failure(let message):
+                return message.text
+            case .success(let job):
+                do {
+                    // Stored through the scheduler, not the ledger, so the first fire is computed
+                    // by the code the polling loop uses — and a cadence that matches nothing comes
+                    // back paused rather than looking scheduled.
+                    return ScheduleJobArguments.resultSentence(for: try await scheduler.schedule(job))
+                } catch {
+                    taken.insert(job.name)
+                }
+            }
+        }
+        return "Could not save the job."
+    }
+
+    /// Brings up the ledger-backed scheduler this engine fires jobs through. Split out of
+    /// `start()`, which also loads plugins, MCP servers and watchers, so the scheduler half can
+    /// be driven on its own.
+    ///
+    /// Reuses the scheduler this engine already has rather than building a second: `start()` runs
+    /// from `AppState.start()`, which `onAppear` can call more than once, and a `schedule_job`
+    /// before it may already have built one for writes. A fresh one each time would leave the
+    /// previous polling loop running with nothing holding a reference to stop it.
+    /// `JobScheduler.start()` cancels its own previous loop, so re-adopting stays one loop.
+    @discardableResult
+    func adoptJobScheduler(ledger: JobLedger) async -> JobScheduler {
+        let scheduler = jobScheduler ?? JobScheduler(ledger: ledger)
+        await scheduler.setFireHandler(fireHandler())
+        await scheduler.start()
+        jobScheduler = scheduler
+        return scheduler
+    }
+
+    /// What a due job does, as `start()` wires it into the scheduler. Deliverable 1: a fire is a
+    /// system event in the job's creating conversation, or the selected one if it has none, and a
+    /// fire is a normal turn with the full tool surface. Deliverable 2 replaces this with the
+    /// background JobRunner. Factored out of `start()` so a test can drive one real fire through
+    /// the engine without also starting the polling loop.
+    func fireHandler() -> JobScheduler.FireHandler {
+        { [weak self] job, _ in
+            await self?.handleSystemEvent("Scheduled Job Triggered: \(job.prompt)", source: "Scheduler",
+                                          conversationId: job.createdInConversationId)
+        }
+    }
+
+    /// What one watch fire does, as `start()` wires it into `WatcherManager.shared`. Factored out
+    /// for the same reason `fireHandler()` was: the job tools hand this to a manager an unstarted
+    /// engine adopts (`JobTools.watcherCallback`), and the two paths must install one definition.
+    func watcherCallback() -> @Sendable (Job, [String]) async -> Void {
+        { [weak self] job, paths in
+            await self?.handleSystemEvent(
+                WatcherManager.eventMessage(job: job, paths: paths),
+                source: "FileWatcher",
+                conversationId: job.createdInConversationId)
+        }
+    }
+
+    /// The scheduler `schedule_job` writes through: the one `start()` built, or one made here over
+    /// the same ledger for an engine that never started. The on-demand scheduler is deliberately
+    /// not `start()`ed — a subagent must not run a second polling loop; it only needs the first
+    /// fire computed and the row written, and the app-wide loop picks the job up from the ledger.
+    private func schedulerForJobWrites(ledger: JobLedger) -> JobScheduler {
+        if let jobScheduler { return jobScheduler }
+        let scheduler = JobScheduler(ledger: ledger)
+        jobScheduler = scheduler
+        return scheduler
+    }
+
     /// Renders a fact-store failure as a sentence the model can act on rather than a raw error.
     private static func factStoreFailure(_ error: Error) -> String {
         switch error {
@@ -1680,45 +1821,8 @@ actor IrisEngine {
             } else {
                 result = "Could not parse the proposed goal contract (missing objective?)."
             }
-        } else if functionCall.name == "schedule_job", let prompt = functionCall.args["prompt"]?.stringValue {
-            let minute = Int(functionCall.args["minute"]?.stringValue ?? "")
-            let hour = Int(functionCall.args["hour"]?.stringValue ?? "")
-            let day = Int(functionCall.args["day"]?.stringValue ?? "")
-            let month = Int(functionCall.args["month"]?.stringValue ?? "")
-            let weekday = Int(functionCall.args["weekday"]?.stringValue ?? "")
-            let parsedWeekdays: [Int] = {
-                guard case .array(let items) = functionCall.args["weekdays"] else { return [] }
-                return items.compactMap { item -> Int? in
-                    switch item {
-                    case .int(let i): return i
-                    case .double(let d): return Int(d)
-                    case .string(let s): return Int(s)
-                    default: return nil
-                    }
-                }
-            }()
-            // Only 1...7 is a valid weekday; out-of-range values are dropped rather than stored,
-            // and named back to the model so a typo'd cron field doesn't silently do less than asked.
-            let validWeekdays = parsedWeekdays.filter { (1...7).contains($0) }
-            let droppedWeekdays = parsedWeekdays.filter { !(1...7).contains($0) }
-            let weekdays: [Int]? = validWeekdays.isEmpty ? nil : validWeekdays
-            let intervalSeconds = Int(functionCall.args["intervalSeconds"]?.stringValue ?? "")
-
-            ScheduleManager.shared.schedule(
-                conversationId: conversationId,
-                prompt: prompt,
-                minute: minute,
-                hour: hour,
-                day: day,
-                month: month,
-                weekday: weekday,
-                weekdays: weekdays,
-                intervalSeconds: intervalSeconds
-            )
-            result = "Job scheduled successfully. It will fire in the background."
-            if !droppedWeekdays.isEmpty {
-                result += " Ignored invalid weekday value\(droppedWeekdays.count == 1 ? "" : "s") (must be 1-7, 1=Sunday): \(droppedWeekdays.map(String.init).joined(separator: ", "))."
-            }
+        } else if functionCall.name == "schedule_job" {
+            result = await scheduleJob(ScheduleJobArguments.parse(functionCall.args), conversationId: conversationId)
         } else if functionCall.name == "save_fact", let content = functionCall.args["content"]?.stringValue {
             let category = functionCall.args["category"]?.stringValue ?? "general"
             let entity = functionCall.args["entity"]?.stringValue

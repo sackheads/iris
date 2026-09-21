@@ -1,7 +1,35 @@
 import Foundation
 
+/// What the job-creating tools need from the app: the ledger to write into, and the watcher
+/// manager to reload once the write lands. They travel together because a watch job that is
+/// stored but not reloaded does nothing until the next launch.
+struct JobTools: Sendable {
+    let ledger: JobLedger
+    let watchers: WatcherManager
+    /// What one watch fire does. Carried alongside the ledger because a `WatcherManager` gets both
+    /// or neither: `setCallback` has a single caller, `IrisEngine.start()`, three lines from its
+    /// `configure(ledger:)`. A manager adopted by an engine that never started would otherwise run
+    /// a live FSEvents stream whose fires go nowhere. No default — every caller has to say.
+    let watcherCallback: @Sendable (Job, [String]) async -> Void
+
+    init(ledger: JobLedger, watchers: WatcherManager,
+         watcherCallback: @escaping @Sendable (Job, [String]) async -> Void) {
+        self.ledger = ledger
+        self.watchers = watchers
+        self.watcherCallback = watcherCallback
+    }
+}
+
 struct ToolExecutor {
     static let shared = ToolExecutor()
+
+    /// How `register_directory_watcher` reaches the jobs table and the watchers running off it.
+    /// The executor is a value type built long before the conversation store opens, so the engine
+    /// hands it a closure that resolves both on demand rather than a ledger at construction — an
+    /// engine that never calls `start()` (a subagent, an evaluator, a scenario run) still gets a
+    /// working tool. nil — the case for `ToolExecutor.shared` and for the plugin auth runner's
+    /// throwaway executor — means the tool declines instead of registering a watch nothing runs.
+    var jobToolsProvider: (@Sendable () async -> JobTools?)?
 
     /// Merges the captured login-shell PATH (`loginPath`) ahead of `base`'s own `PATH`, so host
     /// `run_command` invocations see pyenv/nvm/Homebrew shims that only `.zprofile`/`.zshrc` set up
@@ -60,7 +88,7 @@ struct ToolExecutor {
         ),
         FunctionDeclaration(
             name: "register_directory_watcher",
-            description: "Watch a directory for file changes and execute instructions when files are modified. Use this when the user asks you to monitor a folder.",
+            description: "Watch a directory for file changes. This creates a job that persists across restarts and runs your instructions in the background whenever files under the path are modified. Use this when the user asks you to monitor a folder.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -152,9 +180,7 @@ struct ToolExecutor {
             return await writeFile(path, content: content, cwd: cwd)
         case "register_directory_watcher":
             guard let path = args["path"]?.stringValue, let instructions = args["instructions"]?.stringValue else { return "Error: Missing path or instructions" }
-            let watchPath = Self.resolvePath(path, cwd: cwd)
-            await WatcherManager.shared.addRule(path: watchPath, instructions: instructions)
-            return "Successfully registered watcher for \(watchPath). You will be notified automatically when files change."
+            return await registerWatcher(path: Self.resolvePath(path, cwd: cwd), instructions: instructions, conversationId: conversationId)
         case "search_web":
             guard let query = args["query"]?.stringValue else { return "Error: Missing query" }
             return await searchWeb(query: query)
@@ -187,6 +213,48 @@ struct ToolExecutor {
         }
     }
     
+    /// Stores a `.fsEvent` job for `path` and restarts the watch set. The job is named after the
+    /// directory being watched rather than the instructions, because that is what a user scanning
+    /// the jobs list is looking for.
+    ///
+    /// Re-registering a path already watched rewrites that job's instructions and destination in
+    /// place rather than adding a second one: the model re-states a standing instruction often (a
+    /// new turn, a rephrasing), and two jobs on one directory means two watchers and two turns per
+    /// save.
+    private func registerWatcher(path: String, instructions: String, conversationId: UUID?) async -> String {
+        guard let tools = await jobToolsProvider?() else { return "Jobs are not available yet." }
+        do {
+            let jobs = try tools.ledger.jobs()
+            var job: Job
+            let watchesPath: (Job) -> Bool = { job in
+                guard case .fsEvent(let watch) = job.trigger else { return false }
+                return watch.path == path
+            }
+            if var existing = jobs.first(where: watchesPath) {
+                // An explicit "watch this" is also a request for it to be on, and for the fires
+                // to land where it was asked for — the latest registration wins the destination
+                // the same way it wins the instructions.
+                existing.prompt = instructions
+                existing.enabled = true
+                existing.createdInConversationId = conversationId
+                job = existing
+            } else {
+                job = Job(
+                    name: ScheduleJobArguments.uniqueName(
+                        Job.slug(from: URL(fileURLWithPath: path).lastPathComponent),
+                        existing: Set(jobs.map(\.name))),
+                    prompt: instructions,
+                    trigger: .fsEvent(FSWatch(path: path, quietWindowSeconds: 3)),
+                    createdInConversationId: conversationId)
+            }
+            try tools.ledger.upsert(job)
+            await tools.watchers.reload(adoptingIfUnconfigured: tools.ledger, callback: tools.watcherCallback)
+            return "Watching \(path) as job '\(job.name)'. It runs in the background when files change; you will be notified automatically."
+        } catch {
+            return "Could not save the watcher job."
+        }
+    }
+
     private func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false, timeoutSeconds: Double = 600) async -> String {
         if useSandbox, let conversationId {
             guard SandboxingManager.shared.isContainerInstalled else {
