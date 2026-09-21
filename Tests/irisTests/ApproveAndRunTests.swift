@@ -147,6 +147,74 @@ struct ApproveAndRunTests {
         #expect(arguments.first { $0.key == "path" }?.value == "/tmp/out.txt")
     }
 
+    @Test("an execution-bearing argument is shown whole; a content one is capped with its count")
+    func executionBearingArgumentsAreNeverCut() throws {
+        // The argument a click authorises is the one a cut would hide, so `command` and `path`
+        // survive whole while `content` — what the tool stores rather than executes — is capped.
+        let command = String(repeating: "a", count: 600)
+        let body = String(repeating: "b", count: 600)
+        let path = "/tmp/" + String(repeating: "d", count: 600)
+        let card = EventCard(runId: UUID(), jobId: UUID(), jobName: "sweeper", status: .blockedOnApproval,
+                             startedAt: Date(), finishedAt: Date(),
+                             blockedCall: BlockedCall(toolName: "run_command",
+                                                      args: ["command": .string(command),
+                                                             "content": .string(body),
+                                                             "path": .string(path)],
+                                                      cwd: "/tmp"))
+        let arguments = Dictionary(uniqueKeysWithValues: card.blockedArguments.map { ($0.key, $0.value) })
+        #expect(arguments["command"] == command, "600 characters of shell, all 600 readable")
+        #expect(arguments["path"] == path)
+        let content = try #require(arguments["content"])
+        #expect(content.hasPrefix(String(repeating: "b", count: EventCard.argumentPreviewLimit)))
+        #expect(content.contains("600 characters"), "and it says how much was cut")
+        #expect(content.count < body.count)
+        // The card's stored copy takes the same split: the ledger's untruncated call is what runs.
+        let display = EventCard.displayCopy(of: try #require(card.blockedCall))
+        #expect(display.args["command"]?.stringValue == command)
+        let storedContent = try #require(display.args["content"]?.stringValue)
+        #expect(storedContent.count < body.count)
+    }
+
+    @Test("a newline flood cannot stretch the card: blank runs collapse and the lines are capped")
+    func previewNormalisesNewlines() throws {
+        // Layout itself is not unit-testable — that a `Text` lays out in full is `fixedSize`'s
+        // job and SwiftUI's. What IS testable, and what bounds the card's height, is that the
+        // string handed to that `Text` has a bounded number of lines whatever is poured into it.
+        let flood = String(repeating: "\n", count: 500)
+        let shown = EventCard.preview(key: "content", value: .string("start" + flood + "end"))
+        #expect(shown.components(separatedBy: "\n").count <= EventCard.argumentPreviewLines,
+                "500 blank lines collapse to one gap, so nothing is left to cap")
+        #expect(shown.contains("start") && shown.contains("end"))
+
+        // Non-blank lines are real content, so they are capped rather than collapsed, and the cut
+        // says how many it hid — the same `… (N …)` style the character cap uses.
+        let manyLines = (1...100).map { "line \($0)" }.joined(separator: "\n")
+        let capped = EventCard.preview(key: "content", value: .string(manyLines))
+        #expect(capped.components(separatedBy: "\n").count == EventCard.argumentPreviewLines)
+        #expect(capped.hasSuffix("… (\(100 - EventCard.argumentPreviewLines) more lines)"))
+        #expect(capped.hasPrefix("line 1\n"))
+
+        // Both cuts at once still report both: a wall of long lines loses characters AND lines,
+        // and the note names each, because a truncation the reader cannot see is the failure mode.
+        let wall = (1...100).map { String(repeating: "w", count: 200) + "\($0)" }.joined(separator: "\n")
+        let both = EventCard.preview(key: "content", value: .string(wall))
+        #expect(both.contains("characters,") && both.hasSuffix("more lines)"))
+        #expect(both.count < EventCard.argumentPreviewLimit + 60)
+
+        // The bound holds for an execution-bearing argument too: it is exempt from the character
+        // cap, not from having a height — and with no character cut ahead of it the line count is
+        // exact.
+        let longCommand = (1...100).map { "echo \($0)" }.joined(separator: "\n")
+        let cappedCommand = EventCard.preview(key: "command", value: .string(longCommand))
+        #expect(cappedCommand.components(separatedBy: "\n").count == EventCard.argumentPreviewLines)
+        #expect(cappedCommand.hasSuffix("… (\(100 - EventCard.argumentPreviewLines) more lines)"))
+        #expect(cappedCommand.hasPrefix("echo 1\n"))
+
+        // One hidden line is "1 more line", not "1 more lines".
+        let oneOver = (1...(EventCard.argumentPreviewLines + 1)).map { "x\($0)" }.joined(separator: "\n")
+        #expect(EventCard.preview(key: "content", value: .string(oneOver)).hasSuffix("… (1 more line)"))
+    }
+
     @Test("a profile denial is never offered an Approve button (R13)")
     func profileDenialIsNotApprovable() {
         let card = EventCard(runId: UUID(), jobId: UUID(), jobName: "reader", status: .blockedOnApproval,

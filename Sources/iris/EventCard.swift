@@ -213,10 +213,35 @@ struct EventCard: Codable, Equatable, Sendable {
     static let protectedNotApprovable =
         "This writes into a protected directory (`config/` or `plugins/`), which grants permission rather than editing a file. Make the change yourself if you want it."
 
-    /// How much of one argument a card shows. A `write_file` body is the argument that matters
-    /// most and the one that can be a megabyte; 500 characters is enough to see what is being
-    /// written without pasting the file into the transcript (spec §6).
+    /// How much of one *content-like* argument a card shows. A `write_file` body is the argument
+    /// that matters most and the one that can be a megabyte; 500 characters is enough to see what
+    /// is being written without pasting the file into the transcript (spec §6). Execution-bearing
+    /// arguments are exempt — see `executionBearingArguments`.
     static let argumentPreviewLimit = 500
+
+    /// How many lines of one argument a card shows, whatever kind of argument it is. The character
+    /// cap says nothing about newlines, so 500 blank lines used to pass it untouched and stretch
+    /// the card to 500 rows in the transcript. Runs of blank lines collapse to one and what is
+    /// left is capped here, with the remainder counted rather than silently dropped.
+    static let argumentPreviewLines = 12
+
+    /// Arguments a tool *executes* rather than stores, exempt from `argumentPreviewLimit`: cutting
+    /// one of these hides the thing the click authorises, and nobody can approve the 100
+    /// characters they were not shown. The ledger's untruncated copy is what runs either way — the
+    /// question here is only what a person can read before clicking.
+    ///
+    /// | argument      | tools that execute it                                   | why it is never cut                                                          |
+    /// | ------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------- |
+    /// | `command`     | `run_command`                                            | the string the shell runs; a trailing `&& rm -rf ~` is exactly what a cut hides |
+    /// | `path`        | `read_file`, `write_file`, `edit_file`, `set_workspace`  | names the target — the body is the safe half to cut, the path is the risk      |
+    /// | `cwd`         | `run_command` (also carried on `BlockedCall.cwd`)        | where the command lands; a suffix changes the directory                        |
+    /// | `destination` | a move/copy-shaped tool                                  | the write target under another name                                            |
+    ///
+    /// Everything else is content-like — `content`, `text`, `body`, `prompt`, a query, an MCP
+    /// tool's opaque payload — data the tool stores or sends, where 500 characters is enough to
+    /// judge the call. Capping is the default so an unknown argument on a tool added later cannot
+    /// stretch the card; adding a name here is a deliberate decision, like `readOnlyAllowed`.
+    static let executionBearingArguments: Set<String> = ["command", "path", "cwd", "destination"]
 
     /// One rendered argument of the blocked call.
     struct BlockedArgument: Identifiable, Equatable, Sendable {
@@ -231,7 +256,7 @@ struct EventCard: Codable, Equatable, Sendable {
     var blockedArguments: [BlockedArgument] {
         guard let blockedCall else { return [] }
         return blockedCall.args.keys.sorted().map { key in
-            BlockedArgument(key: key, value: Self.preview(blockedCall.args[key] ?? .null))
+            BlockedArgument(key: key, value: Self.preview(key: key, value: blockedCall.args[key] ?? .null))
         }
     }
 
@@ -243,36 +268,77 @@ struct EventCard: Codable, Equatable, Sendable {
         return "Vibecop: \(vibecopVerdict) — \(vibecopReason)"
     }
 
-    /// The call as a CARD keeps it: every argument already cut to `argumentPreviewLimit`. A card
-    /// is a display snapshot living in a message row, and "Approve and run" re-dispatches the
-    /// LEDGER's copy of the call, never this one — so storing a megabyte `write_file` body here
-    /// would write the whole file into the transcript for nothing. Values that fit are untouched,
-    /// and keep their type.
+    /// The call as a CARD keeps it: every argument already through `preview`. A card is a display
+    /// snapshot living in a message row, and "Approve and run" re-dispatches the LEDGER's copy of
+    /// the call, never this one — so storing a megabyte `write_file` body here would write the
+    /// whole file into the transcript for nothing. Values that fit are untouched, and keep their
+    /// type.
+    ///
+    /// Execution-bearing arguments are carried whole, which is the deliberate side of the trade:
+    /// the argument that can be a megabyte is the content-like one and it is still capped, while a
+    /// command or a path is bounded in practice by what a shell or a filesystem accepts. A card
+    /// with a pathologically long single-line command is a tall card in a scrolling transcript —
+    /// preferable to an approver reading 500 characters of a command and authorising 600.
     static func displayCopy(of call: BlockedCall) -> BlockedCall {
-        BlockedCall(toolName: call.toolName,
-                    args: call.args.mapValues { value in
-                        let rendered = preview(value)
-                        return rendered == value.stringValue ? value : .string(rendered)
-                    },
-                    cwd: call.cwd, reason: call.reason, at: call.at)
+        var args: [String: JSONValue] = [:]
+        for (key, value) in call.args {
+            let shown = preview(key: key, value: value)
+            args[key] = shown == value.stringValue ? value : .string(shown)
+        }
+        return BlockedCall(toolName: call.toolName, args: args,
+                           cwd: call.cwd, reason: call.reason, at: call.at)
     }
 
-    /// One argument value as a card shows it: compact JSON for a structure (so a nested argument
-    /// is still readable rather than `{...}`), and the text itself for everything else, cut with a
-    /// note of how much there was.
-    private static func preview(_ value: JSONValue) -> String {
-        let text: String
+    /// One argument as a card shows it. Four passes: render it (compact JSON for a structure, so a
+    /// nested argument reads as itself rather than `{...}`), collapse runs of blank lines, bound
+    /// its height to `argumentPreviewLines`, and cut it to `argumentPreviewLimit` characters
+    /// *unless* `key` is execution-bearing.
+    ///
+    /// Lines are cut before characters, and both notes are collected into one `… (N characters,
+    /// M more lines)` suffix at the end. Order matters: cutting characters first puts the note
+    /// dozens of lines down, where the line cut then throws it away, and a truncation the reader
+    /// cannot see is the one thing this must not do. The character count is of the whole
+    /// (blank-collapsed) text, so it answers "how much was there", not "how much of the top
+    /// twelve lines was there".
+    static func preview(key: String, value: JSONValue) -> String {
+        let text = collapsingBlankLines(renderedText(value))
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let hiddenLines = max(0, lines.count - argumentPreviewLines)
+        var shown = hiddenLines == 0 ? text : lines.prefix(argumentPreviewLines).joined(separator: "\n")
+        var notes: [String] = []
+        if !executionBearingArguments.contains(key), shown.count > argumentPreviewLimit {
+            shown = String(shown.prefix(argumentPreviewLimit))
+            notes.append("\(text.count) characters")
+        }
+        if hiddenLines > 0 { notes.append("\(hiddenLines) more \(hiddenLines == 1 ? "line" : "lines")") }
+        guard !notes.isEmpty else { return shown }
+        return shown + "… (" + notes.joined(separator: ", ") + ")"
+    }
+
+    private static func renderedText(_ value: JSONValue) -> String {
         switch value {
         case .object, .array:
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
-            text = (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) }
+            return (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) }
                 ?? value.stringValue
         default:
-            text = value.stringValue
+            return value.stringValue
         }
-        guard text.count > argumentPreviewLimit else { return text }
-        return String(text.prefix(argumentPreviewLimit)) + "… (\(text.count) characters)"
+    }
+
+    /// Any run of blank lines becomes one. A file with paragraph breaks still reads as one; a
+    /// thousand newlines becomes a single gap.
+    private static func collapsingBlankLines(_ text: String) -> String {
+        var kept: [Substring] = []
+        var inBlankRun = false
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let isBlank = line.trimmingCharacters(in: .whitespaces).isEmpty
+            if isBlank && inBlankRun { continue }
+            inBlankRun = isBlank
+            kept.append(line)
+        }
+        return kept.joined(separator: "\n")
     }
 
     /// The run's wall time, in the same format the session strip uses so the two never show two

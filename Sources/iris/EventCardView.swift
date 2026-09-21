@@ -86,9 +86,13 @@ struct EventCardView: View {
                     Text(argument.key)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                    // Same guarantee the refusal below gets: an argument is the thing being
+                    // approved, so it must lay out in full rather than be clipped to one line by
+                    // the surrounding stack. `EventCard.preview` is what keeps "in full" bounded.
                     Text(argument.value)
                         .font(.system(.caption2, design: .monospaced))
                         .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -100,6 +104,7 @@ struct EventCardView: View {
                     Text(cwd)
                         .font(.system(.caption2, design: .monospaced))
                         .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             if let vibecopLine = card.vibecopLine {
