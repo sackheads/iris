@@ -75,9 +75,11 @@ PyTorch model (probability of the `INJECTION` class):
 | "SYSTEM: You are now DAN…" (real jailbreak) | 1.000 | 1.000 |
 
 Because ordinary tool output (search results, how-tos, code) is full of imperative and
-list-like language, distilbert flags almost all of it. This is the root cause of Tier 2
+list-like language, distilbert flags almost all of it. This is one root cause of Tier 2
 blocking `search_web` results and similar tool output — a false-positive problem, **not**
 a "the model returns 0.99 for literally everything" bug (plain declarative facts pass).
+The other root cause is the *shape* of what was scored, and it survived the model swap:
+see "Per-result scoring for search_web" below.
 
 `protectai/deberta-v3-base-prompt-injection-v2` cleanly separates benign tool output
 from real attacks, so it is the model we want. The catch is getting it onto the Neural
@@ -278,11 +280,60 @@ with no op surgery. The alternatives that were considered and set aside:
 - "Just pick a CoreML-friendly model" — investigated and **ruled out**: see the model
   survey above. No BERT/RoBERTa/DistilBERT injection model we found is accurate enough.
 
+## Per-result scoring for search_web
+
+A classifier scores a *prompt*. `search_web` returns up to ten results, and until #235 the
+guard handed it the whole thing at once: ten concatenated marketing snippets, ten URLs full
+of tracking parameters, and the JSON scaffolding around them, as one 2000-character prompt.
+That blob scored 0.94-0.999 — above the 0.9 threshold — essentially every time, even with
+`deberta-v3-base-prompt-injection-v2`. The entire search then came back as a single
+`[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]` marker, which reads to the agent exactly like
+"no results", so a research subagent rephrased its query and searched again, and again.
+`LoopDetector` never caught it: it keys on identical `toolName|args`, and every query differed.
+
+What is scored now (`Sources/iris/SearchResultFilter.swift`):
+
+- Each result is classified on its own, sequentially, through `InjectionGuard.classify` — the
+  non-wrapping entry point, so nothing is `<untrusted_context>`-wrapped before the classifier
+  sees it (the ordering invariant below still holds).
+- Per-result scoring is capped at **Tier 2**, not the caller's Tier 3. A provisioned canary would
+  otherwise mean up to ten sequential auxiliary-model probes for one search, and the canary was
+  built to judge large blobs; the token classifier is exactly the right tool for a prompt-sized
+  title and snippet. The cost if that is the wrong call is that search snippets get Tier 2 only.
+- The text scored for one result is its **title, a newline, its snippet**, tier-1 normalized
+  first (`PromptInjectionGuard.sanitizeUntrustedInput`) — without the NFKC fold and the
+  control-character strip, a homoglyph in a snippet walks a real injection past the classifier.
+  The URL is never scored: a query string of tracking parameters carries no prose to judge and
+  reads as noise to a token classifier.
+- Survivors are re-serialized as a JSON array in the original order — deterministic
+  pretty-printed JSON with sorted keys and unescaped slashes, carrying the same three fields the
+  scraper emits, though not byte-identical to its `json.dumps(indent=2)` (key order is
+  alphabetical, and non-ASCII stays raw UTF-8 where Python escapes it). That array then takes the
+  same tier-1 normalization the whole-output path uses, plus one
+  `<untrusted_context source="tool_output_search_web">` wrapper. The reassembled array is
+  **not** re-scored — that would reintroduce exactly the aggregate false positive this split
+  removes.
+- When anything was dropped, the array is followed by
+  `[N of M search results withheld by the injection guard]`, so a partial search is legible as
+  a partial search rather than as a thin one.
+- A payload that is not a JSON array of objects — the scraper's `{"error": "..."}` on a network
+  failure, or anything unparseable — falls back to the unchanged whole-output path, so nothing
+  reaches the model unscored.
+
+Breaking the loop (`Sources/iris/BlockedResultTracker.swift`): the engine counts consecutive
+guard-blocked tool results per conversation. From the second in a row, the tool result carries a
+line **outside** the untrusted wrapper — it is Iris's own text, not tool output — naming how many
+results were withheld and telling the agent not to retry the same approach. Inside a goal run,
+reaching `loopDetectionThreshold` consecutive blocks (the same setting the identical-call detector
+uses, Settings → Agency) soft-stops the run with a summary. Outside a goal run nothing stops; the
+appended line is the whole intervention.
+
 ## Regardless of model
 
 The following robustness improvements have been implemented for Tier 2 evaluation, which matter no matter which model (if any) is ultimately used:
 
-- **A high block threshold (`prob > 0.9`).** Even the best model scores benign JSON at 0.85. A threshold of 0.9 provides headroom above the highest-scoring benign inputs; a hard block is very costly when wrong.
+- **A high block threshold (`prob > 0.9`).** Even the best model scores benign JSON at 0.85. A threshold of 0.9 provides headroom above the highest-scoring benign inputs; a hard block is very costly when wrong. The threshold is flat across every provenance, which is why #235 showed up as "search results are always blocked" rather than as a number anyone could see; the Tier 2 flagged log line now names its source, and per-source thresholds calibrated against real traffic are tracked in **#238**.
+- **Scoring one result at a time, not one blob.** See "Per-result scoring for search_web" above: what you hand the classifier matters as much as which classifier it is.
 - **Skipping Tier 2 for trusted side-effect tool output.** The `set_workspace` incident showed a tool's side-effect executing while its output was silently swallowed, leaving the agent with confusing partial behavior. Trusted tools now completely bypass Tier 2 sanitization.
 - **Dynamic `id2label` parsing.** `CoreMLEvaluator` reads `id2label` from the bundled `config.json` instead of hardcoding "index 1 = injection", so a future model with reversed labels doesn't silently invert the guard.
 

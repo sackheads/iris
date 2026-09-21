@@ -360,6 +360,10 @@ actor IrisEngine {
     /// Per-conversation loop detectors (reset on a fresh UI turn).
     private var loopDetectors: [UUID: LoopDetector] = [:]
 
+    /// Per-conversation runs of guard-blocked tool results (#235), reset alongside `loopDetectors`.
+    /// The identical-call detector cannot see this loop: the agent rephrases its query each time.
+    private var blockedResultTrackers: [UUID: BlockedResultTracker] = [:]
+
     /// Cancels a conversation's pending auto-reprompt, stopping its goal loop.
     func cancelReprompt(for conversationId: UUID) {
         repromptTasks[conversationId]?.cancel()
@@ -371,6 +375,7 @@ actor IrisEngine {
     private func softStopWithSummary(conversationId: UUID, reason: String) async {
         cancelReprompt(for: conversationId)
         loopDetectors[conversationId] = nil
+        blockedResultTrackers[conversationId] = nil
         let localState = state
         // Clear the goal FIRST so the summary turn cannot re-enter the cap/loop-detection paths
         // (both gated on activeGoal != nil) and recurse into softStopWithSummary.
@@ -486,7 +491,10 @@ actor IrisEngine {
     }
 
     private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false) async {
-        if source == "UI" { loopDetectors[conversationId] = nil }
+        if source == "UI" {
+            loopDetectors[conversationId] = nil
+            blockedResultTrackers[conversationId] = nil
+        }
 
         // Callers that already shaped their prompt as `System Event [X]: …` (rename, reflection,
         // goal draft) keep their own label rather than gaining a second `System Event [System]:`.
@@ -1110,6 +1118,15 @@ actor IrisEngine {
                         if tripped {
                             turnFinished = true
                             await softStopWithSummary(conversationId: conversationId, reason: "repeated the same action \(threshold)× in a row")
+                            break
+                        }
+
+                        // The same stop for a loop the signature detector cannot see (#235): every
+                        // result withheld by the guard, so the agent rephrases and searches again.
+                        let blockedRun = blockedResultTrackers[conversationId]?.consecutive ?? 0
+                        if blockedRun >= threshold {
+                            turnFinished = true
+                            await softStopWithSummary(conversationId: conversationId, reason: "the injection guard withheld \(blockedRun) consecutive tool results")
                             break
                         }
                     }
@@ -1744,16 +1761,57 @@ actor IrisEngine {
             return result
         }
 
-        // Tier 1 Sanitization: Apply structural isolation to prevent prompt injection from tool outputs
-        let structuralSafeResult = PromptInjectionGuard.sanitizeUntrustedInput(result)
-
         let trustedTools: Set<String> = ["set_workspace", "register_directory_watcher"]
         let maxTier: InjectionGuard.SanitizationTier = trustedTools.contains(name) ? .tier1_structural : .tier3_canary
-        
-        // Tier 2 & 3 Sanitization: Active heuristic and canary detection (skipped for trusted tools)
-        let sanitizedResult = await InjectionGuard.sanitize(structuralSafeResult, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled)
-        
-        return sanitizedResult
+
+        // `search_web` is scored one result at a time (#235). Its ten concatenated snippets plus
+        // their URLs read as a single malicious prompt to the tier-2 classifier (0.94-0.999), so
+        // the whole search came back as one blocked marker and the agent just searched again.
+        // A payload that is not a JSON array of results (the script's `{"error": ...}`) falls
+        // through to the whole-output path below rather than going unscored.
+        let sanitizedResult: String
+        var fullyBlockedSearch = false
+
+        if name == "search_web",
+           let outcome = await SearchResultFilter.filter(result, allowed: { text in
+               // Capped at tier 2 rather than the caller's tier 3: a provisioned canary would mean
+               // up to ten sequential auxiliary-model probes for one search, and the canary was
+               // built to judge large blobs, while the token classifier is exactly the tool for a
+               // prompt-sized title and snippet. If that is the wrong call, the cost is that
+               // search snippets get tier 2 only.
+               if case .passed = await InjectionGuard.classify(text, contextTag: "tool_output_search_web_result",
+                                                               maxTier: .tier2_coreML, protectionEnabled: protectionEnabled) {
+                   return true
+               }
+               return false
+           }) {
+            // Tier 1 and one wrapper over the survivors — the same normalization the whole-output
+            // path below applies, then `InjectionGuard`'s own structural pass. Tiers 2/3 already
+            // ran per result, so the reassembled array is deliberately not scored a second time:
+            // re-scoring it would reintroduce exactly the aggregate false positive this split
+            // exists to remove.
+            fullyBlockedSearch = outcome.withheld > 0 && outcome.kept == 0
+            let structuralSafeJSON = PromptInjectionGuard.sanitizeUntrustedInput(outcome.json)
+            sanitizedResult = await InjectionGuard.sanitize(structuralSafeJSON, contextTag: "tool_output_search_web",
+                                                            maxTier: .tier1_structural, protectionEnabled: protectionEnabled)
+        } else {
+            // Tier 1 Sanitization: Apply structural isolation to prevent prompt injection from tool outputs
+            let structuralSafeResult = PromptInjectionGuard.sanitizeUntrustedInput(result)
+
+            // Tier 2 & 3 Sanitization: Active heuristic and canary detection (skipped for trusted tools)
+            sanitizedResult = await InjectionGuard.sanitize(structuralSafeResult, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled)
+        }
+
+        // A guard-blocked result reads to the model like an empty one, so it rephrases and calls
+        // again (#235). Say plainly that the content was withheld, outside the untrusted wrapper
+        // because this sentence is Iris's own and must not be presented as tool output.
+        guard let conversationId else { return sanitizedResult }
+        let blocked = fullyBlockedSearch || sanitizedResult.contains("[CONTENT BLOCKED BY TIER")
+        var tracker = blockedResultTrackers[conversationId] ?? BlockedResultTracker()
+        let consecutive = tracker.record(blocked: blocked)
+        blockedResultTrackers[conversationId] = tracker
+        guard blocked, consecutive >= 2 else { return sanitizedResult }
+        return sanitizedResult + "\n[Iris: the injection guard has withheld \(consecutive) consecutive results from \(name). Do not retry the same approach — use a different source or report what you have.]"
     }
     
     /// One model round's assembled result plus when its first token arrived (spec §4).
