@@ -41,40 +41,44 @@ struct VibecopUnderAutoApproveTests {
     @Test("auto-approve alone never consults Vibecop")
     func autoApproveSkipsVibecop() async {
         let engine = CountingVibecop(decision: "APPROVE")
-        AuxiliaryModelManager.shared.setMockEngine(engine, for: "vibecop")
-        let (ok, spans) = await approve(auto: true, measure: false, vibecopEnabled: true)
-        #expect(ok)
-        #expect(engine.calls == 0)
-        #expect(spans == 0)
+        await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": engine]) {
+            let (ok, spans) = await approve(auto: true, measure: false, vibecopEnabled: true)
+            #expect(ok)
+            #expect(engine.calls == 0)
+            #expect(spans == 0)
+        }
     }
 
     @Test("measuring auto-approve consults Vibecop once, records the span, and approves")
     func measuredAutoApproveConsultsVibecop() async {
         let engine = CountingVibecop(decision: "APPROVE")
-        AuxiliaryModelManager.shared.setMockEngine(engine, for: "vibecop")
-        let (ok, spans) = await approve(auto: true, measure: true, vibecopEnabled: true)
-        #expect(ok)
-        #expect(engine.calls == 1)
-        #expect(spans == 1)
+        await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": engine]) {
+            let (ok, spans) = await approve(auto: true, measure: true, vibecopEnabled: true)
+            #expect(ok)
+            #expect(engine.calls == 1)
+            #expect(spans == 1)
+        }
     }
 
     @Test("a DENY verdict is recorded but does not block a headless run")
     func denyStillApproves() async {
         let engine = CountingVibecop(decision: "DENY")
-        AuxiliaryModelManager.shared.setMockEngine(engine, for: "vibecop")
-        let (ok, _) = await approve(auto: true, measure: true, vibecopEnabled: true)
-        #expect(ok)
-        #expect(engine.calls == 1)
+        await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": engine]) {
+            let (ok, _) = await approve(auto: true, measure: true, vibecopEnabled: true)
+            #expect(ok)
+            #expect(engine.calls == 1)
+        }
     }
 
     @Test("with Vibecop disabled nothing is consulted even when measuring")
     func disabledVibecopIsNotConsulted() async {
         let engine = CountingVibecop(decision: "APPROVE")
-        AuxiliaryModelManager.shared.setMockEngine(engine, for: "vibecop")
-        let (ok, spans) = await approve(auto: true, measure: true, vibecopEnabled: false)
-        #expect(ok)
-        #expect(engine.calls == 0)
-        #expect(spans == 0)
+        await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": engine]) {
+            let (ok, spans) = await approve(auto: true, measure: true, vibecopEnabled: false)
+            #expect(ok)
+            #expect(engine.calls == 0)
+            #expect(spans == 0)
+        }
     }
 
     @Test("ScenarioRunner measures Vibecop unless guards are off")
