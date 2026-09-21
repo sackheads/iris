@@ -257,6 +257,10 @@ class AppState {
     /// the second's.
     private var engineTurnCounts: [UUID: Int] = [:]
 
+    /// #185 §7 — the cascade a conversation's current turn belongs to, and what is left of its
+    /// allowance. Absent means "not in a cascade", i.e. a full budget.
+    private var cascades: [UUID: (id: UUID, remaining: Int)] = [:]
+
     /// Called from `IrisEngine.processInput`'s own begin/end pair, which brackets every turn the
     /// engine runs — UI-initiated ones included, so a UI turn is counted by both sources.
     /// Double-counting is harmless; `hasTurnInFlight` only asks whether either is non-zero.
@@ -748,6 +752,33 @@ class AppState {
         }
     }
 
+    func cascadeRemaining(for conversationId: UUID) -> Int {
+        cascades[conversationId]?.remaining ?? ConfigManager.shared.maxSessionCascade
+    }
+
+    /// Records a peer delivery. Returns false when the sender's cascade is spent, in which case
+    /// nothing is delivered and the sender is told why (§5.3).
+    ///
+    /// The allowance travels with the CASCADE, not the branch: a sender fanning out to three peers
+    /// spends three of one budget. A per-branch limit would still permit F^N turns.
+    @discardableResult
+    func beginPeerCascade(into targetId: UUID, from senderId: UUID) -> Bool {
+        let current = cascades[senderId]
+        let remaining = current?.remaining ?? ConfigManager.shared.maxSessionCascade
+        guard remaining > 0 else { return false }
+        let cascadeId = current?.id ?? UUID()
+        // The sender's own budget drops too, so its later branches draw on what is left.
+        cascades[senderId] = (cascadeId, remaining - 1)
+        cascades[targetId] = (cascadeId, remaining - 1)
+        return true
+    }
+
+    /// A person typing begins a fresh cascade — the budget exists to bound unattended machine
+    /// chatter, not to ration a conversation the user is steering (§7).
+    func clearCascade(for conversationId: UUID) {
+        cascades[conversationId] = nil
+    }
+
     func deleteConversation(_ id: UUID) {
         cancelTasks(for: id)
         Task { await SandboxSessionManager.shared.endSession(id) }
@@ -967,6 +998,11 @@ class AppState {
     /// Runs one user message as a turn: attachment processing, the engine call, and the
     /// reflection/rename triggers. The user bubble is already in the chat.
     private func startTurn(text: String, attachments: [FileAttachment], in convId: UUID) {
+        // #185 §7: a person typing starts a fresh cascade. Deliberately here and not in
+        // `runThinkingTask`, which also carries the `/goal` draft kickoff and every goal resume —
+        // machine-initiated continuations that would hand a cascade a new budget on each resume.
+        clearCascade(for: convId)
+
         if let idx = conversations.firstIndex(where: { $0.id == convId }) {
             conversations[idx].messageCountSinceReflection += 1
             markChanged(convId, .metadata)
