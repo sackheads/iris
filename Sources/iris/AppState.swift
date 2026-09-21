@@ -154,13 +154,6 @@ struct ToolApprovalRequest: Identifiable {
     let continuation: CheckedContinuation<Bool, Never>
 }
 
-struct ActiveSubagent: Identifiable, Hashable {
-    let id: UUID
-    let role: String
-    let startTime: Date
-    var status: String
-}
-
 @MainActor
 @Observable
 class AppState {
@@ -191,7 +184,12 @@ class AppState {
     var vibecopUnderAutoApprove = false
     var commandStartTimes: [UUID: Date] = [:]
     var commandDurations: [UUID: TimeInterval] = [:]
-    var activeSubagents: [ActiveSubagent] = []
+    /// Subagent/evaluator sessions only — the main session is synthesised by `visibleSessions`,
+    /// not stored here. A finished entry lingers (see `finishSession`) instead of disappearing so
+    /// #19's "browse what a subagent just did" has something to click on right after it ends.
+    var sessions: [SessionSummary] = []
+    /// How long a `.finished` entry lingers in `sessions` before the sweep drops it.
+    static let sessionLingerWindow: TimeInterval = 60
     var subagentWriteLedger: [UUID: [String]] = [:]
     var pendingApprovals: [ToolApprovalRequest] = []
     var availableUpdate: ReleaseInfo?
@@ -210,6 +208,14 @@ class AppState {
 
     /// Reference count of in-flight "thinking" work. `isThinking` is derived from this.
     private var thinkingCount = 0
+    /// When the main session's current run of turns started (0→1 on `thinkingCount`), for the
+    /// synthesised main row in `visibleSessions`. Cleared implicitly by being overwritten at the
+    /// next 0→1 transition; there is no "idle since" to show meanwhile.
+    private var mainSessionStartTime: Date?
+    /// The main conversation's current activity, set by `updateSessionPhase` alongside the
+    /// subagent/evaluator entries in `sessions`. Reset to `.idle` when `thinkingCount` returns to
+    /// zero so a stale `.executing`/`.responding` can't linger past the turn that set it.
+    private var mainPhase: SessionSummary.Phase = .idle
     /// Tracked UI-initiated tasks so they can be cancelled (e.g. when a conversation is deleted).
     private var activeTasks: [UUID: (conversationId: UUID?, task: Task<Void, Never>)] = [:]
 
@@ -467,6 +473,7 @@ class AppState {
 
     /// Acquire one unit of "thinking". Balanced by `endThinking()`.
     func beginThinking() {
+        if thinkingCount == 0 { mainSessionStartTime = Date() }
         thinkingCount += 1
         isThinking = true
     }
@@ -475,6 +482,7 @@ class AppState {
     func endThinking() {
         thinkingCount = max(0, thinkingCount - 1)
         isThinking = thinkingCount > 0
+        if thinkingCount == 0 { mainPhase = .idle }
     }
 
     /// Runs UI-initiated engine work while holding the thinking indicator and tracking the
@@ -545,15 +553,58 @@ class AppState {
         }
     }
     
-    func registerSubagent(id: UUID, role: String) {
-        let subagent = ActiveSubagent(id: id, role: role, startTime: Date(), status: "Initializing...")
-        activeSubagents.append(subagent)
+    /// `kind` defaults to `.subagent`; `GoalEvaluator` passes `.evaluator` so the strip and the
+    /// toolbar badge can tell an independent grader run apart from a delegated unit of work.
+    func registerSubagent(id: UUID, role: String, kind: SessionSummary.Kind = .subagent) {
+        sessions.append(SessionSummary(id: id, kind: kind, role: role, startTime: Date(),
+                                        phase: .thinking, lastActivity: nil))
     }
 
-    func removeSubagent(id: UUID) {
-        activeSubagents.removeAll(where: { $0.id == id })
+    /// A subagent/evaluator run ended: mark it `.finished` rather than removing it outright, so
+    /// the strip's transcript sheet still has a row to click on right after the run ends. It
+    /// lingers for `sessionLingerWindow` — a sweep dropped after that always clears it even if
+    /// nothing else touches `sessions` in the meantime. The write ledger is cleared unconditionally
+    /// here (as `removeSubagent` used to), independent of whether the session is still tracked.
+    func finishSession(id: UUID, status: String) {
+        if let idx = sessions.firstIndex(where: { $0.id == id }) {
+            sessions[idx].phase = .finished(status: status, at: Date())
+            scheduleSessionSweep()
+        }
         subagentWriteLedger[id] = nil
     }
+
+    /// Hard removal, for a cancel path that wants the row gone immediately rather than lingering.
+    func removeSession(id: UUID) {
+        sessions.removeAll(where: { $0.id == id })
+        subagentWriteLedger[id] = nil
+    }
+
+    /// Drops `sessions` entries in one pass; scheduled once per `finishSession` call rather than on
+    /// a repeating timer, since nothing else needs the strip to update on a clock when idle.
+    private func scheduleSessionSweep() {
+        let window = Self.sessionLingerWindow
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(window * 1_000_000_000))
+            await MainActor.run {
+                guard let self else { return }
+                self.sessions = SessionSummary.sweep(self.sessions, now: Date(), lingerWindow: Self.sessionLingerWindow)
+            }
+        }
+    }
+
+    /// The strip's data source: the synthesised main session first, then every subagent/evaluator
+    /// entry. `sessions` should only ever hold those two kinds, but filtering here is what keeps a
+    /// stray `.main` entry from ever being double-counted next to the synthesised one.
+    var visibleSessions: [SessionSummary] {
+        // A stable fallback id, not a fresh `UUID()`, so the synthesised row's identity doesn't
+        // change on every access (breaking `ForEach` diffing) on the practically-never-hit path
+        // where nothing is selected.
+        let main = SessionSummary(id: selectedConversationId ?? Self.noSelectionSessionId, kind: .main,
+                                   role: "main", startTime: mainSessionStartTime ?? Date(),
+                                   phase: mainPhase, lastActivity: nil)
+        return [main] + sessions.filter { $0.kind != .main }
+    }
+    private static let noSelectionSessionId = UUID()
 
     /// Records a successful write_file path for a subagent conversation (deduped). No-op for the
     /// main agent so its writes don't accumulate. Drained into SubagentResult.filesWritten at
@@ -579,9 +630,19 @@ class AppState {
         markChanged(conversationId, .metadata)
     }
 
-    func updateSubagentStatus(id: UUID, status: String) {
-        if let idx = activeSubagents.firstIndex(where: { $0.id == id }) {
-            activeSubagents[idx].status = status
+    /// The engine calls this for every conversation it runs a turn on — the main conversation
+    /// included, which is why this also updates `mainPhase` rather than only looking in
+    /// `sessions`. Setting `.executing` also records `lastActivity` on `sessions` entries, so a
+    /// test (or a future UI) can see what a subagent/evaluator last ran without racing the phase
+    /// moving on to `.thinking`/`.responding`/`.finished`.
+    func updateSessionPhase(_ id: UUID, _ phase: SessionSummary.Phase) {
+        if let idx = sessions.firstIndex(where: { $0.id == id }) {
+            sessions[idx].phase = phase
+            if case .executing(let tool, let detail) = phase {
+                sessions[idx].lastActivity = SessionSummary.LastActivity(tool: tool, detail: detail)
+            }
+        } else if id == selectedConversationId {
+            mainPhase = phase
         }
     }
     

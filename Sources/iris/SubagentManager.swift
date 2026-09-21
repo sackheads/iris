@@ -173,7 +173,7 @@ final class SubagentManager: @unchecked Sendable {
                                     unitContract: unitContract, verdict: verdict)
         await MainActor.run {
             appState.setSubagentResult(for: subagentId, result)
-            appState.removeSubagent(id: subagentId)
+            appState.finishSession(id: subagentId, status: termination.status.rawValue)
         }
         return (result.renderedForParent(), termination.status)
     }
