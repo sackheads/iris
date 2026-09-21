@@ -91,16 +91,6 @@ actor IrisEngine {
         }
     }
 
-    /// Test-only observability into the session-tools gate (#185 §6). `processInputBody` is a
-    /// single monolithic turn method that also drives the model and mutates history — not
-    /// something a unit test should run just to read back which names were declared. This mirrors
-    /// the exact predicate at the real declaration site (principal == .main, peerCount > 0)
-    /// without re-running the turn. Added per the brief's fallback: no such accessor existed.
-    func declaredToolNamesForTesting() async -> Set<String> {
-        guard principal == .main, (sessionPeerCountOverride ?? 0) > 0 else { return [] }
-        return ["list_sessions", "send_to_session", "set_session_card"]
-    }
-
     func invalidateSystemPrompt() {
         systemPrompt = nil
     }
