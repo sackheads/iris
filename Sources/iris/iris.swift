@@ -156,10 +156,12 @@ actor IrisEngine {
         let targetId = await MainActor.run { conversationId ?? localState?.selectedConversationId }
         guard let activeId = targetId else { return }
 
-        // #182 §6.2: every non-user arrival lands here — the scheduler, subagent post-backs, and
-        // the watcher, which now passes its job's `createdInConversationId` and only falls back to
-        // whatever is selected when the job has none. Stating the rule at this choke point covers
-        // all of them and cannot go stale when a fourth is added.
+        // #182 §6.2: every non-user arrival that drives a turn lands here — subagent post-backs
+        // and peer messages. Stating the rule at this choke point covers all of them and cannot go
+        // stale when another is added. Job fires no longer arrive this way at all (#187
+        // deliverable 2): a run happens in its own background conversation and reports with an
+        // event card, and a card deliberately does not un-archive its destination — it starts no
+        // turn, so an archived conversation stays idle.
         let wasArchived = await MainActor.run { localState?.unarchiveConversation(activeId) ?? false }
 
         // Sanitize incoming system events (especially those from subagents) to prevent injection
@@ -885,7 +887,7 @@ actor IrisEngine {
         
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; a job that was due while the app was asleep runs once on wake. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; a job that was due while the app was asleep runs once on wake. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [

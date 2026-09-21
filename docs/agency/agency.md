@@ -76,7 +76,7 @@ Lands after `#163` and `#177`.
 ## Deliverables, in order
 
 1. **Policies and model.** Write the two decisions above into the spec; define the unified trigger, profile, and ledger schema; import existing jobs and watcher rules. Adopt a cron subset with lists, ranges, steps, and a timezone per job (closes `#156` properly). — landed: see `docs/specs/2026-09-21-agency-model-and-ledger.md`; PR pending
-2. **Ledger and delivery.** `job_runs` beside the conversation store; background conversations hidden from the sidebar; event cards; steer-inbox delivery; `get_job_run`; stop writing job output into `messages`.
+2. **Ledger and delivery.** `job_runs` beside the conversation store; background conversations hidden from the sidebar; event cards; steer-inbox delivery; `get_job_run`; stop writing job output into `messages`. — landed: see `docs/specs/2026-09-21-agency-model-and-ledger.md`; PR pending
 3. **Runtime.** Gate execution, background profile, fail-closed approvals with proposal cards, budgets, breaker, overlap policy, retry and pause, sleep assertion and `catchUp`, `iris --run-job`.
 4. **Watches.** Fold `WatcherManager` onto the trigger model; quiet window; self-write filter; poll trigger.
 5. **Main conversation.** Pin, briefing, tools, anchoring. After `#163` and `#177`.

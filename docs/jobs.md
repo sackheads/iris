@@ -5,10 +5,11 @@ A job is a stored instruction that runs without a conversation open: a recurring
 in the `jobs` table of `~/.iris/conversations.sqlite` — the same database every conversation lives
 in, not `UserDefaults`. Jobs survive an app restart.
 
-This document covers deliverable 1 of `#187` (see `docs/agency/agency.md` and
+This document covers deliverables 1 and 2 of `#187` (see `docs/agency/agency.md` and
 `docs/specs/2026-09-21-agency-model-and-ledger.md`): the job model, the cron subset, the schedule
-aliases, and what happens on sleep. Run history, background run conversations, event cards, and
-`/jobs` are deliverable 2 and are not built yet.
+aliases, what happens on sleep, and what a fire actually does — a run in a hidden conversation of
+its own, a row in the run ledger, and one event card. Gates, budgets, retries and `iris --run-job`
+are deliverable 3.
 
 ## Creating a job
 
@@ -92,8 +93,11 @@ out of range each return a specific refusal sentence rather than silently guessi
 
 Every job has a profile, `readOnly` or `mutating`. `readOnly` is the default and, right now, the
 only one `schedule_job` will create — asking for `profile: mutating` is refused with a message
-saying it arrives with deliverable 3. There is no sandboxing or approval-bypass model for mutating
-jobs yet; until there is, a job that might write is a job nobody is watching.
+saying it arrives with deliverable 3. The runner already honours the profile — a `mutating` job's
+run conversation is pinned to the `apple/container` sandbox — but the model around it (the waiver,
+the declared mounts, the budget) is not built, which is why the tool will not create one. A
+`readOnly` run leaves the sandbox choice alone, so it follows the per-workspace default rather than
+being pinned to the host.
 
 ## What happens on sleep
 
@@ -106,18 +110,95 @@ any others due in the same tick wait for the next one.
 
 A cadence that overlaps its own still-running fire is skipped rather than started a second time.
 
-## Where a fire goes, today
+## Where a fire goes
 
-A job firing posts a system event into the conversation it was created in (or the currently
-selected conversation, if it wasn't created in one) and starts a model turn there — the same
-behavior `schedule_job` and `register_directory_watcher` have always had. Deliverable 2 replaces
-this with a hidden background conversation, a run ledger (`job_runs`), and a compact event card
-delivered to a chosen destination conversation instead of interrupting whatever's open. Until then,
-a job posting into a conversation you're using will still show up as a message there.
+A fire does not touch the conversation you are in. Each run gets a **background conversation** of
+its own — a real conversation, so its transcript can be read back afterwards, but flagged
+`isBackground`, so it is out of the sidebar and can never be selected. The model turn happens
+there. A run in flight shows up in the session strip under the composer as `job:<name>`; that is
+the only place a running job is visible while it runs.
 
-## Not built yet (deliverable 2)
+Before deliverable 2, a fire posted a system event into the conversation the job was created in
+and started a turn there. That is gone: a five-minute cadence no longer writes into the chat you
+are reading.
 
-- The `job_runs` ledger: what ran, when, tokens, cost, pass/fail.
-- Background run conversations, hidden from the sidebar.
-- Event cards and the "Iris Activity" destination conversation.
-- `list_jobs`, `get_job_run`, and the `/jobs` command.
+## The run ledger
+
+Every fire writes a row to `job_runs`, in the same database as the jobs and the conversations: job,
+trigger kind, start and finish, status, outcome (the first line of the last thing the run said,
+capped at 200 characters), token counts, the background conversation it ran in, and — for a
+failure — the reason and the tool it wanted. The row is written *before* the turn, so a run the app
+died inside leaves evidence behind.
+
+A run ends in one of five statuses:
+
+| Status | Meaning |
+| --- | --- |
+| `running` | in flight right now |
+| `completed` | the turn finished and said something |
+| `failed` | the model call errored, the loop was cut short, or the turn ended having said nothing at all |
+| `blocked on approval` | the run wanted a tool it is not allowed to use unattended, and stopped (see below) |
+| `interrupted` | nothing finished it: the app quit mid-run and the next launch closed the row out, or a cadence came round while the previous run of the same job was still going, so this trigger was dropped rather than started twice |
+
+A run that says nothing is a failure, not a success: "it worked and had nothing to report" and "it
+never got as far as a reply" must not look the same on a card.
+
+## Event cards and the Iris Activity conversation
+
+When a run ends, one **event card** is delivered: job name, status, the one-line outcome, tokens,
+and a "View run" button onto the transcript. It goes to the job's destination conversation if it
+has one, and otherwise to **Iris Activity** — a pinned conversation Iris creates on first use and
+keeps at the top of the sidebar. (Pinned conversations refuse `/clear`.)
+
+Delivery never wakes a model turn. The card is a `ChatRole.event` message, drawn as a card and
+never indexed for search; alongside it the card's one-line summary is appended to the destination's
+history, so the next turn *you* start reads it as context. If the destination is mid-turn, the line
+rides the steer inbox and the model sees it with its next tool results instead. A job finishing is
+news, not a request — waking the model on every run would turn a five-minute schedule into a
+five-minute agent loop. Raw run output never enters the destination's messages.
+
+## Approvals fail closed
+
+Nobody is watching a background run, so it never blocks on an approval dialog. A tool call from a
+background conversation is checked against the deterministic allowlist — a call that is already
+permitted needs no human, so it runs — and anything else is denied on the spot, without consulting
+Vibecop and without a dialog. The denial is recorded, the run ends `blocked on approval`, and the
+card names the tool that was refused so you can decide in the morning.
+
+This outranks everything, including the headless auto-approve used by scenario runs.
+
+## `/jobs`
+
+`/jobs` works in every conversation and never spends a model turn.
+
+| Form | What it does |
+| --- | --- |
+| `/jobs` | A table of every job — name, trigger, when it next fires (or why it is paused), how its last run ended — then one line per unacknowledged failure, with the first eight characters of the run's id |
+| `/jobs ack <run id>` | Marks a failed or blocked run as seen: it leaves the failure list, and it stops being exempt from retention. Takes a full id or the first eight or more characters of one, as a card prints it; an ambiguous prefix is refused rather than guessed |
+| `/jobs delete <name>` | Deletes a job and its ledger rows. Refused while a run is in flight. The transcripts are left for retention to clear, so a card you are still reading keeps working |
+
+## The job tools
+
+Two read-only tools let the model answer questions about jobs: `list_jobs` (every job, its trigger,
+its next fire, how its last run ended) and `get_job_run` (one run, by id or by the eight characters
+a card shows, including the last thing the run itself said).
+
+Both are declared **only in a pinned conversation**, and refused at dispatch anywhere else even if
+a call arrives regardless. The reason is cost, not secrecy: two extra tool declarations are a tax on
+every turn of every conversation, and the conversation where you ask about your jobs is the pinned
+one.
+
+## Retention
+
+Run history is pruned at launch and once a day after that:
+
+- ledger rows older than **90 days** are deleted;
+- for each job, background transcripts beyond its **20 most recent runs** are deleted;
+- both are overridden by the same exemption: a `failed` or `blocked on approval` run that nobody
+  has acknowledged keeps its row *and* its transcript, however old. `/jobs ack` is what gives it
+  up.
+
+A pruned transcript leaves the ledger's `transcriptConversationId` dangling on purpose — the card
+then says "transcript pruned" rather than offering a dead button. Only a background conversation is
+ever deleted this way; if a row somehow names a conversation you can see, retention leaves it
+alone.
