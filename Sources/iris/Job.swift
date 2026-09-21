@@ -186,6 +186,8 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
     var profile: JobProfile
     /// Where a fire's event card is delivered — used by event-card delivery, deliverable 2.
     var destinationConversationId: UUID?
+    /// Not read in D2 — kept for `/jobs` provenance ("scheduled from…") and deliverable 5's
+    /// briefing, both of which need the conversation a job was born in.
     var createdInConversationId: UUID?
     var createdAt: Date
     var enabled: Bool

@@ -7,11 +7,12 @@ import Foundation
 struct SessionDirectoryTests {
 
     private func conv(_ title: String, archived: Bool = false, subagent: Bool = false,
-                      card: SessionCard? = nil, workspace: String? = nil,
+                      background: Bool = false, card: SessionCard? = nil, workspace: String? = nil,
                       updated: Date = Date()) -> Conversation {
         var c = Conversation(id: UUID(), title: title, workspacePath: workspace)
         c.isArchived = archived
         c.isSubagent = subagent
+        c.isBackground = background
         c.sessionCard = card
         c.updatedAt = updated
         return c
@@ -24,6 +25,18 @@ struct SessionDirectoryTests {
         let out = SessionDirectory.peers(in: all, excluding: me.id, busy: { _ in false })
         #expect(out.peers.count == 1)
         #expect(out.total == 1)
+    }
+
+    /// A job run gets a conversation of its own (#187), hidden from the sidebar and with nobody
+    /// reading it. Listing it would advertise an address the harness then has to refuse, and
+    /// would inflate the standing peer count with work that is not a session at all.
+    @Test("a background run conversation is not a peer")
+    func excludesBackgroundRuns() {
+        let me = conv("me")
+        let all = [me, conv("active"), conv("pr-sweep run", background: true)]
+        let out = SessionDirectory.peers(in: all, excluding: me.id, busy: { _ in false })
+        #expect(out.peers.count == 1)
+        #expect(out.total == 1, "a hidden run must not inflate the count either")
     }
 
     @Test("the caller is never its own peer")

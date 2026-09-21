@@ -126,6 +126,29 @@ struct EventCardTests {
         #expect(card().elapsedText == "1m 15s")
     }
 
+    /// "View run" is enabled only when the transcript the card names still exists — a run that
+    /// recorded none, or one retention has since pruned, leaves the card inert. The predicate is
+    /// resolved by whoever owns the message list and handed to the row, so an event row does not
+    /// read `AppState.conversations` in its own body and re-render on unrelated mutations.
+    @Test("transcriptAvailable is true only for an event card whose transcript still exists")
+    func transcriptAvailability() {
+        let live = UUID()
+        let pruned = UUID()
+        let conversations = [Conversation(id: live, title: "pr-sweep run")]
+
+        let withTranscript = ChatMessage(role: .event, content: card(transcript: live).encodedContent())
+        let goneTranscript = ChatMessage(role: .event, content: card(transcript: pruned).encodedContent())
+        let noTranscript = ChatMessage(role: .event, content: card(transcript: nil).encodedContent())
+        let notACard = ChatMessage(role: .event, content: "not json")
+        let notAnEvent = ChatMessage(role: .agent, content: card(transcript: live).encodedContent())
+
+        #expect(EventCard.transcriptAvailable(for: withTranscript, in: conversations))
+        #expect(!EventCard.transcriptAvailable(for: goneTranscript, in: conversations))
+        #expect(!EventCard.transcriptAvailable(for: noTranscript, in: conversations))
+        #expect(!EventCard.transcriptAvailable(for: notACard, in: conversations))
+        #expect(!EventCard.transcriptAvailable(for: notAnEvent, in: conversations))
+    }
+
     @Test("ChatRole.event round-trips as \"event\"")
     func chatRoleRawValue() {
         #expect(ChatRole.event.rawValue == "event")

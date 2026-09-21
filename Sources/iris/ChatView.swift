@@ -203,7 +203,9 @@ struct ChatView: View {
                                 Group {
                                     switch item {
                                     case .single(let message):
-                                        MessageView(message: message, state: state)
+                                        MessageView(message: message, state: state,
+                                                    transcriptAvailable: EventCard.transcriptAvailable(
+                                                        for: message, in: state.conversations))
                                     case .systemGroup(_, let messages):
                                         SystemGroupView(messages: messages, appState: state)
                                     }
@@ -645,7 +647,12 @@ struct ChatView: View {
         guard !Task.isCancelled else { return }
         let hits = (try? state.store.searchConversations(query: trimmed, limit: 50)) ?? []
         guard !Task.isCancelled else { return }
-        sidebarSearchGroups = SidebarSearchResults.group(hits)
+        // A job run's transcript and a subagent log are out of the sidebar everywhere else
+        // (#187); the FTS index still carries them, so they must not come back in through
+        // Results. A hit whose conversation is not in memory at all is left alone — `reveal`
+        // already handles that miss.
+        let hidden = Set(state.conversations.filter { !$0.isUserFacing }.map(\.id))
+        sidebarSearchGroups = SidebarSearchResults.group(hits.filter { !hidden.contains($0.conversationId) })
         sidebarSearchedQuery = trimmed
     }
     
@@ -823,10 +830,15 @@ struct ChatView: View {
 
 struct MessageView: View {
     let message: ChatMessage
-    /// Only read by the `.event` branch, to resolve an event card's "View run" target. Every call
+    /// Only *written* through by the `.event` branch, to open the transcript sheet. Every call
     /// site has an `AppState` in scope; it is a stored property rather than an environment value
-    /// because `AppState` is passed explicitly everywhere else in this file.
+    /// because `AppState` is passed explicitly everywhere else in this file. Nothing here reads
+    /// observable state off it — see `transcriptAvailable`.
     var state: AppState
+    /// Whether this message's event card has a transcript to open, resolved by the list that owns
+    /// the message. Read from `state.conversations` in `body` instead, it would subscribe every
+    /// event row to the whole conversation array and re-render them on unrelated mutations.
+    var transcriptAvailable: Bool = false
 
     var body: some View {
         HStack(alignment: .top) {
@@ -934,8 +946,7 @@ struct MessageView: View {
     /// `AppState` (rather than presenting a sheet from here) keeps one sheet with two openers:
     /// the session strip owns the `.sheet`, on a view that stays mounted while it is up.
     private func viewRunAction(for card: EventCard) -> (() -> Void)? {
-        guard let convId = card.transcriptConversationId,
-              state.conversations.contains(where: { $0.id == convId }) else { return nil }
+        guard transcriptAvailable, let convId = card.transcriptConversationId else { return nil }
         return { state.transcriptSheetConversationId = convId }
     }
 

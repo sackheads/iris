@@ -1060,7 +1060,7 @@ actor IrisEngine {
             ))
             toolsList.append(FunctionDeclaration(
                 name: "send_to_session",
-                description: "Send a message to another active session. It arrives as a request that session may decline, not an instruction it must follow. Use it to ask a peer working elsewhere for something only it can do. Archived sessions cannot be reached.",
+                description: "Send a message to another active session. It arrives as a request that session may decline, not an instruction it must follow. Use it to ask a peer working elsewhere for something only it can do. Archived sessions, and the hidden conversations background job runs use, cannot be reached.",
                 parameters: Schema(type: "OBJECT", properties: [
                     "session_id": Schema(type: "STRING", description: "The peer's session_id from list_sessions."),
                     "message": Schema(type: "STRING", description: "What to say. Include enough context to act on without seeing your conversation.")
@@ -1642,20 +1642,24 @@ actor IrisEngine {
     /// also loads plugins and MCP servers, so it can be driven (and tested) on its own.
     func configureJobBookkeeping(ledger: JobLedger) async {
         closeInterruptedRuns(ledger: ledger)
-        let scheduler = await adoptJobScheduler(ledger: ledger)
-        await scheduler.setOnSkip { job in
-            do {
-                try JobRunner.recordSkip(job: job, ledger: ledger, now: Date())
-            } catch {
-                print("[JobRunner] could not record the skipped run for \(job.name): \(error)")
+        // Both handlers are installed through `configure`, which runs before the polling loop
+        // does: installed after `start()`, the first tick could skip an overlapping job (or cross
+        // a day boundary) with no handler to record it.
+        _ = await adoptJobScheduler(ledger: ledger) { scheduler in
+            await scheduler.setOnSkip { job in
+                do {
+                    try JobRunner.recordSkip(job: job, ledger: ledger, now: Date())
+                } catch {
+                    print("[JobRunner] could not record the skipped run for \(job.name): \(error)")
+                }
             }
-        }
-        // Retention runs at launch and once a day (§10). Both, not one: a Mac that is never
-        // restarted would never prune on launch alone, and a Mac restarted twice a day would
-        // never reach the daily hook. The launch pass is this explicit call rather than the
-        // hook's first fire, so it happens now instead of at the next poll.
-        await scheduler.setOnDailyMaintenance { [weak self] in
-            await self?.applyRetention(ledger: ledger)
+            // Retention runs at launch and once a day (§10). Both, not one: a Mac that is never
+            // restarted would never prune on launch alone, and a Mac restarted twice a day would
+            // never reach the daily hook. The launch pass is the explicit call below, so it
+            // happens now instead of at the next poll.
+            await scheduler.setOnDailyMaintenance { [weak self] in
+                await self?.applyRetention(ledger: ledger)
+            }
         }
         await applyRetention(ledger: ledger)
     }
@@ -1681,12 +1685,16 @@ actor IrisEngine {
         guard let state else { return }
         var deletedTranscripts = 0
         for id in decision.deleteTranscriptIds {
-            let deletable = await MainActor.run {
-                state.conversations.first(where: { $0.id == id })?.isBackground == true
+            // Check and delete in the SAME hop: split across two, the conversation can stop being
+            // a background one (or be replaced by a user-facing one under that id) in between,
+            // and the second hop would then delete exactly what the first refused to.
+            let deleted = await MainActor.run { () -> Bool in
+                guard state.conversations.first(where: { $0.id == id })?.isBackground == true
+                else { return false }
+                state.deleteConversation(id)
+                return true
             }
-            guard deletable else { continue }
-            await MainActor.run { state.deleteConversation(id) }
-            deletedTranscripts += 1
+            if deleted { deletedTranscripts += 1 }
         }
         if !decision.deleteRunIds.isEmpty || deletedTranscripts > 0 {
             print("[JobLedger] retention: removed \(decision.deleteRunIds.count) run row(s) and \(deletedTranscripts) transcript(s)")
@@ -1707,9 +1715,12 @@ actor IrisEngine {
     /// previous polling loop running with nothing holding a reference to stop it.
     /// `JobScheduler.start()` cancels its own previous loop, so re-adopting stays one loop.
     @discardableResult
-    func adoptJobScheduler(ledger: JobLedger) async -> JobScheduler {
+    func adoptJobScheduler(ledger: JobLedger,
+                           configure: (JobScheduler) async -> Void = { _ in }) async -> JobScheduler {
         let scheduler = jobScheduler ?? JobScheduler(ledger: ledger)
         await scheduler.setFireHandler(fireHandler())
+        // Every handler goes on before the loop can tick even once.
+        await configure(scheduler)
         await scheduler.start()
         jobScheduler = scheduler
         return scheduler
@@ -1875,7 +1886,10 @@ actor IrisEngine {
             let target = await MainActor.run { () -> (exists: Bool, archived: Bool) in
                 guard let c = localState?.conversations.first(where: { $0.id == targetId })
                 else { return (false, false) }
-                return (true, c.isArchived || c.isSubagent)
+                // A background run is refused like an archived session: it is not a peer in
+                // `list_sessions` either, and a message delivered into it would land in a
+                // transcript nobody reads and retention will prune (#187).
+                return (true, c.isArchived || c.isSubagent || c.isBackground)
             }
             guard target.exists else {
                 result = "No session with that id."

@@ -291,7 +291,9 @@ struct TranscriptSheet: View {
                         // whole transcript, and a subagent log is short enough to lay out eagerly.
                         VStack(alignment: .leading, spacing: 8) {
                             ForEach(conversation.messages) { message in
-                                MessageView(message: message, state: state)
+                                MessageView(message: message, state: state,
+                                            transcriptAvailable: EventCard.transcriptAvailable(
+                                                for: message, in: state.conversations))
                             }
                             // Scroll target for `scrollToBottom`, matching `ChatView`'s own
                             // "bottomAnchor" pattern rather than scrolling to a message id directly.

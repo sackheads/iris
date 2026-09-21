@@ -142,7 +142,7 @@ struct JobRunLedgerTests {
     }
 
     /// The prefix read is what makes a run reachable by the eight characters a card prints, however
-    /// old it is — `recentRuns` would have to guess a window wide enough to contain it.
+    /// old it is — a recency window would have to guess one wide enough to contain it.
     @Test("runs(idPrefix:) matches on a prefix, ignoring case and hyphens, and is capped")
     func prefixLookup() throws {
         let store = try ConversationStore.inMemory()
@@ -176,19 +176,6 @@ struct JobRunLedgerTests {
         try store.ledger.begin(run: makeRun(job, at: t0))
         #expect(try store.ledger.runs(idPrefix: "%%%%%%%%").isEmpty)
         #expect(try store.ledger.runs(idPrefix: "________").isEmpty)
-    }
-
-    @Test("recentRuns is newest first across jobs")
-    func recent() throws {
-        let store = try ConversationStore.inMemory()
-        let a = try seedJob(store, "a")
-        let b = try seedJob(store, "b")
-        try store.ledger.begin(run: makeRun(a, at: t0))
-        try store.ledger.begin(run: makeRun(b, at: t0.addingTimeInterval(60)))
-        try store.ledger.begin(run: makeRun(a, at: t0.addingTimeInterval(120)))
-        #expect(try store.ledger.recentRuns(limit: 10).map(\.jobName) == ["a", "b", "a"])
-        #expect(try store.ledger.recentRuns(limit: 2).map(\.startedAt)
-            == [t0.addingTimeInterval(120), t0.addingTimeInterval(60)])
     }
 
     @Test("unacknowledgedFailures takes failed and blocked runs oldest first, skipping acknowledged and completed")
@@ -410,6 +397,28 @@ struct JobRunLedgerTests {
         #expect(decision.deleteTranscriptIds.count == 3)
     }
 
+    /// A run still marked `running` is either in flight right now or was orphaned by a crash, and
+    /// `closeRunningRuns` is what resolves it at the next launch. Age-deleting it would take the
+    /// row out from under a live run and leave the orphan unresolvable, so it is exempt from both
+    /// halves of retention exactly like an unacknowledged failure.
+    @Test("a running row is exempt from the retention window and from the transcript cap")
+    func pruneDecisionRunningExempt() throws {
+        let job = UUID()
+        let running = oldRun(job, ageDays: 100, status: .running, transcript: UUID())
+        let doneOld = oldRun(job, ageDays: 100, status: .completed, transcript: UUID())
+        var runs = [running, doneOld]
+        // Enough recent transcripts to push the running row well past a cap of 2 as well.
+        for i in 0..<5 {
+            runs.append(oldRun(job, ageDays: Double(i), status: .completed, transcript: UUID()))
+        }
+        let decision = JobLedger.pruneDecision(runs: runs, now: t0, rowRetention: ninetyDays,
+                                               transcriptsPerJob: 2)
+        #expect(decision.deleteRunIds == [doneOld.id], "only the finished old row goes")
+        #expect(!decision.deleteTranscriptIds.contains(running.transcriptConversationId!),
+                "a live run's transcript is the one thing that must not vanish under it")
+        #expect(decision.deleteTranscriptIds.contains(doneOld.transcriptConversationId!))
+    }
+
     // MARK: prune
 
     @Test("prune deletes exactly the rows its decision names and returns it")
@@ -428,6 +437,31 @@ struct JobRunLedgerTests {
         #expect(decision.deleteRunIds == [old.id])
         #expect(decision.deleteTranscriptIds == [transcript])
         #expect(try store.ledger.run(id: old.id) == nil)
-        #expect(Set(try store.ledger.recentRuns(limit: 100).map(\.id)) == Set([openFailure.id, young.id]))
+        #expect(Set(try store.ledger.runs(jobId: job.id, limit: 100).map(\.id)) == Set([openFailure.id, young.id]))
+    }
+
+    /// SQLite caps a statement at `SQLITE_MAX_VARIABLE_NUMBER` bound parameters (999 on the build
+    /// GRDB links by default). A single `DELETE ... WHERE id IN (?, ?, ...)` over every expired row
+    /// therefore fails outright once a Mac has accumulated a few months of runs — the case
+    /// retention exists for. The ids are chunked, in the one write transaction, so the prune is
+    /// still all-or-nothing.
+    @Test("prune of far more rows than SQLite's variable limit deletes all of them")
+    func pruneChunksPastTheVariableLimit() throws {
+        let store = try ConversationStore.inMemory()
+        let job = try seedJob(store, "j")
+        let expiredCount = 1_200
+        for i in 0..<expiredCount {
+            try store.ledger.begin(run: JobRun(
+                jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                startedAt: t0.addingTimeInterval(-91 * 24 * 3600 - Double(i)), status: .completed))
+        }
+        let young = makeRun(job, at: t0.addingTimeInterval(-60), status: .completed)
+        try store.ledger.begin(run: young)
+
+        let decision = try store.ledger.prune(now: t0, rowRetention: ninetyDays, transcriptsPerJob: 20)
+
+        #expect(decision.deleteRunIds.count == expiredCount)
+        #expect(try store.ledger.runCount(jobId: job.id) == 1)
+        #expect(try store.ledger.runs(jobId: job.id, limit: 10).map(\.id) == [young.id])
     }
 }

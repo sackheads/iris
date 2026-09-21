@@ -99,6 +99,32 @@ struct SidebarSearchTests {
         #expect(state.pendingScrollTarget == heronMessages[winner.ordinal].id)
     }
 
+    /// #187: a job run's transcript is a background conversation — out of the sidebar, read-only,
+    /// and with a composer that would refuse anything typed into it. Selecting one from a search
+    /// hit would put exactly that dead end in the main pane, so the hit opens the same read-only
+    /// sheet the session strip uses instead and the selection is left alone.
+    @Test("a search hit on a background run opens the transcript sheet and never selects it")
+    func revealBackgroundOpensSheetWithoutSelecting() throws {
+        let store = try ConversationStore.inMemory()
+        let messages = [ChatMessage(role: .user, content: "the shelved kubeconfig note")]
+        var run = conversation(title: "pr-sweep run", messages)
+        run.isBackground = true
+        let visible = conversation(title: "visible", [ChatMessage(role: .user, content: "hello")])
+        try store.apply([created(visible), created(run)])
+
+        let state = AppState(store: store)
+        state.selectedConversationId = visible.id
+        state.pendingScrollTarget = UUID()
+
+        let hit = ConversationHit(conversationId: run.id, title: "pr-sweep run", role: .user,
+                                  ordinal: 0, snippet: "kubeconfig")
+        state.reveal(hit: hit)
+
+        #expect(state.selectedConversationId == visible.id, "a hidden run must never become the open conversation")
+        #expect(state.pendingScrollTarget == nil)
+        #expect(state.transcriptSheetConversationId == run.id, "it is still readable, read-only")
+    }
+
     /// #182 §11: the Results section replaces both sidebar sections while a query is active, so an
     /// archived conversation is reachable by search. Revealing one must select it like any other —
     /// the Archived group's auto-expand is what then makes the selected row visible.

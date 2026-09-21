@@ -124,6 +124,16 @@ struct EventCard: Codable, Equatable, Sendable {
         return json
     }
 
+    /// Whether `message` is an event card whose transcript conversation still exists — the
+    /// enablement of a card's "View run". Resolved by whoever owns the message list and passed
+    /// down to the row: read inside `MessageView.body` it would subscribe every event row to
+    /// `AppState.conversations`, re-rendering the lot on any unrelated conversation mutation.
+    static func transcriptAvailable(for message: ChatMessage, in conversations: [Conversation]) -> Bool {
+        guard message.role == .event, let card = decode(message.content),
+              let transcript = card.transcriptConversationId else { return false }
+        return conversations.contains { $0.id == transcript }
+    }
+
     /// `nil` when `messageContent` is anything other than a card — plain prose, Markdown, or JSON
     /// without a `runId`. Every render path falls back to the raw content on `nil`.
     static func decode(_ messageContent: String) -> EventCard? {

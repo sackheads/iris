@@ -261,14 +261,19 @@ extension JobLedger {
 
     /// The runs whose id starts with `idPrefix`, hyphens ignored on both sides — what resolves the
     /// eight characters an event card prints (`JobsCommand.resolveRun`). A query rather than a
-    /// filter over `recentRuns`: an unacknowledged failure is exempt from retention and can be
-    /// arbitrarily old, so the one id a person is chasing is exactly the one a recency window
+    /// filter over a recent-runs window: an unacknowledged failure is exempt from retention and
+    /// can be arbitrarily old, so the one id a person is chasing is exactly the one such a window
     /// would hide.
     ///
     /// Capped at `prefixMatchLimit`, which is only ever used to tell "one" from "more than one".
     func runs(idPrefix: String) throws -> [JobRun] {
         let needle = JobsCommand.normalizedRunId(idPrefix)
         guard !needle.isEmpty else { return [] }
+        // `LOWER` on the column rather than leaning on SQLite's ASCII-case-insensitive LIKE:
+        // `normalizedRunId` has already lowercased the needle, and an id is stored uppercased, so
+        // the match is only case-insensitive by a default a `PRAGMA case_sensitive_like` could
+        // change under it.
+        //
         // The prefix reaches here from a person's or a model's typing, so `%` and `_` in it must
         // be literals rather than wildcards that would match every run in the table.
         let escaped = needle
@@ -277,7 +282,7 @@ extension JobLedger {
             .replacingOccurrences(of: "_", with: "\\_")
         return try decodeRuns(
             sql: """
-                SELECT * FROM job_runs WHERE REPLACE(id, '-', '') LIKE ? ESCAPE '\\'
+                SELECT * FROM job_runs WHERE LOWER(REPLACE(id, '-', '')) LIKE ? ESCAPE '\\'
                 ORDER BY startedAt DESC, rowid DESC LIMIT ?
                 """,
             arguments: [escaped + "%", Self.prefixMatchLimit])
@@ -286,12 +291,6 @@ extension JobLedger {
     /// How many prefix matches are read back. More than one is already ambiguous, so the rest are
     /// rows nobody will look at.
     static let prefixMatchLimit = 8
-
-    /// Runs across every job, newest first: what `/jobs` and the activity listing show.
-    func recentRuns(limit: Int) throws -> [JobRun] {
-        try decodeRuns(sql: "SELECT * FROM job_runs ORDER BY startedAt DESC, rowid DESC LIMIT ?",
-                       arguments: [limit])
-    }
 
     /// The runs still waiting on a person: failed or blocked and never acknowledged, oldest first
     /// so the longest-ignored one leads.
@@ -363,7 +362,10 @@ extension JobLedger {
     /// database: rows age out after `rowRetention`, and each job keeps only its `transcriptsPerJob`
     /// newest transcripts. Both are overridden by the same exemption — a failed or blocked run
     /// nobody has acknowledged keeps its row *and* its transcript, however old, because the
-    /// evidence is the point of the notification.
+    /// evidence is the point of the notification. A `running` row is exempt on the same terms: it
+    /// is either in flight right now or an orphan `closeRunningRuns` resolves at the next launch,
+    /// and deleting it would either pull the transcript out from under a live run or leave the
+    /// orphan permanently unresolvable.
     ///
     /// A deleted row's transcript goes with it unless a surviving row still names the same
     /// conversation, which today's writers never do; the check is there so a future one cannot
@@ -374,14 +376,17 @@ extension JobLedger {
     static func pruneDecision(runs: [JobRun], now: Date, rowRetention: TimeInterval,
                               transcriptsPerJob: Int) -> PruneDecision {
         let cutoff = now.addingTimeInterval(-rowRetention)
-        func isOpenFailure(_ run: JobRun) -> Bool {
-            (run.status == .failed || run.status == .blockedOnApproval) && run.acknowledgedAt == nil
+        // Exempt from both halves of retention: a run still in flight (or an orphan awaiting
+        // `closeRunningRuns`), and a failure nobody has acknowledged.
+        func isExempt(_ run: JobRun) -> Bool {
+            if run.status == .running { return true }
+            return (run.status == .failed || run.status == .blockedOnApproval) && run.acknowledgedAt == nil
         }
 
         // Oldest first, ties broken by id, so the decision is a function of the rows alone: two
         // callers that fetched the same runs in different orders get the same arrays back.
         let ordered = runs.sorted { ($0.startedAt, $0.id.uuidString) < ($1.startedAt, $1.id.uuidString) }
-        let deletedRunIds = Set(ordered.filter { $0.startedAt < cutoff && !isOpenFailure($0) }.map(\.id))
+        let deletedRunIds = Set(ordered.filter { $0.startedAt < cutoff && !isExempt($0) }.map(\.id))
 
         // Runs whose transcript is no longer worth keeping: the row is going away, or the run has
         // fallen out of its job's newest `transcriptsPerJob`.
@@ -390,7 +395,7 @@ extension JobLedger {
         let withTranscripts = ordered.filter { $0.transcriptConversationId != nil }
         for (_, jobRuns) in Dictionary(grouping: withTranscripts, by: \.jobId) {
             let newestFirst = jobRuns.reversed()
-            for run in newestFirst.dropFirst(max(0, transcriptsPerJob)) where !isOpenFailure(run) {
+            for run in newestFirst.dropFirst(max(0, transcriptsPerJob)) where !isExempt(run) {
                 doomedRunIds.insert(run.id)
             }
         }
@@ -412,16 +417,26 @@ extension JobLedger {
     /// rows are deleted here: the conversations named by `deleteTranscriptIds` belong to the
     /// caller, which deletes them (and can survive a crash in between — the rows are gone, and the
     /// orphaned transcripts are ordinary conversations).
+    /// Ids bound per `DELETE`. Well under the 999 the oldest SQLite builds cap a statement at, so
+    /// the chunking does not depend on which SQLite the app links.
+    static let deleteChunkSize = 500
+
     func prune(now: Date, rowRetention: TimeInterval, transcriptsPerJob: Int) throws -> PruneDecision {
         try writer.write { db in
             let rows = try Row.fetchAll(db, sql: "SELECT * FROM job_runs ORDER BY startedAt, rowid")
             let decision = Self.pruneDecision(runs: Self.decodeRuns(rows), now: now,
                                               rowRetention: rowRetention,
                                               transcriptsPerJob: transcriptsPerJob)
-            if !decision.deleteRunIds.isEmpty {
-                let placeholders = databaseQuestionMarks(count: decision.deleteRunIds.count)
+            // Chunked, inside the one transaction: a single `IN (...)` over every expired row
+            // binds one variable per id, and a Mac with a few months of run history past its
+            // retention window — exactly the case this exists for — would blow
+            // `SQLITE_MAX_VARIABLE_NUMBER` and prune nothing at all.
+            for chunk in stride(from: 0, to: decision.deleteRunIds.count, by: Self.deleteChunkSize) {
+                let ids = decision.deleteRunIds[chunk..<min(chunk + Self.deleteChunkSize,
+                                                            decision.deleteRunIds.count)]
+                let placeholders = databaseQuestionMarks(count: ids.count)
                 try db.execute(sql: "DELETE FROM job_runs WHERE id IN (\(placeholders))",
-                               arguments: StatementArguments(decision.deleteRunIds.map(\.uuidString)))
+                               arguments: StatementArguments(ids.map(\.uuidString)))
             }
             return decision
         }

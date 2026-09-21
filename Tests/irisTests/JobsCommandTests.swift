@@ -153,7 +153,7 @@ struct JobsCommandTests {
             try store.ledger.begin(run: run(j, status: .completed,
                                             startedAt: Date(timeIntervalSince1970: 1_000 + Double(i))))
         }
-        #expect(try !store.ledger.recentRuns(limit: 500).contains { $0.id == old.id })
+        #expect(try !store.ledger.runs(jobId: j.id, limit: 500).contains { $0.id == old.id })
 
         let prefix = String(old.id.uuidString.lowercased().prefix(8))
         #expect(try JobsCommand.resolveRun(prefix, in: store.ledger) == .found(old.id))

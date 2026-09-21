@@ -301,7 +301,7 @@ struct JobToolsTests {
                 jobId: j.id, jobName: j.name, triggerKind: j.trigger.kind,
                 startedAt: Date(timeIntervalSince1970: 1_700_000_000 + Double(i))))
         }
-        #expect(try !app.store.ledger.recentRuns(limit: 5).contains { $0.id == old.id })
+        #expect(try !app.store.ledger.runs(jobId: j.id, limit: 5).contains { $0.id == old.id })
 
         for query in [old.id.uuidString, String(old.id.uuidString.lowercased().prefix(8))] {
             let result = await runToolCall(

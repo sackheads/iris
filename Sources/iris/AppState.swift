@@ -634,6 +634,16 @@ class AppState {
             pendingScrollTarget = nil
             return
         }
+        // A background run's transcript is out of the sidebar, read-only, and refuses anything
+        // sent to it (#187); selecting one would put that dead end in the main pane. The
+        // read-only sheet the session strip already owns is the right surface for it — same for a
+        // subagent log, hence `isUserFacing` and not `isBackground`. Archived is deliberately not
+        // part of this: an archived hit selects like any other (#182 §11).
+        guard conversation.isUserFacing else {
+            pendingScrollTarget = nil
+            transcriptSheetConversationId = hit.conversationId
+            return
+        }
         selectedConversationId = hit.conversationId
         guard hit.ordinal >= 0, hit.ordinal < conversation.messages.count else {
             pendingScrollTarget = nil
