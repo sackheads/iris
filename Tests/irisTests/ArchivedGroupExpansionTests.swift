@@ -20,9 +20,9 @@ struct ArchivedGroupExpansionTests {
     func userToggleWins() {
         let archived = [archivedConversation(UUID())]
         #expect(ChatView.archivedGroupExpansion(current: false, archived: archived,
-                                                previous: nil, selection: UUID()) == false)
+                                                previousArchivedSelection: nil, selection: UUID()) == false)
         #expect(ChatView.archivedGroupExpansion(current: true, archived: archived,
-                                                previous: nil, selection: UUID()))
+                                                previousArchivedSelection: nil, selection: UUID()))
     }
 
     @Test("selecting an archived conversation opens the group")
@@ -30,7 +30,7 @@ struct ArchivedGroupExpansionTests {
         let id = UUID()
         #expect(ChatView.archivedGroupExpansion(current: false,
                                                 archived: [archivedConversation(id)],
-                                                previous: UUID(), selection: id))
+                                                previousArchivedSelection: UUID(), selection: id))
     }
 
     /// The bug this replaced: the old `userToggle || selectionIsArchived` getter pinned the group
@@ -41,12 +41,43 @@ struct ArchivedGroupExpansionTests {
         let id = UUID()
         #expect(ChatView.archivedGroupExpansion(current: false,
                                                 archived: [archivedConversation(id)],
-                                                previous: id, selection: id) == false)
+                                                previousArchivedSelection: id, selection: id) == false)
+    }
+
+    /// The N2 regression: `/archive` and the context menu on the conversation you are looking at
+    /// move no selection at all, so a rule keyed on selection changing left the user on a row
+    /// inside a collapsed group — exactly what §9 exists to prevent, reached through §8.
+    @Test("archiving the selected conversation expands the group")
+    func archivingTheSelectionExpands() {
+        let id = UUID()
+        #expect(ChatView.archivedGroupExpansion(current: false,
+                                                archived: [archivedConversation(id)],
+                                                previousArchivedSelection: nil, selection: id),
+                "it was not archived a moment ago, so this is a new trigger")
+    }
+
+    /// The collapse holds against everything that is not a trigger: archiving some *other*
+    /// conversation while the user sits on an already-archived, deliberately hidden row.
+    @Test("an explicit collapse survives another conversation being archived")
+    func collapseSurvivesUnrelatedArchiving() {
+        let id = UUID()
+        let other = UUID()
+        #expect(ChatView.archivedGroupExpansion(
+            current: false, archived: [archivedConversation(id), archivedConversation(other)],
+            previousArchivedSelection: id, selection: id) == false)
+    }
+
+    @Test("un-archiving the selected conversation leaves the group alone")
+    func unarchivingTheSelectionDoesNotExpand() {
+        let id = UUID()
+        #expect(ChatView.archivedGroupExpansion(current: false, archived: [],
+                                                previousArchivedSelection: id,
+                                                selection: id) == false)
     }
 
     @Test("no selection and nothing archived leave it closed")
     func nothingToShow() {
         #expect(ChatView.archivedGroupExpansion(current: false, archived: [],
-                                                previous: nil, selection: nil) == false)
+                                                previousArchivedSelection: nil, selection: nil) == false)
     }
 }

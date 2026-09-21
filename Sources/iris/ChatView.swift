@@ -21,16 +21,22 @@ struct ChatView: View {
     /// binds to it directly, so the disclosure triangle always does what it looks like it does.
     @State private var archivedExpanded = false
 
-    /// #182 §9: the group auto-expands when the selection *moves into* it — a search reveal, a
-    /// delete re-point, or the launch fallback can all select an archived row, and a selected row
-    /// nobody can see is the hazard the same-list design exists to dissolve. It is an expand, not
-    /// a pin: evaluating it only on a selection change is what lets an explicit collapse stick
-    /// while that same archived row stays selected. Pulled out of the view so the rule is
+    /// #182 §9: the group auto-expands when the selected conversation *becomes* one of its rows.
+    /// Two ways in, and both are a change of the same one value — "the selection, while it is
+    /// archived": the selection moves onto an archived row (search reveal, delete re-point,
+    /// launch fallback), or the selected conversation is archived where it stands (§8's
+    /// `/archive` and the context menu, which change no selection at all). A selected row nobody
+    /// can see is the hazard the same-list design exists to dissolve, so both have to open it.
+    ///
+    /// It is an expand, not a pin: toggling the disclosure triangle does not move the selection
+    /// and does not archive anything, so it changes nothing this rule reads and an explicit
+    /// collapse sticks until the next genuine trigger. Pulled out of the view so the rule is
     /// testable; the `onChange` that applies it is not.
     static func archivedGroupExpansion(current: Bool, archived: [Conversation],
-                                       previous: UUID?, selection: UUID?) -> Bool {
-        guard selection != previous else { return current }
-        return current || archived.contains { $0.id == selection }
+                                       previousArchivedSelection: UUID?, selection: UUID?) -> Bool {
+        guard let selection, selection != previousArchivedSelection,
+              archived.contains(where: { $0.id == selection }) else { return current }
+        return true
     }
 
     @State private var showSetupWizard = false
@@ -57,6 +63,16 @@ struct ChatView: View {
         state.conversations.filter { !$0.isSubagent && $0.isArchived }
     }
 
+    /// The selected conversation's id, but only while that conversation is archived — nil
+    /// otherwise. The single value `archivedGroupExpansion` keys on: it changes when the
+    /// selection moves into the group *and* when the selected conversation is archived in place,
+    /// and not when the user works the disclosure triangle.
+    private var archivedSelection: UUID? {
+        guard let id = state.selectedConversationId,
+              archivedConversations.contains(where: { $0.id == id }) else { return nil }
+        return id
+    }
+
     var body: some View {
         NavigationSplitView {
             VStack {
@@ -71,9 +87,9 @@ struct ChatView: View {
 
                         let archived = archivedConversations
                         if !archived.isEmpty {
-                            // A plain binding: the auto-expand is applied by the selection
-                            // `onChange` below, not by the getter, so a collapse is never
-                            // undone on the next render (#182 §9).
+                            // A plain binding: the auto-expand is applied by the
+                            // `archivedSelection` `onChange` below, not by the getter, so a
+                            // collapse is never undone on the next render (#182 §9).
                             DisclosureGroup(isExpanded: $archivedExpanded) {
                                 ForEach(archived) { conv in
                                     conversationRow(conv)
@@ -141,16 +157,19 @@ struct ChatView: View {
                 // Attached to the List rather than the group: the group only exists while
                 // something is archived, and the selection can land in it in the same pass that
                 // creates it. `onAppear` covers launch, where the restored selection never
-                // "changes" (#182 §9).
+                // "changes" (#182 §9). Watching `archivedSelection` rather than the selection
+                // alone is what catches archiving the conversation you are looking at, which
+                // moves no selection and would otherwise leave you on a row inside a collapsed
+                // group.
                 .onAppear {
                     archivedExpanded = Self.archivedGroupExpansion(
                         current: archivedExpanded, archived: archivedConversations,
-                        previous: nil, selection: state.selectedConversationId)
+                        previousArchivedSelection: nil, selection: state.selectedConversationId)
                 }
-                .onChange(of: state.selectedConversationId) { old, new in
+                .onChange(of: archivedSelection) { old, _ in
                     archivedExpanded = Self.archivedGroupExpansion(
                         current: archivedExpanded, archived: archivedConversations,
-                        previous: old, selection: new)
+                        previousArchivedSelection: old, selection: state.selectedConversationId)
                 }
                 .searchable(text: $sidebarQuery, placement: .sidebar, prompt: "Search conversations")
                 .task(id: sidebarQuery) {

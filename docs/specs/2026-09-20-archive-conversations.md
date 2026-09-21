@@ -209,9 +209,19 @@ header**, not repeated on every hit row — the user needs to know where clickin
 
 **After the query clears**, the revealed conversation is selected but, if archived, sits inside a
 collapsed group — a selected row the user cannot see, which is the residue of the hazard §5
-dissolves. So: **the Archived disclosure group auto-expands whenever the selected conversation is
-archived.** That is the whole of the "expand to show you this" behaviour — driven by selection,
-not by search, so it covers the launch fallback (§5) and a delete re-point equally.
+dissolves. So: **the Archived disclosure group auto-expands when the selected conversation
+*becomes* archived** — either because the selection moved onto an archived row, or because the
+conversation the user is already on was archived where it stands (§6's `/archive` and context
+menu, which move no selection at all). That is the whole of the "expand to show you this"
+behaviour — driven by selection and archive state, not by search, so it covers the launch fallback
+(§5) and a delete re-point equally.
+
+It is an **auto-expand, not a pin**: the disclosure triangle is a plain binding, and neither
+opening nor closing it changes the selection or archives anything, so an explicit collapse holds
+until the next time the selected conversation becomes archived. Archiving some *other*
+conversation, or un-archiving the selected one, is not such an event and leaves the group as the
+user left it. Pinning it open instead would make the triangle visibly inert while an archived row
+stayed selected.
 
 ### 9.1 Ordering and the context menu
 
@@ -263,9 +273,12 @@ only describe what it adds.
   (it passes an explicit id, where the watcher passes none).
 - **An arrival un-archive does not move selection**, and its system line names the un-archive
   (§6.2).
-- **The Archived group auto-expands when the selected conversation is archived** (§9) — the one
-  genuinely new UI rule, and the thing that keeps a selected row from being invisible after a
-  search reveal or the launch fallback.
+- **The Archived group auto-expands when the selected conversation becomes archived** (§9) — the
+  one genuinely new UI rule, and the thing that keeps a selected row from being invisible after a
+  search reveal or the launch fallback. Both triggers asserted: the selection moving onto an
+  archived row, and the selected conversation being archived in place. Plus the other side of the
+  same rule — an explicit collapse survives the selection staying put, another conversation being
+  archived, and the selected one being un-archived.
 - **Launch selection prefers the last non-archived conversation**, and falls back to an archived one
   only when no active conversation exists (§5). Both halves asserted — the fallback is what makes
   the preference meaningful.
