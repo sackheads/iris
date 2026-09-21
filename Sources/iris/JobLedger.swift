@@ -5,7 +5,8 @@ import os
 /// Jobs' half of the agency ledger (#187 deliverable 1): the `jobs` table, read and written
 /// through the conversation store's own writer so a job and the conversation it produces commit
 /// against one database. Scalar `Job` fields are columns — the scheduler queries `enabled` and
-/// `nextFireAt` directly — while `trigger`, the one open-ended field, is stored as JSON.
+/// `nextFireAt` directly — while the two open-ended fields, `trigger` and `policy`, are stored as
+/// JSON.
 ///
 /// Reads are deliberately lenient: a row whose `trigger` JSON no longer decodes (a kind written by
 /// a newer build, a hand-edited row) is skipped rather than failing the whole listing, so one bad
@@ -32,12 +33,14 @@ final class JobLedger: Sendable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let triggerJSON = String(decoding: try encoder.encode(job.trigger), as: UTF8.self)
+        let policyJSON = String(decoding: try encoder.encode(job.policy), as: UTF8.self)
         try writer.write { db in
             try db.execute(sql: """
                 INSERT INTO jobs (
                     id, name, prompt, triggerKind, trigger, profile, destinationConversationId,
-                    createdInConversationId, createdAt, enabled, nextFireAt, lastRunAt, pausedReason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    createdInConversationId, createdAt, enabled, nextFireAt, lastRunAt, pausedReason,
+                    policy, retryAttempt, queuedFire)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     prompt = excluded.prompt,
@@ -50,12 +53,16 @@ final class JobLedger: Sendable {
                     enabled = excluded.enabled,
                     nextFireAt = excluded.nextFireAt,
                     lastRunAt = excluded.lastRunAt,
-                    pausedReason = excluded.pausedReason
+                    pausedReason = excluded.pausedReason,
+                    policy = excluded.policy,
+                    retryAttempt = excluded.retryAttempt,
+                    queuedFire = excluded.queuedFire
                 """, arguments: [
                     job.id.uuidString, job.name, job.prompt, job.trigger.kind, triggerJSON,
                     job.profile.rawValue, job.destinationConversationId?.uuidString,
                     job.createdInConversationId?.uuidString, job.createdAt, job.enabled,
                     job.nextFireAt, job.lastRunAt, job.pausedReason,
+                    policyJSON, job.retryAttempt, job.queuedFire,
                 ])
         }
     }
@@ -85,6 +92,28 @@ final class JobLedger: Sendable {
         try writer.write { db in
             try db.execute(sql: "UPDATE jobs SET pausedReason = ? WHERE id = ?",
                            arguments: [reason, jobId.uuidString])
+            guard db.changesCount > 0 else { throw JobLedgerError.unknownJob(jobId) }
+        }
+    }
+
+    /// Records where a job is on the retry ladder and when the next attempt is due. One statement
+    /// so a crash cannot leave an attempt counted with no fire scheduled, or the reverse. Throws
+    /// `JobLedgerError.unknownJob` for an id that is not in the table.
+    func setRetry(jobId: UUID, attempt: Int, nextFireAt: Date?) throws {
+        try writer.write { db in
+            try db.execute(sql: "UPDATE jobs SET retryAttempt = ?, nextFireAt = ? WHERE id = ?",
+                           arguments: [attempt, nextFireAt, jobId.uuidString])
+            guard db.changesCount > 0 else { throw JobLedgerError.unknownJob(jobId) }
+        }
+    }
+
+    /// Remembers (or forgets, with `nil`) the one fire held back while this job's previous run was
+    /// still going — `policy.overlap == .queue`. Throws `JobLedgerError.unknownJob` for an id that
+    /// is not in the table.
+    func setQueuedFire(jobId: UUID, at: Date?) throws {
+        try writer.write { db in
+            try db.execute(sql: "UPDATE jobs SET queuedFire = ? WHERE id = ?",
+                           arguments: [at, jobId.uuidString])
             guard db.changesCount > 0 else { throw JobLedgerError.unknownJob(jobId) }
         }
     }
@@ -147,7 +176,20 @@ final class JobLedger: Sendable {
             enabled: try r.read("enabled", Bool.self) ?? true,
             nextFireAt: try r.read("nextFireAt", Date.self),
             lastRunAt: try r.read("lastRunAt", Date.self),
-            pausedReason: try r.read("pausedReason", String.self))
+            pausedReason: try r.read("pausedReason", String.self),
+            policy: Self.policy(from: try r.read("policy", String.self)),
+            retryAttempt: try r.read("retryAttempt", Int.self) ?? 0,
+            queuedFire: try r.read("queuedFire", Date.self))
+    }
+
+    /// A NULL column, and equally a policy this build cannot parse, reads as the default policy —
+    /// never as an unreadable row. Unlike `trigger`, a policy does not decide whether the job runs
+    /// at all, only what it is allowed to spend, and the defaults are the conservative answer.
+    private static func policy(from json: String?) -> JobPolicy {
+        guard let json, let decoded = try? JSONDecoder().decode(JobPolicy.self, from: Data(json.utf8)) else {
+            return JobPolicy()
+        }
+        return decoded
     }
 }
 
@@ -166,19 +208,22 @@ extension JobLedger {
     /// Records a run that has just started. The `jobId` foreign key means a run cannot outlive its
     /// job: deleting the job cascades its runs away.
     func begin(run: JobRun) throws {
+        let blockedCallJSON = try run.blockedCall.map { try Self.encodeBlockedCall($0) }
         try writer.write { db in
             try db.execute(sql: """
                 INSERT INTO job_runs (
                     id, jobId, jobName, triggerKind, startedAt, finishedAt, status, outcome,
                     failureReason, blockedTool, promptTokens, candidateTokens, totalTokens,
-                    costMicros, gateSignal, transcriptConversationId, acknowledgedAt)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    costMicros, gateSignal, transcriptConversationId, acknowledgedAt,
+                    blockedCall, approvedAt, parentRunId)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     run.id.uuidString, run.jobId.uuidString, run.jobName, run.triggerKind,
                     run.startedAt, run.finishedAt, run.status.rawValue, run.outcome,
                     run.failureReason, run.blockedTool, run.promptTokens, run.candidateTokens,
                     run.totalTokens, run.costMicros, run.gateSignal,
                     run.transcriptConversationId?.uuidString, run.acknowledgedAt,
+                    blockedCallJSON, run.approvedAt, run.parentRunId?.uuidString,
                 ])
         }
     }
@@ -215,6 +260,47 @@ extension JobLedger {
                            arguments: [at, runId.uuidString])
             guard db.changesCount > 0 else { throw JobLedgerError.unknownRun(runId) }
         }
+    }
+
+    /// Persists (or clears, with `nil`) the exact call this run failed closed on, so the card can
+    /// show every argument and "Approve and run" can dispatch it. Throws
+    /// `JobLedgerError.unknownRun` for an id that is not in the table.
+    func setBlockedCall(runId: UUID, _ call: BlockedCall?) throws {
+        let json = try call.map { try Self.encodeBlockedCall($0) }
+        try writer.write { db in
+            try db.execute(sql: "UPDATE job_runs SET blockedCall = ? WHERE id = ?",
+                           arguments: [json, runId.uuidString])
+            guard db.changesCount > 0 else { throw JobLedgerError.unknownRun(runId) }
+        }
+    }
+
+    /// Claims this run's blocked call for exactly one dispatch. `true` means the caller won the
+    /// claim and owns running the call; `false` means it was already approved (or the row is gone).
+    /// The `approvedAt IS NULL` guard is in the `UPDATE` itself rather than a read-then-write, so
+    /// two clicks on the same card — or two processes — cannot both see it unapproved and run the
+    /// call twice.
+    func markApproved(runId: UUID, at: Date) throws -> Bool {
+        try writer.write { db in
+            try db.execute(sql: "UPDATE job_runs SET approvedAt = ? WHERE id = ? AND approvedAt IS NULL",
+                           arguments: [at, runId.uuidString])
+            return db.changesCount > 0
+        }
+    }
+
+    /// Records what this run's gate saw, for the next run to compare against. Throws
+    /// `JobLedgerError.unknownRun` for an id that is not in the table.
+    func setGateSignal(runId: UUID, _ signal: String?) throws {
+        try writer.write { db in
+            try db.execute(sql: "UPDATE job_runs SET gateSignal = ? WHERE id = ?",
+                           arguments: [signal, runId.uuidString])
+            guard db.changesCount > 0 else { throw JobLedgerError.unknownRun(runId) }
+        }
+    }
+
+    private static func encodeBlockedCall(_ call: BlockedCall) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return String(decoding: try encoder.encode(call), as: UTF8.self)
     }
 
     /// Closes out every run still marked `running` — at launch, those are runs the last process
@@ -304,6 +390,61 @@ extension JobLedger {
             arguments: [JobRun.Status.failed.rawValue, JobRun.Status.blockedOnApproval.rawValue])
     }
 
+    /// How many of this job's runs started at or after `since` — the breaker's question, asked
+    /// with `since = now - 1h`. Inclusive at the boundary, like `dueJobs`.
+    func runsStarted(jobId: UUID, since: Date) throws -> Int {
+        try writer.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM job_runs WHERE jobId = ? AND startedAt >= ?",
+                             arguments: [jobId.uuidString, since]) ?? 0
+        }
+    }
+
+    /// The tokens spent on runs that *started* during the local calendar day containing `now`, for
+    /// one job or (with `jobId: nil`) every job — the per-job and global daily budgets, spec §10.
+    /// The day is `calendar`'s, so the boundary is the user's local midnight and a caller can pin
+    /// the zone in a test.
+    ///
+    /// Attributed by start, not by finish: a run that began before midnight and ended after it
+    /// belongs to the day it was admitted on, which is the day whose budget let it start.
+    func tokensToday(jobId: UUID?, calendar: Calendar, now: Date) throws -> Int {
+        let dayStart = calendar.startOfDay(for: now)
+        guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return 0 }
+        return try writer.read { db in
+            if let jobId {
+                return try Int.fetchOne(db, sql: """
+                    SELECT COALESCE(SUM(totalTokens), 0) FROM job_runs
+                    WHERE jobId = ? AND startedAt >= ? AND startedAt < ?
+                    """, arguments: [jobId.uuidString, dayStart, dayEnd]) ?? 0
+            }
+            return try Int.fetchOne(db, sql: """
+                SELECT COALESCE(SUM(totalTokens), 0) FROM job_runs
+                WHERE startedAt >= ? AND startedAt < ?
+                """, arguments: [dayStart, dayEnd]) ?? 0
+        }
+    }
+
+    /// Both of a job's live figures in one call — what `/jobs` and `list_jobs` print beside the
+    /// budgets, and what a budget or breaker pause card names (spec §9). Nothing but the two
+    /// queries above: the numbers a person reads are the same ones admission decides on, rather
+    /// than a second, drifting accounting.
+    func usage(jobId: UUID, now: Date, calendar: Calendar) throws -> JobUsage {
+        JobUsage(tokensToday: try tokensToday(jobId: jobId, calendar: calendar, now: now),
+                 runsLastHour: try runsStarted(jobId: jobId, since: now.addingTimeInterval(-3600)))
+    }
+
+    /// The newest gate signal this job recorded, or `nil` if it has never recorded one. Rows with
+    /// no signal are skipped rather than answering `nil`: a gate that errored or a run that
+    /// predates the gate writes nothing, and the question being asked is "what did we last see?",
+    /// which such a row does not answer.
+    func lastGateSignal(jobId: UUID) throws -> String? {
+        try writer.read { db in
+            try String.fetchOne(db, sql: """
+                SELECT gateSignal FROM job_runs WHERE jobId = ? AND gateSignal IS NOT NULL
+                ORDER BY startedAt DESC, rowid DESC LIMIT 1
+                """, arguments: [jobId.uuidString])
+        }
+    }
+
     private func decodeRuns(sql: String, arguments: StatementArguments) throws -> [JobRun] {
         let rows = try writer.read { db in try Row.fetchAll(db, sql: sql, arguments: arguments) }
         return Self.decodeRuns(rows)
@@ -346,6 +487,15 @@ extension JobLedger {
         run.costMicros = try r.read("costMicros", Int64.self)
         run.gateSignal = try r.read("gateSignal", String.self)
         run.acknowledgedAt = try r.read("acknowledgedAt", Date.self)
+        // A blocked call that will not decode reads as absent, never as a reason to skip the row:
+        // the run itself — that it happened, that it was blocked, what it cost — is the part a
+        // person needs, and hiding it would hide the notification too. The card then shows a
+        // blocked run it cannot offer an "Approve and run" for, which is the safe direction.
+        if let json = try r.read("blockedCall", String.self) {
+            run.blockedCall = try? JSONDecoder().decode(BlockedCall.self, from: Data(json.utf8))
+        }
+        run.approvedAt = try r.read("approvedAt", Date.self)
+        run.parentRunId = try r.uuid("parentRunId")
         return run
     }
 
@@ -478,6 +628,13 @@ private struct RowReader {
         }
         return id
     }
+}
+
+/// What one job has spent and how hard it has been running (#187 deliverable 3, spec §9): the two
+/// figures admission decides on, and the same two `/jobs` and `list_jobs` print.
+struct JobUsage: Equatable, Sendable {
+    let tokensToday: Int
+    let runsLastHour: Int
 }
 
 enum JobLedgerError: Error, Equatable {

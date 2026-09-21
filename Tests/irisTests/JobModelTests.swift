@@ -10,7 +10,8 @@ struct JobModelTests {
             .schedule(.cron(CronSchedule(expression: "0 9 * * 1-5", timeZone: "America/Los_Angeles"))),
             .schedule(.interval(seconds: 90)),
             .fsEvent(FSWatch(path: "/tmp/x", quietWindowSeconds: 3)),
-            .poll(PollSpec(schedule: .interval(seconds: 300), gate: "curl -sI https://example.com")),
+            .poll(PollSpec(schedule: .interval(seconds: 300),
+                           gate: .script(command: "curl -sI https://example.com", mounts: [], timeoutSeconds: 60))),
         ]
         for t in triggers {
             let data = try JSONEncoder().encode(t)

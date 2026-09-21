@@ -30,24 +30,103 @@ struct FSWatch: Codable, Equatable, Sendable {
     }
 }
 
-/// A polled trigger: on `schedule`'s cadence, runs `gate` (a shell command) and only fires the job
-/// when it exits zero. Stored and scheduled on its cadence today, but nothing runs the gate and no
+/// The check that decides whether a polled job has anything to do (#187 deliverable 3, spec §7).
+/// The two built-ins run on the host with no model and no container and only read; a `script` gate
+/// is model-written code that runs in the `apple/container` VM with exactly the `mounts` it
+/// declared, read-only, under `timeoutSeconds`.
+///
+/// A script gate's verdict is a token on stdout's last line (`CHANGED`/`UNCHANGED`), never the exit
+/// code — `diff -q` and `grep -q` disagree about what zero means, so any exit-code convention makes
+/// a plausible gate fire every tick or never. Nothing evaluates a gate yet; this is the stored
+/// shape.
+enum Gate: Codable, Equatable, Sendable {
+    /// A HEAD request whose ETag, Last-Modified or Content-Length changed since the last signal.
+    case urlChanged(url: String)
+    /// A file's mtime or hash, or the newest mtime under a directory, changed since the last signal.
+    case pathChanged(path: String)
+    case script(command: String, mounts: [String], timeoutSeconds: Int)
+
+    private enum CodingKeys: String, CodingKey { case kind, url, path, command, mounts, timeoutSeconds }
+
+    var kind: String {
+        switch self {
+        case .urlChanged: return "urlChanged"
+        case .pathChanged: return "pathChanged"
+        case .script: return "script"
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(kind, forKey: .kind)
+        switch self {
+        case .urlChanged(let url):
+            try container.encode(url, forKey: .url)
+        case .pathChanged(let path):
+            try container.encode(path, forKey: .path)
+        case .script(let command, let mounts, let timeoutSeconds):
+            try container.encode(command, forKey: .command)
+            try container.encode(mounts, forKey: .mounts)
+            try container.encode(timeoutSeconds, forKey: .timeoutSeconds)
+        }
+    }
+
+    /// Throws on an unknown kind, like `Trigger` and `Schedule` and unlike `JobPolicy.CatchUp`: a
+    /// gate this build cannot evaluate must not be guessed at — guessing either fires an
+    /// unattended job that should have stayed quiet, or silences one that should have fired. The
+    /// job row is skipped and counted in `unreadableJobCount` instead.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decodeIfPresent(String.self, forKey: .kind) ?? "" {
+        case "urlChanged":
+            self = .urlChanged(url: try container.decode(String.self, forKey: .url))
+        case "pathChanged":
+            self = .pathChanged(path: try container.decode(String.self, forKey: .path))
+        case "script":
+            self = .script(
+                command: try container.decode(String.self, forKey: .command),
+                mounts: try container.decodeIfPresent([String].self, forKey: .mounts) ?? [],
+                timeoutSeconds: try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
+                    ?? PollSpec.legacyGateTimeoutSeconds)
+        case let other:
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath, debugDescription: "unknown gate kind '\(other)'"))
+        }
+    }
+}
+
+/// A polled trigger: on `schedule`'s cadence, evaluates `gate` and only fires the job when it says
+/// something changed. Stored and scheduled on its cadence today, but nothing runs the gate and no
 /// tool creates one: polls are not creatable until deliverable 3 (gates).
 struct PollSpec: Codable, Equatable, Sendable {
     var schedule: Schedule
-    var gate: String
+    var gate: Gate
 
-    init(schedule: Schedule, gate: String) {
+    /// What a gate written before `Gate` existed gets: deliverable 1 stored the gate as a bare
+    /// shell-command string with no mounts and no timeout of its own.
+    static let legacyGateTimeoutSeconds = 60
+
+    init(schedule: Schedule, gate: Gate) {
         self.schedule = schedule
         self.gate = gate
     }
 
     private enum CodingKeys: String, CodingKey { case schedule, gate }
 
+    /// `gate` was a `String` in deliverable 1 (spec §7). A stored row still holding one decodes as
+    /// the script gate it always meant, with no mounts and the legacy timeout — the job keeps its
+    /// cadence rather than becoming an unreadable row.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         schedule = try container.decode(Schedule.self, forKey: .schedule)
-        gate = try container.decodeIfPresent(String.self, forKey: .gate) ?? ""
+        if let legacy = try? container.decode(String.self, forKey: .gate) {
+            gate = .script(command: legacy, mounts: [], timeoutSeconds: Self.legacyGateTimeoutSeconds)
+        } else {
+            // An absent gate was legal in deliverable 1 (it decoded to ""); keep it legal, as the
+            // same empty script gate, rather than dropping the job.
+            gate = try container.decodeIfPresent(Gate.self, forKey: .gate)
+                ?? .script(command: "", mounts: [], timeoutSeconds: Self.legacyGateTimeoutSeconds)
+        }
     }
 }
 
@@ -194,6 +273,15 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
     var nextFireAt: Date?
     var lastRunAt: Date?
     var pausedReason: String?
+    /// What this job may spend and how it behaves around overlap, sleep and failure (#187
+    /// deliverable 3). One JSON column; a NULL one reads back as `JobPolicy()`.
+    var policy: JobPolicy
+    /// How many consecutive failures this job has retried through. 0 is "not retrying"; a
+    /// completed run resets it, and the fourth failure pauses the job instead of incrementing.
+    var retryAttempt: Int
+    /// `policy.overlap == .queue` only: the one fire that came due while the previous run was
+    /// still going, taken when it finishes. Never more than one.
+    var queuedFire: Date?
 
     init(
         id: UUID = UUID(),
@@ -207,7 +295,10 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
         enabled: Bool = true,
         nextFireAt: Date? = nil,
         lastRunAt: Date? = nil,
-        pausedReason: String? = nil
+        pausedReason: String? = nil,
+        policy: JobPolicy = JobPolicy(),
+        retryAttempt: Int = 0,
+        queuedFire: Date? = nil
     ) {
         self.id = id
         self.name = name
@@ -221,12 +312,16 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
         self.nextFireAt = nextFireAt
         self.lastRunAt = lastRunAt
         self.pausedReason = pausedReason
+        self.policy = policy
+        self.retryAttempt = retryAttempt
+        self.queuedFire = queuedFire
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, prompt, trigger, profile
         case destinationConversationId, createdInConversationId, createdAt
         case enabled, nextFireAt, lastRunAt, pausedReason
+        case policy, retryAttempt, queuedFire
     }
 
     init(from decoder: Decoder) throws {
@@ -243,6 +338,10 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
         nextFireAt = try container.decodeIfPresent(Date.self, forKey: .nextFireAt)
         lastRunAt = try container.decodeIfPresent(Date.self, forKey: .lastRunAt)
         pausedReason = try container.decodeIfPresent(String.self, forKey: .pausedReason)
+        // Invariant 1: every job written before deliverable 3 lacks all three keys.
+        policy = try container.decodeIfPresent(JobPolicy.self, forKey: .policy) ?? JobPolicy()
+        retryAttempt = try container.decodeIfPresent(Int.self, forKey: .retryAttempt) ?? 0
+        queuedFire = try container.decodeIfPresent(Date.self, forKey: .queuedFire)
     }
 
     /// Derives a short identifier from a job's prompt for use where a display name is needed but

@@ -395,6 +395,27 @@ final class ConversationStore: Sendable {
                 t.add(column: "isPinned", .boolean)
             }
         }
+        // #187 deliverable 3: one additive migration for every column the runtime needs (spec
+        // ruling 6). `jobs.policy` is JSON like `trigger` is — the policy fields are read together
+        // and the set of them will grow; NULL reads back as the default policy. The `job_runs`
+        // columns carry the persisted blocked call and its one-shot approval, and `jobProfile` is
+        // what a background conversation's turn narrows its tool surface by. All nullable except
+        // `retryAttempt`, which SQLite needs a default for to add NOT NULL in place.
+        m.registerMigration("v10_job_policy") { db in
+            try db.alter(table: "jobs") { t in
+                t.add(column: "policy", .text)
+                t.add(column: "retryAttempt", .integer).notNull().defaults(to: 0)
+                t.add(column: "queuedFire", .datetime)
+            }
+            try db.alter(table: "job_runs") { t in
+                t.add(column: "blockedCall", .text)
+                t.add(column: "approvedAt", .datetime)
+                t.add(column: "parentRunId", .text)
+            }
+            try db.alter(table: "conversations") { t in
+                t.add(column: "jobProfile", .text)
+            }
+        }
         return m
     }
 
@@ -610,24 +631,24 @@ final class ConversationStore: Sendable {
                     messageCountSinceReflection = ?, goalIterationCount = ?, mainAgentSandbox = ?,
                     tokenUsage = ?, goalContract = ?, subagentResult = ?, checkpointHistory = ?,
                     lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?,
-                    isBackground = ?, isPinned = ?, sessionCard = ?
+                    isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  history, evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
-                                 c.id.uuidString])
+                                 c.jobProfile?.rawValue, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
                 INSERT INTO conversations (id, position, title, createdAt, updatedAt, workspacePath, activeGoal,
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
-                    isBackground, isPinned, sessionCard)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    isBackground, isPinned, sessionCard, jobProfile)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
-                                 c.isBackground, c.isPinned, card])
+                                 c.isBackground, c.isPinned, card, c.jobProfile?.rawValue])
         }
     }
 
@@ -875,6 +896,18 @@ final class ConversationStore: Sendable {
                 case .unconvertible:
                     print("WARNING: unreadable isPinned for conversation \(id); defaulting to unpinned")
                     c.isPinned = false
+                }
+
+                // #187 deliverable 3 — same policy as the flags above: a profile this build does
+                // not recognize degrades to nil (not a job run, no narrowing) with a warning,
+                // rather than costing the user the conversation. The tool surface a stamped
+                // profile narrows is decided per turn, and a turn with no profile is the ordinary
+                // foreground one.
+                if let text = Self.readText(row, "jobProfile") {
+                    c.jobProfile = JobProfile(rawValue: text)
+                    if c.jobProfile == nil {
+                        print("WARNING: unreadable jobProfile '\(text)' for conversation \(id); ignoring")
+                    }
                 }
 
                 // #185 -- surfaced, not just written: `updatedAt` has been a store column since v1

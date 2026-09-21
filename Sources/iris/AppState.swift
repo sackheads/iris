@@ -92,6 +92,10 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// #187 — sorted to the top of the sidebar and refused by `/clear`. The "Iris Activity"
     /// conversation event cards are delivered to is the first user of this.
     var isPinned: Bool = false
+    /// #187 deliverable 3 — the profile of the job whose run this background conversation holds.
+    /// The runner stamps it when it opens the conversation; the engine's tool-list builder reads it
+    /// to narrow a `readOnly` run's tool surface. `nil` on every conversation that is not a job run.
+    var jobProfile: JobProfile?
     var goalContract: GoalContract? = nil
     var lastGoalCompletionReport: JSONValue? = nil
     var lastGoalEvaluation: GoalEvaluation? = nil
@@ -125,7 +129,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -145,6 +149,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         // keys, and a throw here would fail the whole decode.
         isBackground = try container.decodeIfPresent(Bool.self, forKey: .isBackground) ?? false
         isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+        // Same invariant 1, and absent is the meaningful value: not a job run.
+        jobProfile = try container.decodeIfPresent(JobProfile.self, forKey: .jobProfile)
         goalContract = try container.decodeIfPresent(GoalContract.self, forKey: .goalContract)
         lastGoalCompletionReport = try container.decodeIfPresent(JSONValue.self, forKey: .lastGoalCompletionReport)
         lastGoalEvaluation = try container.decodeIfPresent(GoalEvaluation.self, forKey: .lastGoalEvaluation)
