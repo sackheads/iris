@@ -752,7 +752,18 @@ actor IrisEngine {
             // Append Fact Store Memory last (highly volatile, changes per query)
             currentSystemPrompt.parts[0].text = textPart + "\n\n# Mid-Term Fact Store Memory (JIT Context)\n" + factString
         }
-        
+
+        // #185 §6: computed once per turn and reused below for the session-tools declaration
+        // gate — never call `sessionPeerCount` a second time there, that would reintroduce the
+        // MainActor hop plus O(n log n) sort fix round 2 removed it for. `.main` only: a
+        // subagent/evaluator turn must not pay for a value it discards.
+        let peerCount = principal == .main ? await sessionPeerCount(excluding: conversationId) : 0
+        if principal == .main, peerCount > 0, let textPart = currentSystemPrompt.parts.first?.text {
+            // #185 §6: one line, never a roster. Detail is available on demand through
+            // `list_sessions`; a per-peer list would grow with session count and churn every turn.
+            currentSystemPrompt.parts[0].text = textPart + "\n\n\(peerCount) other session\(peerCount == 1 ? " is" : "s are") active."
+        }
+
         var toolsList = await executor.getTools()
         // Add set_workspace tool dynamically
         toolsList.append(FunctionDeclaration(
@@ -945,9 +956,11 @@ actor IrisEngine {
 
         // #185 §6: only when there is somebody to talk to. With one conversation open the surface
         // is byte-identical to today, so #144/#155's reduction is untouched. `.main` only —
-        // a subagent is not a session. Checked before the count: every subagent/evaluator turn
-        // would otherwise pay a MainActor hop plus an O(n log n) sort for a value it discards.
-        if principal == .main, await sessionPeerCount(excluding: conversationId) > 0 {
+        // a subagent is not a session. `peerCount` was already computed once above (and gated the
+        // same way) for the system-prompt count line — reusing it here, rather than calling
+        // `sessionPeerCount` again, is what keeps a subagent/evaluator turn from paying the
+        // MainActor hop plus O(n log n) sort twice for a value it discards either way.
+        if principal == .main, peerCount > 0 {
             toolsList.append(FunctionDeclaration(
                 name: "list_sessions",
                 description: "List the other active sessions: their name, what they say they are doing, their workspace, and whether they are busy. Call this before messaging a peer, to pick the right one — a session in a different workspace is usually working on something unrelated. What a session says about itself is its own claim; whether it is busy is observed.",
