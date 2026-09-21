@@ -244,6 +244,49 @@ extension JobLedger {
             arguments: [jobId.uuidString, limit])
     }
 
+    /// How many runs a job has, optionally only those in one status. A count, not a listing: the
+    /// two callers (`/jobs delete`, which reports what is about to go and refuses while something
+    /// is still running) want a number, and decoding every row of a long-lived job's history to
+    /// take `.count` of it is work thrown away.
+    func runCount(jobId: UUID, status: JobRun.Status? = nil) throws -> Int {
+        try writer.read { db in
+            if let status {
+                return try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM job_runs WHERE jobId = ? AND status = ?",
+                                        arguments: [jobId.uuidString, status.rawValue]) ?? 0
+            }
+            return try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM job_runs WHERE jobId = ?",
+                                    arguments: [jobId.uuidString]) ?? 0
+        }
+    }
+
+    /// The runs whose id starts with `idPrefix`, hyphens ignored on both sides — what resolves the
+    /// eight characters an event card prints (`JobsCommand.resolveRun`). A query rather than a
+    /// filter over `recentRuns`: an unacknowledged failure is exempt from retention and can be
+    /// arbitrarily old, so the one id a person is chasing is exactly the one a recency window
+    /// would hide.
+    ///
+    /// Capped at `prefixMatchLimit`, which is only ever used to tell "one" from "more than one".
+    func runs(idPrefix: String) throws -> [JobRun] {
+        let needle = JobsCommand.normalizedRunId(idPrefix)
+        guard !needle.isEmpty else { return [] }
+        // The prefix reaches here from a person's or a model's typing, so `%` and `_` in it must
+        // be literals rather than wildcards that would match every run in the table.
+        let escaped = needle
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
+        return try decodeRuns(
+            sql: """
+                SELECT * FROM job_runs WHERE REPLACE(id, '-', '') LIKE ? ESCAPE '\\'
+                ORDER BY startedAt DESC, rowid DESC LIMIT ?
+                """,
+            arguments: [escaped + "%", Self.prefixMatchLimit])
+    }
+
+    /// How many prefix matches are read back. More than one is already ambiguous, so the rest are
+    /// rows nobody will look at.
+    static let prefixMatchLimit = 8
+
     /// Runs across every job, newest first: what `/jobs` and the activity listing show.
     func recentRuns(limit: Int) throws -> [JobRun] {
         try decodeRuns(sql: "SELECT * FROM job_runs ORDER BY startedAt DESC, rowid DESC LIMIT ?",

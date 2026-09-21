@@ -113,6 +113,67 @@ struct JobsCommandTests {
         #expect(JobsCommand.matchRun(UUID().uuidString, in: [run(j)]) == .none)
     }
 
+    @Test("hyphens are ignored on both sides, so a paste that lost them still matches")
+    func matchIgnoresHyphens() {
+        let j = job()
+        let a = run(j, id: UUID(uuidString: "1A2B3C4D-0000-0000-0000-000000000001")!)
+        #expect(JobsCommand.matchRun("1a2b3c4d0000", in: [a]) == .found(a.id))
+        #expect(JobsCommand.matchRun("1a2b3c4d000000000000000000000001", in: [a]) == .found(a.id))
+        #expect(JobsCommand.normalizedRunId(" 1A2B-3C4D ") == "1a2b3c4d")
+    }
+
+    // MARK: resolveRun — the shared, window-free lookup
+
+    @Test("a full id resolves by primary key, whatever else is in the table")
+    func resolveFullId() throws {
+        let store = try ConversationStore.inMemory()
+        let j = job()
+        try store.ledger.upsert(j)
+        let target = run(j, status: .running, startedAt: Date(timeIntervalSince1970: 1))
+        try store.ledger.begin(run: target)
+        #expect(try JobsCommand.resolveRun(target.id.uuidString, in: store.ledger) == .found(target.id))
+        #expect(try JobsCommand.resolveRun(UUID().uuidString, in: store.ledger) == .none)
+    }
+
+    /// An unacknowledged failure is exempt from retention, so it can be older than anything a
+    /// recency window would return — and it is exactly the run somebody needs to acknowledge. The
+    /// resolver reads by prefix instead, so how much has happened since cannot hide it.
+    @Test("a failure older than any recent-runs window is still resolvable and ackable")
+    func resolveBeyondAnyWindow() throws {
+        let store = try ConversationStore.inMemory()
+        let j = job()
+        try store.ledger.upsert(j)
+        let old = run(j, status: .running, startedAt: Date(timeIntervalSince1970: 1))
+        try store.ledger.begin(run: old)
+        try store.ledger.finish(runId: old.id, status: .failed, outcome: nil, failureReason: "boom",
+                                blockedTool: nil, tokens: TokenUsage(),
+                                finishedAt: Date(timeIntervalSince1970: 2))
+        // Comfortably past the 500-row window the first cut of this read used.
+        for i in 1...600 {
+            try store.ledger.begin(run: run(j, status: .completed,
+                                            startedAt: Date(timeIntervalSince1970: 1_000 + Double(i))))
+        }
+        #expect(try !store.ledger.recentRuns(limit: 500).contains { $0.id == old.id })
+
+        let prefix = String(old.id.uuidString.lowercased().prefix(8))
+        #expect(try JobsCommand.resolveRun(prefix, in: store.ledger) == .found(old.id))
+        #expect(try JobsCommand.resolveRun(old.id.uuidString, in: store.ledger) == .found(old.id))
+    }
+
+    @Test("a prefix that is too short, or that two runs share, resolves to nothing actionable")
+    func resolveShortAndAmbiguous() throws {
+        let store = try ConversationStore.inMemory()
+        let j = job()
+        try store.ledger.upsert(j)
+        let a = run(j, id: UUID(uuidString: "1A2B3C4D-0000-0000-0000-000000000001")!, status: .running)
+        let b = run(j, id: UUID(uuidString: "1A2B3C4D-0000-0000-0000-000000000002")!, status: .running)
+        for r in [a, b] { try store.ledger.begin(run: r) }
+
+        #expect(try JobsCommand.resolveRun("1a2b3c", in: store.ledger) == .none)
+        #expect(try JobsCommand.resolveRun("1a2b3c4d", in: store.ledger) == .ambiguous)
+        #expect(try JobsCommand.resolveRun(a.id.uuidString, in: store.ledger) == .found(a.id))
+    }
+
     // MARK: render
 
     @Test("no jobs says so")
@@ -149,6 +210,15 @@ struct JobsCommandTests {
         let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
                                      unreadableJobs: 0, now: now)
         #expect(out.contains("paused: no matching time in the next year"))
+    }
+
+    @Test("a disabled job says so rather than promising a fire")
+    func renderDisabled() {
+        let now = Date()
+        let j = job(nextFireAt: now.addingTimeInterval(60), enabled: false)
+        let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
+                                     unreadableJobs: 0, now: now)
+        #expect(out.contains("| pr-sweep | every 60 s | disabled | never |"))
     }
 
     @Test("a filesystem watch has no next fire")
@@ -305,6 +375,8 @@ struct JobsCommandTests {
         let ledger = app.store.ledger
         let r = run(j, status: .running)
         try ledger.begin(run: r)
+        try ledger.finish(runId: r.id, status: .completed, outcome: nil, failureReason: nil,
+                          blockedTool: nil, tokens: TokenUsage(), finishedAt: Date())
 
         app.sendMessage("/jobs delete pr-sweep")
 
@@ -312,6 +384,41 @@ struct JobsCommandTests {
         #expect(try ledger.run(id: r.id) == nil, "a run cannot outlive its job")
         #expect(output(app, id).contains("pr-sweep"))
         #expect(output(app, id).contains("1 run(s)"), "say how much evidence went with it")
+    }
+
+    /// Deleting the job under a run in flight cascades away the very row that run is about to
+    /// `finish`, which fails with `unknownRun` and tells the person nothing about the work they
+    /// interrupted. Refusing is the recoverable half: the run ends, or the next launch interrupts
+    /// it, and then the delete goes through.
+    @Test("/jobs delete refuses while a run is still in flight")
+    func deleteRefusedWhileRunning() throws {
+        let j = job()
+        let (app, id) = makeApp(with: [j])
+        let ledger = app.store.ledger
+        let inFlight = run(j, status: .running)
+        try ledger.begin(run: inFlight)
+
+        app.sendMessage("/jobs delete pr-sweep")
+
+        #expect(output(app, id).contains("'pr-sweep' is running; wait for it to finish or let it be interrupted at next launch."))
+        #expect(try ledger.job(named: "pr-sweep") != nil, "nothing was deleted")
+        #expect(try ledger.run(id: inFlight.id) != nil)
+    }
+
+    @Test("once that run has finished the same delete goes through")
+    func deleteAllowedAfterRunFinishes() throws {
+        let j = job()
+        let (app, id) = makeApp(with: [j])
+        let ledger = app.store.ledger
+        let r = run(j, status: .running)
+        try ledger.begin(run: r)
+        try ledger.finish(runId: r.id, status: .completed, outcome: "done", failureReason: nil,
+                          blockedTool: nil, tokens: TokenUsage(), finishedAt: Date())
+
+        app.sendMessage("/jobs delete pr-sweep")
+
+        #expect(try ledger.job(named: "pr-sweep") == nil)
+        #expect(output(app, id).contains("1 run(s)"))
     }
 
     @Test("deleting a job that is not there names it rather than reporting a deletion")

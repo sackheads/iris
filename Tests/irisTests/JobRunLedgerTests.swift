@@ -119,6 +119,65 @@ struct JobRunLedgerTests {
         #expect(try store.ledger.runs(jobId: a.id, limit: 100).count == 4)
     }
 
+    // MARK: runCount / runs(idPrefix:)
+
+    @Test("runCount counts one job's runs, and one status of them, without decoding a row")
+    func counts() throws {
+        let store = try ConversationStore.inMemory()
+        let a = try seedJob(store, "a")
+        let b = try seedJob(store, "b")
+        let running = makeRun(a, at: t0)
+        try store.ledger.begin(run: running)
+        try store.ledger.begin(run: makeRun(a, at: t0.addingTimeInterval(60)))
+        try store.ledger.begin(run: makeRun(b, at: t0.addingTimeInterval(120)))
+        try store.ledger.finish(runId: running.id, status: .completed, outcome: nil,
+                                failureReason: nil, blockedTool: nil, tokens: TokenUsage(),
+                                finishedAt: t0.addingTimeInterval(1))
+
+        #expect(try store.ledger.runCount(jobId: a.id) == 2)
+        #expect(try store.ledger.runCount(jobId: a.id, status: .running) == 1)
+        #expect(try store.ledger.runCount(jobId: a.id, status: .completed) == 1)
+        #expect(try store.ledger.runCount(jobId: a.id, status: .failed) == 0)
+        #expect(try store.ledger.runCount(jobId: UUID()) == 0)
+    }
+
+    /// The prefix read is what makes a run reachable by the eight characters a card prints, however
+    /// old it is — `recentRuns` would have to guess a window wide enough to contain it.
+    @Test("runs(idPrefix:) matches on a prefix, ignoring case and hyphens, and is capped")
+    func prefixLookup() throws {
+        let store = try ConversationStore.inMemory()
+        let job = try seedJob(store, "a")
+        func seed(_ id: String, at offset: Double) throws -> UUID {
+            let uuid = UUID(uuidString: id)!
+            var run = makeRun(job, at: t0.addingTimeInterval(offset))
+            run = JobRun(id: uuid, jobId: run.jobId, jobName: run.jobName,
+                         triggerKind: run.triggerKind, startedAt: run.startedAt)
+            try store.ledger.begin(run: run)
+            return uuid
+        }
+        let target = try seed("1A2B3C4D-0000-0000-0000-000000000001", at: 0)
+        _ = try seed("99999999-0000-0000-0000-000000000002", at: 60)
+
+        #expect(try store.ledger.runs(idPrefix: "1a2b3c4d").map(\.id) == [target])
+        #expect(try store.ledger.runs(idPrefix: "1A2B3C4D-0000").map(\.id) == [target])
+        #expect(try store.ledger.runs(idPrefix: "1a2b3c4d0000").map(\.id) == [target],
+                "a paste that lost its hyphens is the same id")
+        #expect(try store.ledger.runs(idPrefix: target.uuidString).map(\.id) == [target])
+        #expect(try store.ledger.runs(idPrefix: "abcdef01").isEmpty)
+        #expect(try store.ledger.runs(idPrefix: "").isEmpty)
+    }
+
+    /// `%` and `_` arrive from a person's typing. Treated as LIKE wildcards they would match every
+    /// run in the table, and a `/jobs ack %` would acknowledge whichever one came back first.
+    @Test("a LIKE wildcard in the prefix is a literal, not a match-everything")
+    func prefixWildcardsAreLiteral() throws {
+        let store = try ConversationStore.inMemory()
+        let job = try seedJob(store, "a")
+        try store.ledger.begin(run: makeRun(job, at: t0))
+        #expect(try store.ledger.runs(idPrefix: "%%%%%%%%").isEmpty)
+        #expect(try store.ledger.runs(idPrefix: "________").isEmpty)
+    }
+
     @Test("recentRuns is newest first across jobs")
     func recent() throws {
         let store = try ConversationStore.inMemory()

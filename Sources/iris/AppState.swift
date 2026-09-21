@@ -2622,7 +2622,7 @@ class AppState {
 
         case .ack(let runId):
             do {
-                switch JobsCommand.matchRun(runId, in: try ledger.recentRuns(limit: JobsCommand.runLookupLimit)) {
+                switch try JobsCommand.resolveRun(runId, in: ledger) {
                 case .none:
                     emitCommandOutput("No run matching '\(runId)'.", format: .markdown, to: convId)
                 case .ambiguous:
@@ -2642,13 +2642,21 @@ class AppState {
                     emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
                     return
                 }
+                // A run in flight is writing into rows this would delete under it: the runner
+                // would then fail its `finish` with `unknownRun`, and the person would have
+                // deleted a job without being told anything about the work that was happening.
+                // Refusing is recoverable in a way that is not — the run ends on its own, or the
+                // next launch interrupts it (`closeRunningRuns`).
+                guard try ledger.runCount(jobId: job.id, status: .running) == 0 else {
+                    emitCommandOutput("'\(job.name)' is running; wait for it to finish or let it be interrupted at next launch.",
+                                      format: .markdown, to: convId)
+                    return
+                }
                 // The runs go with the job (the `job_runs` foreign key cascades); their transcripts
                 // do not — those are ordinary conversations, and retention clears them on its own
                 // schedule rather than this command deleting a person's evidence out from under a
                 // card they are still reading.
-                // Unlimited, unlike the id lookup: this number is told to a person as what they
-                // are about to lose, so a capped read would quietly understate it.
-                let runCount = try ledger.runs(jobId: job.id, limit: Int.max).count
+                let runCount = try ledger.runCount(jobId: job.id)
                 try ledger.delete(jobId: job.id)
                 // A watch job's FSEvents stream would otherwise keep firing for a job that is gone.
                 Task { await WatcherManager.shared.reload() }

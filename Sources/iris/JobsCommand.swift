@@ -23,11 +23,6 @@ enum JobsCommand: Equatable {
     /// nobody has read.
     static let minimumRunIdPrefix = 8
 
-    /// How far back an id lookup reads. Runs age out on their own (retention, spec §10), so this
-    /// is a bound on a pathological table rather than a policy: a prefix that only matches
-    /// something older than the newest few hundred runs is not an id anybody is holding.
-    static let runLookupLimit = 500
-
     // MARK: Parsing
 
     /// `/jobs`, `/jobs ack <run id>`, `/jobs delete <name>`; anything else is `.usage`. A run id is
@@ -64,19 +59,44 @@ enum JobsCommand: Equatable {
         case found(UUID)
     }
 
-    /// Matches a full UUID or a unique prefix of at least `minimumRunIdPrefix` characters, ignoring
-    /// case and the hyphens' position (the query is compared against the id as written). A full id
-    /// is matched exactly first, so an id that is also the prefix of another is never ambiguous.
+    /// A run id as it is compared: lower-cased with the hyphens taken out, so an id copied from a
+    /// card (`1a2b3c4d`), from a log (`1A2B3C4D-0000-…`) and from a paste that lost its hyphens
+    /// (`1a2b3c4d0000`) are all the same id. The prefix length is counted in these characters.
+    static func normalizedRunId(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespaces).lowercased().replacingOccurrences(of: "-", with: "")
+    }
+
+    /// Matches a full UUID or a unique prefix of at least `minimumRunIdPrefix` characters against
+    /// candidates already in hand. A full id is matched exactly first, so an id that is also the
+    /// prefix of another is never ambiguous.
     static func matchRun(_ query: String, in runs: [JobRun]) -> RunMatch {
-        let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
+        let needle = normalizedRunId(query)
         guard !needle.isEmpty else { return .none }
-        if let exact = runs.first(where: { $0.id.uuidString.lowercased() == needle }) {
+        if let exact = runs.first(where: { normalizedRunId($0.id.uuidString) == needle }) {
             return .found(exact.id)
         }
         guard needle.count >= minimumRunIdPrefix else { return .none }
-        let hits = runs.filter { $0.id.uuidString.lowercased().hasPrefix(needle) }
+        let hits = runs.filter { normalizedRunId($0.id.uuidString).hasPrefix(needle) }
         if hits.isEmpty { return .none }
         return hits.count == 1 ? .found(hits[0].id) : .ambiguous
+    }
+
+    /// The one resolver `/jobs ack` and `get_job_run` share — the only part of this type that
+    /// touches the database, kept here so the two surfaces cannot drift on what an id means.
+    ///
+    /// A full UUID is a primary-key read: no window, no scan, so a run stays reachable by its own
+    /// id forever. A prefix is a prefix query (`runs(idPrefix:)`) rather than a filter over the
+    /// most recent N runs, because the run a person most needs to acknowledge — an unacknowledged
+    /// failure, exempt from retention — is precisely the one that can have aged out of any window.
+    static func resolveRun(_ query: String, in ledger: JobLedger) throws -> RunMatch {
+        let needle = normalizedRunId(query)
+        guard !needle.isEmpty else { return .none }
+        if let id = UUID(uuidString: query.trimmingCharacters(in: .whitespaces)),
+           try ledger.run(id: id) != nil {
+            return .found(id)
+        }
+        guard needle.count >= minimumRunIdPrefix else { return .none }
+        return matchRun(query, in: try ledger.runs(idPrefix: query))
     }
 
     // MARK: Rendering

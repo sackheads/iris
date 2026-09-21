@@ -1893,7 +1893,11 @@ actor IrisEngine {
                     for job in jobs {
                         lastStatuses[job.id] = try ledger.runs(jobId: job.id, limit: 1).first?.status.rawValue
                     }
-                    result = Self.jobsListJSON(jobs, lastStatuses: lastStatuses)
+                    // Read after `jobs()` — that call is what publishes the skipped-row count —
+                    // and reported, so the model's account of what is scheduled matches `/jobs`'s
+                    // rather than silently omitting the same rows.
+                    result = Self.jobsListJSON(jobs, lastStatuses: lastStatuses,
+                                               unreadableJobs: ledger.unreadableJobCount)
                 } catch {
                     result = "Could not read the jobs: \(error)."
                 }
@@ -1901,9 +1905,9 @@ actor IrisEngine {
                 let requested = functionCall.args["run_id"]?.stringValue ?? ""
                 do {
                     // The id a model has is usually the eight characters an event card printed, so
-                    // the same prefix matching `/jobs ack` uses applies here.
-                    let recent = try ledger.recentRuns(limit: JobsCommand.runLookupLimit)
-                    switch JobsCommand.matchRun(requested, in: recent) {
+                    // this is the same resolver `/jobs ack` uses — a full id by primary key, a
+                    // prefix by prefix query, neither bounded by a recency window.
+                    switch try JobsCommand.resolveRun(requested, in: ledger) {
                     case .none:
                         result = "No run with that id."
                     case .ambiguous:
@@ -1920,17 +1924,21 @@ actor IrisEngine {
                             else { return nil }
                             return String(last.content.prefix(Self.jobRunTranscriptExcerpt))
                         }
-                        // The one field here a model wrote. This branch returns directly, so it
-                        // never passes through `executeToolWithHooks`'s guard call — same reason
-                        // `search_memory` sanitizes inline.
-                        var message: String?
-                        if let raw {
-                            message = await InjectionGuard.sanitize(
-                                PromptInjectionGuard.sanitizeUntrustedInput(raw),
-                                contextTag: "tool_output_get_job_run", maxTier: .tier3_canary,
-                                protectionEnabled: protectionEnabled)
-                        }
-                        result = Self.jobRunJSON(run, lastAgentMessage: message)
+                        // Everything a model wrote goes through the guard. This branch returns
+                        // directly, so it never passes through `executeToolWithHooks`'s guard
+                        // call — same reason `search_memory` sanitizes inline. `outcome` and
+                        // `failureReason` are one-liners a previous run's model produced, so tier
+                        // 1's structural pass and the `<untrusted_context>` wrapper are the whole
+                        // of what they need; the transcript excerpt is long enough to be worth the
+                        // classifiers. (`jobName` is left verbatim: it is the handle the model must
+                        // quote back to `/jobs` and `list_jobs`, and it is rendered escaped
+                        // everywhere a person reads it.)
+                        let message = await guardedJobRunField(raw, maxTier: .tier3_canary)
+                        let outcome = await guardedJobRunField(run.outcome, maxTier: .tier1_structural)
+                        let failureReason = await guardedJobRunField(run.failureReason,
+                                                                     maxTier: .tier1_structural)
+                        result = Self.jobRunJSON(run, outcome: outcome, failureReason: failureReason,
+                                                 lastAgentMessage: message)
                     }
                 } catch {
                     result = "Could not read the run: \(error)."
@@ -2486,7 +2494,7 @@ extension IrisEngine {
         return [
             FunctionDeclaration(
                 name: "list_jobs",
-                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, and how the last run ended. Use it to answer what is scheduled, or to find the job behind a run you are being asked about.",
+                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, and how the last run ended, plus `unreadableJobs` — how many stored jobs could not be read at all. Use it to answer what is scheduled, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
                 parameters: Schema(type: "OBJECT", properties: [:], required: [])),
             FunctionDeclaration(
                 name: "get_job_run",
@@ -2497,10 +2505,13 @@ extension IrisEngine {
         ]
     }
 
-    /// `list_jobs`'s body: one object per job, in the ledger's order. JSON rather than prose
-    /// because the model's next move is usually `get_job_run`, and a name it has to re-derive from
-    /// a sentence is a name it can get wrong.
-    nonisolated static func jobsListJSON(_ jobs: [Job], lastStatuses: [UUID: String]) -> String {
+    /// `list_jobs`'s body: one object per job, in the ledger's order, wrapped with the count of
+    /// job rows the ledger could not decode. JSON rather than prose because the model's next move
+    /// is usually `get_job_run`, and a name it has to re-derive from a sentence is a name it can
+    /// get wrong; wrapped rather than a bare array so a model reading this cannot report "you have
+    /// two jobs" when `/jobs` says two jobs and a row it could not read.
+    nonisolated static func jobsListJSON(_ jobs: [Job], lastStatuses: [UUID: String],
+                                         unreadableJobs: Int) -> String {
         let iso = ISO8601DateFormatter()
         let rows: [[String: Any]] = jobs.map { job in
             [
@@ -2511,13 +2522,14 @@ extension IrisEngine {
                 "lastStatus": lastStatuses[job.id] ?? NSNull(),
             ]
         }
-        return jsonString(rows) ?? "[]"
+        return jsonString(["jobs": rows, "unreadableJobs": unreadableJobs]) ?? "{\"jobs\":[],\"unreadableJobs\":0}"
     }
 
     /// `get_job_run`'s body: every ledger column, plus the transcript's last agent message when
-    /// there still is a transcript. The message is the one field written by a model rather than by
-    /// the harness, so the caller hands it in already sanitized.
-    nonisolated static func jobRunJSON(_ run: JobRun, lastAgentMessage: String?) -> String {
+    /// there still is a transcript. `outcome`, `failureReason` and the message are the fields a
+    /// model wrote rather than the harness, so the caller hands all three in already guarded.
+    nonisolated static func jobRunJSON(_ run: JobRun, outcome: String?, failureReason: String?,
+                                       lastAgentMessage: String?) -> String {
         let iso = ISO8601DateFormatter()
         let row: [String: Any] = [
             "id": run.id.uuidString,
@@ -2527,8 +2539,8 @@ extension IrisEngine {
             "startedAt": iso.string(from: run.startedAt),
             "finishedAt": run.finishedAt.map { iso.string(from: $0) } ?? NSNull(),
             "status": run.status.rawValue,
-            "outcome": run.outcome ?? NSNull(),
-            "failureReason": run.failureReason ?? NSNull(),
+            "outcome": outcome ?? NSNull(),
+            "failureReason": failureReason ?? NSNull(),
             "blockedTool": run.blockedTool ?? NSNull(),
             "promptTokens": run.promptTokens,
             "candidateTokens": run.candidateTokens,
@@ -2540,6 +2552,16 @@ extension IrisEngine {
             "lastAgentMessage": lastAgentMessage ?? NSNull(),
         ]
         return jsonString(row) ?? "{}"
+    }
+
+    /// One model-written field of a run, guarded before it is put in front of another model:
+    /// normalized, then wrapped as `tool_output_get_job_run` at `maxTier`. `nil` and empty stay
+    /// `nil` — an absent field should read as absent, not as an empty untrusted wrapper.
+    func guardedJobRunField(_ raw: String?, maxTier: InjectionGuard.SanitizationTier) async -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        return await InjectionGuard.sanitize(PromptInjectionGuard.sanitizeUntrustedInput(raw),
+                                             contextTag: "tool_output_get_job_run", maxTier: maxTier,
+                                             protectionEnabled: protectionEnabled)
     }
 
     /// The first `jobRunTranscriptExcerpt` characters of a run transcript's last agent message —
