@@ -134,10 +134,11 @@ is read-only. Anyone who gives job runs a workspace has to come back to this par
 Declaration is only the cheap half. A call that reaches the dispatcher anyway — a stale
 declaration, a forged name — is refused there too, recorded as the whole call (name, arguments,
 working directory) on the run's ledger row, and the run finishes `blocked on approval` with a card
-naming the tool. The model is told the job is read-only and to report what it found rather than
-look for another way, and the turn ends on the first such refusal: no approval is coming and no
-other tool would do the same thing, so another model round could only spend the run's budget
-arriving at the same answer.
+naming the tool. The tool result the refusal writes into the transcript says the job is
+read-only and that no other tool will do it either — but the turn ends on the first such refusal
+before another model round can read it, which is the order that matters: no approval is coming and
+nothing else would do the same thing, so a further round could only spend the run's budget
+arriving at the same answer. The sentence is the record; the ending is the enforcement.
 
 A `mutating` job keeps the whole tool surface and always runs in the `apple/container` VM — that is
 what pays for the wider surface. "Always" is enforced twice: `schedule_job` refuses to create one

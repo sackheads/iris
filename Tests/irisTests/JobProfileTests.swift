@@ -120,10 +120,13 @@ struct JobProfileTests {
     /// each one was simply never named. Anything added to `readOnlyAllowed` from here on has to
     /// change this line, which is the point.
     ///
-    /// `run_command` is absent because a test process has `ENABLE_SANDBOXING` unset, so the
-    /// sandbox does not resolve and §0.2 denies it on the host; the two answers are pinned
-    /// directly in `runCommandDependsOnTheSandbox`. The Google read tools are absent because no
-    /// refresh token is configured, which is what gates their declaration at all.
+    /// The two exclusions are guarantees of the test environment, not luck, and must not be read
+    /// as fragility: `IrisDefaults` gives a test process its own suite, wiped at process start, so
+    /// `ENABLE_SANDBOXING` reads false whatever the developer's real config says and `run_command`
+    /// cannot resolve sandboxed (§0.2 then denies it); and `googleRefreshToken` comes through a
+    /// `KeychainManager` that is in-memory under tests, so the Google read tools are never
+    /// declared at all. Both are pinned directly elsewhere — `runCommandDependsOnTheSandbox` and
+    /// `allowlistMembership`.
     @Test("a read-only run is offered exactly the read-only surface, and nothing else")
     func readOnlyRunDeclaresExactlyTheAllowedSurface() async throws {
         let (store, app) = try state()
@@ -132,6 +135,10 @@ struct JobProfileTests {
 
         let names = Set(client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
         #expect(names == ["read_file", "search_web", "search_memory", "reflect"])
+        // The property behind the equality: whatever a future config change adds to the surface,
+        // every name on it has to be one the gate itself allows.
+        #expect(names.allSatisfy { !JobProfile.readOnlyDenies($0, sandboxedRunCommand: true,
+                                                              readOnlyMCPTools: []) })
     }
 
     @Test("a mutating run is sandboxed, stamped, and keeps the whole surface")
@@ -305,10 +312,71 @@ struct JobProfileTests {
         #expect(background.messages.contains { $0.content.contains(IrisEngine.budgetStopMarker) })
     }
 
+    @Test("two denied calls in one batch: the transcript and the row name the same one")
+    func oneStoryForABatchOfDenials() async throws {
+        let (store, app) = try state()
+        // Both refused, and the batch runs concurrently — so which one is recorded first is a
+        // race. Whatever it decides, the line that says why the turn stopped and the row the card
+        // is built from have to name the same call, or a person reading one against the other is
+        // told two different stories.
+        let client = FakeLLMClient(responses: [
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [
+                Part(functionCall: FunctionCall(name: "write_file",
+                                                args: ["path": .string("/tmp/a"), "content": .string("x")])),
+                Part(functionCall: FunctionCall(name: "create_skill",
+                                                args: ["name": .string("s"), "description": .string("d"),
+                                                       "body": .string("b")])),
+            ]))], usageMetadata: nil),
+            textResponse("never reached"),
+        ])
+        let job = self.job(name: "two-at-once")
+        try await fire(job, client: client, store: store, state: app)
+
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        let named = try #require(run.blockedTool)
+        #expect(["write_file", "create_skill"].contains(named))
+        #expect(run.blockedCall?.toolName == named)
+
+        let background = try #require(app.conversations.first { $0.isBackground })
+        let stop = try #require(background.messages.last { $0.content.contains(IrisEngine.budgetStopMarker) })
+        #expect(stop.content.contains("`\(named)`"))
+        // Both refusals are still in the transcript; it is the stop line that must be singular.
+        #expect(background.messages.filter { $0.content.hasPrefix("Not run:") }.count == 2)
+    }
+
     @Test("the model is told a read-only job cannot run the tool, not that a user said no")
     func profileRefusalSpeaksForItself() {
         #expect(IrisEngine.profileDeniedToolResult(tool: "write_file").contains("write_file"))
         #expect(IrisEngine.profileDeniedToolResult(tool: "write_file").contains("read-only"))
         #expect(!IrisEngine.profileDeniedToolResult(tool: "write_file").contains("User denied"))
+    }
+
+    // MARK: The predicate behind "always in the VM"
+
+    @Test("a mutating job needs the runtime AND the master switch, not either alone")
+    func mutatingJobCanRunNeedsBothHalves() {
+        // Both call sites inject this in tests, so the production predicate — the whole of the
+        // "always runs in the container" claim — is only exercised here. `enableSandboxing` off
+        // is the half a denylist-shaped fix missed: `SandboxPolicy.resolve` returns `.host` on it
+        // however the conversation is pinned.
+        let onName = "iris-jobprofile-on-\(UUID().uuidString)"
+        let offName = "iris-jobprofile-off-\(UUID().uuidString)"
+        let onStore = UserDefaults(suiteName: onName)!
+        let offStore = UserDefaults(suiteName: offName)!
+        defer {
+            for (name, store) in [(onName, onStore), (offName, offStore)] {
+                store.removePersistentDomain(forName: name)
+                IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
+            }
+        }
+        let on = ConfigManager(store: onStore)
+        on.enableSandboxing = true
+        let off = ConfigManager(store: offStore)
+        off.enableSandboxing = false
+
+        #expect(SandboxPolicy.mutatingJobCanRun(config: on, runtimeAvailable: true))
+        #expect(!SandboxPolicy.mutatingJobCanRun(config: on, runtimeAvailable: false))
+        #expect(!SandboxPolicy.mutatingJobCanRun(config: off, runtimeAvailable: true))
+        #expect(!SandboxPolicy.mutatingJobCanRun(config: off, runtimeAvailable: false))
     }
 }

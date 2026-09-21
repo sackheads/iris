@@ -315,15 +315,17 @@ extension JobLedger {
     ///
     /// A `.profile` blocked call is refused outright (R13): it was not refused for want of a human
     /// but because the job is `readOnly`, and re-dispatching it would reopen the profile gate
-    /// through the ledger. The refusal lives here rather than only in whatever UI offers the
-    /// button, so a second caller cannot get it wrong.
+    /// through the ledger. So is a stored call this build cannot read: "there is a blocked call
+    /// and I do not know what it is" is not a thing to approve, and the same direction is what
+    /// `ConversationStore` takes for an unreadable `jobProfile`. The refusal lives here rather
+    /// than only in whatever UI offers the button, so a second caller cannot get it wrong.
     func markApproved(runId: UUID, at: Date) throws -> Bool {
         try writer.write { db in
             let json = try String.fetchOne(db, sql: "SELECT blockedCall FROM job_runs WHERE id = ?",
                                            arguments: [runId.uuidString])
-            if let json, let call = try? JSONDecoder().decode(BlockedCall.self, from: Data(json.utf8)),
-               call.reason == .profile {
-                return false
+            if let json {
+                let call = try? JSONDecoder().decode(BlockedCall.self, from: Data(json.utf8))
+                guard let call, call.reason != .profile else { return false }
             }
             try db.execute(sql: "UPDATE job_runs SET approvedAt = ? WHERE id = ? AND approvedAt IS NULL",
                            arguments: [at, runId.uuidString])

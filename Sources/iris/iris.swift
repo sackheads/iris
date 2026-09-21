@@ -791,9 +791,12 @@ actor IrisEngine {
                        conversationId: conversationId)
     }
 
-    /// Why a read-only run's turn ended, as the transcript records it.
-    static func profileStopReason(tool: String) -> String {
-        "`\(tool)` is not available to this read-only job"
+    /// Why a run's turn ended, as the transcript records it — phrased from the very call the
+    /// ledger row and the card are built from, so the three agree on what stopped the run.
+    static func stopReason(for call: BlockedCall) -> String {
+        call.reason == .profile
+            ? "`\(call.toolName)` is not available to this read-only job"
+            : "`\(call.toolName)` needs an approval this run cannot get"
     }
 
     private var approvalOrigin: String {
@@ -1039,7 +1042,7 @@ actor IrisEngine {
         if !isUnattended {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; a job that was due while the app was asleep runs once on wake. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so. A job is read-only unless you say otherwise: a read-only fire can read, search and run sandboxed commands, but cannot write files, change skills, schedule work, message another session, delegate, or run a command on the host. Pass profile 'mutating' when the job must change something; those fires always run in the apple/container VM and need that runtime installed. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; a job that was due while the app was asleep runs once on wake. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, its own job records, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -1054,7 +1057,7 @@ actor IrisEngine {
                     "weekday": Schema(type: "INTEGER", description: "Cron weekday (1=Sunday, 2=Monday, ..., 7=Saturday)"),
                     "weekdays": Schema(type: "ARRAY", description: "Cron weekdays, 1=Sunday … 7=Saturday; e.g. [2,3,4,5,6] for Monday–Friday. Prefer this over five separate jobs.", items: Schema(type: "INTEGER")),
                     "intervalSeconds": Schema(type: "INTEGER", description: "Simple recurring interval in seconds (e.g. 3600 for every hour)"),
-                    "profile": Schema(type: "STRING", description: "'readOnly' (default) or 'mutating'. Use 'mutating' only when the job's work must change something; it runs sandboxed and is refused when the container runtime is not installed.")
+                    "profile": Schema(type: "STRING", description: "'readOnly' (default) or 'mutating'. Use 'mutating' only when the job's work must change something: it always runs in the container VM, needs the runtime installed and sandboxing switched on, and is re-checked at every fire.")
                 ],
                 required: ["prompt"]
             )
@@ -1367,7 +1370,7 @@ actor IrisEngine {
         
         // Nothing from a previous turn decides this one: a turn cancelled mid-batch could leave a
         // denial behind, and finding it here would end the next turn before it started.
-        profileDeniedThisTurn[conversationId] = nil
+        profileDeniedThisTurn.remove(conversationId)
 
         var modelRound = 0
         var turnFinished = false
@@ -1387,11 +1390,12 @@ actor IrisEngine {
             // model round can only produce the same refusal — until the run's token budget or its
             // deadline ends the turn instead, having spent the lot on one answer. End it here, on
             // the same no-further-model-call path a budget stop takes.
-            if let refused = takeProfileDenial(for: conversationId) {
+            if takeProfileDenial(for: conversationId),
+               let refused = await MainActor.run(body: { localState?.firstBackgroundDenial(for: conversationId) }) {
                 turnFinished = true
                 _ = await drainPendingInput(conversationId: conversationId, hooksSandbox: hooksSandbox)
                 await endTurnWithoutSummary(conversationId: conversationId,
-                                            reason: Self.profileStopReason(tool: refused))
+                                            reason: Self.stopReason(for: refused))
                 break
             }
             if let turnBudget {
@@ -2057,7 +2061,9 @@ actor IrisEngine {
                                cwd: workspacePath, reason: .profile)
         let localState = state
         await MainActor.run { localState?.recordBackgroundDenial(call: call, in: conversationId) }
-        profileDeniedThisTurn[conversationId] = functionCall.name
+        // A flag, not the name: which call the turn stopped over is read back from the recorded
+        // denials, so the transcript cannot name one tool while the row names another.
+        profileDeniedThisTurn.insert(conversationId)
         return Self.profileDeniedToolResult(tool: functionCall.name)
     }
 
@@ -2073,13 +2079,14 @@ actor IrisEngine {
         "Not available: this job is read-only, so `\(tool)` cannot run in it — and nor can any other tool that changes something. Do not look for another way; report what you found and finish."
     }
 
-    /// The tool a `.profile` denial refused this turn, per conversation. Set by `profileRefusal`
-    /// (actor-isolated, so the concurrent tool batch can write it safely), taken by the model-round
-    /// loop, which ends the turn on it.
-    private var profileDeniedThisTurn: [UUID: String] = [:]
+    /// The conversations whose turn met a `.profile` denial. Set by `profileRefusal`
+    /// (actor-isolated, so the concurrent tool batch can write it safely), taken by the
+    /// model-round loop, which ends the turn on it. The tool it names comes from the recorded
+    /// denials, not from here: a batch can contain two refusals, and the run has one ending.
+    private var profileDeniedThisTurn: Set<UUID> = []
 
-    private func takeProfileDenial(for conversationId: UUID) -> String? {
-        profileDeniedThisTurn.removeValue(forKey: conversationId)
+    private func takeProfileDenial(for conversationId: UUID) -> Bool {
+        profileDeniedThisTurn.remove(conversationId) != nil
     }
 
     private func executeFunctionCall(_ functionCall: FunctionCall, conversationId: UUID, workspacePath: String?, restrictToGoalComplete: Bool = false) async -> String {

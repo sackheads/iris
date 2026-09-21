@@ -2224,6 +2224,14 @@ class AppState {
         appendMessage(role: .system, content: String(format: notice, call.toolName), to: conversationId)
     }
 
+    /// The first fail-closed denial recorded for a background run, without draining it. The
+    /// engine's turn-stop line reads this rather than keeping a name of its own, so the sentence
+    /// in the transcript always names the call the ledger row and the card will name: with two
+    /// refusals in one concurrent tool batch, two copies of "the denied tool" disagreed.
+    func firstBackgroundDenial(for conversationId: UUID) -> BlockedCall? {
+        backgroundDenials[backgroundRunRoot(of: conversationId)]?.first
+    }
+
     /// Returns and clears the recorded fail-closed denials for a background conversation (#187).
     /// The ledger drains this per run to mark it `blockedOnApproval`.
     @discardableResult

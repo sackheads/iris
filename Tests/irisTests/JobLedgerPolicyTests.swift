@@ -251,6 +251,22 @@ struct JobLedgerPolicyTests {
         #expect(try store.ledger.markApproved(runId: run.id, at: t0) == true)
     }
 
+    @Test("markApproved refuses a blocked call it cannot read")
+    func markApprovedRefusesAnUnreadableCall() throws {
+        let store = try ConversationStore.inMemory()
+        let job = try seedJob(store, "j")
+        let run = makeRun(job, at: t0, status: .blockedOnApproval)
+        try store.ledger.begin(run: run)
+        try store.writer.write { db in
+            try db.execute(sql: "UPDATE job_runs SET blockedCall = ? WHERE id = ?",
+                           arguments: ["{not json at all", run.id.uuidString])
+        }
+        // There is a blocked call here and this build cannot tell what it is. The guard exists
+        // because it is the last line before a re-dispatch, so it fails closed.
+        #expect(try store.ledger.markApproved(runId: run.id, at: t0) == false)
+        #expect(try store.ledger.run(id: run.id)?.approvedAt == nil)
+    }
+
     @Test("parentRunId round-trips on a run")
     func parentRunId() throws {
         let store = try ConversationStore.inMemory()
