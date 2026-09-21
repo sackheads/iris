@@ -219,11 +219,17 @@ class AppState {
     /// derived from `hasTurnInFlight(for:)`, not from a phase value, so a conversation with no
     /// recorded phase yet (the brief instant between `beginEngineTurn` and the first
     /// `updateSessionPhase` call) still reads as active rather than idle.
+    /// Fix round 1 follow-up: pruned in `endEngineTurn` (when `engineTurnCounts` for that
+    /// conversation returns to nil) and in `deleteConversation`. Without this, every conversation
+    /// that ever ran a turn — including a deleted subagent/evaluator, whose id nothing will ever
+    /// look up again — left one entry behind here forever. `visibleSessions` only reads this while
+    /// `hasTurnInFlight` says the conversation is running, so pruning it eagerly is safe: a running
+    /// row with no entry yet (the brief window between `beginThinking`/`activeTasks` registering a
+    /// turn and the engine's own `beginEngineTurn` call, e.g. during attachment/vision processing)
+    /// simply reads as just-started rather than showing a previous turn's stale phase.
     private var mainPhaseByConversation: [UUID: SessionSummary.Phase] = [:]
     /// When each conversation's current run of turns began (0→1 on its own `engineTurnCounts`
-    /// entry). Not cleared on the way back to zero: `visibleSessions` only consults this while
-    /// `hasTurnInFlight` says the conversation is running, so a stale value from a past run is
-    /// simply never read until the next run overwrites it.
+    /// entry). Pruned alongside `mainPhaseByConversation` — see its comment.
     private var mainStartTimeByConversation: [UUID: Date] = [:]
     /// Tracked UI-initiated tasks so they can be cancelled (e.g. when a conversation is deleted).
     private var activeTasks: [UUID: (conversationId: UUID?, task: Task<Void, Never>)] = [:]
@@ -271,7 +277,22 @@ class AppState {
         // conversation starts the interleaved turn the inbox exists to prevent. A UI turn is
         // counted here *and* in `activeTasks`, so this call no-ops for it and `runThinkingTask`'s
         // completion still does the draining.
-        if engineTurnCounts[conversationId] == nil { drainPendingUserMessages(for: conversationId) }
+        if engineTurnCounts[conversationId] == nil {
+            // Fix round 1 follow-up (#217/#19): these two dictionaries were never pruned —
+            // conversations that had ever run a turn (deleted subagents/evaluators included) each
+            // left one stale entry behind forever. A running row with no recorded start falls back
+            // to "0s"/no elapsed (`visibleSessions`) until the NEXT `beginEngineTurn` records one,
+            // which is what makes it safe to drop this eagerly rather than only on delete.
+            mainStartTimeByConversation[conversationId] = nil
+            mainPhaseByConversation[conversationId] = nil
+            drainPendingUserMessages(for: conversationId)
+        }
+    }
+
+    /// Test seam (fix round 1 follow-up): whether either per-conversation main-timing dictionary
+    /// still holds an entry for `conversationId`, without exposing the dictionaries themselves.
+    func hasMainTimingEntry(for conversationId: UUID) -> Bool {
+        mainPhaseByConversation[conversationId] != nil || mainStartTimeByConversation[conversationId] != nil
     }
 
     /// Both sources OR'd. `activeTasks` is what cancellation can reach; `engineTurnCounts` also
@@ -682,12 +703,21 @@ class AppState {
             if case .executing(let tool, let detail) = phase {
                 sessions[idx].lastActivity = SessionSummary.LastActivity(tool: tool, detail: detail)
             }
-        } else {
-            // Not a tracked subagent/evaluator: record it by conversation id regardless of
-            // whether this happens to be the SELECTED conversation right now (fix round 1, item
-            // 4) — `visibleSessions` looks this up for whichever conversation is selected AT READ
-            // TIME, so a background turn's phase is preserved even while the user is looking at a
-            // different conversation, and reselecting it later shows the right thing.
+        } else if conversations.first(where: { $0.id == id })?.isSubagent == false {
+            // Record it by conversation id regardless of whether this happens to be the SELECTED
+            // conversation right now (fix round 1, item 4) — `visibleSessions` looks this up for
+            // whichever conversation is selected AT READ TIME, so a background turn's phase is
+            // preserved even while the user is looking at a different conversation, and
+            // reselecting it later shows the right thing.
+            //
+            // Fix round 1 follow-up: gated on `isSubagent == false` (not just "absent from
+            // `sessions`") — an evaluator's `finishSession` removes it from `sessions` immediately
+            // (no linger), but its SAME engine turn keeps running and reaches this call afterward
+            // with its trailing `.responding` update. Without this guard that update fell through
+            // to here and leaked a permanent entry for a conversation nothing ever reads back (an
+            // evaluator conversation is never `selectedConversationId`) and that `deleteConversation`
+            // had, by then, usually already removed from `conversations` — in which case the lookup
+            // above returns `nil` and this branch is skipped anyway.
             mainPhaseByConversation[id] = phase
         }
     }
@@ -836,6 +866,11 @@ class AppState {
         cancelTasks(for: id)
         Task { await SandboxSessionManager.shared.endSession(id) }
         purgeCommandTimings(forMessagesIn: id)   // before the messages go — they are the keys
+        // Fix round 1 follow-up (#217/#19): mirrors `endEngineTurn`'s cleanup — a deleted
+        // conversation (a subagent/evaluator whose engine turn is still trailing off) must not
+        // leave a stale entry behind forever.
+        mainStartTimeByConversation[id] = nil
+        mainPhaseByConversation[id] = nil
         conversations.removeAll { $0.id == id }
         // Re-point at what the sidebar actually renders (`ChatView` lists non-subagent
         // conversations). Picking `conversations.last` could land the selection on a subagent or

@@ -285,6 +285,52 @@ struct SessionTrackingTests {
         #expect(app.visibleSessions.first?.phase == .executing(tool: "run_command", detail: "echo hi"))
         app.endEngineTurn(for: a)
     }
+
+    /// Fix round 1 follow-up: `mainStartTimeByConversation`/`mainPhaseByConversation` used to keep
+    /// one entry per conversation forever. `endEngineTurn` now prunes both once the conversation's
+    /// own turn count returns to zero.
+    @Test("endEngineTurn prunes the per-conversation main-timing entries")
+    func endEngineTurnPrunesMainTiming() {
+        let app = isolatedApp()
+        let id = app.selectedConversationId!
+        app.beginEngineTurn(for: id)
+        app.updateSessionPhase(id, .thinking)
+        #expect(app.hasMainTimingEntry(for: id))
+        app.endEngineTurn(for: id)
+        #expect(app.hasMainTimingEntry(for: id) == false)
+    }
+
+    /// Fix round 1 follow-up: mirrors the `endEngineTurn` pruning for a conversation deleted while
+    /// (or after) its turn ran — a deleted subagent/evaluator's id is never looked up again, so an
+    /// un-pruned entry there was a permanent leak.
+    @Test("deleteConversation prunes the per-conversation main-timing entries")
+    func deleteConversationPrunesMainTiming() {
+        let app = isolatedApp()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        app.beginEngineTurn(for: id)
+        app.updateSessionPhase(id, .thinking)
+        #expect(app.hasMainTimingEntry(for: id))
+        app.deleteConversation(id)
+        #expect(app.hasMainTimingEntry(for: id) == false)
+    }
+
+    /// Fix round 1 follow-up: an evaluator's `finishSession` removes it from `sessions`
+    /// immediately (item 6), but its SAME engine turn keeps running and can still reach
+    /// `updateSessionPhase` afterward with a trailing `.responding`. That must not leak into
+    /// `mainPhaseByConversation` — the guard is `isSubagent == false`, and an evaluator
+    /// conversation (a) is `isSubagent == true` and (b) is usually already deleted by
+    /// `GoalEvaluator` by the time this fires, so the lookup fails either way.
+    @Test("a subagent/evaluator's trailing phase update after finishSession does not leak into the main dictionary")
+    func trailingPhaseUpdateForSubagentDoesNotLeak() {
+        let app = isolatedApp()
+        let id = UUID()
+        app.createNewConversation(id: id, isSubagent: true)
+        app.registerSubagent(id: id, role: "evaluator", kind: .evaluator)
+        app.finishSession(id: id, status: "graded")   // removes it from `sessions` immediately
+        app.updateSessionPhase(id, .responding)        // the trailing update from the same turn
+        #expect(app.hasMainTimingEntry(for: id) == false)
+    }
 }
 
 /// The linger sweep is a pure function over `[SessionSummary]` + `now` (AppState schedules it via

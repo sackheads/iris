@@ -38,9 +38,11 @@ struct SessionSummary: Identifiable, Hashable, Sendable {
 
     /// `startTime` while there is something to time, `nil` while `.idle` — an idle main session
     /// (the only kind that is ever `.idle`; subagents/evaluators start `.thinking`) has no turn in
-    /// progress to show an elapsed time for, and `AppState` clears its recorded start when it goes
-    /// idle. Fix round 1 (#217/#19): the row used to render a `Text(timerInterval:)` against a
-    /// stale/placeholder start regardless of phase.
+    /// progress to show an elapsed time for. `AppState` derives `.idle` from `hasTurnInFlight`, not
+    /// from whether a start is recorded (`beginEngineTurn`/`endEngineTurn` prune the per-
+    /// conversation start on the way back to zero, but that pruning is a memory-hygiene cleanup,
+    /// not what makes this `nil` — this checks `phase` alone). Fix round 1 (#217/#19): the row used
+    /// to render a `Text(timerInterval:)` against a stale/placeholder start regardless of phase.
     var elapsedStartTime: Date? {
         if case .idle = phase { return nil }
         return startTime
