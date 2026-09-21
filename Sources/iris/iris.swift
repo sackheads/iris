@@ -9,9 +9,34 @@ actor IrisEngine {
     static let goalCompletionSkillCheck = "System Event [Goal Completion Skill Check]: Evaluate the goal just completed. Did you execute a complex multi-step procedure, overcome non-obvious errors, or discover a reusable recipe? If so, call `create_skill` or `update_skill` now to save or patch it in your permanent skill library."
 
     let client: any LLMClientProtocol
-    /// A value-type copy, not the shared singleton's storage: `init` gives this engine's copy the
-    /// closure the job tools resolve the ledger through (`ToolExecutor.jobToolsProvider`).
-    var executor = ToolExecutor.shared
+    /// A value-type copy of the shared executor, plus the closure the job tools resolve their
+    /// ledger and watcher callback through (`ToolExecutor.jobToolsProvider`). Built on read rather
+    /// than stored in `init`, because that closure captures `self` and an actor's nonisolated
+    /// initializer may not touch a stored property once `self` has escaped into one. Read twice a
+    /// turn — the tool list and each dispatched call.
+    var executor: ToolExecutor {
+        var executor = ToolExecutor.shared
+        executor.jobToolsProvider = jobToolsProvider()
+        return executor
+    }
+
+    /// How an engine that never called `start()` — a subagent, an evaluator, a scenario run —
+    /// still gets working job tools: both the ledger and the watch-fire callback are resolved per
+    /// call off this engine, rather than read from whatever `start()` happened to configure.
+    /// Resolved per call, not at `start()`: an engine that never starts otherwise answers "Jobs
+    /// are not available yet." to a tool whose ledger is sitting right there on its state.
+    private func jobToolsProvider() -> @Sendable () async -> JobTools? {
+        { [weak self, weak state] in
+            guard let self,
+                  let ledger = await MainActor.run(resultType: JobLedger?.self, body: { state?.store.ledger })
+            else { return nil }
+            // The fire callback travels with the ledger: `WatcherManager.shared` is handed both in
+            // `start()` or neither, so a watch registered through an unstarted engine would
+            // otherwise run a live FSEvents stream with nowhere to deliver to. Same closure
+            // `start()` installs.
+            return JobTools(ledger: ledger, watchers: .shared, watcherCallback: await self.watcherCallback())
+        }
+    }
     let manager = SkillManager.shared
     /// The fact store this engine reads and writes. Injectable so a test drives the memory tools
     /// against its own store. Resolved lazily: forcing `.shared` at construction would open the
@@ -86,14 +111,6 @@ actor IrisEngine {
         self.checkpointAutoAdvanceOverride = checkpointAutoAdvance
         self.sessionPeerCountOverride = sessionPeerCount
         systemPrompt = nil
-        // Resolved per call, not at `start()`: an engine that never starts — a subagent, an
-        // evaluator, a scenario run — otherwise answers "Jobs are not available yet." to a tool
-        // whose ledger is sitting right there on the state it was built with.
-        executor.jobToolsProvider = { [weak state] in
-            guard let ledger = await MainActor.run(resultType: JobLedger?.self, body: { state?.store.ledger })
-            else { return nil }
-            return JobTools(ledger: ledger, watchers: .shared)
-        }
     }
 
     /// Peers this session could reach right now, excluding itself (#185 §6). Falls back to
@@ -388,13 +405,7 @@ actor IrisEngine {
         let pluginConfigs = await PluginManager.shared.mcpConfigs()
         await MCPManager.shared.setPluginConfigs(pluginConfigs)
         await MCPManager.shared.startServers()
-        await WatcherManager.shared.setCallback { [weak self] job, paths in
-            guard let self = self else { return }
-            await self.handleSystemEvent(
-                WatcherManager.eventMessage(job: job, paths: paths),
-                source: "FileWatcher",
-                conversationId: job.createdInConversationId)
-        }
+        await WatcherManager.shared.setCallback(watcherCallback())
 
         if let ledger = jobLedger {
             await WatcherManager.shared.configure(ledger: ledger)
@@ -1619,6 +1630,18 @@ actor IrisEngine {
         { [weak self] job, _ in
             await self?.handleSystemEvent("Scheduled Job Triggered: \(job.prompt)", source: "Scheduler",
                                           conversationId: job.createdInConversationId)
+        }
+    }
+
+    /// What one watch fire does, as `start()` wires it into `WatcherManager.shared`. Factored out
+    /// for the same reason `fireHandler()` was: the job tools hand this to a manager an unstarted
+    /// engine adopts (`JobTools.watcherCallback`), and the two paths must install one definition.
+    func watcherCallback() -> @Sendable (Job, [String]) async -> Void {
+        { [weak self] job, paths in
+            await self?.handleSystemEvent(
+                WatcherManager.eventMessage(job: job, paths: paths),
+                source: "FileWatcher",
+                conversationId: job.createdInConversationId)
         }
     }
 

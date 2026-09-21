@@ -6,10 +6,17 @@ import Foundation
 struct JobTools: Sendable {
     let ledger: JobLedger
     let watchers: WatcherManager
+    /// What one watch fire does. Carried alongside the ledger because a `WatcherManager` gets both
+    /// or neither: `setCallback` has a single caller, `IrisEngine.start()`, three lines from its
+    /// `configure(ledger:)`. A manager adopted by an engine that never started would otherwise run
+    /// a live FSEvents stream whose fires go nowhere. No default — every caller has to say.
+    let watcherCallback: @Sendable (Job, [String]) async -> Void
 
-    init(ledger: JobLedger, watchers: WatcherManager) {
+    init(ledger: JobLedger, watchers: WatcherManager,
+         watcherCallback: @escaping @Sendable (Job, [String]) async -> Void) {
         self.ledger = ledger
         self.watchers = watchers
+        self.watcherCallback = watcherCallback
     }
 }
 
@@ -241,7 +248,7 @@ struct ToolExecutor {
                     createdInConversationId: conversationId)
             }
             try tools.ledger.upsert(job)
-            await tools.watchers.reload(adoptingIfUnconfigured: tools.ledger)
+            await tools.watchers.reload(adoptingIfUnconfigured: tools.ledger, callback: tools.watcherCallback)
             return "Watching \(path) as job '\(job.name)'. It runs in the background when files change; you will be notified automatically."
         } catch {
             return "Could not save the watcher job."

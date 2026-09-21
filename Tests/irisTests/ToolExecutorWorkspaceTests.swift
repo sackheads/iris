@@ -49,7 +49,7 @@ struct ToolExecutorWorkspaceTests {
         let store = try ConversationStore.inMemory()
         let watchers = WatcherManager(ledger: store.ledger)
         var executor = ToolExecutor()
-        executor.jobToolsProvider = { JobTools(ledger: store.ledger, watchers: watchers) }
+        executor.jobToolsProvider = { JobTools(ledger: store.ledger, watchers: watchers, watcherCallback: { _, _ in }) }
 
         let result = await executor.execute(
             name: "register_directory_watcher",
@@ -74,7 +74,7 @@ struct ToolExecutorWorkspaceTests {
 
         let watchers = WatcherManager(ledger: store.ledger)
         var executor = ToolExecutor()
-        executor.jobToolsProvider = { JobTools(ledger: store.ledger, watchers: watchers) }
+        executor.jobToolsProvider = { JobTools(ledger: store.ledger, watchers: watchers, watcherCallback: { _, _ in }) }
         let args: [String: JSONValue] = ["path": .string(tmp.path), "instructions": .string("first")]
         let firstConversation = UUID()
         let secondConversation = UUID()
