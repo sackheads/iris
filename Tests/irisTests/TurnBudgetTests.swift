@@ -27,6 +27,21 @@ struct TurnBudgetTests {
         return (store, state, engine, client, conversation)
     }
 
+    /// The same harness with a client of the test's own, for the runs that have to be observed
+    /// part-way through rather than replayed from a fixed list.
+    private func harness(client: any LLMClientProtocol)
+        throws -> (ConversationStore, AppState, IrisEngine) {
+        let store = try ConversationStore.inMemory()
+        let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        state.conversations.removeAll()
+        state.autoApproveTools = true
+        let conversation = UUID()
+        state.createNewConversation(id: conversation)
+        state.selectedConversationId = conversation
+        return (store, state, IrisEngine(state: state, tier: .medium, client: client,
+                                         protectionEnabled: false, sessionPeerCount: 0))
+    }
+
     /// A settings store of this suite's own (AGENTS invariant 7).
     private func isolatedConfig() -> (ConfigManager, () -> Void) {
         let name = "iris-turnbudget-\(UUID().uuidString)"
@@ -160,6 +175,65 @@ struct TurnBudgetTests {
     }
 
     // MARK: Through a run
+
+    /// Answers the first round with a tool call — so the turn goes round again — and parks in the
+    /// second, so the run's row can be read while the run is still in flight.
+    private final class ParkingClient: LLMClientProtocol, @unchecked Sendable {
+        let gate = JobSchedulerTests.Gate()
+        private let lock = NSLock()
+        private var calls = 0
+        private let first: GeminiResponse
+        private let last: GeminiResponse
+
+        init(first: GeminiResponse, last: GeminiResponse) {
+            self.first = first
+            self.last = last
+        }
+
+        private func bump() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            calls += 1
+            return calls
+        }
+
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            if bump() == 1 { return first }
+            await gate.arriveAndWait()
+            return last
+        }
+    }
+
+    @Test("what a run has spent is on its row before it ends, not only when it ends")
+    func spendIsOnTheRowWhileTheRunIsStillGoing() async throws {
+        // The hole this closes: `totalTokens` was written by `finish` alone, so a run the app quit
+        // in the middle of left a zero-cost row and its spend counted against no budget at all.
+        let client = ParkingClient(first: probeRound(total: 40), last: textRound("all done"))
+        let (store, state, engineWithClient) = try harness(client: client)
+        let job = Job(name: "counter", prompt: "Work.", trigger: .schedule(.interval(seconds: 60)))
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engineWithClient, ledger: store.ledger,
+                               config: config, activity: RecordingActivity())
+
+        let fire = Task { await runner.fire(job: job, origin: .schedule) }
+        await client.gate.waitForEntry()
+
+        let midRun = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(midRun.status == .running, "still in flight")
+        #expect(midRun.totalTokens == 40, "the first round's spend is already on the row")
+        #expect(midRun.promptTokens == 39 && midRun.candidateTokens == 1)
+        let utc = Calendar(identifier: .gregorian)
+        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: utc, now: Date()) == 40,
+                "and the day's budget can see it")
+
+        await client.gate.open()
+        await fire.value
+        let finished = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(finished.status == .completed)
+        #expect(finished.totalTokens == 40, "and `finish` writes the same figure again")
+    }
 
     @Test("a run that spends its per-run budget is a failed row and a card that says why")
     func budgetStopIsAFailedRun() async throws {

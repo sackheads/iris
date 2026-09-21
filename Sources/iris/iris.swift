@@ -32,6 +32,17 @@ struct TurnBudget: Sendable, Equatable {
     }
 }
 
+/// Where a turn reports what it has spent so far, after every model round (#187 §4). A protocol
+/// rather than a ledger reference because the engine knows nothing about jobs: the only
+/// implementation writes the running total onto the run's row, so a run the app quit in the middle
+/// of leaves its spend behind on the row the next launch closes — and the day's budget counts it.
+/// Without it, `totalTokens` was written only by `finish`, and a run that never finished was free.
+protocol TurnUsageSink: Sendable {
+    /// The turn's accumulated usage, not this round's: absolute like everything else in
+    /// `TurnBudget`, so a report that never arrives cannot leave a half-counted row behind.
+    func record(_ tokens: TokenUsage) async
+}
+
 actor IrisEngine {
     /// The reflection turn fired after a goal completes. Shared with `AppState`, which completes a
     /// goal whose last criteria the user judged — that path returns from this handler long before
@@ -861,18 +872,18 @@ actor IrisEngine {
         }
     }
 
-    func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil) async {
+    func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil) async {
         await withEngineTurn(conversationId) {
             let turnID = PerformanceProfiler.shared.beginTurn(label: input, source: source)
             let turnStart = CFAbsoluteTimeGetCurrent()
             await PerformanceProfiler.$currentTurnID.withValue(turnID) {
-                await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, turnBudget: turnBudget)
+                await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, turnBudget: turnBudget, usageSink: usageSink)
             }
             PerformanceProfiler.shared.endTurn(turnID, totalMs: (CFAbsoluteTimeGetCurrent() - turnStart) * 1000.0)
         }
     }
 
-    private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil) async {
+    private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil) async {
         if source == "UI" {
             loopDetectors[conversationId] = nil
             blockedResultTrackers[conversationId] = nil
@@ -1463,11 +1474,16 @@ actor IrisEngine {
                 history = await MainActor.run {
                     localState?.conversations.first(where: { $0.id == conversationId })?.history ?? []
                 }
-                await MainActor.run { 
+                let spentSoFar = await MainActor.run { () -> TokenUsage in
                     if let usage = activeResponse.usageMetadata {
                         localState?.updateTokenUsage(for: conversationId, usage: usage)
                     }
+                    return localState?.conversations.first(where: { $0.id == conversationId })?.tokenUsage ?? TokenUsage()
                 }
+                // What the run has spent, on the run's own row, before the next round can start
+                // (#187 §4). A row only ever costed by its `finish` counts as zero against the
+                // day's budget when the app quits mid-turn and nothing ever finishes it.
+                if let usageSink { await usageSink.record(spentSoFar) }
                 
                 var hasFunctionCall = false
                 

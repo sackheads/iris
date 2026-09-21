@@ -327,6 +327,42 @@ struct JobRetryTests {
         }
     }
 
+    /// A client that parks inside the model call and never comes back — cancellation or no
+    /// cancellation. `withCheckedContinuation` installs no cancellation handler, so
+    /// `turnTask.cancel()` slides straight off it, which is the shape of a blocking `Process` or a
+    /// stream with no resource timeout. `GatedClient` above cannot stand in for this: it parks in
+    /// `Task.sleep`, which throws the moment the turn is cancelled.
+    private final class WedgedClient: LLMClientProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+        private var parked: [CheckedContinuation<GeminiResponse, Never>] = []
+        private var calls = 0
+        private let response: GeminiResponse
+
+        init(response: GeminiResponse) { self.response = response }
+
+        var callCount: Int { lock.withLock { calls } }
+        var parkedCount: Int { lock.withLock { parked.count } }
+
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            lock.withLock { calls += 1 }
+            return await withCheckedContinuation { continuation in
+                lock.withLock { parked.append(continuation) }
+            }
+        }
+
+        /// Lets every orphaned turn finish at teardown. Not needed for the assertions — the point
+        /// of the test is that the run ends without this — but a `CheckedContinuation` that is
+        /// never resumed keeps its task (and the engine, state and store behind it) alive for the
+        /// rest of the process, which is a leak the next suite would pay for.
+        func releaseAll() {
+            let waiting = lock.withLock { () -> [CheckedContinuation<GeminiResponse, Never>] in
+                defer { parked = [] }
+                return parked
+            }
+            for continuation in waiting { continuation.resume(returning: response) }
+        }
+    }
+
     private func waitFor(_ description: String, timeout: TimeInterval = 10,
                          _ condition: () -> Bool) async {
         let deadline = Date().addingTimeInterval(timeout)
@@ -385,12 +421,62 @@ struct JobRetryTests {
         #expect(card.outcome?.contains(TurnBudget.timeExceeded) == true)
     }
 
+    @Test("a turn that ignores cancellation is left behind at the deadline, not waited on")
+    func deadlineDoesNotWaitForANonCooperativeTurn() async throws {
+        // The failure this covers: the deadline used to cancel the turn and then go on awaiting
+        // it. A turn parked where cancellation is not checked never came back, so `fire` never
+        // returned, the job kept its `inFlight` slot forever, its row stayed `running`, and every
+        // later tick wrote another skip row. The job stopped, and nothing said why.
+        let client = WedgedClient(response: textResponse("too late"))
+        let (store, state, engine) = try harness([], client: client)
+        let j = job(timeoutSeconds: 1)
+        try store.ledger.upsert(j)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let activity = RecordingActivity()
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               activity: activity)
+        defer { client.releaseAll() }
+
+        // No timeout around this on purpose: if the deadline cannot end the wait, the right
+        // failure is the suite hanging here, which is exactly what the shipped bug did.
+        await runner.fire(job: j, origin: .schedule)
+
+        #expect(client.parkedCount == 1, "the turn is still parked in the model call")
+        let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
+        #expect(run.status == .failed, "the row is closed, not left running")
+        #expect(run.failureReason == TurnBudget.timeExceeded)
+        #expect(activity.events == [.begin("Iris job pr-sweep"), .end],
+                "and the Mac is not held awake by a turn nothing can end")
+
+        // The other half of the wedge: the job has to be firable again. A second fire admitted is
+        // proof `inFlight` was given back.
+        let second = await runner.fire(job: j, origin: .manual)
+        #expect(second == .run, "got: \(String(describing: second))")
+        #expect(client.callCount == 2, "the second fire reached the model rather than being skipped")
+        let runs = try store.ledger.runs(jobId: j.id, limit: 5)
+        #expect(runs.count == 2)
+        #expect(runs.allSatisfy { $0.status == .failed && $0.failureReason == TurnBudget.timeExceeded })
+        #expect(runs.allSatisfy { $0.finishedAt != nil })
+    }
+
     @Test("the turn and the deadline race for one claim, and exactly one of them wins it")
     func theEndingIsClaimedOnce() async {
         let ending = DeadlineFlag()
-        #expect(await ending.claim() == true)
-        #expect(await ending.claim() == false, "the loser gets no say in how the run ended")
-        #expect(await ending.claim() == false)
+        #expect(await ending.claim(deadline: false) == true)
+        #expect(await ending.claim(deadline: true) == false, "the loser gets no say in how the run ended")
+        #expect(await ending.claim(deadline: false) == false)
+        #expect(await ending.wait() == false, "and the run hears the winner's answer, not the loser's")
+    }
+
+    @Test("the run waits for the claim, and the deadline taking it is what releases the wait")
+    func theRunWaitsForWhicheverClaimsTheEnding() async {
+        let ending = DeadlineFlag()
+        let waiting = Task { await ending.wait() }
+        // Resolved by the claim, not by the racer it belongs to finishing: this is the difference
+        // between a run that ends at its deadline and one that waits on a turn that never returns.
+        #expect(await ending.claim(deadline: true) == true)
+        #expect(await waiting.value == true)
     }
 
     @Test("a turn that came back on its own is never written up as a timeout, whatever the watchdog does")

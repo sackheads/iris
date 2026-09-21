@@ -24,6 +24,10 @@ actor JobRunner {
     static let noReplyReason = "run produced no reply"
     /// The app quit (or `AppState` was otherwise released) with the run still open.
     static let releasedReason = "app state released"
+    /// The longest the deadline watchdog sleeps before looking at the wall clock again. See the
+    /// loop in `run()`: the sleep and the deadline are on different clocks, so the bound on how
+    /// far a sleeping Mac can push a run past its timeout is this, not the timeout itself.
+    static let watchdogSlice: TimeInterval = 60
 
     /// Weak, both of them: `AppState` owns the engine, the engine owns this runner for the life of
     /// the process, and a strong reference back either way is a cycle that keeps a whole app state
@@ -416,36 +420,57 @@ actor JobRunner {
         // deadline even when the turn overruns it, so a wedged run cannot hold the Mac awake for
         // the rest of the session. `ActivityHolder` ends once, whichever gets there first.
         let holder = ActivityHolder(api: activity, reason: "Iris job \(job.name)")
-        // The turn is a task of its own so the deadline can actually end it. The budget check at
-        // the top of each model round cannot: a turn parked inside a model call that never returns
-        // never reaches another round, which is exactly the run a timeout exists for.
-        let turnTask = Task { [weak engine] in
-            await engine?.processInput(prompt, source: "job:\(job.name)",
-                                       conversationId: conversationId, turnBudget: budget)
-        }
         // One claim, taken by whichever of the two gets there first, because "the turn came back"
         // and "the deadline arrived" are a race and the run has exactly one ending. The watchdog
         // used to set a flag unconditionally, so a turn that returned microseconds before the
         // deadline was still written `failed` / "budget: time exceeded" — a completed run reported
         // as a timeout.
         let ending = DeadlineFlag()
+        // The turn is a task of its own so the deadline can actually end it. The budget check at
+        // the top of each model round cannot: a turn parked inside a model call that never returns
+        // never reaches another round, which is exactly the run a timeout exists for.
+        let turnTask = Task { [weak engine] in
+            await engine?.processInput(prompt, source: "job:\(job.name)",
+                                       conversationId: conversationId, turnBudget: budget,
+                                       usageSink: LedgerUsageSink(ledger: ledger, runId: run.id,
+                                                                  jobName: job.name))
+            // Claimed the instant the turn is back, before anything else can suspend: having won,
+            // this run ended on its own terms and is never an overrun, whatever the watchdog does
+            // next. A turn that lost — one the deadline already gave up on — claims nothing and
+            // writes nothing: the row it would have written was closed at the deadline.
+            return await ending.claim(deadline: false)
+        }
         let watchdog = Task.detached {
-            let seconds = deadline.timeIntervalSinceNow
-            if seconds > 0 {
+            // Sliced, and re-read from the wall clock every time round, because the two clocks
+            // are not the same one: `Task.sleep` suspends on the machine's *suspending* clock,
+            // which does not advance while the Mac is asleep, and `deadline` is a wall-clock
+            // instant. One long sleep across a lid close wakes up however long the Mac slept past
+            // the deadline it exists to enforce — holding the assertion, and the run, open for
+            // all of it. A slice is at most a minute, so that overshoot is at most a minute.
+            while true {
+                let seconds = deadline.timeIntervalSinceNow
+                if seconds <= 0 { break }
                 // Not `try?`: a cancelled sleep means the run finished first, and the two things
                 // below are the deadline's alone to do.
-                do { try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) } catch { return }
+                do {
+                    let slice = min(seconds, Self.watchdogSlice)
+                    try await Task.sleep(nanoseconds: UInt64(slice * 1_000_000_000))
+                } catch { return }
             }
             // Lost the claim: the turn is already over, so ending its assertion and cancelling it
             // are not this task's to do.
-            guard await ending.claim() else { return }
+            guard await ending.claim(deadline: true) else { return }
             await holder.end()
+            // Cooperative, and that is the whole reason this does not wait for it: a turn parked
+            // where nothing checks cancellation never comes back, and `run()` returning on the
+            // claim below is what stops that wedging the job forever. The orphaned task leaks —
+            // a bounded cost, against a job that would otherwise never run again.
             turnTask.cancel()
         }
-        await turnTask.value
-        // Claimed the instant the turn is back, before anything else can suspend: having won, this
-        // run ended on its own terms and is never an overrun, whatever the watchdog does next.
-        let overran = !(await ending.claim())
+        // Whichever of them claimed the ending, not `turnTask.value`: awaiting the turn here gave
+        // a non-cooperative one the power to hold `fire` open — and with it the job's `inFlight`
+        // slot, its `running` row, and a skip row per cadence tick — for as long as it liked.
+        let overran = await ending.wait()
         watchdog.cancel()
         await holder.end()
         let finishedAt = now()
@@ -783,18 +808,56 @@ actor JobRunner {
     }
 }
 
-/// Which of the two racers gets to say how a run ended. The turn returning and the deadline
-/// arriving are concurrent by construction, so the decision is a single claim rather than a flag:
-/// the winner owns it, and the loser does nothing at all. An actor because the two are different
-/// tasks — and because "read it, then decide" across a suspension is the race this replaces.
-actor DeadlineFlag {
-    private var claimed = false
+/// The run row's own meter: what the turn has spent, written after every model round while the run
+/// is still open (#187 §4). Failures are logged and dropped — a ledger that cannot take a progress
+/// figure is not a reason to stop a turn that is working, and `finish` writes the total again at
+/// the end.
+private struct LedgerUsageSink: TurnUsageSink {
+    let ledger: JobLedger
+    let runId: UUID
+    let jobName: String
 
-    /// `true` for exactly one caller, ever.
-    func claim() -> Bool {
-        guard !claimed else { return false }
-        claimed = true
+    func record(_ tokens: TokenUsage) async {
+        do {
+            try ledger.recordUsage(runId: runId, tokens: tokens)
+        } catch {
+            print("[JobRunner] could not record the spend of \(jobName): \(error)")
+        }
+    }
+}
+
+/// Which of the two racers gets to say how a run ended, and the one place the run waits to hear
+/// it. The turn returning and the deadline arriving are concurrent by construction, so the
+/// decision is a single claim rather than a flag: the winner owns it, and the loser does nothing
+/// at all. An actor because the two are different tasks — and because "read it, then decide"
+/// across a suspension is the race this replaces.
+actor DeadlineFlag {
+    /// How the run ended, once either racer has said so: `true` when it was the deadline. `nil`
+    /// until one of them claims it.
+    private var ending: Bool?
+    /// `run()`, parked in `wait()`. One at a time, by construction: a run has one waiter.
+    private var waiter: CheckedContinuation<Bool, Never>?
+
+    /// `true` for exactly one caller, ever. `deadline` says which racer took it, so the waiter is
+    /// told how the run ended rather than having to ask afterwards.
+    @discardableResult
+    func claim(deadline: Bool) -> Bool {
+        guard ending == nil else { return false }
+        ending = deadline
+        if let waiter {
+            self.waiter = nil
+            waiter.resume(returning: deadline)
+        }
         return true
+    }
+
+    /// Returns as soon as either racer has claimed the ending — `true` when it was the deadline.
+    /// This is what lets the deadline win the *wait* and not only the claim: a turn parked
+    /// somewhere that never checks cancellation is left behind rather than kept waited on, and the
+    /// run closes its row and gives the job back.
+    func wait() async -> Bool {
+        if let ending { return ending }
+        return await withCheckedContinuation { self.waiter = $0 }
     }
 }
 
