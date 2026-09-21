@@ -1,6 +1,7 @@
 # Sessions: Identity, Discovery, and One Message (slice 1 of #185) — Design
 
-**Status:** approved, not yet implemented
+**Status:** implemented — all seven tasks complete on `feat/185-sessions-slice1` (#185); not yet
+merged to `main`, no PR opened yet.
 **Issue:** #185
 **Builds on:** #182 (archiving), #163 (conversation store), #144/#133 (tool-surface gating)
 
@@ -213,8 +214,31 @@ already running it enqueues through the #172 inbox rather than starting a second
 on one history (`AppState.swift:937-940`), because two turns on one history produce empty or
 rejected provider responses.
 
-Today reaching that hazard needs a scheduler or watcher coincidence. **Peer messaging would make it
-agent-triggerable at will**, which is not a risk this slice may introduce.
+Today reaching that hazard needs a scheduler or watcher coincidence. **Peer messaging makes it
+agent-triggerable at will, and this slice introduced a partial form of that risk** — the correction
+below states what actually holds, in place of the guarantee this paragraph originally claimed.
+
+**Correction (review round 3): the busy check is not atomic with the turn it guards.**
+`deliverPeerMessage` (`iris.swift` ~206-263) reads `AppState.hasTurnInFlight(for: targetId)` once,
+and that read is not atomic with the delivery it gates. Two concurrent `send_to_session` calls that
+both target one idle session can both observe `busy == false` before either hands off, and both then
+land a turn on the same history — the exact hazard this section describes, now reachable by an agent
+choosing to send twice rather than only by scheduler/watcher coincidence.
+
+Round 3 narrowed the window: a second `hasTurnInFlight` check runs immediately before handoff, after
+`sanitizeArrival` — the dominant term in the gap, since it runs tier-2 CoreML and tier-3
+auxiliary-model inference and can hold the window open for hundreds of milliseconds, far wider than
+a few actor hops. If that second check finds the target now busy, delivery falls back to the same
+#172 inbox the always-busy path uses. **This narrows the race; it does not close it.** The gap
+between that second check and `processInput`'s own turn start (`withEngineTurn`, inside
+`deliverSanitizedSystemEvent`) is still open. Closing it needs an atomic check-and-claim over a
+conversation's turn state — `IrisEngine` is a single reentrant actor with no lock over that state —
+and was not attempted in this round. Filed as **#240** rather than fixed here.
+
+So: the inbox routing described in the next paragraph holds for the sequential case — one sender, or
+two sends spaced further apart than `sanitizeArrival` takes. It does not hold under genuine
+concurrency. Say this plainly rather than softening it: the slice introduced a partial, narrowed
+form of the risk this section said it would not introduce.
 
 **A peer message to a busy session is enqueued through the same #172 inbox**, delivered as a steer
 at the target's next model round. Not refused: the sender has no way to know the target is busy,
@@ -287,9 +311,21 @@ Their `description` strings are agent-facing text and fall under invariant 9: th
 call, per #155, and must not imply a peer is obliged to act on a request.
 
 **The card column decodes defensively**: unreadable → `nil`, with a warning, never a dropped
-conversation. This follows the store's `checkpointHistory` precedent — an unreadable *identity*
-must not cost the user a conversation, and the failure direction is toward the session simply
-appearing uncarded.
+conversation. The *policy* matches `checkpointHistory`'s: a JSON decode failure on either field
+(`ConversationStore.swift` ~771-773 for `checkpointHistory`, ~814-821 for `sessionCard`) is recorded
+as a skipped row and leaves the field absent, never the conversation.
+
+The *mechanism* is not merely a copy of that precedent — it is strictly more defensive, and that is
+worth stating precisely rather than claiming it "follows" `checkpointHistory`. `checkpointHistory` is
+read through the shared `text(_:)` closure in `loadAll` (~705-713), whose `.invalid` case — bytes
+that are not valid UTF-8 — sets `unreadableColumn` and quarantines the **entire conversation**
+(~732-735), the same trap `title`, `workspacePath`, and `goalContract` fall into. `sessionCard`
+deliberately bypasses that closure and reads through `Self.readTextValue` directly (~814), so an
+invalid encoding on the card degrades to an absent card plus a reported loss — never a dropped
+conversation. Only a *decode* failure (valid UTF-8, bad JSON) behaves the same way for both fields;
+an *encoding* failure does not. `sessionCard`'s own precedent comment in the source (`~809-813`)
+states this directly: "opposite of `goalContract`... here even non-UTF8 bytes degrade to
+'uncarded' plus a reported loss, never a dropped conversation."
 
 ## 7. The cascade cap
 
@@ -321,6 +357,15 @@ that conversation's entry clears and its onward sends start fresh. That is the i
 person has entered the loop, and the budget exists to bound *unattended* machine chatter, not to
 ration a conversation the user is actively steering. Sibling branches of the original cascade keep
 their own remaining allowance.
+
+**A drained peer message does not reset the budget — this is deliberate, not an oversight.**
+`AppState.startTurn` only clears the cascade entry when `isPeer` is false (`AppState.swift`
+~1034-1040): a person typing clears it, a peer message finally drained from the #172 inbox and run
+as a turn does not. Round 3 fixed a path where draining a queued peer entry cleared the cascade
+unconditionally — handing the target a fresh budget on every drained message regardless of how much
+the cascade had already spent, a cap bypass by timing rather than by count. So when a cascade's
+budget is exhausted, it **stays** exhausted until a human types into that conversation; no machine-
+initiated continuation, drained peer message included, may hand it a new one.
 
 `N` starts at **8** and is a `ConfigManager` setting, because the right number is empirical and
 guessing it permanently would be worse than making it adjustable.
@@ -411,6 +456,12 @@ describing what it adds.
 - The declaration test drives the **injected** peer count, not global state, so it cannot pass or
   fail based on what is in the developer's store.
 - The standing count line appears only when peers exist.
+- **Known gap: the round-3 late busy re-check (§5.2) has no test.** Constructing that window
+  deterministically — a target that is idle at `deliverPeerMessage`'s first check but busy by its
+  second — needs a blockable delay inside `sanitizeArrival`, whose only seam is
+  `CoreMLEvaluator.shared` / `AuxiliaryModelManager.shared`. Those are shared, global mocks, which is
+  itself a known test-isolation hazard (**#237**) that makes suites order-dependent and flaky. The
+  test is blocked on a real bug, not merely unwritten — do not treat this as covered.
 
 ## 12. Relationship to #217's session summary
 
