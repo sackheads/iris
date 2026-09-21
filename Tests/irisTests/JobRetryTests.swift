@@ -26,7 +26,11 @@ struct JobRetryTests {
                        usageMetadata: nil)
     }
 
-    private func harness(_ responses: [GeminiResponse], client: (any LLMClientProtocol)? = nil)
+    /// `streamResponses` is pinned per engine rather than read from `ConfigManager.shared`
+    /// (invariant 7): the wedged test below needs the streaming path taken deterministically,
+    /// because that is where its park lives.
+    private func harness(_ responses: [GeminiResponse], client: (any LLMClientProtocol)? = nil,
+                         streamResponses: Bool? = nil)
         throws -> (ConversationStore, AppState, IrisEngine) {
         let store = try ConversationStore.inMemory()
         let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
@@ -37,6 +41,7 @@ struct JobRetryTests {
         state.selectedConversationId = conversation
         let engine = IrisEngine(state: state, tier: .medium,
                                 client: client ?? FakeLLMClient(responses: responses),
+                                streamResponses: streamResponses,
                                 protectionEnabled: false, sessionPeerCount: 0)
         return (store, state, engine)
     }
@@ -327,39 +332,66 @@ struct JobRetryTests {
         }
     }
 
-    /// A client that parks inside the model call and never comes back — cancellation or no
-    /// cancellation. `withCheckedContinuation` installs no cancellation handler, so
-    /// `turnTask.cancel()` slides straight off it, which is the shape of a blocking `Process` or a
-    /// stream with no resource timeout. `GatedClient` above cannot stand in for this: it parks in
-    /// `Task.sleep`, which throws the moment the turn is cancelled.
+    /// A client whose stream parks and never yields anything, in a way cancellation cannot
+    /// unwind — the shape of a blocking subprocess or a stream with no resource timeout.
+    ///
+    /// The distinction is the whole point, and the first version of this test missed it. A client
+    /// that parks inside `generateContent` is consumed through `LLMStreamEvent.replay`, an
+    /// `AsyncThrowingStream` whose `next()` *is* cancellable: `turnTask.cancel()` unwinds the
+    /// consumer in `consumeModelStream`, the turn returns on its own, and the test then passes
+    /// with the runner-side fix reverted — it guards the engine's unwind, not `run()`'s wait.
+    /// (`deadlineEndsTheRun`, on `GatedClient`, is that cooperative case and keeps covering it.)
+    ///
+    /// This parks in the stream's own iterator, in a bare `withCheckedContinuation` with no
+    /// cancellation handler, so nothing interrupts the suspension: `for try await event in stream`
+    /// never comes back, `processInput` never returns, and only `run()` giving up on the wait can
+    /// end the run. No thread is blocked — the cooperative pool is free the whole time.
     private final class WedgedClient: LLMClientProtocol, @unchecked Sendable {
         private let lock = NSLock()
-        private var parked: [CheckedContinuation<GeminiResponse, Never>] = []
-        private var calls = 0
+        private var parked: [CheckedContinuation<LLMStreamEvent?, Never>] = []
+        private var streamCalls = 0
+        private var replayCalls = 0
         private let response: GeminiResponse
 
         init(response: GeminiResponse) { self.response = response }
 
-        var callCount: Int { lock.withLock { calls } }
+        /// How many times the turn asked the model, i.e. how many runs reached their model call.
+        var callCount: Int { lock.withLock { streamCalls } }
+        /// Continuations still parked: the proof the turn is *inside* the call right now.
         var parkedCount: Int { lock.withLock { parked.count } }
+        /// Must stay zero. If it ever moves, the engine resolved streaming off and the park went
+        /// back to the cancellable `LLMStreamEvent.replay` path, which is the bug in the first
+        /// version of this test.
+        var replayCount: Int { lock.withLock { replayCalls } }
 
-        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
-            lock.withLock { calls += 1 }
-            return await withCheckedContinuation { continuation in
-                lock.withLock { parked.append(continuation) }
-            }
+        var supportsStreaming: Bool { true }
+
+        func streamContent(request: GeminiRequest, tier: ModelTier) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+            lock.withLock { streamCalls += 1 }
+            // `unfolding`, not the buffered form: the buffered stream's `next()` installs a
+            // cancellation handler that finishes the stream, which is exactly the unwind this
+            // test must not have. The unfolding form awaits this closure directly.
+            return AsyncThrowingStream<LLMStreamEvent, Error>(unfolding: { [self] in
+                await withCheckedContinuation { continuation in
+                    lock.withLock { parked.append(continuation) }
+                }
+            })
         }
 
-        /// Lets every orphaned turn finish at teardown. Not needed for the assertions — the point
-        /// of the test is that the run ends without this — but a `CheckedContinuation` that is
-        /// never resumed keeps its task (and the engine, state and store behind it) alive for the
-        /// rest of the process, which is a leak the next suite would pay for.
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            lock.withLock { replayCalls += 1 }
+            return response
+        }
+
+        /// Ends every parked stream at teardown. Not needed for the assertions — the point of the
+        /// test is that the run ends without it — but a continuation that is never resumed keeps
+        /// its task, and the engine, state and store behind it, alive for the rest of the process.
         func releaseAll() {
-            let waiting = lock.withLock { () -> [CheckedContinuation<GeminiResponse, Never>] in
+            let waiting = lock.withLock { () -> [CheckedContinuation<LLMStreamEvent?, Never>] in
                 defer { parked = [] }
                 return parked
             }
-            for continuation in waiting { continuation.resume(returning: response) }
+            for continuation in waiting { continuation.resume(returning: nil) }
         }
     }
 
@@ -428,7 +460,7 @@ struct JobRetryTests {
         // returned, the job kept its `inFlight` slot forever, its row stayed `running`, and every
         // later tick wrote another skip row. The job stopped, and nothing said why.
         let client = WedgedClient(response: textResponse("too late"))
-        let (store, state, engine) = try harness([], client: client)
+        let (store, state, engine) = try harness([], client: client, streamResponses: true)
         let j = job(timeoutSeconds: 1)
         try store.ledger.upsert(j)
         let (config, teardown) = isolatedConfig()
@@ -443,6 +475,8 @@ struct JobRetryTests {
         await runner.fire(job: j, origin: .schedule)
 
         #expect(client.parkedCount == 1, "the turn is still parked in the model call")
+        #expect(client.replayCount == 0,
+                "parked in the stream itself; a park behind `LLMStreamEvent.replay` unwinds on cancel")
         let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
         #expect(run.status == .failed, "the row is closed, not left running")
         #expect(run.failureReason == TurnBudget.timeExceeded)
@@ -494,7 +528,7 @@ struct JobRetryTests {
         // inverted condition or a slice that never shrinks would spin unnoticed. A tenth of a
         // second against a one-second timeout is about ten times round.
         let client = WedgedClient(response: textResponse("too late"))
-        let (store, state, engine) = try harness([], client: client)
+        let (store, state, engine) = try harness([], client: client, streamResponses: true)
         let j = job(timeoutSeconds: 1)
         try store.ledger.upsert(j)
         let (config, teardown) = isolatedConfig()
