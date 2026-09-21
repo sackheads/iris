@@ -786,14 +786,15 @@ class AppState {
         }
     }
     
-    /// `kind` defaults to `.subagent`; `GoalEvaluator` passes `.evaluator` so the strip and the
-    /// toolbar badge can tell an independent grader run apart from a delegated unit of work.
+    /// `kind` defaults to `.subagent`; `GoalEvaluator` passes `.evaluator` and `JobRunner` passes
+    /// `.job` (#187), so the strip and the toolbar badge can tell an independent grader run, a
+    /// background job run and a delegated unit of work apart.
     func registerSubagent(id: UUID, role: String, kind: SessionSummary.Kind = .subagent) {
         sessions.append(SessionSummary(id: id, kind: kind, role: role, startTime: Date(),
                                         phase: .thinking, lastActivity: nil))
     }
 
-    /// A subagent/evaluator run ended: mark it `.finished` rather than removing it outright, so
+    /// A subagent/evaluator/job run ended: mark it `.finished` rather than removing it outright, so
     /// the strip's transcript sheet still has a row to click on right after the run ends. It
     /// lingers for `sessionLingerWindow` — a sweep dropped after that always clears it even if
     /// nothing else touches `sessions` in the meantime. The write ledger is cleared unconditionally
@@ -827,11 +828,11 @@ class AppState {
         }
     }
 
-    /// The strip's data source: the synthesised main session first, then every subagent/evaluator
-    /// entry. `sessions` only ever holds those two kinds (`registerSubagent` is the sole writer and
-    /// takes a non-main `kind`); the filter is belt-and-braces. The synthesised row's id can't
-    /// collide with a subagent's either: `createNewConversation` never selects a subagent
-    /// conversation, so `selectedConversationId` is never a subagent id.
+    /// The strip's data source: the synthesised main session first, then every subagent, evaluator
+    /// and background job-run entry. `sessions` only ever holds non-main kinds (`registerSubagent`
+    /// is the sole writer and takes a non-main `kind`); the filter is belt-and-braces. The
+    /// synthesised row's id can't collide with one of them either: `createNewConversation` never
+    /// selects a subagent or background conversation, so `selectedConversationId` is never one.
     var visibleSessions: [SessionSummary] {
         // A stable fallback id, not a fresh `UUID()`, so the synthesised row's identity doesn't
         // change on every access (breaking `ForEach` diffing) on the practically-never-hit path

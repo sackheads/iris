@@ -83,7 +83,17 @@ actor JobScheduler {
         var skipped: [Job] = []
         for job in due {
             if toFire.count >= maxFiresPerTick { break }
-            if firing.contains(job.id) { skipped.append(job); continue }
+            if firing.contains(job.id) {
+                // Advance the cadence exactly as a fire does, and only then record the skip:
+                // leaving `nextFireAt` in the past would make every 10s tick re-skip the same
+                // still-running job, so one dropped trigger would write a ledger row a minute
+                // until the run finished. One dropped trigger, one row.
+                if record(jobId: job.id, nextFireAt: Self.cadence(of: job.trigger)?.next(after: now),
+                          lastRunAt: job.lastRunAt) {
+                    skipped.append(job)
+                }
+                continue
+            }
             // A pause is not always a cleared `nextFireAt`: D3 pauses a job on budget exhaustion
             // and leaves its cadence intact, so `dueJobs` keeps returning it. The reason is what
             // says it must not run — honour it here rather than in the query.

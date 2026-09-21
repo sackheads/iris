@@ -385,23 +385,18 @@ actor IrisEngine {
         let schedulerState = state
         let jobLedger = await MainActor.run(resultType: JobLedger?.self, body: { schedulerState?.store.ledger })
         if let ledger = jobLedger {
-            // Before the scheduler starts, so a run this process is about to begin is never
-            // mistaken for one the last process died in.
-            closeInterruptedRuns(ledger: ledger)
-            let scheduler = await adoptJobScheduler(ledger: ledger)
-            await scheduler.setOnSkip { job in
-                do {
-                    try JobRunner.recordSkip(job: job, ledger: ledger, now: Date())
-                } catch {
-                    print("[JobRunner] could not record the skipped run for \(job.name): \(error)")
-                }
-            }
+            await configureJobBookkeeping(ledger: ledger)
         }
 
         await PluginManager.shared.loadAll()
         let pluginConfigs = await PluginManager.shared.mcpConfigs()
         await MCPManager.shared.setPluginConfigs(pluginConfigs)
         await MCPManager.shared.startServers()
+        // Straight to the runner, NOT through `JobScheduler`: a watch fire has no cadence to
+        // advance and no `firing` entry, so two bursts a second apart start two runs of the same
+        // job. Deliberate until deliverable 4, which owns `FSWatch.quietWindowSeconds` — routing
+        // this through the scheduler's overlap skip today would coalesce nothing and write one
+        // `interrupted` ledger row per file event in a burst, which is noisier than the overlap.
         await WatcherManager.shared.setCallback { [weak self] job, paths in
             guard let runner = await self?.jobRunner() else { return }
             await runner.run(job: job, reason: "fsEvent", changedPaths: paths)
@@ -1623,6 +1618,23 @@ actor IrisEngine {
             }
         }
         return "Could not save the job."
+    }
+
+    /// Everything launch does about job runs, in the order it has to happen (#187 §6, §10): close
+    /// out the runs the last process died inside — before the scheduler can start a new one, so a
+    /// run this process is about to begin is never mistaken for one of them — then bring the
+    /// scheduler up and give it somewhere to record an overlap skip. Split out of `start()`, which
+    /// also loads plugins and MCP servers, so it can be driven (and tested) on its own.
+    func configureJobBookkeeping(ledger: JobLedger) async {
+        closeInterruptedRuns(ledger: ledger)
+        let scheduler = await adoptJobScheduler(ledger: ledger)
+        await scheduler.setOnSkip { job in
+            do {
+                try JobRunner.recordSkip(job: job, ledger: ledger, now: Date())
+            } catch {
+                print("[JobRunner] could not record the skipped run for \(job.name): \(error)")
+            }
+        }
     }
 
     /// Brings up the ledger-backed scheduler this engine fires jobs through. Split out of

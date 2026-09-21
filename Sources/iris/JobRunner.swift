@@ -18,9 +18,19 @@ import Foundation
 actor JobRunner {
     /// The failure reason on the row an overlap-skip writes. Spelled once: `/jobs` reads it back.
     static let skipReason = "skipped: previous run still in progress"
+    /// A turn that ended without the agent saying anything: a hook that blocked it, a cancelled
+    /// engine, a conversation deleted mid-run. Not `completed` — "it worked and had nothing to
+    /// report" and "it never got as far as a reply" must not look the same on a card.
+    static let noReplyReason = "run produced no reply"
+    /// The app quit (or `AppState` was otherwise released) with the run still open.
+    static let releasedReason = "app state released"
 
-    private let state: AppState
-    private let engine: IrisEngine
+    /// Weak, both of them: `AppState` owns the engine, the engine owns this runner for the life of
+    /// the process, and a strong reference back either way is a cycle that keeps a whole app state
+    /// — conversations, store, sessions — alive forever. Every hop below re-reads them and bails
+    /// (closing the ledger row) rather than holding one across the turn.
+    private weak var state: AppState?
+    private weak var engine: IrisEngine?
     private let ledger: JobLedger
     private let now: @Sendable () -> Date
 
@@ -38,9 +48,70 @@ actor JobRunner {
     /// to tell.
     func run(job: Job, reason: String, changedPaths: [String] = []) async {
         let startedAt = now()
+        guard let conversationId = await openConversation(for: job, at: startedAt) else {
+            print("[JobRunner] not running \(job.name): \(Self.releasedReason)")
+            return
+        }
+
+        let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: reason, startedAt: startedAt,
+                         transcriptConversationId: conversationId)
+        do {
+            try ledger.begin(run: run)
+        } catch {
+            // The row is what makes a run visible — without it the turn would burn tokens and a
+            // model call with nothing to show for it, and `finish` below would throw anyway.
+            // Deleting the job out from under a due tick is the way this happens.
+            print("[JobRunner] not running \(job.name): could not record the run: \(error)")
+            await closeSession(conversationId, status: "not recorded")
+            return
+        }
+
+        guard let engine else {
+            await closeInterrupted(run: run, conversationId: conversationId, at: now())
+            return
+        }
+        await engine.processInput(Self.prompt(job: job, changedPaths: changedPaths),
+                                  source: "job:\(job.name)", conversationId: conversationId)
+        let finishedAt = now()
+
+        guard let turn = await readTurn(conversationId: conversationId) else {
+            await closeInterrupted(run: run, conversationId: conversationId, at: finishedAt)
+            return
+        }
+
+        let status = Self.status(messages: turn.messages, denials: turn.denials,
+                                 softStopped: Self.softStopped(in: turn.messages))
+        let outcome = Self.outcome(from: turn.messages)
+        let blockedTool = turn.denials.first?.toolName
+        let failureReason = Self.failureReason(status: status, messages: turn.messages,
+                                               blockedTool: blockedTool)
+        do {
+            // The conversation is fresh, so its accumulated `tokenUsage` IS this run's cost.
+            try ledger.finish(runId: run.id, status: status, outcome: outcome,
+                              failureReason: failureReason, blockedTool: blockedTool,
+                              tokens: turn.tokens, finishedAt: finishedAt)
+        } catch {
+            print("[JobRunner] could not close the run for \(job.name): \(error)")
+        }
+
+        let card = EventCard(runId: run.id, jobId: job.id, jobName: job.name, status: status,
+                             // A card shows one line. With no reply to show, that line is why
+                             // there is none (§6.2) — a blank failed card tells nobody anything.
+                             outcome: outcome ?? failureReason, blockedTool: blockedTool,
+                             startedAt: startedAt, finishedAt: finishedAt,
+                             totalTokens: turn.tokens.totalTokenCount,
+                             transcriptConversationId: conversationId)
+        await closeSession(conversationId, status: card.statusText)
+        await deliver(card, for: job)
+    }
+
+    /// The run's own hidden conversation, registered in the session strip. `nil` when the app
+    /// state has been released — there is nothing to run a turn against, and no row has been
+    /// written yet, so the fire is simply dropped.
+    private func openConversation(for job: Job, at startedAt: Date) async -> UUID? {
+        guard let state else { return nil }
         let title = "\(job.name) · \(ISO8601DateFormatter().string(from: startedAt))"
-        let state = self.state
-        let conversationId = await MainActor.run { () -> UUID in
+        return await MainActor.run { () -> UUID in
             let id = state.createNewConversation(isBackground: true, title: title)
             // `.mutating` is the only profile that asks for a container. `.readOnly` leaves the
             // field nil deliberately: nil means "fall through to the per-workspace/global
@@ -53,55 +124,49 @@ actor JobRunner {
             state.registerSubagent(id: id, role: "job:\(job.name)", kind: .job)
             return id
         }
+    }
 
-        let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: reason, startedAt: startedAt,
-                         transcriptConversationId: conversationId)
-        do {
-            try ledger.begin(run: run)
-        } catch {
-            // The row is what makes a run visible — without it the turn would burn tokens and a
-            // model call with nothing to show for it, and `finish` below would throw anyway.
-            // Deleting the job out from under a due tick is the way this happens.
-            print("[JobRunner] not running \(job.name): could not record the run: \(error)")
-            await MainActor.run { state.finishSession(id: conversationId, status: "not recorded") }
-            return
-        }
+    /// What the finished turn left behind. `nil` when the app state went away while it ran.
+    private struct TurnResult {
+        let messages: [ChatMessage]
+        let denials: [BlockedToolCall]
+        let tokens: TokenUsage
+    }
 
-        await engine.processInput(Self.prompt(job: job, changedPaths: changedPaths),
-                                  source: "job:\(job.name)", conversationId: conversationId)
-        let finishedAt = now()
-
-        let (messages, denials, tokens) = await MainActor.run {
-            () -> ([ChatMessage], [BlockedToolCall], TokenUsage) in
+    private func readTurn(conversationId: UUID) async -> TurnResult? {
+        guard let state else { return nil }
+        return await MainActor.run { () -> TurnResult in
             let conversation = state.conversations.first(where: { $0.id == conversationId })
             // Taken, not read: the denials belong to this run, and leaving them behind would mark
             // the next run in the same conversation blocked too (there is no next run in the same
             // conversation today, but the drain is what guarantees that).
-            return (conversation?.messages ?? [],
-                    state.takeBackgroundDenials(for: conversationId),
-                    conversation?.tokenUsage ?? TokenUsage())
+            return TurnResult(messages: conversation?.messages ?? [],
+                              denials: state.takeBackgroundDenials(for: conversationId),
+                              tokens: conversation?.tokenUsage ?? TokenUsage())
         }
+    }
 
-        let status = Self.status(messages: messages, denials: denials,
-                                 softStopped: Self.softStopped(in: messages))
-        let outcome = Self.outcome(from: messages)
-        let blockedTool = denials.first?.toolName
+    /// Closes a run whose app state disappeared under it: the same shape as the sweep at the next
+    /// launch, because it is the same situation — nothing will ever finish this turn. No card:
+    /// there is nowhere to deliver one to.
+    private func closeInterrupted(run: JobRun, conversationId: UUID, at: Date) async {
         do {
-            // The conversation is fresh, so its accumulated `tokenUsage` IS this run's cost.
-            try ledger.finish(runId: run.id, status: status, outcome: outcome,
-                              failureReason: Self.failureReason(status: status, messages: messages),
-                              blockedTool: blockedTool, tokens: tokens, finishedAt: finishedAt)
+            try ledger.finish(runId: run.id, status: .interrupted, outcome: nil,
+                              failureReason: Self.releasedReason, blockedTool: nil,
+                              tokens: TokenUsage(), finishedAt: at)
         } catch {
-            print("[JobRunner] could not close the run for \(job.name): \(error)")
+            print("[JobRunner] could not close the released run for \(run.jobName): \(error)")
         }
+        await closeSession(conversationId, status: "interrupted")
+    }
 
-        let card = EventCard(runId: run.id, jobId: job.id, jobName: job.name, status: status,
-                             outcome: outcome, blockedTool: blockedTool,
-                             startedAt: startedAt, finishedAt: finishedAt,
-                             totalTokens: tokens.totalTokenCount,
-                             transcriptConversationId: conversationId)
-        await MainActor.run { state.finishSession(id: conversationId, status: card.statusText) }
+    private func closeSession(_ conversationId: UUID, status: String) async {
+        guard let state else { return }
+        await MainActor.run { state.finishSession(id: conversationId, status: status) }
+    }
 
+    private func deliver(_ card: EventCard, for job: Job) async {
+        guard let state else { return }
         let destination = await MainActor.run { () -> UUID in
             // A destination that has since been deleted falls back to Activity rather than
             // dropping the card: `deliverEvent` is a no-op for an unknown id, and a run nobody
@@ -123,8 +188,8 @@ actor JobRunner {
     }
 
     /// The first line of the last thing the agent said, capped at 200 characters — the one line a
-    /// card and `/jobs` show. `nil` when the run said nothing, which is a perfectly ordinary
-    /// outcome for a job whose work was all tool calls.
+    /// card and `/jobs` show. `nil` when the run said nothing at all, which `status` treats as a
+    /// failure: an empty bubble is no more of a reply than no bubble, so both land here.
     static func outcome(from messages: [ChatMessage]) -> String? {
         guard let last = messages.last(where: { $0.role == .agent }) else { return nil }
         let text = last.content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -136,11 +201,15 @@ actor JobRunner {
     /// Fail-closed precedence (§6.2). A denial outranks everything: it is the one outcome a person
     /// can do something about, and it is the reason the run stopped short even if the turn also
     /// errored on its way out. An `[LLM_ERROR]` outranks a soft stop for the same reason — it says
-    /// what actually broke, where a soft stop only says the loop was cut off.
+    /// what actually broke, where a soft stop only says the loop was cut off. Last, a turn that
+    /// reached the end with nothing said is a failure too: a hook that blocked the turn, a
+    /// cancelled engine or a conversation deleted mid-run all land here, and reporting any of them
+    /// as `completed` would put a green card on a run that did nothing.
     static func status(messages: [ChatMessage], denials: [BlockedToolCall], softStopped: Bool) -> JobRun.Status {
         if !denials.isEmpty { return .blockedOnApproval }
         if llmErrorHeadline(in: messages) != nil { return .failed }
         if softStopped { return .failed }
+        if outcome(from: messages) == nil { return .failed }
         return .completed
     }
 
@@ -163,11 +232,18 @@ actor JobRunner {
         messages.last { $0.role == .system && $0.content.contains(IrisEngine.softStopMarker) }?.content
     }
 
-    /// What the row records about why a run did not simply complete. A blocked run says it with
-    /// `blockedTool` instead, so there is nothing to add here.
-    static func failureReason(status: JobRun.Status, messages: [ChatMessage]) -> String? {
-        guard status == .failed else { return nil }
-        return llmErrorHeadline(in: messages) ?? softStopLine(in: messages)
+    /// What the row records about why a run did not simply complete — and, when the run left no
+    /// reply to show, what the card prints in its place.
+    static func failureReason(status: JobRun.Status, messages: [ChatMessage],
+                              blockedTool: String?) -> String? {
+        switch status {
+        case .blockedOnApproval:
+            return "needs approval: \(blockedTool ?? "a gated tool")"
+        case .failed:
+            return llmErrorHeadline(in: messages) ?? softStopLine(in: messages) ?? noReplyReason
+        case .running, .completed, .interrupted:
+            return nil
+        }
     }
 
     /// The row an overlap skip writes: a run that started and ended in the same instant, with no

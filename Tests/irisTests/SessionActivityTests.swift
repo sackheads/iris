@@ -118,6 +118,16 @@ struct SessionActivityTests {
                 == "1 evaluator running, 1 finished")
     }
 
+    @Test("collapsed summary counts a background job run, whose conversation is hidden (#187)")
+    func collapsedSummaryJobs() {
+        #expect(SessionActivity.collapsedSummary(for: [Self.session(.thinking, kind: .job)]) == "1 job running")
+        #expect(SessionActivity.collapsedSummary(for: [Self.session(.thinking, kind: .job), Self.session(.responding, kind: .job)])
+                == "2 jobs running")
+        #expect(SessionActivity.collapsedSummary(for: [Self.session(.thinking), Self.session(.thinking, kind: .evaluator), Self.session(.thinking, kind: .job)])
+                == "1 subagent running, 1 evaluator running, 1 job running")
+        #expect(SessionActivity.collapsedSummary(for: [Self.session(.finished(status: "completed", at: Date()), kind: .job)]) == "1 finished")
+    }
+
     @Test("collapsed summary: fix round 1 — the collapsed main line summarizes background work")
     func collapsedSummary() {
         #expect(SessionActivity.collapsedSummary(for: []) == "")
