@@ -62,6 +62,7 @@ actor JobScheduler {
     /// already moved and `firing` covers the window before it does.
     @discardableResult
     func tick() async -> Int {
+        let handler = fireHandler
         let now = self.now()
         let due: [Job]
         do {
@@ -75,10 +76,15 @@ actor JobScheduler {
         for job in due {
             if toFire.count >= maxFiresPerTick { break }
             if firing.contains(job.id) { continue }
+            // A pause is not always a cleared `nextFireAt`: D3 pauses a job on budget exhaustion
+            // and leaves its cadence intact, so `dueJobs` keeps returning it. The reason is what
+            // says it must not run — honour it here rather than in the query.
+            if job.pausedReason != nil { continue }
 
             // Cadence-less triggers (fsEvent) have no next occurrence to compute; clear the stray
             // nextFireAt that made this row due rather than pausing a job the filesystem drives.
             guard let cadence = Self.cadence(of: job.trigger) else {
+                guard handler != nil else { continue }
                 if record(jobId: job.id, nextFireAt: nil, lastRunAt: now) {
                     toFire.append(job)
                 }
@@ -86,7 +92,9 @@ actor JobScheduler {
             }
 
             guard let next = cadence.next(after: now) else {
-                // Not a fire: the job never runs again until someone edits it.
+                // Not a fire, so this runs whether or not a handler is set: a cadence that can
+                // never match again is broken no matter who is listening, and leaving it due
+                // would have every tick recompute the same dead lookahead forever.
                 do {
                     try ledger.setPaused(jobId: job.id, reason: Self.unmatchableReason)
                     try ledger.setNextFire(jobId: job.id, at: nil, lastRunAt: job.lastRunAt)
@@ -96,6 +104,10 @@ actor JobScheduler {
                 continue
             }
 
+            // Nothing to fire into: leave the job due rather than advancing past it, or every
+            // run that came due before the engine finished wiring itself up is silently consumed.
+            guard handler != nil else { continue }
+
             // Before the handler, never after: a crash between the two loses a run instead of
             // repeating one.
             if record(jobId: job.id, nextFireAt: next, lastRunAt: now) {
@@ -103,7 +115,7 @@ actor JobScheduler {
             }
         }
 
-        guard !toFire.isEmpty, let handler = fireHandler else { return 0 }
+        guard !toFire.isEmpty, let handler else { return 0 }
         for job in toFire { firing.insert(job.id) }
 
         await withTaskGroup(of: UUID.self) { group in
@@ -151,6 +163,10 @@ actor JobScheduler {
         }
     }
 
+    /// Cancels the polling loop and the wake observer. Nothing calls this in the app: the
+    /// scheduler is app-lifetime, and `applicationWillTerminate` ends the process with `_exit(0)`
+    /// without an async teardown for `MCPManager` or `WatcherManager` either. It exists so tests
+    /// can tear a scheduler down, so `start()` is idempotent, and for a future orderly shutdown.
     func stop() {
         pollTask?.cancel()
         pollTask = nil

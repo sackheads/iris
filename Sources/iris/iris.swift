@@ -381,7 +381,6 @@ actor IrisEngine {
             self.jobScheduler = scheduler
         }
 
-        
         await PluginManager.shared.loadAll()
         let pluginConfigs = await PluginManager.shared.mcpConfigs()
         await MCPManager.shared.setPluginConfigs(pluginConfigs)
