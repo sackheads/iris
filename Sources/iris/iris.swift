@@ -1674,21 +1674,15 @@ actor IrisEngine {
     /// Everything launch does about job runs, in the order it has to happen (#187 §6, §10): close
     /// out the runs the last process died inside — before the scheduler can start a new one, so a
     /// run this process is about to begin is never mistaken for one of them — then bring the
-    /// scheduler up and give it somewhere to record an overlap skip. Split out of `start()`, which
-    /// also loads plugins and MCP servers, so it can be driven (and tested) on its own.
+    /// scheduler up, pointed at the runner every fire is admitted through. Split out of `start()`,
+    /// which also loads plugins and MCP servers, so it can be driven (and tested) on its own.
     func configureJobBookkeeping(ledger: JobLedger) async {
         closeInterruptedRuns(ledger: ledger)
-        // Both handlers are installed through `configure`, which runs before the polling loop
-        // does: installed after `start()`, the first tick could skip an overlapping job (or cross
-        // a day boundary) with no handler to record it.
+        // The handler is installed through `configure`, which runs before the polling loop does:
+        // installed after `start()`, the first tick could cross a day boundary with nothing to
+        // record it. Overlap needs no handler of its own any more — every fire goes through
+        // `JobRunner.fire`, which is where a skip row is written (§4).
         _ = await adoptJobScheduler(ledger: ledger) { scheduler in
-            await scheduler.setOnSkip { job in
-                do {
-                    try JobRunner.recordSkip(job: job, ledger: ledger, now: Date())
-                } catch {
-                    print("[JobRunner] could not record the skipped run for \(job.name): \(error)")
-                }
-            }
             // Retention runs at launch and once a day (§10). Both, not one: a Mac that is never
             // restarted would never prune on launch alone, and a Mac restarted twice a day would
             // never reach the daily hook. The launch pass is the explicit call below, so it
@@ -1771,7 +1765,9 @@ actor IrisEngine {
     func fireHandler() -> JobScheduler.FireHandler {
         { [weak self] job, reason in
             guard let runner = await self?.jobRunner() else { return }
-            await runner.run(job: job, reason: reason)
+            // `fire`, not `run`: the runner is the single admission point, so a due job meets the
+            // same overlap, breaker and budget checks a watch fire does (§4).
+            await runner.fire(job: job, reason: reason)
         }
     }
 
@@ -1833,16 +1829,16 @@ actor IrisEngine {
     /// for the same reason `fireHandler()` was: the job tools hand this to a manager an unstarted
     /// engine adopts (`JobTools.watcherCallback`), and the two paths must install one definition.
     ///
-    /// Straight to the runner, NOT through `JobScheduler`: a watch fire has no cadence to advance
-    /// and no `firing` entry, and routing it through the scheduler's overlap skip would write one
-    /// `interrupted` ledger row per file event in a burst — noisier than the overlap itself.
-    /// Overlap is handled where every fire passes: `JobRunner.run` keeps its own in-flight set and
-    /// drops a watch fire for a job already running, silently and without a row. Deliverable 4
-    /// owns `FSWatch.quietWindowSeconds` and turns that into coalescing.
+    /// Straight to the runner, NOT through `JobScheduler`: a watch fire has no cadence to advance.
+    /// It meets the same admission as a scheduled one all the same — `JobRunner.fire` is where
+    /// overlap, the breaker and the budgets are decided (§4) — and a watch fire that overlaps is
+    /// dropped without a row, because FSEvents delivers a burst per save and one `interrupted` row
+    /// per event would be noisier than the overlap itself. Deliverable 4 owns
+    /// `FSWatch.quietWindowSeconds` and turns that into coalescing.
     func watcherCallback() -> @Sendable (Job, [String]) async -> Void {
         { [weak self] job, paths in
             guard let runner = await self?.jobRunner() else { return }
-            await runner.run(job: job, reason: "fsEvent", changedPaths: paths)
+            await runner.fire(job: job, reason: "fsEvent", changedPaths: paths)
         }
     }
 

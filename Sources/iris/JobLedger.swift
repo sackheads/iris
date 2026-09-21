@@ -135,6 +135,12 @@ final class JobLedger: Sendable {
         try decodeAll(sql: "SELECT * FROM jobs WHERE name = ?", arguments: [name]).jobs.first
     }
 
+    /// One job by id — what the runner re-reads after a run to see whether a trigger was queued
+    /// while it was going, rather than trusting the copy it was handed when the run began.
+    func job(id: UUID) throws -> Job? {
+        try decodeAll(sql: "SELECT * FROM jobs WHERE id = ?", arguments: [id.uuidString]).jobs.first
+    }
+
     /// The enabled jobs whose `nextFireAt` has arrived, soonest first. Inclusive at `now`, so a job
     /// scheduled for exactly this tick fires on it.
     func dueJobs(at now: Date) throws -> [Job] {

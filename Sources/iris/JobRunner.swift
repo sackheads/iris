@@ -35,35 +35,194 @@ actor JobRunner {
     private weak var engine: IrisEngine?
     private let ledger: JobLedger
     private let now: @Sendable () -> Date
+    /// Whose day "tokens today" is counted in — the user's, so the budget resets at their
+    /// midnight. Injectable only so a test can pin the zone.
+    private let calendar: Calendar
+    private let config: ConfigManager
     private let protectionEnabled: Bool?
-    /// The jobs with a run in flight right now. Every fire goes through `run`, so one set here is
+    /// The jobs with a run in flight right now. Every fire goes through `fire`, so one set here is
     /// the whole overlap story, whatever woke the job.
     private var inFlight: Set<UUID> = []
 
     init(state: AppState, engine: IrisEngine, ledger: JobLedger,
          now: @escaping @Sendable () -> Date = Date.init,
+         calendar: Calendar = .current,
+         config: ConfigManager = .shared,
          protectionEnabled: Bool? = nil) {
         self.state = state
         self.engine = engine
         self.ledger = ledger
         self.now = now
+        self.calendar = calendar
+        self.config = config
         self.protectionEnabled = protectionEnabled
+    }
+
+    // MARK: Admission (#187 §4)
+
+    /// What a fire is allowed to do. One value per branch of §4's "before a run" order, carrying
+    /// the figures the row, the pause reason and the card have to name — a card that says a budget
+    /// was reached without saying which number reached it tells nobody anything (§9).
+    enum Admission: Equatable, Sendable {
+        case run
+        case dropPaused
+        case skipInFlight
+        case queued
+        case pauseBreaker(count: Int)
+        case pauseBudget(scope: String, used: Int, limit: Int)
+    }
+
+    /// The whole admission decision, as a pure function of the job and four numbers, so the order
+    /// can be tested without a ledger, an engine or a clock.
+    ///
+    /// The order is load-bearing (§4). A paused job is dropped before anything else, because a
+    /// pause is already the answer and re-reporting it as an overlap or a budget would write a row
+    /// per tick for a job that is not running. An overlap comes next: a run that never started is
+    /// not a run, so it must not be counted against the breaker or a budget. The breaker then
+    /// outranks the budgets: a job thrashing its way through its allowance should say it is
+    /// thrashing, which is the thing a person can act on.
+    ///
+    /// A non-positive limit means "no limit". Nothing configured can produce one — `ConfigManager`
+    /// reads 0 back as the default — but a hand-written policy can, and a job that can never run
+    /// again is a worse reading of `maxRunsPerHour: 0` than an unbounded one.
+    static func admit(job: Job, inFlight: Bool, runsLastHour: Int,
+                      tokensTodayJob: Int, tokensTodayAll: Int, limits: JobLimits) -> Admission {
+        if job.pausedReason != nil { return .dropPaused }
+        if inFlight { return job.policy.overlap == .queue ? .queued : .skipInFlight }
+        if limits.maxRunsPerHour > 0, runsLastHour >= limits.maxRunsPerHour {
+            return .pauseBreaker(count: runsLastHour)
+        }
+        if limits.dailyTokens > 0, tokensTodayJob >= limits.dailyTokens {
+            return .pauseBudget(scope: "job", used: tokensTodayJob, limit: limits.dailyTokens)
+        }
+        if limits.globalDailyTokens > 0, tokensTodayAll >= limits.globalDailyTokens {
+            return .pauseBudget(scope: "global", used: tokensTodayAll, limit: limits.globalDailyTokens)
+        }
+        return .run
+    }
+
+    /// The pause reason a breaker trip writes — on the job, on its row, and on its card.
+    static func breakerReason(count: Int) -> String {
+        "breaker: \(count) runs in the last hour"
+    }
+
+    /// The pause reason an exhausted daily budget writes. It names the figure that tripped it
+    /// (§9): "reached its budget" without the number leaves a person with nothing to decide on.
+    static func budgetReason(scope: String, used: Int, limit: Int) -> String {
+        "daily token budget reached (\(scope)): \(used) / \(limit)"
+    }
+
+    /// A fire that came from a filesystem watch. FSEvents delivers a burst per save, so the
+    /// overlap it causes is not news: it is dropped without a row, where a scheduled overlap
+    /// writes one. D2's decision, kept — a row per dropped event would bury the ledger far worse
+    /// than the overlap it recorded.
+    static func isWatcherFire(reason: String) -> Bool { reason.hasPrefix("fsEvent") }
+
+    /// The single admission point for every fire, scheduled or watcher-driven (§4). Decides, acts
+    /// on the decision (a row, a pause, a card), runs the turn when it is allowed, and afterwards
+    /// takes the one trigger the `queue` policy held back.
+    ///
+    /// `JobScheduler` no longer keeps its own `firing` set: a watch fire never went through it, so
+    /// two bursts a second apart used to start two runs of the same job (D2-R9). Overlap is a
+    /// property of the job, so it lives where every fire passes.
+    ///
+    /// The ledger reads below are synchronous, so nothing suspends between reading `inFlight` and
+    /// inserting into it: two fires arriving at once cannot both be admitted.
+    func fire(job: Job, reason: String, changedPaths: [String] = []) async {
+        let at = now()
+        let limits = JobLimits.resolve(job: job, config: config)
+        let usage = (try? ledger.usage(jobId: job.id, now: at, calendar: calendar))
+            ?? JobUsage(tokensToday: 0, runsLastHour: 0)
+        let tokensAll = (try? ledger.tokensToday(jobId: nil, calendar: calendar, now: at)) ?? 0
+
+        switch Self.admit(job: job, inFlight: inFlight.contains(job.id),
+                          runsLastHour: usage.runsLastHour, tokensTodayJob: usage.tokensToday,
+                          tokensTodayAll: tokensAll, limits: limits) {
+        case .dropPaused:
+            // Nothing: the card that paused it already went out, and a row per tick would bury it.
+            return
+        case .skipInFlight:
+            guard !Self.isWatcherFire(reason: reason) else { return }
+            do {
+                try Self.recordSkip(job: job, ledger: ledger, now: at)
+            } catch {
+                print("[JobRunner] could not record the skipped run for \(job.name): \(error)")
+            }
+            return
+        case .queued:
+            // One held trigger, never a queue of them: a job that fell far behind should run once
+            // when it is free, not N times in a row.
+            do {
+                if try ledger.job(id: job.id)?.queuedFire == nil {
+                    try ledger.setQueuedFire(jobId: job.id, at: at)
+                }
+            } catch {
+                print("[JobRunner] could not queue a fire for \(job.name): \(error)")
+            }
+            return
+        case .pauseBreaker(let count):
+            await pause(job: job, reason: Self.breakerReason(count: count), at: at)
+            return
+        case .pauseBudget(let scope, let used, let limit):
+            await pause(job: job, reason: Self.budgetReason(scope: scope, used: used, limit: limit), at: at)
+            return
+        case .run:
+            break
+        }
+
+        inFlight.insert(job.id)
+        await run(job: job, reason: reason, changedPaths: changedPaths)
+        inFlight.remove(job.id)
+
+        await takeQueuedFire(job: job)
+    }
+
+    /// Runs the one trigger held back while this job was busy, if there was one. Cleared before it
+    /// is taken, so a trigger arriving during *that* run is what refills the slot rather than this
+    /// one firing forever.
+    private func takeQueuedFire(job: Job) async {
+        // Only the `queue` policy can have left one, so every other job's run ends without a read.
+        guard job.policy.overlap == .queue else { return }
+        var queued = job
+        do {
+            guard let stored = try ledger.job(id: job.id), stored.queuedFire != nil else { return }
+            try ledger.setQueuedFire(jobId: job.id, at: nil)
+            queued = stored
+        } catch {
+            print("[JobRunner] could not take the queued fire for \(job.name): \(error)")
+            return
+        }
+        queued.queuedFire = nil
+        await fire(job: queued, reason: "queued")
+    }
+
+    /// Stops a job, says why on the job itself, and tells the user once: the reason on a
+    /// zero-length `interrupted` row and on a card. Both, because they answer different questions
+    /// — `/jobs` shows the row, and the card is the only thing that reaches someone who is not
+    /// looking for it.
+    private func pause(job: Job, reason: String, at: Date) async {
+        do {
+            try ledger.setPaused(jobId: job.id, reason: reason)
+        } catch {
+            print("[JobRunner] could not pause \(job.name): \(error)")
+        }
+        do {
+            let run = try Self.recordStillborn(job: job, ledger: ledger, reason: reason, now: at)
+            await deliver(EventCard(runId: run.id, jobId: job.id, jobName: job.name,
+                                    status: .interrupted, outcome: reason, startedAt: at,
+                                    finishedAt: at), for: job)
+        } catch {
+            print("[JobRunner] could not record the pause for \(job.name): \(error)")
+        }
     }
 
     /// Creates the background conversation, records the run, runs the turn, closes the row and
     /// delivers the card. Never throws: a fire is unattended, so every failure here is logged and
     /// the run is still accounted for in the ledger rather than surfacing to a caller with no one
     /// to tell.
-    func run(job: Job, reason: String, changedPaths: [String] = []) async {
-        // One guard for every fire. A watch is the case that needs it: FSEvents delivers a burst
-        // for a single save, and each event used to start its own run of the same job. A fire that
-        // arrives while the job is running is dropped SILENTLY — a row per dropped event would
-        // spam the ledger far worse than the overlap it recorded, and a scheduled fire still gets
-        // the scheduler's one skip row per cadence. D3's policy work turns this into a real quiet
-        // window; until then, dropping is the conservative half.
-        guard inFlight.insert(job.id).inserted else { return }
-        defer { inFlight.remove(job.id) }
-
+    ///
+    /// Private: `fire` is the only way in, so nothing can start a run that skipped admission.
+    private func run(job: Job, reason: String, changedPaths: [String] = []) async {
         let startedAt = now()
         guard let conversationId = await openConversation(for: job, at: startedAt) else {
             print("[JobRunner] not running \(job.name): \(Self.releasedReason)")
@@ -286,11 +445,47 @@ actor JobRunner {
     /// went wrong, the previous copy was simply still going, and `failed` would put it in front of
     /// a person as something to fix.
     static func recordSkip(job: Job, ledger: JobLedger, now: Date) throws {
+        _ = try recordStillborn(job: job, ledger: ledger, reason: skipReason, now: now)
+    }
+
+    /// A run that never happened, recorded so `/jobs` can show why: begun and finished at the same
+    /// instant, `interrupted`, no transcript, no tokens. Every admission branch that refuses a
+    /// fire and owes the user an explanation writes one — the overlap skip and both pauses.
+    @discardableResult
+    static func recordStillborn(job: Job, ledger: JobLedger, reason: String, now: Date) throws -> JobRun {
         let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: job.trigger.kind,
                          startedAt: now, status: .interrupted)
         try ledger.begin(run: run)
         try ledger.finish(runId: run.id, status: .interrupted, outcome: nil,
-                          failureReason: skipReason, blockedTool: nil,
+                          failureReason: reason, blockedTool: nil,
                           tokens: TokenUsage(), finishedAt: now)
+        return run
+    }
+}
+
+/// The numbers one fire is judged against: the job's own policy where it set one, the global
+/// `ConfigManager` defaults where it did not (§0.1). Resolved once per fire rather than read
+/// field by field, so a run and the card that reports it cannot disagree about what its budget was.
+struct JobLimits: Equatable, Sendable {
+    let maxRunsPerHour: Int
+    let dailyTokens: Int
+    /// Across every job. Deliberately not overridable per job: it is the ceiling on the whole
+    /// unattended system, and a job that could raise its own share of it is not a ceiling.
+    let globalDailyTokens: Int
+    let perRunTokens: Int
+    let runTimeoutSeconds: Int
+
+    static func resolve(job: Job, config: ConfigManager) -> JobLimits {
+        let policy = job.policy
+        // `runTimeoutSeconds` is the one non-optional override on `JobPolicy`, so "the job set it"
+        // has to be read as "it is not the struct's own default" — which is what lets the global
+        // stepper still move every job that never asked for a timeout of its own.
+        let timeout = policy.runTimeoutSeconds == JobPolicy().runTimeoutSeconds
+            ? config.jobRunTimeoutSeconds : policy.runTimeoutSeconds
+        return JobLimits(maxRunsPerHour: policy.maxRunsPerHour ?? config.jobMaxRunsPerHour,
+                         dailyTokens: policy.dailyTokenBudget ?? config.jobDailyTokenBudget,
+                         globalDailyTokens: config.jobGlobalDailyTokenBudget,
+                         perRunTokens: policy.perRunTokenBudget ?? config.jobPerRunTokenBudget,
+                         runTimeoutSeconds: timeout)
     }
 }

@@ -131,7 +131,7 @@ struct BackgroundDescendantTests {
         try store.ledger.upsert(job)
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger)
 
-        await runner.run(job: job, reason: "schedule")
+        await runner.fire(job: job, reason: "schedule")
 
         #expect(state.pendingApprovals.isEmpty, "an unattended run never parks on a dialog")
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)

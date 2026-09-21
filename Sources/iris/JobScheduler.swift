@@ -27,13 +27,6 @@ actor JobScheduler {
     private let maxFiresPerTick: Int
 
     private var fireHandler: FireHandler?
-    /// Called once per skipped fire, with the job that did not start a second copy (#187
-    /// deliverable 2, where it writes the `interrupted` ledger row). Optional: nil is deliverable
-    /// 1's behaviour, a skip that leaves no trace.
-    private var onSkip: (@Sendable (Job) async -> Void)?
-    /// Jobs whose handler has not returned yet. The spec's `skip` overlap policy: a job that is
-    /// still running when its next fire comes round does not start a second copy.
-    private var firing: Set<UUID> = []
     /// Called at most once every `maintenanceInterval`, from the same loop that polls for due jobs
     /// (#187 §10: retention runs "at launch and once a day"). The loop is the only thing in the
     /// app that already ticks forever, so a daily chore hangs off it rather than off a second
@@ -54,10 +47,6 @@ actor JobScheduler {
 
     func setFireHandler(_ handler: @escaping FireHandler) {
         fireHandler = handler
-    }
-
-    func setOnSkip(_ handler: @escaping @Sendable (Job) async -> Void) {
-        onSkip = handler
     }
 
     /// A day, as the maintenance hook counts one. Not a calendar day: nothing about retention
@@ -84,7 +73,8 @@ actor JobScheduler {
     /// Awaits the batch it started, so a caller (and a test) can observe the fires this tick
     /// caused. `start()`'s loop therefore runs each tick detached: a handler that takes an hour
     /// must not hold up the next poll, and an overlapping tick is safe because `nextFireAt` has
-    /// already moved and `firing` covers the window before it does.
+    /// already moved before the handler is called and the runner refuses a job it is already
+    /// running (§4) — overlap is the runner's, so a watch fire is covered by the same set.
     @discardableResult
     func tick() async -> Int {
         let handler = fireHandler
@@ -99,24 +89,14 @@ actor JobScheduler {
         }
 
         var toFire: [Job] = []
-        var skipped: [Job] = []
         for job in due {
             if toFire.count >= maxFiresPerTick { break }
-            // First, before the overlap check: a pause is not always a cleared `nextFireAt` (D3
-            // pauses a job on budget exhaustion and leaves its cadence intact, so `dueJobs` keeps
-            // returning it), and a job paused while its previous run is still going must not be
-            // logged as a skip or bumped along a cadence it is no longer following. The reason is
-            // what says it must not run — honour it here rather than in the query.
+            // A pause is not always a cleared `nextFireAt` — D3 pauses a job on budget exhaustion
+            // and leaves its cadence intact, so `dueJobs` keeps returning it — and a paused job
+            // must not be bumped along a cadence it is no longer following. The reason is what
+            // says it must not run, so honour it here rather than in the query. The runner drops
+            // a paused fire too; this is what stops the cadence from drifting while it is quiet.
             if job.pausedReason != nil { continue }
-
-            if firing.contains(job.id) {
-                // Advance the cadence exactly as a fire does — same helper, so the two cannot
-                // drift — and only then record the skip: leaving `nextFireAt` in the past would
-                // make every 10s poll re-skip the same still-running job, so one dropped trigger
-                // would write a ledger row a minute until the run finished. One trigger, one row.
-                if advanceCadence(for: job, at: now, ran: false) { skipped.append(job) }
-                continue
-            }
 
             guard handler != nil else {
                 // Nothing to fire into: leave the job due rather than advancing past it, or every
@@ -130,29 +110,15 @@ actor JobScheduler {
                 continue
             }
 
-            // Before the handler, never after: a crash between the two loses a run instead of
-            // repeating one.
-            if advanceCadence(for: job, at: now, ran: true) { toFire.append(job) }
-        }
-
-        // After the loop, not inside it: awaiting the hook mid-scan would let another tick
-        // interleave and read a half-built `firing`/`toFire`. Awaited rather than detached so a
-        // caller that observes the ledger right after `tick()` sees the skip it caused.
-        if let onSkip {
-            for job in skipped { await onSkip(job) }
+            if advanceCadence(for: job, at: now) { toFire.append(job) }
         }
 
         guard !toFire.isEmpty, let handler else { return 0 }
-        for job in toFire { firing.insert(job.id) }
 
-        await withTaskGroup(of: UUID.self) { group in
+        await withTaskGroup(of: Void.self) { group in
             for job in toFire {
-                group.addTask {
-                    await handler(job, job.trigger.kind)
-                    return job.id
-                }
+                group.addTask { await handler(job, job.trigger.kind) }
             }
-            for await id in group { firing.remove(id) }
         }
         return toFire.count
     }
@@ -176,15 +142,15 @@ actor JobScheduler {
         await onDailyMaintenance()
     }
 
-    /// Moves a job past the trigger being handled, and says whether it is still schedulable —
-    /// false when the row is gone or the cadence has no future match. The one place a fire and a
-    /// skip agree: both advance `nextFireAt`, and both pause a cadence that can never match again
-    /// with the same reason, so the two paths cannot drift apart.
+    /// Moves a job past the trigger being handed over, and says whether it is still schedulable —
+    /// false when the row is gone or the cadence has no future match.
     ///
-    /// `ran` is what separates them. A skip ran nothing, so `lastRunAt` must not move — it is the
-    /// last time the job actually did something, and `/jobs` shows it.
-    private func advanceCadence(for job: Job, at now: Date, ran: Bool) -> Bool {
-        let lastRunAt = ran ? now : job.lastRunAt
+    /// Always before the handler, never after: a crash between the two loses a run instead of
+    /// repeating one. `lastRunAt` moves with it, because the scheduler no longer knows whether the
+    /// fire will become a run — admission is the runner's (§4), and a tick that reaches here has
+    /// handed the trigger over either way.
+    private func advanceCadence(for job: Job, at now: Date) -> Bool {
+        let lastRunAt = now
         // Cadence-less triggers (fsEvent) have no next occurrence to compute; clear the stray
         // nextFireAt that made this row due rather than pausing a job the filesystem drives.
         guard let cadence = Self.cadence(of: job.trigger) else {
