@@ -10,7 +10,22 @@ public final class CoreMLEvaluator: @unchecked Sendable {
     
     private var model: CoreMLModelProtocol?
     private let lock = NSLock()
-    
+
+    /// A model scoped to the current task tree, taking precedence over the installed one.
+    ///
+    /// `setModel` writes process-global state, and `swift test` runs suites in parallel, so a
+    /// suite that installed a malicious-probability mock decided the verdict for every other
+    /// suite sanitising at the same moment — assertions failed against content that was never
+    /// the problem (#237). A task-local is visible only inside the `withValue` body and the
+    /// tasks it spawns, so two suites can hold different models at once without racing.
+    /// Production never sets it.
+    @TaskLocal public static var scopedModel: CoreMLModelProtocol?
+
+    /// The task-scoped model when one is set, otherwise the installed one.
+    private var effectiveModel: CoreMLModelProtocol? {
+        Self.scopedModel ?? lock.withLock { model }
+    }
+
     private init() {}
     
     /// `nil` clears the loaded model (#210 fix round 1) — the test seam for forcing
@@ -23,7 +38,7 @@ public final class CoreMLEvaluator: @unchecked Sendable {
     }
     
     public var hasModelLoaded: Bool {
-        lock.withLock { model != nil }
+        effectiveModel != nil
     }
     
     public func loadModelIfNeeded() async throws {
@@ -70,7 +85,7 @@ public final class CoreMLEvaluator: @unchecked Sendable {
     }
     
     public func evaluate(text: String) async throws -> Double {
-        let currentModel = lock.withLock { model }
+        let currentModel = effectiveModel
         guard let m = currentModel else {
             // If no model is loaded (e.g. BYOM not yet downloaded), we fail open (assume safe) 
             // so we don't break the user's workflow just because they haven't set up Tier 2 yet.
