@@ -98,15 +98,16 @@ final class VisionRouterTests: XCTestCase {
         }
 
         let mockEngine = MockVisionEngine()
-        AuxiliaryModelManager.shared.setMockEngine(mockEngine, for: "vision")
         config.auxiliaryVisionEngine = "ollama"
         config.auxiliaryVisionModel = "llava"
 
-        let result = await VisionRouter.processTextOnlyImages(attachments: [imageAttachment], config: config)
-        XCTAssertTrue(result.warnings.isEmpty)
-        XCTAssertTrue(result.descriptionText.contains("<image_description file=\"test_image.png\">"))
-        XCTAssertTrue(result.descriptionText.contains("A sample diagram showing workflow."))
-        XCTAssertTrue(result.descriptionText.contains("</image_description>"))
-        XCTAssertEqual(mockEngine.receivedImages, [dummyData.base64EncodedString()])
+        await AuxiliaryModelManager.$scopedEngines.withValue(["vision": mockEngine]) {
+            let result = await VisionRouter.processTextOnlyImages(attachments: [imageAttachment], config: config)
+            XCTAssertTrue(result.warnings.isEmpty)
+            XCTAssertTrue(result.descriptionText.contains("<image_description file=\"test_image.png\">"))
+            XCTAssertTrue(result.descriptionText.contains("A sample diagram showing workflow."))
+            XCTAssertTrue(result.descriptionText.contains("</image_description>"))
+            XCTAssertEqual(mockEngine.receivedImages, [dummyData.base64EncodedString()])
+        }
     }
 }
