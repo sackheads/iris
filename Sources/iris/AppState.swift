@@ -602,7 +602,7 @@ class AppState {
                            paths: IrisPaths = .default) -> String? {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return nil }
         let fm = FileManager.default
-        let workspacesRoot = paths.root.appendingPathComponent("workspaces").path
+        let workspacesRoot = paths.workspacesDir.path
 
         let resolution = GoalWorkspace.resolve(
             proposed: contract.workspace,
@@ -633,6 +633,35 @@ class AppState {
             appendMessage(role: .system, content: "Goal workspace: \(path)", to: conversationId)
             return path
         }
+    }
+
+    /// Deletes a goal workspace listed by `WorkspaceInventory.scan` (#126, Settings → Advanced).
+    ///
+    /// Refuses while the owning conversation's goal is still active (ruling 3: the goal is using
+    /// it) — the caller is expected to show `reason` and disable the row rather than call this at
+    /// all, but the check is repeated here so a stale UI snapshot can't slip a delete through.
+    /// Otherwise the directory is moved to the Trash, never `removeItem`d, so a mistake is
+    /// recoverable; the owning conversation (if any) has its `workspacePath` cleared and gets a
+    /// system line, so nothing is left pointing at a directory that is gone.
+    ///
+    /// `trash` is injectable so a test whose sandbox can't reach the real Trash can substitute a
+    /// plain move.
+    @discardableResult
+    func deleteWorkspace(_ entry: WorkspaceEntry, trash: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0) }) throws -> WorkspaceDeletion {
+        if entry.ownerHasActiveGoal, let ownerId = entry.ownerConversationId,
+           let idx = conversations.firstIndex(where: { $0.id == ownerId }) {
+            return .refusedActiveGoal(title: conversations[idx].title)
+        }
+
+        try trash(entry.url)
+
+        if let ownerId = entry.ownerConversationId,
+           let idx = conversations.firstIndex(where: { $0.id == ownerId }) {
+            conversations[idx].workspacePath = nil
+            markChanged(ownerId, .metadata)
+            appendMessage(role: .system, content: "Workspace \(entry.url.path) was deleted from Settings", to: ownerId)
+        }
+        return .trashed(entry.url)
     }
 
     func setMainAgentSandbox(for conversationId: UUID, pref: SandboxPref?) {

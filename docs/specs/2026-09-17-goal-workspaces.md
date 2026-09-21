@@ -24,7 +24,7 @@ Binding happens **at contract lock**, for **contracted goals only**.
 - **Checkpoints are untouched.** The ladder does not rebind anything.
 
 **Explicitly deferred (deliberate, not silent omissions):**
-- **Garbage collection of `~/.iris/workspaces` → its own issue.** Goals will accumulate directories. Deleting a goal's artifacts is destructive and needs its own argument about retention and user consent; it is not going in the slice that creates them.
+- **Garbage collection of `~/.iris/workspaces` → its own issue.** Goals will accumulate directories. Deleting a goal's artifacts is destructive and needs its own argument about retention and user consent; it is not going in the slice that creates them. (Addressed by #126: Settings → Advanced → Goal Workspaces lists every directory under this root, marks the ones no conversation still points at as orphans, and deletes to the Trash — manual, per-item only, no automatic sweep.)
 - **Migrating existing conversations → out of scope.** A conversation that already ran in the cwd stays as it is. Rebinding it retroactively would move nothing and would misrepresent where its artifacts actually are.
 - **Changing `set_workspace` → out of scope.** It remains the explicit way to bind, and it still wins.
 

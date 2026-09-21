@@ -3,6 +3,7 @@ import KeyboardShortcuts
 
 struct SettingsView: View {
     @Bindable private var config = ConfigManager.shared
+    @State private var state = AppState.shared
     @State private var isInstallingContainer = false
     @State private var installError: String?
     @State private var downloader = ModelDownloader.shared
@@ -813,6 +814,8 @@ struct SettingsView: View {
                                            set: { config.vibecopTimeoutSeconds = max(1, $0) }), in: 1...30)
                         .help("How long to wait for the Vibecop guard before falling back to a manual approval prompt.")
                 }
+
+                GoalWorkspacesSection(state: state)
             }
             .formStyle(.grouped)
             .padding(20)
