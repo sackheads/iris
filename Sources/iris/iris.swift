@@ -46,6 +46,11 @@ actor IrisEngine {
     /// Conversations already shown the "no sandbox runtime" fallback notice (deduped).
     private var warnedNoRuntime: Set<UUID> = []
 
+    /// The ledger-backed scheduler this engine started, once `start()` has run. `schedule_job`
+    /// stores through it so a job created mid-conversation gets its first fire computed by the
+    /// same code the polling loop uses.
+    private(set) var jobScheduler: JobScheduler?
+
     // We need to keep a weak reference to the state or pass it in.
     // Since AppState owns IrisEngine, we can pass it when we start or process.
     private weak var state: AppState?
@@ -361,10 +366,21 @@ actor IrisEngine {
     }
 
     func start() async {
-        ScheduleManager.shared.onJobFired = { [weak self] prompt, convId in
-            await self?.handleSystemEvent("Scheduled Job Triggered: \(prompt)", source: "Scheduler", conversationId: convId)
+        JobScheduler.removeLegacyDefaults(from: IrisDefaults.store)
+        let schedulerState = state
+        if let ledger = await MainActor.run(resultType: JobLedger?.self, body: { schedulerState?.store.ledger }) {
+            let scheduler = JobScheduler(ledger: ledger)
+            await scheduler.setFireHandler { [weak self] job, _ in
+                // Deliverable 1: unchanged behaviour — a fire is a system event in the job's
+                // creating conversation, or the selected one. Deliverable 2 replaces this with
+                // the background JobRunner.
+                await self?.handleSystemEvent("Scheduled Job Triggered: \(job.prompt)", source: "Scheduler",
+                                              conversationId: job.createdInConversationId)
+            }
+            await scheduler.start()
+            self.jobScheduler = scheduler
         }
-        ScheduleManager.shared.start()
+
         
         await PluginManager.shared.loadAll()
         let pluginConfigs = await PluginManager.shared.mcpConfigs()
@@ -1704,20 +1720,28 @@ actor IrisEngine {
             let weekdays: [Int]? = validWeekdays.isEmpty ? nil : validWeekdays
             let intervalSeconds = Int(functionCall.args["intervalSeconds"]?.stringValue ?? "")
 
-            ScheduleManager.shared.schedule(
-                conversationId: conversationId,
-                prompt: prompt,
-                minute: minute,
-                hour: hour,
-                day: day,
-                month: month,
-                weekday: weekday,
-                weekdays: weekdays,
-                intervalSeconds: intervalSeconds
-            )
-            result = "Job scheduled successfully. It will fire in the background."
-            if !droppedWeekdays.isEmpty {
-                result += " Ignored invalid weekday value\(droppedWeekdays.count == 1 ? "" : "s") (must be 1-7, 1=Sunday): \(droppedWeekdays.map(String.init).joined(separator: ", "))."
+            // Task 5 rewrites this handler around the full job vocabulary (names, cron strings,
+            // profiles). Until then the old loose arguments are resolved to a `Schedule` and
+            // stored as a `Job`, so the tool keeps working against the ledger.
+            let alias = ScheduleAlias(minute: minute, hour: hour, day: day, month: month,
+                                      weekday: weekday, weekdays: weekdays,
+                                      intervalSeconds: intervalSeconds)
+            switch alias.resolve(defaultTimeZone: TimeZone.current.identifier) {
+            case .failure(let error):
+                result = "Job not scheduled: \(error)."
+            case .success(let schedule):
+                let name = Job.slug(from: prompt) + "-" + String(UUID().uuidString.prefix(4)).lowercased()
+                let job = Job(name: name, prompt: prompt, trigger: .schedule(schedule),
+                              createdInConversationId: conversationId)
+                do {
+                    _ = try await jobScheduler?.schedule(job)
+                    result = "Job scheduled."
+                    if !droppedWeekdays.isEmpty {
+                        result += " Ignored invalid weekday value\(droppedWeekdays.count == 1 ? "" : "s") (must be 1-7, 1=Sunday): \(droppedWeekdays.map(String.init).joined(separator: ", "))."
+                    }
+                } catch {
+                    result = "Job not scheduled: \(error)."
+                }
             }
         } else if functionCall.name == "save_fact", let content = functionCall.args["content"]?.stringValue {
             let category = functionCall.args["category"]?.stringValue ?? "general"
