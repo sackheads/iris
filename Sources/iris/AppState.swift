@@ -267,9 +267,17 @@ class AppState {
     /// the second's.
     private var engineTurnCounts: [UUID: Int] = [:]
 
-    /// #185 §7 — the cascade a conversation's current turn belongs to, and what is left of its
-    /// allowance. Absent means "not in a cascade", i.e. a full budget.
-    private var cascades: [UUID: (id: UUID, remaining: Int)] = [:]
+    /// #185 §7 — which cascade a conversation's current turn belongs to. Absent means "not in a
+    /// cascade", i.e. a full budget.
+    ///
+    /// Two dictionaries, not one, because the allowance is a property of the CASCADE and the
+    /// membership is a property of the conversation. Holding `(id, remaining)` per conversation
+    /// looked equivalent and was not: every delivery copied the count into both sender and target,
+    /// after which the two drifted independently and each branch effectively got its own budget —
+    /// 2^N - 1 peer-woken turns from one user action at binary fan-out, which is exactly the F^N
+    /// §7 exists to forbid (whole-branch review, C1).
+    private var cascadeOf: [UUID: UUID] = [:]      // conversation -> the cascade it belongs to
+    private var cascadeBudget: [UUID: Int] = [:]   // cascade -> what is left of its allowance
 
     /// Called from `IrisEngine.processInput`'s own begin/end pair, which brackets every turn the
     /// engine runs — UI-initiated ones included, so a UI turn is counted by both sources.
@@ -780,34 +788,48 @@ class AppState {
     }
 
     func cascadeRemaining(for conversationId: UUID) -> Int {
-        cascades[conversationId]?.remaining ?? ConfigManager.shared.maxSessionCascade
+        guard let cascadeId = cascadeOf[conversationId],
+              let remaining = cascadeBudget[cascadeId] else { return ConfigManager.shared.maxSessionCascade }
+        return remaining
     }
 
     /// Records a peer delivery. Returns false when the sender's cascade is spent, in which case
     /// nothing is delivered and the sender is told why (§5.3).
     ///
     /// The allowance travels with the CASCADE, not the branch: a sender fanning out to three peers
-    /// spends three of one budget. A per-branch limit would still permit F^N turns.
+    /// spends three of ONE budget, and so does a chain that walks away from it. One decrement of
+    /// one counter per delivery, read back through `cascadeOf` by every member — a per-branch
+    /// limit, or a per-conversation copy of a shared number, would still permit F^N turns.
     @discardableResult
     func beginPeerCascade(into targetId: UUID, from senderId: UUID) -> Bool {
-        let current = cascades[senderId]
-        let remaining = current?.remaining ?? ConfigManager.shared.maxSessionCascade
+        // A sender not yet in a cascade starts one; its first delivery is what mints the id.
+        let cascadeId = cascadeOf[senderId] ?? UUID()
+        let remaining = cascadeBudget[cascadeId] ?? ConfigManager.shared.maxSessionCascade
         guard remaining > 0 else { return false }
-        let cascadeId = current?.id ?? UUID()
-        // The sender's own budget drops too, so its later branches draw on what is left.
-        cascades[senderId] = (cascadeId, remaining - 1)
-        cascades[targetId] = (cascadeId, remaining - 1)
+        cascadeBudget[cascadeId] = remaining - 1
+        // Both ends are now in this cascade, reading the single counter above.
+        cascadeOf[senderId] = cascadeId
+        cascadeOf[targetId] = cascadeId
         return true
     }
 
     /// A person typing begins a fresh cascade — the budget exists to bound unattended machine
     /// chatter, not to ration a conversation the user is steering (§7).
+    ///
+    /// Drops this conversation's MEMBERSHIP only. It must not touch the shared counter: sibling
+    /// branches of the same cascade are still unattended machine chatter and keep their remaining
+    /// allowance (§7, "sibling branches keep their own remaining allowance").
     func clearCascade(for conversationId: UUID) {
-        cascades[conversationId] = nil
+        guard let cascadeId = cascadeOf.removeValue(forKey: conversationId) else { return }
+        // The counter outlives its last member otherwise: nothing else removes budget entries, so
+        // a long session would accumulate one per cascade it ever ran.
+        if !cascadeOf.values.contains(cascadeId) { cascadeBudget[cascadeId] = nil }
     }
 
     func deleteConversation(_ id: UUID) {
         cancelTasks(for: id)
+        clearCascade(for: id)   // a deleted conversation is in no cascade; also prunes a spent budget
+
         Task { await SandboxSessionManager.shared.endSession(id) }
         purgeCommandTimings(forMessagesIn: id)   // before the messages go — they are the keys
         conversations.removeAll { $0.id == id }
@@ -1904,9 +1926,22 @@ class AppState {
     static let saveMaxWait: TimeInterval = 2.0
 
     /// Records one change and schedules a flush with the #62 debounce and max-wait.
+    ///
+    /// Also stamps `updatedAt` in memory (#185 §4, whole-branch review M3). The store column has
+    /// always been written on upsert, but nothing wrote the field back onto the live object, so
+    /// the in-memory value meant "when this was loaded or created" and the peer listing's
+    /// most-recently-active ordering was frozen at launch: a session working all day never moved,
+    /// and any conversation created later outranked every one loaded at startup. This is the one
+    /// place every persisted mutation already passes through, which is exactly what makes it the
+    /// right signal for "touched". Set directly on the element — routing it back through
+    /// `markChanged` would recurse without end.
     func markChanged(_ id: UUID, _ change: ConversationChange) {
-        pendingChanges[id, default: ChangeSet()].add(change)
         let now = Date()
+        // Not on `.deleted`: there is nothing left to stamp, and the row is on its way out.
+        if change != .deleted, let idx = conversations.firstIndex(where: { $0.id == id }) {
+            conversations[idx].updatedAt = now
+        }
+        pendingChanges[id, default: ChangeSet()].add(change)
         let dirtySince = firstDirtyAt ?? now
         firstDirtyAt = dirtySince
 

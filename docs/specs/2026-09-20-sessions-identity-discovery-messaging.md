@@ -115,6 +115,19 @@ Ordering is most-recently-active first, keyed on the conversation's `updatedAt` 
 self-describer above a busy one. The truncated tail is therefore the least recently active. A
 session needing the full set narrows by workspace, which is the gate the card exists to provide.
 
+**`updatedAt` has to be advanced in memory for any of that to be true.** The store column has been
+written on every upsert since v1, but nothing wrote the value back onto the live `Conversation`, so
+the in-memory field meant "when this was loaded or created" and the ordering above froze at launch:
+a session working all day never moved up, and any conversation created later in the run outranked
+every one loaded at startup. It is therefore stamped at `AppState.markChanged` — the single point
+every persisted mutation already passes through, which is what makes it the right signal for
+"touched" — set directly on the element rather than routed back through `markChanged`, which would
+not terminate. `.deleted` is excluded: there is nothing left to stamp. `ConversationStore` writes
+the conversation's own `updatedAt` into the column rather than the write clock, so a batch of dirty
+conversations flushed together comes back from a restart ordered by activity and not by flush order.
+A test that assigns `updatedAt` by hand cannot see any of this; the ordering test must drive real
+activity through the public API.
+
 `card.updatedAt` exists so a reader can judge staleness: a description written an hour ago may no
 longer be what the session is doing. Nothing acts on it automatically — liveness comes from the
 harness (§6.1), not from the card's age.
@@ -310,6 +323,20 @@ demand through `list_sessions`.
 Their `description` strings are agent-facing text and fall under invariant 9: they must say when to
 call, per #155, and must not imply a peer is obliged to act on a request.
 
+**Every session-authored field is hardened before it is rendered.** `list_sessions` returns a
+`\n`-separated, `|`-delimited list, and three of its five fields — `name`, `description`,
+`workspace` — are bytes another session wrote through `set_session_card` / `set_workspace` with no
+length bound and no flattening at the point of writing. Rendered raw they are a cross-agent
+injection channel: a card can embed newlines and pipes to close its own row and open forged ones,
+naming a `session_id` of its choosing or announcing itself as `User`. §5.0's "the sender never
+chooses its own trust label" has to hold on the *list* path as well as the message path. So each
+such field goes through the same flattener `peerLabel` uses (`IrisEngine.flattenCardField`): every
+line break removed (Unicode separators included), `|` replaced, `"` replaced, and a per-field cap —
+64 for a name, 200 for a description, 160 for a workspace. Session-authored values are additionally
+rendered **quoted**, harness-owned ones (`session_id`, `busy`/`idle`) unquoted, so a peer's claims
+about ids are visibly the peer's own string. One flattener, not two: a second copy is how the
+message path and the list path came to disagree in the first place.
+
 **The card column decodes defensively**: unreadable → `nil`, with a warning, never a dropped
 conversation. The *policy* matches `checkpointHistory`'s: a JSON decode failure on either field
 (`ConversationStore.swift` ~771-773 for `checkpointHistory`, ~814-821 for `sessionCard`) is recorded
@@ -335,7 +362,13 @@ unbounded that is a cascade: A messages B, B messages C and D, each of those mes
 **A depth limit alone does not cap this.** With fan-out F and depth N it still permits F^N turns.
 The budget must be shared by the whole cascade, not carried per branch.
 
-`AppState` holds, per conversation, `(cascadeId: UUID, remaining: Int)`:
+`AppState` holds two maps: `cascadeOf` (conversation -> the cascade it is in) and `cascadeBudget`
+(cascade -> what is left of its allowance). **Two maps, not one `(cascadeId, remaining)` per
+conversation** — that shape looks equivalent and is not. It has no way to share a counter: a
+delivery has to copy `remaining - 1` into both sender and target, after which the two drift
+independently and every branch effectively holds its own allowance. At the default 8 and binary
+fan-out that is 2^8 - 1 = 255 peer-woken turns from one user action: the F^N this section exists to
+forbid, at base 2. The rules below are therefore stated against the shared counter:
 
 - **A user-initiated turn clears the entry**, at `AppState.startTurn` (`:945`) specifically — not
   `runThinkingTask`. §5 argues for choke points, so this one is named: `runThinkingTask` also
@@ -343,13 +376,23 @@ The budget must be shared by the whole cascade, not carried per branch.
   continuations rather than a person typing, and clearing there would hand a cascade a fresh
   budget every time a goal resumed. `startTurn` is the tightest point that means "the user sent
   something".
-- **A peer delivery into X sets X's entry** to the sender's `cascadeId` with `remaining - 1`.
-- **`send_to_session` reads the sender's entry** and refuses at zero, otherwise delivers with the
-  decremented value.
+- **A peer delivery resolves the sender's cascade** (minting one on its first send), checks that
+  cascade's single counter, decrements it **once**, and maps both sender and target into it.
+- **`send_to_session` reads the sender's cascade through `cascadeOf`** and refuses at zero.
+- **Clearing is per conversation and never touches the counter.** `clearCascade` drops that
+  conversation's membership only; the budget entry is removed only once no conversation maps to it
+  any more, so it neither refunds siblings nor leaks an entry per cascade the session ever ran.
+  Deleting a conversation clears it the same way.
 
 Because the allowance travels with the cascade rather than the branch, A→B, C, D consumes three of
 the same budget. Total peer-woken turns descending from one user action is capped at N for any
 shape — depth, fan-out, or any mix.
+
+The shape that *proves* this is neither a ping-pong nor a fan-out: in a ping-pong the sender is
+always the most recent target, and in a fan-out the sender never changes, so a copied allowance and
+a shared one produce identical numbers in both. The discriminating shape is a chain that walks away
+from the original sender — x→y, y→z, z→a — until the budget is spent, and then one more send **from
+x**. Shared, it is refused; copied, x is still holding the count it was handed at step one.
 
 **A human typing into a woken session ends that session's cascade.** The rule in the first bullet
 is stated per conversation, so if the user opens a session that a peer woke and sends a message,
@@ -438,7 +481,25 @@ describing what it adds.
 - **The cascade cap holds under fan-out, not just depth**: a cascade that branches must exhaust the
   same budget as one that chains. This is the assertion that would have caught the design error the
   first draft of §7 contained.
-- A user-initiated turn resets the budget.
+- **The cap holds for a sender the chain has moved on from** (§7's discriminating shape): spend the
+  budget along a chain, then send once more from the original sender and expect a refusal. Fan-out
+  and ping-pong cannot see the difference between a shared counter and a copied one; this can.
+- A user-initiated turn resets the budget **for that conversation only** — siblings still in the
+  cascade keep their remaining allowance, and the counter is not refunded.
+- A self-send is refused, and the refusal does not debit the budget.
+- The budget-exhausted refusal reaches the sender with its reason, and delivers nothing.
+- Both acceptance strings are asserted: the idle path reports a background delivery, the busy path
+  reports that the target will see it at its next turn.
+- `set_session_card` writes the calling session's card, refuses an empty name, and refuses a
+  subagent — the last asserted at the handler, not only at declaration.
+- **A card cannot forge a row or a `session_id` in `list_sessions`** (§6.1): a card carrying
+  newlines and pipes still produces exactly one row, advertising exactly the real peer's id, and an
+  over-long field is capped rather than becoming the bulk of the reader's turn.
+- **The peer listing's ordering responds to real activity** (§4): driven through the public API,
+  never by assigning `updatedAt`. A test that hand-sets the field passes against a frozen signal.
+- **A peer message queued behind a busy turn is visible to the user**: the busy path appends the
+  same transcript notice the idle path does, so a steer the user did not issue is never invisible
+  to them.
 - The three tools are absent with one conversation open and present with two — asserted on the
   declaration list, since this is what protects #133's win.
 - `list_sessions` truncates at the cap and reports the true total, so a large peer set cannot

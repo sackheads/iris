@@ -221,9 +221,7 @@ actor IrisEngine {
             // uses, and mark the entry `isPeer` so the consumer (iris.swift, the steer loop) picks
             // a label that does not claim user authorship.
             let safe = await sanitizeArrival(attributed, source: Self.peerSource)
-            await MainActor.run {
-                localState?.enqueuePendingUserMessage(text: safe, attachments: [], for: targetId, isPeer: true)
-            }
+            await queuePeerArrival(safe, to: targetId)
             return true
         }
         // Idle at the first check. Sanitize now — the same helper the busy branch above uses —
@@ -240,9 +238,7 @@ actor IrisEngine {
         // add here. Filed as a separate issue rather than fixed in this round.
         let stillBusy = await MainActor.run { localState?.hasTurnInFlight(for: targetId) ?? false }
         if stillBusy {
-            await MainActor.run {
-                localState?.enqueuePendingUserMessage(text: safe, attachments: [], for: targetId, isPeer: true)
-            }
+            await queuePeerArrival(safe, to: targetId)
             return true
         }
         // Round 2 fix (#185 review, M3): this used to `await handleSystemEvent` inline, which
@@ -261,6 +257,25 @@ actor IrisEngine {
             await self.deliverSanitizedSystemEvent(safe, source: Self.peerSource, conversationId: targetId, wasArchived: wasArchived)
         }
         return false
+    }
+
+    /// Queues a peer arrival for a busy target AND puts it in the transcript.
+    ///
+    /// The transcript line is the point: the idle path shows the arrival (via
+    /// `deliverSanitizedSystemEvent`'s `appendMessage`), and the busy path used to show nothing at
+    /// all — neither on enqueue nor on the drain, since `startTurn` appends no bubble for text it
+    /// did not get from the composer. So a peer message that happened to land behind a running
+    /// turn reached the model and never reached the user, which is precisely the case where a
+    /// person most wants to know another session steered this one (whole-branch review).
+    ///
+    /// One helper because both busy branches — the first check and the round-3 late re-check —
+    /// need identical treatment, and two copies of "append then enqueue" is how they drift.
+    private func queuePeerArrival(_ safe: String, to targetId: UUID) async {
+        let localState = state
+        await MainActor.run {
+            localState?.appendMessage(role: .system, content: safe, to: targetId)
+            localState?.enqueuePendingUserMessage(text: safe, attachments: [], for: targetId, isPeer: true)
+        }
     }
 
     /// The framing IS the control (#185 §5.0): sanitisation is a detector — it catches known
@@ -285,19 +300,39 @@ actor IrisEngine {
         """
     }
 
-    /// `senderName` is a self-chosen card string (§9: advertised, not authoritative) and cannot be
-    /// trusted with structure: flattened to one line and capped so it cannot forge a newline-borne
-    /// fake `System Event [...]:` block, or an unterminated quote, into the framing's trusted prose.
+    /// Everything a session writes about itself is a self-chosen card string (§9: advertised, not
+    /// authoritative) and cannot be trusted with structure. One flattener for every such field, on
+    /// every path, because there were two paths and only one of them sanitised: `peerLabel` below
+    /// hardened the message framing while `renderPeerList` interpolated the same bytes raw into a
+    /// newline-separated, pipe-delimited listing, so a card could forge extra rows — a fake
+    /// `session_id:` pointing wherever it liked, or a peer naming itself `User` (whole-branch
+    /// review, M2). A second flattener would drift from this one; there is deliberately only this.
+    ///
+    /// Removed: every line break (Unicode ones included — `.newlines` covers U+0085/2028/2029, not
+    /// just LF/CR), the `|` the listing delimits on, and the `"` that could close the framing's
+    /// quoting early. Capped because none of these fields has a length bound at the point a session
+    /// writes it, and an unbounded one is a context-flooding channel on its own.
+    nonisolated static func flattenCardField(_ value: String, cap: Int) -> String {
+        let flattened = value
+            .replacingOccurrences(of: "\r\n", with: " ")            // one space, not two
+            .components(separatedBy: .newlines).joined(separator: " ")
+            .replacingOccurrences(of: "|", with: "/")                // the listing's row delimiter
+            .replacingOccurrences(of: "\"", with: "'")
+        return flattened.count > cap ? String(flattened.prefix(cap)) + "…" : flattened
+    }
+
+    /// Field caps. A name is a handle, a description is a sentence about current work, a workspace
+    /// is a path — all bounded so one peer cannot make the listing the bulk of a reader's context.
+    nonisolated static let cardNameCap = 64
+    nonisolated static let cardDescriptionCap = 200
+    nonisolated static let cardWorkspaceCap = 160
+
+    /// The sender's name as the framing states it: flattened and capped so it cannot forge a
+    /// newline-borne fake `System Event [...]:` block, or an unterminated quote, into trusted prose.
     private nonisolated static func peerLabel(senderName: String?, senderId: UUID) -> String {
         guard let senderName else { return senderId.uuidString }
         let shortId = senderId.uuidString.prefix(8)
-        let flattened = senderName
-            .replacingOccurrences(of: "\r\n", with: " ")
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\r", with: " ")
-            .replacingOccurrences(of: "\"", with: "'")
-        let capped = flattened.count > 64 ? String(flattened.prefix(64)) + "…" : flattened
-        return "\"\(capped)\" (\(shortId))"
+        return "\"\(flattenCardField(senderName, cap: cardNameCap))\" (\(shortId))"
     }
 
     /// `list_sessions`'s response body (#185 §6.1): one line per peer, `session_id` spelled out
@@ -305,11 +340,18 @@ actor IrisEngine {
     private nonisolated static func renderPeerList(_ peers: [SessionPeer], total: Int) -> String {
         guard !peers.isEmpty else { return "No other active sessions." }
         let lines = peers.map { peer -> String in
-            let name = peer.name ?? "(no name set)"
-            let description = peer.description ?? "(no description set)"
-            let workspace = peer.workspace ?? "(no workspace)"
+            // Every field below is written by ANOTHER session. The id and the status are the only
+            // two the harness owns, and they are the only two interpolated as-is.
+            let name = peer.name.map { flattenCardField($0, cap: cardNameCap) } ?? "(no name set)"
+            let description = peer.description.map { flattenCardField($0, cap: cardDescriptionCap) }
+                ?? "(no description set)"
+            let workspace = peer.workspace.map { flattenCardField($0, cap: cardWorkspaceCap) } ?? "(no workspace)"
             let status = peer.isBusy ? "busy" : "idle"
-            return "session_id: \(peer.id) | name: \(name) | status: \(status) | workspace: \(workspace) | doing: \(description)"
+            // Session-authored values are QUOTED; harness-owned ones (the id, the status) are not.
+            // Flattening already removed every `"` from inside a field, so the quotes cannot be
+            // closed early — a card claiming `session_id: <someone else>` inside its own name is
+            // then visibly the peer's own string rather than a row of its own.
+            return "session_id: \(peer.id) | name: \"\(name)\" | status: \(status) | workspace: \"\(workspace)\" | doing: \"\(description)\""
         }
         var out = lines.joined(separator: "\n")
         if total > peers.count {

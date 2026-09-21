@@ -535,6 +535,11 @@ final class ConversationStore: Sendable {
 
     private static func upsertMetadata(_ c: Conversation, exists: Bool, db: Database, encoder: JSONEncoder) throws {
         let now = Date()
+        // The column takes the conversation's own `updatedAt`, not the write clock. Now that
+        // `markChanged` advances the field when a conversation is touched (#185 §4), a batch of
+        // several dirty conversations flushed together would otherwise all land on the same
+        // instant and come back from a restart ordered by flush order rather than by activity.
+        let touched = c.updatedAt
         let tokenUsage = try json(c.tokenUsage, encoder)
         let contract = try c.goalContract.map { try json($0, encoder) }
         let result = try c.subagentResult.map { try json($0, encoder) }
@@ -553,7 +558,7 @@ final class ConversationStore: Sendable {
                     tokenUsage = ?, goalContract = ?, subagentResult = ?, checkpointHistory = ?,
                     lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?, sessionCard = ?
                 WHERE id = ?
-                """, arguments: [c.title, now, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
+                """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  history, evaluation, report, c.isArchived, card, c.id.uuidString])
         } else {
@@ -563,7 +568,7 @@ final class ConversationStore: Sendable {
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived, sessionCard)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, arguments: [c.id.uuidString, position, c.title, now, now, c.workspacePath, c.activeGoal,
+                """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived, card])
         }

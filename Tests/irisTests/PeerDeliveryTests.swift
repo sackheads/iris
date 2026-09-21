@@ -298,4 +298,30 @@ struct PeerDeliveryTests {
         #expect(!drainedText.hasPrefix("do the thing"),
                 "raw peer text must never become the literal turn content with no attribution at all")
     }
+
+    /// The busy path used to enqueue silently: the idle path appends the arrival to the transcript
+    /// and the busy path appended nothing, and no later step made up for it — `startTurn` adds no
+    /// bubble for a drained entry. So a peer message that landed behind a running turn reached the
+    /// model and never reached the person (whole-branch review, optional item).
+    @Test("a peer message queued behind a busy turn is still visible in the transcript")
+    func busyArrivalIsVisibleToTheUser() async {
+        let app = AppState(); app.conversations.removeAll()
+        let sender = UUID(), target = UUID()
+        app.createNewConversation(id: sender)
+        app.createNewConversation(id: target)
+        app.selectedConversationId = target
+        app.sendMessage("start a turn")
+        #expect(app.hasTurnInFlight(for: target))
+
+        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false)
+        await engine.deliverPeerMessage("please review the spec", from: sender, senderName: "peer", to: target)
+
+        let systemLines = app.conversations.first { $0.id == target }!.messages
+            .filter { $0.role == .system }.map(\.content)
+        #expect(systemLines.contains { $0.contains("please review the spec") },
+                "a steer the user did not issue must not be invisible to the user")
+        #expect(systemLines.contains { $0.contains("Request from another session") },
+                "and it arrives wearing the peer framing, not as the user's own words")
+    }
 }

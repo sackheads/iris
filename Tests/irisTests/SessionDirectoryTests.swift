@@ -74,4 +74,36 @@ struct SessionDirectoryTests {
                                          busy: { $0 == liar.id })
         #expect(out.peers.first?.isBusy == true)
     }
+
+    /// `ordersByConversationActivity` above sets `updatedAt` by hand, so it stays green against a
+    /// signal production never moves — which is exactly what happened: the field was written only
+    /// at decode and at load, so the "most recently active" ordering was really "most recently
+    /// loaded or created" and froze at launch (whole-branch review, M3). This drives real work
+    /// through the public API and never assigns `updatedAt` after the setup line.
+    @MainActor
+    @Test("real activity through the public API moves a session up the listing")
+    func activityReordersTheListing() {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID(), quiet = UUID(), worker = UUID()
+        for id in [me, quiet, worker] { app.createNewConversation(id: id) }
+
+        // Backdate both peers so the starting order is unambiguous rather than a function of how
+        // fast `createNewConversation` ran. This is the LAST hand-set timestamp in this test.
+        func backdate(_ id: UUID, _ seconds: TimeInterval) {
+            let idx = app.conversations.firstIndex { $0.id == id }!
+            app.conversations[idx].updatedAt = Date(timeIntervalSince1970: seconds)
+        }
+        backdate(worker, 1_000)
+        backdate(quiet, 2_000)
+
+        let before = SessionDirectory.peers(in: app.conversations, excluding: me, busy: { _ in false })
+        #expect(before.peers.first?.id == quiet, "the newer timestamp leads to begin with")
+
+        // Real work on the stale one, through the API a session actually uses.
+        app.setSessionCard(for: worker, SessionCard(name: "worker", description: "doing the thing"))
+
+        let after = SessionDirectory.peers(in: app.conversations, excluding: me, busy: { _ in false })
+        #expect(after.peers.first?.id == worker,
+                "a session that is actually working must outrank one that has been idle since launch")
+    }
 }
