@@ -68,6 +68,19 @@ actor SandboxSessionManager {
         if created {
             do { try await ensureSession(id, workspace: workspace, mounts: mounts) }
             catch { return creationError(error) }
+            // Asked again on the far side of the barrier. `ensureSession` coalesces concurrent
+            // first-commands onto one create, and the container belongs to whichever of them got
+            // there first — including its mounts. A caller that asked for a different set was
+            // never told; the check above could not fire for it, because at the time it ran there
+            // was no session to compare against. Running anyway would put a gate's script in a
+            // container with someone else's mounts, once, silently, and the mismatch would only
+            // surface on the next call.
+            if let s = sessions[id], s.mounts != mounts || s.mountedWorkspace != workspace {
+                await runtime.remove(name: s.name)
+                sessions[id] = nil
+                do { try await ensureSession(id, workspace: workspace, mounts: mounts) }
+                catch { return creationError(error) }
+            }
         }
 
         let workdir = workspace ?? "/"
@@ -82,7 +95,16 @@ actor SandboxSessionManager {
             // the self-heal path below — it is reported in the words the host path uses.
             if case ContainerRuntimeError.timedOut(let elapsed) = error {
                 sessions[id]?.lastUsed = Date()
-                return ToolExecutor.commandTimedOutMessage(seconds: timeoutSeconds.map(Double.init) ?? elapsed)
+                // Decorated like any other outcome: the reset notice is written by the call that
+                // recreated the container and by no other, so a timeout on that very call would
+                // otherwise be the thing that loses it for good.
+                return decorate(ToolExecutor.commandTimedOutMessage(seconds: timeoutSeconds.map(Double.init) ?? elapsed),
+                                notice: wasLost && created, for: id)
+            }
+            // Nor is a cancelled turn a dead container. Tearing the session down and building a
+            // new one to retry a command nobody is waiting for is work for its own sake.
+            if error is CancellationError {
+                return decorate("Error: the command was cancelled.", notice: wasLost && created, for: id)
             }
             // Container likely died/was reaped: mark lost, recreate once, retry.
             lostSessions.insert(id)
@@ -97,7 +119,8 @@ actor SandboxSessionManager {
             } catch {
                 if case ContainerRuntimeError.timedOut(let elapsed) = error {
                     sessions[id]?.lastUsed = Date()
-                    return ToolExecutor.commandTimedOutMessage(seconds: timeoutSeconds.map(Double.init) ?? elapsed)
+                    return decorate(ToolExecutor.commandTimedOutMessage(seconds: timeoutSeconds.map(Double.init) ?? elapsed),
+                                    notice: true, for: id)
                 }
                 return creationError(error)
             }
@@ -140,7 +163,11 @@ actor SandboxSessionManager {
         if sessions[id] != nil { return }
         if let inflight = creating[id] {
             try await inflight.value
-            return
+            // Not necessarily done: the create we waited on may have been torn down again by a
+            // caller whose mounts differed, and `creating[id]` is only cleared once the task's own
+            // `defer` runs, which can be after this resumes. Ask the sessions table, not the
+            // barrier, and fall through to creating our own if the answer is still nothing.
+            if sessions[id] != nil { return }
         }
         let task = Task<Void, Error> { [self] in try await create(id, workspace: workspace, mounts: mounts) }
         creating[id] = task

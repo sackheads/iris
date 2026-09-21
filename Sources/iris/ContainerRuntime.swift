@@ -4,8 +4,9 @@ enum ContainerRuntimeError: Error, Equatable {
     case launchFailed(String)
     case createFailed(String)
     /// The command outlived its deadline and was killed. `elapsedSeconds` is wall clock from
-    /// launch to the child being reaped, so a caller can say how long was actually spent rather
-    /// than only how long was allowed.
+    /// launch to the kill ladder finishing — a diagnostic, not the number anybody is told: both
+    /// routes report the *allowance*, so a timed-out command reads the same in the container as
+    /// on the host.
     case timedOut(elapsedSeconds: Double)
     /// A mount entry that cannot be handed to the CLI without changing what it means.
     case invalidMount(entry: String, reason: String)
@@ -23,9 +24,17 @@ enum ContainerMount {
     /// Paths are passed through byte for byte. That is safe for every character the CLI's own
     /// parser can read back — `Process` execs the binary directly, so no shell ever sees these,
     /// and a path with a space needs no quoting because it is one argv element. It is *not* safe
-    /// for a comma: the flag's value is a comma-separated `key=value` list with no escape, so a
-    /// comma inside a path would start a key the CLI does not have. Such an entry is refused
-    /// here rather than mangled there.
+    /// for the two characters the directive list is punctuated with: a comma starts the next
+    /// directive and an `=` separates a key from its value, and the format has no escape for
+    /// either. Such an entry is refused here rather than mangled there.
+    ///
+    /// Both paths must be absolute. A source that is not is read by the CLI as the name of a
+    /// *volume* rather than a directory to bind, so `data:/data` would quietly look up something
+    /// else entirely instead of failing.
+    ///
+    /// What is not checked here, because only the daemon can answer it: the source must exist and
+    /// be a directory. A single file cannot be mounted this way — mount its parent. That surfaces
+    /// as a `createFailed` from the CLI.
     static func argument(for entry: String) throws -> String {
         var parts = entry.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
         var readOnly = false
@@ -41,10 +50,17 @@ enum ContainerMount {
         guard !source.isEmpty, !target.isEmpty else {
             throw ContainerRuntimeError.invalidMount(entry: entry, reason: "the source and target must both be non-empty")
         }
-        guard !source.contains(","), !target.contains(",") else {
+        guard source.hasPrefix("/"), target.hasPrefix("/") else {
             throw ContainerRuntimeError.invalidMount(
                 entry: entry,
-                reason: "a path containing a comma cannot be expressed as a mount; rename it or mount its parent")
+                reason: "both paths must be absolute; a relative source is read as the name of a volume, not a directory")
+        }
+        let punctuation = CharacterSet(charactersIn: ",=")
+        guard source.rangeOfCharacter(from: punctuation) == nil,
+              target.rangeOfCharacter(from: punctuation) == nil else {
+            throw ContainerRuntimeError.invalidMount(
+                entry: entry,
+                reason: "a path containing a comma or an equals sign cannot be expressed as a mount; rename it or mount its parent")
         }
         var spec = "type=virtiofs,source=\(source),target=\(target)"
         if readOnly { spec += ",readonly" }
@@ -77,6 +93,10 @@ struct CLIProcessRunner: Sendable {
     /// How long SIGTERM gets to be polite before SIGKILL settles it.
     static let killGraceSeconds: Double = 2
 
+    /// How long the ordinary exit path gets, after the kill ladder, to deliver the real output
+    /// before the ladder's own answer is returned instead.
+    static let postKillSettleSeconds: Double = 0.25
+
     /// `Process` is not `Sendable`, and the watchdog below runs on a different task from the one
     /// awaiting the exit. It only reads `isRunning`/`processIdentifier` and calls `terminate()`,
     /// each of which Foundation makes safe to call from another thread.
@@ -94,17 +114,142 @@ struct CLIProcessRunner: Sendable {
         var didFire: Bool { lock.withLock { fired } }
     }
 
+    /// Reads the child's output as it arrives and answers the caller exactly once.
+    ///
+    /// Incremental, because the obvious alternative — one `readDataToEndOfFile` when the child
+    /// exits — hands the schedule to whoever holds the write end. A process that inherited it and
+    /// outlived everything we can signal blocks that read for as long as it lives, which is a
+    /// deadline that expires whenever a stranger says so; and a child that writes more than the
+    /// pipe buffer never exits at all, because nobody is emptying it.
+    ///
+    /// "Exactly once" is the other half: the deadline resumes the caller itself when the ordinary
+    /// path has not, and a late exit must then find the answer already given.
+    private final class Collector: @unchecked Sendable {
+        typealias Output = (stdout: String, stderr: String, exitCode: Int32)
+
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Output, Error>?
+        private var answered = false
+        private var out = Data()
+        private var err = Data()
+        private var outOpen = true
+        private var errOpen = true
+        private var status: Int32?
+        private let outHandle: FileHandle
+        private let errHandle: FileHandle
+
+        init(stdout: Pipe, stderr: Pipe) {
+            outHandle = stdout.fileHandleForReading
+            errHandle = stderr.fileHandleForReading
+        }
+
+        /// Call inside the continuation body, before the process is launched: both the drain and
+        /// the exit can fire the moment it is.
+        func start(_ continuation: CheckedContinuation<Output, Error>) {
+            lock.withLock { self.continuation = continuation }
+            outHandle.readabilityHandler = { [weak self] handle in self?.absorb(handle.availableData, isStdout: true) }
+            errHandle.readabilityHandler = { [weak self] handle in self?.absorb(handle.availableData, isStdout: false) }
+        }
+
+        func noteExit(_ code: Int32) {
+            lock.withLock { status = code }
+            deliverIfComplete()
+        }
+
+        func fail(_ error: Error) { answer(.failure(error)) }
+
+        var hasAnswered: Bool { lock.withLock { answered } }
+
+        private func absorb(_ data: Data, isStdout: Bool) {
+            lock.withLock {
+                guard !data.isEmpty else {
+                    // Empty means end of file on that stream.
+                    if isStdout { outOpen = false } else { errOpen = false }
+                    return
+                }
+                if isStdout { out.append(data) } else { err.append(data) }
+            }
+            if isStdout, !lock.withLock({ outOpen }) { outHandle.readabilityHandler = nil }
+            if !isStdout, !lock.withLock({ errOpen }) { errHandle.readabilityHandler = nil }
+            deliverIfComplete()
+        }
+
+        /// The child has exited *and* both streams have ended, so everything it wrote is in hand.
+        private func deliverIfComplete() {
+            let payload: Output? = lock.withLock {
+                guard !answered, let status, !outOpen, !errOpen else { return nil }
+                return (Self.text(out), Self.text(err), status)
+            }
+            if let payload { answer(.success(payload)) }
+        }
+
+        private func answer(_ result: Result<Output, Error>) {
+            let continuation: CheckedContinuation<Output, Error>? = lock.withLock {
+                guard !answered, let c = self.continuation else { return nil }
+                answered = true
+                self.continuation = nil
+                return c
+            }
+            guard let continuation else { return }
+            outHandle.readabilityHandler = nil
+            errHandle.readabilityHandler = nil
+            continuation.resume(with: result)
+        }
+
+        private static func text(_ data: Data) -> String { String(data: data, encoding: .utf8) ?? "" }
+    }
+
     /// SIGKILLs the direct children of `pid`, which must still be alive (a reaped pid can be
     /// reused, and this would then signal a stranger's children). Direct children only — the same
     /// reach the host `run_command` path has.
-    private static func killChildren(of pid: pid_t) {
+    ///
+    /// Awaited rather than waited on: `pkill` takes milliseconds, but they are milliseconds of a
+    /// cooperative-pool thread, and the SIGKILL that follows must not overtake it.
+    private static func killChildren(of pid: pid_t) async {
+        guard pid > 0 else { return }
         let killer = Process()
         killer.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
         killer.arguments = ["-9", "-P", String(pid)]
         killer.standardOutput = FileHandle.nullDevice
         killer.standardError = FileHandle.nullDevice
-        try? killer.run()
-        killer.waitUntilExit()      // milliseconds, and the SIGKILL below must not overtake it
+        await withCheckedContinuation { cont in
+            killer.terminationHandler = { _ in cont.resume() }
+            do {
+                try killer.run()
+            } catch {
+                killer.terminationHandler = nil
+                cont.resume()
+            }
+        }
+    }
+
+    /// The kill ladder, and the answer at the end of it. Children first — they inherited the pipes,
+    /// and one left alive keeps the read open for as long as it lives — then SIGTERM, then a grace,
+    /// then children again and SIGKILL. Whatever survives that is a leaked process; it does not get
+    /// to decide when the caller hears back.
+    private static func enforce(_ reason: @escaping @Sendable () -> Error, on box: Box, collector: Collector) async {
+        let pid = box.process.processIdentifier
+        if box.process.isRunning {
+            await killChildren(of: pid)
+            box.process.terminate()                                     // SIGTERM
+        }
+        await waitUntil(Self.killGraceSeconds) { !box.process.isRunning }
+        if box.process.isRunning {
+            await killChildren(of: pid)                                 // anything it spawned since
+            kill(pid, SIGKILL)
+        }
+        // A moment for the ordinary path to land with the real output, then the ladder answers.
+        await waitUntil(Self.postKillSettleSeconds) { collector.hasAnswered }
+        collector.fail(reason())
+    }
+
+    /// Polls `condition` until it holds or `seconds` elapse. Sleeping in slices rather than for
+    /// the whole grace so a child that dies promptly is not waited out.
+    private static func waitUntil(_ seconds: Double, _ condition: @Sendable () -> Bool) async {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline, !condition() {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
     }
 
     func run(_ arguments: [String], timeoutSeconds: Int? = nil) async throws -> (stdout: String, stderr: String, exitCode: Int32) {
@@ -120,57 +265,49 @@ struct CLIProcessRunner: Sendable {
         process.standardInput = FileHandle.nullDevice
 
         let box = Box(process)
+        let collector = Collector(stdout: out, stderr: err)
         let deadline = Deadline()
         let started = Date()
 
         // The watchdog kills; it never abandons. Racing the wait with a `withTimeout` and walking
         // away would leave the child running and unreaped — a zombie holding a pid and, for
-        // `container exec`, a live connection to the VM. It is a separate task rather than a
-        // `waitUntilExit()` with a timer because a cooperative-pool thread must not be parked in
-        // a blocking wait.
+        // `container exec`, a live connection to the VM.
         let watchdog: Task<Void, Never>? = timeoutSeconds.map { seconds in
             Task {
                 try? await Task.sleep(nanoseconds: UInt64(max(1, seconds)) * 1_000_000_000)
-                guard !Task.isCancelled, box.process.isRunning else { return }
+                guard !Task.isCancelled, !collector.hasAnswered, box.process.isRunning else { return }
                 deadline.fire()
-                let pid = box.process.processIdentifier
-                // Children first. They inherited the pipes, so one left alive holds
-                // `readDataToEndOfFile` below open for as long as it lives — and a deadline that
-                // returns when some grandchild feels like it is not a deadline. Sent while the
-                // child is known to be alive, so its pid cannot have been recycled under us.
-                Self.killChildren(of: pid)
-                box.process.terminate()                                     // SIGTERM
-                try? await Task.sleep(nanoseconds: UInt64(Self.killGraceSeconds * 1_000_000_000))
-                guard box.process.isRunning else { return }
-                Self.killChildren(of: pid)                                  // anything it spawned since
-                kill(pid, SIGKILL)
+                await Self.enforce({ ContainerRuntimeError.timedOut(elapsedSeconds: Date().timeIntervalSince(started)) },
+                                   on: box, collector: collector)
             }
         }
         defer { watchdog?.cancel() }
 
         let result: (stdout: String, stderr: String, exitCode: Int32) = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { cont in
+                collector.start(cont)
                 // Installed before `run()`: a process that exits first would never call a handler
                 // attached after the fact, and this continuation would never resume.
-                process.terminationHandler = { proc in
-                    let o = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                    let e = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                    cont.resume(returning: (o, e, proc.terminationStatus))
-                }
+                process.terminationHandler = { collector.noteExit($0.terminationStatus) }
                 do {
                     try process.run()
                 } catch {
                     process.terminationHandler = nil
-                    cont.resume(throwing: ContainerRuntimeError.launchFailed(error.localizedDescription))
+                    collector.fail(ContainerRuntimeError.launchFailed(error.localizedDescription))
                 }
             }
         } onCancel: {
-            if box.process.isRunning { box.process.terminate() }
+            // The same ladder the deadline uses, for the same reason: a cancelled call that waits
+            // on a survivor is a cancelled call that never returns.
+            Task { await Self.enforce({ CancellationError() }, on: box, collector: collector) }
         }
 
         if deadline.didFire {
             throw ContainerRuntimeError.timedOut(elapsedSeconds: Date().timeIntervalSince(started))
         }
+        // No `Task.checkCancellation()` here on purpose: a cancelled call whose child exited
+        // anyway has a real result, and the host route returns that result too. Cancellation only
+        // becomes an error when the ladder above had to answer for a process that would not.
         return result
     }
 }

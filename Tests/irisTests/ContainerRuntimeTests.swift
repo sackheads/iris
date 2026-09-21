@@ -99,6 +99,21 @@ struct ContainerRuntimeTests {
         #expect(throws: ContainerRuntimeError.self) { try ContainerMount.argument(for: "/a:/b:rw") }
     }
 
+    /// L2: the CLI reads a source that is not an absolute path as a *named volume*, not a bind,
+    /// so `data:/data:ro` would quietly look up a volume instead of mounting the directory.
+    @Test("a source that is not an absolute path is refused")
+    func relativeSourceRejected() {
+        #expect(throws: ContainerRuntimeError.self) { try ContainerMount.argument(for: "data:/data:ro") }
+        #expect(throws: ContainerRuntimeError.self) { try ContainerMount.argument(for: "/data:data") }
+        #expect(throws: ContainerRuntimeError.self) { try ContainerMount.argument(for: "~/data:/data") }
+    }
+
+    @Test("a path containing an equals sign is refused")
+    func equalsInPathRejected() {
+        #expect(throws: ContainerRuntimeError.self) { try ContainerMount.argument(for: "/a=b:/work") }
+        #expect(throws: ContainerRuntimeError.self) { try ContainerMount.argument(for: "/a:/work=x") }
+    }
+
     @Test("a read-only entry with no explicit target mounts the source at itself")
     func readOnlySameTarget() throws {
         #expect(try ContainerMount.argument(for: "/ws:ro") == "type=virtiofs,source=/ws,target=/ws,readonly")

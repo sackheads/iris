@@ -71,6 +71,34 @@ struct SandboxTimeoutTests {
         #expect(!Self.processExists(matching: marker))
     }
 
+    /// R26: the deadline wins the wait. An orphan that inherited the child's stdout keeps the
+    /// write end of the pipe open after every process we can reach is dead, so anything that waits
+    /// for end-of-file waits on a process nobody owns. The call must still come back on time.
+    @Test("an orphan holding the pipes cannot outlast the deadline", .timeLimit(.minutes(1)))
+    func orphanCannotOutlastDeadline() async throws {
+        let marker = "60.\(Int.random(in: 100_000...999_999))"
+        // `( … & )` puts the first sleep in a subshell that exits at once, so that sleep is
+        // reparented away from us: `pkill -P` cannot reach it, and it holds the inherited pipe.
+        let script = "(sleep \(marker) &) ; sleep \(marker)"
+        defer { Self.killAll(matching: "sleep \(marker)") }
+
+        let started = Date()
+        var thrown: Error?
+        do {
+            _ = try await CLIProcessRunner(executable: "/bin/sh").run(["-c", script], timeoutSeconds: 1)
+        } catch {
+            thrown = error
+        }
+        let wall = Date().timeIntervalSince(started)
+
+        let error = try #require(thrown as? ContainerRuntimeError)
+        guard case .timedOut = error else {
+            Issue.record("expected .timedOut, got \(error)")
+            return
+        }
+        #expect(wall < 10)
+    }
+
     @Test("a child that finishes inside its deadline returns normally", .timeLimit(.minutes(1)))
     func childUnderDeadline() async throws {
         let r = try await CLIProcessRunner(executable: "/bin/sh").run(["-c", "echo ok; exit 3"], timeoutSeconds: 30)
@@ -83,6 +111,18 @@ struct SandboxTimeoutTests {
         let r = try await CLIProcessRunner(executable: "/bin/sh").run(["-c", "echo hi"], timeoutSeconds: nil)
         #expect(r.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "hi")
         #expect(r.exitCode == 0)
+    }
+
+    /// Kills anything whose argv matches `needle`, so a test that deliberately orphans a process
+    /// takes it with it.
+    private static func killAll(matching needle: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        p.arguments = ["-9", "-f", needle]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+        p.waitUntilExit()
     }
 
     /// True when any process's argv matches `needle`. Its own `pgrep` is excluded by construction:
@@ -153,6 +193,42 @@ struct SandboxTimeoutTests {
         _ = await m.run(command: "b", conversationId: id, workspace: "/ws", extraMounts: ["/other:/other:ro"])
         #expect(rt.createdCount == 2)
         #expect(rt.removedNames.count == 1)
+    }
+
+    /// M3: the in-flight create barrier coalesces concurrent first-commands onto one create, and
+    /// the winner's mounts are the ones the container got. The loser must not run in it — for a
+    /// gate that would be its script running with another caller's mounts, once, silently.
+    @Test("two callers racing with different mounts each get their own container")
+    func racingMountsEachGetTheirOwn() async {
+        let rt = MockRuntime()
+        let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" })
+        let id = UUID()
+        await withTaskGroup(of: Void.self) { g in
+            g.addTask { _ = await m.run(command: "a", conversationId: id, workspace: "/ws", extraMounts: ["/a:/a:ro"]) }
+            g.addTask { _ = await m.run(command: "b", conversationId: id, workspace: "/ws", extraMounts: ["/b:/b:ro"]) }
+            await g.waitForAll()
+        }
+        #expect(rt.createdMounts.contains(["/ws:/ws", "/a:/a:ro"]))
+        #expect(rt.createdMounts.contains(["/ws:/ws", "/b:/b:ro"]))
+    }
+
+    /// L1: the reset notice is written once, by the call that recreated the container. A timeout
+    /// on that very call must not be the thing that eats it — no later call can say it instead,
+    /// because no later call is the one that recreated.
+    @Test("a timeout on a just-recreated session still carries the reset notice")
+    func timeoutKeepsResetNotice() async {
+        let rt = MockRuntime()
+        let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" })
+        let id = UUID()
+        _ = await m.run(command: "a", conversationId: id, workspace: "/ws")
+        await m.reapIdle(olderThan: 60, now: Date().addingTimeInterval(3600))
+        rt.nextExecError = ContainerRuntimeError.timedOut(elapsedSeconds: 30.4)
+
+        let out = await m.run(command: "b", conversationId: id, workspace: "/ws", timeoutSeconds: 30)
+
+        #expect(out.hasPrefix("[sandbox]"))
+        #expect(out.contains("reclaimed"))
+        #expect(out.hasSuffix("Error: command timed out after 30 seconds"))
     }
 
     @Test("the same mount list reuses the container")

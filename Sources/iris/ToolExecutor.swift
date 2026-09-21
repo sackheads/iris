@@ -289,6 +289,9 @@ struct ToolExecutor {
             var containerArgs = ["run", "--rm", ConfigManager.shared.sandboxImage, "bash", "-c", command]
             if let cwd = cwd {
                 let expandedPath = (cwd as NSString).expandingTildeInPath
+                // `-v`, where the session path uses `--mount` (see `ContainerMount`). The CLI
+                // lowers both to the same virtiofs bind; this one is the ephemeral no-conversation
+                // path and is left as it was rather than changed for symmetry alone.
                 containerArgs.insert(contentsOf: ["-v", "\(expandedPath):\(expandedPath)", "--workdir", expandedPath], at: 2)
             }
             process.arguments = containerArgs
