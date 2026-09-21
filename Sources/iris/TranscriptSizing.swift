@@ -25,6 +25,9 @@ enum TranscriptSizing {
     /// a 500-character `<untrusted_context>` block is two lines on screen — so their text counts
     /// for at most this much.
     static let systemRowTextCap: CGFloat = 48
+    /// Characters of a system row measured before the cap applies (a few lines' worth at the
+    /// sheet's width; more can't raise the result).
+    static let systemRowMeasuredPrefix = 400
 
     private static var bodyFont: NSFont { .systemFont(ofSize: NSFont.systemFontSize) }
 
@@ -34,9 +37,18 @@ enum TranscriptSizing {
         let textWidth = max(width - horizontalInset, 120)
         var total: CGFloat = 0
         for message in messages {
-            var text = textHeight(message.content, width: textWidth)
-            if message.role == .system { text = min(text, systemRowTextCap) }
+            let text: CGFloat
+            if message.role == .system {
+                // Capped rows only need enough text to reach the cap: measuring a full tool
+                // payload with Core Text and then discarding it is the expensive part.
+                text = min(textHeight(String(message.content.prefix(systemRowMeasuredPrefix)), width: textWidth),
+                           systemRowTextCap)
+            } else {
+                text = textHeight(message.content, width: textWidth)
+            }
             total += perMessageChrome + text
+            // Past the sheet's maximum every further row is clamped away anyway.
+            if total + chromeHeight >= maxSheetHeight { break }
         }
         return total.rounded(.up)
     }

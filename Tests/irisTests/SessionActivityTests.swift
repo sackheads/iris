@@ -105,8 +105,17 @@ struct SessionActivityTests {
         #expect(SessionActivity.formatElapsed(3_720) == "1h 02m")
     }
 
-    private static func session(_ phase: SessionSummary.Phase) -> SessionSummary {
-        SessionSummary(id: UUID(), kind: .subagent, role: "r", startTime: Date(), phase: phase, lastActivity: nil)
+    private static func session(_ phase: SessionSummary.Phase, kind: SessionSummary.Kind = .subagent) -> SessionSummary {
+        SessionSummary(id: UUID(), kind: kind, role: "r", startTime: Date(), phase: phase, lastActivity: nil)
+    }
+
+    @Test("collapsed summary tells an evaluator apart from a subagent, like the expanded rows do")
+    func collapsedSummaryEvaluators() {
+        #expect(SessionActivity.collapsedSummary(for: [Self.session(.thinking, kind: .evaluator)]) == "1 evaluator running")
+        #expect(SessionActivity.collapsedSummary(for: [Self.session(.thinking), Self.session(.responding, kind: .evaluator)])
+                == "1 subagent running, 1 evaluator running")
+        #expect(SessionActivity.collapsedSummary(for: [Self.session(.thinking, kind: .evaluator), Self.session(.finished(status: "completed", at: Date()))])
+                == "1 evaluator running, 1 finished")
     }
 
     @Test("collapsed summary: fix round 1 — the collapsed main line summarizes background work")

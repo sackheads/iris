@@ -289,8 +289,8 @@ class AppState {
         }
     }
 
-    /// Test seam (fix round 1 follow-up): whether either per-conversation main-timing dictionary
-    /// still holds an entry for `conversationId`, without exposing the dictionaries themselves.
+    /// Test seam only — no production caller. The timing dictionaries are private, and the tests
+    /// for `endEngineTurn`/`deleteConversation` pruning need to observe that an entry is gone.
     func hasMainTimingEntry(for conversationId: UUID) -> Bool {
         mainPhaseByConversation[conversationId] != nil || mainStartTimeByConversation[conversationId] != nil
     }
@@ -619,12 +619,6 @@ class AppState {
         subagentWriteLedger[id] = nil
     }
 
-    /// Hard removal, for a cancel path that wants the row gone immediately rather than lingering.
-    func removeSession(id: UUID) {
-        sessions.removeAll(where: { $0.id == id })
-        subagentWriteLedger[id] = nil
-    }
-
     /// Drops `sessions` entries in one pass; scheduled once per `finishSession` call rather than on
     /// a repeating timer, since nothing else needs the strip to update on a clock when idle.
     private func scheduleSessionSweep() {
@@ -639,8 +633,10 @@ class AppState {
     }
 
     /// The strip's data source: the synthesised main session first, then every subagent/evaluator
-    /// entry. `sessions` should only ever hold those two kinds, but filtering here is what keeps a
-    /// stray `.main` entry from ever being double-counted next to the synthesised one.
+    /// entry. `sessions` only ever holds those two kinds (`registerSubagent` is the sole writer and
+    /// takes a non-main `kind`); the filter is belt-and-braces. The synthesised row's id can't
+    /// collide with a subagent's either: `createNewConversation` never selects a subagent
+    /// conversation, so `selectedConversationId` is never a subagent id.
     var visibleSessions: [SessionSummary] {
         // A stable fallback id, not a fresh `UUID()`, so the synthesised row's identity doesn't
         // change on every access (breaking `ForEach` diffing) on the practically-never-hit path

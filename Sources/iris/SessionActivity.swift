@@ -9,10 +9,11 @@ struct SessionSummary: Identifiable, Hashable, Sendable {
         case subagent
         case evaluator
     }
-
-    /// What the session is doing right now. `.executing`'s `detail` is derived from the tool's
-    /// arguments by `SessionActivity.detail(tool:args:)` — never model-written prose — so the
-    /// strip cannot be made to display arbitrary text a model chose.
+    /// `detail` is derived from the tool call's own arguments by `SessionActivity.detail(tool:args:)`.
+    /// Those arguments are model-written (a `run_command` command, a `search_memory` query), so this
+    /// is not a guarantee against model-chosen text; the guarantee is narrower: no body-bearing
+    /// argument (file content, email body) is ever shown, the text is bounded to 60 characters, and
+    /// it is prefixed by the tool name so it reads as a tool call, not as a message.
     enum Phase: Hashable, Sendable {
         case idle
         case thinking
@@ -176,16 +177,23 @@ enum SessionActivity {
     /// Fix round 1 (#217/#19): while the strip is collapsed but subagent/evaluator sessions exist,
     /// the badge count used to be the ONLY sign of background work — exactly the visibility gap
     /// #19 asked to close. This summarizes what the expanded rows would show: `"2 subagents
-    /// running"`, `"1 finished"`, or both joined, so the collapsed line still says something.
+    /// running"`, `"1 evaluator running"`, `"1 finished"`, or those joined, so the collapsed line
+    /// still says something.
     /// `sessions` here is non-main entries only (`AppState.sessions`).
     static func collapsedSummary(for sessions: [SessionSummary]) -> String {
         let running = sessions.filter {
             if case .finished = $0.phase { return false }
             return true
-        }.count
-        let finished = sessions.count - running
+        }
+        // Evaluators are counted apart from subagents: `registerSubagent(kind:)` exists so the
+        // strip can tell a grader run from a delegated unit of work, and the collapsed line is
+        // part of the strip.
+        let subagents = running.filter { $0.kind == .subagent }.count
+        let evaluators = running.filter { $0.kind == .evaluator }.count
+        let finished = sessions.count - running.count
         var parts: [String] = []
-        if running > 0 { parts.append("\(running) subagent\(running == 1 ? "" : "s") running") }
+        if subagents > 0 { parts.append("\(subagents) subagent\(subagents == 1 ? "" : "s") running") }
+        if evaluators > 0 { parts.append("\(evaluators) evaluator\(evaluators == 1 ? "" : "s") running") }
         if finished > 0 { parts.append("\(finished) finished") }
         return parts.joined(separator: ", ")
     }
