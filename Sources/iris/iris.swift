@@ -1744,15 +1744,35 @@ actor IrisEngine {
             return result
         }
 
+        let trustedTools: Set<String> = ["set_workspace", "register_directory_watcher"]
+        let maxTier: InjectionGuard.SanitizationTier = trustedTools.contains(name) ? .tier1_structural : .tier3_canary
+
+        // `search_web` is scored one result at a time (#235). Its ten concatenated snippets plus
+        // their URLs read as a single malicious prompt to the tier-2 classifier (0.94-0.999), so
+        // the whole search came back as one blocked marker and the agent just searched again.
+        // A payload that is not a JSON array of results (the script's `{"error": ...}`) falls
+        // through to the whole-output path below rather than going unscored.
+        if name == "search_web",
+           let outcome = await SearchResultFilter.filter(result, allowed: { text in
+               if case .passed = await InjectionGuard.classify(text, contextTag: "tool_output_search_web_result",
+                                                               maxTier: maxTier, protectionEnabled: protectionEnabled) {
+                   return true
+               }
+               return false
+           }) {
+            // Tier 1 and one wrapper over the survivors. Tiers 2/3 already ran per result, so the
+            // reassembled array is deliberately not scored a second time — re-scoring it would
+            // reintroduce exactly the aggregate false positive this split exists to remove.
+            return await InjectionGuard.sanitize(outcome.json, contextTag: "tool_output_search_web",
+                                                 maxTier: .tier1_structural, protectionEnabled: protectionEnabled)
+        }
+
         // Tier 1 Sanitization: Apply structural isolation to prevent prompt injection from tool outputs
         let structuralSafeResult = PromptInjectionGuard.sanitizeUntrustedInput(result)
 
-        let trustedTools: Set<String> = ["set_workspace", "register_directory_watcher"]
-        let maxTier: InjectionGuard.SanitizationTier = trustedTools.contains(name) ? .tier1_structural : .tier3_canary
-        
         // Tier 2 & 3 Sanitization: Active heuristic and canary detection (skipped for trusted tools)
         let sanitizedResult = await InjectionGuard.sanitize(structuralSafeResult, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled)
-        
+
         return sanitizedResult
     }
     

@@ -3,7 +3,9 @@ import CryptoKit
 
 public struct InjectionGuard {
     
-    public enum SanitizationTier {
+    /// `Sendable` because a per-result scoring closure captures the tier it was computed for
+    /// (#235); the enum has no payload, so the conformance costs nothing.
+    public enum SanitizationTier: Sendable {
         case tier1_structural
         case tier2_coreML
         case tier3_canary
