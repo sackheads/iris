@@ -27,6 +27,26 @@ struct ScheduleAliasTests {
         #expect(try ScheduleAlias(minute: 0, hour: 8, day: 1, month: 4).resolve(defaultTimeZone: tz).get() == .cron(CronSchedule(expression: "0 8 1 4 *", timeZone: tz)))
     }
 
+    @Test("a coarser field without an hour means midnight, not every hour")
+    func coarseFieldsDefaultToMidnight() throws {
+        // `0 * * * 1` is 24 fires every Monday, which is nobody's idea of "on Mondays".
+        #expect(try ScheduleAlias(weekday: 2).resolve(defaultTimeZone: tz).get()
+                == .cron(CronSchedule(expression: "0 0 * * 1", timeZone: tz)))
+        #expect(try ScheduleAlias(weekdays: [2, 3]).resolve(defaultTimeZone: tz).get()
+                == .cron(CronSchedule(expression: "0 0 * * 1,2", timeZone: tz)))
+        #expect(try ScheduleAlias(day: 15).resolve(defaultTimeZone: tz).get()
+                == .cron(CronSchedule(expression: "0 0 15 * *", timeZone: tz)))
+        #expect(try ScheduleAlias(month: 4).resolve(defaultTimeZone: tz).get()
+                == .cron(CronSchedule(expression: "0 0 * 4 *", timeZone: tz)))
+        // Minute alone is still hourly, and an explicit hour still wins over the default.
+        #expect(try ScheduleAlias(minute: 30).resolve(defaultTimeZone: tz).get()
+                == .cron(CronSchedule(expression: "30 * * * *", timeZone: tz)))
+        #expect(try ScheduleAlias(hour: 9).resolve(defaultTimeZone: tz).get()
+                == .cron(CronSchedule(expression: "0 9 * * *", timeZone: tz)))
+        #expect(try ScheduleAlias(minute: 30, weekday: 2).resolve(defaultTimeZone: tz).get()
+                == .cron(CronSchedule(expression: "30 0 * * 1", timeZone: tz)))
+    }
+
     @Test("intervalSeconds wins alone; combined with cron fields is conflicting")
     func interval() {
         #expect(ScheduleAlias(intervalSeconds: 120).resolve(defaultTimeZone: tz) == .success(.interval(seconds: 120)))

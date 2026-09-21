@@ -40,7 +40,7 @@ fs event (debounced, self-writes filtered) ─┼─► gate (deterministic, no 
 poll (script at a cadence) ─┘
 ```
 
-- **Trigger.** `.schedule`, `.fsEvent`, `.poll`. A poll is a schedule whose gate is a script; it exists as a trigger type so the model has a name for it. Existing `ScheduledJob` and `WatcherRule` records import into this model.
+- **Trigger.** `.schedule`, `.fsEvent`, `.poll`. A poll is a schedule whose gate is a script; it exists as a trigger type so the model has a name for it. The old `ScheduledJob` and `WatcherRule` records are not imported into this model — nobody outside development had real ones, so deliverable 1 drops them (see below).
 - **Gate.** A check that returns a signal and an optional diff. No model tokens are spent unless the gate says something changed. The gate is code the model wrote, and it runs on every tick with nobody watching, so it gets the same treatment as a mutating tool: either one of a fixed set of built-in checks (HEAD of a URL, mtime or hash of a path, exit code of a script) or a script run through the `run_command` sandbox path in the `apple/container` VM with the job's declared mounts. A gate never executes free-form on the host, and creating or editing one is Vibecop-reviewed like any mutating action. Gate output is untrusted input and passes the InjectionGuard tiers before any model sees it, the same path system events use today.
 - **Run.** An `IrisEngine` turn in a background conversation: hidden from the sidebar, subject to the job's profile, Vibecop, sandbox preference, and budget. It has the normal tool surface minus anything the profile forbids. Its transcript is stored like any conversation so `#177` search covers it.
 - **Deliver.** A compact event card (job, status, one-line outcome, run id) to the job's destination: the main conversation by default, or a designated one. If the destination is mid-turn, the card rides the `#173` steer inbox so the model sees it with its next tool results. Raw output never enters `messages`.
@@ -75,7 +75,7 @@ Lands after `#163` and `#177`.
 
 ## Deliverables, in order
 
-1. **Policies and model.** Write the two decisions above into the spec; define the unified trigger, profile, and ledger schema; import existing jobs and watcher rules. Adopt a cron subset with lists, ranges, steps, and a timezone per job (closes `#156` properly). — landed: see `docs/specs/2026-09-21-agency-model-and-ledger.md`; PR pending
+1. **Policies and model.** Write the two decisions above into the spec; define the unified trigger, profile, and ledger schema; drop the old `UserDefaults` records (decision: no importer — nothing real existed to carry over, and the two keys are deleted, with a count logged, on first launch of a build with migration v9). Adopt a cron subset with lists, ranges, steps, and a timezone per job (closes `#156` properly). — landed: see `docs/specs/2026-09-21-agency-model-and-ledger.md`; PR pending
 2. **Ledger and delivery.** `job_runs` beside the conversation store; background conversations hidden from the sidebar; event cards; steer-inbox delivery; `get_job_run`; stop writing job output into `messages`. — landed: see `docs/specs/2026-09-21-agency-model-and-ledger.md`; PR pending
 3. **Runtime.** Gate execution, background profile, fail-closed approvals with proposal cards, budgets, breaker, overlap policy, retry and pause, sleep assertion and `catchUp`, `iris --run-job`.
 4. **Watches.** Fold `WatcherManager` onto the trigger model; quiet window; self-write filter; poll trigger.

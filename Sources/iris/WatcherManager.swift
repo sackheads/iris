@@ -38,6 +38,16 @@ actor WatcherManager {
         self.onEventCallback = callback
     }
 
+    /// `reload()`, adopting `ledger` first if none was configured. `shared` is configured in
+    /// `IrisEngine.start()`, which a subagent, an evaluator or a scenario run never calls — and
+    /// the job tools resolve the ledger per call precisely so those engines can still register a
+    /// watch. Without this the registration wrote its job and then reloaded a nil ledger, so the
+    /// directory was never actually watched. An already-configured manager keeps its ledger.
+    func reload(adoptingIfUnconfigured ledger: JobLedger) async {
+        if self.ledger == nil { self.ledger = ledger }
+        await reload()
+    }
+
     /// Rebuilds the watch set from the ledger: stop everything, then start one watcher per enabled
     /// `.fsEvent` job. Stopping first — rather than diffing — keeps a job whose path or enabled
     /// flag changed from needing a special case; FSEvents streams are cheap to recreate.

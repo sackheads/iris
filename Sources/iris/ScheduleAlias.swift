@@ -54,7 +54,11 @@ struct ScheduleAlias: Equatable, Sendable {
 
         let dow = days.isEmpty ? "*" : Array(Set(days.map { $0 - 1 })).sorted().map(String.init).joined(separator: ",")
         let minuteText = String(minute ?? 0)
-        let hourText = hour.map(String.init) ?? "*"
+        // A coarser field without an hour means midnight on those days, not every hour of them:
+        // `weekday: 2` alone used to resolve to `0 * * * 1` and fire 24 times every Monday.
+        // Minute alone keeps meaning hourly, which is the one case where `*` is what was asked.
+        let coarserThanHour = day != nil || month != nil || weekday != nil || !(weekdays ?? []).isEmpty
+        let hourText = hour.map(String.init) ?? (coarserThanHour ? "0" : "*")
         let dayText = day.map(String.init) ?? "*"
         let monthText = month.map(String.init) ?? "*"
         let expression = "\(minuteText) \(hourText) \(dayText) \(monthText) \(dow)"

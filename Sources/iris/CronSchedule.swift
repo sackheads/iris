@@ -19,6 +19,10 @@ enum CronParseError: Error, Equatable {
 /// A five-field cron expression (minute hour day-of-month month day-of-week) paired with the
 /// IANA time zone it should be evaluated in. Supports `*`, numbers, lists (`a,b`), ranges (`a-b`),
 /// and steps (`*/n`, `a-b/n`). Day-of-week accepts 0-7, where both 0 and 7 mean Sunday.
+///
+/// Two forms are rejected rather than guessed at: an empty list element (`1,,2`, `1-5,`) and a
+/// range that wraps past the end of the field (`22-2`, which would have to mean 22,23,0,1,2 —
+/// write `22-23,0-2`).
 struct CronSchedule: Codable, Equatable, Sendable {
     var expression: String
     var timeZone: String
@@ -48,7 +52,10 @@ struct CronSchedule: Codable, Equatable, Sendable {
         func field(_ raw: String, _ name: String, _ range: ClosedRange<Int>, mapSeven: Bool = false) -> Result<(Set<Int>, Bool), CronParseError> {
             var out = Set<Int>()
             var restricted = false
-            for token in raw.split(separator: ",").map(String.init) {
+            for token in raw.split(separator: ",", omittingEmptySubsequences: false).map(String.init) {
+                // A stray comma (`1,,2`, `1-5,`) is a typo, not an empty set: dropping it would
+                // silently widen or narrow the schedule the caller asked for.
+                guard !token.isEmpty else { return .failure(.badToken(field: name, token: token)) }
                 let slashParts = token.split(separator: "/", maxSplits: 1).map(String.init)
                 let base = slashParts[0]
                 let stepText = slashParts.count == 2 ? slashParts[1] : nil
@@ -147,19 +154,24 @@ struct CronSchedule: Codable, Equatable, Sendable {
                 return t
             }
 
+            // Both skips search forward for the next *instant* whose local clock reads the
+            // boundary, and both are clamped to at least a minute of progress. Rebuilding a
+            // boundary from wall-clock components cannot do this: inside a DST fall-back repeated
+            // hour two instants share one local time and `repeatedTimePolicy: .first` resolves
+            // both onto the earlier pass, so `t + 1h` came back as `t` and the loop span forever
+            // — on an actor, taking the scheduler and a core with it (#252).
             if !fields.months.contains(c.month!) || !dayOK {
-                let nextDay = cal.date(byAdding: .day, value: 1, to: t)!
-                t = cal.date(bySettingHour: 0, minute: 0, second: 0, of: nextDay)!
+                let midnight = cal.nextDate(after: t, matching: DateComponents(hour: 0, minute: 0, second: 0),
+                                            matchingPolicy: .nextTime, direction: .forward)
+                t = max(midnight ?? t.addingTimeInterval(86_400), t.addingTimeInterval(60))
                 continue
             }
             if !fields.hours.contains(c.hour!) {
-                // `date(bySetting:value:of:)` searches forward for the next time the single
-                // component equals value, which rolls to the *next* hour when the target minute
-                // (0) is less than the current one; setting hour/minute/second together truncates
-                // within the same hour instead, which is what "start of the next hour" needs.
-                let nextHour = cal.date(byAdding: .hour, value: 1, to: t)!
-                let hourOfNextHour = cal.component(.hour, from: nextHour)
-                t = cal.date(bySettingHour: hourOfNextHour, minute: 0, second: 0, of: nextHour)!
+                // The top of the next hour, not `t + 1h`: an offset jump would leave `t` at :31
+                // and skip the first half of an hour that does match.
+                let topOfHour = cal.nextDate(after: t, matching: DateComponents(minute: 0, second: 0),
+                                             matchingPolicy: .nextTime, direction: .forward)
+                t = max(topOfHour ?? t.addingTimeInterval(3_600), t.addingTimeInterval(60))
                 continue
             }
             t = t.addingTimeInterval(60)

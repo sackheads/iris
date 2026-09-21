@@ -133,6 +133,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
         case .fieldCount(let count):
             return "give five fields (minute hour day-of-month month day-of-week), not \(count)."
         case .badToken(let field, let token):
+            if token.isEmpty { return "the \(field) field has an empty list element — check for a stray comma." }
             return "'\(token)' is not a valid \(field) value."
         case .outOfRange(let field, let value):
             return "\(value) is out of range for \(field)."
