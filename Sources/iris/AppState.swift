@@ -83,6 +83,12 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// unlike `isSubagent`, which has no column because subagent conversations are filtered out of
     /// persistence entirely.
     var isArchived: Bool = false
+    /// #187 — a conversation a scheduled job runs in: never shown in the sidebar, never selected,
+    /// but persisted and searchable so a finished run's transcript can be opened from its card.
+    var isBackground: Bool = false
+    /// #187 — sorted to the top of the sidebar and refused by `/clear`. The "Iris Activity"
+    /// conversation event cards are delivered to is the first user of this.
+    var isPinned: Bool = false
     var goalContract: GoalContract? = nil
     var lastGoalCompletionReport: JSONValue? = nil
     var lastGoalEvaluation: GoalEvaluation? = nil
@@ -116,7 +122,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -132,6 +138,10 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         mainAgentSandbox = try container.decodeIfPresent(SandboxPref.self, forKey: .mainAgentSandbox)
         isSubagent = try container.decodeIfPresent(Bool.self, forKey: .isSubagent) ?? false
         isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
+        // Invariant 1, same as `isArchived`: every conversation persisted before #187 lacks both
+        // keys, and a throw here would fail the whole decode.
+        isBackground = try container.decodeIfPresent(Bool.self, forKey: .isBackground) ?? false
+        isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         goalContract = try container.decodeIfPresent(GoalContract.self, forKey: .goalContract)
         lastGoalCompletionReport = try container.decodeIfPresent(JSONValue.self, forKey: .lastGoalCompletionReport)
         lastGoalEvaluation = try container.decodeIfPresent(GoalEvaluation.self, forKey: .lastGoalEvaluation)
@@ -624,11 +634,17 @@ class AppState {
         appendMessage(role: .system, content: notice, to: convId)
     }
     
-    func createNewConversation(id: UUID = UUID(), isSubagent: Bool = false) {
-        var newConv = Conversation(id: id, title: "New Conversation")
+    /// `select` nil means the default rule — select the new conversation unless it is a subagent
+    /// scratch thread or a background job run (#187), neither of which the user is looking at.
+    /// Pass `false` explicitly to create a conversation without disturbing the selection.
+    @discardableResult
+    func createNewConversation(id: UUID = UUID(), isSubagent: Bool = false, isBackground: Bool = false,
+                               title: String? = nil, select: Bool? = nil) -> UUID {
+        var newConv = Conversation(id: id, title: title ?? "New Conversation")
         newConv.isSubagent = isSubagent
+        newConv.isBackground = isBackground
         conversations.append(newConv)
-        if !isSubagent {
+        if select ?? (!isSubagent && !isBackground) {
             selectedConversationId = newConv.id
         }
         markChanged(newConv.id, .created)
@@ -636,6 +652,47 @@ class AppState {
         Task {
             _ = await HookManager.shared.fireSessionStart(conversationId: newConv.id)
         }
+        return newConv.id
+    }
+
+    /// #187 — the pinned conversation event cards are delivered to.
+    static let activityConversationTitle = "Iris Activity"
+    /// The `meta` key its id is recorded under, so it survives a relaunch and is never created
+    /// twice. Deliberately not "the conversation titled Iris Activity": the user may rename it.
+    static let activityConversationMetaKey = "activity_conversation_id"
+
+    /// Returns the Activity conversation's id, creating it (pinned, unselected) and recording it
+    /// in `meta` on first use. Stable across calls and across launches; if the recorded id names a
+    /// conversation that no longer exists (deleted by hand), a fresh one is created and recorded.
+    func activityConversationId() -> UUID {
+        if let raw = try? store.metaValue(forKey: Self.activityConversationMetaKey),
+           let existing = UUID(uuidString: raw),
+           conversations.contains(where: { $0.id == existing }) {
+            return existing
+        }
+        let id = createNewConversation(title: Self.activityConversationTitle, select: false)
+        if let idx = conversations.firstIndex(where: { $0.id == id }) {
+            conversations[idx].isPinned = true
+            markChanged(id, .metadata)
+        }
+        try? store.setMetaValue(id.uuidString, forKey: Self.activityConversationMetaKey)
+        return id
+    }
+
+    /// Why `/clear` will not empty a conversation. nil means it may (#187).
+    enum ClearRefusal: Equatable {
+        case pinned
+
+        var reason: String {
+            switch self {
+            case .pinned: return "This conversation is pinned and cannot be cleared."
+            }
+        }
+    }
+
+    func clearRefusal(for conversationId: UUID) -> ClearRefusal? {
+        guard let conv = conversations.first(where: { $0.id == conversationId }) else { return nil }
+        return conv.isPinned ? .pinned : nil
     }
     
     func updateConversationTitle(id: UUID, title: String) {
@@ -2579,7 +2636,13 @@ class AppState {
         emitCommandOutput(body, format: .markdown, to: convId)
     }
 
-    private func handleClearCommand(convId: UUID) {
+    func handleClearCommand(convId: UUID) {
+        // #187 — a pinned conversation (the Activity log) keeps its history; `/clear` says so
+        // rather than silently doing nothing.
+        if let refusal = clearRefusal(for: convId) {
+            emitCommandOutput(refusal.reason, format: .system, to: convId)
+            return
+        }
         if let idx = conversations.firstIndex(where: { $0.id == convId }) {
             purgeCommandTimings(forMessagesIn: convId)   // before the messages go — they are the keys
             conversations[idx].messages.removeAll()

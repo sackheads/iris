@@ -65,7 +65,7 @@ struct ChatView: View {
     @State private var composerShouldFocus = false
     
     private var archivedConversations: [Conversation] {
-        state.conversations.filter { !$0.isSubagent && $0.isArchived }
+        SidebarOrdering.archived(state.conversations)
     }
 
     /// The selected conversation's id, but only while that conversation is archived — nil
@@ -85,7 +85,7 @@ struct ChatView: View {
                     let trimmedQuery = sidebarQuery.trimmingCharacters(in: .whitespacesAndNewlines)
                     if trimmedQuery.isEmpty {
                         Section(header: Text("Conversations").font(.caption.weight(.bold)).foregroundColor(.secondary).padding(.bottom, 4)) {
-                            ForEach(state.conversations.filter { !$0.isSubagent && !$0.isArchived }) { conv in
+                            ForEach(SidebarOrdering.visible(state.conversations)) { conv in
                                 conversationRow(conv)
                             }
                         }
