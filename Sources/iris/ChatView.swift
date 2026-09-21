@@ -16,7 +16,12 @@ struct ChatView: View {
     /// the same pass, and only coalescing to a single, later-evaluated scroll makes the pending
     /// search-reveal target reliably win regardless of which handler happened to run first.
     @State private var scrollPassScheduled = false
-    @State private var showSubagents = false
+    /// Toggled by the toolbar "cpu" badge; drives `SessionStripView`'s collapsed/expanded state.
+    /// Replaces the old `SubagentPopoverView` popover (#217 + #19). Not persisted. Starts `true`:
+    /// fix round 1's ruling is that the strip defaults to expanded whenever a subagent/evaluator
+    /// session exists (a manual collapse is remembered only until the strip empties out, at which
+    /// point `SessionStripView` resets this back to `true` itself).
+    @State private var sessionStripExpanded = true
     /// Whether the Archived disclosure group is open. The single source of truth: the group
     /// binds to it directly, so the disclosure triangle always does what it looks like it does.
     @State private var archivedExpanded = false
@@ -365,6 +370,8 @@ struct ChatView: View {
                     ModelLEDBar(isThinking: state.isThinking)
 
                     messageInputBar
+
+                    SessionStripView(state: state, isExpanded: $sessionStripExpanded)
                 }
                 .onDrop(of: [.fileURL], isTargeted: $isDraggingOver) { providers in
                     handleDrop(providers: providers)
@@ -439,12 +446,12 @@ struct ChatView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Button(action: {
-                    showSubagents.toggle()
+                    withAnimation { sessionStripExpanded.toggle() }
                 }) {
                     ZStack {
                         Image(systemName: "cpu")
-                        if state.activeSubagents.count > 0 {
-                            Text("\(state.activeSubagents.count)")
+                        if runningSubagentCount > 0 {
+                            Text("\(runningSubagentCount)")
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundColor(.white)
                                 .padding(3)
@@ -454,9 +461,7 @@ struct ChatView: View {
                         }
                     }
                 }
-                .popover(isPresented: $showSubagents) {
-                    SubagentPopoverView(appState: state)
-                }
+                .help("Toggle the session strip")
             }
         }
         // Global approval overlay: floats over the whole window so a request from ANY conversation
@@ -788,6 +793,16 @@ struct ChatView: View {
     }
 
     /// The message input bar: a multi-line field (Enter submits, Shift+Enter newlines) + send button.
+    /// The toolbar "cpu" badge's count: running subagent/evaluator sessions only (`state.sessions`
+    /// never holds the main session — see `AppState.visibleSessions`), matching what
+    /// `SessionStripView`'s expanded view lists.
+    private var runningSubagentCount: Int {
+        state.sessions.filter {
+            if case .finished = $0.phase { return false }
+            return true
+        }.count
+    }
+
     private var messageInputBar: some View {
         let isInputEmpty = inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let isSendDisabled = isInputEmpty && draftAttachments.isEmpty

@@ -38,6 +38,7 @@ final class GoalEvaluator: Sendable {
             app.createNewConversation(id: evalId, isSubagent: true)
             app.updateConversationTitle(id: evalId, title: "Evaluator")
             app.setWorkspace(for: evalId, path: workspaceDir)   // its run_command runs here
+            app.registerSubagent(id: evalId, role: "evaluator", kind: .evaluator)
         }
 
         // Fresh engine, evaluator principal. It never sees the working transcript.
@@ -69,6 +70,7 @@ final class GoalEvaluator: Sendable {
                 // awaiting `evaluate` (#103).
                 app.recordEvaluation(for: originId, eval)
                 app.onEvaluationComplete[evalId] = nil
+                app.finishSession(id: evalId, status: "graded")
                 app.deleteConversation(evalId)
             }
         }
@@ -101,6 +103,7 @@ final class GoalEvaluator: Sendable {
         await MainActor.run {
             app.recordEvaluation(for: originId, failed)
             app.onEvaluationComplete[evalId] = nil
+            app.finishSession(id: evalId, status: "failed")
             app.deleteConversation(evalId)
         }
         return failed

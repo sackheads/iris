@@ -171,9 +171,14 @@ final class SubagentManager: @unchecked Sendable {
                                     summary: termination.summary, filesWritten: files,
                                     startedAt: startedAt, endedAt: Date(),
                                     unitContract: unitContract, verdict: verdict)
+        // Cheap defense-in-depth alongside the `updateSessionPhase` guard above: the timeout/failed
+        // paths above already cancel the reprompt loop before finishing; do the same here so a
+        // straggling auto-reprompt (there shouldn't be one once the goal is cleared, but nothing
+        // here guarantees it) can't fire another phase update after `finishSession`.
+        await engine.cancelReprompt(for: subagentId)
         await MainActor.run {
             appState.setSubagentResult(for: subagentId, result)
-            appState.removeSubagent(id: subagentId)
+            appState.finishSession(id: subagentId, status: termination.status.rawValue)
         }
         return (result.renderedForParent(), termination.status)
     }

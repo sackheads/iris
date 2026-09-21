@@ -579,6 +579,10 @@ actor IrisEngine {
     /// Per-conversation loop detectors (reset on a fresh UI turn).
     private var loopDetectors: [UUID: LoopDetector] = [:]
 
+    /// Per-conversation runs of guard-blocked tool results (#235), reset alongside `loopDetectors`.
+    /// The identical-call detector cannot see this loop: the agent rephrases its query each time.
+    private var blockedResultTrackers: [UUID: BlockedResultTracker] = [:]
+
     /// Cancels a conversation's pending auto-reprompt, stopping its goal loop.
     func cancelReprompt(for conversationId: UUID) {
         repromptTasks[conversationId]?.cancel()
@@ -590,6 +594,7 @@ actor IrisEngine {
     private func softStopWithSummary(conversationId: UUID, reason: String) async {
         cancelReprompt(for: conversationId)
         loopDetectors[conversationId] = nil
+        blockedResultTrackers[conversationId] = nil
         let localState = state
         // Clear the goal FIRST so the summary turn cannot re-enter the cap/loop-detection paths
         // (both gated on activeGoal != nil) and recurse into softStopWithSummary.
@@ -705,7 +710,10 @@ actor IrisEngine {
     }
 
     private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false) async {
-        if source == "UI" { loopDetectors[conversationId] = nil }
+        if source == "UI" {
+            loopDetectors[conversationId] = nil
+            blockedResultTrackers[conversationId] = nil
+        }
 
         // Callers that already shaped their prompt as `System Event [X]: …` (rename, reflection,
         // goal draft) keep their own label rather than gaining a second `System Event [System]:`.
@@ -841,7 +849,7 @@ actor IrisEngine {
         
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Use this whenever the user asks to be reminded of something or to have something done on a schedule, for example every weekday at 9 or every hour; the prompt is what Iris should do when it fires. Never use shell cron for this; no setup, files, or commands are needed, calling this tool is the whole job. The job persists across app restarts and catches up if the computer wakes from sleep. You MUST provide EITHER intervalSeconds OR one or more cron fields (minute, hour, day, month, weekday), but not both.",
+            description: "Use this whenever the user asks to be reminded of something or to have something done on a schedule, for example every weekday at 9 or every hour; the prompt is what Iris should do when it fires. Never use shell cron for this; no setup, files, or commands are needed, calling this tool is the whole job. The job persists across app restarts and catches up if the computer wakes from sleep. You MUST provide EITHER intervalSeconds OR one or more cron fields (minute, hour, day, month, weekday/weekdays), but not both. Example: every weekday at 9 → weekdays [2,3,4,5,6], hour 9, minute 0.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -851,6 +859,7 @@ actor IrisEngine {
                     "day": Schema(type: "INTEGER", description: "Cron day of month (1-31)"),
                     "month": Schema(type: "INTEGER", description: "Cron month (1-12)"),
                     "weekday": Schema(type: "INTEGER", description: "Cron weekday (1=Sunday, 2=Monday, ..., 7=Saturday)"),
+                    "weekdays": Schema(type: "ARRAY", description: "Cron weekdays, 1=Sunday … 7=Saturday; e.g. [2,3,4,5,6] for Monday–Friday. Prefer this over five separate jobs.", items: Schema(type: "INTEGER")),
                     "intervalSeconds": Schema(type: "INTEGER", description: "Simple recurring interval in seconds (e.g. 3600 for every hour)")
                 ],
                 required: ["prompt"]
@@ -1184,7 +1193,7 @@ actor IrisEngine {
                 }
                 
                 await MainActor.run {
-                    localState?.updateSubagentStatus(id: conversationId, status: "Thinking...")
+                    localState?.updateSessionPhase(conversationId, .thinking)
                 }
                 // Measure at the seam so every client (real, fake, future) is attributed
                 // uniformly, and the span includes engine-side call overhead. Each attempt is
@@ -1217,10 +1226,11 @@ actor IrisEngine {
                         returnedToolCalls: response.candidates?.first?.content?.parts.contains { $0.functionCall != nil } ?? false,
                         firstTokenMs: streamed ? outcome.firstTokenMs : nil))
                 modelRound += 1
-                await MainActor.run {
-                    localState?.updateSubagentStatus(id: conversationId, status: "Executing...")
-                }
-                
+                // No coarse "Executing..." mark here any more: this fires on every model round
+                // whether or not it actually returned a tool call. The session strip's `.executing`
+                // phase (with the tool name + detail) is now set at the point a tool call is
+                // actually about to run, in `executeToolWithHooks` below.
+
                 let afterModelDecision = await HookManager.shared.fireAfterModel(response: response, useSandbox: hooksSandbox)
                 if case .block(let reason) = afterModelDecision {
                     _ = await streamer.settle()
@@ -1378,6 +1388,15 @@ actor IrisEngine {
                         if tripped {
                             turnFinished = true
                             await softStopWithSummary(conversationId: conversationId, reason: "repeated the same action \(threshold)× in a row")
+                            break
+                        }
+
+                        // The same stop for a loop the signature detector cannot see (#235): every
+                        // result withheld by the guard, so the agent rephrases and searches again.
+                        let blockedRun = blockedResultTrackers[conversationId]?.consecutive ?? 0
+                        if blockedRun >= threshold {
+                            turnFinished = true
+                            await softStopWithSummary(conversationId: conversationId, reason: "the injection guard withheld \(blockedRun) consecutive tool results")
                             break
                         }
                     }
@@ -1667,8 +1686,24 @@ actor IrisEngine {
             let day = Int(functionCall.args["day"]?.stringValue ?? "")
             let month = Int(functionCall.args["month"]?.stringValue ?? "")
             let weekday = Int(functionCall.args["weekday"]?.stringValue ?? "")
+            let parsedWeekdays: [Int] = {
+                guard case .array(let items) = functionCall.args["weekdays"] else { return [] }
+                return items.compactMap { item -> Int? in
+                    switch item {
+                    case .int(let i): return i
+                    case .double(let d): return Int(d)
+                    case .string(let s): return Int(s)
+                    default: return nil
+                    }
+                }
+            }()
+            // Only 1...7 is a valid weekday; out-of-range values are dropped rather than stored,
+            // and named back to the model so a typo'd cron field doesn't silently do less than asked.
+            let validWeekdays = parsedWeekdays.filter { (1...7).contains($0) }
+            let droppedWeekdays = parsedWeekdays.filter { !(1...7).contains($0) }
+            let weekdays: [Int]? = validWeekdays.isEmpty ? nil : validWeekdays
             let intervalSeconds = Int(functionCall.args["intervalSeconds"]?.stringValue ?? "")
-            
+
             ScheduleManager.shared.schedule(
                 conversationId: conversationId,
                 prompt: prompt,
@@ -1677,9 +1712,13 @@ actor IrisEngine {
                 day: day,
                 month: month,
                 weekday: weekday,
+                weekdays: weekdays,
                 intervalSeconds: intervalSeconds
             )
             result = "Job scheduled successfully. It will fire in the background."
+            if !droppedWeekdays.isEmpty {
+                result += " Ignored invalid weekday value\(droppedWeekdays.count == 1 ? "" : "s") (must be 1-7, 1=Sunday): \(droppedWeekdays.map(String.init).joined(separator: ", "))."
+            }
         } else if functionCall.name == "save_fact", let content = functionCall.args["content"]?.stringValue {
             let category = functionCall.args["category"]?.stringValue ?? "general"
             let entity = functionCall.args["entity"]?.stringValue
@@ -2020,6 +2059,15 @@ actor IrisEngine {
     private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool) async -> String {
         var execArgs: [String: JSONValue] = args
 
+        // Session strip activity (#217/#19): the detail is derived from the tool's own arguments
+        // by a pure mapping, never model-written free text, before anything about the call (hooks,
+        // sandbox, sanitization) can change what's shown.
+        if let conversationId {
+            let localState = state
+            let detail = SessionActivity.detail(tool: name, args: execArgs)
+            await MainActor.run { localState?.updateSessionPhase(conversationId, .executing(tool: name, detail: detail)) }
+        }
+
         // Command hooks run in the agent's environment (per principal policy), independent of this
         // specific tool's own host/sandbox routing.
         let hooksSandbox = conversationId == nil ? false : await hooksUseSandbox(conversationId: conversationId!, workspacePath: cwd)
@@ -2066,16 +2114,57 @@ actor IrisEngine {
             return result
         }
 
-        // Tier 1 Sanitization: Apply structural isolation to prevent prompt injection from tool outputs
-        let structuralSafeResult = PromptInjectionGuard.sanitizeUntrustedInput(result)
-
         let trustedTools: Set<String> = ["set_workspace", "register_directory_watcher"]
         let maxTier: InjectionGuard.SanitizationTier = trustedTools.contains(name) ? .tier1_structural : .tier3_canary
-        
-        // Tier 2 & 3 Sanitization: Active heuristic and canary detection (skipped for trusted tools)
-        let sanitizedResult = await InjectionGuard.sanitize(structuralSafeResult, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled)
-        
-        return sanitizedResult
+
+        // `search_web` is scored one result at a time (#235). Its ten concatenated snippets plus
+        // their URLs read as a single malicious prompt to the tier-2 classifier (0.94-0.999), so
+        // the whole search came back as one blocked marker and the agent just searched again.
+        // A payload that is not a JSON array of results (the script's `{"error": ...}`) falls
+        // through to the whole-output path below rather than going unscored.
+        let sanitizedResult: String
+        var fullyBlockedSearch = false
+
+        if name == "search_web",
+           let outcome = await SearchResultFilter.filter(result, allowed: { text in
+               // Capped at tier 2 rather than the caller's tier 3: a provisioned canary would mean
+               // up to ten sequential auxiliary-model probes for one search, and the canary was
+               // built to judge large blobs, while the token classifier is exactly the tool for a
+               // prompt-sized title and snippet. If that is the wrong call, the cost is that
+               // search snippets get tier 2 only.
+               if case .passed = await InjectionGuard.classify(text, contextTag: "tool_output_search_web_result",
+                                                               maxTier: .tier2_coreML, protectionEnabled: protectionEnabled) {
+                   return true
+               }
+               return false
+           }) {
+            // Tier 1 and one wrapper over the survivors — the same normalization the whole-output
+            // path below applies, then `InjectionGuard`'s own structural pass. Tiers 2/3 already
+            // ran per result, so the reassembled array is deliberately not scored a second time:
+            // re-scoring it would reintroduce exactly the aggregate false positive this split
+            // exists to remove.
+            fullyBlockedSearch = outcome.withheld > 0 && outcome.kept == 0
+            let structuralSafeJSON = PromptInjectionGuard.sanitizeUntrustedInput(outcome.json)
+            sanitizedResult = await InjectionGuard.sanitize(structuralSafeJSON, contextTag: "tool_output_search_web",
+                                                            maxTier: .tier1_structural, protectionEnabled: protectionEnabled)
+        } else {
+            // Tier 1 Sanitization: Apply structural isolation to prevent prompt injection from tool outputs
+            let structuralSafeResult = PromptInjectionGuard.sanitizeUntrustedInput(result)
+
+            // Tier 2 & 3 Sanitization: Active heuristic and canary detection (skipped for trusted tools)
+            sanitizedResult = await InjectionGuard.sanitize(structuralSafeResult, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled)
+        }
+
+        // A guard-blocked result reads to the model like an empty one, so it rephrases and calls
+        // again (#235). Say plainly that the content was withheld, outside the untrusted wrapper
+        // because this sentence is Iris's own and must not be presented as tool output.
+        guard let conversationId else { return sanitizedResult }
+        let blocked = fullyBlockedSearch || sanitizedResult.contains("[CONTENT BLOCKED BY TIER")
+        var tracker = blockedResultTrackers[conversationId] ?? BlockedResultTracker()
+        let consecutive = tracker.record(blocked: blocked)
+        blockedResultTrackers[conversationId] = tracker
+        guard blocked, consecutive >= 2 else { return sanitizedResult }
+        return sanitizedResult + "\n[Iris: the injection guard has withheld \(consecutive) consecutive results from \(name). Do not retry the same approach — use a different source or report what you have.]"
     }
     
     /// One model round's assembled result plus when its first token arrived (spec §4).
@@ -2118,7 +2207,7 @@ actor IrisEngine {
                 guard let self else { return }
                 await self.pushToUI(role: .agent, text: text, conversationId: conversationId, id: id)
                 let localState = await self.state
-                await MainActor.run { localState?.updateSubagentStatus(id: conversationId, status: "Responding...") }
+                await MainActor.run { localState?.updateSessionPhase(conversationId, .responding) }
             },
             update: { [weak self] id, text, isFinal in
                 await self?.updateStreamedMessage(id: id, content: text, isFinal: isFinal, conversationId: conversationId)
