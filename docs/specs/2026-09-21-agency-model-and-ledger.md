@@ -103,10 +103,10 @@ Anything else is a parse error returned to the model.
 
 `CronSchedule.next(after date: Date, calendar: Calendar) -> Date?` is a pure function. It walks
 forward minute by minute from `date + 1 min` in the schedule's time zone, checking fields, and
-gives up after 366 days (returns nil, which disables the job with `pausedReason = "no matching
-time in the next year"`). Minute-stepping is simple, correct across DST and month boundaries, and
-fast enough: the worst realistic case (`0 0 29 2 *`) is about 2 million cheap comparisons once every
-four years. The calendar parameter exists for tests; production passes `Calendar(identifier:
+gives up after four years (1,466 days; returns nil, which disables the job with `pausedReason =
+"no matching time in the next four years"`). Four years, not one, so `0 0 29 2 *` is schedulable.
+Minute-stepping with day and hour skip-ahead is simple, correct across DST and month boundaries,
+and fast: the worst realistic case (`0 0 29 2 *` asked in March) is a few thousand day-steps. The calendar parameter exists for tests; production passes `Calendar(identifier:
 .gregorian)` with the job's zone.
 
 **Aliases.** `schedule_job` keeps accepting `minute`, `hour`, `day`, `month`, `weekday` (1 = Sunday
@@ -369,7 +369,7 @@ All Swift Testing, none touching `~/.iris`, `ConfigManager.shared`, or the netwo
 
 - **Cron:** parse each field form and each rejection; `next(after:)` for lists, ranges, steps,
   month end, February 29, a DST spring-forward hour in `America/Los_Angeles` and a non-local zone,
-  the day-of-month OR day-of-week rule, and the 366-day give-up; a fixed `Calendar` and explicit
+  the day-of-month OR day-of-week rule, and the four-year give-up; a fixed `Calendar` and explicit
   dates throughout.
 - **Aliases:** every combination the old handler accepted → same next fire as its cron translation,
   including `weekdays: [2,3,4,5,6]` → `MON-FRI` from a Friday and a Saturday.
