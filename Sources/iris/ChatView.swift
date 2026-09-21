@@ -543,9 +543,17 @@ struct ChatView: View {
                 let refusal = state.archiveRefusal(for: conv.id)
                 Button(refusal == nil ? "Archive" : "Archive (\(refusal!.reason))") {
                     if let denied = state.archiveConversation(conv.id) {
-                        state.appendMessage(role: .system,
-                                            content: "Cannot archive: \(denied.reason).",
-                                            to: conv.id)
+                        let line = "Cannot archive: \(denied.reason)."
+                        // The row right-clicked is usually *not* the conversation on screen, so
+                        // writing only into its transcript hides the refusal behind a click the
+                        // user has no reason to make. It goes where they are looking, and into
+                        // the refused conversation too so its own history records it.
+                        state.appendMessage(role: .system, content: line, to: conv.id)
+                        if let selected = state.selectedConversationId, selected != conv.id {
+                            state.appendMessage(role: .system,
+                                                content: "Cannot archive \"\(conv.title)\": \(denied.reason).",
+                                                to: selected)
+                        }
                     }
                 }
                 .disabled(refusal != nil)

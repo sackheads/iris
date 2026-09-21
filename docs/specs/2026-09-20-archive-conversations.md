@@ -234,7 +234,11 @@ menu with **Unarchive** substituted for **Archive**; Export and Delete remain av
 
 **Where a refusal is shown (§6.1).** `/archive` appends a system line to the conversation. A
 context-menu click has no such channel, so the menu item is **disabled** there, with its title
-carrying the reason ("Archive (goal running)") rather than failing silently on click.
+carrying the reason ("Archive (goal running)") rather than failing silently on click. The title is
+computed when the menu is built and a turn can start before the click lands, so the action
+re-checks; when that late refusal fires it is written **into the conversation the user is looking
+at** (naming the refused conversation), as well as into the refused conversation's own transcript
+— the right-clicked row is usually not the one on screen.
 
 ## 10. Documentation
 
