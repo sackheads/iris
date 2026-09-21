@@ -165,7 +165,15 @@ permitted needs no human, so it runs — and anything else is denied on the spot
 Vibecop and without a dialog. The denial is recorded, the run ends `blocked on approval`, and the
 card names the tool that was refused so you can decide in the morning.
 
-This outranks everything, including the headless auto-approve used by scenario runs.
+This outranks everything, including the headless auto-approve used by scenario runs, and it is
+inherited: a subagent or an evaluator a run spawns is a background conversation too, so delegating
+is not a way around the gate. What a descendant was refused is recorded against the run itself, so
+it is the run that ends `blocked on approval` and the run's card that names the tool.
+
+The allowlist has one carve-out — the agent's own `~/.iris` directory — and it stops short of two
+things: nothing auto-allows a *write* into `~/.iris/config`, which is where the file that grants
+permissions lives, and a background run gets no write carve-out at all. It reads its own memory
+freely; anything it wants to write outside that needs a rule you approved.
 
 ## `/jobs`
 

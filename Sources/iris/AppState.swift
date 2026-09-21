@@ -263,6 +263,12 @@ class AppState {
     /// enqueued in `pendingApprovals`, since nobody is watching to resolve them. Task 6's ledger
     /// drains this per run via `takeBackgroundDenials(for:)` to mark it `blockedOnApproval`.
     private(set) var backgroundDenials: [UUID: [BlockedToolCall]] = [:]
+    /// Which background run a spawned conversation belongs to. A subagent or an evaluator
+    /// descended from an unattended run is unattended too, and what it was refused is the RUN's
+    /// denial: the ledger row and the event card belong to the job, not to the scratch
+    /// conversation the run delegated into (and which is often deleted before anyone could drain
+    /// it). Entries are dropped when the run they belong to is drained.
+    private var backgroundRunAncestor: [UUID: UUID] = [:]
     var availableUpdate: ReleaseInfo?
     var isCheckingForUpdates = false
     var updateCheckStatusMessage: String?
@@ -2099,7 +2105,8 @@ class AppState {
                                      isBackground: true) {
                 return true
             }
-            backgroundDenials[id, default: []].append(BlockedToolCall(toolName: toolName, details: details, at: Date()))
+            backgroundDenials[backgroundRunRoot(of: id), default: []]
+                .append(BlockedToolCall(toolName: toolName, details: details, at: Date()))
             appendMessage(role: .system, content: String(format: Self.unattendedDenialNotice, toolName), to: id)
             return false
         }
@@ -2195,7 +2202,20 @@ class AppState {
     func takeBackgroundDenials(for conversationId: UUID) -> [BlockedToolCall] {
         let denials = backgroundDenials[conversationId] ?? []
         backgroundDenials.removeValue(forKey: conversationId)
+        // The run is over, so nothing it spawned can be refused anything more.
+        backgroundRunAncestor = backgroundRunAncestor.filter { $0.value != conversationId }
         return denials
+    }
+
+    /// Records that `child` (a subagent or evaluator conversation) belongs to the background run
+    /// `parent` is part of, so a denial anywhere in the tree is drained with the run.
+    func linkBackgroundDescendant(_ child: UUID, of parent: UUID) {
+        backgroundRunAncestor[child] = backgroundRunRoot(of: parent)
+    }
+
+    /// The background run `id` belongs to — itself when it is the run, or when nothing linked it.
+    private func backgroundRunRoot(of id: UUID) -> UUID {
+        backgroundRunAncestor[id] ?? id
     }
 
     func resolveApproval(_ resolution: ApprovalResolution) {
