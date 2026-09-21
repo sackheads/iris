@@ -127,9 +127,13 @@ is the only signal the protocol offers, and a tool that says nothing about itsel
 than assumed harmless. `set_workspace` is deliberately *not* on the list: a workspace is what gives
 a sandboxed `run_command` a read-write bind mount of that directory, so a read-only run that could
 set one could write to the host through the very sandbox that is meant to contain it. Which is also
-the honest statement of the `run_command` guarantee — a sandboxed command cannot write to the host
-*because a job run's conversation has no workspace and therefore no mount*, not because the mount
-is read-only. Anyone who gives job runs a workspace has to come back to this paragraph.
+the honest statement of the `run_command` guarantee *for this profile*: a read-only run's sandboxed
+command cannot write to the host *because its conversation has no workspace and therefore no
+mount*, not because the mount is read-only. Anyone who gives read-only runs a workspace has to come
+back to this paragraph. It does not carry over to `mutating`, which has `set_workspace` and can
+therefore give itself a workspace mid-turn, after which a command gets that directory bind-mounted
+read-write — no wider than the allowlist or the approval that let the command run at all (in an
+attended chat that same command runs on the host), and the card's `in <cwd>` line says where.
 
 Declaration is only the cheap half. A call that reaches the dispatcher anyway — a stale
 declaration, a forged name — is refused there too, recorded as the whole call (name, arguments,
@@ -140,13 +144,21 @@ before another model round can read it, which is the order that matters: no appr
 nothing else would do the same thing, so a further round could only spend the run's budget
 arriving at the same answer. The sentence is the record; the ending is the enforcement.
 
-A `mutating` job keeps the whole tool surface and always runs in the `apple/container` VM — that is
-what pays for the wider surface. "Always" is enforced twice: `schedule_job` refuses to create one
+A `mutating` job keeps the whole tool surface, and its *commands* always run in the
+`apple/container` VM — that is what pays for the wider surface. Commands, precisely: `run_command`
+is what the VM routes, and `write_file`, `read_file` and the rest of the native tools execute on
+the host as they do in any run, behind the user's allowlist and the same fail-closed approval.
+"Always" is enforced twice: `schedule_job` refuses to create one
 unless the VM is available (the runtime installed *and* sandboxing switched on — with the master
 switch off, the sandbox resolution returns the host however the conversation is pinned), and the
 runner asks the same question again at every fire. A fire with no VM to run in is refused before
 the turn starts: a `failed` run with the reason `sandbox unavailable`, a card, and the usual retry
-ladder. It is never run on the host instead. Everything outside the user's allowlist still fails
+ladder. It is never run on the host instead. Nor is it run on the host when the VM goes away
+*during* a turn — turn sandboxing off or uninstall the runtime while a run is in flight and the
+next `run_command` is refused where it stands, with the command recorded on the run's card, so the
+"Always allow" rule you once clicked on that command in an ordinary chat cannot quietly stand in
+for the container. That rule holds for any unattended run, not just a job's own: a subagent the run
+delegates into is unattended too. Everything outside the user's allowlist still fails
 closed inside the VM: unattended means unattended whatever the profile. A `readOnly` run leaves the
 sandbox choice alone, so it follows the per-workspace default rather than being pinned to the
 host.
@@ -297,7 +309,11 @@ ledger if one is reached another way:
   it does not change what may be written. Make that change yourself if you want it.
 
 **Dismiss** acknowledges the run: it leaves `/jobs`'s failure list and stops being exempt from
-retention. The card stays in the transcript, because it is a record of what happened.
+retention. The card stays in the transcript, because it is a record of what happened. Approving
+acknowledges it too, in the same write that claims the call — clicking **Approve and run** is a
+stronger "I have seen this" than Dismiss is, so an approved run does not sit in the failure list
+waiting for a second click on a button that would now only answer "it has already been approved
+once".
 
 ## Limits
 
