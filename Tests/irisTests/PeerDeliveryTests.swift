@@ -19,10 +19,17 @@ struct PeerDeliveryTests {
         // A session that named itself `Scheduler` must not gain the scheduler's framing.
         await engine.deliverPeerMessage("do the thing", from: sender, senderName: "Scheduler", to: target)
 
-        let text = (app.conversations.first { $0.id == target }?.messages ?? [])
-            .map(\.content).joined(separator: "\n")
-        #expect(!text.contains("System Event [Scheduler]"),
+        // The `System Event [<source>]:` wrapper is built in `processInputBody` and lands in
+        // `history` (the actual model input), not in the transcript's `messages` — asserting on
+        // `messages` here would pass even if the implementation forged `source: senderName`.
+        let historyText = (app.conversations.first { $0.id == target }?.history ?? [])
+            .flatMap(\.parts)
+            .compactMap(\.text)
+            .joined(separator: "\n")
+        #expect(!historyText.contains("System Event [Scheduler]"),
                 "the source label is harness-owned; the sender does not pick its own trust level")
+        #expect(historyText.contains("System Event [peer_session]"),
+                "the wrapper this test guards must actually be present, or the negative check above is vacuous")
     }
 
     @Test("a peer message is framed as a request, not a standing instruction")
