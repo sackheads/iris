@@ -27,24 +27,39 @@ struct WatcherJobsTests {
         await wm.stopAll()
     }
 
-    @Test("registering a watch on a manager that was never configured adopts the tools' ledger")
+    @Test("registering a watch on a manager that was never configured adopts the tools' ledger and its fire callback")
     func reloadAdoptsLedgerWhenUnconfigured() async throws {
         // `WatcherManager.shared` is only configured in `IrisEngine.start()`. An engine that never
         // started — a subagent, a scenario run — still resolves job tools, and the watch it
         // registers has to actually start watching rather than reload an empty nil ledger.
+        // Adopting the ledger alone is not enough: `setCallback` has exactly one caller, three
+        // lines from `configure(ledger:)` in `start()`, so an unstarted engine that adopted only
+        // the ledger would run a live FSEvents stream whose fires go nowhere.
         let store = try ConversationStore.inMemory()
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
 
+        let recorder = FireRecorder()
         let wm = WatcherManager(ledger: nil)
         var executor = ToolExecutor()
-        executor.jobToolsProvider = { JobTools(ledger: store.ledger, watchers: wm) }
+        executor.jobToolsProvider = {
+            JobTools(ledger: store.ledger, watchers: wm,
+                     watcherCallback: { job, paths in await recorder.record(job, paths) })
+        }
         let result = await executor.execute(
             name: "register_directory_watcher",
             args: ["path": .string(tmp.path), "instructions": .string("note changes")])
         #expect(result.contains(tmp.path))
         #expect(await wm.activeJobIds.count == 1)
+
+        // And a fire on the adopted manager reaches the callback the tools supplied.
+        let job = try #require(try store.ledger.jobs().first)
+        await wm.deliver(job: job, paths: [tmp.path + "/a.txt"])
+        let fires = await recorder.fires
+        #expect(fires.count == 1)
+        #expect(fires.first?.job.id == job.id)
+        #expect(fires.first?.paths == [tmp.path + "/a.txt"])
         await wm.stopAll()
     }
 

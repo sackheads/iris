@@ -88,6 +88,44 @@ struct JobFireIntegrationTests {
         #expect(await scheduler.tick() == 0, "the same now does not fire it twice")
     }
 
+    @Test("the job tools an engine hands out carry its watcher fire callback, not just its ledger")
+    func jobToolsCarryTheWatcherCallback() async throws {
+        // `WatcherManager.shared` gets both its ledger and its callback in `start()` or neither,
+        // so an engine that never started has to supply both through the tools — a ledger without
+        // a callback is a live FSEvents stream whose fires are dropped on the floor.
+        let store = try ConversationStore.inMemory()
+        let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        state.conversations.removeAll()
+        state.autoApproveTools = true
+        let conversationId = UUID()
+        state.createNewConversation(id: conversationId)
+
+        let client = FakeLLMClient(responses: [
+            Scenario.ScriptedResponse(kind: .text, text: "noted", calls: nil).asGeminiResponse()
+        ])
+        let engine = IrisEngine(state: state, client: client, protectionEnabled: false, sessionPeerCount: 0)
+        let tools = try #require(await engine.executor.jobToolsProvider?())
+
+        let job = Job(name: "notes", prompt: "Note what changed",
+                      trigger: .fsEvent(FSWatch(path: "/tmp/notes")),
+                      createdInConversationId: conversationId)
+        try store.ledger.upsert(job)
+        await tools.watcherCallback(job, ["/tmp/notes/a.txt"])
+
+        // #187 §6: the fire is a run, not a turn in the conversation the watch was created in —
+        // its own background conversation, its own ledger row, and a card in Activity.
+        let background = try #require(state.conversations.first { $0.isBackground })
+        #expect(background.title.hasPrefix("notes · "))
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.triggerKind == "fsEvent")
+        #expect(run.status == .completed)
+        #expect(run.transcriptConversationId == background.id)
+        let prompt = background.history.first?.parts.compactMap(\.text).joined() ?? ""
+        #expect(prompt.contains("/tmp/notes/a.txt"), "the paths that woke it reached the run")
+        #expect(state.conversations.first { $0.id == conversationId }?.messages.isEmpty == true,
+                "and the conversation the watch was created in heard nothing")
+    }
+
     @Test("bringing the scheduler up twice keeps one, rather than orphaning a polling loop")
     func schedulerIsReusedAcrossStarts() async throws {
         // `AppState.start()` is called from `onAppear` and can run more than once.

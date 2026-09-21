@@ -38,13 +38,17 @@ actor WatcherManager {
         self.onEventCallback = callback
     }
 
-    /// `reload()`, adopting `ledger` first if none was configured. `shared` is configured in
-    /// `IrisEngine.start()`, which a subagent, an evaluator or a scenario run never calls — and
-    /// the job tools resolve the ledger per call precisely so those engines can still register a
-    /// watch. Without this the registration wrote its job and then reloaded a nil ledger, so the
-    /// directory was never actually watched. An already-configured manager keeps its ledger.
-    func reload(adoptingIfUnconfigured ledger: JobLedger) async {
+    /// `reload()`, adopting the ledger and the fire callback first if either was never configured.
+    /// `shared` is configured in `IrisEngine.start()`, which a subagent, an evaluator or a scenario
+    /// run never calls — and the job tools resolve both per call precisely so those engines can
+    /// still register a watch. Without the ledger the registration wrote its job and then reloaded
+    /// a nil ledger, so the directory was never actually watched; without the callback it is
+    /// watched and every fire is dropped on the floor, which is the same inert watch one step
+    /// later. An already-configured manager keeps whatever it already has.
+    func reload(adoptingIfUnconfigured ledger: JobLedger,
+                callback: @escaping @Sendable (Job, [String]) async -> Void) async {
         if self.ledger == nil { self.ledger = ledger }
+        if onEventCallback == nil { onEventCallback = callback }
         await reload()
     }
 

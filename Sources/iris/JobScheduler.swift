@@ -288,6 +288,21 @@ actor JobScheduler {
         return (jobs, rules)
     }
 
+    /// The one-time line the app shows for what `removeLegacyDefaults` just deleted, or nil when
+    /// there was nothing to delete. The log line above is a `print`, which nobody running a macOS
+    /// app ever reads: no importer ships, so this sentence in the conversation is the user's only
+    /// notice that records they created are gone and have to be made again.
+    static func legacyDropNotice(jobs: Int, watcherRules: Int) -> String? {
+        var counted: [String] = []
+        if jobs > 0 { counted.append("\(jobs) scheduled job\(jobs == 1 ? "" : "s")") }
+        if watcherRules > 0 { counted.append("\(watcherRules) watcher rule\(watcherRules == 1 ? "" : "s")") }
+        guard !counted.isEmpty else { return nil }
+        let verb = jobs + watcherRules == 1 ? "was" : "were"
+        return "Iris no longer reads the scheduled jobs and watcher rules saved by an earlier version: "
+            + "\(counted.joined(separator: " and ")) \(verb) dropped. "
+            + "Recreate them with schedule_job or register_directory_watcher."
+    }
+
     /// The length of a legacy JSON array blob. Read as untyped JSON rather than through the old
     /// `Codable` types, which no longer exist: a count does not need the fields, and a row the old
     /// decoder would have rejected still counts as something the user lost.
