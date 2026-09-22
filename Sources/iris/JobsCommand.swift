@@ -123,18 +123,34 @@ enum JobsCommand: Equatable {
     /// the count of job rows the ledger could not read. `lastRuns` is each job's newest run, keyed
     /// by job id. `now` is a parameter rather than `Date()` so the relative next-fire text is
     /// testable.
-    static func render(jobs: [Job], lastRuns: [UUID: JobRun], unacknowledged: [JobRun],
-                       unreadableJobs: Int, now: Date) -> String {
+    ///
+    /// `usage` is what the job has spent and how hard it has been running, against the numbers
+    /// admission decides on (§0.1). A listing whose ledger reads failed passes `.empty` and still
+    /// prints the table, with a dash where a figure would be — inventing a zero there would read as
+    /// "this job has spent nothing today", which is a different and wrong claim. Required rather
+    /// than defaulted for exactly that reason: a caller that forgot the figures would render a
+    /// table of dashes and claim the ledger could not be read.
+    static func render(jobs: [Job], lastRuns: [UUID: JobRun], usage: UsageSnapshot,
+                       unacknowledged: [JobRun], unreadableJobs: Int, now: Date) -> String {
         var blocks: [String] = []
 
         if jobs.isEmpty {
             blocks.append("No jobs.")
         } else {
-            var rows = ["| Job | Trigger | Next | Last |", "| --- | --- | --- | --- |"]
+            var rows = ["| Job | Trigger | Policy | Next | Last | Tokens today | Runs/h |",
+                        "| --- | --- | --- | --- | --- | --- | --- |"]
             for job in jobs {
                 let last = lastRuns[job.id]?.status.text ?? "never"
+                let figures = usage.perJob[job.id]
                 rows.append("| \(cell(job.name)) | \(cell(job.trigger.summary)) | "
-                            + "\(cell(nextText(for: job, now: now))) | \(cell(last)) |")
+                            + "\(cell(policySummary(for: job))) | "
+                            + "\(cell(nextText(for: job, now: now))) | \(cell(last)) | "
+                            + "\(figures.map(tokensCell) ?? missingFigure) | "
+                            + "\(figures.map(runsCell) ?? missingFigure) |")
+            }
+            if let global = usage.global {
+                rows.append("")
+                rows.append("Tokens today, all jobs: \(budgetText(used: global.tokensToday, budget: global.dailyBudget))")
             }
             blocks.append(rows.joined(separator: "\n"))
         }
@@ -148,6 +164,107 @@ enum JobsCommand: Equatable {
             blocks.append("\(unreadableJobs) unreadable job row(s)")
         }
         return blocks.joined(separator: "\n\n")
+    }
+
+    /// What one job has spent today and how hard it has been running, beside the numbers it is
+    /// judged against (§0.1). The figures come from the ledger sums admission itself decides on
+    /// (`JobLedger.usage`) and the limits from `JobLimits.resolve`, so what a person reads in the
+    /// table is the same arithmetic that would pause the job — not a second, drifting accounting.
+    struct JobFigures: Equatable, Sendable {
+        let tokensToday: Int
+        let runsLastHour: Int
+        let limits: JobLimits
+    }
+
+    /// The whole unattended system's spend for the local day, against the one ceiling no job can
+    /// raise for itself.
+    struct GlobalUsage: Equatable, Sendable {
+        let tokensToday: Int
+        let dailyBudget: Int
+    }
+
+    /// Every figure one listing needs. Absent entries are the point: a ledger read that failed is
+    /// reported as a dash rather than as a zero.
+    struct UsageSnapshot: Equatable, Sendable {
+        var perJob: [UUID: JobFigures] = [:]
+        var global: GlobalUsage?
+        static let empty = UsageSnapshot()
+    }
+
+    /// The figures for a listing, read through the same two ledger seams admission uses. Each read
+    /// is allowed to fail on its own: one unreadable job costs that job its two columns, not the
+    /// table, and a global sum that will not read costs the footer.
+    static func usageSnapshot(jobs: [Job], ledger: JobLedger, config: ConfigManager,
+                              now: Date, calendar: Calendar = .current) -> UsageSnapshot {
+        var snapshot = UsageSnapshot()
+        for job in jobs {
+            guard let usage = try? ledger.usage(jobId: job.id, now: now, calendar: calendar) else { continue }
+            snapshot.perJob[job.id] = JobFigures(tokensToday: usage.tokensToday,
+                                                 runsLastHour: usage.runsLastHour,
+                                                 limits: JobLimits.resolve(job: job, config: config))
+        }
+        // `globalDailyTokens` is deliberately not overridable per job, so the first job's
+        // resolution answers for all of them; with no jobs at all there is no table to foot.
+        let globalBudget = jobs.first.map { JobLimits.resolve(job: $0, config: config).globalDailyTokens }
+        if let globalBudget, let total = try? ledger.tokensToday(jobId: nil, calendar: calendar, now: now) {
+            snapshot.global = GlobalUsage(tokensToday: total, dailyBudget: globalBudget)
+        }
+        return snapshot
+    }
+
+    /// What this job does differently from every other job (§3), in the order a person asks about
+    /// it: what it may touch, whether it may run beside itself, and what it does with occurrences
+    /// it slept through. A job that departs from none of the defaults says `default` rather than
+    /// repeating them in every row.
+    ///
+    /// The gate is deliberately not here. `Trigger.summary` already ends a polled job's cell with
+    /// `(url gate)`, and in the widest table Iris prints the one word worth cutting is the one
+    /// printed twice on the same row; `list_jobs` carries `gateKind` as a field of its own,
+    /// because it has no trigger column to read it out of.
+    static func policySummary(for job: Job) -> String {
+        var parts: [String] = []
+        if job.profile == .mutating { parts.append("mutating") }
+        if job.policy.overlap == .queue { parts.append("overlap queue") }
+        switch job.policy.catchUp {
+        case .coalesce: break
+        case .skip: parts.append("catch-up skip")
+        case .replay(let cap): parts.append("catch-up replay \(cap)")
+        }
+        return parts.isEmpty ? "default" : parts.joined(separator: " · ")
+    }
+
+    /// What a column says when the figure behind it could not be read.
+    static let missingFigure = "—"
+
+    private static func tokensCell(_ figures: JobFigures) -> String {
+        budgetText(used: figures.tokensToday, budget: figures.limits.dailyTokens)
+    }
+
+    private static func runsCell(_ figures: JobFigures) -> String {
+        figures.limits.maxRunsPerHour > 0
+            ? "\(figures.runsLastHour) / \(figures.limits.maxRunsPerHour)"
+            : "\(figures.runsLastHour) / unlimited"
+    }
+
+    /// `620k / 1M (62%)`. A zero budget is not a ceiling of nothing — it is how a hand-written
+    /// policy says "unbounded" (§0.1) — so it prints the word rather than a percentage of zero.
+    static func budgetText(used: Int, budget: Int) -> String {
+        guard budget > 0 else { return "\(compactTokens(used)) / unlimited" }
+        let pct = Int((Double(used) / Double(budget) * 100).rounded())
+        return "\(compactTokens(used)) / \(compactTokens(budget)) (\(pct)%)"
+    }
+
+    /// Token counts as a person reads them in a table: `620k`, `1M`, `1.2M`. Exact figures are
+    /// what `get_job_run` and `list_jobs` are for; a column that has to fit beside four others is
+    /// for noticing that a job is at 90% of its day.
+    static func compactTokens(_ value: Int) -> String {
+        let n = max(0, value)
+        if n < 1_000 { return "\(n)" }
+        if n < 999_500 { return "\(Int((Double(n) / 1_000).rounded()))k" }
+        let millions = (Double(n) / 1_000_000 * 10).rounded() / 10
+        return millions == millions.rounded()
+            ? "\(Int(millions))M"
+            : String(format: "%.1fM", millions)
     }
 
     /// `⚠️ pr-sweep · failed · 1a2b3c4d · could not reach the API` — the run's own account of

@@ -56,7 +56,7 @@ struct JobSchedulerTests {
         let store = try ConversationStore.inMemory()
         let now = Date(timeIntervalSince1970: 1_000_000)
         let (s, fired) = scheduler(store, now: now)
-        await s.setFireHandler { job, _ in fired.add(job.name) }
+        await s.setFireHandler { job, _ in fired.add(job.name); return true }
         try store.ledger.upsert(Job(name: "j", prompt: "p", trigger: .schedule(.interval(seconds: 300)), nextFireAt: now.addingTimeInterval(-1)))
         #expect(await s.tick() == 1)
         #expect(fired.names == ["j"])
@@ -71,7 +71,7 @@ struct JobSchedulerTests {
         let store = try ConversationStore.inMemory()
         let now = Date(timeIntervalSince1970: 1_000_000)
         let (s, fired) = scheduler(store, now: now, cap: 2)
-        await s.setFireHandler { job, _ in fired.add(job.name) }
+        await s.setFireHandler { job, _ in fired.add(job.name); return true }
         for n in ["a", "b", "c", "d"] {
             try store.ledger.upsert(Job(name: n, prompt: "p", trigger: .schedule(.interval(seconds: 3600)), nextFireAt: now.addingTimeInterval(-10)))
         }
@@ -107,7 +107,7 @@ struct JobSchedulerTests {
         let store = try ConversationStore.inMemory()
         let now = Date(timeIntervalSince1970: 1_000_000)
         let (s, fired) = scheduler(store, now: now)
-        await s.setFireHandler { job, _ in fired.add(job.name) }
+        await s.setFireHandler { job, _ in fired.add(job.name); return true }
         let due = now.addingTimeInterval(-1)
         try store.ledger.upsert(Job(name: "broke", prompt: "p", trigger: .schedule(.interval(seconds: 300)),
                                     nextFireAt: due, pausedReason: "budget"))
@@ -142,6 +142,7 @@ struct JobSchedulerTests {
         await s.setFireHandler { job, _ in
             fired.add(job.name)
             await gate.arriveAndWait()
+            return true
         }
         let job = Job(name: "slow", prompt: "p", trigger: .schedule(.interval(seconds: 300)),
                       nextFireAt: now.addingTimeInterval(-1))
@@ -172,6 +173,7 @@ struct JobSchedulerTests {
         // second one that parked too would hang the poll driving this test rather than fail it.
         await s.setFireHandler { _, _ in
             if calls.next() == 1 { await gate.arriveAndWait() }
+            return true
         }
         let job = Job(name: "slow", prompt: "p", trigger: .schedule(.interval(seconds: 60)),
                       nextFireAt: start.addingTimeInterval(-1))
@@ -209,6 +211,7 @@ struct JobSchedulerTests {
         await s.setFireHandler { job, _ in
             fired.add(job.name)
             if job.name == "a" { try? ledger.delete(jobId: doomed) }
+            return true
         }
         #expect(await s.tick() == 2)
         #expect(Set(fired.names) == ["a", "b"])

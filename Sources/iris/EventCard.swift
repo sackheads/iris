@@ -48,6 +48,11 @@ struct EventCard: Codable, Equatable, Sendable {
     /// was written — today, a write into a protected directory (#187 R10). `nil` means nothing
     /// stored objected; `approvalRefusal` is what the view asks, and it has the last word.
     let approvalBlockedReason: String?
+    /// What the catch-up that produced this run dropped: "27 earlier occurrences skipped" (#187
+    /// §5). Only the first run of a `replay` burst carries it — the count is one fact about the
+    /// burst — and every ordinary fire carries `nil`. It is on the card rather than in the run's
+    /// outcome because it is news about the schedule, not about what the turn did.
+    let catchUpNote: String?
 
     init(kind: String = "job_run",
          runId: UUID,
@@ -63,7 +68,8 @@ struct EventCard: Codable, Equatable, Sendable {
          blockedCall: BlockedCall? = nil,
          vibecopVerdict: String? = nil,
          vibecopReason: String? = nil,
-         approvalBlockedReason: String? = nil) {
+         approvalBlockedReason: String? = nil,
+         catchUpNote: String? = nil) {
         self.kind = kind
         self.runId = runId
         self.jobId = jobId
@@ -79,6 +85,7 @@ struct EventCard: Codable, Equatable, Sendable {
         self.vibecopVerdict = vibecopVerdict
         self.vibecopReason = vibecopReason
         self.approvalBlockedReason = approvalBlockedReason
+        self.catchUpNote = catchUpNote
     }
 
     /// A card that fails to decode renders as raw JSON in the transcript, so every field a future
@@ -121,6 +128,7 @@ struct EventCard: Codable, Equatable, Sendable {
         vibecopVerdict = try container.decodeIfPresent(String.self, forKey: .vibecopVerdict)
         vibecopReason = try container.decodeIfPresent(String.self, forKey: .vibecopReason)
         approvalBlockedReason = try container.decodeIfPresent(String.self, forKey: .approvalBlockedReason)
+        catchUpNote = try container.decodeIfPresent(String.self, forKey: .catchUpNote)
     }
 
     private static let unknownId = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
@@ -349,8 +357,12 @@ struct EventCard: Codable, Equatable, Sendable {
     /// Markdown export print in place of the card's JSON (spec §8.2).
     var transcriptLine: String {
         let head = "[job \(jobName) · \(statusText) · \(SessionActivity.formatTokenCount(totalTokens)) tokens]"
-        guard let outcome, !outcome.isEmpty else { return head }
-        return "\(head) \(outcome)"
+        var line = head
+        if let outcome, !outcome.isEmpty { line += " \(outcome)" }
+        // Appended rather than dropped: the view reads this out as its accessibility label, and a
+        // run that stands for thirty-two missed occurrences should not read as an ordinary one.
+        if let catchUpNote, !catchUpNote.isEmpty { line += " (\(catchUpNote))" }
+        return line
     }
 
     /// `[Event] job pr-sweep completed: swept 3 PRs (run 1a2b3c4d)` — the model-legible form, for
@@ -359,8 +371,13 @@ struct EventCard: Codable, Equatable, Sendable {
     var historyLine: String {
         let runPrefix = runId.uuidString.lowercased().prefix(8)
         let head = "[Event] job \(jobName) \(statusText)"
-        guard let outcome, !outcome.isEmpty else { return "\(head) (run \(runPrefix))" }
-        return "\(head): \(outcome) (run \(runPrefix))"
+        // The catch-up note rides along for the same reason the transcript carries it: this is the
+        // line a model reads out of history, and a run that stands for thirty-two occurrences the
+        // cap dropped must not answer "did the overnight sweeps all happen?" as an ordinary one.
+        // `EventDelivery` puts it through `InjectionGuard.sanitize` like the rest of the line.
+        let tail = catchUpNote.flatMap { $0.isEmpty ? nil : " (\($0))" } ?? ""
+        guard let outcome, !outcome.isEmpty else { return "\(head) (run \(runPrefix))\(tail)" }
+        return "\(head): \(outcome) (run \(runPrefix))\(tail)"
     }
 }
 

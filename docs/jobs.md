@@ -16,8 +16,8 @@ This document covers deliverables 1 to 3 of `#187` (see `docs/agency/agency.md`,
 `docs/specs/2026-09-21-agency-model-and-ledger.md` and
 `docs/specs/2026-09-21-agency-runtime.md`): the job model, the cron subset, the schedule aliases,
 what happens on sleep, what a fire actually does — a run in a hidden conversation of its own, a row
-in the run ledger, and one event card — and the gates, limits and retries around it.
-`iris --run-job` is still to come.
+in the run ledger, and one event card — the gates, limits and retries around it, and
+`iris --run-job`, which fires one job from a terminal and prints the row it wrote.
 
 ## Creating a job
 
@@ -32,6 +32,19 @@ in the run ledger, and one event card — and the gates, limits and retries arou
 
 Every job needs a unique name. If the requested name (or a slug of the prompt) is already taken,
 `-2`, `-3`, … is appended until it isn't.
+
+Two of the job's policies can be set at creation, and both default to the quieter answer:
+
+| `schedule_job` argument | Values | What it decides |
+| --- | --- | --- |
+| `overlap` | `skip` (default), `queue` | What a fire does when the previous run is still going: drop it and record the drop, or hold exactly one and take it when that run ends |
+| `catch_up` | `coalesce` (default), `skip`, `replay`, `replay:N` | What a wake does with occurrences missed while the Mac slept (see "What happens on sleep"). A bare `replay` uses the cap of 5; a negative cap is read as the typo it is and takes that default. The object form the policy itself stores, `{"kind": "replay", "cap": N}`, is also accepted, but the argument is declared a string, so prefer `replay:N` |
+
+A value neither field recognizes is refused with a sentence naming the ones that work, rather than
+quietly creating a job that behaves differently from the one that was asked for. The rest of a job's
+policy is not settable from the tool: the budgets, the breaker and the run timeout are global
+settings with a per-job override in the stored `policy` column, and `retry` is per job and on (see
+"Limits").
 
 ## The cron subset
 
@@ -243,10 +256,72 @@ unasked would spend the very turn the gate exists to save. `/jobs` shows a gated
 
 A background scheduler polls the jobs table for due jobs every 10 seconds, and once more right
 after the Mac wakes from sleep (`NSWorkspace.didWakeNotification`) so a job doesn't wait out the
-rest of the poll interval. A job that came due while the Mac was asleep — or otherwise missed one
-or more ticks — fires once when the scheduler next looks, and its next fire is computed fresh from
-that moment. It does not replay every tick it missed. At most three jobs start firing per tick;
-any others due in the same tick wait for the next one.
+rest of the poll interval.
+
+A job that came due while the Mac was asleep — or otherwise missed more than one cadence — is
+handled by its **catch-up policy**. The default is `coalesce`: it fires once when the scheduler
+next looks, its next fire is computed fresh from that moment, and it does not replay every tick
+it missed. A job that missed exactly one occurrence is an ordinary fire whatever its policy says;
+there is nothing to coalesce, skip or replay.
+
+| catch-up | what a job that fell behind does |
+| -------- | -------------------------------- |
+| `coalesce` (default) | one fire now, against the world as it is, rescheduled from now |
+| `skip` | no fire at all; the cadence jumps to the first occurrence still in the future |
+| `replay(cap)` | one fire per missed occurrence, up to `cap` (5 unless the job says otherwise; 100 at most) |
+
+A cap above **100** is lowered to 100, and `schedule_job` says so in its answer rather than
+refusing the job: a hundred is far past any cadence worth replaying — a quarter-hourly job asleep
+for a whole day is 96 occurrences — and an uncapped figure only buys a job that walks its breaker
+open, pauses, is resumed and does it again.
+
+`replay` runs the **most recent** `N` missed occurrences, oldest of those first — a job that slept
+through eight hours of quarter-hours wants the last five states of the world, not five from this
+morning. The older ones are dropped, and the first run of the burst says how many on its card:
+"27 earlier occurrences skipped". The fires are sequential, never side by side, and each one goes
+through the same admission an ordinary fire meets — so it asks the gate, and it counts against the
+breaker and the daily budgets. The burst therefore ends at the first refusal: if the breaker opens
+or a budget runs out on the second of five, the other three are abandoned and the job goes back on
+its ordinary cadence rather than spending the next tick being refused four more times.
+
+A replayed run that **fails** ends the burst too. The failure puts the job on the retry ladder — a
+minute, then five, then twenty-five, then a pause — and that is now the schedule; the occurrences
+the burst still owed are dropped rather than fired over the top of it. Without that, a provider
+outage during a catch-up would spend the whole ladder in the time it takes to make four failing
+runs and leave the job paused, where an ordinary failed fire costs one run now and one a minute
+later. For the same reason a job that was asleep *mid-retry* is an ordinary single fire whatever
+its catch-up policy says: the time it was waiting for was a retry, not a missed occurrence.
+
+On a **gated** job, `replay` will usually produce a single run whatever the cap says, and that is
+the right answer: the first replayed fire stamps the fresh gate signal, so the second asks the gate
+and is told nothing has changed since a moment ago, which ends the burst. There was one change to
+react to, not five.
+
+A job so far behind that catching up would mean stepping through more than 10,000 occurrences — a
+per-minute cadence and a fortnight with the app closed — coalesces instead. That is a restart, not
+a catch-up, and one fire against the present is what a restart wants; the card for that fire says
+"too far behind to replay; ran once instead", and the job's policy is untouched for the next time.
+
+When the first replayed fire is refused before it can run — a gate that found nothing, an open
+breaker, an exhausted budget — the count still gets recorded: on the gate's ledger row, or on the
+pause card. The same is true of the two answers a wake gives most often. If the job is **still
+running** the turn it started before the sleep, the count goes on the overlap skip row
+("skipped: previous run still in progress (27 earlier occurrences skipped)"); if the job's
+`overlap` is `queue`, the fire is held and the count is held with it, so it arrives on the card of
+the run that fire becomes when the previous one ends. The count is only dropped where the job
+itself has stopped — paused or disabled — and there the pause reason is what a person needs, and
+the scheduler would not have planned the burst in the first place.
+
+At most three fires start per tick, counting every job's rather than counting jobs — so one job's
+replay cannot start more work in a tick than any three ordinary fires would. It does take the whole
+tick while it lasts: due jobs are served furthest-behind first, so a job catching up goes first and
+anything that does not fit waits. Nothing is lost by waiting — what did not fit is still due and
+the next tick takes it, including the rest of the replay burst — and the wait is bounded by how
+many ticks the burst needs, two at the default cap of five.
+
+A job whose burst is still running is not planned again while it runs, even though its next fire
+is deliberately left in the past: that is what brings a later tick back to finish the burst, not an
+invitation to start a second one alongside it.
 
 A cadence that overlaps its own still-running fire is skipped rather than started a second time,
 and the skip is recorded as an `interrupted` run so `/jobs` can show it — unless the job's overlap
@@ -451,8 +526,12 @@ recomputes the next fire from the job's own schedule.
 
 The five global numbers are `ConfigManager` keys — `JOB_MAX_RUNS_PER_HOUR`,
 `JOB_DAILY_TOKEN_BUDGET`, `JOB_GLOBAL_DAILY_TOKEN_BUDGET`, `JOB_PER_RUN_TOKEN_BUDGET` and
-`JOB_RUN_TIMEOUT_SECONDS` — and Settings → Advanced grows a stepper for each of them later in this
-deliverable; today they are defaults with per-job overrides.
+`JOB_RUN_TIMEOUT_SECONDS` — and **Settings → Advanced → Job Limits** has a stepper for each. A
+stepper wound down to zero reads as "default": the figure above is what the runner then uses, and
+the row says so rather than claiming a budget of nothing. Each stepper moves from the figure its
+row is showing, so one click up from "default (6)" is 7 and one click down is 5 — and winding one
+back down to zero is how you give that number to the default again. A job's own `policy` column
+overrides any of them except the global daily budget.
 
 **What zero means depends on which number it is.** An unset settings key — which is how a `0` reads
 — is simply the default above. In a job's own `JobPolicy`, `0` is an answer rather than a gap, and
@@ -464,14 +543,18 @@ whole section exists to prevent. A **negative** figure is not a third answer —
 mean unlimited — so it is read as the typo it is and takes the default, wherever it was written: a
 settings key, or a hand-edited `policy` column.
 
-**What you can see of all this today.** `/jobs` shows a job's place on the retry ladder
-(`retry 1/3`) beside its next fire, and any pause names the figure that caused it — the breaker
-count, or the budget and the spend that reached it — in the pause reason the table prints, on the
-`interrupted` row and on the card. `list_jobs` shows the model less: name, trigger, whether the job
-is enabled, its next fire and how its last run ended. Neither shows a **running** total — there is
-no per-job token figure and no runs-this-hour count in either — so between pauses, what a job is
-spending has to be read off its run rows (`get_job_run`, or the token counts on a card). Both
-figures land with the last PR of this deliverable.
+**What you can see of all this.** Every one of these numbers is readable before it bites, not only
+in the pause that names it. `/jobs` prints, per job, what it has spent today against its own daily
+budget (`620k / 1M (62%)`), how many runs it has started in the last hour against the breaker
+(`2 / 6`), its place on the retry ladder (`retry 1/3`) beside its next fire, and a policy column
+naming whatever it does differently from the defaults; under the table is the whole unattended
+system's spend for the day against the global ceiling. `list_jobs` carries the same figures as
+fields — `tokensToday`, `dailyBudget`, `runsLastHour`, `maxRunsPerHour`, `retryAttempt`, `policy`,
+`gateKind`, `profile`, and `tokensTodayAllJobs` against `globalDailyBudget` — so the model answers
+"what is this job costing?" from the same arithmetic admission decides on. A figure that could not
+be read is a dash in the table and a `null` in the tool, never a zero: "nothing spent today" is a
+claim, and an unreadable ledger is not one. A pause still names the figure that caused it, in the
+pause reason the table prints, on the `interrupted` row and on the card.
 
 ## `/jobs`
 
@@ -479,18 +562,94 @@ figures land with the last PR of this deliverable.
 
 | Form | What it does |
 | --- | --- |
-| `/jobs` | A table of every job — name, trigger, when it next fires (or why it is paused), how its last run ended — then one line per unacknowledged failure, with the first eight characters of the run's id |
+| `/jobs` | A table of every job — name, trigger (with its gate, if it has one), its policy where it departs from the defaults, when it next fires (or why it is paused), how its last run ended, its tokens today against its daily budget and its runs in the last hour against the breaker — then the day's spend across every job, then one line per unacknowledged failure with the first eight characters of the run's id |
 | `/jobs ack <run id>` | Marks a failed or blocked run as seen: it leaves the failure list, and it stops being exempt from retention. Takes a full id or the first eight or more characters of one, as a card prints it; an ambiguous prefix is refused rather than guessed |
 | `/jobs pause <name>` | Stops a job firing, with "paused by user" as the reason the table shows |
 | `/jobs resume <name>` | Clears the pause *and* the retry ladder, and recomputes the next fire from the job's own schedule |
 | `/jobs run <name>` | Fires the job now, through the same admission a scheduled fire meets. Says it is starting straight away, then reports what admission decided once the fire is over — an overlap, the breaker or an exhausted budget is named rather than reported as a run. The result itself arrives as a card. A paused or disabled job is refused up front |
 | `/jobs delete <name>` | Deletes a job and its ledger rows. Refused while a run is in flight. The transcripts are left for retention to clear, so a card you are still reading keeps working |
 
+## Running one job from a terminal (`iris --run-job`)
+
+```
+iris --run-job <id-or-name> [--dry-run] [--json]
+```
+
+One job, fired once, against your real store (`~/.iris/conversations.sqlite`) with the real model
+client — then the process exits. No scheduler starts, no watchers, no window. What it is for is
+**measuring a job before you trust it**: run a new job or a new gate on demand and read its row —
+status, tokens, duration, gate signal — instead of waiting for its cadence, feed a gate's verdicts
+to an eval harness, or debug a misbehaving job under exactly the rules it has unattended. It is a
+measurement and debugging tool, not a way to run jobs in production.
+
+It behaves like `/jobs run`, not like a scheduled tick: the fire's origin is `manual`, so it meets
+the same admission checks (paused, disabled, overlap, breaker, budgets) and **skips the gate** — a
+person asking for a run does not get outvoted by one. `--dry-run` is where the gate is the
+question: it evaluates the gate and nothing else, prints the verdict and the signal, and writes no
+run row, no card and no stored signal.
+
+Approvals fail closed exactly as they do at 3 a.m.: no auto-approve, no headless mode, no volatile
+settings copy. A tool call a read-only profile denies, or one that would need a human, is recorded
+as a `blocked on approval` run with the call on it — the same row and the same card a scheduled
+fire would leave, so the card is in the Activity conversation the next time you open the app.
+
+Apart from the run's own two conversations — its hidden transcript and the Activity conversation
+the card lands in — the command leaves nothing behind. The things a *launch* does and a
+measurement must not (creating an empty conversation in a store with nothing selected, appending
+the guard-provisioning and unreadable-row notices) are suppressed for a CLI run; the fire, its
+row, its card and its approvals are untouched by that.
+
+**It refuses while another Iris process holds the store**, `--dry-run` included — a dry run
+writes nothing, but opening the store may *migrate* it, and a schema migration under a live app is
+a worse failure than being told to try again. The app writes a lock file holding its
+pid beside the store (`conversations.sqlite.lock`) at launch and removes it at exit; `--run-job`
+takes the same lock for the length of its run and gives it back. The file holds a pid and nothing
+else, so the refusal names both possibilities — "another Iris process holds the store (pid N) —
+the app, or another `--run-job`" — rather than sending you off to quit an app that may not be
+running. GRDB's WAL would survive two writers, but
+`AppState` keeps conversation state in memory, so a CLI write behind a live app desyncs the UI and
+the app then saves its stale copy over the top. A lock left behind by a crash names a process that
+no longer exists and is taken over; one that cannot be read or parsed is treated as held, and the
+message names the file to delete. Very occasionally a crashed holder's pid has since been handed
+to some unrelated process, and then there is nothing to wait for and no app to quit: the refusal
+names the lock file for that case too, and deleting it is the fix.
+
+What that covers, exactly: a CLI run started while the app is up, a second CLI run started while
+the first one is going, and — because the CLI *creates* the lock file rather than checking and
+then writing it — several `--run-job` launched at the same instant, of which exactly one proceeds
+and the rest refuse. A harness may therefore run them in parallel and read the refusals. What it
+does **not** cover is the app being launched *during* a CLI run — the app never checks the lock,
+it simply takes it — so do not start Iris while a `--run-job` is in flight. (An app that starts
+mid-run also keeps the lock afterwards: the CLI's release is pid-guarded and will not delete
+somebody else's.)
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | The run `completed` — or, with `--dry-run`, the gate says something changed |
+| `1` | Usage; no job with that id or name; `--dry-run` on a job that has no gate; a store that would not open; the app (or another `--run-job`) holding the lock; or the job being deleted out from under the fire |
+| `2` | The run did not complete: `failed`, `blocked on approval`, `interrupted`, an admission refusal (paused, disabled, overlap, breaker, budget), or a gate that could not answer |
+| `3` | The gate looked and nothing had changed (`--dry-run`) |
+
+Without `--json` the row prints one field per line (`job`, `run`, `status`, `trigger`, `started`,
+`duration`, `tokens`, `gate`, then `outcome` / `reason` / `blocked tool` when there is one). With
+`--json` it is a single object with sorted keys, which is what a script or `jq` should read; a
+refusal or an error prints its sentence to stderr and, under `--json`, a `{"error": …,
+"exitCode": …}` object on stdout too, so a pipeline is never handed an empty stdout.
+
+One known gap, and it is pre-existing rather than new: a few tool implementations reach
+`AppState.shared` directly (skill curation, plugin auth). In the app that is the app's own state;
+in a `--run-job` process it would open a *second* `AppState` over the same store. A read-only job
+cannot reach any of those tools, so this is only in play for a `mutating` job, and the durable fix
+is threading the run's own state to those call sites.
+
 ## The job tools
 
 Two read-only tools let the model answer questions about jobs: `list_jobs` (every job, its trigger,
-its next fire, how its last run ended) and `get_job_run` (one run, by id or by the eight characters
-a card shows, including the last thing the run itself said).
+its next fire, why it is paused, how its last run ended, its policy, profile and gate kind, and what
+it has spent today against its budgets and the breaker) and `get_job_run` (one run, by id or by the
+eight characters a card shows, including the last thing the run itself said). Neither can change
+anything: creating, pausing and deleting a job are `schedule_job` and `/jobs`, and nothing a
+background run can reach.
 
 Both are declared **only in a pinned conversation**, and refused at dispatch anywhere else even if
 a call arrives regardless. The reason is cost, not secrecy: two extra tool declarations are a tax on

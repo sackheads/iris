@@ -136,6 +136,55 @@ struct JobToolsTests {
         #expect(rows[0]["lastStatus"] as? String == "completed")
     }
 
+    @Test("list_jobs carries the figures /jobs prints, as fields")
+    func listJobsFigures() throws {
+        var j = job()
+        j.profile = .mutating
+        j.policy.overlap = .queue
+        j.policy.catchUp = .replay(cap: 4)
+        j.retryAttempt = 2
+        j.trigger = .poll(PollSpec(schedule: .interval(seconds: 60),
+                                   gate: .pathChanged(path: "/tmp/in")))
+        let snapshot = JobsCommand.UsageSnapshot(
+            perJob: [j.id: JobsCommand.JobFigures(
+                tokensToday: 620_000, runsLastHour: 2,
+                limits: JobLimits(maxRunsPerHour: 6, dailyTokens: 1_000_000,
+                                  globalDailyTokens: 3_000_000, perRunTokens: 200_000,
+                                  runTimeoutSeconds: 600))],
+            global: JobsCommand.GlobalUsage(tokensToday: 1_200_000, dailyBudget: 3_000_000))
+
+        let json = IrisEngine.jobsListJSON([j], lastStatuses: [:], usage: snapshot, unreadableJobs: 0)
+        let body = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let row = try #require((body["jobs"] as? [[String: Any]])?.first)
+        #expect(row["tokensToday"] as? Int == 620_000)
+        #expect(row["dailyBudget"] as? Int == 1_000_000)
+        #expect(row["runsLastHour"] as? Int == 2)
+        #expect(row["maxRunsPerHour"] as? Int == 6)
+        #expect(row["retryAttempt"] as? Int == 2)
+        #expect(row["profile"] as? String == "mutating")
+        #expect(row["gateKind"] as? String == "path")
+        // The same sentence the table's policy column shows, so the two cannot drift.
+        #expect(row["policy"] as? String == JobsCommand.policySummary(for: j))
+        #expect(body["tokensTodayAllJobs"] as? Int == 1_200_000)
+        #expect(body["globalDailyBudget"] as? Int == 3_000_000)
+    }
+
+    @Test("a job whose figures could not be read still lists, with nulls rather than zeros")
+    func listJobsFiguresLenient() throws {
+        let j = job()
+        let json = IrisEngine.jobsListJSON([j], lastStatuses: [:], usage: .empty, unreadableJobs: 0)
+        let body = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let row = try #require((body["jobs"] as? [[String: Any]])?.first)
+        #expect(row["name"] as? String == "pr-sweep")
+        for key in ["tokensToday", "dailyBudget", "runsLastHour", "maxRunsPerHour", "gateKind"] {
+            #expect(row[key] is NSNull, "\(key) should be null, not invented")
+        }
+        #expect(row["retryAttempt"] as? Int == 0)
+        #expect(row["profile"] as? String == "readOnly")
+        #expect(row["policy"] as? String == "default")
+        #expect(body["tokensTodayAllJobs"] is NSNull)
+    }
+
     @Test("list_jobs with no jobs is an empty array, not prose")
     func listJobsEmpty() async throws {
         let (app, id) = pinnedApp()

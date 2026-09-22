@@ -86,4 +86,113 @@ struct ScheduleJobArgumentsTests {
         #expect(ScheduleJobArguments.resultSentence(for: dead)
                 == "Saved 'leap' but it will never fire: no matching time in the next four years.")
     }
+
+    // MARK: overlap and catch-up (#187 §3)
+
+    @Test("overlap and catch_up reach the stored policy")
+    func policyArguments() throws {
+        let a = try ScheduleJobArguments.parse([
+            "prompt": .string("p"), "hour": .int(9),
+            "overlap": .string("queue"),
+            "catch_up": .object(["kind": .string("replay"), "cap": .int(3)])]).get()
+        #expect(a.overlap == .queue)
+        #expect(a.catchUp == .replay(cap: 3))
+        let job = try a.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: []).get()
+        #expect(job.policy.overlap == .queue)
+        #expect(job.policy.catchUp == .replay(cap: 3))
+    }
+
+    @Test("a job that asks for nothing keeps the default policy")
+    func policyDefaults() throws {
+        let a = try ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9)]).get()
+        #expect(a.overlap == nil && a.catchUp == nil)
+        let job = try a.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: []).get()
+        #expect(job.policy == JobPolicy())
+    }
+
+    @Test("catch_up takes the loose shapes a model writes")
+    func catchUpShapes() throws {
+        func parsed(_ value: JSONValue) throws -> JobPolicy.CatchUp? {
+            try ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9),
+                                            "catch_up": value]).get().catchUp
+        }
+        #expect(try parsed(.string("coalesce")) == .coalesce)
+        #expect(try parsed(.string("SKIP")) == .skip)
+        // A bare `replay` is the cap the spec picked, not a refusal over an unwritten number.
+        #expect(try parsed(.string("replay")) == .replay(cap: JobPolicy.defaultReplayCap))
+        #expect(try parsed(.string("replay:2")) == .replay(cap: 2))
+        #expect(try parsed(.object(["kind": .string("replay")])) == .replay(cap: JobPolicy.defaultReplayCap))
+        // Clamped exactly as the stored policy clamps it (R15): a negative cap is a typo.
+        #expect(try parsed(.object(["kind": .string("replay"), "cap": .int(-4)]))
+                == .replay(cap: JobPolicy.defaultReplayCap))
+        #expect(try parsed(.object(["kind": .string("replay"), "cap": .string("7")])) == .replay(cap: 7))
+        #expect(try parsed(.object(["kind": .string("replay"), "cap": .int(0)])) == .replay(cap: 0))
+    }
+
+    @Test("a replay cap past the ceiling is lowered to it, and the answer says so")
+    func aHugeReplayCapIsCappedAndSaidSo() throws {
+        func arguments(_ value: JSONValue) throws -> ScheduleJobArguments {
+            try ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9),
+                                            "catch_up": value]).get()
+        }
+        // Not a refusal: the job is worth creating, and a model that asked for 5,000 needs to be
+        // told it got 100 rather than left believing the plan it wrote.
+        for value in [JSONValue.string("replay:5000"),
+                      .object(["kind": .string("replay"), "cap": .int(5000)])] {
+            let a = try arguments(value)
+            #expect(a.catchUp == .replay(cap: JobPolicy.maxReplayCap))
+            #expect(a.notes == [ScheduleJobArguments.cappedReplay(asked: 5000)])
+            #expect(a.notes.first?.contains("100") == true)
+            let job = try a.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: []).get()
+            #expect(job.policy.catchUp == .replay(cap: JobPolicy.maxReplayCap))
+            // The sentence the tool returns carries it, after the one about the next run.
+            let stored = Job(name: job.name, prompt: job.prompt, trigger: job.trigger,
+                             nextFireAt: Date(timeIntervalSince1970: 1_700_000_000),
+                             policy: job.policy)
+            let sentence = ScheduleJobArguments.resultSentence(for: stored, notes: a.notes)
+            #expect(sentence.hasPrefix("Scheduled '\(stored.name)'"))
+            #expect(sentence.contains("capped at 100 occurrences"))
+            #expect(!sentence.lowercased().contains("deliverable"))
+        }
+        // A cap under the ceiling is stored as asked and says nothing extra.
+        let ordinary = try arguments(.string("replay:7"))
+        #expect(ordinary.catchUp == .replay(cap: 7) && ordinary.notes.isEmpty)
+        #expect(ScheduleJobArguments.resultSentence(for: Job(
+            name: "j", prompt: "p", trigger: .schedule(.interval(seconds: 60)),
+            nextFireAt: Date(timeIntervalSince1970: 1_700_000_000))).contains("capped") == false)
+    }
+
+    @Test("a policy value this build does not know is refused with somewhere to go")
+    func policyRefusals() {
+        let bad = ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9),
+                                              "overlap": .string("wait")])
+        #expect(bad == .failure(ScheduleJobArguments.overlapShape))
+        #expect(ScheduleJobArguments.overlapShape.text.contains("queue"))
+        let badCatchUp = ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9),
+                                                     "catch_up": .string("everything")])
+        #expect(badCatchUp == .failure(ScheduleJobArguments.catchUpShape))
+        #expect(ScheduleJobArguments.catchUpShape.text.contains("replay"))
+        // Neither sentence names a milestone or a pull request (invariant 9).
+        for sentence in [ScheduleJobArguments.overlapShape.text, ScheduleJobArguments.catchUpShape.text] {
+            #expect(!sentence.lowercased().contains("deliverable"))
+        }
+        #expect(ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9),
+                                            "catch_up": .int(3)]) == .failure(ScheduleJobArguments.catchUpShape))
+        // The refusal must not send a model at a shape the declared STRING schema would reject.
+        #expect(!ScheduleJobArguments.catchUpShape.text.contains("{"))
+    }
+
+    @Test("an empty string is a model saying nothing, not a value to refuse")
+    func emptyPolicyValuesReadAsAbsent() throws {
+        let a = try ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9),
+                                                "overlap": .string(""),
+                                                "catch_up": .string("   ")]).get()
+        #expect(a.overlap == nil && a.catchUp == nil)
+        #expect(try a.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: []).get().policy
+                == JobPolicy())
+        // A JSON null is the same answer.
+        let nulled = try ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9),
+                                                     "overlap": .null, "catch_up": .null]).get()
+        #expect(nulled.overlap == nil && nulled.catchUp == nil)
+    }
 }
