@@ -19,7 +19,9 @@ struct WatchRootTests {
     func tooBroadRootsAreRefused() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }
-        for root in WatchRoot.tooBroad + [f.home, "/Volumes/Data", "/private/var"] {
+        // `/System/Volumes/Data` is the data volume on every supported macOS: it is a mount point
+        // Foundation leaves unchanged, and it is the real container of `~/.iris`.
+        for root in WatchRoot.tooBroad + [f.home, "/Volumes/Data", "/private/var", "/System/Volumes/Data"] {
             #expect(WatchRoot.refusal(for: root, paths: f.paths, home: f.home) == WatchRoot.tooBroadRefusal,
                     "\(root) should be too broad")
         }
@@ -27,6 +29,30 @@ struct WatchRootTests {
         #expect(WatchRoot.refusal(for: "/private/tmp/notes", paths: f.paths, home: f.home) == nil)
         // Case is not a way round the list.
         #expect(WatchRoot.refusal(for: "/SYSTEM", paths: f.paths, home: f.home) == WatchRoot.tooBroadRefusal)
+    }
+
+    /// The mount-point rule is the file system's answer, not a spelling: the same temp directory
+    /// is refused when it is a mount and allowed when it is not. The lexical `/Volumes/<name>`
+    /// rule stays alongside it for a volume that is not mounted and cannot be asked.
+    @Test("a mount point anywhere is too broad; the same path unmounted is a folder like any other")
+    func mountPointsAreRefusedWhereverTheyAreMounted() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let share = f.base.appendingPathComponent("share")
+        try FileManager.default.createDirectory(at: share, withIntermediateDirectories: true)
+        let canonical = IrisPaths.canonicalPath(share.path).lowercased()
+        #expect(WatchRoot.refusal(for: share.path, paths: f.paths, home: f.home,
+                                  isVolume: { $0 == canonical }) == WatchRoot.tooBroadRefusal)
+        #expect(WatchRoot.refusal(for: share.path, paths: f.paths, home: f.home,
+                                  isVolume: { _ in false }) == nil)
+        // An unmounted volume is judged by its spelling, whatever the file system says.
+        #expect(WatchRoot.refusal(for: "/Volumes/NotMounted", paths: f.paths, home: f.home,
+                                  isVolume: { _ in false }) == WatchRoot.tooBroadRefusal)
+        // And the real answer for the real paths.
+        #expect(WatchRoot.isMountPoint("/"))
+        #expect(WatchRoot.isMountPoint("/System/Volumes/Data"))
+        #expect(!WatchRoot.isMountPoint(share.path))
+        #expect(!WatchRoot.isMountPoint(f.base.appendingPathComponent("absent").path))
     }
 
     /// `IrisPaths.isUnderProtectedWriteDir` covers only the "is under" direction; a watch root

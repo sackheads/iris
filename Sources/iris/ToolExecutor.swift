@@ -292,8 +292,10 @@ struct ToolExecutor {
                     // mid-run is queued, not dropped.
                     policy: JobPolicy(overlap: parsed.overlap ?? .queue))
                 let others = watching.map { "`\($0.name)`" }
+                let named = others.count <= 2 ? others.joined(separator: " and ")
+                    : others.dropLast().joined(separator: ", ") + " and " + others[others.count - 1]
                 opening = "created `\(job.name)`" + (others.isEmpty ? "" :
-                    "; \(others.joined(separator: " and ")) \(others.count == 1 ? "belongs to another conversation" : "belong to other conversations")"
+                    "; \(named) \(others.count == 1 ? "belongs to another conversation" : "belong to other conversations")"
                     + " — this folder now has \(others.count + 1) watches, each of which runs on every change")
             }
             // The write is the registration: in the app, `onJobsChanged` syncs the coordinator

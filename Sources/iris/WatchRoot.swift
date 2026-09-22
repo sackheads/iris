@@ -40,11 +40,12 @@ enum WatchRoot {
     }
 
     /// The directories a watch on which would be a watch on the machine (spec §5). Compared by
-    /// canonical form, so `/var` here also turns down `/private/var`; a volume root
-    /// (`/Volumes/<name>`) and the home directory are refused too, by `refusal(for:paths:home:)`.
-    /// Only the root itself is too broad — a folder *under* `/private` or `/Users` is exactly what a
-    /// watch is for.
-    static let tooBroad = ["/", "/System", "/Library", "/usr", "/private", "/var", "/etc", "/bin", "/sbin"]
+    /// canonical form, so `/var` here also turns down `/private/var`; the home directory and any
+    /// mount point are refused too, by `refusal(for:paths:home:isVolume:)`. Only the root itself is
+    /// too broad — a folder *under* `/private` or `/Users` is exactly what a watch is for.
+    /// `/Volumes` is here because FSEvents does not cross mount points, so a watch on it would be
+    /// a watch on nothing — "name a specific folder" is still the answer.
+    static let tooBroad = ["/", "/System", "/Library", "/usr", "/private", "/var", "/etc", "/bin", "/sbin", "/Volumes"]
 
     static let tooBroadRefusal = "that is too broad to watch; name a specific folder"
 
@@ -64,19 +65,37 @@ enum WatchRoot {
     /// both directions — a root that *contains* Iris's directory sees every write into it — which is
     /// why it is not written as a call to it.
     ///
+    /// A volume root is too broad whichever way it is spelled. Two rules, because neither alone is
+    /// enough: a mount point is what the file system says it is (`isVolume`), which is the only
+    /// rule that catches `/System/Volumes/Data` — the data volume on every supported macOS, left
+    /// unchanged by symlink resolution and the real container of `~/.iris` (R-D4-13) — and any
+    /// SMB share or DMG mounted somewhere unexpected; the lexical `/Volumes/<name>` rule stays for
+    /// a volume that is not mounted right now, which cannot be stat'ed and should still not be
+    /// registered as a watch waiting for the day it is.
+    ///
     /// - Parameters:
     ///   - paths: where Iris's own directory is; injected so a test can refuse a temp root.
     ///   - home: the user's home directory, injected for the same reason.
-    static func refusal(for canonical: String, paths: IrisPaths, home: String) -> String? {
+    ///   - isVolume: whether a canonical path is a mount point; injected so a test can make a temp
+    ///     directory one without mounting anything. The default asks the file system.
+    static func refusal(for canonical: String, paths: IrisPaths, home: String,
+                        isVolume: (String) -> Bool = { isMountPoint($0) }) -> String? {
         let root = IrisPaths.canonicalPath(canonical).lowercased()
         let broad = (tooBroad + [home]).map { IrisPaths.canonicalPath($0).lowercased() }
         if broad.contains(root) { return tooBroadRefusal }
         let components = URL(fileURLWithPath: root).pathComponents
         if components.count == 3, components[1] == "volumes" { return tooBroadRefusal }
+        if isVolume(root) { return tooBroadRefusal }
         let iris = IrisPaths.canonicalPath(paths.root.path).lowercased()
         if root == iris || root.hasPrefix(iris + "/") || iris.hasPrefix(root + "/") {
             return protectedRefusal
         }
         return nil
+    }
+
+    /// What the file system says: `true` for `/`, `/System/Volumes/Data`, anything under `/Volumes`
+    /// that is mounted, and any other mount point; `false` for a path that is not there.
+    static func isMountPoint(_ path: String) -> Bool {
+        (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.isVolumeKey]))?.isVolume == true
     }
 }

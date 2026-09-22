@@ -4,6 +4,14 @@ import Foundation
 
 @Suite("ToolExecutor workspace path resolution")
 struct ToolExecutorWorkspaceTests {
+    /// An executor whose watch refusals resolve against `sandbox`, not the real `~/.iris` or home.
+    private func watchExecutor(store: ConversationStore, sandbox: URL) -> ToolExecutor {
+        var executor = ToolExecutor()
+        executor.jobToolsProvider = { JobTools(ledger: store.ledger) }
+        executor.irisPaths = IrisPaths(root: sandbox.appendingPathComponent("dot-iris"))
+        executor.homeDirectory = sandbox.appendingPathComponent("home").path
+        return executor
+    }
 
     @Test("resolvePath joins relative paths onto the workspace; leaves absolute and tilde alone")
     func resolve() {
@@ -54,8 +62,7 @@ struct ToolExecutorWorkspaceTests {
         defer { try? FileManager.default.removeItem(at: workspace) }
         // The tool now writes a job, so it needs a ledger to write into (nil declines instead).
         let store = try ConversationStore.inMemory()
-        var executor = ToolExecutor()
-        executor.jobToolsProvider = { JobTools(ledger: store.ledger) }
+        let executor = watchExecutor(store: store, sandbox: workspace)
 
         let result = await executor.execute(
             name: "register_directory_watcher",
@@ -81,8 +88,7 @@ struct ToolExecutorWorkspaceTests {
         defer { try? fm.removeItem(at: base) }
 
         let store = try ConversationStore.inMemory()
-        var executor = ToolExecutor()
-        executor.jobToolsProvider = { JobTools(ledger: store.ledger) }
+        let executor = watchExecutor(store: store, sandbox: base)
 
         _ = await executor.execute(
             name: "register_directory_watcher",
@@ -111,8 +117,8 @@ struct ToolExecutorWorkspaceTests {
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
 
-        var executor = ToolExecutor()
-        executor.jobToolsProvider = { JobTools(ledger: store.ledger) }
+        let executor = watchExecutor(store: store, sandbox: tmp.deletingLastPathComponent()
+            .appendingPathComponent("iris-watch-seams-\(UUID().uuidString)"))
         let args: [String: JSONValue] = ["path": .string(tmp.path), "instructions": .string("first")]
         let firstConversation = UUID()
         let secondConversation = UUID()
