@@ -452,6 +452,47 @@ actor IrisEngine {
         value.count > cap ? String(value.prefix(cap)) + "…" : value
     }
 
+    /// `PATH_MAX` on Darwin. A path longer than this cannot name a file, so accepting one only
+    /// defers the failure to whatever tries to use it.
+    nonisolated static let maxWorkspacePathLength = 1024
+
+    /// `~` and `~/…` expanded without Foundation's PATH_MAX truncation, so a length check can see
+    /// the real length. `~user/…` is rare enough to hand to Foundation, where the truncation only
+    /// bites at lengths this function's caller refuses anyway.
+    nonisolated static func expandTilde(_ path: String) -> String {
+        if path == "~" { return NSHomeDirectory() }
+        if path.hasPrefix("~/") { return NSHomeDirectory() + path.dropFirst(1) }
+        if path.hasPrefix("~") { return (path as NSString).expandingTildeInPath }
+        return path
+    }
+
+    /// Why a workspace path is unusable, or nil if it is fine (#273). Shape only: whether the
+    /// directory EXISTS is reported by the handler rather than refused, since a session naming a
+    /// directory it is about to create is legitimate.
+    nonisolated static func workspaceRefusal(for path: String) -> String? {
+        if path.contains("\0") {
+            return "Refused — a path cannot contain a NUL character."
+        }
+        // Measured on an expansion done here rather than on `expandingTildeInPath`, which cannot
+        // be used to detect an over-long path: it silently truncates its result to exactly
+        // PATH_MAX, so a 2001-character path comes back as a 1024-character one that still looks
+        // absolute and plausible. That truncation is itself the reason this check matters — the
+        // AGENTS.md loader and `WorkspaceInventory` both expand through it, so an over-long
+        // workspace does not fail loudly today, it silently becomes a DIFFERENT directory.
+        let expanded = Self.expandTilde(path)
+        if expanded.count > maxWorkspacePathLength {
+            return "Refused — that path is \(expanded.count) characters; the maximum is \(maxWorkspacePathLength)."
+        }
+        // Checked after expansion so `~/src` passes: it is the spelling models reach for most, and
+        // every consumer of `workspacePath` expands it. A path that is still relative here would
+        // be resolved against the PROCESS working directory, which this repo does not depend on
+        // (#242, #160) — so the same string would mean different directories across launches.
+        guard expanded.hasPrefix("/") else {
+            return "Refused — give an absolute path (or one starting with ~), not a relative one: a relative path would depend on where Iris was launched from."
+        }
+        return nil
+    }
+
     /// Field caps. A name is a handle, a description is a sentence about current work, a workspace
     /// is a path — all bounded so one peer cannot make the listing the bulk of a reader's context.
     nonisolated static let cardNameCap = 64
@@ -1088,7 +1129,7 @@ actor IrisEngine {
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
-                    "path": Schema(type: "STRING", description: "Absolute or tilde-expanded path to the workspace directory")
+                    "path": Schema(type: "STRING", description: "Absolute or tilde-expanded path to the workspace directory. A relative path is refused, since it would depend on where Iris was launched from.")
                 ],
                 required: ["path"]
             )
@@ -2264,18 +2305,40 @@ actor IrisEngine {
 
         if functionCall.name == "set_workspace", let path = functionCall.args["path"]?.stringValue {
             let currentWorkspace = path
-            
+            // #273: validate the shape before storing. This value is persisted to `workspacePath`,
+            // decoded on every launch, and advertised to peers, and unlike the session card (#246)
+            // the answer is a REFUSAL rather than a truncation — a truncated path is a different
+            // path, so storing `prefix(n)` would point the workspace somewhere else or nowhere.
+            if let refusal = Self.workspaceRefusal(for: currentWorkspace) {
+                result = refusal
+                return result
+            }
+
+            // Probe the filesystem through the EXPANDED path. `FileManager` does not expand `~`,
+            // so every check below silently missed for a tilde workspace — which is the spelling
+            // models reach for most, and the one the Vibecop hint never fired for.
+            let expanded = Self.expandTilde(currentWorkspace)
             var extraHint = ""
             let fm = FileManager.default
-            let irisDir = URL(fileURLWithPath: currentWorkspace).appendingPathComponent(".iris")
-            let vibecopPath = irisDir.appendingPathComponent("vibecop.md").path
-            
-            if !fm.fileExists(atPath: vibecopPath) {
-                if let contents = try? fm.contentsOfDirectory(atPath: currentWorkspace), !contents.isEmpty {
+            var isDir: ObjCBool = false
+            let exists = fm.fileExists(atPath: expanded, isDirectory: &isDir)
+
+            // Set it either way and say what is there. A session naming a directory it is about to
+            // create is plausible, so refusing would be a behaviour change; reporting "successfully
+            // set" for a directory that is not there is simply untrue.
+            if !exists {
+                extraHint = "\n\n⚠️ Note: that directory does not exist yet. Create it before relying on file tools there."
+            } else if !isDir.boolValue {
+                extraHint = "\n\n⚠️ Note: that path is a file, not a directory."
+            } else {
+                let vibecopPath = URL(fileURLWithPath: expanded)
+                    .appendingPathComponent(".iris").appendingPathComponent("vibecop.md").path
+                if !fm.fileExists(atPath: vibecopPath),
+                   let contents = try? fm.contentsOfDirectory(atPath: expanded), !contents.isEmpty {
                     extraHint = "\n\n💡 Hint: No Vibecop Guardian config found for this workspace. Suggest that the user run `/vibecop init` to generate one."
                 }
             }
-            
+
             await MainActor.run { localState?.setWorkspace(for: conversationId, path: currentWorkspace) }
             result = "Workspace successfully set to \(currentWorkspace). You will now load AGENTS.md from this directory." + extraHint
         } else if functionCall.name == "list_sessions" {
