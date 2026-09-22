@@ -45,6 +45,8 @@ struct RecentWritesTests {
         #expect(await r.isOwn("/w/notes.md", within: 5), "the file itself")
         #expect(await r.isOwn("/w", within: 5), "the directory-modified event the write produces")
         #expect(await r.isOwn("/w/.notes.md.sb-1a2b", within: 5), "Foundation's atomic staging file")
+        #expect(await r.isOwn("/w/notes.md.sb-f1f3bd48-yAcDX5", within: 5),
+                "the spelling `Data.write(options: .atomic)` actually uses on macOS 26: no leading dot")
         #expect(await r.isOwn("/w/notes.md.tmp", within: 5), "the other atomic temp spelling")
         #expect(await r.isOwn("/w/(A Document Being Saved By Iris)", within: 5), "and the third")
         #expect(!(await r.isOwn("/w/other.md", within: 5)),

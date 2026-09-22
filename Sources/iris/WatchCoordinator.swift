@@ -57,7 +57,7 @@ actor WatchCoordinator {
     /// temp forms — every `write_file` in a watched directory produces one.
     static let builtInIgnore: [String] = [
         ".git/", ".DS_Store", "node_modules/", "*~", "*.swp", "*.swx", ".#*", "4913", "*.tmp",
-        ".*.sb-*", "(A Document Being Saved By *",
+        "*.sb-*", "(A Document Being Saved By *",
     ]
 
     /// Spec §2's table, plus the two things the admission branches need: what the runner last

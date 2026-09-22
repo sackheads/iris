@@ -4,7 +4,7 @@ import Foundation
 
 /// #187 deliverable 4, spec §0.4 — the ignore matcher. Two things are load-bearing and neither is
 /// obvious from the pattern strings: the built-in set has to catch the names editors and VCSs
-/// actually produce (a `4913` from Vim, a `.#f` from Emacs, Foundation's `.f.sb-9f`), and `*` has
+/// actually produce (a `4913` from Vim, a `.#f` from Emacs, Foundation's `f.sb-9f`), and `*` has
 /// to stop at a `/` so a watch's own glob cannot silently swallow a whole subtree it never named.
 @Suite("Watch globs (#187)")
 struct WatchGlobTests {
@@ -14,6 +14,10 @@ struct WatchGlobTests {
         let ignored = WatchGlob.matcher(WatchCoordinator.builtInIgnore)
         for name in [".git/HEAD", "a/.DS_Store", "node_modules/x/y.js", "f~", ".f.swp", ".#f",
                      "4913", "x.tmp", ".notes.md.sb-9f",
+                     // Measured on macOS 26 (Darwin 25.6): `Data.write(options: .atomic)` stages
+                     // as `<name>.sb-<hex>-<rand>` beside the file, with no leading dot. Seen on
+                     // screen as a "changed file" handed to a run before the pattern was widened.
+                     "agent.txt.sb-f1f3bd48-yAcDX5",
                      "(A Document Being Saved By TextEdit)"] {
             #expect(ignored(name), "the built-in set should absorb \(name)")
         }

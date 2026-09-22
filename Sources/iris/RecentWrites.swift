@@ -117,7 +117,10 @@ actor RecentWrites {
     /// they are spelled here as well because a temp file *in a watched folder* is ignored by the
     /// glob, while the question here is whose write it was.
     static func isAtomicTempSibling(_ basename: String, of recorded: String) -> Bool {
-        if basename.hasPrefix(".\(recorded).sb-") { return true }   // Foundation's staging file
+        // Foundation's staging file. Measured on macOS 26 (Darwin 25.6): `Data.write(options:
+        // .atomic)` stages as `<name>.sb-<hex>-<rand>` with no leading dot; the dotted spelling is
+        // kept for the releases that used it.
+        if basename.hasPrefix("\(recorded).sb-") || basename.hasPrefix(".\(recorded).sb-") { return true }
         if basename == "\(recorded).tmp" { return true }
         if basename.hasPrefix("(A Document Being Saved By ") { return true }
         return false
