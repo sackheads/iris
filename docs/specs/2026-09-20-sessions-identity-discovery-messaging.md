@@ -231,27 +231,29 @@ Today reaching that hazard needs a scheduler or watcher coincidence. **Peer mess
 agent-triggerable at will, and this slice introduced a partial form of that risk** — the correction
 below states what actually holds, in place of the guarantee this paragraph originally claimed.
 
-**Correction (review round 3): the busy check is not atomic with the turn it guards.**
-`deliverPeerMessage` (`iris.swift` ~206-263) reads `AppState.hasTurnInFlight(for: targetId)` once,
-and that read is not atomic with the delivery it gates. Two concurrent `send_to_session` calls that
-both target one idle session can both observe `busy == false` before either hands off, and both then
-land a turn on the same history — the exact hazard this section describes, now reachable by an agent
-choosing to send twice rather than only by scheduler/watcher coincidence.
+**Closed (#240): the busy decision and the turn it authorises are now atomic.**
+`deliverPeerMessage` used to read `AppState.hasTurnInFlight(for: targetId)` and then hand off — a
+check followed by an act. Two concurrent `send_to_session` calls targeting one idle session both
+passed the check, because the winner's turn is handed to a detached task and has not registered
+yet, and both landed a turn on the same history. That was the exact hazard this section describes,
+reachable by an agent choosing to send twice rather than only by scheduler/watcher coincidence.
 
-Round 3 narrowed the window: a second `hasTurnInFlight` check runs immediately before handoff, after
-`sanitizeArrival` — the dominant term in the gap, since it runs tier-2 CoreML and tier-3
-auxiliary-model inference and can hold the window open for hundreds of milliseconds, far wider than
-a few actor hops. If that second check finds the target now busy, delivery falls back to the same
-#172 inbox the always-busy path uses. **This narrows the race; it does not close it.** The gap
-between that second check and `processInput`'s own turn start (`withEngineTurn`, inside
-`deliverSanitizedSystemEvent`) is still open. Closing it needs an atomic check-and-claim over a
-conversation's turn state — `IrisEngine` is a single reentrant actor with no lock over that state —
-and was not attempted in this round. Filed as **#240** rather than fixed here.
+Review round 3 narrowed it with a second `hasTurnInFlight` check after `sanitizeArrival` — the
+dominant term in the gap, since tier-2 CoreML and tier-3 auxiliary-model inference can hold it open
+for hundreds of milliseconds. That narrowed the window without closing it, and the remainder was
+filed as #240.
 
-So: the inbox routing described in the next paragraph holds for the sequential case — one sender, or
-two sends spaced further apart than `sanitizeArrival` takes. It does not hold under genuine
-concurrency. Say this plainly rather than softening it: the slice introduced a partial, narrowed
-form of the risk this section said it would not introduce.
+It is closed now, and without the lock the earlier note assumed it would need.
+`AppState.claimPeerDelivery(for:)` decides and reserves in a single synchronous `MainActor` body,
+so no moment exists between the two for a second claimant to occupy. The reservation *is* a turn
+count: `hasTurnInFlight` already reads `engineTurnCounts`, so claiming through `beginEngineTurn`
+makes a concurrent claimant see the target as busy immediately, with no second piece of state to
+keep in step. The loser takes the #172 inbox — which is what it would have done had the winner's
+turn already been running. The claim is released once the turn it authorised finishes, so the count
+never reaches zero mid-turn and the inbox drain still fires exactly once.
+
+So the inbox routing described below now holds under genuine concurrency, not only for sends spaced
+further apart than `sanitizeArrival` takes.
 
 **A peer message to a busy session is enqueued through the same #172 inbox**, delivered as a steer
 at the target's next model round. Not refused: the sender has no way to know the target is busy,

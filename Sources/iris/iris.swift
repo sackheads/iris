@@ -317,64 +317,53 @@ actor IrisEngine {
     /// (§5.1), self-send (§5.4), and the cascade budget (§7) before calling — `deliverPeerMessage`
     /// itself will happily deliver into an archived target or let a session message itself.
     ///
-    /// The busy check and the actual send are not atomic (round 3 narrowed this, it did not
-    /// close it — see below). `IrisEngine` is a single reentrant actor with no lock over a
-    /// conversation's turn state, so closing this fully would need one; not attempted here, and
-    /// it is filed as its own issue rather than done inside this fix round.
-    /// Returns `true` when the message was queued behind a busy turn (either check caught it),
-    /// `false` when it was handed to an idle target. Callers that only care about delivery, not
-    /// which path it took (most of `PeerDeliveryTests`), can ignore it.
+    /// The busy decision and the turn it authorises are atomic (#240). They were not: this took
+    /// two reads of `hasTurnInFlight`, and two concurrent sends to one idle target both passed
+    /// them, landing two turns on one history — which is the hazard §5.2 exists to prevent and the
+    /// one peer messaging was not allowed to make agent-triggerable. `claimPeerDelivery` decides
+    /// and reserves in a single synchronous `MainActor` body, so there is no longer a moment
+    /// between them for a second claimant to occupy. No lock was needed in the end: the turn count
+    /// `hasTurnInFlight` already reads is the reservation.
+    ///
+    /// Returns `true` when the message was queued behind a busy turn or lost the claim, `false`
+    /// when it was handed to an idle target. Callers that only care about delivery, not which path
+    /// it took (most of `PeerDeliveryTests`), can ignore it.
     @discardableResult
     func deliverPeerMessage(_ message: String, from senderId: UUID, senderName: String?,
                              to targetId: UUID) async -> Bool {
         let localState = state
+        let attributed = Self.framePeerMessage(message, senderName: senderName, senderId: senderId)
+        // Sanitise before deciding where it goes, because both destinations need it sanitised and
+        // both use the identical helper. Doing it first also keeps the claim below as narrow as it
+        // can be: tier-2 CoreML and tier-3 auxiliary-model inference are the expensive part, and
+        // they are over before anything is reserved.
+        //
+        // Round 2 fix: the busy branch used to enqueue the framed text straight into the #172
+        // inbox, skipping sanitisation and any marker distinguishing it from a message the user
+        // typed — `takePendingSteers`' consumer renders queued text as `"User (mid-task): …"`, the
+        // system's highest trust label. The `isPeer` flag on the queued entry is what stops that.
+        let safe = await sanitizeArrival(attributed, source: Self.peerSource)
         // §5.2: a second turn on one history produces empty or rejected provider responses, so a
         // busy target takes the same #172 inbox a user message would. Peer messaging must not make
         // that hazard agent-triggerable.
-        let busy = await MainActor.run { localState?.hasTurnInFlight(for: targetId) ?? false }
-        let attributed = Self.framePeerMessage(message, senderName: senderName, senderId: senderId)
-        if busy {
-            // Round 2 fix: the busy branch used to enqueue `attributed` straight into the #172
-            // inbox, skipping both sanitisation (only `handleSystemEvent` ran it, below) and any
-            // marker distinguishing this from a message the user typed. `takePendingSteers`'
-            // consumer renders queued text as `"User (mid-task): …"` — the system's highest trust
-            // label — so an unsanitised peer message to a busy target reached the model announced
-            // as the user's own words. Sanitise here with the identical helper `handleSystemEvent`
-            // uses, and mark the entry `isPeer` so the consumer (iris.swift, the steer loop) picks
-            // a label that does not claim user authorship.
-            let safe = await sanitizeArrival(attributed, source: Self.peerSource)
+        //
+        // One atomic claim rather than the two reads this used to take (#240). Reading
+        // `hasTurnInFlight` and then starting a turn is a check followed by an act, and two
+        // concurrent sends to one idle target both passed the check — the second read added in
+        // #185's round 3 narrowed that window without closing it. `claimPeerDelivery` decides and
+        // reserves in one synchronous MainActor body, so the loser of a race sees the winner's
+        // reservation and takes the inbox, which is exactly what it would have done had the
+        // winner's turn already been running.
+        let claimed = await MainActor.run { localState?.claimPeerDelivery(for: targetId) ?? false }
+        guard claimed else {
             await queuePeerArrival(safe, to: targetId)
             return true
         }
-        // Idle at the first check. Sanitize now — the same helper the busy branch above uses —
-        // so the late re-check just below can hand off without a second sanitisation pass.
-        let safe = await sanitizeArrival(attributed, source: Self.peerSource)
-        // Round 3 fix (#185 review): `sanitizeArrival` runs tier-2 CoreML and tier-3
-        // auxiliary-model inference, which can hold this open for hundreds of milliseconds — far
-        // wider than "a few actor hops". A turn can start on `targetId` during that window, so
-        // re-check right before handoff and route to the same #172 inbox the busy branch above
-        // uses if it did. This NARROWS the TOCTOU between the first read and the actual send; it
-        // does not close it — the gap between THIS read and `withEngineTurn`'s own
-        // `beginEngineTurn` firing (inside `deliverSanitizedSystemEvent` -> `processInput`) is
-        // still open, and closing that needs the lock the type-level comment above declines to
-        // add here. Filed as a separate issue rather than fixed in this round.
-        let stillBusy = await MainActor.run { localState?.hasTurnInFlight(for: targetId) ?? false }
-        if stillBusy {
-            await queuePeerArrival(safe, to: targetId)
-            return true
-        }
-        // Round 2 fix (#185 review, M3): this used to `await handleSystemEvent` inline, which
-        // runs the target's entire turn (`handleSystemEvent` -> `processInput` ->
-        // `withEngineTurn`) before `send_to_session`'s tool call returns — so a depth-N cascade
-        // ran N full turns nested inside the sender's first call, and "the session will see it at
-        // its next turn" was already false by the time it was said. `beginPeerCascade` debits the
-        // cascade budget synchronously in the caller before this function even runs, so detaching
-        // the delivery here cannot let a burst of sends outrun the cap. Plain `Task`, mirroring
-        // the background-subagent precedent at `invoke_subagent`'s `isBackground` branch — not
-        // `.detached`, so it still runs on this actor. `deliverSanitizedSystemEvent`, not
-        // `handleSystemEvent`, because `safe` has already been through `sanitizeArrival` above —
-        // routing through `handleSystemEvent` again would sanitise it a second time.
         Task {
+            // The claim is given back only once the turn it authorised is over. Releasing at
+            // handoff instead would reopen a gap between this function returning and
+            // `withEngineTurn` registering the turn — the very gap the claim exists to close.
+            defer { Task { @MainActor in localState?.releasePeerDelivery(for: targetId) } }
             let wasArchived = await MainActor.run { localState?.unarchiveConversation(targetId) ?? false }
             await self.deliverSanitizedSystemEvent(safe, source: Self.peerSource, conversationId: targetId, wasArchived: wasArchived)
         }

@@ -324,4 +324,35 @@ struct PeerDeliveryTests {
         #expect(systemLines.contains { $0.contains("Request from another session") },
                 "and it arrives wearing the peer framing, not as the user's own words")
     }
+
+    /// #240. `deliverPeerMessage` used to read `hasTurnInFlight` and *then* start a turn — a check
+    /// followed by an act. Two sends to one idle target both passed the check, because the first
+    /// one's turn is handed to a detached task and has not registered yet, and both went on to
+    /// start a turn on the same history. §5.2 exists to stop exactly that, and peer messaging was
+    /// the thing not allowed to make it agent-triggerable.
+    ///
+    /// Deterministic in both directions rather than a race to observe: the two calls serialise on
+    /// the actor, so with the claim the second sees the first's reservation, and without it the
+    /// second sees a conversation with no turn registered yet.
+    @Test("two sends to one idle target: exactly one starts a turn, the other takes the inbox")
+    func concurrentSendsCannotBothStartATurn() async {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(), b = UUID(), target = UUID()
+        for id in [a, b, target] { app.createNewConversation(id: id) }
+        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false)
+
+        async let first = engine.deliverPeerMessage("from a", from: a, senderName: "a", to: target)
+        async let second = engine.deliverPeerMessage("from b", from: b, senderName: "b", to: target)
+        let queued = await [first, second]
+
+        // `true` means "queued to the #172 inbox", `false` means "handed to an idle target".
+        #expect(queued.filter { $0 }.count == 1,
+                "exactly one send may take the turn; got \(queued)")
+        #expect(queued.filter { !$0 }.count == 1)
+        // And the loser is really in the inbox rather than dropped — a send that is neither
+        // delivered nor queued is worse than one that raced.
+        let pending = await MainActor.run { app.pendingUserMessageCount(for: target) }
+        #expect(pending == 1, "the send that lost the claim must be waiting, not gone")
+    }
 }

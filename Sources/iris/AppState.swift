@@ -403,6 +403,30 @@ class AppState {
 
     /// Both sources OR'd. `activeTasks` is what cancellation can reach; `engineTurnCounts` also
     /// covers the arrival path, which nothing tracks per conversation.
+    /// Decides whether a peer message may start a turn on `conversationId` and, if so, reserves
+    /// the right to — in one synchronous body, so the decision and the reservation cannot be
+    /// split (#240).
+    ///
+    /// The reservation *is* a turn count. `hasTurnInFlight` already reads `engineTurnCounts`, so
+    /// claiming through `beginEngineTurn` makes a concurrent claimant see the conversation as busy
+    /// immediately, with no new state to keep in step and no lock. The delivery releases it with
+    /// `releasePeerDelivery` once the turn it handed off has finished; the real turn's own
+    /// begin/end nests inside, so the count never touches zero mid-turn and the #172 drain still
+    /// fires exactly once, at the release.
+    ///
+    /// Balanced on every path: a delivery that never reaches a turn still releases, which takes
+    /// the count back to nil and drains an inbox that has nothing in it.
+    func claimPeerDelivery(for conversationId: UUID) -> Bool {
+        guard !hasTurnInFlight(for: conversationId) else { return false }
+        beginEngineTurn(for: conversationId)
+        return true
+    }
+
+    /// Gives back what `claimPeerDelivery` took.
+    func releasePeerDelivery(for conversationId: UUID) {
+        endEngineTurn(for: conversationId)
+    }
+
     func hasTurnInFlight(for conversationId: UUID) -> Bool {
         if (engineTurnCounts[conversationId] ?? 0) > 0 { return true }
         return activeTasks.values.contains { $0.conversationId == conversationId }
