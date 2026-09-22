@@ -209,7 +209,24 @@ actor SandboxSessionManager {
         try await task.value
     }
 
+    /// Creates this conversation's container, and sweeps up after itself if it cannot.
+    ///
+    /// The sweep is the point. A create has a ceiling now (R31), and a create that breaches it —
+    /// or is cancelled, or dies half way — kills the CLI child while the daemon may go on to
+    /// finish the pull and keep `iris-<conversation>`. The name is a pure function of the
+    /// conversation id, so every later command in it would then fail with "already exists" until
+    /// `reapOrphans()` at the next launch. Best effort, and its own failure is ignored: the create
+    /// has already failed, and this is tidying, not the answer anybody is waiting for.
     private func create(_ id: UUID, workspace: String?, mounts: [String]) async throws {
+        do {
+            try await attemptCreate(id, workspace: workspace, mounts: mounts)
+        } catch {
+            await runtime.remove(name: name(for: id))
+            throw error
+        }
+    }
+
+    private func attemptCreate(_ id: UUID, workspace: String?, mounts: [String]) async throws {
         do {
             try await runtime.createDetached(name: name(for: id), image: image(),
                                              mounts: mounts, workdir: workspace ?? "/")

@@ -61,6 +61,30 @@ struct SandboxSessionManagerTests {
         #expect(await m.hasSession(id))
     }
 
+    /// A create that failed can still have left a container behind — it has a ceiling now, and a
+    /// create killed at it may go on to finish daemon-side. The name is a pure function of the
+    /// conversation, so anything left under it would fail every later command in that conversation
+    /// with "already exists" until the next launch sweeps it.
+    @Test("a failed create is swept up, and the next command can still start a container")
+    func failedCreateRemovesWhatItMayHaveLeft() async {
+        let rt = MockRuntime()
+        let m = mgr(rt)
+        let id = UUID()
+        rt.nextCreateError = ContainerRuntimeError.timedOut(elapsedSeconds: 1_200.4)
+
+        let first = await m.run(command: "a", conversationId: id, workspace: "/ws")
+
+        #expect(first.hasPrefix("Error:"))
+        #expect(rt.removedNames == ["\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())"],
+                "the name the create was given, removed exactly once")
+        #expect(!(await m.hasSession(id)))
+
+        // And the conversation is not poisoned: the next command creates and runs.
+        let second = await m.run(command: "b", conversationId: id, workspace: "/ws")
+        #expect(second == "ok")
+        #expect(rt.createdCount == 1, "one container, built by the second command")
+    }
+
     @Test("concurrent first commands still create exactly one container")
     func concurrentCreateOnce() async {
         let rt = MockRuntime()
