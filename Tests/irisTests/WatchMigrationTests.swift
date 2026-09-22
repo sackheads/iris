@@ -84,6 +84,41 @@ struct WatchMigrationTests {
         #expect(expected != link.path, "the symlinked spelling is not the canonical one")
     }
 
+    @Test("v11 leaves a row whose root is already canonical byte for byte")
+    func v11LeavesACanonicalRowUntouched() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("iris-v11-canon-\(UUID().uuidString)")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let canonical = try #require(WatchRoot.canonical(dir.path))
+        // Keys deliberately not in sorted order and no `ignore` key: the row must still not be
+        // touched. Nor must the second row, whose stored window is out of range — the clamp is a
+        // read-time rule, not something a data migration writes back.
+        let stored = #"{"watch":{"quietWindowSeconds":3,"path":"\#(canonical)"},"kind":"fsEvent"}"#
+        let wild = #"{"kind":"fsEvent","watch":{"path":"\#(canonical)","quietWindowSeconds":9000}}"#
+        let queue = try v10Database()
+        try queue.write { db in
+            try insertJob(db, id: UUID(), name: "canon", kind: "fsEvent", trigger: stored)
+            try insertJob(db, id: UUID(), name: "wild", kind: "fsEvent", trigger: wild)
+        }
+
+        try ConversationStore.migrator.migrate(queue)
+
+        let after = try queue.read { db in
+            try Row.fetchAll(db, sql: "SELECT name, trigger FROM jobs ORDER BY name")
+                .map { (String.fromDatabaseValue($0["name"]), String.fromDatabaseValue($0["trigger"])) }
+        }
+        #expect(after.map(\.0) == ["canon", "wild"])
+        #expect(after.map(\.1) == [stored, wild])
+        // The out-of-range window still reads back clamped; the row on disk is just not rewritten.
+        let ledger = JobLedger(writer: queue)
+        let windows = try ledger.jobs().compactMap { job -> Int? in
+            guard case .fsEvent(let watch) = job.trigger else { return nil }
+            return watch.quietWindowSeconds
+        }
+        #expect(windows.sorted() == [3, 300])
+    }
+
     @Test("v11 leaves a root that no longer exists as it was stored")
     func v11LeavesAMissingRootAsStored() throws {
         let gone = "/tmp/iris-v11-missing-\(UUID().uuidString)/notes"

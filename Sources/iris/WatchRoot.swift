@@ -17,6 +17,12 @@ enum WatchRoot {
     /// and the launch check pauses the job. Guessing a canonical form for a path nobody can stat
     /// would hide all three.
     ///
+    /// Resolution is lexical first: `..` is removed textually before symlinks are resolved, so
+    /// `/tmp/link/../notes` lands on `link`'s *parent*, not on the parent of what `link` points at,
+    /// and it is that path the existence check is run against. `IrisPaths.canonicalPath` has always
+    /// behaved this way and the two must agree, so this is consistency rather than a choice; a
+    /// caller that refuses roots should know the `..` in an argument was resolved on the spelling.
+    ///
     /// - Parameter fileExists: the existence check, injectable so a test can decide the answer
     ///   without a directory on disk.
     static func canonical(_ raw: String,
