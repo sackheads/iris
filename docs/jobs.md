@@ -207,10 +207,17 @@ it is fenced in:
   job that goes quiet with nobody to notice;
 - its mounts are **always read-only**, whatever was written, and each one is checked when the job is
   created: an absolute path, no commas, and an existing directory (a single file cannot be mounted
-  — give its directory);
+  — give its directory). Neither `/` nor Iris's own `config/` and `plugins/` can be one, however
+  they are spelled;
+- a mount is recorded as the directory it **resolves to**, not the name it was given: `..` is
+  removed and symlinks are followed, so what you are shown at creation is what will actually be
+  read. The same check runs on every tick — a source that has since been pointed somewhere else,
+  or is no longer a directory, is a gate failure and nothing is started;
 - it is reviewed once, at creation, by Vibecop, with the ordinary approval dialog for anything
-  Vibecop escalates or cannot answer. That review is the last time a human sees it, which is why
-  the sandbox, the read-only mounts and the timeout are not negotiable.
+  Vibecop escalates or cannot answer. Both are shown the same thing: the script, every mount as
+  `source → target, read-only`, and the timeout — the mounts are the standing permission being
+  granted, and the script is only what is done with them. That review is the last time a human sees
+  it, which is why the sandbox, the read-only mounts and the timeout are not negotiable.
 
 What each answer costs:
 
@@ -218,7 +225,7 @@ What each answer costs:
 | --- | --- |
 | changed | The job runs, and the signal is recorded on that run's row |
 | nothing changed | A `completed` row with the outcome `gate: no change`, and **no card** — cards are for things that happened, and a five-minute poll would otherwise bury the Activity conversation. It costs no model turn and does not count towards the breaker |
-| it could not tell (a 404 or 5xx, a response with none of the three headers, a missing path, a non-zero exit, a timeout, or any other last line) | An `interrupted` row whose reason starts `gate error`. Three of those **in a row** pause the job with the reason `gate failing`, and that pause gets a card |
+| it could not tell (a 404 or 5xx, a response with none of the three headers, a missing path, a mount that has moved, a non-zero exit, a timeout, or any other last line — and a ledger Iris could not read the last signal out of) | An `interrupted` row whose reason starts `gate error`. Three of those **in a row** pause the job with the reason `gate failing`, and that pause gets a card |
 
 If a job's gate is ever changed — no tool does this today — the signals its runs recorded are
 dropped: a signal is a reading taken by one particular gate, and an ETag cannot answer for an
