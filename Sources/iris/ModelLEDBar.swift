@@ -104,9 +104,13 @@ struct ModelLED: View {
         case .error:
             // The error itself, not just "failed": a half-unzipped model directory and a truncated
             // gguf are the same LED and completely different fixes (#218).
+            //
+            // Deliberately does not say "installed": tier 3 reaches this state for cloud, Ollama
+            // and MLX too, where nothing was ever downloaded. The conversation notice carries the
+            // engine-specific remedy; a tooltip's job here is to name the error.
             let tier = tierNumber.map(String.init) ?? "?"
             let detail = failure.map { ": \($0)" } ?? ""
-            return "\(label) — model installed but failing; tier \(tier) is blocking output\(detail)"
+            return "\(label) — failing; tier \(tier) is blocking output rather than checking it\(detail)"
         }
     }
 }
@@ -172,14 +176,17 @@ struct ModelLEDBar: View {
 
     func tier2State(failure: String? = nil) -> ModelLED.LEDState {
         guard config.enableAdvancedPromptInjectionProtection else { return .off }
-        // Ahead of the provisioning switch and the download check: a tier that is installed and
-        // failing is blocking output right now, which outranks both "still downloading" and any
-        // answer about what is on disk (#218). `.off` still wins — a disabled tier blocks nothing,
-        // and a stale failure from before the user turned it off is not news.
-        if let failure, !failure.isEmpty { return .error }
+        // `.downloading` first, and only for *this* tier's model: the notice a failure posts tells
+        // the user to re-download, and showing `.error` while they are doing exactly that leaves
+        // the one action they were asked to take with no progress anywhere (#218 review). The
+        // failure returns if the next evaluation still fails once the download finishes.
         let d = ModelDownloader.shared
         let fn = ModelDownloader.resolvedFilename(for: config.promptGuardCoreMLModel)
         if d.isDownloading && d.currentDownloadName == fn { return .downloading }
+        // Otherwise a tier that is installed and failing is blocking output right now, which
+        // outranks any answer about what is on disk. `.off` still wins — a disabled tier blocks
+        // nothing, and a stale failure from before the user turned it off is not news.
+        if let failure, !failure.isEmpty { return .error }
         // Delegate to the same predicate the guard itself evaluates (#210, mirror of tier 3's
         // #202 fix round 4) instead of re-deriving "downloaded" here — the two must never drift
         // apart on what counts as provisioned.
@@ -198,10 +205,10 @@ struct ModelLEDBar: View {
 
     func tier3State(failure: String? = nil) -> ModelLED.LEDState {
         guard config.enableAdvancedPromptInjectionProtection else { return .off }
-        // Same precedence as tier 2 above, and for the same reason.
-        if let failure, !failure.isEmpty { return .error }
+        // Same precedence as tier 2 above, and for the same reasons.
         let d = ModelDownloader.shared
         if d.isDownloading && d.currentDownloadName == config.promptGuardModel { return .downloading }
+        if let failure, !failure.isEmpty { return .error }
         // Delegate to the same predicate the guard itself evaluates (#202 fix round 4) instead of
         // re-deriving "downloaded" via `ModelDownloader` here — the two must never drift apart on
         // what counts as provisioned.

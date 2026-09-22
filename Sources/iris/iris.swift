@@ -3242,6 +3242,11 @@ struct IrisApp: App {
         ShippedSkills.seedIfNeeded(.default)
         // Once, in the app, on the one `AppState` that exists here — never from `AppState.init`,
         // which a test suite runs hundreds of times (#218).
+        //
+        // `assumeIsolated` is safe *here* specifically: `App.init` is documented to run on the
+        // main thread, and this is a synchronous call in it. It is not a general escape hatch —
+        // the same construct trapped in #187's D3 PR B when it was reached from a non-isolated
+        // closure. If this moves anywhere else, it needs a real hop instead.
         MainActor.assumeIsolated { AppState.shared.installGuardHealthSink() }
         Task {
             await SandboxSessionManager.shared.reapOrphans()

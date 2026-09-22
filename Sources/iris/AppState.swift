@@ -1561,8 +1561,13 @@ class AppState {
     /// app has one `AppState` while the suite has hundreds — so the app installs it explicitly.
     func installGuardHealthSink() {
         GuardTierHealth.shared.announce = { [weak self] text in
-            guard let self, let target = self.selectedConversationId else { return }
+            guard let self else { return false }
+            // The selected conversation when there is one; otherwise Activity, which is where
+            // background runs already put their user-facing lines. A headless `--run-job` selects
+            // nothing, and "no selection" must not mean "swallow the warning".
+            let target = self.selectedConversationId ?? self.activityConversationId()
             self.appendLaunchNotice(text, to: target)
+            return true
         }
     }
 
