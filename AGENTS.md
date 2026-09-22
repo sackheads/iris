@@ -13,8 +13,25 @@ The primary provider abstraction supports Anthropic, Gemini, and OpenAI. Local i
 ```sh
 swift build                          # compile
 swift test                           # full suite
-swift test --filter MyTestSuite      # focused run
+scripts/test-filter.sh MyTestSuite   # focused run, guarded (see below)
 ```
+
+**`--filter` takes the TYPE name, and matching nothing looks exactly like passing.** It does not
+match the `@Suite`/`@Test` display string — and the display string is what the test output
+*prints*, so the obvious copy-paste selects nothing and still exits 0:
+
+```
+$ swift test --filter "Vibecop under headless auto-approve"
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.   # ← ran nothing, exit 0
+$ swift test --filter VibecopUnderAutoApproveTests
+✔ Test run with 5 tests in 1 suite passed after 0.220 seconds.
+```
+
+This matters because the standard way to tell a real failure from a parallel-suite race is to run
+the suite alone (Invariant 7). Filter by the printed name and the green proves nothing, while the
+conclusion drawn from it — "not a race" — is the opposite of the truth. `scripts/test-filter.sh`
+wraps `swift test --filter` and fails when the filter matched no tests; use it, and when citing a
+filtered run as evidence, quote the test count (#271).
 
 **Never mutate `ConfigManager.shared` in a test.** It is process-global and suites run in
 parallel, so mutating it races — and its setters persist, so a bad value used to outlive the process
@@ -125,6 +142,7 @@ docs/                     # design specs, plans, reviews, roadmaps
 ## Pre-commit checklist
 
 - [ ] `swift test` is green
+- [ ] If you cite a **filtered** run as evidence: it ran a non-zero number of tests, and you say how many. `--filter` matching nothing exits 0 (Invariant 7; see Build and test, #271)
 - [ ] If you added a field to a persisted `Codable` type: it uses `decodeIfPresent` (Invariant 1)
 - [ ] If you added or modified a tool with a credential prerequisite, a triggering command, or a lifecycle state: its declaration is gated on it rather than exposed unconditionally on plain turns (Invariant 6; see #144)
 - [ ] If you added or changed a tool parameter: `getTools()` schema and `execute()` handler are both updated
