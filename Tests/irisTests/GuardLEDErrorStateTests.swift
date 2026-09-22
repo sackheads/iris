@@ -90,16 +90,24 @@ struct GuardLEDErrorStateTests {
         #expect(said.count == 2, "a second spell is a second thing worth saying")
     }
 
-    @Test("the two tiers do not share a spell")
+    @Test("the two tiers do not share a spell, and each names itself")
     func tiersAreIndependent() {
         let health = GuardTierHealth()
+        var said: [String] = []
+        health.announce = { said.append($0) }
         health.recordTier2Failure("tier 2 is broken")
         #expect(health.tier2Failure != nil)
         #expect(health.tier3Failure == nil, "tier 3 is fine and must not be reported as failing")
+        // Separate stored properties make the halves above hard to get wrong. The notices are
+        // where a cross-wiring actually shows: tier 3 breaking must not be announced as tier 2,
+        // and clearing one tier must not silence the other's first notice.
         health.clearTier2()
         health.recordTier3Failure("tier 3 is broken")
         #expect(health.tier2Failure == nil)
         #expect(health.tier3Failure != nil)
+        #expect(said.count == 2, "each tier gets its own notice")
+        #expect(said[0].contains("tier-2"))
+        #expect(said[1].contains("tier-3"))
     }
 
     @Test("the notice says which tier, what it is doing, and the error")

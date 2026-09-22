@@ -15,9 +15,12 @@ import Foundation
 /// **Injectable rather than a bare singleton.** `InjectionGuard` is static and reached from
 /// everywhere, so the recorder has to outlive the call and cannot be a task-local. That makes it
 /// process-global state, which suites running in parallel race — the #237 / #250 family. Two
-/// things keep that from biting: a view or a test takes an instance (`ModelLEDBar(health:)`), so
-/// only a test that specifically exercises *recording* touches `shared`; and unlike a scoped guard
-/// model, a stray failure string changes no other suite's verdict — the blast radius is one LED.
+/// things keep that from biting. A view or a test takes an instance (`ModelLEDBar(health:)`), so
+/// nothing here needs the singleton to render or to assert. And the *sink* — the half that writes
+/// into a conversation — is installed by `IrisApp`, never by `AppState.init`: suites that drive a
+/// tier into `.error` on purpose (`InjectionGuardTests`, `GuardTestIsolationTests`) would
+/// otherwise persist a system message into whichever store happened to own the live `AppState`.
+/// What remains shared is a failure string, which changes no other suite's verdict.
 @MainActor @Observable final class GuardTierHealth {
     static let shared = GuardTierHealth()
 
@@ -50,18 +53,22 @@ import Foundation
     /// load a guard model when the app starts, so "in that state at startup" is not a state that
     /// exists yet. The first guarded output is the earliest honest moment to say it — and it is
     /// also the moment the user starts getting `[CONTENT BLOCKED …]` in place of their content.
+    /// The spell is marked announced only when something actually took the notice. The sink is
+    /// installed by the app, not by `AppState.init`, so there is a window at launch — and the
+    /// whole of any test run — where it is nil; marking the spell announced there would swallow
+    /// the first real notice for the rest of the spell.
     func recordTier2Failure(_ description: String) {
         tier2Failure = description
-        guard !tier2Announced else { return }
+        guard !tier2Announced, let announce else { return }
         tier2Announced = true
-        announce?(Self.notice(tier: 2, description: description))
+        announce(Self.notice(tier: 2, description: description))
     }
 
     func recordTier3Failure(_ description: String) {
         tier3Failure = description
-        guard !tier3Announced else { return }
+        guard !tier3Announced, let announce else { return }
         tier3Announced = true
-        announce?(Self.notice(tier: 3, description: description))
+        announce(Self.notice(tier: 3, description: description))
     }
 
     /// Names the tier, what it is doing about it, and the error — a notice that says a guard is
@@ -74,6 +81,13 @@ import Foundation
     }
 
     /// A tier that produced a verdict is working, whatever it said about the content.
+    ///
+    /// Known limit: nothing clears a failure when the user *changes* the guard model or toggles
+    /// protection off and on, so the LED can read red for a model that is no longer the one that
+    /// broke. It corrects itself on the next successful evaluation, which is the next guarded
+    /// output — every tool result, so seconds in practice. Qualifying the failure by model name
+    /// would close it properly and needs a model identifier threaded into both tier executors,
+    /// which is more surgery on a security path than a self-healing wrong colour is worth.
     func clearTier2() {
         tier2Failure = nil
         tier2Announced = false

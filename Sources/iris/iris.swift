@@ -3240,6 +3240,9 @@ struct IrisApp: App {
     init() {
         IrisMigrator.migrate(.default)
         ShippedSkills.seedIfNeeded(.default)
+        // Once, in the app, on the one `AppState` that exists here — never from `AppState.init`,
+        // which a test suite runs hundreds of times (#218).
+        MainActor.assumeIsolated { AppState.shared.installGuardHealthSink() }
         Task {
             await SandboxSessionManager.shared.reapOrphans()
             while true {

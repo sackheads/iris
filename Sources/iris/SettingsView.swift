@@ -61,8 +61,9 @@ struct SettingsView: View {
                     Toggle("Copy chats as Markdown (default)", isOn: $config.copyChatsAsMarkdown)
                         .help("If disabled, copies will default to plain text without markdown formatting.")
                     Toggle("Stream responses as they are generated", isOn: $config.streamResponses)
-                    Toggle("Show model activity LEDs", isOn: $config.showModelLEDs)
                         .help("Show Iris's reply while the model is still writing it. Turn off to receive whole replies.")
+                    Toggle("Show model activity LEDs", isOn: $config.showModelLEDs)
+                        .help("Show the row of model status lights above the message box. A guard model that is installed but failing still reports itself in the conversation with this off.")
                     Picker("Default emoji skin tone", selection: $config.defaultEmojiSkinTone) {
                         Text("Default 👋").tag(SkinTone.none.rawValue)
                         Text("Light 👋🏻").tag(SkinTone.light.rawValue)

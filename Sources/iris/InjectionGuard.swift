@@ -398,11 +398,14 @@ public struct InjectionGuard {
         let startTime = Date()
         do {
             let probability = try await CoreMLEvaluator.shared.evaluate(text: input)
+            let durationMs = Date().timeIntervalSince(startTime) * 1000
             // A tier that reached a verdict is working, whatever the verdict says about the
             // content (#218). Cleared here rather than on `.safe` alone: `.malicious` is the tier
             // doing its job, and leaving the LED red for it would be a lie about the model.
+            //
+            // *After* `durationMs` is taken: this hop waits on the main actor, and a latency
+            // sample that includes UI contention is not a measurement of the model.
             await MainActor.run { GuardTierHealth.shared.clearTier2() }
-            let durationMs = Date().timeIntervalSince(startTime) * 1000
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier2, modelName: "CoreML", durationMs: durationMs, success: true)
 
             if probability > 0.9 {
@@ -473,10 +476,11 @@ public struct InjectionGuard {
             """
             
             let response = try await engine.generate(prompt: prompt, jsonSchema: nil)
-            // As tier 2 above: the canary answered, so the model is fine — what it answered is a
-            // statement about the content, not about the model (#218).
-            await MainActor.run { GuardTierHealth.shared.clearTier3() }
             let durationMs = Date().timeIntervalSince(startTime) * 1000
+            // As tier 2 above: the canary answered, so the model is fine — what it answered is a
+            // statement about the content, not about the model (#218). Taken after `durationMs`
+            // for the same reason.
+            await MainActor.run { GuardTierHealth.shared.clearTier3() }
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier3, modelName: modelName, durationMs: durationMs, success: true)
             return (response.contains("SAFE") && !response.contains("MALICIOUS")) ? .safe : .malicious
         } catch {
