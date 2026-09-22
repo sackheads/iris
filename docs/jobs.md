@@ -243,10 +243,36 @@ unasked would spend the very turn the gate exists to save. `/jobs` shows a gated
 
 A background scheduler polls the jobs table for due jobs every 10 seconds, and once more right
 after the Mac wakes from sleep (`NSWorkspace.didWakeNotification`) so a job doesn't wait out the
-rest of the poll interval. A job that came due while the Mac was asleep — or otherwise missed one
-or more ticks — fires once when the scheduler next looks, and its next fire is computed fresh from
-that moment. It does not replay every tick it missed. At most three jobs start firing per tick;
-any others due in the same tick wait for the next one.
+rest of the poll interval.
+
+A job that came due while the Mac was asleep — or otherwise missed more than one cadence — is
+handled by its **catch-up policy**. The default is `coalesce`: it fires once when the scheduler
+next looks, its next fire is computed fresh from that moment, and it does not replay every tick
+it missed. A job that missed exactly one occurrence is an ordinary fire whatever its policy says;
+there is nothing to coalesce, skip or replay.
+
+| catch-up | what a job that fell behind does |
+| -------- | -------------------------------- |
+| `coalesce` (default) | one fire now, against the world as it is, rescheduled from now |
+| `skip` | no fire at all; the cadence jumps to the first occurrence still in the future |
+| `replay(cap)` | one fire per missed occurrence, up to `cap` (5 unless the job says otherwise) |
+
+`replay` runs the **most recent** `N` missed occurrences, oldest of those first — a job that slept
+through eight hours of quarter-hours wants the last five states of the world, not five from this
+morning. The older ones are dropped, and the first run of the burst says how many on its card:
+"27 earlier occurrences skipped". The fires are sequential, never side by side, and each one goes
+through the same admission an ordinary fire meets — so it asks the gate, and it counts against the
+breaker and the daily budgets. The burst therefore ends at the first refusal: if the breaker opens
+or a budget runs out on the second of five, the other three are abandoned and the job goes back on
+its ordinary cadence rather than spending the next tick being refused four more times.
+
+A job so far behind that catching up would mean stepping through more than 10,000 occurrences — a
+per-minute cadence and a fortnight with the app closed — coalesces instead. That is a restart, not
+a catch-up, and one fire against the present is what a restart wants.
+
+At most three fires start per tick, counting every job's, so one job's replay cannot crowd the
+loop out; what does not fit is still due and the next tick takes it, including the rest of a
+replay burst.
 
 A cadence that overlaps its own still-running fire is skipped rather than started a second time,
 and the skip is recorded as an `interrupted` run so `/jobs` can show it — unless the job's overlap

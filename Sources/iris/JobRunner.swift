@@ -224,9 +224,14 @@ actor JobRunner {
     /// that follows it does not change that answer — so `/jobs run` can say what happened instead
     /// of claiming a run that never started. `nil` means there was no job left to fire: the row was
     /// deleted out from under the trigger, or could not be read.
+    ///
+    /// `note` is what the scheduler's catch-up arithmetic wants said on this fire's card — "27
+    /// earlier occurrences skipped" (§5) — and belongs to the caller's fire alone: a held `queue`
+    /// fire taken afterwards stands in for a different one and carries nothing.
     @discardableResult
-    func fire(job: Job, origin: FireOrigin) async -> Admission? {
+    func fire(job: Job, origin: FireOrigin, note: String? = nil) async -> Admission? {
         var origin = origin
+        var note = note
         var decided: Admission?
         // A loop, not recursion: the `queue` policy can hand this straight back a trigger, and a
         // busy job would otherwise grow one stack frame per held fire.
@@ -324,7 +329,8 @@ actor JobRunner {
                 origin = .queued(from: held)
                 continue
             }
-            await run(job: current, origin: origin, limits: limits, gate: gate)
+            await run(job: current, origin: origin, limits: limits, gate: gate, note: note)
+            note = nil
             inFlight.remove(current.id)
 
             guard let held = takeQueuedFire(job: current) else { return decided }
@@ -617,7 +623,8 @@ actor JobRunner {
     /// to tell.
     ///
     /// Private: `fire` is the only way in, so nothing can start a run that skipped admission.
-    private func run(job: Job, origin: FireOrigin, limits: JobLimits, gate: GateContext? = nil) async {
+    private func run(job: Job, origin: FireOrigin, limits: JobLimits, gate: GateContext? = nil,
+                     note: String? = nil) async {
         let startedAt = now()
         let title = "\(job.name) · \(ISO8601DateFormatter().string(from: startedAt))"
         guard let conversationId = await openConversation(for: job, titled: title,
@@ -661,7 +668,7 @@ actor JobRunner {
         // ladder say so.
         if job.profile == .mutating, !sandboxAvailable() {
             await closeFailed(run: run, job: job, origin: origin, conversationId: conversationId,
-                              reason: Self.sandboxUnavailableReason, at: now())
+                              reason: Self.sandboxUnavailableReason, at: now(), note: note)
             return
         }
 
@@ -816,7 +823,8 @@ actor JobRunner {
                              blockedCall: blockedCall.map(EventCard.displayCopy),
                              vibecopVerdict: approval.verdict,
                              vibecopReason: approval.reason,
-                             approvalBlockedReason: approval.refusal)
+                             approvalBlockedReason: approval.refusal,
+                             catchUpNote: note)
         await closeSession(conversationId, status: card.statusText)
         await deliver(card, for: job)
     }
@@ -1217,7 +1225,7 @@ actor JobRunner {
     /// finished turn has (an outcome, a token count, a blocked call). Separate from
     /// `closeInterrupted`, which is not a failure and never retries.
     private func closeFailed(run: JobRun, job: Job, origin: FireOrigin, conversationId: UUID,
-                             reason: String, at finishedAt: Date) async {
+                             reason: String, at finishedAt: Date, note: String? = nil) async {
         if let state {
             await MainActor.run { _ = state.takeBackgroundDenials(for: conversationId) }
         }
@@ -1236,7 +1244,7 @@ actor JobRunner {
                              outcome: Self.cardOutcome(reason, retry: retry, now: finishedAt),
                              blockedTool: nil,
                              startedAt: run.startedAt, finishedAt: finishedAt, totalTokens: 0,
-                             transcriptConversationId: conversationId)
+                             transcriptConversationId: conversationId, catchUpNote: note)
         await closeSession(conversationId, status: card.statusText)
         await deliver(card, for: job)
     }
