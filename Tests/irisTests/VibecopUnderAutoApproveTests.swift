@@ -7,11 +7,13 @@ import Foundation
 /// With `vibecopUnderAutoApprove` the evaluation runs (and records its span) and the tool is
 /// approved regardless of the verdict: a benchmark measures the cost, it never blocks on it.
 @MainActor
-// #237 made the mock engine task-scoped, so that is no longer why this is serialized. It still
-// is, for a different global: these tests read span counts off `PerformanceProfiler.shared`.
-// Note that `.serialized` only orders tests WITHIN this suite — three other suites touch the
-// same profiler and run in parallel with it. See the follow-up issue.
-@Suite("Vibecop under headless auto-approve", .serialized)
+// Not serialized. The mock engine became task-scoped in #237, and the profiler was never a
+// reason (#250): `PerformanceProfiler`'s `active` map is keyed by the turn id `beginTurn` returns,
+// so `activeProfileForTesting(id)` reads this test's own profile and a concurrent suite's turn is
+// a different key. `ProfilerRecordTests.turnsAreIsolated` pins that. One process-global does
+// remain — `runnerSetsTheFlag` reaches `ScenarioRunner.warnedGuardsIgnored`, a write-once
+// main-actor static that only suppresses a duplicate log line and which nothing asserts on.
+@Suite("Vibecop under headless auto-approve")
 struct VibecopUnderAutoApproveTests {
     /// Answers every Vibecop prompt with a fixed decision and counts how often it was asked.
     private final class CountingVibecop: AuxiliaryInferenceEngine, @unchecked Sendable {

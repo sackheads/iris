@@ -14,7 +14,7 @@ import Foundation
 ///
 /// **Injectable rather than a bare singleton.** `InjectionGuard` is static and reached from
 /// everywhere, so the recorder has to outlive the call and cannot be a task-local. That makes it
-/// process-global state, which suites running in parallel race — the #237 / #250 family. Two
+/// process-global state, which suites running in parallel race — the #237 / #242 family. Two
 /// things keep that from biting. A view or a test takes an instance (`ModelLEDBar(health:)`), so
 /// nothing here needs the singleton to render or to assert. And the *sink* — the half that writes
 /// into a conversation — is installed by `IrisApp`, never by `AppState.init`: suites that drive a

@@ -6,6 +6,19 @@ import Foundation
 /// These records ride on the same task-local turn id as the buckets do.
 @Suite("PerformanceProfiler records")
 struct ProfilerRecordTests {
+    /// The argument for running profiler-touching suites unserialized (#250, #269) is that
+    /// `active` is keyed per turn. Pin it, so a refactor to a single current profile fails here
+    /// rather than silently reintroducing the race the doc comment says cannot happen.
+    @Test("two turns on one profiler cannot see each other's spans")
+    func turnsAreIsolated() {
+        let p = PerformanceProfiler()
+        let a = p.beginTurn(label: "a", source: "test")
+        let b = p.beginTurn(label: "b", source: "test")
+        p.recordSpan(turnID: a, name: "guard.tier2", durationMs: 1)
+        #expect(p.activeProfileForTesting(a)?.spans["guard.tier2"]?.count == 1)
+        #expect(p.activeProfileForTesting(b)?.spans["guard.tier2"] == nil)
+    }
+
     @Test("model calls, tool calls and spans attribute to the active turn")
     func attributesToTurn() {
         let p = PerformanceProfiler()
