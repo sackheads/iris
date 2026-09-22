@@ -256,6 +256,8 @@ public final class PerformanceProfiler: ObservableObject, @unchecked Sendable {
     /// lands under a different key and cannot be seen here. Only a read that is not keyed by an id
     /// the caller owns — `recentCommands`, `activeCountForTesting` — needs its own instance, and
     /// the suites that assert on those construct one (`PerformanceProfiler()` is not private).
+    /// Note that the global `measure*` helpers always write to `.shared`, so an own instance only
+    /// isolates direct `record`/`recordSpan` calls, not code exercised through those.
     func activeProfileForTesting(_ id: UUID) -> CommandProfile? {
         lock.lock(); defer { lock.unlock() }
         return active[id]
