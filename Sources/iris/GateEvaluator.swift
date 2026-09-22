@@ -3,9 +3,11 @@ import CryptoKit
 
 /// What one look at a `Gate` decided (#187 deliverable 3, spec §7).
 ///
-/// `signal` is what the gate saw — an ETag, an mtime and a hash, a digest of a script's output —
-/// recorded on the run's row (`job_runs.gateSignal`) and handed back as `previous` the next time
-/// the same gate is asked. `.error` is neither verdict: three of them in a row pause the job
+/// `signal` is what the gate saw — a digest of a URL's validators, an mtime and a hash, a digest of
+/// a script's output — recorded on the run's row (`job_runs.gateSignal`). For the two built-ins it
+/// is handed back as `previous` the next time the same gate is asked, and the comparison *is* the
+/// verdict. A script gate's signal is a record only: the script does its own comparing and answers
+/// with a token, so nothing ever reads its signal back. `.error` is neither verdict: three of them in a row pause the job
 /// (`JobRunner.gateFailingReason`), because a gate nobody can evaluate is a job that is either
 /// running for no reason or silently never running, and both need a person.
 enum GateResult: Equatable, Sendable {
@@ -45,6 +47,15 @@ enum GateEvaluator {
     /// cadence pays for, and a file this large that changed almost certainly changed its size or
     /// its mtime too.
     static let hashSizeLimit = 64 * 1_024 * 1_024
+    /// The ceiling on starting a gate's container. `createDetached` is deliberately unbounded
+    /// (R27: a cold image pull is legitimately minutes), which is the right call for a person
+    /// waiting at a keyboard and the wrong one here: this is an unattended, repeating caller, and
+    /// an await with no bound inside a job's in-flight mark is a job that goes quiet forever —
+    /// every later tick dropped as an overlap, no row, no card, and the three-error pause never
+    /// reached. Generous, because a legitimate pull is slow; finite, because nobody is watching.
+    static let createCeilingSeconds = 300
+    /// The longest the one line of somebody else's output that a gate error quotes may be.
+    static let detailLimit = 160
 
     /// What a script gate is told when the VM it must run in is not there (R28). A gate script
     /// never falls back to the host: it is model-written code that runs unattended forever, and
@@ -57,10 +68,15 @@ enum GateEvaluator {
     /// `runtime` is `nil` when the sandbox is not resolvable right now — the runtime is not
     /// installed, or sandboxing is switched off. Only a script gate cares, and it answers
     /// `.error`; the built-ins read the host and never needed it.
+    /// `image` and `createCeilingSeconds` are the script gate's alone — `nil` resolves the
+    /// configured sandbox image when, and only when, a script gate is what is being asked. A
+    /// default argument is evaluated at every call site that omits it, and a URL gate has no
+    /// business constructing a `ConfigManager`.
     static func evaluate(_ gate: Gate, previous: String?, runtime: (any ContainerRuntime)?,
                          http session: URLSession = .shared,
                          fileManager: FileManager = .default,
-                         image: String = ConfigManager.shared.sandboxImage) async -> GateResult {
+                         image: String? = nil,
+                         createCeilingSeconds: Int = GateEvaluator.createCeilingSeconds) async -> GateResult {
         switch gate {
         case .urlChanged(let url):
             return await evaluateURL(url, previous: previous, session: session)
@@ -68,7 +84,9 @@ enum GateEvaluator {
             return evaluatePath(path, previous: previous, fileManager: fileManager)
         case .script(let command, let mounts, let timeoutSeconds):
             return await evaluateScript(command, mounts: mounts, timeoutSeconds: timeoutSeconds,
-                                        runtime: runtime, image: image)
+                                        runtime: runtime,
+                                        image: image ?? ConfigManager.shared.sandboxImage,
+                                        createCeiling: createCeilingSeconds)
         }
     }
 
@@ -82,8 +100,11 @@ enum GateEvaluator {
     // MARK: urlChanged
 
     /// The three headers that say "this is the same document": whichever the server actually
-    /// sends, joined in a fixed order so the signal is stable across ticks.
+    /// sends, in a fixed order so the signal is stable across ticks.
     static let urlValidators = ["ETag", "Last-Modified", "Content-Length"]
+
+    /// What a URL gate that cannot work against this server tells whoever reads the pause.
+    static let tryAnotherGate = "use gate_path or gate_script instead"
 
     private static func evaluateURL(_ url: String, previous: String?, session: URLSession) async -> GateResult {
         guard let parsed = URL(string: url), let scheme = parsed.scheme?.lowercased(),
@@ -101,19 +122,34 @@ enum GateEvaluator {
                 return .error("HEAD \(url) did not answer with HTTP")
             }
             guard (200..<300).contains(http.statusCode) else {
-                return .error("HEAD \(url) answered \(http.statusCode)")
+                // 405 gets its own advice: the document may be perfectly fine, and the server
+                // simply will not answer the request this gate is made of.
+                let hint = http.statusCode == 405
+                    ? " — that server does not answer HEAD requests; \(Self.tryAnotherGate)" : ""
+                return .error("HEAD \(url) answered \(http.statusCode)\(hint)")
             }
-            let fields = urlValidators.compactMap { name -> String? in
-                guard let value = http.value(forHTTPHeaderField: name)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
-                return "\(name.lowercased())=\(value)"
+            let present = urlValidators.filter { name in
+                !(http.value(forHTTPHeaderField: name)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty
             }
             // Not "unchanged": with no validator at all this gate can never answer, and a job that
             // silently never fires is worse news than one that says its gate is broken.
-            guard !fields.isEmpty else {
-                return .error("HEAD \(url) carried no ETag, Last-Modified or Content-Length to compare")
+            guard !present.isEmpty else {
+                return .error("HEAD \(url) carried no ETag, Last-Modified or Content-Length to compare; "
+                    + Self.tryAnotherGate)
             }
-            return verdict(signal: fields.joined(separator: "; "), previous: previous)
+            // The *values* are hashed rather than stored. They are arbitrary text chosen by a
+            // remote server, and this column is read back into a model's context by `get_job_run`
+            // and into a person's `/jobs` by the ledger. A hash answers the only question the
+            // signal is ever asked — "is this the same document?" — is bounded, and cannot carry
+            // an instruction. Which validators were present is our own vocabulary, so it stays
+            // legible: "the ETag stopped being sent" is a real diagnosis.
+            let joined = urlValidators.compactMap { name in
+                http.value(forHTTPHeaderField: name).map { "\(name.lowercased())=\($0)" }
+            }.joined(separator: "\n")
+            let signal = "validators=\(present.map { $0.lowercased() }.joined(separator: ","))"
+                + "; sha256=" + hex(SHA256.hash(data: Data(joined.utf8)))
+            return verdict(signal: signal, previous: previous)
         } catch {
             return .error("HEAD \(url) failed: \(error.localizedDescription)")
         }
@@ -189,15 +225,26 @@ enum GateEvaluator {
     static let changedToken = "CHANGED"
     static let unchangedToken = "UNCHANGED"
 
+    /// A create that outlived `createCeilingSeconds`. Its own type so the catch below can tell it
+    /// from anything the runtime itself threw.
+    private struct CreateTimedOut: Error {}
+
     private static func evaluateScript(_ command: String, mounts: [String], timeoutSeconds: Int,
-                                       runtime: (any ContainerRuntime)?, image: String) async -> GateResult {
+                                       runtime: (any ContainerRuntime)?, image: String,
+                                       createCeiling: Int) async -> GateResult {
         // R28, and the reason this parameter is optional at all.
         guard let runtime else { return .error(sandboxUnavailableDetail) }
         let seconds = clampedTimeout(timeoutSeconds)
         let name = "\(SandboxSessionManager.namePrefix)gate-\(UUID().uuidString.lowercased())"
         do {
-            try await runtime.createDetached(name: name, image: image,
-                                             mounts: readOnly(mounts), workdir: workdir)
+            try await createWithinCeiling(runtime, name: name, image: image,
+                                          mounts: readOnly(mounts), seconds: createCeiling)
+        } catch is CreateTimedOut {
+            // Not a hang: a bounded failure that lands on the ordinary error path, so it is
+            // counted towards the three-error pause and somebody is eventually told. The remove
+            // is the same best-effort sweep a failed create gets.
+            await runtime.remove(name: name)
+            return .error("the gate's container could not be started within \(createCeiling) seconds")
         } catch {
             // Remove anyway: a create that failed part way through can still have left a container
             // behind, and the next tick would collide with nothing but the daemon's opinion of it.
@@ -221,13 +268,38 @@ enum GateEvaluator {
         return result
     }
 
+    /// `createDetached` with a deadline on it.
+    ///
+    /// A race in a task group rather than a `withTimeout` helper that walks away: losing the race
+    /// cancels the create, and `CLIProcessRunner` answers cancellation with its kill ladder, so the
+    /// CLI child is signalled rather than left running. The group awaits the cancelled child before
+    /// this returns, which is what makes "the gate did not start a container" true rather than
+    /// hopeful.
+    private static func createWithinCeiling(_ runtime: any ContainerRuntime, name: String,
+                                            image: String, mounts: [String], seconds: Int) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await runtime.createDetached(name: name, image: image, mounts: mounts,
+                                                 workdir: workdir)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(max(1, seconds)) * 1_000_000_000)
+                throw CreateTimedOut()
+            }
+            defer { group.cancelAll() }
+            // The first to finish decides; `cancelAll` above stops the other, and leaving the
+            // group's scope waits for it.
+            try await group.next()
+        }
+    }
+
     /// The verdict is the last line of stdout, never the exit code (spec §7): `diff -q` and
     /// `grep -q` disagree about what zero means, so any exit-code convention makes a plausible
     /// model-written gate fire every tick or never. A non-zero exit is still an error — the script
     /// did not get as far as an opinion — and so is any other last line.
     static func scriptVerdict(_ output: (stdout: String, stderr: String, exitCode: Int32)) -> GateResult {
         guard output.exitCode == 0 else {
-            let said = firstLine(of: output.stderr) ?? firstLine(of: output.stdout) ?? ""
+            let said = quoted(output.stderr) ?? quoted(output.stdout) ?? ""
             return .error("the gate script exited \(output.exitCode)\(said.isEmpty ? "" : ": \(said)")")
         }
         let lines = output.stdout.split(whereSeparator: \.isNewline)
@@ -242,7 +314,7 @@ enum GateEvaluator {
         case unchangedToken:
             return .unchanged(signal: signal)
         default:
-            return .error("the gate script's last line was '\(String(last.prefix(80)))', not \(changedToken) or \(unchangedToken)")
+            return .error("the gate script's last line was '\(quoted(last) ?? "")', not \(changedToken) or \(unchangedToken)")
         }
     }
 
@@ -255,7 +327,10 @@ enum GateEvaluator {
     /// at its inputs, and a writable mount would be model-written code with a durable handle on
     /// the user's disk, running unattended on a cadence forever.
     static func readOnly(_ mounts: [String]) -> [String] {
-        mounts.map { $0.hasSuffix(":ro") ? $0 : $0 + ":ro" }
+        // `ContainerMount`'s own test for the flag, not a `hasSuffix(":ro")` of our own: the two
+        // must agree about what "already read-only" means, or an entry could be appended to here
+        // and read differently there. This is the first caller that rewrites a user's entry.
+        mounts.map { ContainerMount.hasReadOnlyFlag($0) ? $0 : $0 + ":ro" }
     }
 
     /// Why `entry` cannot be a gate's mount, or `nil` when it can. Asked at creation, while there
@@ -292,9 +367,20 @@ enum GateEvaluator {
         }
     }
 
-    private static func firstLine(of text: String) -> String? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return String(trimmed.split(separator: "\n").first.map(String.init)?.prefix(200) ?? "")
+    /// One short, printable line of somebody else's output, safe to put in a sentence.
+    ///
+    /// A gate error's detail is the only part of it a script or a server wrote, and it is rendered
+    /// raw in `/jobs run`'s answer and stored on a ledger row. So: newlines and runs of whitespace
+    /// collapse to single spaces, control characters go, and the whole thing is capped. Not an
+    /// injection defence — the model-facing routes are guarded — a rendering one, so a script
+    /// cannot redraw somebody's terminal or bury the sentence it is quoted inside.
+    static func quoted(_ text: some StringProtocol) -> String? {
+        let collapsed = text.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }.joined(separator: " ")
+        let printable = String(String.UnicodeScalarView(
+            collapsed.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
+        return printable.isEmpty ? nil : String(printable.prefix(detailLimit))
     }
+
+    private static func firstLine(of text: String) -> String? { quoted(text) }
 }

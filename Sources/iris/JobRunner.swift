@@ -374,9 +374,28 @@ actor JobRunner {
         }
     }
 
-    /// Asks this job's gate, if it has one, and records what it said.
+    /// Whether this fire is one the gate gets a say in (R29). Only a **fresh cadence** fire.
+    ///
+    /// Everything else has already had the question answered for it. A retry re-runs work the gate
+    /// authorised a minute ago, and asking again would get "nothing has changed since the run that
+    /// failed" — the work would be dropped, the row would read `completed`, and the ladder would
+    /// sit at attempt 1 for ever, which is the retry silently disabled for exactly the jobs that
+    /// were gated to avoid wasted turns. A held `queue` re-fire stands in for a fire that was
+    /// admitted. And `/jobs run` is a person saying "run it now", which a gate does not get a vote
+    /// on; `--dry-run` is where someone asks what the gate thinks.
+    ///
+    /// Pure, so the table of origins can be read and tested without a fire.
+    static func gateApplies(origin: FireOrigin, job: Job) -> Bool {
+        guard case .cadence = origin else { return false }
+        return job.retryAttempt == 0
+    }
+
+    /// Asks this job's gate, if it has one and this fire is one it decides, and records what it
+    /// said.
     private func gateDecision(for job: Job, origin: FireOrigin, at: Date) async -> GateDecision {
-        guard let gate = job.trigger.gate else { return .proceed(nil) }
+        guard let gate = job.trigger.gate, Self.gateApplies(origin: origin, job: job) else {
+            return .proceed(nil)
+        }
         let previous: String?
         do {
             previous = try ledger.lastGateSignal(jobId: job.id)
@@ -386,12 +405,8 @@ actor JobRunner {
             // every tick a query happened to fail on.
             let reason = Self.unavailableReason(error)
             print("[JobRunner] not firing \(job.name): \(reason)")
-            do {
-                try Self.recordStillborn(job: job, ledger: ledger, reason: reason,
-                                         triggerKind: origin.triggerKind, now: at)
-            } catch {
-                print("[JobRunner] could not record the skipped fire for \(job.name): \(error)")
-            }
+            await recordGateRow(job: job, origin: origin, at: at, status: .interrupted,
+                                outcome: nil, reason: reason, signal: nil)
             return .refuse(.dropUnavailable(reason: reason))
         }
 
@@ -399,7 +414,7 @@ actor JobRunner {
         case .changed(let signal, let payload):
             return .proceed(GateContext(signal: signal, payload: payload))
         case .unchanged(let signal):
-            recordGateSkip(job: job, origin: origin, signal: signal, at: at)
+            await recordGateSkip(job: job, origin: origin, signal: signal, at: at)
             return .refuse(.gateUnchanged)
         case .error(let detail):
             return .refuse(await noteGateError(detail, job: job, origin: origin, at: at))
@@ -411,18 +426,39 @@ actor JobRunner {
     /// it saw, with no transcript (so the breaker counts it as the non-event it is) and no card:
     /// cards are for things that happened, and a quiet job checked every five minutes would
     /// otherwise bury the Activity conversation (§11 ruling 4).
-    private func recordGateSkip(job: Job, origin: FireOrigin, signal: String, at: Date) {
+    private func recordGateSkip(job: Job, origin: FireOrigin, signal: String, at: Date) async {
+        await recordGateRow(job: job, origin: origin, at: at, status: .completed,
+                            outcome: Self.gateUnchangedOutcome, reason: nil, signal: signal)
+    }
+
+    /// Every row the gate path writes goes through here, and every one of them then goes through
+    /// `apply` (R29). The rows are stillborn — begun and finished at the same instant, with no
+    /// transcript, so `runsStarted` and the breaker read them as the non-events they are — but a
+    /// gated job's ladder bookkeeping has to be identical to an ungated one's, and the way to
+    /// guarantee that is for no gate-path row to be written anywhere else. Today `apply` is a
+    /// no-op on all of them (the gate is only consulted at attempt 0, and neither `completed` nor
+    /// `interrupted` starts a ladder); it is here so that stays true when `gateApplies` changes.
+    ///
+    /// The pause on the third error is the exception, and deliberately so: it goes through
+    /// `pause`, which is the one writer of a pause row, the same as the breaker's and the budget's.
+    private func recordGateRow(job: Job, origin: FireOrigin, at: Date, status: JobRun.Status,
+                               outcome: String?, reason: String?, signal: String?) async {
         do {
             let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: origin.triggerKind,
-                             startedAt: at)
+                             startedAt: at, status: status)
             try ledger.begin(run: run)
-            try ledger.setGateSignal(runId: run.id, signal)
-            try ledger.finish(runId: run.id, status: .completed, outcome: Self.gateUnchangedOutcome,
-                              failureReason: nil, blockedTool: nil, tokens: TokenUsage(),
+            if let signal { try ledger.setGateSignal(runId: run.id, signal) }
+            try ledger.finish(runId: run.id, status: status, outcome: outcome,
+                              failureReason: reason, blockedTool: nil, tokens: TokenUsage(),
                               finishedAt: at)
         } catch {
-            print("[JobRunner] could not record the quiet tick for \(job.name): \(error)")
+            print("[JobRunner] could not record the gate's answer for \(job.name): \(error)")
         }
+        await apply(Self.retryDecision(status: status, attempt: job.retryAttempt,
+                                       retryEnabled: job.policy.retry,
+                                       watcherFire: Self.isPathDriven(origin: origin, job: job),
+                                       now: at),
+                    job: job, status: status)
     }
 
     /// Records a gate that could not answer, and pauses the job on the third in a row (§7).
@@ -444,12 +480,8 @@ actor JobRunner {
             await pause(job: job, origin: origin, reason: Self.gateFailingReason, at: at)
             return .gateError(detail: detail, paused: true)
         }
-        do {
-            try Self.recordStillborn(job: job, ledger: ledger, reason: Self.gateErrorReason(detail),
-                                     triggerKind: origin.triggerKind, now: at)
-        } catch {
-            print("[JobRunner] could not record the gate error for \(job.name): \(error)")
-        }
+        await recordGateRow(job: job, origin: origin, at: at, status: .interrupted, outcome: nil,
+                            reason: Self.gateErrorReason(detail), signal: nil)
         return .gateError(detail: detail, paused: false)
     }
 

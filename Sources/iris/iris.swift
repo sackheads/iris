@@ -1861,7 +1861,13 @@ actor IrisEngine {
     /// The `schedule_job` handler. Every exit is one of the tool's sentences: a raw
     /// `ScheduleAlias.Failure` or a Swift error description would read to the model as noise it
     /// cannot act on.
-    private func scheduleJob(_ parsed: Result<ScheduleJobArguments, ToolMessage>, conversationId: UUID?) async -> String {
+    /// `review` is the gate-script review, injectable so a test can drive a `DENY` (and count the
+    /// dialogs) without a local model; production passes `nil` and gets `gateScriptReview`.
+    /// `sandboxAvailable` is `makeJob`'s own default, hoisted into the signature for the same
+    /// reason: whether this Mac has the VM today is not something a test can arrange.
+    func scheduleJob(_ parsed: Result<ScheduleJobArguments, ToolMessage>, conversationId: UUID?,
+                     review: GateScriptReview? = nil,
+                     sandboxAvailable: Bool = SandboxPolicy.mutatingJobCanRun()) async -> String {
         let args: ScheduleJobArguments
         switch parsed {
         case .failure(let message): return message.text
@@ -1884,15 +1890,17 @@ actor IrisEngine {
         // One retry under the next suffix is enough to absorb that; a second failure is real.
         for _ in 0..<2 {
             switch args.makeJob(defaultTimeZone: TimeZone.current.identifier,
-                                createdIn: conversationId, existingNames: taken) {
+                                createdIn: conversationId, existingNames: taken,
+                                sandboxAvailable: sandboxAvailable) {
             case .failure(let message):
                 return message.text
             case .success(let job):
                 // §7: the one review model-written gate code ever gets, taken before anything is
                 // stored and while the person who asked for it is still in the conversation.
                 if case .script(let command, _, _) = job.trigger.gate, !reviewedScript {
-                    if case .failure(let message) = await Self.gateScriptReview(
-                        state: state, conversationId: conversationId).review(command) {
+                    let reviewer = review ?? Self.gateScriptReview(state: state,
+                                                                   conversationId: conversationId)
+                    if case .failure(let message) = await reviewer.review(command) {
                         return message.text
                     }
                     reviewedScript = true
@@ -2428,8 +2436,14 @@ actor IrisEngine {
                         let outcome = await guardedJobRunField(run.outcome, maxTier: .tier1_structural)
                         let failureReason = await guardedJobRunField(run.failureReason,
                                                                      maxTier: .tier1_structural)
+                        // The gate signal too: a URL gate's is derived from headers a remote server
+                        // chose, and a path gate's carries a filesystem path. The signal is
+                        // structurally bounded at the source (a hash, not the header text), and
+                        // this is the belt to that pair of braces.
+                        let gateSignal = await guardedJobRunField(run.gateSignal,
+                                                                  maxTier: .tier1_structural)
                         result = Self.jobRunJSON(run, outcome: outcome, failureReason: failureReason,
-                                                 lastAgentMessage: message)
+                                                 gateSignal: gateSignal, lastAgentMessage: message)
                     }
                 } catch {
                     result = "Could not read the run: \(error)."
@@ -3137,7 +3151,7 @@ extension IrisEngine {
 
     /// `get_job_run`'s body: the ledger's columns, plus the transcript's last agent message when
     /// there still is a transcript. `outcome`, `failureReason` and the message are the fields a
-    /// model wrote rather than the harness, so the caller hands all three in already guarded.
+    /// model wrote rather than the harness, so the caller hands all four in already guarded.
     ///
     /// The one column deliberately left out is the blocked call itself (#187 §6): its arguments
     /// are a previous run's model output in full — a command, a file body — and putting them here
@@ -3145,7 +3159,7 @@ extension IrisEngine {
     /// what was refused, which is what a question about the run is actually asking; the whole call
     /// is for the person reading the card.
     nonisolated static func jobRunJSON(_ run: JobRun, outcome: String?, failureReason: String?,
-                                       lastAgentMessage: String?) -> String {
+                                       gateSignal: String?, lastAgentMessage: String?) -> String {
         let iso = ISO8601DateFormatter()
         let row: [String: Any] = [
             "id": run.id.uuidString,
@@ -3162,7 +3176,7 @@ extension IrisEngine {
             "candidateTokens": run.candidateTokens,
             "totalTokens": run.totalTokens,
             "costMicros": run.costMicros ?? NSNull(),
-            "gateSignal": run.gateSignal ?? NSNull(),
+            "gateSignal": gateSignal ?? NSNull(),
             "transcriptConversationId": run.transcriptConversationId?.uuidString ?? NSNull(),
             "acknowledgedAt": run.acknowledgedAt.map { iso.string(from: $0) } ?? NSNull(),
             "approvedAt": run.approvedAt.map { iso.string(from: $0) } ?? NSNull(),

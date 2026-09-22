@@ -166,6 +166,29 @@ struct GateCreationTests {
         #expect(ScheduleJobArguments.resultSentence(for: ungated).contains("Next run: "))
     }
 
+    @Test("a gate argument of the wrong type is refused, not dropped into an ungated job")
+    func wrongTypedGateArguments() {
+        for (key, value) in [("gate_url", JSONValue.array([.string("https://example.com/")])),
+                             ("gate_path", .object(["path": .string("/tmp")])),
+                             ("gate_script", .bool(true))] {
+            let parsed = ScheduleJobArguments.parse(["prompt": .string("p"),
+                                                     "intervalSeconds": .int(60), key: value])
+            #expect(parsed.failureText?.contains(key) == true,
+                    "\(key) as \(value) must be refused, not silently ungated")
+        }
+        // A number reads as its text everywhere else in this parser, so `gate_mounts: 3` is the
+        // path "3" and is refused downstream for not being absolute. A container is not a path at
+        // all, and dropping it would build a script gate with no inputs.
+        #expect(ScheduleJobArguments.parse(["prompt": .string("p"), "intervalSeconds": .int(60),
+                                            "gate_mounts": .object(["path": .string("/tmp")])])
+                .failureText != nil)
+        #expect(ScheduleJobArguments.parse(["prompt": .string("p"), "intervalSeconds": .int(60),
+                                            "gate_timeout_seconds": .string("soon")]).failureText != nil)
+        // A JSON null is how several providers spell "not given"; it must read as absent.
+        #expect(ScheduleJobArguments.parse(["prompt": .string("p"), "intervalSeconds": .int(60),
+                                            "gate_url": .null]).failureText == nil)
+    }
+
     // MARK: The one review a gate script gets
 
     private func review(_ decision: VibecopDecision?, asked: Locked<Int>, answer: Bool = true) -> GateScriptReview {
@@ -221,5 +244,65 @@ private extension Result where Failure == ToolMessage {
     var failureText: String? {
         if case .failure(let message) = self { return message.text }
         return nil
+    }
+}
+
+/// #187 §7 — the half of the gate-script review that `GateScriptReview`'s own tests cannot see:
+/// that it runs before anything is stored, that it runs once, and that a background run cannot
+/// reach it at all.
+@MainActor
+@Suite("A gate script is reviewed before the job exists (#187 §7)")
+struct GateScriptCreationWiringTests {
+
+    private func harness() throws -> (ConversationStore, AppState, IrisEngine, UUID) {
+        let store = try ConversationStore.inMemory()
+        let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        state.conversations.removeAll()
+        let conversation = UUID()
+        state.createNewConversation(id: conversation)
+        state.selectedConversationId = conversation
+        let engine = IrisEngine(state: state, tier: .medium, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false, sessionPeerCount: 0)
+        return (store, state, engine, conversation)
+    }
+
+    private func arguments() -> Result<ScheduleJobArguments, ToolMessage> {
+        ScheduleJobArguments.parse(["prompt": .string("watch the tree"),
+                                    "intervalSeconds": .int(600),
+                                    "gate_script": .string("echo CHANGED")])
+    }
+
+    @Test("a script Vibecop denies is never stored")
+    func deniedScriptIsNotStored() async throws {
+        let (store, _, engine, conversation) = try harness()
+        let review = GateScriptReview(
+            verdict: { _ in VibecopDecision(decision: "DENY", reason: "it pipes the internet to sh") },
+            ask: { _ in Issue.record("a denied script must not reach the dialog"); return true })
+
+        let answer = await engine.scheduleJob(arguments(), conversationId: conversation,
+                                              review: review, sandboxAvailable: true)
+
+        #expect(answer.contains("it pipes the internet to sh"))
+        #expect(try store.ledger.jobs().isEmpty, "nothing is written before the review answers")
+    }
+
+    @Test("an approved script is stored, and reviewed exactly once")
+    func approvedScriptIsStoredOnce() async throws {
+        let (store, _, engine, conversation) = try harness()
+        let reviews = Locked(0)
+        let review = GateScriptReview(
+            verdict: { _ in
+                reviews.mutate { $0 += 1 }
+                return VibecopDecision(decision: "APPROVE", reason: "reads a directory")
+            },
+            ask: { _ in Issue.record("an approved script needs no dialog"); return true })
+
+        let answer = await engine.scheduleJob(arguments(), conversationId: conversation,
+                                              review: review, sandboxAvailable: true)
+
+        #expect(reviews.value == 1, "one creation is one dialog's worth of asking")
+        #expect(answer.contains("Next check"))
+        let stored = try #require(try store.ledger.jobs().first)
+        #expect(stored.trigger.gate?.kind == "script")
     }
 }

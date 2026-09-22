@@ -114,6 +114,16 @@ enum Gate: Codable, Equatable, Sendable {
         }
     }
 
+    /// One word for a job listing: what this gate looks at. Not `kind`, which is the stored
+    /// discriminator and must not change to suit a table.
+    var summary: String {
+        switch self {
+        case .urlChanged: return "url"
+        case .pathChanged: return "path"
+        case .script: return "script"
+        }
+    }
+
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(kind, forKey: .kind)
@@ -261,11 +271,14 @@ enum Trigger: Codable, Equatable, Sendable {
         case .fsEvent(let watch):
             return "watch \(watch.path)"
         case .poll(let spec):
+            // The gate's kind, not just the cadence: "poll every 900 s" says how often this job
+            // *looks*, and someone asking why it has not run in a week needs to know that a check
+            // stands between the cadence and the work, and which one.
             switch spec.schedule {
             case .cron(let cron):
-                return "poll cron \(cron.expression) \(cron.timeZone)"
+                return "poll cron \(cron.expression) \(cron.timeZone) (\(spec.gate.summary) gate)"
             case .interval(let seconds):
-                return "poll every \(seconds) s"
+                return "poll every \(seconds) s (\(spec.gate.summary) gate)"
             }
         }
     }

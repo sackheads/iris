@@ -202,6 +202,9 @@ it is fenced in:
 - it runs **only** inside the `apple/container` VM, in a container created and removed around that
   one command, never on the host — with the runtime uninstalled or sandboxing switched off, the
   evaluation is a gate failure rather than a command on your Mac;
+- *starting* that container is bounded as well as running the script in it, so a daemon that never
+  answers shows up as a gate failure — and, after three, a paused job that says so — rather than a
+  job that goes quiet with nobody to notice;
 - its mounts are **always read-only**, whatever was written, and each one is checked when the job is
   created: an absolute path, no commas, and an existing directory (a single file cannot be mounted
   — give its directory);
@@ -220,6 +223,13 @@ What each answer costs:
 Editing a job's gate drops the signals its runs recorded: a signal is a reading taken by one
 particular gate, and an ETag cannot answer for an mtime. The new gate takes its own baseline on the
 next tick.
+
+**Only a fresh cadence tick asks the gate.** A retry after a failed run does not — it is re-running
+work the gate already authorised, and asking again would get "nothing has changed since the run
+that failed" and quietly drop it. Neither does a fire the `queue` policy held while the previous
+run finished, nor `/jobs run <name>`: a hand-started fire runs the job whatever the gate would have
+said, because you asked for it. `/jobs` shows a gated job's trigger as, for example, `poll every
+900 s (url gate)`, so a job that has been quiet for a week says why it might be.
 
 ## What happens on sleep
 

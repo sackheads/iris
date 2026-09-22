@@ -56,6 +56,21 @@ struct ScheduleJobArguments: Equatable, Sendable {
             cron: text(args["cron"]),
             timeZone: text(args["timezone"])
         )
+        // A `gate_*` that is not the type it should be is a refusal, not a drop. Dropping it
+        // creates an **ungated** job on the same cadence — the exact opposite of what was asked,
+        // running a turn every tick — and nothing in the answer would say so. Same reasoning as
+        // `weekdays`, where dropping an unreadable element would silently widen the schedule.
+        for key in ["gate_url", "gate_path", "gate_script"] where present(args[key]) {
+            guard text(args[key]) != nil else {
+                return .failure(ToolMessage("\(key) must be a non-empty string."))
+            }
+        }
+        if present(args["gate_mounts"]), stringList(args["gate_mounts"]) == nil {
+            return .failure("gate_mounts must be a directory path, or a list of them.")
+        }
+        if present(args["gate_timeout_seconds"]), integer(args["gate_timeout_seconds"]) == nil {
+            return .failure("gate_timeout_seconds must be a number of seconds.")
+        }
         return .success(ScheduleJobArguments(
             prompt: prompt, name: text(args["name"]), alias: alias, profile: text(args["profile"]),
             gateURL: text(args["gate_url"]), gatePath: text(args["gate_path"]),
@@ -269,6 +284,15 @@ struct ScheduleJobArguments: Equatable, Sendable {
         case .string(let string): return Int(string.trimmingCharacters(in: .whitespaces))
         default: return nil
         }
+    }
+
+    /// Whether the model sent this key at all. A JSON `null` reads as absent: it is how several
+    /// providers spell "no value", and refusing it as a wrong type would fail a call that asked
+    /// for nothing.
+    private static func present(_ value: JSONValue?) -> Bool {
+        guard let value else { return false }
+        if case .null = value { return false }
+        return true
     }
 
     /// A list of non-empty strings — `gate_mounts`. A model that sends one mount as a bare string

@@ -82,8 +82,10 @@ final class JobLedger: JobUsageReading, Sendable {
                     policyJSON, job.retryAttempt, job.queuedFire,
                 ])
             if let storedTrigger, Self.storedGate(storedTrigger) != job.trigger.gate {
-                // An unreadable stored trigger lands here too, and that is the safe direction: a
-                // signal nobody can vouch for is one run, not a job that never fires again.
+                // A stored trigger this build cannot read decodes as "no gate", so a job that
+                // *gains* one clears — the safe direction, since a signal nobody can vouch for
+                // costs one run rather than a gate that never fires. A job that had no gate and
+                // still has none clears nothing, because there is nothing to compare against.
                 try db.execute(sql: "UPDATE job_runs SET gateSignal = NULL WHERE jobId = ?",
                                arguments: [job.id.uuidString])
             }

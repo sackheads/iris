@@ -36,10 +36,19 @@ enum ContainerMount {
     /// What is not checked here, because only the daemon can answer it: the source must exist and
     /// be a directory. A single file cannot be mounted this way — mount its parent. That surfaces
     /// as a `createFailed` from the CLI.
+    /// Whether `entry` already ends in the read-only flag. Spelled once, because a caller that
+    /// *adds* `:ro` to an entry (a gate's inputs, `GateEvaluator.readOnly`) has to decide the same
+    /// question this parser does — two spellings would eventually disagree about an entry whose
+    /// target happens to be called `ro`.
+    static func hasReadOnlyFlag(_ entry: String) -> Bool {
+        let parts = entry.split(separator: ":", omittingEmptySubsequences: false)
+        return parts.count > 1 && parts.last == "ro"
+    }
+
     static func argument(for entry: String) throws -> String {
         var parts = entry.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
         var readOnly = false
-        if parts.count > 1, parts.last == "ro" {
+        if hasReadOnlyFlag(entry) {
             readOnly = true
             parts.removeLast()
         }

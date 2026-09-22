@@ -11,11 +11,17 @@ final class GateRuntime: ContainerRuntime, @unchecked Sendable {
     private(set) var execs: [(name: String, workdir: String, command: String, timeoutSeconds: Int?)] = []
     private(set) var removed: [String] = []
     var createError: Error?
+    /// How long `createDetached` takes before it answers. Cancellation-aware, like the real one's
+    /// kill ladder, so a caller that gives up on it is not waited out.
+    var createDelaySeconds: Double?
     var execError: Error?
     var execResult: (stdout: String, stderr: String, exitCode: Int32) = ("CHANGED", "", 0)
 
     func createDetached(name: String, image: String, mounts: [String], workdir: String) async throws {
         lock.withLock { creates.append((name, image, mounts, workdir)) }
+        if let createDelaySeconds {
+            try await Task.sleep(nanoseconds: UInt64(createDelaySeconds * 1_000_000_000))
+        }
         if let createError { throw createError }
     }
 
@@ -96,6 +102,10 @@ struct GateEvaluatorTests {
         }
         #expect(payload == nil, "a built-in gate has no payload to hand the run")
         #expect(first.methods.all == ["HEAD"], "a gate reads headers, never a body")
+        // The header VALUES are a remote server's text and this signal is read back into a model's
+        // context by `get_job_run`; it carries a hash of them, not the text.
+        #expect(!recorded.contains("aaa"))
+        #expect(recorded.contains("validators=etag,content-length"), "which ones were there is ours to say")
 
         let same = await GateEvaluator.evaluate(.urlChanged(url: "https://example.invalid/f"),
                                                 previous: recorded, runtime: nil, http: first.session)
@@ -348,6 +358,49 @@ struct GateEvaluatorTests {
         #expect(runtime.removedNames.count == 1, "and the half-made container is cleaned up")
     }
 
+    @Test("a server that refuses HEAD, or sends nothing to compare, says what to do instead")
+    func urlErrorsAreActionable() async throws {
+        let refusesHead = stub(405, [:])
+        defer { refusesHead.remove() }
+        guard case .error(let notAllowed) = await GateEvaluator.evaluate(
+            .urlChanged(url: "https://example.invalid/f"), previous: nil, runtime: nil,
+            http: refusesHead.session) else { Issue.record("405 is an error"); return }
+        #expect(notAllowed.contains(GateEvaluator.tryAnotherGate))
+
+        let bare = stub(200, [:])
+        defer { bare.remove() }
+        guard case .error(let nothing) = await GateEvaluator.evaluate(
+            .urlChanged(url: "https://example.invalid/f"), previous: nil, runtime: nil,
+            http: bare.session) else { Issue.record("no validators is an error"); return }
+        #expect(nothing.contains(GateEvaluator.tryAnotherGate))
+    }
+
+    @Test("a create that never answers is bounded, and nothing is left running")
+    func scriptCreateCeiling() async throws {
+        let runtime = GateRuntime()
+        runtime.createDelaySeconds = 30      // longer than any test would wait for
+        let started = Date()
+        let result = await GateEvaluator.evaluate(.script(command: "s", mounts: [], timeoutSeconds: 10),
+                                                  previous: nil, runtime: runtime, image: "i",
+                                                  createCeilingSeconds: 1)
+
+        guard case .error(let detail) = result else {
+            Issue.record("a wedged create is a gate error, not a wedged job: \(result)"); return
+        }
+        #expect(detail.contains("could not be started within"))
+        #expect(Date().timeIntervalSince(started) < 10, "and it answered at the ceiling, not at the create")
+        #expect(runtime.execCount == 0)
+        #expect(runtime.removedNames.count == 1, "the half-started container is swept")
+    }
+
+    @Test("a mount whose target is called /ro is still given the read-only flag")
+    func readOnlyIsNotASuffixMatch() {
+        #expect(GateEvaluator.readOnly(["/host/dir:/ro"]) == ["/host/dir:/ro:ro"])
+        #expect(GateEvaluator.readOnly(["/host/dir:ro"]) == ["/host/dir:ro"], "already flagged")
+        #expect(ContainerMount.hasReadOnlyFlag("/host/dir:/ro") == false)
+        #expect(ContainerMount.hasReadOnlyFlag("/host/dir:ro"))
+    }
+
     // MARK: mount validation
 
     @Test("a mount is checked before a job is created, not trusted")
@@ -529,6 +582,103 @@ struct JobGateAdmissionTests {
 
         #expect(try store.ledger.job(id: job.id)?.pausedReason == nil,
                 "three errors, but not three in a row")
+    }
+
+    // MARK: Which fires the gate decides (R29)
+
+    @Test("only a fresh cadence fire is the gate's to decide")
+    func gateApplicability() {
+        let fresh = polled()
+        var retrying = polled(); retrying.retryAttempt = 1
+        #expect(JobRunner.gateApplies(origin: .cadence(kind: "poll"), job: fresh))
+        #expect(!JobRunner.gateApplies(origin: .cadence(kind: "poll"), job: retrying),
+                "a retry re-runs work the gate already authorised")
+        #expect(!JobRunner.gateApplies(origin: .manual, job: fresh), "a person asked for this one")
+        #expect(!JobRunner.gateApplies(origin: .queued(from: .cadence(kind: "poll")), job: fresh),
+                "a held fire stands in for one that was already admitted")
+        #expect(!JobRunner.gateApplies(origin: .watcher(paths: ["/tmp/a"]), job: fresh))
+    }
+
+    @Test("a gated run that fails is retried, and the retry does the work")
+    func retryOfAGatedRunIsNotGated() async throws {
+        // The regression: the failed run stamps its signal, so a retry a minute later would ask
+        // the gate, hear "nothing has changed since the run that failed", write a `completed`
+        // "gate: no change" row and leave the ladder stuck at attempt 1 for ever.
+        let (store, state, engine, client) = try harness([textResponse(""), textResponse("done")])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let job = polled()
+        try store.ledger.upsert(job)
+        let asked = Locked(0)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               protectionEnabled: false,
+                               gateEvaluator: { _, _ in
+                                   asked.mutate { $0 += 1 }
+                                   return asked.value == 1 ? .changed(signal: "etag=one", payload: nil)
+                                                           : .unchanged(signal: "etag=one")
+                               })
+
+        await runner.fire(job: job, origin: .cadence(kind: "poll"))
+        #expect(try store.ledger.job(id: job.id)?.retryAttempt == 1, "the failure is on the ladder")
+
+        await runner.fire(job: job, origin: .cadence(kind: "poll"))   // the retry tick
+
+        #expect(asked.value == 1, "the retry does not ask the gate again")
+        #expect(client.callCount == 2, "the work the failed run was gated for actually happens")
+        let runs = try store.ledger.runs(jobId: job.id, limit: 10)
+        #expect(runs.count == 2)
+        #expect(runs.map(\.status) == [.completed, .failed], "newest first")
+        #expect(!runs.contains { $0.outcome == JobRunner.gateUnchangedOutcome })
+        #expect(try store.ledger.job(id: job.id)?.retryAttempt == 0, "and the ladder is cleared")
+    }
+
+    @Test("a hand-started fire runs whatever the gate would have said")
+    func manualFireSkipsTheGate() async throws {
+        let (store, state, engine, client) = try harness([textResponse("tick")])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let job = polled()
+        try store.ledger.upsert(job)
+        let asked = Locked(0)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               protectionEnabled: false,
+                               gateEvaluator: { _, _ in
+                                   asked.mutate { $0 += 1 }
+                                   return .unchanged(signal: "etag=one")
+                               })
+
+        let admission = await runner.fire(job: job, origin: .manual)
+
+        #expect(admission == .run)
+        #expect(asked.value == 0, "`/jobs run` is a person saying run it now")
+        #expect(client.callCount == 1)
+        #expect(try store.ledger.runs(jobId: job.id, limit: 5).first?.outcome == "tick")
+    }
+
+    @Test("the next fresh cadence fire after a run asks the gate again")
+    func gateIsAskedAgainOnTheNextTick() async throws {
+        let (store, state, engine, client) = try harness([textResponse("tick")])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let job = polled()
+        try store.ledger.upsert(job)
+        let asked = Locked(0)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               protectionEnabled: false,
+                               gateEvaluator: { _, previous in
+                                   asked.mutate { $0 += 1 }
+                                   return previous == nil ? .changed(signal: "etag=one", payload: nil)
+                                                          : .unchanged(signal: "etag=one")
+                               })
+
+        await runner.fire(job: job, origin: .cadence(kind: "poll"))
+        await runner.fire(job: job, origin: .cadence(kind: "poll"))
+
+        #expect(asked.value == 2)
+        #expect(client.callCount == 1, "the second tick found nothing to do")
+        let runs = try store.ledger.runs(jobId: job.id, limit: 10)
+        #expect(runs.first?.outcome == JobRunner.gateUnchangedOutcome)
+        #expect(runs.count == 2)
     }
 
     @Test("an ungated job never asks a gate anything")
