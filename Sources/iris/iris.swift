@@ -1310,8 +1310,11 @@ actor IrisEngine {
                 name: "set_session_card",
                 description: "Describe this session to its peers: a short stable name and what you are working on right now. Update it when the work changes, so peers deciding whether to involve you are reading something current.",
                 parameters: Schema(type: "OBJECT", properties: [
-                    "name": Schema(type: "STRING", description: "Short handle, 1-3 words."),
-                    "description": Schema(type: "STRING", description: "One line: what this session is doing now.")
+                    // Interpolated, not spelled out: an agent-facing string naming a cap as a
+                    // literal is a second copy of it, and invariant 9's whole subject is the copy
+                    // nobody updates.
+                    "name": Schema(type: "STRING", description: "Short handle, 1-3 words. Truncated past \(Self.cardNameCap) characters."),
+                    "description": Schema(type: "STRING", description: "One line: what this session is doing now. Truncated past \(Self.cardDescriptionCap) characters.")
                 ], required: ["name", "description"])
             ))
         }
@@ -2388,7 +2391,13 @@ actor IrisEngine {
                 localState?.setSessionCard(for: conversationId,
                                            SessionCard(name: boundedName, description: boundedDescription))
             }
-            result = "Card updated."
+            // Say so when it was cut. There is no `get_session_card` and `list_sessions` shows a
+            // session its peers, never its own row, so silence here is the one thing that would
+            // leave a session permanently believing it advertises text peers cannot see.
+            let truncated = boundedName != name || boundedDescription != description
+            result = truncated
+                ? "Card updated — over-long fields were truncated to what the peer listing shows."
+                : "Card updated."
         } else if functionCall.name == "list_jobs" || functionCall.name == "get_job_run" {
             // Declaration gating stops a well-behaved model from being offered these; dispatch
             // reads the function name alone, so the invariant ("in no other conversation") is

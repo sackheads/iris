@@ -255,8 +255,10 @@ struct SessionToolsTests {
     // MARK: - list_sessions is an untrusted rendering surface (#185 §5.0, review M2)
 
     /// The listing is `\n`-separated and `|`-delimited, and three of its five fields are written by
-    /// ANOTHER session through `set_session_card` / `set_workspace` with no length bound and no
-    /// flattening at the point of writing. Rendered raw, a card could close its own row and open a
+    /// ANOTHER session through `set_session_card` / `set_workspace`. Neither flattens at the point
+    /// of writing, and `workspace` is still unbounded there; the card's two fields are
+    /// length-bounded at the write since #246, which is why this test plants its values through
+    /// `setSessionCard` directly. Rendered raw, a card could close its own row and open a
     /// forged one — a `session_id:` pointing wherever it liked, or a peer announcing itself as
     /// `User`. §5.0 ("the sender never chooses its own trust label") held on the message path and
     /// not on this one.
@@ -410,13 +412,18 @@ struct SessionToolsTests {
                                 args: ["name": .string(String(repeating: "n", count: 5_000)),
                                        "description": .string(String(repeating: "d", count: 5_000))],
                                 id: "c1")
-        _ = await runToolCall(call, on: app, as: me)
+        let result = await runToolCall(call, on: app, as: me)
+        #expect(result.contains("truncated"),
+                "a session has no other way to learn its card was cut — there is no get_session_card")
 
         let card = app.conversations.first { $0.id == me }?.sessionCard
-        #expect((card?.name.count ?? 0) <= IrisEngine.cardNameCap + 1,
-                "stored name must not exceed the cap the listing would apply (+1 for the ellipsis)")
-        #expect((card?.description.count ?? 0) <= IrisEngine.cardDescriptionCap + 1)
+        // `==`, not `<=`: the spec says each field is truncated to THE RENDER CAP, and `<=` would
+        // pass for any smaller cap too — `cap: 4` leaves a `<=` version of this test green.
+        #expect(card?.name.count == IrisEngine.cardNameCap + 1,
+                "stored name is the cap the listing applies, +1 for the ellipsis")
+        #expect(card?.description.count == IrisEngine.cardDescriptionCap + 1)
         #expect(card?.name.hasSuffix("\u{2026}") == true, "and the truncation must be visible, not silent")
+        #expect(card?.description.hasSuffix("\u{2026}") == true)
     }
 
     /// `capCardField`'s doc comment claims it is idempotent, and the write-then-render design
