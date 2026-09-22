@@ -95,7 +95,7 @@ struct FSWatch: Codable, Equatable, Sendable {
 ///
 /// A script gate's verdict is a token on stdout's last line (`CHANGED`/`UNCHANGED`), never the exit
 /// code — `diff -q` and `grep -q` disagree about what zero means, so any exit-code convention makes
-/// a plausible gate fire every tick or never. Nothing evaluates a gate yet; this is the stored
+/// a plausible gate fire every tick or never. `GateEvaluator` is what asks; this is the stored
 /// shape.
 enum Gate: Codable, Equatable, Sendable {
     /// A HEAD request whose ETag, Last-Modified or Content-Length changed since the last signal.
@@ -154,8 +154,8 @@ enum Gate: Codable, Equatable, Sendable {
 }
 
 /// A polled trigger: on `schedule`'s cadence, evaluates `gate` and only fires the job when it says
-/// something changed. Stored and scheduled on its cadence today, but nothing runs the gate and no
-/// tool creates one: polls are not creatable until deliverable 3 (gates).
+/// something changed. `schedule_job` creates one from `gate_url`, `gate_path` or `gate_script`;
+/// `JobRunner.fire` evaluates it as the last thing asked before a turn starts (spec §4 step 5).
 struct PollSpec: Codable, Equatable, Sendable {
     var schedule: Schedule
     var gate: Gate
@@ -268,6 +268,14 @@ enum Trigger: Codable, Equatable, Sendable {
                 return "poll every \(seconds) s"
             }
         }
+    }
+
+    /// The gate this trigger carries, if it has one — only a `poll` does. Read where a fire
+    /// decides whether to run (`JobRunner.fire`) and where an edited job's recorded signals are
+    /// dropped (`JobLedger.upsert`): a signal recorded under one gate cannot answer for another.
+    var gate: Gate? {
+        if case .poll(let spec) = self { return spec.gate }
+        return nil
     }
 
     /// The IANA time zone identifier governing this trigger's cadence, when it has one. `nil` for

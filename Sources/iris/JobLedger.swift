@@ -38,12 +38,20 @@ final class JobLedger: JobUsageReading, Sendable {
     /// Inserts `job`, or replaces the row with the same id. A rename onto another job's name
     /// surfaces as the UNIQUE violation on `name` rather than silently clobbering that job, which
     /// is why this is an `ON CONFLICT(id)` upsert and not `INSERT OR REPLACE`.
+    ///
+    /// Editing a job's **gate** also drops every signal its runs recorded, in the same write (#187
+    /// §7). A signal is a reading taken by one gate: an ETag cannot answer for an mtime, and
+    /// leaving the old one behind would have the new gate compare against something it never saw —
+    /// silently "unchanged" forever, or one spurious run. Every path that changes a job goes
+    /// through here, so this is the one place it has to be done.
     func upsert(_ job: Job) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let triggerJSON = String(decoding: try encoder.encode(job.trigger), as: UTF8.self)
         let policyJSON = String(decoding: try encoder.encode(job.policy), as: UTF8.self)
         try writer.write { db in
+            let storedTrigger = try String.fetchOne(db, sql: "SELECT trigger FROM jobs WHERE id = ?",
+                                                    arguments: [job.id.uuidString])
             try db.execute(sql: """
                 INSERT INTO jobs (
                     id, name, prompt, triggerKind, trigger, profile, destinationConversationId,
@@ -73,7 +81,19 @@ final class JobLedger: JobUsageReading, Sendable {
                     job.nextFireAt, job.lastRunAt, job.pausedReason,
                     policyJSON, job.retryAttempt, job.queuedFire,
                 ])
+            if let storedTrigger, Self.storedGate(storedTrigger) != job.trigger.gate {
+                // An unreadable stored trigger lands here too, and that is the safe direction: a
+                // signal nobody can vouch for is one run, not a job that never fires again.
+                try db.execute(sql: "UPDATE job_runs SET gateSignal = NULL WHERE jobId = ?",
+                               arguments: [job.id.uuidString])
+            }
         }
+    }
+
+    /// The gate inside a stored `trigger` column, or `nil` — for a trigger that carries none, and
+    /// for one this build cannot read.
+    private static func storedGate(_ json: String) -> Gate? {
+        (try? JSONDecoder().decode(Trigger.self, from: Data(json.utf8)))?.gate
     }
 
     func delete(jobId: UUID) throws {

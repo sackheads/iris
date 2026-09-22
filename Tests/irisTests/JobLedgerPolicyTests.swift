@@ -370,6 +370,32 @@ struct JobLedgerPolicyTests {
         #expect(throws: (any Error).self) { try store.ledger.setGateSignal(runId: UUID(), "x") }
     }
 
+    @Test("editing a job's gate drops the signals recorded under the old one")
+    func gateEditClearsSignals() throws {
+        let store = try ConversationStore.inMemory()
+        var job = Job(name: "polled", prompt: "p",
+                      trigger: .poll(PollSpec(schedule: .interval(seconds: 60),
+                                              gate: .urlChanged(url: "https://a.invalid/x"))))
+        try store.ledger.upsert(job)
+        let run = makeRun(job, at: t0)
+        try store.ledger.begin(run: run)
+        try store.ledger.setGateSignal(runId: run.id, "etag-1")
+
+        // A write that leaves the gate alone keeps the signal: renaming a job is not a reason to
+        // run it again.
+        job.name = "renamed"
+        try store.ledger.upsert(job)
+        #expect(try store.ledger.lastGateSignal(jobId: job.id) == "etag-1")
+
+        // A new gate has never seen anything, so the old gate's signal must not answer for it —
+        // it would compare an ETag against an mtime and call the world unchanged forever.
+        job.trigger = .poll(PollSpec(schedule: .interval(seconds: 60),
+                                     gate: .pathChanged(path: "/tmp/x")))
+        try store.ledger.upsert(job)
+        #expect(try store.ledger.lastGateSignal(jobId: job.id) == nil)
+        #expect(try store.ledger.run(id: run.id) != nil, "the row itself stays; only its signal goes")
+    }
+
     // MARK: Migration
 
     @Test("a v9 database migrates to v10 with its jobs, runs and conversations intact")

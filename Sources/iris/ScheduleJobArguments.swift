@@ -26,6 +26,14 @@ struct ScheduleJobArguments: Equatable, Sendable {
     let name: String?
     let alias: ScheduleAlias
     let profile: String?
+    /// The gate, in the three shapes a model can ask for one (#187 §7). At most one may be given:
+    /// which of two contradictory checks a job should be run on is not something to guess at.
+    let gateURL: String?
+    let gatePath: String?
+    let gateScript: String?
+    /// A script gate's inputs, `source[:target]` — always mounted read-only, whatever was written.
+    let gateMounts: [String]?
+    let gateTimeoutSeconds: Int?
 
     /// Reads the tool call's arguments. The only hard requirement is a prompt: a schedule that
     /// resolves to nothing is `makeJob`'s refusal, not this one, so the caller can report the
@@ -49,7 +57,10 @@ struct ScheduleJobArguments: Equatable, Sendable {
             timeZone: text(args["timezone"])
         )
         return .success(ScheduleJobArguments(
-            prompt: prompt, name: text(args["name"]), alias: alias, profile: text(args["profile"])))
+            prompt: prompt, name: text(args["name"]), alias: alias, profile: text(args["profile"]),
+            gateURL: text(args["gate_url"]), gatePath: text(args["gate_path"]),
+            gateScript: text(args["gate_script"]), gateMounts: stringList(args["gate_mounts"]),
+            gateTimeoutSeconds: integer(args["gate_timeout_seconds"])))
     }
 
     /// Builds the job to store, or the sentence explaining why there is none. `existingNames` is
@@ -63,25 +74,84 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// the user's allowlist, as in any run — so without the VM there is nowhere safe to run a
     /// command and the tool says so rather than creating a job whose commands would quietly fall
     /// back to the host.
-    /// `JobRunner` asks the same question again at every fire: this one can only speak for today.
+    /// `JobRunner` asks the same question again at every fire: this one can only speak for today —
+    /// and a `script` gate is held to the same rule for the same reason (`resolvedGate`).
+    ///
+    /// A job that carries a gate becomes a `.poll` over the cadence it was given: same schedule,
+    /// with the gate deciding at each occurrence whether there is anything to run.
     func makeJob(defaultTimeZone: String, createdIn: UUID?, existingNames: Set<String>,
-                 sandboxAvailable: Bool = SandboxPolicy.mutatingJobCanRun()) -> Result<Job, ToolMessage> {
+                 sandboxAvailable: Bool = SandboxPolicy.mutatingJobCanRun(),
+                 fileManager: FileManager = .default) -> Result<Job, ToolMessage> {
         // Anything that is not the word `mutating` reads as read-only, including a value this
         // build does not recognize: the narrow surface is the safe guess, and a refusal over a
         // spelling would cost a retry to arrive at the same job.
         let wantsMutating = profile?.lowercased() == JobProfile.mutating.rawValue.lowercased()
         if wantsMutating, !sandboxAvailable { return .failure(ToolMessage(Self.noRuntimeForMutating)) }
+        let gate: Gate?
+        switch resolvedGate(sandboxAvailable: sandboxAvailable, fileManager: fileManager) {
+        case .failure(let message): return .failure(message)
+        case .success(let resolved): gate = resolved
+        }
         switch alias.resolve(defaultTimeZone: defaultTimeZone) {
         case .failure(let failure):
             return .failure(Self.message(for: failure))
         case .success(let schedule):
+            // A gate needs a cadence to be checked on, so a gated job is a `poll` over the same
+            // schedule an ungated one would have run on.
+            let trigger: Trigger = gate.map { .poll(PollSpec(schedule: schedule, gate: $0)) }
+                ?? .schedule(schedule)
             return .success(Job(
                 name: Self.uniqueName(Job.slug(from: name ?? prompt), existing: existingNames),
                 prompt: prompt,
-                trigger: .schedule(schedule),
+                trigger: trigger,
                 profile: wantsMutating ? .mutating : .readOnly,
                 createdInConversationId: createdIn))
         }
+    }
+
+    /// The gate these arguments describe, `nil` for none, or the sentence saying why they describe
+    /// no usable one. Everything a gate can be wrong about is decided here, while there is still a
+    /// person in the conversation to read the answer: the alternative is a job that fails silently
+    /// on a cadence until three errors pause it.
+    func resolvedGate(sandboxAvailable: Bool, fileManager: FileManager = .default) -> Result<Gate?, ToolMessage> {
+        let asked = [gateURL, gatePath, gateScript].compactMap { $0 }
+        guard asked.count <= 1 else { return .failure(ToolMessage(Self.oneGateOnly)) }
+        // The two script-only options, given without one — or beside a gate that cannot use them.
+        // Ignoring them would store a gate the user thinks has inputs and a deadline of its own.
+        guard gateScript != nil || (gateMounts == nil && gateTimeoutSeconds == nil) else {
+            return .failure(ToolMessage(Self.gateOptionsNeedAScript))
+        }
+        if let gateURL {
+            guard let url = URL(string: gateURL), let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" else {
+                return .failure("gate_url must be an http(s) URL (got '\(gateURL)').")
+            }
+            return .success(.urlChanged(url: gateURL))
+        }
+        if let gatePath {
+            guard gatePath.hasPrefix("/") else {
+                return .failure("gate_path must be an absolute path (got '\(gatePath)').")
+            }
+            guard fileManager.fileExists(atPath: gatePath) else {
+                return .failure("There is nothing at \(gatePath), so a gate watching it could never answer.")
+            }
+            return .success(.pathChanged(path: gatePath))
+        }
+        guard let gateScript else { return .success(nil) }
+        // R28: a script gate runs in the VM or nowhere. Refused at creation, and asked again at
+        // every evaluation — where the answer is a gate error, never a command on the host.
+        guard sandboxAvailable else { return .failure(ToolMessage(Self.noRuntimeForGateScript)) }
+        let declared = gateMounts ?? []
+        for entry in declared {
+            if let refusal = GateEvaluator.mountRefusal(entry, fileManager: fileManager) {
+                return .failure(ToolMessage("gate_mounts: \(refusal)."))
+            }
+        }
+        return .success(.script(
+            command: gateScript,
+            mounts: GateEvaluator.readOnly(declared),
+            timeoutSeconds: GateEvaluator.clampedTimeout(gateTimeoutSeconds
+                ?? GateEvaluator.defaultTimeoutSeconds)))
     }
 
     /// The refusal a `mutating` job gets when the VM its commands would run in is unavailable —
@@ -89,6 +159,16 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// because Settings → Sandboxing is where either is fixed. Spelled once: the test that pins it
     /// and the tool that returns it read the same string.
     static let noRuntimeForMutating = "A mutating job's commands always run in the apple/container VM, and that VM is not available: install the runtime and turn sandboxing on in Settings → Sandboxing, or create the job read-only."
+
+    /// The same refusal for a gate script, which runs in that VM on every tick for as long as the
+    /// job exists and never anywhere else. It offers the two gates that need no VM, because a
+    /// "check whether this page or this file changed" gate is what most requests turn out to be.
+    static let noRuntimeForGateScript = "A gate script always runs in the apple/container VM, and that VM is not available: install the runtime and turn sandboxing on in Settings → Sandboxing, or use gate_url or gate_path, which run no code."
+
+    /// Two gates on one job: a refusal rather than a guess about which check the user meant.
+    static let oneGateOnly = "Give one gate: gate_url, gate_path or gate_script — not more than one."
+
+    static let gateOptionsNeedAScript = "gate_mounts and gate_timeout_seconds only apply to gate_script."
 
     /// `base`, or `base-2`, `base-3`, … — the first form not already taken.
     static func uniqueName(_ base: String, existing: Set<String>) -> String {
@@ -130,7 +210,10 @@ struct ScheduleJobArguments: Equatable, Sendable {
         guard let next = stored.nextFireAt, stored.pausedReason == nil else {
             return "Saved '\(stored.name)' but it will never fire: \(stored.pausedReason ?? JobScheduler.unmatchableReason)."
         }
-        return "Scheduled '\(stored.name)' (\(stored.trigger.summary)). Next run: \(formatFire(next, zone: stored.trigger.timeZoneIdentifier))."
+        // A gated job's cadence is how often its gate is *looked at*, not how often it runs:
+        // "next run" would promise a turn that, if the gate is doing its job, is not coming.
+        let label = stored.trigger.gate == nil ? "Next run" : "Next check"
+        return "Scheduled '\(stored.name)' (\(stored.trigger.summary)). \(label): \(formatFire(next, zone: stored.trigger.timeZoneIdentifier))."
     }
 
     /// A job's next fire, written for the model: minute precision in the zone the job's own cadence
@@ -188,6 +271,16 @@ struct ScheduleJobArguments: Equatable, Sendable {
         }
     }
 
+    /// A list of non-empty strings — `gate_mounts`. A model that sends one mount as a bare string
+    /// rather than a one-element array means the same thing, so both are read; anything else in
+    /// the array is dropped, because a mount that is not a string is not a path.
+    private static func stringList(_ value: JSONValue?) -> [String]? {
+        if let single = text(value) { return [single] }
+        guard case .array(let items) = value else { return nil }
+        let values = items.compactMap { text($0) }
+        return values.isEmpty ? nil : values
+    }
+
     /// The `weekdays` array. An element that is not a number is a refusal, not a silent drop:
     /// dropping `["monday", "tuesday"]` would leave no weekday at all, and a cron with `*` for
     /// day-of-week runs every day — far more than was asked for. Absent or empty reads as "not
@@ -202,4 +295,46 @@ struct ScheduleJobArguments: Equatable, Sendable {
         guard unreadable.isEmpty else { return .failure(invalidWeekdayMessage(unreadable)) }
         return .success(values.isEmpty ? nil : values)
     }
+}
+
+/// The one review a gate script gets (#187 §7).
+///
+/// A gate script is the only model-written code in the system that executes repeatedly, unattended,
+/// with no further review: it is checked once here, at creation, and then runs on every tick for as
+/// long as the job exists. The sandbox, the read-only mounts and the timeout are the standing
+/// mitigation; this is the moment a person is still in the loop.
+///
+/// Both halves are closures so the decision can be tested without a model, a dialog or an engine:
+/// `verdict` is Vibecop over the script (as a `run_command` in the sandbox, which is what it is),
+/// and `ask` is the ordinary approval dialog, reached only when Vibecop escalates or cannot answer.
+struct GateScriptReview: Sendable {
+    let verdict: @Sendable (String) async -> VibecopDecision?
+    let ask: @Sendable (String) async -> Bool
+
+    /// `APPROVE` creates the job; `DENY` refuses it and says why; anything else — an `ESCALATE`, a
+    /// verdict this build does not recognize, or no verdict at all because Vibecop is off, wedged
+    /// or timed out — asks the user, who is right there typing. Fail *open to the person*, never
+    /// past them: the same shape `AppState.requestApproval` uses for an attended call.
+    func review(_ script: String) async -> Result<Void, ToolMessage> {
+        let decision = await verdict(script)
+        switch decision?.decision {
+        case "APPROVE":
+            return .success(())
+        case "DENY":
+            return .failure(ToolMessage(Self.denied(decision?.reason ?? "")))
+        default:
+            return await ask(script) ? .success(()) : .failure(ToolMessage(Self.declined))
+        }
+    }
+
+    /// What the model is told when the review refused the script. The reason is quoted so the
+    /// model can rewrite the gate rather than retry the same one.
+    static func denied(_ reason: String) -> String {
+        let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        let because = trimmed.isEmpty ? "" : " \(trimmed)"
+        return "That gate script was refused by the safety review, so no job was created:\(because)"
+            + " Describe the check in gate_url or gate_path terms, or propose a narrower script."
+    }
+
+    static let declined = "That gate script was not approved, so no job was created."
 }
