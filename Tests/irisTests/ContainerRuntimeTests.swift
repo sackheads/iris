@@ -108,10 +108,13 @@ struct ContainerRuntimeTests {
         #expect(throws: ContainerRuntimeError.self) { try ContainerMount.argument(for: "~/data:/data") }
     }
 
-    @Test("a path containing an equals sign is refused")
-    func equalsInPathRejected() {
-        #expect(throws: ContainerRuntimeError.self) { try ContainerMount.argument(for: "/a=b:/work") }
-        #expect(throws: ContainerRuntimeError.self) { try ContainerMount.argument(for: "/a:/work=x") }
+    /// L10: the CLI splits a directive at the *first* `=` and takes the rest of the value
+    /// verbatim, so an `=` in a path is safe — and refusing it would lose a mount that worked
+    /// before this task.
+    @Test("a path containing an equals sign is passed through")
+    func equalsInPathAllowed() throws {
+        #expect(try ContainerMount.argument(for: "/a=b:/work") == "type=virtiofs,source=/a=b,target=/work")
+        #expect(try ContainerMount.argument(for: "/a:/work=x") == "type=virtiofs,source=/a,target=/work=x")
     }
 
     @Test("a read-only entry with no explicit target mounts the source at itself")
@@ -135,6 +138,23 @@ struct ContainerRuntimeTests {
         _ = try await CLIContainerRuntime(launch: launcher.launch)
             .exec(name: "iris-g", workdir: "/", command: "true", timeoutSeconds: nil)
         #expect(launcher.timeouts == [nil])
+    }
+
+    /// R27: the calls that are not the user's command are bounded, so `reapOrphans()` on the
+    /// launch path cannot be the thing that never comes back.
+    @Test("housekeeping calls carry a deadline; create does not")
+    func housekeepingDeadlines() async throws {
+        let launcher = RecordingLauncher(result: ("[]", "", 0))
+        let rt = CLIContainerRuntime(launch: launcher.launch)
+        await rt.remove(name: "iris-a")
+        _ = await rt.list(prefix: "iris-")
+        #expect(launcher.timeouts == [60, 60, 60])
+        #expect(launcher.argv.map(\.first) == ["stop", "delete", "list"])
+
+        let creator = RecordingLauncher()
+        try await CLIContainerRuntime(launch: creator.launch)
+            .createDetached(name: "iris-a", image: "img", mounts: [], workdir: "/")
+        #expect(creator.timeouts == [nil])
     }
 
     @Test("a non-zero create exit becomes createFailed carrying the CLI's output")

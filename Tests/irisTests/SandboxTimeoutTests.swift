@@ -99,6 +99,52 @@ struct SandboxTimeoutTests {
         #expect(wall < 10)
     }
 
+    /// H1: the same orphan, but the child does not hang around to keep it company. The process is
+    /// reaped within milliseconds while the pipe it handed on stays open, so "is the child still
+    /// running?" is exactly the wrong question to ask about whether anyone has been answered.
+    @Test("a child that exits and leaves an orphan on the pipes cannot outlast the deadline", .timeLimit(.minutes(1)))
+    func exitedChildWithOrphanCannotOutlastDeadline() async throws {
+        let marker = "60.\(Int.random(in: 100_000...999_999))"
+        let script = "(sleep \(marker) &) ; echo done"
+        defer { Self.killAll(matching: "sleep \(marker)") }
+
+        let started = Date()
+        var thrown: Error?
+        do {
+            _ = try await CLIProcessRunner(executable: "/bin/sh").run(["-c", script], timeoutSeconds: 1)
+        } catch {
+            thrown = error
+        }
+        let wall = Date().timeIntervalSince(started)
+
+        let error = try #require(thrown as? ContainerRuntimeError)
+        guard case .timedOut = error else {
+            Issue.record("expected .timedOut, got \(error)")
+            return
+        }
+        #expect(wall < 10)
+    }
+
+    /// R27: a call with no deadline — `createDetached`, because a cold image pull is legitimately
+    /// minutes — still must not wait on a stranger's file descriptor. The child exits; whatever is
+    /// still holding the read open gets the post-exit grace and no more.
+    @Test("an unbounded call returns after its child exits, orphan or no orphan", .timeLimit(.minutes(1)))
+    func unboundedCallReturnsAfterExit() async throws {
+        let marker = "60.\(Int.random(in: 100_000...999_999))"
+        let script = "(sleep \(marker) &) ; echo created"
+        defer { Self.killAll(matching: "sleep \(marker)") }
+
+        // The runtime's own seam, wired to a real child: `createDetached` passes no deadline, so
+        // nothing but the collector can end this call.
+        let runtime = CLIContainerRuntime(launch: { _, timeoutSeconds in
+            #expect(timeoutSeconds == nil)
+            return try await CLIProcessRunner(executable: "/bin/sh").run(["-c", script], timeoutSeconds: timeoutSeconds)
+        })
+        let started = Date()
+        try await runtime.createDetached(name: "iris-x", image: "img", mounts: [], workdir: "/")
+        #expect(Date().timeIntervalSince(started) < 10)
+    }
+
     @Test("a child that finishes inside its deadline returns normally", .timeLimit(.minutes(1)))
     func childUnderDeadline() async throws {
         let r = try await CLIProcessRunner(executable: "/bin/sh").run(["-c", "echo ok; exit 3"], timeoutSeconds: 30)
@@ -229,6 +275,50 @@ struct SandboxTimeoutTests {
         #expect(out.hasPrefix("[sandbox]"))
         #expect(out.contains("reclaimed"))
         #expect(out.hasSuffix("Error: command timed out after 30 seconds"))
+    }
+
+    /// L11: two callers settle on the first retry, but the retry can itself be coalesced onto a
+    /// third caller's create. Every caller either runs in the mounts it asked for or does not run.
+    @Test("three callers racing with three mount sets never run in another's mounts")
+    func threeWayMountRace() async {
+        let rt = MockRuntime()
+        let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" })
+        let id = UUID()
+        let sets = ["/a:/a:ro", "/b:/b:ro", "/c:/c:ro"]
+        let outcomes = await withTaskGroup(of: String.self) { g -> [String] in
+            for mount in sets {
+                g.addTask { await m.run(command: "x", conversationId: id, workspace: "/ws", extraMounts: [mount]) }
+            }
+            var all: [String] = []
+            for await o in g { all.append(o) }
+            return all
+        }
+        // Whatever each caller got, it was its own mounts or nothing at all.
+        for outcome in outcomes {
+            #expect(outcome == "ok" || outcome == SandboxSessionManager.mountsContendedError)
+        }
+        // And every container that was built was built for one of the three, never a blend.
+        for built in rt.createdMounts {
+            #expect(sets.contains { built == ["/ws:/ws", $0] })
+        }
+    }
+
+    /// L13: a cancelled command is not a dead container, and it says so in its own words rather
+    /// than borrowing the timeout's.
+    @Test("a cancelled exec reports cancellation and keeps the session")
+    func cancelledExecKeepsSession() async {
+        let rt = MockRuntime()
+        let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" })
+        let id = UUID()
+        _ = await m.run(command: "a", conversationId: id, workspace: "/ws")
+        rt.nextExecError = CancellationError()
+
+        let out = await m.run(command: "b", conversationId: id, workspace: "/ws", timeoutSeconds: 30)
+
+        #expect(out == "Error: the command was cancelled.")
+        #expect(rt.createdCount == 1)
+        #expect(rt.removedNames.isEmpty)
+        #expect(await m.hasSession(id))
     }
 
     @Test("the same mount list reuses the container")

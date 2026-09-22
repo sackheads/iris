@@ -66,20 +66,29 @@ actor SandboxSessionManager {
         // awaiting, so the reset notice fires correctly even when multiple callers race.
         let created = (sessions[id] == nil)
         if created {
-            do { try await ensureSession(id, workspace: workspace, mounts: mounts) }
-            catch { return creationError(error) }
-            // Asked again on the far side of the barrier. `ensureSession` coalesces concurrent
-            // first-commands onto one create, and the container belongs to whichever of them got
-            // there first — including its mounts. A caller that asked for a different set was
-            // never told; the check above could not fire for it, because at the time it ran there
-            // was no session to compare against. Running anyway would put a gate's script in a
-            // container with someone else's mounts, once, silently, and the mismatch would only
-            // surface on the next call.
-            if let s = sessions[id], s.mounts != mounts || s.mountedWorkspace != workspace {
-                await runtime.remove(name: s.name)
-                sessions[id] = nil
+            // Asked on the far side of the barrier, and asked until the answer holds.
+            // `ensureSession` coalesces concurrent first-commands onto one create, and the
+            // container belongs to whichever of them got there first — including its mounts. A
+            // caller that asked for a different set was never told: the check above could not fire
+            // for it, because when it ran there was no session to compare against. Running anyway
+            // would put a gate's script in a container with someone else's mounts, once, silently.
+            //
+            // A loop and not a single retry, because the recreate can be coalesced in turn onto a
+            // third caller's create. Bounded, and it fails closed at the bound: a command that
+            // cannot be given the mounts it asked for does not run in the ones it was handed.
+            var attempts = 0
+            while true {
                 do { try await ensureSession(id, workspace: workspace, mounts: mounts) }
                 catch { return creationError(error) }
+                guard let s = sessions[id], s.mounts != mounts || s.mountedWorkspace != workspace else { break }
+                attempts += 1
+                if attempts >= Self.mountAgreementAttempts {
+                    await runtime.remove(name: s.name)
+                    sessions[id] = nil
+                    return Self.mountsContendedError
+                }
+                await runtime.remove(name: s.name)
+                sessions[id] = nil
             }
         }
 
@@ -126,6 +135,19 @@ actor SandboxSessionManager {
             }
         }
     }
+
+    /// How many times a call will replace a container created with somebody else's mounts before
+    /// giving up. Two callers racing settle on the first retry; the bound is for the pathological
+    /// case where a third and a fourth keep arriving, and it exists so the loop terminates rather
+    /// than because any particular number is right.
+    static let mountAgreementAttempts = 3
+
+    /// What a call gets when it could not be given a container with the mounts it asked for. It
+    /// is not run in the mounts it was handed: for a gate that would be the isolation the mounts
+    /// exist to provide, quietly not happening.
+    static let mountsContendedError = """
+    Error: could not start a sandbox container with the requested mounts — another command in this     conversation is using different ones. Nothing was run; try again.
+    """
 
     /// The workspace mount (read-write — the agent edits the files it is working on) followed by
     /// whatever the caller declared. Workspace first so the order a container is created with is

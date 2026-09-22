@@ -24,9 +24,10 @@ enum ContainerMount {
     /// Paths are passed through byte for byte. That is safe for every character the CLI's own
     /// parser can read back — `Process` execs the binary directly, so no shell ever sees these,
     /// and a path with a space needs no quoting because it is one argv element. It is *not* safe
-    /// for the two characters the directive list is punctuated with: a comma starts the next
-    /// directive and an `=` separates a key from its value, and the format has no escape for
-    /// either. Such an entry is refused here rather than mangled there.
+    /// for a comma: it starts the next directive, and the format has no escape for one. Such an
+    /// entry is refused here rather than mangled there. An `=` is fine — the CLI splits a
+    /// directive at the *first* `=` and takes the rest verbatim, so `source=/a=b` is the path
+    /// `/a=b` and not a malformed key.
     ///
     /// Both paths must be absolute. A source that is not is read by the CLI as the name of a
     /// *volume* rather than a directory to bind, so `data:/data` would quietly look up something
@@ -55,12 +56,10 @@ enum ContainerMount {
                 entry: entry,
                 reason: "both paths must be absolute; a relative source is read as the name of a volume, not a directory")
         }
-        let punctuation = CharacterSet(charactersIn: ",=")
-        guard source.rangeOfCharacter(from: punctuation) == nil,
-              target.rangeOfCharacter(from: punctuation) == nil else {
+        guard !source.contains(","), !target.contains(",") else {
             throw ContainerRuntimeError.invalidMount(
                 entry: entry,
-                reason: "a path containing a comma or an equals sign cannot be expressed as a mount; rename it or mount its parent")
+                reason: "a path containing a comma cannot be expressed as a mount; rename it or mount its parent")
         }
         var spec = "type=virtiofs,source=\(source),target=\(target)"
         if readOnly { spec += ",readonly" }
@@ -96,6 +95,13 @@ struct CLIProcessRunner: Sendable {
     /// How long the ordinary exit path gets, after the kill ladder, to deliver the real output
     /// before the ladder's own answer is returned instead.
     static let postKillSettleSeconds: Double = 0.25
+
+    /// How long end-of-file gets after the child has exited. On any ordinary call it arrives in
+    /// the same breath as the exit; this only matters when something the child spawned inherited
+    /// the pipes and outlived it, and it is what makes a call with no deadline at all still
+    /// answer. Deliberately longer than a `Pipe`'s round trip and shorter than any deadline a
+    /// caller would set.
+    static let postExitEOFGraceSeconds: Double = 2
 
     /// `Process` is not `Sendable`, and the watchdog below runs on a different task from the one
     /// awaiting the exit. It only reads `isRunning`/`processIdentifier` and calls `terminate()`,
@@ -154,6 +160,16 @@ struct CLIProcessRunner: Sendable {
         func noteExit(_ code: Int32) {
             lock.withLock { status = code }
             deliverIfComplete()
+            guard !hasAnswered else { return }
+            // The child is gone, so it has written everything it is ever going to write. Anything
+            // still keeping the read open is somebody else's file descriptor, and waiting on it
+            // is waiting on a process this call does not own — which is how a call with no
+            // deadline (a cold `createDetached`, `reapOrphans` at launch) wedges forever. After
+            // the grace, whatever is in hand is the answer.
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(CLIProcessRunner.postExitEOFGraceSeconds * 1_000_000_000))
+                self?.deliverAfterExit()
+            }
         }
 
         func fail(_ error: Error) { answer(.failure(error)) }
@@ -172,6 +188,16 @@ struct CLIProcessRunner: Sendable {
             if isStdout, !lock.withLock({ outOpen }) { outHandle.readabilityHandler = nil }
             if !isStdout, !lock.withLock({ errOpen }) { errHandle.readabilityHandler = nil }
             deliverIfComplete()
+        }
+
+        /// Publishes what the pipes have delivered so far, on the strength of the exit alone.
+        /// Only reached when end-of-file did not arrive within `postExitEOFGraceSeconds` of it.
+        private func deliverAfterExit() {
+            let payload: Output? = lock.withLock {
+                guard !answered, let status else { return nil }
+                return (Self.text(out), Self.text(err), status)
+            }
+            if let payload { answer(.success(payload)) }
         }
 
         /// The child has exited *and* both streams have ended, so everything it wrote is in hand.
@@ -239,15 +265,20 @@ struct CLIProcessRunner: Sendable {
             kill(pid, SIGKILL)
         }
         // A moment for the ordinary path to land with the real output, then the ladder answers.
+        // Load bearing on the cancellation path, where a promptly-exiting child's real result is
+        // what the caller gets. On the deadline path it only costs latency: `run` throws
+        // `.timedOut` below whether or not the result landed, because the deadline did fire.
         await waitUntil(Self.postKillSettleSeconds) { collector.hasAnswered }
         collector.fail(reason())
     }
 
     /// Polls `condition` until it holds or `seconds` elapse. Sleeping in slices rather than for
-    /// the whole grace so a child that dies promptly is not waited out.
+    /// the whole grace so a child that dies promptly is not waited out — and giving up when the
+    /// task is cancelled, because `Task.sleep` returns at once from then on and the loop would
+    /// otherwise spin a cooperative thread for the rest of the grace.
     private static func waitUntil(_ seconds: Double, _ condition: @Sendable () -> Bool) async {
         let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline, !condition() {
+        while Date() < deadline, !condition(), !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
     }
@@ -275,7 +306,11 @@ struct CLIProcessRunner: Sendable {
         let watchdog: Task<Void, Never>? = timeoutSeconds.map { seconds in
             Task {
                 try? await Task.sleep(nanoseconds: UInt64(max(1, seconds)) * 1_000_000_000)
-                guard !Task.isCancelled, !collector.hasAnswered, box.process.isRunning else { return }
+                // Not "is the child still running?": a child can exit in milliseconds and leave
+                // something it spawned holding the inherited pipes, in which case end-of-file
+                // never comes, the collector never publishes, and the only condition that means
+                // "nobody has been told yet" is the collector's own.
+                guard !Task.isCancelled, !collector.hasAnswered else { return }
                 deadline.fire()
                 await Self.enforce({ ContainerRuntimeError.timedOut(elapsedSeconds: Date().timeIntervalSince(started)) },
                                    on: box, collector: collector)
@@ -324,6 +359,11 @@ struct CLIContainerRuntime: ContainerRuntime {
         return try await CLIProcessRunner(executable: binary).run(arguments, timeoutSeconds: timeoutSeconds)
     }
 
+    /// The deadline on the calls that are not the user's command. Generous — `container stop`
+    /// waits for the VM to come down — but finite: `reapOrphans()` runs `list` on the launch path,
+    /// and nothing there is watching to notice that it never came back.
+    static let housekeepingTimeoutSeconds = 60
+
     private let launch: Launch
 
     init(launch: @escaping Launch = CLIContainerRuntime.spawnCLI) {
@@ -338,7 +378,9 @@ struct CLIContainerRuntime: ContainerRuntime {
             args += ["--mount", try ContainerMount.argument(for: entry)]
         }
         args += ["-w", workdir, image, "sleep", "infinity"]
-        // No deadline: a cold create pulls the image, which can legitimately take minutes.
+        // No deadline: a cold create pulls the image, which can legitimately take minutes. It is
+        // still not open-ended — the collector answers on the exit plus a grace, so this cannot
+        // wait on a file descriptor somebody else is holding.
         let r = try await launch(args, nil)
         if r.exitCode != 0 {
             throw ContainerRuntimeError.createFailed((r.stdout + r.stderr).trimmingCharacters(in: .whitespacesAndNewlines))
@@ -350,12 +392,12 @@ struct CLIContainerRuntime: ContainerRuntime {
     }
 
     func remove(name: String) async {
-        _ = try? await launch(["stop", name], nil)
-        _ = try? await launch(["delete", name], nil)
+        _ = try? await launch(["stop", name], Self.housekeepingTimeoutSeconds)
+        _ = try? await launch(["delete", name], Self.housekeepingTimeoutSeconds)
     }
 
     func list(prefix: String) async -> [String] {
-        guard let r = try? await launch(["list", "-a", "--format", "json"], nil),
+        guard let r = try? await launch(["list", "-a", "--format", "json"], Self.housekeepingTimeoutSeconds),
               let data = r.stdout.data(using: .utf8),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             return []

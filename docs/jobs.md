@@ -364,7 +364,9 @@ had no bound at all while the model believed it had set one; it is honoured now.
 the command is killed — politely first, then not — and the result reads exactly as it does on the
 host: `Error: command timed out after N seconds`. The container itself is left alone, because a
 deadline is the command's answer and not a sign of a dead container: the session, its installed
-packages and its files are all still there for the next command. This is a bound on a command, not
+packages and its files are all still there for the next command. Stopping a run mid-command reads
+differently — `Error: the command was cancelled.` — and leaves the session alone for the same
+reason. This is a bound on a command, not
 on the run: a turn that spends its ten minutes on six timed-out commands still ends on the run's
 own deadline, above.
 
