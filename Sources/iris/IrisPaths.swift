@@ -7,6 +7,10 @@ import Foundation
 /// paths through here instead of re-deriving `("~/.iris" as NSString).expandingTildeInPath`,
 /// which removes the duplication that produced the SOUL split-brain bug. `root` is injectable
 /// so `IrisMigrator` and the memory managers can be unit-tested against a temp directory.
+///
+/// NOTE: `expandingTildeInPath` silently truncates its result to PATH_MAX, so it cannot be used
+/// to measure a path's length — `IrisEngine.expandTilde` expands without that, and
+/// `IrisEngine.workspaceRefusal` is where the resulting length rule lives (#273).
 struct IrisPaths: Sendable {
     let root: URL
 
