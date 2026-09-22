@@ -784,8 +784,14 @@ actor JobRunner {
     /// the caller's to word, since only the stream knows which path vanished.
     ///
     /// The origin is a watcher with no paths: nothing changed, the watch itself did.
+    ///
+    /// Idempotent on the row, not on the argument: the manager can report one vanished root twice
+    /// — the hook its first pause fires re-enters `sync`, which pauses the next vanished job before
+    /// the report loop that woke it gets there — and a second card for one deletion is a second
+    /// thing to explain. A row that is gone is nothing to pause either.
     func pauseUnavailable(job: Job, reason: String) async {
-        await pause(job: job, origin: .watcher(paths: []), reason: reason, at: now())
+        guard let current = try? ledger.job(id: job.id), current.pausedReason == nil else { return }
+        await pause(job: current, origin: .watcher(paths: []), reason: reason, at: now())
     }
 
     /// Creates the background conversation, records the run, runs the turn, closes the row and

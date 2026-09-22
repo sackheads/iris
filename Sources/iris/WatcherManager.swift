@@ -54,6 +54,12 @@ actor WatcherManager {
     /// The jobs the last `sync` was given — the fallback answer to "who was this stream serving"
     /// for a manager with no ledger.
     private var syncedJobs: [Job] = []
+    /// The keys of streams that ended unprompted and whose subscribers are still being reported.
+    /// A `sync` that re-enters during that report — every pause fires the hook — finds the root
+    /// still wanted by the subscribers not yet paused and would open the stream again, for
+    /// FSEvents to refuse again, once per subscriber. Held only for the length of `streamEnded`,
+    /// so `/jobs resume` still gets its retry.
+    private var refused: Set<String> = []
     private var batchHandler: (@Sendable (_ root: String, _ paths: [String]) async -> Void)?
     private var unavailableHandler: (@Sendable (Job, String) async -> Void)?
 
@@ -100,8 +106,15 @@ actor WatcherManager {
     ///
     /// The stream diff is applied before anything is reported, and deliberately: reporting awaits
     /// the unavailable handler, whose pause is a `setPaused` that re-enters the hook and calls
-    /// this method again. Doing the diff first means the re-entrant call — which has the fresher
-    /// job list — is the one that lands last, rather than this call's older list overwriting it.
+    /// this method again. The diff itself is atomic — nothing between `syncedJobs = jobs` and the
+    /// last `close` suspends, so two syncs cannot interleave their diffs, double-start a stream or
+    /// tear the table — but which of two syncs lands last is not this actor's to decide; the
+    /// engine queues them so the later one reads the later table, and the minute sync is the
+    /// backstop. Reporting last keeps the streams right before anyone is told about them.
+    ///
+    /// Each vanished job's row is re-read before it is reported: by the time the loop reaches
+    /// the second of two, the re-entrant sync the first pause set off may already have paused it,
+    /// and one deletion is one card (§7).
     func sync(with jobs: [Job]) async {
         syncedJobs = jobs
         let gone = Self.vanished(in: jobs, fileExists: fileExists)
@@ -112,15 +125,30 @@ actor WatcherManager {
         for root in wanted.sorted() {
             let key = root.lowercased()
             wantedKeys.insert(key)
-            guard live[key] == nil else { continue }
+            guard live[key] == nil, !refused.contains(key) else { continue }
             open(root: root, key: key)
         }
         for key in Array(live.keys) where !wantedKeys.contains(key) { close(key) }
 
         for job in gone {
-            guard case .fsEvent(let watch) = job.trigger else { continue }
+            guard case .fsEvent(let watch) = job.trigger, stillWatching(job) else { continue }
             await unavailableHandler?(job, Self.unavailableReason(watch.path))
         }
+    }
+
+    /// Whether a job is still something to report, as of now rather than as of the list this
+    /// pass was given: the row re-read from the ledger when there is one, otherwise the list the
+    /// latest (possibly re-entrant) `sync` left behind. A row that cannot be read is reported
+    /// anyway — the runner re-reads it too, and its pause is idempotent.
+    private func stillWatching(_ job: Job) -> Bool {
+        let row: Job?
+        if let ledger {
+            do { row = try ledger.job(id: job.id) } catch { return true }
+        } else {
+            row = syncedJobs.first { $0.id == job.id }
+        }
+        guard let row else { return false }
+        return row.enabled && row.pausedReason == nil
     }
 
     /// The roots that need a stream: every enabled, unpaused `.fsEvent` job's root, with nested
@@ -166,7 +194,9 @@ actor WatcherManager {
     /// The watches whose directory is not there: deleted, renamed or unmounted. FSEvents does not
     /// stop a stream whose root disappears — it keeps running and delivers nothing further — so
     /// this stat is the only thing that ever notices (§7), and it runs on every job change and
-    /// once a minute besides.
+    /// once a minute besides. It runs on the actor, synchronously, once per watch: nothing for a
+    /// local folder, but a root on a stalled network mount blocks the actor — and every batch
+    /// behind it — for the mount's timeout, which is the price of the twentieth watch.
     static func vanished(in jobs: [Job], fileExists: (String) -> Bool) -> [Job] {
         jobs.filter { job in
             guard job.enabled, job.pausedReason == nil,
@@ -219,16 +249,20 @@ actor WatcherManager {
     /// stream's, because the person registered that path and that is what `/jobs` shows.
     ///
     /// The entry is dropped rather than left in place: a dead stream that still looks live would
-    /// stop the next `sync` from ever trying again, and `/jobs resume` is meant to retry.
+    /// stop the next `sync` from ever trying again, and `/jobs resume` is meant to retry. For the
+    /// length of the report, though, the key sits in `refused`, so the syncs each pause sets off
+    /// do not reopen a stream FSEvents has just declined — one refusal, one report.
     private func streamEnded(root: String, key: String) async {
         guard live[key] != nil else { return }
         live[key] = nil
+        refused.insert(key)
+        defer { refused.remove(key) }
         let folded = root.lowercased()
         for job in currentJobs() {
             guard job.enabled, job.pausedReason == nil,
                   case .fsEvent(let watch) = job.trigger else { continue }
             let path = watch.path.lowercased()
-            guard path == folded || Self.contains(folded, path) else { continue }
+            guard path == folded || Self.contains(folded, path), stillWatching(job) else { continue }
             await unavailableHandler?(job, Self.unavailableReason(watch.path))
         }
     }

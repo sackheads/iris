@@ -106,7 +106,10 @@ actor WatchCoordinator {
     /// 0 is never issued, which is what lets an abandoned fire be marked by setting `fireSeq = 0`.
     private var nextFireSeq: UInt64 = 0
     private var loop: Task<Void, Never>?
-    /// The loop, parked on its wait. Only ever one: `startLoop` refuses a second loop.
+    /// The loop, parked on its wait. Only ever one: `startLoop` refuses a second loop, and
+    /// `waitOrWake` refuses to park a loop that has been cancelled — so a loop stopped between
+    /// waits cannot take the slot from the one started after it. The precondition there is what
+    /// makes that a fact rather than a convention.
     private var sleeper: CheckedContinuation<Void, Never>?
     /// A wake that arrived while the loop was between waits. Without it, an event accepted in that
     /// window would be answered by the *next* wait rather than by this one, which is the same
@@ -222,6 +225,10 @@ actor WatchCoordinator {
     /// `/tmp` or `/etc` arrives spelled `/private/…` and matches neither the canonical root nor
     /// the registry entry the write recorded. The roots and `RecentWrites` use the same helper, so
     /// all three agree on one spelling.
+    ///
+    /// `root` is carried for diagnostics, not used to route: fan-out is decided per subscriber by
+    /// `covers(root:path:)` against each watch's own root, which is the same answer — a stream
+    /// on `/r` only ever yields paths under `/r` — and does not trust the tag to be right.
     func deliver(root: String, paths: [String]) async {
         let at = now()
         let canonical = paths.map { IrisPaths.canonicalPath($0) }
@@ -728,6 +735,15 @@ actor WatchCoordinator {
             await self?.signalWake()
         }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            // A loop cancelled between waits does not park: nothing but its timer would resume
+            // it, and a loop started in the meantime would find the slot taken — or take it
+            // from this one, leaking this continuation. Resumed at once, it sees the
+            // cancellation on the line after the wait and returns.
+            if Task.isCancelled {
+                continuation.resume()
+                return
+            }
+            precondition(sleeper == nil, "two loops parked on one WatchCoordinator")
             if pendingWake {
                 pendingWake = false
                 continuation.resume()

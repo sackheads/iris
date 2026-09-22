@@ -228,4 +228,50 @@ struct WatcherManagerSyncTests {
         #expect(await manager.activeRoots.isEmpty, "a dead stream is not left looking live")
         await manager.stopAll()
     }
+
+    @Test("a refused stream is opened once, not once per subscriber it was serving")
+    func aRefusedStreamIsNotReopenedWhileItsDeathIsReported() async throws {
+        // Reporting a dead stream pauses each subscriber in turn, and each pause re-enters `sync`
+        // through the hook with the subscribers not yet paused still wanting the root. Without a
+        // guard, every one of those re-entries opens the stream again, FSEvents refuses it again,
+        // and the report starts over. The hook's sync is modelled inline in the handler, with the
+        // job it just paused marked as such, so the re-entry happens every time.
+        let fake = FakeStreams()
+        let sink = Sink()
+        let paused = Paused()
+        let one = Self.watchJob("one", root: "/r")
+        let two = Self.watchJob("two", root: "/r")
+        let manager = await Self.manager(fake, present: ["/r"], sink: sink)
+        await manager.setUnavailableHandler { job, reason in
+            await sink.unavailable(job, reason)
+            await paused.mark(job.id)
+            await manager.sync(with: await paused.apply(to: [one, two]))
+        }
+        await manager.sync(with: [one, two])
+        #expect(fake.openedRoots == ["/r"])
+
+        fake.finish("/r")
+
+        await Self.eventually("both subscribers of the dead stream to be reported") {
+            await sink.unavailableCount == 2
+        }
+        #expect(Set(await sink.unavailable.map(\.job.id)) == [one.id, two.id])
+        #expect(fake.openedRoots == ["/r"], "one refusal is not tried again per subscriber")
+        #expect(await manager.activeRoots.isEmpty)
+        await manager.stopAll()
+    }
+
+    /// The pauses a handler applied, so the re-entrant sync can be handed the table as the ledger
+    /// would show it.
+    actor Paused {
+        private var ids: Set<UUID> = []
+        func mark(_ id: UUID) { ids.insert(id) }
+        func apply(to jobs: [Job]) -> [Job] {
+            jobs.map { job in
+                var job = job
+                if ids.contains(job.id) { job.pausedReason = "watch path unavailable" }
+                return job
+            }
+        }
+    }
 }

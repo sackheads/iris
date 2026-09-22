@@ -449,6 +449,72 @@ struct JobRunnerTests {
         #expect(client.callCount == 0, "a paused job runs nothing")
     }
 
+    @Test("pauseUnavailable on a job that is already paused writes nothing: one deletion, one card")
+    func pauseUnavailableIsIdempotent() async throws {
+        let (store, state, engine, _, _) = try harness([])
+        var job = self.job(name: "vanished")
+        job.trigger = .fsEvent(FSWatch(path: "/gone"))
+        try store.ledger.upsert(job)
+        let at = Date(timeIntervalSince1970: 1_700_000_900)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { at },
+                               config: config)
+        let reason = "watch path unavailable: /gone"
+
+        await runner.pauseUnavailable(job: job, reason: reason)
+        await runner.pauseUnavailable(job: job, reason: reason)
+        await runner.pauseUnavailable(job: job, reason: "watch path unavailable: /gone (again)")
+
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == reason, "the first reason stands")
+        #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1)
+        let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
+        #expect(activity.messages.filter { $0.role == .event }.count == 1)
+    }
+
+    @Test("two watches vanishing together are each paused once, with one card and one row apiece")
+    func twoVanishedRootsAreEachPausedOnce() async throws {
+        // The manager reports every vanished root in turn, awaiting the pause for each. The pause
+        // is a `setPaused`, which fires the ledger's hook, which syncs the manager again with the
+        // fresher table — and that second sync pauses the *next* vanished job before the first
+        // report loop reaches it. In production the hook's sync is a task and whether it overtakes
+        // the loop is the scheduler's call; here it runs inline in the handler so the overtaking
+        // interleaving is the one that happens every time.
+        let (store, state, engine, _, _) = try harness([])
+        var first = self.job(name: "first")
+        first.trigger = .fsEvent(FSWatch(path: "/gone/first"))
+        var second = self.job(name: "second")
+        second.trigger = .fsEvent(FSWatch(path: "/gone/second"))
+        try store.ledger.upsert(first)
+        try store.ledger.upsert(second)
+        let at = Date(timeIntervalSince1970: 1_700_000_900)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { at },
+                               config: config)
+        let streams = WatcherManagerSyncTests.FakeStreams()
+        let manager = WatcherManager(ledger: store.ledger, streams: streams.factory,
+                                     fileExists: { _ in false })
+        await manager.setUnavailableHandler { job, reason in
+            await runner.pauseUnavailable(job: job, reason: reason)
+            await manager.sync(with: (try? store.ledger.jobs()) ?? [])
+        }
+
+        await manager.sync(with: try store.ledger.jobs())
+
+        for (job, root) in [(first, "/gone/first"), (second, "/gone/second")] {
+            #expect(try store.ledger.job(id: job.id)?.pausedReason == "watch path unavailable: \(root)")
+            #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1,
+                    "\(job.name): one interrupted row for one deletion")
+        }
+        let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
+        let cards = activity.messages.filter { $0.role == .event }.compactMap { EventCard.decode($0.content) }
+        #expect(cards.filter { $0.jobId == first.id }.count == 1, "one card for the first watch")
+        #expect(cards.filter { $0.jobId == second.id }.count == 1, "one card for the second watch")
+        #expect(streams.openedRoots.isEmpty, "a vanished root gets no stream")
+        await manager.stopAll()
+    }
+
     // MARK: overlap and launch bookkeeping
 
     @Test("a skipped overlap is recorded as an interrupted run with no transcript")

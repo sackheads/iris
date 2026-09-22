@@ -161,6 +161,14 @@ actor IrisEngine {
     /// The watch layer's clock and bookkeeping (#187 deliverable 4). Built by `start()` and only
     /// there: a subagent or an evaluator must not run a second set of windows over the same jobs.
     private var watchCoordinatorInstance: WatchCoordinator?
+    /// Claimed by `startWatching` before its first suspension, so two overlapping `start()`s
+    /// cannot both find the coordinator slot empty and both fill it.
+    private var watchLayerStarting = false
+    /// The tail of the watch-sync queue. Every sync — the hook's, the loop's, the first — runs
+    /// behind the one before it and reads the jobs table only when its turn comes, so the sync
+    /// that lands last is the one that saw the latest table. Two free-running hook tasks would
+    /// promise nothing of the kind: each would read its own snapshot, and either could land last.
+    private var watchSyncChain: Task<Void, Never>?
     /// Whether this launch has already swept runs left `running` by the previous one.
     private var closedInterruptedRuns = false
 
@@ -2141,7 +2149,11 @@ actor IrisEngine {
         // `AppState.start()` runs from `onAppear` and can run more than once. A second watch layer
         // would be a second set of windows over the same jobs, and the second hook would replace
         // the first — so the first coordinator would go on firing from a loop nothing can stop.
-        guard watchCoordinatorInstance == nil, let runner = await jobRunner() else { return }
+        // The slot is claimed before the `await`: a guard on the coordinator alone would let two
+        // starts through, both suspended in `jobRunner()` with the check already passed.
+        guard !watchLayerStarting else { return }
+        watchLayerStarting = true
+        guard let runner = await jobRunner() else { watchLayerStarting = false; return }
         let coordinator = WatchCoordinator(
             ledger: ledger, now: Date.init, recentWrites: recentWrites,
             fire: { [weak runner] job, fire in
@@ -2167,22 +2179,37 @@ actor IrisEngine {
             // wait on an actor — least of all one whose fire handler writes to this same ledger.
             Task {
                 guard let self, let ledger else { return }
-                await self.syncWatches(ledger: ledger)
+                await self.scheduleWatchSync(ledger: ledger).value
             }
         }
-        await syncWatches(ledger: ledger)
+        await scheduleWatchSync(ledger: ledger).value
         // The minute hand of §7's vanished-root check: FSEvents never reports a root that was
         // deleted, so nothing but a periodic re-stat would ever notice.
         await coordinator.startLoop(everyMinute: { [weak self, weak ledger] in
             guard let self, let ledger else { return }
-            await self.syncWatches(ledger: ledger)
+            await self.scheduleWatchSync(ledger: ledger).value
         })
+    }
+
+    /// Queues one `syncWatches` behind whichever is already queued or running. Single-flight in
+    /// order, not deduplicated: a sync that has started may have read the table before the write
+    /// that prompted the next one, so the next one still has to run.
+    private func scheduleWatchSync(ledger: JobLedger) -> Task<Void, Never> {
+        let previous = watchSyncChain
+        let next = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            await self.syncWatches(ledger: ledger)
+        }
+        watchSyncChain = next
+        return next
     }
 
     /// The two syncs, in the order §7 fixes: the coordinator first, so a batch can never arrive
     /// for a subscriber that does not exist yet. A ledger read that fails leaves both exactly as
     /// they are — the streams that are running keep running, and the next job change tries again;
     /// tearing the watch set down because one read failed is the worse of the two answers.
+    /// Reached only through `scheduleWatchSync`, which is what orders one call after another.
     private func syncWatches(ledger: JobLedger) async {
         guard let coordinator = watchCoordinatorInstance else { return }
         let jobs: [Job]
