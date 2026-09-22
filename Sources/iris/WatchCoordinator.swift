@@ -148,6 +148,9 @@ actor WatchCoordinator {
     /// when they arrived.
     func sync(with jobs: [Job]) {
         var wanted: Set<UUID> = []
+        /// Whether a `queue` → `skip` edit released a hold into a fresh burst below: a new
+        /// deadline the parked loop has not seen, so it is woken for it as `apply` is.
+        var releasedAHold = false
         for job in jobs {
             guard job.enabled, job.pausedReason == nil,
                   case .fsEvent(let watch) = job.trigger else { continue }
@@ -207,10 +210,12 @@ actor WatchCoordinator {
                 existing.overflow = released.count - kept.count
                 existing.noise = 0
                 existing.ownWrites = 0
+                releasedAHold = true
             }
             subscribers[job.id] = existing
         }
         for id in subscribers.keys where !wanted.contains(id) { subscribers[id] = nil }
+        if releasedAHold { signalWake() }
     }
 
     private static func matcher(for watch: FSWatch) -> @Sendable (String) -> Bool {
@@ -322,12 +327,12 @@ actor WatchCoordinator {
             subscribers[decision.id] = subscriber
         }
 
-        // §2: the loop sleeps to the earliest deadline *or until woken by an accepted event*. An
-        // accept is what brings a deadline forward (the other source of a new deadline is an
-        // admission, which `apply` wakes for), so it is what wakes here; a batch of nothing but
-        // noise leaves the loop where it was. A wake for an accept that only joined a hold (no
-        // deadline of its own yet) costs one no-op `tick`, which is cheaper than the arithmetic
-        // needed to be sure it did not.
+        // §2: the loop sleeps to the earliest deadline *or until woken*. Three things can create a
+        // deadline the parked loop has not seen, and each wakes it: an accept (here), an admission
+        // that leaves a burst or a re-ask behind (`apply`), and a `queue` → `skip` edit releasing a
+        // hold (`sync`). A batch of nothing but noise leaves the loop where it was. A wake for an
+        // accept that only joined a hold (no deadline of its own yet) costs one no-op `tick`, which
+        // is cheaper than the arithmetic needed to be sure it did not.
         if !acceptedIn.isEmpty { signalWake() }
     }
 
@@ -831,8 +836,9 @@ actor WatchCoordinator {
 
     /// Wakes the loop, or remembers that it should not park when it next tries to. Called for a
     /// batch that accepted at least one path, for an admission that left a deadline behind (a
-    /// burst begun from a run's hold, or a `.skipInFlight` re-ask) — the two things that can move
-    /// the earliest deadline earlier — and by the timer when the wait runs out.
+    /// burst begun from a run's hold, or a `.skipInFlight` re-ask), for a `queue` → `skip` edit
+    /// that released a hold into a burst — the three things that can move the earliest deadline
+    /// earlier — and by the timer when the wait runs out.
     private func signalWake() {
         if sleeper != nil { resumeSleeper() } else { pendingWake = true }
     }

@@ -1251,7 +1251,8 @@ struct WatchCoordinatorTests {
         // F3. `nextDeadline()` is read before the sleep, so a watch that has been quiet is parked
         // on a 60 s wait when the first save of a burst lands. Without a wake, its 3 s window
         // expires unnoticed and the run happens up to a minute late — §2 promises the loop sleeps
-        // "until the earliest deadline or until woken by an accepted event". This test drives the
+        // to the earliest deadline or until woken, an accepted event being the first source of a
+        // wake. This test drives the
         // loop, not `tick`: `tick` is the unit seam and cannot see the bug.
         let store = try ConversationStore.inMemory()
         let clock = Clock(Self.t0)
@@ -1308,7 +1309,9 @@ struct WatchCoordinatorTests {
         // Saved again mid-run: held, and the loop is back on its idle wait.
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
         await Self.eventually("the loop to park again behind the outstanding fire") {
-            await sleeps.requested.filter { $0 >= 30 }.count >= 2
+            // Idle wait #1 is the start, #2 follows the fire (a fire leaves no deadline), #3 follows
+            // the held save's no-op tick — so #3 is the one that says the loop is parked again.
+            await sleeps.requested.filter { $0 >= 30 }.count >= 3
         }
 
         await gate.open()
@@ -1319,6 +1322,47 @@ struct WatchCoordinatorTests {
                 "one window after the run ended, not a minute later and past the ceiling")
         #expect(await sleeps.shortWaits.filter { $0 > 2.9 && $0 <= 3.0 }.count == 2,
                 "the run's end woke the loop to the new burst's window")
+        await coordinator.stopLoop()
+    }
+
+    @Test("a burst released by a queue-to-skip edit fires one window later, not on the minute wake")
+    func theLoopIsWokenWhenSyncReleasesAQueuedHold() async throws {
+        // The third source of a deadline, after an accept and an admission: `sync` releasing a
+        // `.queued` fire's paths into a fresh burst when the job's overlap is edited from `queue`
+        // to `skip`. The loop is parked on its 60 s wait at that moment (a queued fire leaves
+        // `nextDeadline()` nil), so without a wake the released window expires unnoticed.
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder([.queued])
+        var job = Self.job("notes", root: "/r")
+        try store.ledger.upsert(job)
+        let coordinator = Self.coordinator(ledger: store.ledger, clock: clock,
+                                           writes: RecentWrites(now: { clock.now }), recorder: recorder)
+        await coordinator.sync(with: [job])
+
+        let sleeps = Sleeps(clock: clock)
+        await coordinator.startLoop(everyMinute: {}, sleep: { await sleeps.wait($0) })
+        await Self.eventually("the loop to park on its idle wait") { await sleeps.parkedOnTheIdleWait }
+
+        await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
+        await recorder.waitFor(1)
+        await Self.eventually("the loop to park behind the queued fire") {
+            await sleeps.requested.filter { $0 >= 30 }.count >= 2
+        }
+        await coordinator.deliver(root: "/r", paths: ["/r/b.txt"])   // held behind the queued fire
+        await Self.eventually("the loop to park again after the held save") {
+            await sleeps.requested.filter { $0 >= 30 }.count >= 3
+        }
+
+        job.policy.overlap = .skip
+        try store.ledger.upsert(job)
+        await coordinator.sync(with: [job])
+
+        await recorder.waitFor(2)
+        #expect(await recorder.paths.last == ["/r/a.txt", "/r/b.txt"])
+        #expect(await recorder.summaries.last?.ceilingFired == false)
+        #expect(await sleeps.shortWaits.filter { $0 > 2.9 && $0 <= 3.0 }.count == 2,
+                "the release woke the loop to the new burst's window")
         await coordinator.stopLoop()
     }
 
