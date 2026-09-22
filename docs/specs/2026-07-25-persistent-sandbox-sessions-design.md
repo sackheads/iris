@@ -37,7 +37,7 @@ how `read_file`/`write_file` work (they stay on the host).
 
 Thin seam over the `container` CLI so the session manager is unit-testable without a real VM.
 
-> Superseded 2026-09-21 (#187, agency runtime amendment 10): the single `mount: String?` is now
+> Superseded 2026-09-21 (#187, agency runtime amendment 11): the single `mount: String?` is now
 > `mounts: [String]`, rendered one `--mount` per entry instead of one `-v`, and `exec` takes a
 > `timeoutSeconds: Int?` it enforces by killing the CLI child at the deadline. The signatures
 > below are the shape this document shipped with, kept as the record of it.
