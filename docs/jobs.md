@@ -182,7 +182,7 @@ are three kinds.
 | Argument | What it checks | Needs the VM |
 | --- | --- | --- |
 | `gate_url` | A HEAD request to an `http(s)` URL: its `ETag`, `Last-Modified` and `Content-Length` | no |
-| `gate_path` | An absolute path: a file's mtime, size and content hash, or a directory's own mtime, the newest modification under it, and how many entries it holds | no |
+| `gate_path` | An absolute path: a file's mtime, size and content hash, or a directory's own mtime, the newest modification under it, and how many entries it holds — up to 20,000 of them, past which the path is refused when the job is created and reads as a gate failure if it grows into one | no |
 | `gate_script` | A shell script, run inside the sandbox VM with `gate_mounts` attached read-only, under `gate_timeout_seconds` (default 60, clamped to 5–600) | yes |
 
 What the gate saw is stored on the run's ledger row as its **signal** and compared with the
@@ -220,15 +220,16 @@ What each answer costs:
 | nothing changed | A `completed` row with the outcome `gate: no change`, and **no card** — cards are for things that happened, and a five-minute poll would otherwise bury the Activity conversation. It costs no model turn and does not count towards the breaker |
 | it could not tell (a 404 or 5xx, a response with none of the three headers, a missing path, a non-zero exit, a timeout, or any other last line) | An `interrupted` row whose reason starts `gate error`. Three of those **in a row** pause the job with the reason `gate failing`, and that pause gets a card |
 
-Editing a job's gate drops the signals its runs recorded: a signal is a reading taken by one
-particular gate, and an ETag cannot answer for an mtime. The new gate takes its own baseline on the
-next tick.
+If a job's gate is ever changed — no tool does this today — the signals its runs recorded are
+dropped: a signal is a reading taken by one particular gate, and an ETag cannot answer for an
+mtime. The new gate would take its own baseline on the next tick.
 
-**Only a fresh cadence tick asks the gate.** A retry after a failed run does not — it is re-running
-work the gate already authorised, and asking again would get "nothing has changed since the run
-that failed" and quietly drop it. Neither does a fire the `queue` policy held while the previous
-run finished, nor `/jobs run <name>`: a hand-started fire runs the job whatever the gate would have
-said, because you asked for it. `/jobs` shows a gated job's trigger as, for example, `poll every
+**A cadence tick asks the gate; a retry and a hand-started fire do not.** A retry after a failed
+run is re-running work the gate already authorised, and asking again would get "nothing has changed
+since the run that failed" and quietly drop it. `/jobs run <name>` runs the job whatever the gate
+would have said, because you asked for it. A fire the `queue` policy held while the previous run
+finished *is* asked: it is an ordinary tick whose gate never got a chance to answer, and running it
+unasked would spend the very turn the gate exists to save. `/jobs` shows a gated job's trigger as, for example, `poll every
 900 s (url gate)`, so a job that has been quiet for a week says why it might be.
 
 ## What happens on sleep
@@ -428,9 +429,8 @@ host: `Error: command timed out after N seconds`. The container itself is left a
 deadline is the command's answer and not a sign of a dead container: the session, its installed
 packages and its files are all still there for the next command. Stopping a run mid-command reads
 differently — `Error: the command was cancelled.` — and leaves the session alone for the same
-reason. This is a bound on a command, not
-on the run: a turn that spends its ten minutes on six timed-out commands still ends on the run's
-own deadline, above.
+reason. This is a bound on a command, not on the run: a turn that spends its ten
+minutes on six timed-out commands still ends on the run's own deadline, above.
 
 **After a run**, a failure climbs the retry ladder: **1 minute, 5 minutes, 25 minutes**, and the
 fourth consecutive failure pauses the job ("failed 3 times; paused"). A run that finally works
