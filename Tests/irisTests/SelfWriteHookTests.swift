@@ -105,6 +105,11 @@ struct SelfWriteHookTests {
 
     // MARK: the skill tools, which name no path in their arguments
 
+    /// Every sentence `writtenPaths` reads is pinned against the tool that produces it — a
+    /// re-worded result and the recording move together, or this fails. Without that,
+    /// `"Successfully updated skill '"` could be rewritten and two of the four filtered tools
+    /// would quietly stop being recorded with the whole suite green, which is exactly the loop
+    /// this deliverable exists to break.
     @Test("a skill write records both the folder and the file inside it")
     func skillWritesRecordFolderAndFile() async throws {
         let home = try tempDirectory("selfwrite-skills")
@@ -132,6 +137,20 @@ struct SelfWriteHookTests {
         #expect(IrisEngine.writtenPaths(tool: "create_skill", args: args, cwd: nil,
                                         result: "Error saving skill 'watch-notes': disk full",
                                         paths: paths).isEmpty)
+
+        // The other two sentences, from the tools that actually write them.
+        let updated = await ToolExecutor.shared.updateSkill(name: "Watch Notes", description: "d2",
+                                                            body: "b2", paths: paths)
+        #expect(IrisEngine.writtenPaths(tool: "update_skill", args: args, cwd: nil,
+                                        result: updated, paths: paths)
+                == [folder.path, folder.appendingPathComponent("SKILL.md").path])
+
+        let deleted = await ToolExecutor.shared.deleteSkill(name: "Watch Notes", paths: paths)
+        #expect(IrisEngine.writtenPaths(tool: "delete_skill",
+                                        args: ["name": .string("Watch Notes")], cwd: nil,
+                                        result: deleted, paths: paths) == [folder.path])
+        #expect(!FileManager.default.fileExists(atPath: folder.path),
+                "precondition: the delete really happened, so its sentence is the real one")
     }
 
     // MARK: the pin
@@ -140,13 +159,19 @@ struct SelfWriteHookTests {
     func everyDeclaredToolIsClassified() async {
         // Pinned against the live declarations, so a tool added later without a classification
         // fails this suite rather than quietly going unrecorded. MCP tools are excluded: they are
-        // a user's servers, not a declaration in this repo, and §4 does not feed them.
+        // a user's servers, not a declaration in this repo, and §4 does not feed them. So are the
+        // tools `buildRequest` declares inline (memory, identity, sessions, goals, delegation):
+        // they return from `executeFunctionCall` directly and never reach the choke point at all,
+        // so calling them "writes no path" would be a claim in the one direction that matters.
         let mcp = Set(await MCPManager.shared.getGeminiTools().map(\.name))
         let declared = Set(await ToolExecutor.shared.getTools(workspaceToolsEnabled: true).map(\.name))
             .subtracting(mcp)
             .union(IrisEngine.jobToolDeclarations(isPinned: true).map(\.name))
 
         #expect(declared.contains("write_file"), "precondition: the declarations were readable")
+        // Both directions: a name left behind after its tool is deleted, or a typo in either set,
+        // fails here too — not just a new tool nobody classified.
+        #expect(IrisEngine.pathWritingTools.union(IrisEngine.toolsThatWriteNoPath) == declared)
         for name in declared {
             let writes = IrisEngine.pathWritingTools.contains(name)
             let doesNot = IrisEngine.toolsThatWriteNoPath.contains(name)

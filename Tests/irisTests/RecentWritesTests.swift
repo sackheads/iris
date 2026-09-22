@@ -109,9 +109,7 @@ struct RecentWritesTests {
         let clock = FakeClock()
         let r = registry(clock)
         let throughTheLink = link.appendingPathComponent("notes.md").path
-        // Written first, because that is the order the hook runs in — and because
-        // `resolvingSymlinksInPath` (measured, 2026-09-22) returns a path whose leaf does not
-        // exist completely unchanged, symlinked parents and all.
+        // Written first, because that is the order the hook runs in.
         try "notes".write(toFile: throughTheLink, atomically: true, encoding: .utf8)
         await r.record(throughTheLink)
 
@@ -127,6 +125,16 @@ struct RecentWritesTests {
                 "the `/private` spelling is not what was stored")
         #expect(!(await r.isOwn(throughTheLink, within: 5)),
                 "matching is lexical: the link's own spelling was never recorded")
+
+        // A path whose leaf is already gone — what `delete_skill` records, a folder it has just
+        // removed. `resolvingSymlinksInPath` alone returns such a path unchanged, symlinked
+        // parents and all; `IrisPaths.canonicalPath` resolves the deepest ancestor that does
+        // exist, so both spellings still agree.
+        let removed = link.appendingPathComponent("gone").path
+        await r.record(removed)
+        #expect(await r.isOwn("\(dir.path)/gone", within: 5),
+                "a deleted leaf records its parent-resolved form")
+        #expect(!(await r.isOwn(removed, within: 5)))
     }
 
     // MARK: bounds

@@ -63,21 +63,24 @@ actor RecentWrites {
 
     /// Remember `path` as ours, in the spelling FSEvents will report it in.
     ///
-    /// `resolvingSymlinksInPath().standardizedFileURL` and not merely `ToolExecutor.resolvePath`'s
-    /// output: that one expands `~` and joins the workspace but leaves symlinks alone, and a watch
-    /// root reached through one (`/tmp`, `/var`, a symlinked workspace) would then never match.
-    /// The standardisation also strips a leading `/private` on macOS, which is what makes a write
-    /// under the temp directory record as `/var/folders/…` — the same normalisation the watch
-    /// coordinator applies to the paths it is handed.
+    /// Symlink-resolved, and not merely `ToolExecutor.resolvePath`'s output: that one expands `~`
+    /// and joins the workspace but leaves symlinks alone, and a watch root reached through one
+    /// (`/tmp`, `/var`, a symlinked workspace) would then never match. Standardising also strips a
+    /// leading `/private` on macOS, which is what makes a write under the temp directory record as
+    /// `/var/folders/…` — the same normalisation the watch coordinator applies to the paths it is
+    /// handed.
     ///
-    /// One measured limit (2026-09-22): `resolvingSymlinksInPath` returns a path whose *leaf* does
-    /// not exist unchanged, symlinked parents and all. Every write records a path that is on disk
-    /// by then, so they resolve; a `delete_skill` records a folder that has just gone, so its
-    /// entry keeps whatever spelling the caller had. That only diverges if a symlink sits above
-    /// `~/.iris`, and the cost is a missed filter (an extra fire), never a swallowed change.
+    /// `IrisPaths.canonicalPath` rather than a bare `resolvingSymlinksInPath()` (which is §4's
+    /// literal expression, widened here): that one returns a path whose *leaf* does not exist
+    /// unchanged, symlinked parents and all — measured, and already both documented and handled by
+    /// the helper, which resolves the deepest existing ancestor and re-appends what is missing.
+    /// `delete_skill` records a folder that has just gone, so without this the registry and
+    /// `WatchRoot.canonical` would spell the same directory two ways. It ends in
+    /// `standardizedFileURL`, so the recorded form is unchanged for a path that does exist.
+    ///
+    /// This is the one place in the registry that touches the file system; `isOwn` stays lexical.
     func record(_ path: String) {
-        let canonical = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
-        entries.append(Entry(path: canonical, at: now()))
+        entries.append(Entry(path: IrisPaths.canonicalPath(path), at: now()))
         sweep()
     }
 
