@@ -383,10 +383,13 @@ struct ScheduleJobArguments: Equatable, Sendable {
 
     // MARK: Loose argument reading
 
+    // The four readers below are shared with `RegisterWatcherArguments`, whose arguments arrive
+    // from the same models in the same loose shapes.
+
     /// A non-empty string, or nil. Numbers are accepted as their text so a model that quotes a
     /// name or a cron expression's stray number still gets what it meant; containers and nulls
     /// are not strings at all and read as absent.
-    private static func text(_ value: JSONValue?) -> String? {
+    static func text(_ value: JSONValue?) -> String? {
         guard let value else { return nil }
         switch value {
         case .string(let string):
@@ -403,7 +406,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// truncated: "every 1.5 minutes" is a cadence cron cannot express, and 1 is closer to the
     /// request than a refusal. A double that no `Int` can hold (`1e30`) is unreadable rather than
     /// a trap — `Int(_: Double)` crashes on those, and the value came from a model.
-    private static func integer(_ value: JSONValue?) -> Int? {
+    static func integer(_ value: JSONValue?) -> Int? {
         switch value {
         case .int(let int): return int
         case .double(let double): return double.isFinite ? Int(exactly: double.rounded(.towardZero)) : nil
@@ -417,7 +420,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// and for the same reason: refusing it would fail a call that asked for nothing, and the
     /// refusal it would earn ("overlap must be 'skip' or 'queue'") is no help to a caller that
     /// named neither.
-    private static func given(_ value: JSONValue?) -> JSONValue? {
+    static func given(_ value: JSONValue?) -> JSONValue? {
         guard present(value) else { return nil }
         if case .string(let string) = value,
            string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return nil }
@@ -427,7 +430,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// Whether the model sent this key at all. A JSON `null` reads as absent: it is how several
     /// providers spell "no value", and refusing it as a wrong type would fail a call that asked
     /// for nothing.
-    private static func present(_ value: JSONValue?) -> Bool {
+    static func present(_ value: JSONValue?) -> Bool {
         guard let value else { return false }
         if case .null = value { return false }
         return true

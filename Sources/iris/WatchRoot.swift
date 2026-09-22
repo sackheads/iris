@@ -38,4 +38,45 @@ enum WatchRoot {
         guard fileExists(standardized.path) else { return nil }
         return standardized.resolvingSymlinksInPath().standardizedFileURL.path
     }
+
+    /// The directories a watch on which would be a watch on the machine (spec §5). Compared by
+    /// canonical form, so `/var` here also turns down `/private/var`; a volume root
+    /// (`/Volumes/<name>`) and the home directory are refused too, by `refusal(for:paths:home:)`.
+    /// Only the root itself is too broad — a folder *under* `/private` or `/Users` is exactly what a
+    /// watch is for.
+    static let tooBroad = ["/", "/System", "/Library", "/usr", "/private", "/var", "/etc", "/bin", "/sbin"]
+
+    static let tooBroadRefusal = "that is too broad to watch; name a specific folder"
+
+    /// Iris's whole directory, not only `config` and `plugins`: `update_memory`, `save_fact` and
+    /// `update_soul` write under `~/.iris/memory` through their own managers, where the self-write
+    /// filter (spec §4) cannot see them, so a watch anywhere over that tree would fire on the run's
+    /// own notes and the run would write more of them.
+    static let protectedRefusal = "that path is or contains Iris's own directory (~/.iris); a watch there would react to itself"
+
+    /// Why `canonical` may not be watched, or nil when it may. Checked in the order a reader would
+    /// want the answer: a root that is too broad is told so even when it also contains Iris's
+    /// directory (the home directory does), because "name a specific folder" is the fix for both.
+    ///
+    /// Both sides go through `IrisPaths.canonicalPath` and are compared case-insensitively — the
+    /// same rule as `IrisPaths.isUnderProtectedWriteDir`, and for the same reason: the default
+    /// volume is case-insensitive and `/var` is a symlink. Unlike that check, this one refuses in
+    /// both directions — a root that *contains* Iris's directory sees every write into it — which is
+    /// why it is not written as a call to it.
+    ///
+    /// - Parameters:
+    ///   - paths: where Iris's own directory is; injected so a test can refuse a temp root.
+    ///   - home: the user's home directory, injected for the same reason.
+    static func refusal(for canonical: String, paths: IrisPaths, home: String) -> String? {
+        let root = IrisPaths.canonicalPath(canonical).lowercased()
+        let broad = (tooBroad + [home]).map { IrisPaths.canonicalPath($0).lowercased() }
+        if broad.contains(root) { return tooBroadRefusal }
+        let components = URL(fileURLWithPath: root).pathComponents
+        if components.count == 3, components[1] == "volumes" { return tooBroadRefusal }
+        let iris = IrisPaths.canonicalPath(paths.root.path).lowercased()
+        if root == iris || root.hasPrefix(iris + "/") || iris.hasPrefix(root + "/") {
+            return protectedRefusal
+        }
+        return nil
+    }
 }
