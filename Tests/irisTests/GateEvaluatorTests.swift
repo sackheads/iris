@@ -16,6 +16,10 @@ final class GateRuntime: ContainerRuntime, @unchecked Sendable {
     var createDelaySeconds: Double?
     var execError: Error?
     var execResult: (stdout: String, stderr: String, exitCode: Int32) = ("CHANGED", "", 0)
+    /// When set, `exec` waits to be cancelled and then throws, the way a real `container exec`
+    /// answers a cancelled call: through the kill ladder, with the caller's task already cancelled
+    /// by the time the cleanup runs.
+    var execAwaitsCancellation = false
 
     func createDetached(name: String, image: String, mounts: [String], workdir: String) async throws {
         lock.withLock { creates.append((name, image, mounts, workdir)) }
@@ -28,11 +32,22 @@ final class GateRuntime: ContainerRuntime, @unchecked Sendable {
     func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws
         -> (stdout: String, stderr: String, exitCode: Int32) {
         lock.withLock { execs.append((name, workdir, command, timeoutSeconds)) }
+        if lock.withLock({ execAwaitsCancellation }) {
+            while !Task.isCancelled { try? await Task.sleep(nanoseconds: 5_000_000) }
+            throw CancellationError()
+        }
         if let execError { throw execError }
         return lock.withLock { execResult }
     }
 
-    func remove(name: String) async { lock.withLock { removed.append(name) } }
+    /// Refuses on a cancelled task, exactly as `CLIProcessRunner.run` does — it will not launch a
+    /// child for a caller that has already given up, so a cleanup taken down the ordinary path
+    /// from a cancelled evaluation spawns neither `stop` nor `delete`. Modelled here so the test
+    /// of that can fail when it is wrong.
+    func remove(name: String) async {
+        guard !Task.isCancelled else { return }
+        lock.withLock { removed.append(name) }
+    }
     func list(prefix: String) async -> [String] { [] }
 
     var createdMounts: [String] { lock.withLock { creates.last?.mounts ?? [] } }
@@ -311,10 +326,12 @@ struct GateEvaluatorTests {
 
     @Test("the verdict is the last line of stdout, and the rest is the payload")
     func scriptTokens() async throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
         let runtime = GateRuntime()
         runtime.execResult = ("3 new PRs\nCHANGED\n", "", 0)
         let changed = await GateEvaluator.evaluate(
-            .script(command: "check.sh", mounts: ["/tmp/in"], timeoutSeconds: 30),
+            .script(command: "check.sh", mounts: [IrisPaths.canonicalPath(dir.path)], timeoutSeconds: 30),
             previous: nil, runtime: runtime, image: "ubuntu:latest")
         guard case .changed(_, let payload) = changed else {
             Issue.record("CHANGED is a change, got \(changed)"); return
@@ -360,14 +377,20 @@ struct GateEvaluatorTests {
 
     @Test("the declared mounts are made read-only and the timeout is forwarded verbatim")
     func scriptMountsAndTimeout() async throws {
+        // Real directories, because a stored mount is checked against what is on disk at every
+        // evaluation now (R33) — a gate whose source is not there is an error, not a create.
+        let a = try temporaryDirectory(), b = try temporaryDirectory(), c = try temporaryDirectory()
+        defer { for d in [a, b, c] { try? FileManager.default.removeItem(at: d) } }
+        let (pa, pb, pc) = (IrisPaths.canonicalPath(a.path), IrisPaths.canonicalPath(b.path),
+                            IrisPaths.canonicalPath(c.path))
         let runtime = GateRuntime()
         runtime.execResult = ("UNCHANGED", "", 0)
         _ = await GateEvaluator.evaluate(
-            .script(command: "check.sh", mounts: ["/tmp/a", "/tmp/b:/inputs", "/tmp/c:/c:ro"],
+            .script(command: "check.sh", mounts: [pa, "\(pb):/inputs", "\(pc):/c:ro"],
                     timeoutSeconds: 45),
             previous: nil, runtime: runtime, image: "alpine:3")
 
-        #expect(runtime.createdMounts == ["/tmp/a:ro", "/tmp/b:/inputs:ro", "/tmp/c:/c:ro"],
+        #expect(runtime.createdMounts == ["\(pa):ro", "\(pb):/inputs:ro", "\(pc):/c:ro"],
                 "R28: nothing in the runtime forces read-only, so the gate does")
         #expect(runtime.creates.last?.image == "alpine:3")
         #expect(runtime.lastExecTimeout == 45)
@@ -450,6 +473,82 @@ struct GateEvaluatorTests {
         #expect(ContainerMount.hasReadOnlyFlag("/host/dir:ro"))
     }
 
+    /// R33: the mounts are a standing read capability, granted once by a review, so what is bound
+    /// at every later tick must still be what was reviewed. A source that now resolves elsewhere —
+    /// deleted and replaced by a link, which takes one command — is a gate error, and nothing is
+    /// started.
+    @Test("a mount source swapped after creation is a gate error, and no container is made")
+    func mountDriftIsAGateError() async throws {
+        let watched = try temporaryDirectory()
+        let elsewhere = try temporaryDirectory()
+        defer { for d in [watched, elsewhere] { try? FileManager.default.removeItem(at: d) } }
+        let stored = "\(IrisPaths.canonicalPath(watched.path)):/in:ro"
+        let gate = Gate.script(command: "ls /in; echo UNCHANGED", mounts: [stored], timeoutSeconds: 30)
+
+        let runtime = GateRuntime()
+        runtime.execResult = ("UNCHANGED", "", 0)
+        guard case .unchanged = await GateEvaluator.evaluate(gate, previous: nil, runtime: runtime,
+                                                             image: "i") else {
+            Issue.record("the directory is still the one that was approved"); return
+        }
+
+        // The same path, pointed somewhere else.
+        try FileManager.default.removeItem(at: watched)
+        try FileManager.default.createSymbolicLink(at: watched, withDestinationURL: elsewhere)
+
+        let result = await GateEvaluator.evaluate(gate, previous: nil, runtime: runtime, image: "i")
+
+        guard case .error(let detail) = result else {
+            Issue.record("a mount that moved is a gate error, got \(result)"); return
+        }
+        #expect(detail.contains("now resolves to"))
+        #expect(detail.contains(IrisPaths.canonicalPath(elsewhere.path)))
+        #expect(runtime.creates.count == 1, "the second evaluation started nothing")
+    }
+
+    @Test("a mount source that is no longer a directory is a gate error")
+    func mountThatIsNoLongerADirectory() async throws {
+        let watched = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: watched) }
+        let stored = "\(IrisPaths.canonicalPath(watched.path)):/in:ro"
+        try FileManager.default.removeItem(at: watched)
+        try "not a directory".write(to: watched, atomically: true, encoding: .utf8)
+
+        let runtime = GateRuntime()
+        let result = await GateEvaluator.evaluate(
+            .script(command: "echo UNCHANGED", mounts: [stored], timeoutSeconds: 30),
+            previous: nil, runtime: runtime, image: "i")
+
+        guard case .error(let detail) = result else {
+            Issue.record("expected a gate error, got \(result)"); return
+        }
+        #expect(detail.contains("no longer a directory"))
+        #expect(runtime.creates.isEmpty)
+    }
+
+    /// R34: cancellation is exactly when a container most needs removing, and exactly when the
+    /// ordinary route will not do it — the CLI refuses to launch on a cancelled task, so a plain
+    /// `remove` spawns neither `stop` nor `delete` and the container lives until something sweeps
+    /// it. `GateRuntime.remove` refuses the same way, so this fails when the cleanup does.
+    @Test("a cancelled evaluation still removes the container it started", .timeLimit(.minutes(1)))
+    func cancelledEvaluationStillRemoves() async throws {
+        let runtime = GateRuntime()
+        runtime.execAwaitsCancellation = true
+        let evaluation = Task {
+            await GateEvaluator.evaluate(.script(command: "sleep 600", mounts: [], timeoutSeconds: 600),
+                                         previous: nil, runtime: runtime, image: "i")
+        }
+        while runtime.execCount == 0 { try await Task.sleep(nanoseconds: 5_000_000) }
+        evaluation.cancel()
+        let result = await evaluation.value
+
+        guard case .error = result else { Issue.record("a cancelled gate answers no verdict"); return }
+        let name = try #require(runtime.creates.last?.name)
+        #expect(runtime.removedNames == [name], "the gate's container does not outlive a cancelled tick")
+        #expect(!(await GateContainerRegistry.shared.current().contains(name)),
+                "and it is out of the in-flight set, so a later sweep is free to take it")
+    }
+
     // MARK: mount validation
 
     @Test("a mount is checked before a job is created, not trusted")
@@ -466,6 +565,18 @@ struct GateEvaluatorTests {
         #expect(GateEvaluator.mountRefusal("relative/dir") != nil, "a relative source is a volume name")
         #expect(GateEvaluator.mountRefusal("/tmp/\(UUID().uuidString)") != nil, "the source must exist")
         #expect(GateEvaluator.mountRefusal("\(dir.path):/in,puts") != nil, "a comma has no escape")
+
+        // R33: the whole disk, and Iris's own configuration, are refused by where they resolve to
+        // rather than by how they are written. The home here is a stand-in, so nothing in this
+        // test goes near the real `~/.iris` (invariant 7).
+        let home = IrisPaths(root: try temporaryDirectory())
+        try FileManager.default.createDirectory(at: home.configDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: home.pluginsDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home.root) }
+        #expect(GateEvaluator.mountRefusal("/", paths: home) != nil, "a gate may not mount /")
+        #expect(GateEvaluator.mountRefusal(home.configDir.path, paths: home) != nil)
+        #expect(GateEvaluator.mountRefusal(home.pluginsDir.path, paths: home) != nil)
+        #expect(GateEvaluator.mountRefusal(dir.path, paths: home) == nil, "and anything else is fine")
     }
 }
 
@@ -611,6 +722,44 @@ struct JobGateAdmissionTests {
         let reasons = try store.ledger.runs(jobId: job.id, limit: 10).compactMap(\.failureReason)
         #expect(reasons.filter { $0.hasPrefix(JobRunner.gateErrorPrefix) }.count == 2)
         #expect(reasons.contains(JobRunner.gateFailingReason))
+    }
+
+    /// R34: a gate whose *ledger* cannot be read is a gate that cannot answer, and it is counted
+    /// as one. Before, the row it wrote carried no gate-error prefix, so the streak never saw it:
+    /// an unreadable ledger left the job writing a row every tick for ever — never running, never
+    /// pausing, never carded, which is the exact failure the three-error pause exists to end.
+    @Test("three ledger reads that fail pause the job, like any other gate that cannot answer")
+    func unreadableLedgerPausesToo() async throws {
+        let (store, state, engine, client) = try harness([textResponse("tick")])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let job = polled()
+        try store.ledger.upsert(job)
+        struct Unreadable: Error {}
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               protectionEnabled: false,
+                               gateEvaluator: { _, _ in
+                                   Issue.record("the gate is never asked when its signal cannot be read")
+                                   return .unchanged(signal: "x")
+                               },
+                               lastGateSignal: { _ in throw Unreadable() })
+
+        for _ in 0..<2 { await runner.fire(job: job, origin: .cadence(kind: "poll")) }
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == nil, "two is not three")
+        #expect(cards(state).isEmpty, "the first two are quiet rows, like any other gate error")
+
+        let third = await runner.fire(job: job, origin: .cadence(kind: "poll"))
+
+        guard case .gateError(_, let paused) = third else {
+            Issue.record("an unreadable ledger is a gate error, got \(third)"); return
+        }
+        #expect(paused)
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == JobRunner.gateFailingReason)
+        #expect(cards(state).count == 1, "and somebody is told, once")
+        #expect(client.callCount == 0, "no turn was ever spent")
+        let reasons = try store.ledger.runs(jobId: job.id, limit: 10).compactMap(\.failureReason)
+        #expect(reasons.filter { $0.hasPrefix(JobRunner.gateErrorPrefix) }.count == 2,
+                "the rows the streak counts are the rows it wrote")
     }
 
     @Test("a run between two errors resets the count")

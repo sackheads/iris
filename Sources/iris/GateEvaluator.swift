@@ -102,7 +102,8 @@ enum GateEvaluator {
             return await evaluateScript(command, mounts: mounts, timeoutSeconds: timeoutSeconds,
                                         runtime: runtime,
                                         image: image ?? ConfigManager.shared.sandboxImage,
-                                        createCeiling: createCeilingSeconds)
+                                        createCeiling: createCeilingSeconds,
+                                        fileManager: fileManager)
         }
     }
 
@@ -268,7 +269,8 @@ enum GateEvaluator {
 
     private static func evaluateScript(_ command: String, mounts: [String], timeoutSeconds: Int,
                                        runtime: (any ContainerRuntime)?, image: String,
-                                       createCeiling: Int) async -> GateResult {
+                                       createCeiling: Int,
+                                       fileManager: FileManager) async -> GateResult {
         // R28, and the reason this parameter is optional at all.
         guard let runtime else { return .error(sandboxUnavailableDetail) }
         // A legacy `PollSpec` row with no gate at all decodes to a script gate with an empty
@@ -277,8 +279,13 @@ enum GateEvaluator {
         guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .error("this job's gate has no script to run")
         }
+        // Before anything is started: the mounts must still be the directories that were reviewed.
+        if let drift = mountDrift(mounts, fileManager: fileManager) { return .error(drift) }
         let seconds = clampedTimeout(timeoutSeconds)
         let name = "\(SandboxSessionManager.namePrefix)gate-\(UUID().uuidString.lowercased())"
+        // Registered before the create and taken out again by `sweep`, so a sweep of the leftovers
+        // of a previous process cannot delete a container that is mid-evaluation right now.
+        await GateContainerRegistry.shared.register(name)
         do {
             try await createWithinCeiling(runtime, name: name, image: image,
                                           mounts: readOnly(mounts), seconds: createCeiling)
@@ -286,12 +293,12 @@ enum GateEvaluator {
             // Not a hang: a bounded failure that lands on the ordinary error path, so it is
             // counted towards the three-error pause and somebody is eventually told. The remove
             // is the same best-effort sweep a failed create gets.
-            await runtime.remove(name: name)
+            await sweep(runtime, name: name)
             return .error("the gate's container could not be started within \(createCeiling) seconds")
         } catch {
             // Remove anyway: a create that failed part way through can still have left a container
             // behind, and the next tick would collide with nothing but the daemon's opinion of it.
-            await runtime.remove(name: name)
+            await sweep(runtime, name: name)
             return .error("the gate's container could not be started: \(describe(error))")
         }
         let result: GateResult
@@ -307,7 +314,7 @@ enum GateEvaluator {
             result = .error("the gate script could not be run: \(describe(error))")
         }
         // No `defer`: it cannot await, and a container left running would outlive every tick.
-        await runtime.remove(name: name)
+        await sweep(runtime, name: name)
         return result
     }
 
@@ -365,6 +372,70 @@ enum GateEvaluator {
         min(max(seconds, minTimeoutSeconds), maxTimeoutSeconds)
     }
 
+    /// A mount entry's parts, under the `source[:target][:ro]` grammar: a bare source mounts at
+    /// itself. Lenient, because a row can be edited outside Iris and hold anything — the strict
+    /// reading is `ContainerMount.argument`'s, which refuses what it cannot make sense of before
+    /// any container is created.
+    static func mountParts(_ entry: String) -> (source: String, target: String, readOnly: Bool) {
+        var parts = entry.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        let readOnly = ContainerMount.hasReadOnlyFlag(entry)
+        if readOnly, parts.count > 1 { parts.removeLast() }
+        let source = parts.first ?? ""
+        return (source, parts.count > 1 ? parts[1] : source, readOnly)
+    }
+
+    /// `entry` with its source resolved — tilde expanded, `..` removed, symlinks followed — by the
+    /// same helper the permission layer canonicalises a write with, and its target left exactly as
+    /// it was asked for.
+    ///
+    /// Stored this way, so the directory the review was shown and the directory the daemon binds
+    /// are the same one: `/tmp/innocuous` is whatever it points at, and a reviewer shown the
+    /// spelling rather than the location is reviewing nothing. The target is *not* resolved —
+    /// it is a path inside the container that the script was written against, and moving it would
+    /// break a script the review just approved.
+    static func canonicalMount(_ entry: String) -> String {
+        let parts = mountParts(entry)
+        guard !parts.source.isEmpty else { return entry }
+        let resolved = IrisPaths.canonicalPath(parts.source)
+        return parts.readOnly ? "\(resolved):\(parts.target):ro" : "\(resolved):\(parts.target)"
+    }
+
+    /// Why this gate's mounts cannot be used *now*, or `nil` when they are still what was stored.
+    ///
+    /// Asked at every evaluation, not only at creation. A mount is a standing read capability over
+    /// a directory that is not ours, granted once by a review and then used unattended for as long
+    /// as the job lives: a source replaced by a symlink somewhere else, or by a file, would
+    /// otherwise be bound without anybody having looked at it. Resolving to something other than
+    /// the stored path is the whole test — the stored path is already canonical, so any difference
+    /// is a change made since.
+    static func mountDrift(_ mounts: [String], fileManager: FileManager = .default) -> String? {
+        for entry in mounts {
+            let source = mountParts(entry).source
+            guard !source.isEmpty else { continue }
+            let resolved = IrisPaths.canonicalPath(source)
+            guard resolved == source else {
+                return "the gate's mount \(source) now resolves to \(resolved), which is not what was approved"
+            }
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: source, isDirectory: &isDirectory),
+                  isDirectory.boolValue else {
+                return "the gate's mount \(source) is no longer a directory"
+            }
+        }
+        return nil
+    }
+
+    /// Removes the gate's container and takes its name out of the in-flight set.
+    ///
+    /// `removeIgnoringCancellation`, because this is the cleanup and the caller may well be
+    /// cancelled by the time it runs: `CLIProcessRunner` refuses to launch on a cancelled task, so
+    /// a plain `remove` would spawn neither `stop` nor `delete` and leave the container standing
+    /// until something swept it. Bounded by the remove's own housekeeping deadline.
+    private static func sweep(_ runtime: any ContainerRuntime, name: String) async {
+        await runtime.removeIgnoringCancellation(name: name)
+        await GateContainerRegistry.shared.unregister(name)
+    }
+
     /// Every declared mount, read-only. Nothing in `ContainerRuntime` forces that — `:ro` is just
     /// one spelling its grammar accepts — so the gate forces it here, on the way in: a gate looks
     /// at its inputs, and a writable mount would be model-written code with a durable handle on
@@ -379,7 +450,12 @@ enum GateEvaluator {
     /// Why `entry` cannot be a gate's mount, or `nil` when it can. Asked at creation, while there
     /// is a person to read the answer: the daemon's version of these refusals arrives later, on a
     /// tick nobody is watching, as three gate errors and a paused job.
-    static func mountRefusal(_ entry: String, fileManager: FileManager = .default) -> String? {
+    ///
+    /// Every question below is asked of the *resolved* source, never the spelling, because that is
+    /// what would actually be bound: `/tmp/innocuous -> /` is a mount of the whole disk, and a
+    /// refusal that reads the text would miss it.
+    static func mountRefusal(_ entry: String, fileManager: FileManager = .default,
+                             paths: IrisPaths = .default) -> String? {
         let normalized = readOnly([entry])[0]
         do {
             _ = try ContainerMount.argument(for: normalized)
@@ -388,13 +464,24 @@ enum GateEvaluator {
         } catch {
             return "the mount `\(entry)` cannot be used"
         }
-        let source = String(normalized.split(separator: ":", omittingEmptySubsequences: false)[0])
+        let source = IrisPaths.canonicalPath(mountParts(normalized).source)
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: source, isDirectory: &isDirectory) else {
             return "the mount source \(source) does not exist"
         }
         guard isDirectory.boolValue else {
             return "the mount source \(source) is a file, and a file cannot be mounted — mount its directory instead"
+        }
+        // The whole disk read-only, on a cadence, into a model's context is not a gate — it is the
+        // absence of one, and no review of a two-line script would catch it.
+        guard source != "/" else {
+            return "the mount source \(source) is the whole filesystem, which is too much for a gate to read — name the directory the script actually looks at"
+        }
+        // The same two directories `PermissionManager` will not let a write into: the allowlist,
+        // the hook definitions and the plugins are how Iris decides what anything may do, and a
+        // gate script reading them on a cadence puts them in a model's context forever.
+        guard !paths.isUnderProtectedWriteDir(source) else {
+            return "the mount source \(source) is part of Iris's own configuration, which a gate may not read — name a directory outside it"
         }
         return nil
     }
@@ -426,4 +513,25 @@ enum GateEvaluator {
     }
 
     private static func firstLine(of text: String) -> String? { quoted(text) }
+}
+
+/// The gate containers that exist right now, by name.
+///
+/// A gate's container is named with `SandboxSessionManager.namePrefix` on purpose: that is what
+/// makes one left behind by a crash sweepable at the next launch. The price of sharing the prefix
+/// is that the prefix alone no longer identifies an orphan, so the sweep asks here as well as
+/// asking its own session table. Nothing schedules the sweep today — it runs once, at launch,
+/// before any gate could be mid-evaluation — and this is what keeps it correct if anything ever
+/// does.
+actor GateContainerRegistry {
+    static let shared = GateContainerRegistry()
+
+    private var names: Set<String> = []
+
+    func register(_ name: String) { names.insert(name) }
+    func unregister(_ name: String) { names.remove(name) }
+
+    /// The names in flight at this instant. A snapshot: a gate that starts after it is taken is
+    /// not in it, which is why the sweep is a launch-time job and not a periodic one.
+    func current() -> Set<String> { names }
 }

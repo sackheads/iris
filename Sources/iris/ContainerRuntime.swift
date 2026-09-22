@@ -91,6 +91,23 @@ protocol ContainerRuntime: Sendable {
     func list(prefix: String) async -> [String]
 }
 
+extension ContainerRuntime {
+    /// `remove`, run where the caller's cancellation cannot reach it — for cleanup, and only for
+    /// cleanup.
+    ///
+    /// A cancelled call is exactly when a container most needs removing and exactly when the
+    /// ordinary route will not do it: `CLIProcessRunner.run` refuses to launch on an
+    /// already-cancelled task (deliberately — a ladder cannot kill a child that was never started),
+    /// so `container stop` and `container delete` never spawn and the container outlives the call
+    /// that made it. An unstructured `Task` does not inherit the caller's cancellation, and
+    /// awaiting it keeps the cleanup ordered before whatever the caller does next. Bounded by the
+    /// remove's own `housekeepingTimeoutSeconds`, so a cancelled caller waits seconds, not
+    /// indefinitely.
+    func removeIgnoringCancellation(name: String) async {
+        await Task { await self.remove(name: name) }.value
+    }
+}
+
 /// Spawns one child process, bounds it with a deadline, and reaps it.
 ///
 /// Split out of `CLIContainerRuntime` so the deadline can be tested against a child of the test's

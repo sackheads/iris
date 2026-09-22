@@ -171,14 +171,19 @@ struct ScheduleJobArguments: Equatable, Sendable {
         // every evaluation — where the answer is a gate error, never a command on the host.
         guard sandboxAvailable else { return .failure(ToolMessage(Self.noRuntimeForGateScript)) }
         let declared = gateMounts ?? []
+        var resolved: [String] = []
         for entry in declared {
             if let refusal = GateEvaluator.mountRefusal(entry, fileManager: fileManager) {
                 return .failure(ToolMessage("gate_mounts: \(refusal)."))
             }
+            // Stored resolved, never as typed: the review is about to be shown these paths, and
+            // the evaluation compares against them at every tick. A source that resolves somewhere
+            // else after today is then a gate error rather than a silent swap.
+            resolved.append(GateEvaluator.canonicalMount(entry))
         }
         return .success(.script(
             command: gateScript,
-            mounts: GateEvaluator.readOnly(declared),
+            mounts: GateEvaluator.readOnly(resolved),
             timeoutSeconds: GateEvaluator.clampedTimeout(gateTimeoutSeconds
                 ?? GateEvaluator.defaultTimeoutSeconds)))
     }
@@ -355,25 +360,53 @@ struct ScheduleJobArguments: Equatable, Sendable {
 /// mitigation; this is the moment a person is still in the loop.
 ///
 /// Both halves are closures so the decision can be tested without a model, a dialog or an engine:
-/// `verdict` is Vibecop over the script (as a `run_command` in the sandbox, which is what it is),
-/// and `ask` is the ordinary approval dialog, reached only when Vibecop escalates or cannot answer.
+/// `verdict` is Vibecop over the script and the capability it comes with (as a `run_command` in
+/// the sandbox, which is what it is), and `ask` is the ordinary approval dialog, reached only when
+/// Vibecop escalates or cannot answer. Both are handed the same `details` text.
 struct GateScriptReview: Sendable {
     let verdict: @Sendable (String) async -> VibecopDecision?
     let ask: @Sendable (String) async -> Bool
+
+    /// What both halves of the review are shown: the script, the directories it will be able to
+    /// read, and how long it may take.
+    ///
+    /// The mounts are not decoration. They are the durable capability being granted — a standing,
+    /// unattended read of somebody's disk whose output comes back into a model's prompt — and the
+    /// script is only the half that says what is done with them. `find /in -type f` is
+    /// unremarkable until `/in` turns out to be the home directory, so a reviewer shown the script
+    /// alone is reviewing the wrong half. Each mount is rendered as the resolved source and the
+    /// path the script will see it at, because that is what will actually be bound.
+    static func details(script: String, mounts: [String], timeoutSeconds: Int) -> String {
+        let rendered = mounts.map { entry -> String in
+            let parts = GateEvaluator.mountParts(entry)
+            return "  \(parts.source) \u{2192} \(parts.target), read-only"
+        }
+        let inputs = rendered.isEmpty
+            ? "  (none \u{2014} the script can read nothing of yours)" : rendered.joined(separator: "\n")
+        return script + "\n\n" + """
+            This script runs unattended inside the sandbox VM every time the job's schedule comes \
+            round, for as long as the job exists. What it can read:
+            """ + "\n" + inputs + "\n" + "It is stopped after \(timeoutSeconds) seconds."
+    }
 
     /// `APPROVE` creates the job; `DENY` refuses it and says why; anything else — an `ESCALATE`, a
     /// verdict this build does not recognize, or no verdict at all because Vibecop is off, wedged
     /// or timed out — asks the user, who is right there typing. Fail *open to the person*, never
     /// past them: the same shape `AppState.requestApproval` uses for an attended call.
-    func review(_ script: String) async -> Result<Void, ToolMessage> {
-        let decision = await verdict(script)
+    ///
+    /// Both halves see the same text, mounts and timeout included: an escalation is a second
+    /// opinion on what Vibecop was asked about, and showing the person less than the model was
+    /// shown is how an authorisation gets given without sight of what it authorises.
+    func review(script: String, mounts: [String], timeoutSeconds: Int) async -> Result<Void, ToolMessage> {
+        let subject = Self.details(script: script, mounts: mounts, timeoutSeconds: timeoutSeconds)
+        let decision = await verdict(subject)
         switch decision?.decision {
         case "APPROVE":
             return .success(())
         case "DENY":
             return .failure(ToolMessage(Self.denied(decision?.reason ?? "")))
         default:
-            return await ask(script) ? .success(()) : .failure(ToolMessage(Self.declined))
+            return await ask(subject) ? .success(()) : .failure(ToolMessage(Self.declined))
         }
     }
 

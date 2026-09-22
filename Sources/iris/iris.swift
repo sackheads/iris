@@ -1118,7 +1118,7 @@ actor IrisEngine {
         if !isUnattended {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; a job that was due while the app was asleep runs once on wake. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; a job that was due while the app was asleep runs once on wake. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -1137,7 +1137,7 @@ actor IrisEngine {
                     "gate_url": Schema(type: "STRING", description: "Only run the job when a HEAD request to this http(s) URL shows a new ETag, Last-Modified or Content-Length. Needs no sandbox."),
                     "gate_path": Schema(type: "STRING", description: "Only run the job when this absolute path changes: a file's mtime, size or contents, or the newest modification anywhere under a directory. The path must already exist, and a directory must hold fewer than 20,000 entries — checking a whole home folder on a cadence is refused, so name a narrower path or use gate_script. Needs no sandbox."),
                     "gate_script": Schema(type: "STRING", description: "Only run the job when this shell script says so. It runs inside the sandbox VM on every tick, and its LAST line of stdout must be exactly CHANGED or UNCHANGED (the exit code is not the verdict; a non-zero exit is a gate failure). Everything it printed before that line is handed to the run as untrusted context. Requires the container runtime and sandboxing; reviewed once before the job is created."),
-                    "gate_mounts": Schema(type: "ARRAY", description: "Directories the gate script can read, as '/host/dir' or '/host/dir:/path/in/container'. Always mounted read-only. A single file cannot be mounted — give its directory.", items: Schema(type: "STRING")),
+                    "gate_mounts": Schema(type: "ARRAY", description: "Directories the gate script can read, as '/host/dir' or '/host/dir:/path/in/container'. Always mounted read-only, and recorded as the directory the path resolves to. A single file cannot be mounted — give its directory. The whole filesystem and Iris's own configuration cannot be mounted at all, so name the narrowest directory the check needs.", items: Schema(type: "STRING")),
                     "gate_timeout_seconds": Schema(type: "INTEGER", description: "How long the gate script may take before it is killed and counted as a failure (default 60, clamped to 5-600).")
                 ],
                 required: ["prompt"]
@@ -1897,10 +1897,15 @@ actor IrisEngine {
             case .success(let job):
                 // §7: the one review model-written gate code ever gets, taken before anything is
                 // stored and while the person who asked for it is still in the conversation.
-                if case .script(let command, _, _) = job.trigger.gate, !reviewedScript {
+                // The mounts and the timeout travel with the script: they are the standing
+                // capability the review is being asked about, and the script is only what is done
+                // with them.
+                if case .script(let command, let mounts, let timeout) = job.trigger.gate, !reviewedScript {
                     let reviewer = review ?? Self.gateScriptReview(state: state,
                                                                    conversationId: conversationId)
-                    if case .failure(let message) = await reviewer.review(command) {
+                    if case .failure(let message) = await reviewer.review(script: command,
+                                                                          mounts: mounts,
+                                                                          timeoutSeconds: timeout) {
                         return message.text
                     }
                     reviewedScript = true
@@ -1920,26 +1925,29 @@ actor IrisEngine {
 
     /// Vibecop and the approval dialog, wired to the app for a gate script (#187 §7). A script
     /// gate is a `run_command` that will run in the sandbox forever, so that is exactly how it is
-    /// described to the review — `toolName: "run_command"`, the script as its details,
-    /// `inSandbox: true`.
+    /// described to the review — `toolName: "run_command"`, `inSandbox: true`, and as its details
+    /// the text `GateScriptReview.details` composes: the script, the read-only mounts it comes
+    /// with and its timeout. `BlockedCall.approvalDetails` reads a `run_command`'s `command` and
+    /// nothing else, so that whole text is what goes there; anything left out of it is something
+    /// neither reviewer sees.
     ///
     /// Static, and taking the state it needs, so the decision itself (`GateScriptReview.review`)
     /// stays testable without an engine.
     private static func gateScriptReview(state: AppState?, conversationId: UUID?) -> GateScriptReview {
         GateScriptReview(
-            verdict: { script in
+            verdict: { details in
                 guard let state else { return nil }
                 return await state.vibecopVerdict(
-                    for: BlockedCall(toolName: "run_command", args: ["command": .string(script)]),
+                    for: BlockedCall(toolName: "run_command", args: ["command": .string(details)]),
                     inSandbox: true, vibecopEnabled: nil)
             },
-            ask: { script in
+            ask: { details in
                 // The ordinary dialog, not `requestApproval`: that would consult Vibecop a second
                 // time to reach the same escalation. `schedule_job` is never offered to a
                 // background run, so there is always someone to answer this.
                 guard let state else { return false }
                 return await state.enqueueUserApproval(
-                    toolName: "run_command", details: script, workspace: nil,
+                    toolName: "run_command", details: details, workspace: nil,
                     conversationId: conversationId, origin: "Gate script")
             })
     }

@@ -177,8 +177,25 @@ actor SandboxSessionManager {
         lostSessions.remove(id)
     }
 
+    /// Deletes the containers a previous process left behind. Launch only, before anything else
+    /// can have started one.
+    ///
+    /// Everything Iris creates carries `namePrefix`, a gate's per-evaluation container included —
+    /// that is deliberate, and it is what makes a gate container a crash left behind sweepable at
+    /// all. The price is that the prefix alone no longer means "an orphan", so two sets of names
+    /// are spared: this manager's live sessions, and the gate containers
+    /// `GateContainerRegistry` says are mid-evaluation. Nothing schedules this today; both
+    /// exclusions are what keep it from killing live work if anything ever does.
     func reapOrphans() async {
-        for n in await runtime.list(prefix: Self.namePrefix) { await runtime.remove(name: n) }
+        await reapOrphans(inFlightGates: await GateContainerRegistry.shared.current())
+    }
+
+    /// The sweep itself, with the in-flight gate names handed in — a test has no way to park a
+    /// real gate inside its own evaluation.
+    func reapOrphans(inFlightGates: Set<String>) async {
+        let found = await runtime.list(prefix: Self.namePrefix)
+        let spared = Set(sessions.values.map(\.name)).union(inFlightGates)
+        for n in found where !spared.contains(n) { await runtime.remove(name: n) }
     }
 
     func reapIdle(olderThan seconds: TimeInterval, now: Date = Date()) async {
@@ -221,7 +238,10 @@ actor SandboxSessionManager {
         do {
             try await attemptCreate(id, workspace: workspace, mounts: mounts)
         } catch {
-            await runtime.remove(name: name(for: id))
+            // Ignoring cancellation on purpose: a cancelled create is one of the two ways this is
+            // reached, and the ordinary `remove` would launch nothing at all from a cancelled task
+            // — leaving behind the very container this exists to sweep up.
+            await runtime.removeIgnoringCancellation(name: name(for: id))
             throw error
         }
     }

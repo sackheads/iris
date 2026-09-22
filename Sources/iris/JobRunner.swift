@@ -60,6 +60,10 @@ actor JobRunner {
     /// What asks a job's gate whether anything changed (§7). Injected so a test can answer for it
     /// without a network, a file or a VM; in the app it is `GateEvaluator` over the real three.
     private let gateEvaluator: @Sendable (Gate, String?) async -> GateResult
+    /// The ledger's own `lastGateSignal`, except where a test needs that one read to fail — the
+    /// same reason `usageSource` exists. A gate whose previous signal cannot be read is a gate
+    /// error like any other, and there is no other way to make only that read fail.
+    private let lastGateSignal: @Sendable (UUID) throws -> String?
     /// The jobs with a run in flight right now. Every fire goes through `fire`, so one set here is
     /// the whole overlap story, whatever woke the job.
     private var inFlight: Set<UUID> = []
@@ -76,6 +80,7 @@ actor JobRunner {
          usageSource: (any JobUsageReading)? = nil,
          sandboxAvailable: (@Sendable () -> Bool)? = nil,
          gateEvaluator: (@Sendable (Gate, String?) async -> GateResult)? = nil,
+         lastGateSignal: (@Sendable (UUID) throws -> String?)? = nil,
          watchdogSlice: TimeInterval = JobRunner.defaultWatchdogSlice) {
         self.state = state
         self.engine = engine
@@ -90,6 +95,7 @@ actor JobRunner {
         self.sandboxAvailable = resolvedSandboxAvailable
         self.gateEvaluator = gateEvaluator ?? Self.liveGateEvaluator(
             sandboxAvailable: resolvedSandboxAvailable, image: { config.sandboxImage })
+        self.lastGateSignal = lastGateSignal ?? { [ledger] in try ledger.lastGateSignal(jobId: $0) }
         self.watchdogSlice = watchdogSlice
     }
 
@@ -359,6 +365,14 @@ actor JobRunner {
     /// Three, per spec §7.
     static let consecutiveGateErrorsToPause = 3
 
+    /// What a gate whose last signal could not be read says. The one gate error that is Iris's own
+    /// fault rather than the world's, and the reason it is worded as the gate's failure anyway is
+    /// that the consequence is identical: nothing can be decided, and after three of them a person
+    /// has to look.
+    static func gateUnreadableDetail(_ error: any Error) -> String {
+        "the last gate signal could not be read: \(error)"
+    }
+
     /// The real evaluator, over the real three gates. The runtime is handed over only when the
     /// sandbox is resolvable *at this evaluation* (R28) — installed and switched on — so a script
     /// gate on a machine that has lost either is a gate error rather than a command on the host.
@@ -403,16 +417,16 @@ actor JobRunner {
         }
         let previous: String?
         do {
-            previous = try ledger.lastGateSignal(jobId: job.id)
+            previous = try lastGateSignal(job.id)
         } catch {
-            // Fail closed for this fire only, exactly like an unreadable usage read: without the
-            // last signal the gate cannot be decided, and guessing "changed" would run the job on
-            // every tick a query happened to fail on.
-            let reason = Self.unavailableReason(error)
-            print("[JobRunner] not firing \(job.name): \(reason)")
-            await recordGateRow(job: job, origin: origin, at: at, status: .interrupted,
-                                outcome: nil, reason: reason, signal: nil)
-            return .refuse(.dropUnavailable(reason: reason))
+            // A gate error, not a quiet drop. Without the last signal the gate cannot be decided,
+            // so nothing runs either way — but a ledger that stays unreadable is not a passing
+            // flake, and anything quieter than this leaves the job writing a row every tick for
+            // ever: never running, never pausing, never carded. Carrying `gateErrorPrefix` is what
+            // makes it count towards the three-error pause like any other gate that cannot answer.
+            let detail = Self.gateUnreadableDetail(error)
+            print("[JobRunner] not firing \(job.name): \(detail)")
+            return .refuse(await noteGateError(detail, job: job, origin: origin, at: at))
         }
 
         switch await gateEvaluator(gate, previous) {
@@ -492,6 +506,11 @@ actor JobRunner {
 
     /// How many of the newest rows, in a row, are gate errors. Newest first, stopping at the first
     /// row that is anything else: a run that happened, a quiet tick, or the pause row itself.
+    ///
+    /// The rows come from `decodeRuns`, which drops one it cannot read — so an unreadable row
+    /// between two errors collapses the streak and the pause takes an extra tick. That is the fail
+    /// direction to have: it narrows towards pausing late rather than pausing a job nothing is
+    /// wrong with.
     static func gateErrorStreak(in runs: [JobRun]) -> Int {
         runs.prefix { ($0.failureReason ?? "").hasPrefix(gateErrorPrefix) }.count
     }

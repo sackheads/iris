@@ -46,15 +46,20 @@ struct SandboxTimeoutTests {
     @Test("a child that ignores SIGTERM is SIGKILLed after the grace period", .timeLimit(.minutes(1)))
     func childKilledAfterGrace() async throws {
         let marker = "iris-kill-\(UUID().uuidString)"
-        // Perl rather than a shell: it ignores SIGTERM outright and sleeps in-process, so the
-        // only way out is SIGKILL. A shell would fork its `sleep`, and killing that child is
-        // enough to let the shell fall through — which would test the wrong thing. The marker is
-        // there so `pgrep -f` can find this process and nothing else.
-        let script = "$SIG{TERM} = 'IGNORE'; sleep 9;   # \(marker)"
+        // `/bin/sh`, and nothing outside the base system: the shell traps SIGTERM so the ladder's
+        // second rung is the only way out of it. The sleep is inside a loop on purpose — the rung
+        // before SIGTERM kills the shell's children, and a shell waiting on a single `sleep` would
+        // fall straight through when that one died, which is not what this is testing. The nap is
+        // a duration nothing else would be sleeping for, so the teardown below can find any child
+        // orphaned between the last `pkill -P` and the SIGKILL, and reaches nothing of anyone
+        // else's. The marker is in the shell's own argv alone, so the assertion is about the shell.
+        let nap = "9.\(Int.random(in: 100_000...999_999))"
+        let script = "trap '' TERM; while :; do sleep \(nap); done   # \(marker)"
+        defer { Self.killAll(matching: "sleep \(nap)") }
         let started = Date()
         var thrown: Error?
         do {
-            _ = try await CLIProcessRunner(executable: "/usr/bin/perl").run(["-e", script], timeoutSeconds: 1)
+            _ = try await CLIProcessRunner(executable: "/bin/sh").run(["-c", script], timeoutSeconds: 1)
         } catch {
             thrown = error
         }
@@ -68,7 +73,7 @@ struct SandboxTimeoutTests {
         // SIGTERM was ignored, so it took the grace period plus SIGKILL — but not the full sleep.
         #expect(wall >= 1 + CLIProcessRunner.killGraceSeconds)
         #expect(wall < 9)
-        #expect(!Self.processExists(matching: marker))
+        #expect(!Self.processExists(matching: marker), "the shell that would not take SIGTERM is gone")
     }
 
     /// R26: the deadline wins the wait. An orphan that inherited the child's stdout keeps the
@@ -309,16 +314,25 @@ struct SandboxTimeoutTests {
     /// M3: the in-flight create barrier coalesces concurrent first-commands onto one create, and
     /// the winner's mounts are the ones the container got. The loser must not run in it — for a
     /// gate that would be its script running with another caller's mounts, once, silently.
-    @Test("two callers racing with different mounts each get their own container")
+    @Test("two callers racing with different mounts each get their own container",
+          .timeLimit(.minutes(1)))
     func racingMountsEachGetTheirOwn() async {
-        let rt = MockRuntime()
+        // A create that parks, so the second caller is genuinely coalesced onto the first's
+        // barrier rather than arriving after it has already finished — which is what an
+        // instantaneous mock made this test do most of the time, passing on the sequential path.
+        let rt = HeldCreateRuntime()
         let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" })
         let id = UUID()
-        await withTaskGroup(of: Void.self) { g in
-            g.addTask { _ = await m.run(command: "a", conversationId: id, workspace: "/ws", extraMounts: ["/a:/a:ro"]) }
-            g.addTask { _ = await m.run(command: "b", conversationId: id, workspace: "/ws", extraMounts: ["/b:/b:ro"]) }
-            await g.waitForAll()
-        }
+
+        async let first = m.run(command: "a", conversationId: id, workspace: "/ws",
+                                extraMounts: ["/a:/a:ro"])
+        await rt.waitUntilParked()
+        async let second = m.run(command: "b", conversationId: id, workspace: "/ws",
+                                 extraMounts: ["/b:/b:ro"])
+        try? await Task.sleep(nanoseconds: 150_000_000)   // the second joins the barrier behind it
+        rt.release()
+        _ = await (first, second)
+
         #expect(rt.createdMounts.contains(["/ws:/ws", "/a:/a:ro"]))
         #expect(rt.createdMounts.contains(["/ws:/ws", "/b:/b:ro"]))
     }
@@ -344,9 +358,12 @@ struct SandboxTimeoutTests {
 
     /// L11: two callers settle on the first retry, but the retry can itself be coalesced onto a
     /// third caller's create. Every caller either runs in the mounts it asked for or does not run.
-    @Test("three callers racing with three mount sets never run in another's mounts")
+    @Test("three callers racing with three mount sets never run in another's mounts",
+          .timeLimit(.minutes(1)))
     func threeWayMountRace() async {
-        let rt = MockRuntime()
+        // Held, for the same reason as the two-way race: with an instantaneous create the three
+        // callers mostly run one after another and never contend at all.
+        let rt = HeldCreateRuntime()
         let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" })
         let id = UUID()
         let sets = ["/a:/a:ro", "/b:/b:ro", "/c:/c:ro"]
@@ -354,6 +371,9 @@ struct SandboxTimeoutTests {
             for mount in sets {
                 g.addTask { await m.run(command: "x", conversationId: id, workspace: "/ws", extraMounts: [mount]) }
             }
+            await rt.waitUntilParked()
+            try? await Task.sleep(nanoseconds: 150_000_000)   // the other two reach the barrier
+            rt.release()
             var all: [String] = []
             for await o in g { all.append(o) }
             return all
@@ -368,16 +388,43 @@ struct SandboxTimeoutTests {
         }
     }
 
-    /// A runtime whose first create parks until it is released, so the interleaving the mount
-    /// agreement exists for happens on purpose rather than when the scheduler obliges.
+    /// A runtime whose first create parks until the test releases it, and which says when it has
+    /// parked, so the interleaving the mount agreement exists for happens on purpose rather than
+    /// when the scheduler obliges. A continuation rather than a polled flag: `waitUntilParked`
+    /// then means "the barrier is occupied", which is the precondition every test below needs and
+    /// a sleep can only hope for.
     private final class HeldCreateRuntime: ContainerRuntime, @unchecked Sendable {
         private let lock = NSLock()
         private var held = false
-        private var releaseFlag = false
+        private var released = false
+        private var parked = false
+        private var gate: CheckedContinuation<Void, Never>?
+        private var arrival: CheckedContinuation<Void, Never>?
         private(set) var created: [[String]] = []
         private(set) var removed: [String] = []
 
-        func release() { lock.withLock { releaseFlag = true } }
+        /// Lets the parked create finish. Safe before anything has parked: the next create through
+        /// simply does not stop.
+        func release() {
+            let waiting: CheckedContinuation<Void, Never>? = lock.withLock {
+                released = true
+                defer { gate = nil }
+                return gate
+            }
+            waiting?.resume()
+        }
+
+        /// Suspends until the first create is inside the barrier.
+        func waitUntilParked() async {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                let already = lock.withLock { () -> Bool in
+                    if parked { return true }
+                    arrival = cont
+                    return false
+                }
+                if already { cont.resume() }
+            }
+        }
 
         func createDetached(name: String, image: String, mounts: [String], workdir: String) async throws {
             let first = lock.withLock { () -> Bool in
@@ -386,8 +433,17 @@ struct SandboxTimeoutTests {
                 return true
             }
             if first {
-                while !lock.withLock({ releaseFlag }) {
-                    try? await Task.sleep(nanoseconds: 5_000_000)
+                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                    var goOn = false
+                    var arrived: CheckedContinuation<Void, Never>?
+                    lock.withLock {
+                        parked = true
+                        arrived = arrival
+                        arrival = nil
+                        if released { goOn = true } else { gate = cont }
+                    }
+                    arrived?.resume()
+                    if goOn { cont.resume() }
                 }
             }
             lock.withLock { created.append(mounts) }
@@ -416,7 +472,7 @@ struct SandboxTimeoutTests {
 
         async let winner = m.run(command: "w", conversationId: id, workspace: "/ws",
                                  extraMounts: ["/a:/a:ro"])
-        try? await Task.sleep(nanoseconds: 150_000_000)      // the winner reaches its create
+        await rt.waitUntilParked()                           // the winner is inside its create
         async let loser = m.run(command: "l", conversationId: id, workspace: "/ws",
                                 extraMounts: ["/b:/b:ro"])
         try? await Task.sleep(nanoseconds: 150_000_000)      // the loser joins the barrier behind it
