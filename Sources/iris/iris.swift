@@ -3140,8 +3140,10 @@ extension IrisEngine {
     /// is usually `get_job_run`, and a name it has to re-derive from a sentence is a name it can
     /// get wrong; wrapped rather than a bare array so a model reading this cannot report "you have
     /// two jobs" when `/jobs` says two jobs and a row it could not read.
+    /// `usage` is required rather than defaulted: a caller that forgot it would answer every
+    /// figure with `null`, which says "the ledger could not be read".
     nonisolated static func jobsListJSON(_ jobs: [Job], lastStatuses: [UUID: String],
-                                         usage: JobsCommand.UsageSnapshot = .empty,
+                                         usage: JobsCommand.UsageSnapshot,
                                          unreadableJobs: Int) -> String {
         let iso = ISO8601DateFormatter()
         let rows: [[String: Any]] = jobs.map { job in

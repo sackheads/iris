@@ -172,7 +172,7 @@ struct JobToolsTests {
     @Test("a job whose figures could not be read still lists, with nulls rather than zeros")
     func listJobsFiguresLenient() throws {
         let j = job()
-        let json = IrisEngine.jobsListJSON([j], lastStatuses: [:], unreadableJobs: 0)
+        let json = IrisEngine.jobsListJSON([j], lastStatuses: [:], usage: .empty, unreadableJobs: 0)
         let body = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
         let row = try #require((body["jobs"] as? [[String: Any]])?.first)
         #expect(row["name"] as? String == "pr-sweep")

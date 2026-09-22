@@ -20,7 +20,10 @@ enum GUILock {
     enum State: Equatable {
         /// Nothing holds it: no file, or a file naming a process that is gone.
         case free
-        case app(pid: Int32)
+        /// A live Iris process holds it — the app, or another `--run-job`. The file carries a pid
+        /// and nothing else, so which of the two it is cannot be known from here; the refusal
+        /// says both rather than sending the user hunting for an app that is not running.
+        case held(pid: Int32)
         /// A file that is there but says nothing a pid check can be made of. Held, not free:
         /// refusing is recoverable (delete it), and two writers at the store is not.
         case unreadable(path: String)
@@ -37,8 +40,8 @@ enum GUILock {
         }
         // Signal 0 asks the kernel whether the process exists without sending anything. `EPERM`
         // means it exists and belongs to somebody else — still alive, still holding the store.
-        if kill(pid, 0) == 0 { return .app(pid: pid) }
-        return errno == ESRCH ? .free : .app(pid: pid)
+        if kill(pid, 0) == 0 { return .held(pid: pid) }
+        return errno == ESRCH ? .free : .held(pid: pid)
     }
 
     /// Claims the lock for this process. Called once, at app launch.
@@ -51,7 +54,7 @@ enum GUILock {
     /// Gives it back, if it is ours to give: a lock file naming another live process belongs to
     /// another app instance, and this one must not delete it on its way out.
     static func release(at url: URL = IrisPaths.default.guiLockFile) {
-        guard case .app(let pid) = state(at: url),
+        guard case .held(let pid) = state(at: url),
               pid == ProcessInfo.processInfo.processIdentifier else { return }
         try? FileManager.default.removeItem(at: url)
     }
@@ -164,13 +167,18 @@ enum RunJobCLI {
         switch GUILock.state(at: lockPath) {
         case .free:
             break
-        case .app(let pid):
-            return refuse("the Iris app is running (pid \(pid)); quit it and try again — "
-                          + "the CLI will not write to the store behind a live app.")
+        case .held(let pid):
+            // Named as what the lock file can actually prove: a live Iris process. It is the app
+            // most of the time, but a second `--run-job` takes the same lock and writes the same
+            // bare pid, and telling that user to quit an app that is not running is worse than
+            // telling them the truth.
+            return refuse("another Iris process holds the store (pid \(pid)) — the app, or another "
+                          + "--run-job. Wait for it to finish, or quit the app, and try again; the "
+                          + "CLI will not write to the store behind a live one.")
         case .unreadable(let path):
-            return refuse("the Iris app is running, or left \(path) behind; the CLI will not "
-                          + "write to the store behind a live app. Delete that file if the app "
-                          + "is not running.")
+            return refuse("another Iris process holds the store, or left \(path) behind; the CLI "
+                          + "will not write to the store behind a live one. Delete that file if "
+                          + "nothing is running.")
         }
         // Take the lock the check just found free. Two `--run-job` invocations would otherwise
         // both read `.free` and both build an `AppState` over the same file — the same two

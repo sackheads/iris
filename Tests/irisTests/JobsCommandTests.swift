@@ -190,7 +190,7 @@ struct JobsCommandTests {
 
     @Test("no jobs says so")
     func renderEmpty() {
-        let out = JobsCommand.render(jobs: [], lastRuns: [:], unacknowledged: [],
+        let out = JobsCommand.render(jobs: [], lastRuns: [:], usage: .empty, unacknowledged: [],
                                      unreadableJobs: 0, now: Date())
         #expect(out == "No jobs.")
     }
@@ -200,7 +200,7 @@ struct JobsCommandTests {
         let now = Date()
         let j = job(nextFireAt: now.addingTimeInterval(180))
         let last = run(j, status: .completed)
-        let out = JobsCommand.render(jobs: [j], lastRuns: [j.id: last], unacknowledged: [],
+        let out = JobsCommand.render(jobs: [j], lastRuns: [j.id: last], usage: .empty, unacknowledged: [],
                                      unreadableJobs: 0, now: now)
         #expect(out.contains("| Job | Trigger | Policy | Next | Last | Tokens today | Runs/h |"))
         #expect(out.contains("| pr-sweep | every 60 s | default | in 3 m | completed | — | — |"))
@@ -210,7 +210,7 @@ struct JobsCommandTests {
     func renderNeverRun() {
         let now = Date()
         let j = job(nextFireAt: now.addingTimeInterval(7_200))
-        let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
+        let out = JobsCommand.render(jobs: [j], lastRuns: [:], usage: .empty, unacknowledged: [],
                                      unreadableJobs: 0, now: now)
         #expect(out.contains("| pr-sweep | every 60 s | default | in 2 h | never | — | — |"))
     }
@@ -220,12 +220,13 @@ struct JobsCommandTests {
         let now = Date()
         var j = job(nextFireAt: now.addingTimeInterval(300))
         j.retryAttempt = 2
-        let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
+        let out = JobsCommand.render(jobs: [j], lastRuns: [:], usage: .empty, unacknowledged: [],
                                      unreadableJobs: 0, now: now)
         #expect(out.contains("in 5 m · retry 2/3"))
         // And a job that is not retrying says nothing about retries at all.
         let clean = JobsCommand.render(jobs: [job(nextFireAt: now.addingTimeInterval(300))],
-                                       lastRuns: [:], unacknowledged: [], unreadableJobs: 0, now: now)
+                                       lastRuns: [:], usage: .empty, unacknowledged: [],
+                                       unreadableJobs: 0, now: now)
         #expect(!clean.contains("retry"))
     }
 
@@ -233,7 +234,7 @@ struct JobsCommandTests {
     func renderPaused() {
         let now = Date()
         let j = job(nextFireAt: nil, pausedReason: "no matching time in the next year")
-        let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
+        let out = JobsCommand.render(jobs: [j], lastRuns: [:], usage: .empty, unacknowledged: [],
                                      unreadableJobs: 0, now: now)
         #expect(out.contains("paused: no matching time in the next year"))
     }
@@ -242,7 +243,7 @@ struct JobsCommandTests {
     func renderDisabled() {
         let now = Date()
         let j = job(nextFireAt: now.addingTimeInterval(60), enabled: false)
-        let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
+        let out = JobsCommand.render(jobs: [j], lastRuns: [:], usage: .empty, unacknowledged: [],
                                      unreadableJobs: 0, now: now)
         #expect(out.contains("| pr-sweep | every 60 s | default | disabled | never | — | — |"))
     }
@@ -251,7 +252,7 @@ struct JobsCommandTests {
     func renderFSEvent() {
         let now = Date()
         let j = job("inbox", trigger: .fsEvent(FSWatch(path: "/tmp/in")))
-        let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
+        let out = JobsCommand.render(jobs: [j], lastRuns: [:], usage: .empty, unacknowledged: [],
                                      unreadableJobs: 0, now: now)
         #expect(out.contains("| inbox | watch /tmp/in | default | — | never | — | — |"))
     }
@@ -261,7 +262,7 @@ struct JobsCommandTests {
         let now = Date()
         let due = job("due", nextFireAt: now.addingTimeInterval(-5))
         let far = job("far", nextFireAt: now.addingTimeInterval(3 * 86_400))
-        let out = JobsCommand.render(jobs: [due, far], lastRuns: [:], unacknowledged: [],
+        let out = JobsCommand.render(jobs: [due, far], lastRuns: [:], usage: .empty, unacknowledged: [],
                                      unreadableJobs: 0, now: now)
         #expect(out.contains("| due | every 60 s | default | due | never | — | — |"))
         #expect(out.contains("| far | every 60 s | default | in 3 d | never | — | — |"))
@@ -273,7 +274,7 @@ struct JobsCommandTests {
         let j = job(nextFireAt: now.addingTimeInterval(60))
         let failed = run(j, id: UUID(uuidString: "1A2B3C4D-0000-0000-0000-000000000001")!,
                          status: .failed, outcome: "could not reach the API")
-        let out = JobsCommand.render(jobs: [j], lastRuns: [j.id: failed], unacknowledged: [failed],
+        let out = JobsCommand.render(jobs: [j], lastRuns: [j.id: failed], usage: .empty, unacknowledged: [failed],
                                      unreadableJobs: 0, now: now)
         #expect(out.contains("⚠️ pr-sweep · failed · 1a2b3c4d · could not reach the API"))
     }
@@ -284,7 +285,7 @@ struct JobsCommandTests {
         let j = job()
         let blocked = run(j, id: UUID(uuidString: "DEADBEEF-0000-0000-0000-000000000001")!,
                           status: .blockedOnApproval, failureReason: "run_command needed approval")
-        let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [blocked],
+        let out = JobsCommand.render(jobs: [j], lastRuns: [:], usage: .empty, unacknowledged: [blocked],
                                      unreadableJobs: 0, now: now)
         #expect(out.contains("⚠️ pr-sweep · blocked on approval · deadbeef · run_command needed approval"))
     }
@@ -293,7 +294,7 @@ struct JobsCommandTests {
     func renderBareFailureLine() {
         let j = job()
         let failed = run(j, id: UUID(uuidString: "0BADF00D-0000-0000-0000-000000000001")!, status: .failed)
-        let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [failed],
+        let out = JobsCommand.render(jobs: [j], lastRuns: [:], usage: .empty, unacknowledged: [failed],
                                      unreadableJobs: 0, now: Date())
         #expect(out.contains("⚠️ pr-sweep · failed · 0badf00d"))
         #expect(!out.contains("0badf00d · \n") && !out.hasSuffix("· "))
@@ -301,10 +302,10 @@ struct JobsCommandTests {
 
     @Test("unreadable rows are counted out loud rather than silently dropped")
     func renderUnreadableCount() {
-        let out = JobsCommand.render(jobs: [], lastRuns: [:], unacknowledged: [],
+        let out = JobsCommand.render(jobs: [], lastRuns: [:], usage: .empty, unacknowledged: [],
                                      unreadableJobs: 2, now: Date())
         #expect(out.contains("2 unreadable job row(s)"))
-        let clean = JobsCommand.render(jobs: [], lastRuns: [:], unacknowledged: [],
+        let clean = JobsCommand.render(jobs: [], lastRuns: [:], usage: .empty, unacknowledged: [],
                                        unreadableJobs: 0, now: Date())
         #expect(!clean.contains("unreadable"))
     }
@@ -313,7 +314,7 @@ struct JobsCommandTests {
     func renderEscapesPipes() {
         let now = Date()
         let j = job("evil | name", nextFireAt: now.addingTimeInterval(60))
-        let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
+        let out = JobsCommand.render(jobs: [j], lastRuns: [:], usage: .empty, unacknowledged: [],
                                      unreadableJobs: 0, now: now)
         #expect(out.contains("evil \\| name"))
         let row = out.split(separator: "\n").first { $0.contains("evil") } ?? ""
@@ -350,7 +351,7 @@ struct JobsCommandTests {
     func renderUsageMissing() {
         let now = Date()
         let j = job(nextFireAt: now.addingTimeInterval(180))
-        let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
+        let out = JobsCommand.render(jobs: [j], lastRuns: [:], usage: .empty, unacknowledged: [],
                                      unreadableJobs: 0, now: now)
         #expect(out.contains("| pr-sweep | every 60 s | default | in 3 m | never | — | — |"))
     }
@@ -380,7 +381,7 @@ struct JobsCommandTests {
             unacknowledged: [], unreadableJobs: 0, now: now)
         #expect(out.contains("Tokens today, all jobs: 1.2M / 3M (40%)"))
         // And no footer at all when the ledger could not answer.
-        let quiet = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
+        let quiet = JobsCommand.render(jobs: [j], lastRuns: [:], usage: .empty, unacknowledged: [],
                                        unreadableJobs: 0, now: now)
         #expect(!quiet.contains("all jobs"))
     }
@@ -396,16 +397,18 @@ struct JobsCommandTests {
                        profile: .mutating)
         loud.policy.overlap = .queue
         loud.policy.catchUp = .replay(cap: 5)
-        #expect(JobsCommand.policySummary(for: loud)
-                == "mutating · overlap queue · catch-up replay 5 · gate url")
+        // The gate is the Trigger column's to print — `poll every 60 s (url gate)` — so the policy
+        // cell does not print it a second time.
+        #expect(JobsCommand.policySummary(for: loud) == "mutating · overlap queue · catch-up replay 5")
 
         var quiet = job()
         quiet.policy.catchUp = .skip
         #expect(JobsCommand.policySummary(for: quiet) == "catch-up skip")
 
-        let out = JobsCommand.render(jobs: [loud], lastRuns: [:], unacknowledged: [],
+        let out = JobsCommand.render(jobs: [loud], lastRuns: [:], usage: .empty, unacknowledged: [],
                                      unreadableJobs: 0, now: now)
-        #expect(out.contains("| mutating · overlap queue · catch-up replay 5 · gate url |"))
+        #expect(out.contains("| mutating · overlap queue · catch-up replay 5 |"))
+        #expect(out.contains("| poll every 60 s (url gate) |"), "and the gate is named once, by the trigger")
     }
 
     @Test("the snapshot's figures are the ledger's own sums, read through the same seams admission uses")

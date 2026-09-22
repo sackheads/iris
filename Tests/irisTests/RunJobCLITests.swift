@@ -134,7 +134,7 @@ struct RunJobCLITests {
 
     // MARK: The GUI lock (ruling R35, spec §8)
 
-    @Test("the CLI refuses while the GUI holds the lock, and says so")
+    @Test("the CLI refuses while another Iris process holds the lock, and says which it might be")
     func aLiveGUIRefusesTheRun() async throws {
         let store = try ConversationStore.inMemory()
         let job = self.job()
@@ -151,7 +151,11 @@ struct RunJobCLITests {
                                        lockPath: path, protectionEnabled: false,
                                        out: { _ in }, err: { err.write($0) })
         #expect(code == RunJobCLI.Exit.usage)
-        #expect(err.text.contains("the Iris app is running"))
+        // The file holds a bare pid, so the holder may be the app or a second `--run-job`. The
+        // refusal must not send the user off to quit an app that is not running.
+        #expect(err.text.contains("another Iris process holds the store"))
+        #expect(err.text.contains("--run-job"))
+        #expect(err.text.contains("\(ProcessInfo.processInfo.processIdentifier)"))
         #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty, "and nothing was run")
     }
 
@@ -164,7 +168,7 @@ struct RunJobCLITests {
         #expect(GUILock.state(at: path) == .free)
 
         try Data("\(ProcessInfo.processInfo.processIdentifier)".utf8).write(to: path)
-        #expect(GUILock.state(at: path) == .app(pid: ProcessInfo.processInfo.processIdentifier))
+        #expect(GUILock.state(at: path) == .held(pid: ProcessInfo.processInfo.processIdentifier))
 
         // A lock file nobody can read is held, not free: refusing is recoverable (delete it), and
         // racing two writers at the store is not.
@@ -178,7 +182,7 @@ struct RunJobCLITests {
         defer { try? FileManager.default.removeItem(at: path) }
         #expect(GUILock.state(at: path) == .free, "nothing there yet")
         GUILock.acquire(at: path)
-        #expect(GUILock.state(at: path) == .app(pid: ProcessInfo.processInfo.processIdentifier))
+        #expect(GUILock.state(at: path) == .held(pid: ProcessInfo.processInfo.processIdentifier))
         GUILock.release(at: path)
         #expect(!FileManager.default.fileExists(atPath: path.path))
     }
@@ -241,7 +245,7 @@ struct RunJobCLITests {
                                        out: { _ in }, err: { _ in })
 
         #expect(code == RunJobCLI.Exit.completed)
-        #expect(seen.text.contains("app(pid: \(ProcessInfo.processInfo.processIdentifier))"),
+        #expect(seen.text.contains("held(pid: \(ProcessInfo.processInfo.processIdentifier))"),
                 "the run must hold the lock while it runs, not only check it")
         #expect(!FileManager.default.fileExists(atPath: path.path),
                 "and give it back when it is over")
@@ -259,6 +263,57 @@ struct RunJobCLITests {
                                        out: { _ in }, err: { err.write($0) })
         #expect(code == RunJobCLI.Exit.usage)
         #expect(err.text.contains("no-such-job"))
+    }
+
+    @Test("a lookup failure under --json is one error object, not a sentence a script cannot read")
+    func unknownJobUnderJSONIsAnErrorObject() async throws {
+        let store = try ConversationStore.inMemory()
+        let out = Output()
+        let err = Output()
+        let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "no-such-job", json: true),
+                                       store: store, client: FakeLLMClient(responses: []),
+                                       lockPath: lockPath(), protectionEnabled: false,
+                                       out: { out.write($0) }, err: { err.write($0) })
+
+        #expect(code == RunJobCLI.Exit.usage)
+        // Both, on purpose: the sentence goes to stderr where a person reads it, and the same
+        // failure goes to stdout as an object, because a `--json` run is something `jq` is
+        // pointed at and a bare sentence there is a parse error rather than a result.
+        #expect(err.text.contains("no-such-job"))
+        let object = try #require(JSONSerialization.jsonObject(with: Data(out.text.utf8)) as? [String: Any])
+        #expect((object["error"] as? String)?.contains("no-such-job") == true)
+        #expect(object["exitCode"] as? Int == Int(RunJobCLI.Exit.usage))
+        #expect(object["dryRun"] as? Bool == false)
+    }
+
+    @Test("a ledger that cannot be read before the fire suppresses the row rather than printing an older one")
+    func anUnreadableLedgerPrintsNoRow() async throws {
+        let store = try ConversationStore.inMemory()
+        let job = self.job(name: "unreadable")
+        try store.ledger.upsert(job)
+        // An earlier run of the same job: exactly the row that would be reported as this fire's
+        // if a failed "what was newest before?" read were swallowed to nil.
+        let earlier = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                             startedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        try store.ledger.begin(run: earlier)
+        try store.ledger.finish(runId: earlier.id, status: .completed, outcome: "an older run",
+                                failureReason: nil, blockedTool: nil, tokens: TokenUsage(),
+                                finishedAt: Date(timeIntervalSince1970: 1_700_000_060))
+        // The only honest way to make the read fail: take the table away. Every `job_runs` read
+        // and write then throws, which is what a corrupt or locked database looks like from here.
+        try await store.writer.write { db in try db.execute(sql: "DROP TABLE job_runs") }
+
+        let out = Output()
+        let code = await RunJobCLI.run(RunJobCLI.Invocation(target: job.name), store: store,
+                                       client: FakeLLMClient(responses: [textResponse("tick")]),
+                                       lockPath: lockPath(), protectionEnabled: false,
+                                       out: { out.write($0) }, err: { out.write($0) })
+
+        #expect(code == RunJobCLI.Exit.notCompleted)
+        #expect(out.text.contains("the ledger could not be read before the fire"))
+        #expect(!out.text.contains("an older run"),
+                "the earlier run is not this fire's, and must not be printed as if it were")
+        #expect(!out.text.contains(earlier.id.uuidString.lowercased().prefix(8)))
     }
 
     // MARK: A real run

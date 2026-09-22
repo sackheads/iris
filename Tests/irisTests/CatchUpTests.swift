@@ -185,7 +185,11 @@ struct CatchUpTests {
         #expect(await scheduler.tick() == 0)
     }
 
-    @Test("a burst still running is not planned a second time by an overlapping tick")
+    // `.timeLimit`, because the rendezvous below is an unbounded continuation: the failure it
+    // exists to catch fails fast, but a future change that handed this job no fires at all would
+    // park `waitForEntry()` for ever and hang the suite instead of failing it.
+    @Test("a burst still running is not planned a second time by an overlapping tick",
+          .timeLimit(.minutes(1)))
     func aTruncatedBurstIsNotPlannedTwice() async throws {
         // The shipped defaults: `maxFiresPerTick` 3 against a cap of 5, so the burst is cut short
         // and `nextFireAt` is deliberately left in the past — which is what lets a later tick
@@ -250,18 +254,40 @@ struct CatchUpTests {
     @Test("a refused replay stops there and the schedule advances from now (R32)")
     func aRefusalEndsTheBurst() async throws {
         let store = try ConversationStore.inMemory()
-        let scheduler = JobScheduler(ledger: store.ledger, now: { Self.now }, maxFiresPerTick: 2)
+        let clock = MutableClock(Self.now)
+        let scheduler = JobScheduler(ledger: store.ledger, now: { clock.now }, maxFiresPerTick: 2)
         // The second fire is refused — a pause, an open breaker, an exhausted budget, a gate that
         // found nothing. What refused this occurrence would refuse the next one too.
         let fires = Handovers(refusingFrom: 2)
         await scheduler.setFireHandler(fires.handler())
         try store.ledger.upsert(Self.job(.replay(cap: 5)))
 
+        // Two fires, not five: the tick's cap allowed two and the second was refused. The cap is
+        // also what makes this the burst-lock case — `nextFireAt` is left in the past mid-burst,
+        // so the job is locked out of being planned again until the burst ends.
         #expect(await scheduler.tick() == 2)
         #expect(fires.count == 2)
         #expect(try store.ledger.job(named: "behind")?.nextFireAt == Self.at(9, 0),
                 "the three occurrences still owed are abandoned, not tried again next tick")
-        #expect(await scheduler.tick() == 0)
+        #expect(await scheduler.tick() == 0, "nothing is due at 08:59 any more")
+
+        // The lock has to come off on the refusal path too, and only the clock can prove it: the
+        // assertion above reads the same whether it was released or leaked, because the abandoned
+        // job is not due either way. A leaked entry is not a lost tick, it is a job silenced for
+        // the life of the process, so move past 09:00 and watch it fire again.
+        clock.advance(to: Self.at(9, 1))
+        #expect(await scheduler.tick() == 1, "the burst lock was released when the refusal ended it")
+        #expect(fires.count == 3)
+    }
+
+    /// A clock a test can move between ticks. The suite's other tests pin one instant; the ones
+    /// about what happens *next* need two.
+    final class MutableClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Date
+        init(_ value: Date) { self.value = value }
+        var now: Date { lock.withLock { value } }
+        func advance(to date: Date) { lock.withLock { value = date } }
     }
 
     @Test("a replay whose fire paused the job leaves the paused cadence where it is")
@@ -471,7 +497,12 @@ struct CatchUpTests {
                                 protectionEnabled: false, sessionPeerCount: 0)
         let (config, teardown) = Self.isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        // The clock is pinned on the runner too, not only on the rows: `tokensToday` sums the
+        // *current* local day, so a runner on the real clock stops counting this suite's 2026-09-21
+        // row the moment the machine's own midnight passes — and the budget this test spends is
+        // then unspent, deterministically, for every wall-clock day but one.
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               now: { Self.now }, calendar: Self.utc, config: config,
                                protectionEnabled: false)
         // A daily budget of one token, already spent by a finished run, so the next fire pauses.
         var job = Self.job(.replay(cap: 2))

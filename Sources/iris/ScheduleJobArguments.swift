@@ -82,15 +82,14 @@ struct ScheduleJobArguments: Equatable, Sendable {
         // with the default overlap when `queue` was asked for runs a different way for as long as
         // it exists, and nothing in the answer would say so.
         var overlap: JobPolicy.Overlap?
-        if present(args["overlap"]) {
-            guard let raw = text(args["overlap"]),
-                  let value = JobPolicy.Overlap(rawValue: raw.lowercased())
+        if let asked = given(args["overlap"]) {
+            guard let word = text(asked), let value = JobPolicy.Overlap(rawValue: word.lowercased())
             else { return .failure(Self.overlapShape) }
             overlap = value
         }
         var catchUp: JobPolicy.CatchUp?
-        if present(args["catch_up"]) {
-            guard let value = self.catchUp(args["catch_up"]) else { return .failure(Self.catchUpShape) }
+        if let asked = given(args["catch_up"]) {
+            guard let value = self.catchUp(asked) else { return .failure(Self.catchUpShape) }
             catchUp = value
         }
         return .success(ScheduleJobArguments(
@@ -232,6 +231,11 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// stored policy itself uses (`{"kind": "replay", "cap": 3}`). `nil` means the value was none
     /// of them, which is a refusal rather than a silent default — see `parse`.
     ///
+    /// The object form is accepted and not advertised: the declared schema says STRING, so a
+    /// provider that enforces it would reject an object, and the refusal must not send a model
+    /// towards a shape its own transport may refuse. Read anyway, because a model that has seen
+    /// the stored policy will write it.
+    ///
     /// A negative cap clamps to the default exactly as `JobPolicy`'s decoder clamps a stored one
     /// (R15): nobody writes "replay -1 occurrences", so it is a typo, and a job is not worth
     /// refusing over one when the cap it meant is knowable. Zero is kept: replay nothing.
@@ -267,7 +271,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// model that guessed wrong can fix the call rather than drop the field.
     static let overlapShape: ToolMessage = "overlap must be 'skip' (a fire while the previous run is still going is dropped) or 'queue' (one fire is held and taken when that run ends)."
 
-    static let catchUpShape: ToolMessage = "catch_up must be 'coalesce' (one fire on wake, whatever was missed), 'skip' (no fire; jump to the next occurrence), or 'replay' — optionally with a cap, as 'replay:3' or {\"kind\": \"replay\", \"cap\": 3} — to run the most recent missed occurrences one at a time."
+    static let catchUpShape: ToolMessage = "catch_up must be 'coalesce' (one fire on wake, whatever was missed), 'skip' (no fire; jump to the next occurrence), or 'replay' to run the most recent missed occurrences one at a time — with a cap, if you want one other than 5, as 'replay:3'."
 
     static let gateOptionsNeedAScript = "gate_mounts and gate_timeout_seconds only apply to gate_script."
 
@@ -372,6 +376,18 @@ struct ScheduleJobArguments: Equatable, Sendable {
         case .string(let string): return Int(string.trimmingCharacters(in: .whitespaces))
         default: return nil
         }
+    }
+
+    /// The value a model actually gave, or `nil` — absent, `null`, or an **empty string**, which
+    /// is one of the ways a model spells "none". Same reading `stringList` gives an empty array,
+    /// and for the same reason: refusing it would fail a call that asked for nothing, and the
+    /// refusal it would earn ("overlap must be 'skip' or 'queue'") is no help to a caller that
+    /// named neither.
+    private static func given(_ value: JSONValue?) -> JSONValue? {
+        guard present(value) else { return nil }
+        if case .string(let string) = value,
+           string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return nil }
+        return value
     }
 
     /// Whether the model sent this key at all. A JSON `null` reads as absent: it is how several

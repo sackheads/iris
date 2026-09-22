@@ -145,5 +145,21 @@ struct ScheduleJobArgumentsTests {
         }
         #expect(ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9),
                                             "catch_up": .int(3)]) == .failure(ScheduleJobArguments.catchUpShape))
+        // The refusal must not send a model at a shape the declared STRING schema would reject.
+        #expect(!ScheduleJobArguments.catchUpShape.text.contains("{"))
+    }
+
+    @Test("an empty string is a model saying nothing, not a value to refuse")
+    func emptyPolicyValuesReadAsAbsent() throws {
+        let a = try ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9),
+                                                "overlap": .string(""),
+                                                "catch_up": .string("   ")]).get()
+        #expect(a.overlap == nil && a.catchUp == nil)
+        #expect(try a.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: []).get().policy
+                == JobPolicy())
+        // A JSON null is the same answer.
+        let nulled = try ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9),
+                                                     "overlap": .null, "catch_up": .null]).get()
+        #expect(nulled.overlap == nil && nulled.catchUp == nil)
     }
 }

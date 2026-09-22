@@ -125,10 +125,12 @@ enum JobsCommand: Equatable {
     /// testable.
     ///
     /// `usage` is what the job has spent and how hard it has been running, against the numbers
-    /// admission decides on (§0.1). It defaults to nothing: a listing whose ledger reads failed
-    /// still prints the table, with a dash where a figure would be. Inventing a zero there would
-    /// read as "this job has spent nothing today", which is a different and wrong claim.
-    static func render(jobs: [Job], lastRuns: [UUID: JobRun], usage: UsageSnapshot = .empty,
+    /// admission decides on (§0.1). A listing whose ledger reads failed passes `.empty` and still
+    /// prints the table, with a dash where a figure would be — inventing a zero there would read as
+    /// "this job has spent nothing today", which is a different and wrong claim. Required rather
+    /// than defaulted for exactly that reason: a caller that forgot the figures would render a
+    /// table of dashes and claim the ledger could not be read.
+    static func render(jobs: [Job], lastRuns: [UUID: JobRun], usage: UsageSnapshot,
                        unacknowledged: [JobRun], unreadableJobs: Int, now: Date) -> String {
         var blocks: [String] = []
 
@@ -195,16 +197,15 @@ enum JobsCommand: Equatable {
     static func usageSnapshot(jobs: [Job], ledger: JobLedger, config: ConfigManager,
                               now: Date, calendar: Calendar = .current) -> UsageSnapshot {
         var snapshot = UsageSnapshot()
-        var globalBudget: Int?
         for job in jobs {
-            let limits = JobLimits.resolve(job: job, config: config)
-            globalBudget = limits.globalDailyTokens
             guard let usage = try? ledger.usage(jobId: job.id, now: now, calendar: calendar) else { continue }
             snapshot.perJob[job.id] = JobFigures(tokensToday: usage.tokensToday,
-                                                 runsLastHour: usage.runsLastHour, limits: limits)
+                                                 runsLastHour: usage.runsLastHour,
+                                                 limits: JobLimits.resolve(job: job, config: config))
         }
-        // `globalDailyTokens` is deliberately not overridable per job, so any job's resolution
-        // answers for all of them; with no jobs at all there is no table to foot.
+        // `globalDailyTokens` is deliberately not overridable per job, so the first job's
+        // resolution answers for all of them; with no jobs at all there is no table to foot.
+        let globalBudget = jobs.first.map { JobLimits.resolve(job: $0, config: config).globalDailyTokens }
         if let globalBudget, let total = try? ledger.tokensToday(jobId: nil, calendar: calendar, now: now) {
             snapshot.global = GlobalUsage(tokensToday: total, dailyBudget: globalBudget)
         }
@@ -212,9 +213,14 @@ enum JobsCommand: Equatable {
     }
 
     /// What this job does differently from every other job (§3), in the order a person asks about
-    /// it: what it may touch, whether it may run beside itself, what it does with occurrences it
-    /// slept through, and what it checks before spending a turn. A job that departs from none of
-    /// the defaults says `default` rather than repeating them in every row.
+    /// it: what it may touch, whether it may run beside itself, and what it does with occurrences
+    /// it slept through. A job that departs from none of the defaults says `default` rather than
+    /// repeating them in every row.
+    ///
+    /// The gate is deliberately not here. `Trigger.summary` already ends a polled job's cell with
+    /// `(url gate)`, and in the widest table Iris prints the one word worth cutting is the one
+    /// printed twice on the same row; `list_jobs` carries `gateKind` as a field of its own,
+    /// because it has no trigger column to read it out of.
     static func policySummary(for job: Job) -> String {
         var parts: [String] = []
         if job.profile == .mutating { parts.append("mutating") }
@@ -224,7 +230,6 @@ enum JobsCommand: Equatable {
         case .skip: parts.append("catch-up skip")
         case .replay(let cap): parts.append("catch-up replay \(cap)")
         }
-        if let gate = job.trigger.gate { parts.append("gate \(gate.summary)") }
         return parts.isEmpty ? "default" : parts.joined(separator: " · ")
     }
 
