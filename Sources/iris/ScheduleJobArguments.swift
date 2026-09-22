@@ -34,6 +34,11 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// A script gate's inputs, `source[:target]` — always mounted read-only, whatever was written.
     let gateMounts: [String]?
     let gateTimeoutSeconds: Int?
+    /// The two policy fields a model may set at creation (#187 §3). `nil` is "say nothing", which
+    /// is not the same as asking for the default: it leaves `JobPolicy`'s own default in place, so
+    /// a later change to that default reaches every job that never had an opinion.
+    let overlap: JobPolicy.Overlap?
+    let catchUp: JobPolicy.CatchUp?
 
     /// Reads the tool call's arguments. The only hard requirement is a prompt: a schedule that
     /// resolves to nothing is `makeJob`'s refusal, not this one, so the caller can report the
@@ -73,11 +78,27 @@ struct ScheduleJobArguments: Equatable, Sendable {
         if present(args["gate_timeout_seconds"]), integer(args["gate_timeout_seconds"]) == nil {
             return .failure("gate_timeout_seconds must be a number of seconds.")
         }
+        // Refused rather than dropped, like the gates above and for the same reason: a job created
+        // with the default overlap when `queue` was asked for runs a different way for as long as
+        // it exists, and nothing in the answer would say so.
+        var overlap: JobPolicy.Overlap?
+        if present(args["overlap"]) {
+            guard let raw = text(args["overlap"]),
+                  let value = JobPolicy.Overlap(rawValue: raw.lowercased())
+            else { return .failure(Self.overlapShape) }
+            overlap = value
+        }
+        var catchUp: JobPolicy.CatchUp?
+        if present(args["catch_up"]) {
+            guard let value = self.catchUp(args["catch_up"]) else { return .failure(Self.catchUpShape) }
+            catchUp = value
+        }
         return .success(ScheduleJobArguments(
             prompt: prompt, name: text(args["name"]), alias: alias, profile: text(args["profile"]),
             gateURL: text(args["gate_url"]), gatePath: text(args["gate_path"]),
             gateScript: text(args["gate_script"]), gateMounts: gateMounts,
-            gateTimeoutSeconds: integer(args["gate_timeout_seconds"])))
+            gateTimeoutSeconds: integer(args["gate_timeout_seconds"]),
+            overlap: overlap, catchUp: catchUp))
     }
 
     /// Builds the job to store, or the sentence explaining why there is none. `existingNames` is
@@ -119,12 +140,16 @@ struct ScheduleJobArguments: Equatable, Sendable {
             // schedule an ungated one would have run on.
             let trigger: Trigger = gate.map { .poll(PollSpec(schedule: schedule, gate: $0)) }
                 ?? .schedule(schedule)
+            var policy = JobPolicy()
+            if let overlap { policy.overlap = overlap }
+            if let catchUp { policy.catchUp = catchUp }
             return .success(Job(
                 name: Self.uniqueName(Job.slug(from: name ?? prompt), existing: existingNames),
                 prompt: prompt,
                 trigger: trigger,
                 profile: wantsMutating ? .mutating : .readOnly,
-                createdInConversationId: createdIn))
+                createdInConversationId: createdIn,
+                policy: policy))
         }
     }
 
@@ -201,6 +226,48 @@ struct ScheduleJobArguments: Equatable, Sendable {
 
     /// Two gates on one job: a refusal rather than a guess about which check the user meant.
     static let oneGateOnly = "Give one gate: gate_url, gate_path or gate_script — not more than one."
+
+    /// The catch-up a model asked for, in every shape one writes it: the word on its own
+    /// (`"replay"` taking the spec's cap), the word with a cap (`"replay:3"`), or the object the
+    /// stored policy itself uses (`{"kind": "replay", "cap": 3}`). `nil` means the value was none
+    /// of them, which is a refusal rather than a silent default — see `parse`.
+    ///
+    /// A negative cap clamps to the default exactly as `JobPolicy`'s decoder clamps a stored one
+    /// (R15): nobody writes "replay -1 occurrences", so it is a typo, and a job is not worth
+    /// refusing over one when the cap it meant is knowable. Zero is kept: replay nothing.
+    private static func catchUp(_ value: JSONValue?) -> JobPolicy.CatchUp? {
+        if let word = text(value) {
+            let lowered = word.lowercased()
+            switch lowered {
+            case "coalesce": return .coalesce
+            case "skip": return .skip
+            case "replay": return .replay(cap: JobPolicy.defaultReplayCap)
+            default:
+                guard lowered.hasPrefix("replay:"),
+                      let cap = Int(lowered.dropFirst("replay:".count).trimmingCharacters(in: .whitespaces))
+                else { return nil }
+                return .replay(cap: cap >= 0 ? cap : JobPolicy.defaultReplayCap)
+            }
+        }
+        guard case .object(let fields)? = value else { return nil }
+        guard let kind = text(fields["kind"])?.lowercased() else { return nil }
+        switch kind {
+        case "coalesce": return .coalesce
+        case "skip": return .skip
+        case "replay":
+            guard let cap = integer(fields["cap"]), cap >= 0 else {
+                return .replay(cap: JobPolicy.defaultReplayCap)
+            }
+            return .replay(cap: cap)
+        default: return nil
+        }
+    }
+
+    /// The two policy refusals. Each names the values that work and what choosing one means, so a
+    /// model that guessed wrong can fix the call rather than drop the field.
+    static let overlapShape: ToolMessage = "overlap must be 'skip' (a fire while the previous run is still going is dropped) or 'queue' (one fire is held and taken when that run ends)."
+
+    static let catchUpShape: ToolMessage = "catch_up must be 'coalesce' (one fire on wake, whatever was missed), 'skip' (no fire; jump to the next occurrence), or 'replay' — optionally with a cap, as 'replay:3' or {\"kind\": \"replay\", \"cap\": 3} — to run the most recent missed occurrences one at a time."
 
     static let gateOptionsNeedAScript = "gate_mounts and gate_timeout_seconds only apply to gate_script."
 

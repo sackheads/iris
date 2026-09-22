@@ -893,16 +893,6 @@ actor IrisEngine {
         }
     }
 
-    /// Whether a call of `toolName` in this conversation would run in the container — the same
-    /// answer `resolveUseSandbox` gives the dispatcher, minus the host-fallback notice, which
-    /// belongs to a call that is actually about to run and not to a card describing one. Asked by
-    /// `JobRunner` so the Vibecop verdict on a blocked call is taken in the context the call would
-    /// have run in (#187 §6).
-    func runsInSandbox(toolName: String, conversationId: UUID, workspacePath: String?) async -> Bool {
-        guard toolName == "run_command" else { return false }
-        return await isSandboxed(conversationId: conversationId, workspacePath: workspacePath)
-    }
-
     /// Whether this conversation's turn runs sandboxed, with no side effect — the plain question,
     /// asked by everything that needs the answer without a specific call in hand.
     ///
@@ -910,8 +900,7 @@ actor IrisEngine {
     /// (subagents always sandboxed; main agent per its resolution) independent of any one tool,
     /// and `run_command` already surfaces the missing-runtime notice for itself. The read-only
     /// declaration gate (#187 §0.2) asks before the model has proposed anything at all, so
-    /// `resolveUseSandbox`'s notice would be a warning about a call that does not exist — and
-    /// `runsInSandbox` above asks about a call that has already been refused.
+    /// `resolveUseSandbox`'s notice would be a warning about a call that does not exist.
     private func isSandboxed(conversationId: UUID, workspacePath: String?) async -> Bool {
         if case .sandboxed = await sandboxDecision(conversationId: conversationId, workspacePath: workspacePath) {
             return true
@@ -1118,7 +1107,7 @@ actor IrisEngine {
         if !isUnattended {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -1138,7 +1127,9 @@ actor IrisEngine {
                     "gate_path": Schema(type: "STRING", description: "Only run the job when this absolute path changes: a file's mtime, size or contents, or the newest modification anywhere under a directory. The path must already exist, and a directory must hold fewer than 20,000 entries — checking a whole home folder on a cadence is refused, so name a narrower path or use gate_script. Needs no sandbox."),
                     "gate_script": Schema(type: "STRING", description: "Only run the job when this shell script says so. It runs inside the sandbox VM on every tick, and its LAST line of stdout must be exactly CHANGED or UNCHANGED (the exit code is not the verdict; a non-zero exit is a gate failure). Everything it printed before that line is handed to the run as untrusted context. Requires the container runtime and sandboxing; reviewed once before the job is created."),
                     "gate_mounts": Schema(type: "ARRAY", description: "Directories the gate script can read, as '/host/dir' or '/host/dir:/path/in/container'. Always mounted read-only, and recorded as the directory the path resolves to. A single file cannot be mounted — give its directory. The whole filesystem and Iris's own configuration cannot be mounted at all, so name the narrowest directory the check needs.", items: Schema(type: "STRING")),
-                    "gate_timeout_seconds": Schema(type: "INTEGER", description: "How long the gate script may take before it is killed and counted as a failure (default 60, clamped to 5-600).")
+                    "gate_timeout_seconds": Schema(type: "INTEGER", description: "How long the gate script may take before it is killed and counted as a failure (default 60, clamped to 5-600)."),
+                    "overlap": Schema(type: "STRING", description: "What a fire does when the previous run has not finished: 'skip' (default — the fire is dropped and recorded) or 'queue' (one fire is held and taken as soon as that run ends; never more than one)."),
+                    "catch_up": Schema(type: "STRING", description: "What a wake does with occurrences missed while the Mac slept: 'coalesce' (default — one fire now), 'skip' (none; jump to the next occurrence), or 'replay' to run the most recent missed ones one at a time, up to a cap (default 5) — write a cap as 'replay:3'. A replayed fire is an ordinary one, so it asks the gate and counts against the breaker and the budgets.")
                 ],
                 required: ["prompt"]
             )
@@ -2403,10 +2394,14 @@ actor IrisEngine {
                     for job in jobs {
                         lastStatuses[job.id] = try ledger.runs(jobId: job.id, limit: 1).first?.status.rawValue
                     }
+                    // The same figures `/jobs` prints, from the same seams (§0.1): a person and a
+                    // model asking what a job has spent today get one answer, not two.
+                    let usage = JobsCommand.usageSnapshot(jobs: jobs, ledger: ledger,
+                                                          config: ConfigManager.shared, now: Date())
                     // Read after `jobs()` — that call is what publishes the skipped-row count —
                     // and reported, so the model's account of what is scheduled matches `/jobs`'s
                     // rather than silently omitting the same rows.
-                    result = Self.jobsListJSON(jobs, lastStatuses: lastStatuses,
+                    result = Self.jobsListJSON(jobs, lastStatuses: lastStatuses, usage: usage,
                                                unreadableJobs: ledger.unreadableJobCount)
                 } catch {
                     result = "Could not read the jobs: \(error)."
@@ -3129,7 +3124,7 @@ extension IrisEngine {
         return [
             FunctionDeclaration(
                 name: "list_jobs",
-                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, and how the last run ended, plus `unreadableJobs` — how many stored jobs could not be read at all. Use it to answer what is scheduled, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
+                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, why one is paused, and how the last run ended, plus what each has spent today and how hard it has been running — `tokensToday` against `dailyBudget`, `runsLastHour` against `maxRunsPerHour` (the breaker), `retryAttempt` out of three, and `policy`, `gateKind` and `profile` — with `tokensTodayAllJobs` against `globalDailyBudget` for every background run together, and `unreadableJobs` — how many stored jobs could not be read at all. A figure that is null could not be read, which is not the same as zero. Use it to answer what is scheduled, what a job is costing, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
                 parameters: Schema(type: "OBJECT", properties: [:], required: [])),
             FunctionDeclaration(
                 name: "get_job_run",
@@ -3146,18 +3141,39 @@ extension IrisEngine {
     /// get wrong; wrapped rather than a bare array so a model reading this cannot report "you have
     /// two jobs" when `/jobs` says two jobs and a row it could not read.
     nonisolated static func jobsListJSON(_ jobs: [Job], lastStatuses: [UUID: String],
+                                         usage: JobsCommand.UsageSnapshot = .empty,
                                          unreadableJobs: Int) -> String {
         let iso = ISO8601DateFormatter()
         let rows: [[String: Any]] = jobs.map { job in
-            [
+            let figures = usage.perJob[job.id]
+            return [
                 "name": job.name,
                 "trigger": job.trigger.summary,
                 "enabled": job.enabled,
                 "nextFireAt": job.nextFireAt.map { iso.string(from: $0) } ?? NSNull(),
                 "lastStatus": lastStatuses[job.id] ?? NSNull(),
+                "pausedReason": job.pausedReason ?? NSNull(),
+                "profile": job.profile.rawValue,
+                // The same sentence the table's policy column shows, so a person reading `/jobs`
+                // and a model reading this cannot describe the same job differently.
+                "policy": JobsCommand.policySummary(for: job),
+                "gateKind": job.trigger.gate?.summary ?? NSNull(),
+                "retryAttempt": job.retryAttempt,
+                // Null, never zero, when the ledger would not answer: "spent nothing today" is a
+                // claim, and an unread figure is not one.
+                "tokensToday": figures?.tokensToday ?? NSNull(),
+                "dailyBudget": figures?.limits.dailyTokens ?? NSNull(),
+                "runsLastHour": figures?.runsLastHour ?? NSNull(),
+                "maxRunsPerHour": figures?.limits.maxRunsPerHour ?? NSNull(),
             ]
         }
-        return jsonString(["jobs": rows, "unreadableJobs": unreadableJobs]) ?? "{\"jobs\":[],\"unreadableJobs\":0}"
+        let body: [String: Any] = [
+            "jobs": rows,
+            "unreadableJobs": unreadableJobs,
+            "tokensTodayAllJobs": usage.global?.tokensToday ?? NSNull(),
+            "globalDailyBudget": usage.global?.dailyBudget ?? NSNull(),
+        ]
+        return jsonString(body) ?? "{\"jobs\":[],\"unreadableJobs\":0}"
     }
 
     /// `get_job_run`'s body: the ledger's columns, plus the transcript's last agent message when

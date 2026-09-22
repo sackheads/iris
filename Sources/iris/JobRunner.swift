@@ -836,10 +836,10 @@ actor JobRunner {
                                        now: finishedAt)
         await apply(retry, job: job, status: status)
 
-        // Taken here, while the run's conversation still exists to say how the call would have
-        // run: what the card can offer a person to do about the blocked call, and what Vibecop
-        // makes of it (§6).
-        let approval = await approvalOffer(for: blockedCall, in: conversationId)
+        // What the card can offer a person to do about the blocked call, and what Vibecop makes of
+        // it (§6) — taken now, while the card is being written, because it is there to inform the
+        // click and a verdict taken afterwards would be too late to.
+        let approval = await approvalOffer(for: blockedCall, job: job)
         let card = EventCard(runId: run.id, jobId: job.id, jobName: job.name, status: status,
                              // A card shows one line. With no reply to show, that line is why
                              // there is none (§6.2) — a blank failed card tells nobody anything.
@@ -879,7 +879,10 @@ actor JobRunner {
     /// on the persisted call, and a human click overrides a `DENY` rather than skipping the
     /// evaluation** (§6). Nothing is asked about a call no click can authorise — a refusal is
     /// already the answer, and a local model call to decorate it would be spent for nothing.
-    private func approvalOffer(for call: BlockedCall?, in conversationId: UUID?) async -> ApprovalOffer {
+    /// Takes the job rather than the blocked run's conversation, because the job is what decides
+    /// how the call would run if it were approved. Internal so a test can ask for the offer
+    /// without driving a whole turn.
+    func approvalOffer(for call: BlockedCall?, job: Job) async -> ApprovalOffer {
         guard let call, let state else { return .nothing }
         // R13 is not stored: the card decides it from the call's own reason, so a card written by
         // a build that stored nothing still cannot offer a button for a read-only job's call.
@@ -888,14 +891,13 @@ actor JobRunner {
         if protectedTarget {
             return ApprovalOffer(refusal: EventCard.protectedNotApprovable, verdict: nil, reason: nil)
         }
-        let sandboxed: Bool
-        if let conversationId, let engine {
-            sandboxed = await engine.runsInSandbox(toolName: call.toolName,
-                                                   conversationId: conversationId,
-                                                   workspacePath: call.cwd)
-        } else {
-            sandboxed = false
-        }
+        // The same expression `runApproved` opens the approved call's conversation with, so the
+        // verdict is taken about the isolation the call would actually have. Asking the *blocked
+        // run's* conversation instead — which is what this used to do — answered for a `write_file`
+        // with "not sandboxed" even when the job is `mutating` and the approved call would run in
+        // the VM, and answered for a `run_command` with whatever that conversation happened to
+        // resolve to rather than with R20's "the container or nobody".
+        let sandboxed = job.profile == .mutating || call.toolName == "run_command"
         let verdict = await state.vibecopVerdict(for: call, inSandbox: sandboxed,
                                                  vibecopEnabled: config.enableVibecop)
         return ApprovalOffer(refusal: nil, verdict: verdict?.decision, reason: verdict?.reason)

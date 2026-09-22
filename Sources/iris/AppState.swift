@@ -2751,13 +2751,19 @@ class AppState {
 
         case .list:
             do {
+                let now = Date()
                 let jobs = try ledger.jobs()
                 var lastRuns: [UUID: JobRun] = [:]
                 for job in jobs { lastRuns[job.id] = try ledger.runs(jobId: job.id, limit: 1).first }
+                // What each job has spent today and how hard it has been running (§0.1), against
+                // the same limits admission resolves. Read leniently — a figure that will not come
+                // back leaves its column blank rather than costing the listing.
+                let usage = JobsCommand.usageSnapshot(jobs: jobs, ledger: ledger,
+                                                      config: ConfigManager.shared, now: now)
                 // Read after `jobs()`: that call is what publishes the skipped-row count.
-                let body = JobsCommand.render(jobs: jobs, lastRuns: lastRuns,
+                let body = JobsCommand.render(jobs: jobs, lastRuns: lastRuns, usage: usage,
                                               unacknowledged: try ledger.unacknowledgedFailures(),
-                                              unreadableJobs: ledger.unreadableJobCount, now: Date())
+                                              unreadableJobs: ledger.unreadableJobCount, now: now)
                 emitCommandOutput(body, format: .markdown, to: convId)
             } catch {
                 emitCommandOutput("Could not read the jobs: \(error).", format: .markdown, to: convId)

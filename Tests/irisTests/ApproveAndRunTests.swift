@@ -325,6 +325,46 @@ struct ApproveAndRunTests {
         #expect(card.vibecopVerdict == nil)
     }
 
+    @Test("the verdict is taken in the context the approved call will actually run in")
+    func verdictFollowsTheExecutorsSandboxRule() async throws {
+        let (store, state, engine) = try harness()
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        config.enableVibecop = true
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               sandboxAvailable: { true })
+        // The context line Vibecop is given when the call runs inside the VM.
+        let inVM = "EXECUTION CONTEXT"
+
+        // A mutating job's approved call opens a sandboxed conversation whatever the tool is, so
+        // that is the context the verdict has to be taken in.
+        let mutatingJob = job(name: "writer", profile: .mutating)
+        let write = BlockedCall(toolName: "write_file", args: ["path": .string("/tmp/x")])
+        let writeSpy = SpyVibecop(decision: "APPROVE")
+        await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": writeSpy]) {
+            _ = await runner.approvalOffer(for: write, job: mutatingJob)
+        }
+        #expect(writeSpy.calls == 1)
+        #expect(writeSpy.lastPrompt.contains(inVM),
+                "a mutating job's call is run in the VM, so the verdict is asked about the VM")
+
+        // A read-only job's `run_command` is the container's or nobody's, so it is sandboxed too.
+        let readerJob = job(name: "reader", profile: .readOnly)
+        let command = BlockedCall(toolName: "run_command", args: ["command": .string("ls")])
+        let commandSpy = SpyVibecop(decision: "APPROVE")
+        await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": commandSpy]) {
+            _ = await runner.approvalOffer(for: command, job: readerJob)
+        }
+        #expect(commandSpy.lastPrompt.contains(inVM))
+
+        // Anything else takes the host path under the user's allowlist, and is judged as such.
+        let hostSpy = SpyVibecop(decision: "APPROVE")
+        await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": hostSpy]) {
+            _ = await runner.approvalOffer(for: BlockedCall(toolName: "send_mail"), job: readerJob)
+        }
+        #expect(!hostSpy.lastPrompt.contains(inVM))
+    }
+
     // MARK: runApproved
 
     @Test("Approve and run executes exactly the persisted call as its own tracked run")

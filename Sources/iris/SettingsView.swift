@@ -1,6 +1,124 @@
 import SwiftUI
 import KeyboardShortcuts
 
+/// The five global numbers an unattended job is bounded by (#187 §0.1, §9), as one value type so
+/// Settings renders five identical steppers from a list and a test can drive the clamp, the label
+/// and the round trip through `ConfigManager` without SwiftUI.
+///
+/// Zero is the resting state, not a hole: `JobLimits.resolve` reads a non-positive global back as
+/// the built-in default, so a stepper wound down to zero means "use the figure Iris ships with"
+/// rather than "no budget". A job's own `JobPolicy` is where zero means unlimited, and that is not
+/// settable from here — the one ceiling that matters most is the one nobody edits by accident.
+enum JobLimitSetting: String, CaseIterable, Sendable {
+    case perRunTokens, dailyTokens, globalDailyTokens, maxRunsPerHour, runTimeoutSeconds
+
+    var configKey: String {
+        switch self {
+        case .perRunTokens: return "JOB_PER_RUN_TOKEN_BUDGET"
+        case .dailyTokens: return "JOB_DAILY_TOKEN_BUDGET"
+        case .globalDailyTokens: return "JOB_GLOBAL_DAILY_TOKEN_BUDGET"
+        case .maxRunsPerHour: return "JOB_MAX_RUNS_PER_HOUR"
+        case .runTimeoutSeconds: return "JOB_RUN_TIMEOUT_SECONDS"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .perRunTokens: return "Tokens one run may spend"
+        case .dailyTokens: return "Tokens one job may spend a day"
+        case .globalDailyTokens: return "Tokens all jobs may spend a day"
+        case .maxRunsPerHour: return "Runs per job per hour"
+        case .runTimeoutSeconds: return "Wall clock one run may take"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .perRunTokens:
+            return "A run that reaches this is stopped between model rounds and its card says so."
+        case .dailyTokens:
+            return "A job whose spend for the local day has reached this pauses instead of firing."
+        case .globalDailyTokens:
+            return "The ceiling on every background run together. A job cannot raise it for itself."
+        case .maxRunsPerHour:
+            return "The breaker: a job that has already run this many times in the last hour pauses instead of firing again."
+        case .runTimeoutSeconds:
+            return "A run still going at this deadline is closed as failed and the Mac is let go back to sleep."
+        }
+    }
+
+    var defaultValue: Int {
+        switch self {
+        case .perRunTokens: return ConfigManager.JobDefaults.perRunTokenBudget
+        case .dailyTokens: return ConfigManager.JobDefaults.dailyTokenBudget
+        case .globalDailyTokens: return ConfigManager.JobDefaults.globalDailyTokenBudget
+        case .maxRunsPerHour: return ConfigManager.JobDefaults.maxRunsPerHour
+        case .runTimeoutSeconds: return ConfigManager.JobDefaults.runTimeoutSeconds
+        }
+    }
+
+    /// How far one click moves the number — a click has to be worth making on figures this large,
+    /// and worth trusting on figures this small.
+    var step: Int {
+        switch self {
+        case .perRunTokens: return 50_000
+        case .dailyTokens, .globalDailyTokens: return 100_000
+        case .maxRunsPerHour: return 1
+        case .runTimeoutSeconds: return 60
+        }
+    }
+
+    var range: ClosedRange<Int> {
+        switch self {
+        case .perRunTokens: return 0...10_000_000
+        case .dailyTokens: return 0...50_000_000
+        case .globalDailyTokens: return 0...100_000_000
+        case .maxRunsPerHour: return 0...1_000
+        case .runTimeoutSeconds: return 0...86_400
+        }
+    }
+
+    func value(in config: ConfigManager) -> Int {
+        switch self {
+        case .perRunTokens: return config.jobPerRunTokenBudget
+        case .dailyTokens: return config.jobDailyTokenBudget
+        case .globalDailyTokens: return config.jobGlobalDailyTokenBudget
+        case .maxRunsPerHour: return config.jobMaxRunsPerHour
+        case .runTimeoutSeconds: return config.jobRunTimeoutSeconds
+        }
+    }
+
+    /// Clamped at zero on the way in. A negative figure is never a third answer — nobody writes -1
+    /// to mean unlimited — and storing one would only have `JobLimits.resolve` read it back as the
+    /// default anyway, from a stepper that claimed otherwise.
+    func set(_ newValue: Int, in config: ConfigManager) {
+        let clamped = max(0, newValue)
+        switch self {
+        case .perRunTokens: config.jobPerRunTokenBudget = clamped
+        case .dailyTokens: config.jobDailyTokenBudget = clamped
+        case .globalDailyTokens: config.jobGlobalDailyTokenBudget = clamped
+        case .maxRunsPerHour: config.jobMaxRunsPerHour = clamped
+        case .runTimeoutSeconds: config.jobRunTimeoutSeconds = clamped
+        }
+    }
+
+    /// What the stepper reads. Zero says which figure it will actually use, because a row saying
+    /// "Runs per job per hour: 0" otherwise reads as a job that can never run.
+    func label(_ value: Int) -> String {
+        guard value > 0 else { return "\(title): default (\(grouped(defaultValue))\(unit))" }
+        return "\(title): \(grouped(value))\(unit)"
+    }
+
+    private var unit: String { self == .runTimeoutSeconds ? " s" : "" }
+
+    /// Grouped in the user's own locale, like every other figure in Settings.
+    private func grouped(_ value: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+}
+
 struct SettingsView: View {
     @Bindable private var config = ConfigManager.shared
     @State private var state = AppState.shared
@@ -813,6 +931,22 @@ struct SettingsView: View {
                             value: Binding(get: { config.vibecopTimeoutSeconds },
                                            set: { config.vibecopTimeoutSeconds = max(1, $0) }), in: 1...30)
                         .help("How long to wait for the Vibecop guard before falling back to a manual approval prompt.")
+                }
+
+                // #187 §9: the five numbers every unattended run is bounded by. A job's own policy
+                // may override any of them except the global daily budget, which is the ceiling on
+                // the whole background system.
+                Section(header: Text("Job Limits").font(.headline)) {
+                    ForEach(JobLimitSetting.allCases, id: \.rawValue) { limit in
+                        Stepper(limit.label(limit.value(in: config)),
+                                value: Binding(get: { limit.value(in: config) },
+                                               set: { limit.set($0, in: config) }),
+                                in: limit.range, step: limit.step)
+                            .help(limit.help)
+                    }
+                    Text("A stepper at its default uses the figure Iris ships with. `/jobs` shows what each job has spent today against these numbers.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
 
                 GoalWorkspacesSection(state: state)

@@ -202,8 +202,8 @@ struct JobsCommandTests {
         let last = run(j, status: .completed)
         let out = JobsCommand.render(jobs: [j], lastRuns: [j.id: last], unacknowledged: [],
                                      unreadableJobs: 0, now: now)
-        #expect(out.contains("| Job | Trigger | Next | Last |"))
-        #expect(out.contains("| pr-sweep | every 60 s | in 3 m | completed |"))
+        #expect(out.contains("| Job | Trigger | Policy | Next | Last | Tokens today | Runs/h |"))
+        #expect(out.contains("| pr-sweep | every 60 s | default | in 3 m | completed | — | — |"))
     }
 
     @Test("a job that has never run says never")
@@ -212,7 +212,7 @@ struct JobsCommandTests {
         let j = job(nextFireAt: now.addingTimeInterval(7_200))
         let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
                                      unreadableJobs: 0, now: now)
-        #expect(out.contains("| pr-sweep | every 60 s | in 2 h | never |"))
+        #expect(out.contains("| pr-sweep | every 60 s | default | in 2 h | never | — | — |"))
     }
 
     @Test("a job part-way up the retry ladder says where it is")
@@ -244,7 +244,7 @@ struct JobsCommandTests {
         let j = job(nextFireAt: now.addingTimeInterval(60), enabled: false)
         let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
                                      unreadableJobs: 0, now: now)
-        #expect(out.contains("| pr-sweep | every 60 s | disabled | never |"))
+        #expect(out.contains("| pr-sweep | every 60 s | default | disabled | never | — | — |"))
     }
 
     @Test("a filesystem watch has no next fire")
@@ -253,7 +253,7 @@ struct JobsCommandTests {
         let j = job("inbox", trigger: .fsEvent(FSWatch(path: "/tmp/in")))
         let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
                                      unreadableJobs: 0, now: now)
-        #expect(out.contains("| inbox | watch /tmp/in | — | never |"))
+        #expect(out.contains("| inbox | watch /tmp/in | default | — | never | — | — |"))
     }
 
     @Test("a fire already due, and one days out, both read as time")
@@ -263,8 +263,8 @@ struct JobsCommandTests {
         let far = job("far", nextFireAt: now.addingTimeInterval(3 * 86_400))
         let out = JobsCommand.render(jobs: [due, far], lastRuns: [:], unacknowledged: [],
                                      unreadableJobs: 0, now: now)
-        #expect(out.contains("| due | every 60 s | due | never |"))
-        #expect(out.contains("| far | every 60 s | in 3 d | never |"))
+        #expect(out.contains("| due | every 60 s | default | due | never | — | — |"))
+        #expect(out.contains("| far | every 60 s | default | in 3 d | never | — | — |"))
     }
 
     @Test("an unacknowledged failure gets its own line under the table")
@@ -317,7 +317,144 @@ struct JobsCommandTests {
                                      unreadableJobs: 0, now: now)
         #expect(out.contains("evil \\| name"))
         let row = out.split(separator: "\n").first { $0.contains("evil") } ?? ""
-        #expect(row.components(separatedBy: " | ").count == 4, "still four columns: \(row)")
+        #expect(row.components(separatedBy: " | ").count == 7, "still seven columns: \(row)")
+    }
+
+    // MARK: observability (§0.1, §9)
+
+    /// Fixed figures, so the columns are pinned to numbers rather than to whatever this machine's
+    /// settings and ledger happen to hold (invariant 7).
+    private func figures(tokens: Int = 620_000, runs: Int = 2, dailyTokens: Int = 1_000_000,
+                         maxRunsPerHour: Int = 6, globalDailyTokens: Int = 3_000_000)
+        -> JobsCommand.JobFigures {
+        JobsCommand.JobFigures(
+            tokensToday: tokens, runsLastHour: runs,
+            limits: JobLimits(maxRunsPerHour: maxRunsPerHour, dailyTokens: dailyTokens,
+                              globalDailyTokens: globalDailyTokens, perRunTokens: 200_000,
+                              runTimeoutSeconds: 600))
+    }
+
+    @Test("a job prints what it has spent today and how hard it has been running")
+    func renderUsageColumns() {
+        let now = Date()
+        let j = job(nextFireAt: now.addingTimeInterval(180))
+        let out = JobsCommand.render(
+            jobs: [j], lastRuns: [:],
+            usage: JobsCommand.UsageSnapshot(perJob: [j.id: figures()], global: nil),
+            unacknowledged: [], unreadableJobs: 0, now: now)
+        #expect(out.contains("| Job | Trigger | Policy | Next | Last | Tokens today | Runs/h |"))
+        #expect(out.contains("| 620k / 1M (62%) | 2 / 6 |"))
+    }
+
+    @Test("a job whose figures could not be read still lists, with nothing invented")
+    func renderUsageMissing() {
+        let now = Date()
+        let j = job(nextFireAt: now.addingTimeInterval(180))
+        let out = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
+                                     unreadableJobs: 0, now: now)
+        #expect(out.contains("| pr-sweep | every 60 s | default | in 3 m | never | — | — |"))
+    }
+
+    @Test("a zero budget or breaker reads as unlimited rather than as a percentage of nothing")
+    func renderUnlimitedFigures() {
+        let now = Date()
+        let j = job(nextFireAt: now.addingTimeInterval(180))
+        let out = JobsCommand.render(
+            jobs: [j], lastRuns: [:],
+            usage: JobsCommand.UsageSnapshot(
+                perJob: [j.id: figures(tokens: 500, runs: 3, dailyTokens: 0, maxRunsPerHour: 0)],
+                global: nil),
+            unacknowledged: [], unreadableJobs: 0, now: now)
+        #expect(out.contains("| 500 / unlimited | 3 / unlimited |"))
+    }
+
+    @Test("the footer carries the whole unattended system's spend for the day")
+    func renderGlobalFooter() {
+        let now = Date()
+        let j = job(nextFireAt: now.addingTimeInterval(180))
+        let out = JobsCommand.render(
+            jobs: [j], lastRuns: [:],
+            usage: JobsCommand.UsageSnapshot(
+                perJob: [j.id: figures()],
+                global: JobsCommand.GlobalUsage(tokensToday: 1_200_000, dailyBudget: 3_000_000)),
+            unacknowledged: [], unreadableJobs: 0, now: now)
+        #expect(out.contains("Tokens today, all jobs: 1.2M / 3M (40%)"))
+        // And no footer at all when the ledger could not answer.
+        let quiet = JobsCommand.render(jobs: [j], lastRuns: [:], unacknowledged: [],
+                                       unreadableJobs: 0, now: now)
+        #expect(!quiet.contains("all jobs"))
+    }
+
+    @Test("a job on the default policy says so, and every departure from it is named")
+    func renderPolicyColumn() {
+        let now = Date()
+        #expect(JobsCommand.policySummary(for: job()) == "default")
+
+        var loud = Job(name: "loud", prompt: "go",
+                       trigger: .poll(PollSpec(schedule: .interval(seconds: 60),
+                                               gate: .urlChanged(url: "https://example.com"))),
+                       profile: .mutating)
+        loud.policy.overlap = .queue
+        loud.policy.catchUp = .replay(cap: 5)
+        #expect(JobsCommand.policySummary(for: loud)
+                == "mutating · overlap queue · catch-up replay 5 · gate url")
+
+        var quiet = job()
+        quiet.policy.catchUp = .skip
+        #expect(JobsCommand.policySummary(for: quiet) == "catch-up skip")
+
+        let out = JobsCommand.render(jobs: [loud], lastRuns: [:], unacknowledged: [],
+                                     unreadableJobs: 0, now: now)
+        #expect(out.contains("| mutating · overlap queue · catch-up replay 5 · gate url |"))
+    }
+
+    @Test("the snapshot's figures are the ledger's own sums, read through the same seams admission uses")
+    func usageSnapshotReadsTheLedger() throws {
+        let store = try ConversationStore.inMemory()
+        let name = "iris-jobs-usage-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer {
+            defaults.removePersistentDomain(forName: name)
+            IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
+        }
+        let config = ConfigManager(store: defaults)
+        config.jobDailyTokenBudget = 50_000
+        config.jobMaxRunsPerHour = 9
+        config.jobGlobalDailyTokenBudget = 400_000
+
+        let now = Date()
+        let j = job()
+        try store.ledger.upsert(j)
+        for tokens in [1_000, 2_500] {
+            let r = JobRun(jobId: j.id, jobName: j.name, triggerKind: "schedule", startedAt: now,
+                           transcriptConversationId: UUID())
+            try store.ledger.begin(run: r)
+            try store.ledger.finish(runId: r.id, status: .completed, outcome: "did it",
+                                    failureReason: nil, blockedTool: nil,
+                                    tokens: TokenUsage(promptTokenCount: tokens, candidatesTokenCount: 0,
+                                                       totalTokenCount: tokens),
+                                    finishedAt: now)
+        }
+
+        let snapshot = JobsCommand.usageSnapshot(jobs: [j], ledger: store.ledger, config: config,
+                                                 now: now, calendar: .current)
+        let figures = try #require(snapshot.perJob[j.id])
+        #expect(figures.tokensToday == 3_500)
+        #expect(figures.runsLastHour == 2)
+        #expect(figures.limits.dailyTokens == 50_000)
+        #expect(figures.limits.maxRunsPerHour == 9)
+        #expect(snapshot.global == JobsCommand.GlobalUsage(tokensToday: 3_500, dailyBudget: 400_000))
+
+        let rendered = JobsCommand.render(jobs: [j], lastRuns: [:], usage: snapshot,
+                                          unacknowledged: [], unreadableJobs: 0, now: now)
+        #expect(rendered.contains("| 4k / 50k (7%) | 2 / 9 |"))
+    }
+
+    @Test("the usage line names every form the command takes")
+    func usageTextNamesEveryForm() {
+        for form in ["/jobs ack", "/jobs pause", "/jobs resume", "/jobs run", "/jobs delete"] {
+            #expect(JobsCommand.usageText.contains(form), "usage text is missing \(form)")
+        }
     }
 
     // MARK: handlers
