@@ -183,31 +183,93 @@ struct RunJobCLITests {
         var value: [GUILock.Claim] { lock.withLock { all } }
     }
 
-    @Test("two CLI runs starting at the same instant: exactly one takes the lock")
-    func simultaneousAcquiresHaveOneWinner() throws {
-        // The scenario the command is documented *for*: an eval harness that launches several
-        // `--run-job` at once. A check-then-write lock passes them all — both read "free", both
-        // write, both open the store — so the claim has to be the check: `O_CREAT | O_EXCL`.
-        let path = lockPath()
-        defer { try? FileManager.default.removeItem(at: path) }
-        let startLine = StartLine(racers: 2)
+    /// Runs `racers` claims against one path, all released together.
+    private func race(racers: Int, at path: URL) -> [GUILock.Claim] {
+        let startLine = StartLine(racers: racers)
         let claims = Claims()
         let finished = DispatchGroup()
-        for _ in 0..<2 {
+        for _ in 0..<racers {
             DispatchQueue.global().async(group: finished) {
                 startLine.arrive()
                 claims.add(GUILock.acquireExclusively(at: path))
             }
         }
         #expect(finished.wait(timeout: .now() + 30) == .success)
+        return claims.value
+    }
 
-        let all = claims.value
+    /// A lock path in a directory of this test's own, so "what is beside the lock afterwards" is
+    /// answerable without walking the whole of `/tmp`.
+    private func lockPathInOwnDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-runjob-lock-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("conversations.sqlite.lock")
+    }
+
+    /// Anything the claim staged beside the lock and did not clean up.
+    private func leftovers(beside path: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: path.deletingLastPathComponent().path)
+            .filter { $0 != path.lastPathComponent }
+    }
+
+    @Test("two CLI runs starting at the same instant: exactly one takes the lock")
+    func simultaneousAcquiresHaveOneWinner() throws {
+        // The scenario the command is documented *for*: an eval harness that launches several
+        // `--run-job` at once. A check-then-write lock passes them all — both read "free", both
+        // write, both open the store — so the claim has to be the check. And the claim has to
+        // create the file *with the pid already in it*: an `O_CREAT | O_EXCL` create followed by a
+        // write leaves a window in which the file exists and says nothing, and a loser reading it
+        // then would be told to delete a lock that is about to be perfectly valid. `link(2)` of a
+        // staged file closes that window, so both assertions below hold every time rather than
+        // almost every time.
+        let path = try lockPathInOwnDirectory()
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+
+        let all = race(racers: 2, at: path)
         #expect(all.filter { $0 == .acquired }.count == 1, "exactly one claim, whoever gets there first")
         // Both racers are this test process, so the pid the loser is told about is this one — it
         // is the winner's pid, which is the fact the message has to carry.
         #expect(all.filter { $0 == .held(pid: ProcessInfo.processInfo.processIdentifier) }.count == 1,
-                "and the loser is told who has it: \(all)")
+                "and the loser is told who has it, never an empty file: \(all)")
         #expect(GUILock.state(at: path) == .held(pid: ProcessInfo.processInfo.processIdentifier))
+        #expect(try leftovers(beside: path).isEmpty, "and nothing is staged beside it afterwards")
+    }
+
+    @Test("two runs taking over one crashed process's lock: still exactly one winner")
+    func simultaneousTakeoversHaveOneWinner() throws {
+        // Crash recovery is the other half of the claim, and the place a careless one hands out
+        // the double claim it exists to prevent: if a takeover *unlinks* the stale file, both
+        // racers succeed at unlinking and the second one deletes the live lock the first has just
+        // created in the gap. The takeover is a rename, which exactly one of them can do.
+        let path = try lockPathInOwnDirectory()
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        // Above any pid macOS will hand out, so the file names nothing that exists.
+        try Data("999999\n".utf8).write(to: path)
+
+        let all = race(racers: 2, at: path)
+        #expect(all.filter { $0 == .acquired }.count == 1,
+                "a crashed holder must not let two runs at the store: \(all)")
+        #expect(all.filter { $0 == .held(pid: ProcessInfo.processInfo.processIdentifier) }.count == 1,
+                "and the loser is told the taker-over has it: \(all)")
+        // The winner's lock is still there and still names it — the loser's takeover must not have
+        // removed a live file on its way past.
+        #expect(GUILock.state(at: path) == .held(pid: ProcessInfo.processInfo.processIdentifier))
+        #expect(try leftovers(beside: path).isEmpty,
+                "and the stale file was moved aside and deleted, not left lying about")
+    }
+
+    @Test("release only takes a lock this process holds")
+    func releaseIsPidGuarded() throws {
+        // pid 1 is launchd: alive, and not us. A release that went by "the file is there" would
+        // let a CLI run ending at the wrong moment delete the app's lock.
+        let path = lockPath()
+        defer { try? FileManager.default.removeItem(at: path) }
+        try Data("1\n".utf8).write(to: path)
+        GUILock.release(at: path)
+        #expect(FileManager.default.fileExists(atPath: path.path),
+                "somebody else's lock is not ours to give back")
+        #expect(GUILock.acquireExclusively(at: path) == .held(pid: 1))
     }
 
     @Test("a lock file left by a crashed process is taken over, once")

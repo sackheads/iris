@@ -57,27 +57,41 @@ enum GUILock {
 
     /// Claims the lock for a process that must **refuse** rather than race: the CLI.
     ///
-    /// `O_CREAT | O_EXCL` is the whole point — the create and the "is it free?" are one syscall,
-    /// so of two `--run-job` invocations started at the same instant exactly one gets the file.
-    /// Checking `state(at:)` and then writing cannot do that: both read `.free`, both write, both
-    /// open the store, and the documented eval-harness use (`xargs -P 4 iris --run-job …`) is
-    /// precisely that shape.
+    /// Create-with-content, in one atomic step: the pid is written to a private file in the same
+    /// directory and then `link(2)`ed to the lock path, which either succeeds — nothing was there
+    /// and the file now exists *already holding the pid* — or fails `EEXIST`. Checking
+    /// `state(at:)` and then writing cannot do that: two `--run-job` started at the same instant
+    /// both read `.free`, both write, both open the store, and the documented eval-harness use
+    /// (`xargs -P 4 iris --run-job …`) is precisely that shape. Nor can `O_CREAT | O_EXCL` on its
+    /// own: between the create and the `write` the file exists and says nothing, so a loser
+    /// reading it in that window sees a lock with no pid in it and tells the user to delete a file
+    /// that is about to be perfectly valid.
     ///
     /// A leftover from a crash still has to be recoverable, so `EEXIST` is not the end of it: a
-    /// file naming a pid the kernel no longer knows about is unlinked and the exclusive create is
-    /// tried **once** more. Once, not in a loop — a second `EEXIST` means another process took the
-    /// file in between, and that process is alive by construction, so this one is the loser.
+    /// file naming a pid the kernel no longer knows about is taken over and the link tried **once**
+    /// more. Once, not in a loop — a second `EEXIST` means another process got the file in
+    /// between, and that process is alive by construction, so this one is the loser.
+    ///
+    /// The takeover is a `rename(2)` of the stale file to a private aside name, never an `unlink`
+    /// of the lock path. Of two processes taking over the same stale file exactly one rename
+    /// succeeds; the other gets `ENOENT` and goes straight to its own link attempt. An `unlink`
+    /// gives them both a success and lets the second one delete the *live* lock the first has just
+    /// created in the gap — the crash-recovery path handing out the double claim it exists to
+    /// prevent.
     static func acquireExclusively(at url: URL) -> Claim {
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                 withIntermediateDirectories: true)
+        let directory = url.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for attempt in 0...1 {
-            let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
-            if descriptor >= 0 {
-                let pid = Array("\(ProcessInfo.processInfo.processIdentifier)\n".utf8)
-                _ = pid.withUnsafeBufferPointer { write(descriptor, $0.baseAddress, $0.count) }
-                close(descriptor)
-                return .acquired
+            // Same directory, so the link cannot cross a filesystem, and a name no other process
+            // will pick, so two claims in flight cannot share a staging file.
+            let staged = directory.appendingPathComponent(Self.privateName(beside: url, "pid"))
+            let pid = Data("\(ProcessInfo.processInfo.processIdentifier)\n".utf8)
+            guard (try? pid.write(to: staged)) != nil else {
+                return .blocked(detail: "could not write \(staged.path)")
             }
+            defer { try? FileManager.default.removeItem(at: staged) }
+
+            if link(staged.path, url.path) == 0 { return .acquired }
             // Anything other than "it is already there" is this process's own problem — a
             // directory it may not write, a full disk — and it is still a refusal: a CLI that
             // cannot take the lock cannot know whether the app has it, and two writers at one
@@ -88,10 +102,23 @@ enum GUILock {
             case .unreadable: return .blocked(detail: nil)
             case .free:
                 guard attempt == 0 else { return .blocked(detail: nil) }
-                try? FileManager.default.removeItem(at: url)
+                let aside = directory.appendingPathComponent(Self.privateName(beside: url, "stale"))
+                // `ENOENT` is somebody else having got there first, and is not a failure: this
+                // process simply tries the link like any other claimant on the next pass.
+                if rename(url.path, aside.path) == 0 {
+                    try? FileManager.default.removeItem(at: aside)
+                }
             }
         }
         return .blocked(detail: nil)
+    }
+
+    /// A name beside the lock file that belongs to this claim and no other: hidden, so a user
+    /// listing `~/.iris` never sees it, and carrying the pid and a UUID, so two claims racing in
+    /// one process (the tests do exactly that) cannot stage over each other.
+    private static func privateName(beside url: URL, _ purpose: String) -> String {
+        ".\(url.lastPathComponent).\(purpose).\(ProcessInfo.processInfo.processIdentifier)."
+            + UUID().uuidString
     }
 
     /// Claims the lock for this process, whatever was there before. Called once, at app launch.
