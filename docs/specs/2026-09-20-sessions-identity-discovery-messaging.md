@@ -320,15 +320,18 @@ demand through `list_sessions`.
   misreport. See §12 on where that derived state comes from.
 - **`send_to_session(session_id, message)`** — outcomes in §5.3.
 - **`set_session_card(name, description)`** — writes the calling session's own card; it cannot
-  write another's. Rejects an empty name.
+  write another's. Rejects an empty name, and truncates each field to the render cap before storing
+  it (#246), so a card cannot be an unbounded row in the `sessionCard` column.
 
 Their `description` strings are agent-facing text and fall under invariant 9: they must say when to
 call, per #155, and must not imply a peer is obliged to act on a request.
 
 **Every session-authored field is hardened before it is rendered.** `list_sessions` returns a
 `\n`-separated, `|`-delimited list, and three of its five fields — `name`, `description`,
-`workspace` — are bytes another session wrote through `set_session_card` / `set_workspace` with no
-length bound and no flattening at the point of writing. Rendered raw they are a cross-agent
+`workspace` — are bytes another session wrote through `set_session_card` / `set_workspace`. The
+card's two fields are length-bounded at the write since #246, but nothing flattens at the write
+and `workspace` is bounded only here, so the renderer keeps its own bound on all three
+regardless, and treats all three as hostile. Rendered raw they are a cross-agent
 injection channel: a card can embed newlines and pipes to close its own row and open forged ones,
 naming a `session_id` of its choosing or announcing itself as `User`. §5.0's "the sender never
 chooses its own trust label" has to hold on the *list* path as well as the message path. So each
@@ -498,6 +501,8 @@ describing what it adds.
   reports that the target will see it at its next turn.
 - `set_session_card` writes the calling session's card, refuses an empty name, and refuses a
   subagent — the last asserted at the handler, not only at declaration.
+- The stored card is bounded at the write to the same caps the listing applies (§6.3, #246), and
+  that truncation is idempotent, so a card does not erode a character on each render.
 - **A card cannot forge a row or a `session_id` in `list_sessions`** (§6.1): a card carrying
   newlines and pipes still produces exactly one row, advertising exactly the real peer's id, and an
   over-long field is capped rather than becoming the bulk of the reader's turn.

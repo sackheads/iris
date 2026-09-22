@@ -1012,6 +1012,11 @@ class AppState {
 
     /// #185 §6.3 — a session's self-description to its peers, written by `set_session_card`.
     /// Advertised, not authoritative: `SessionDirectory.peers` never reads this for `isBusy`.
+    ///
+    /// Deliberately a plain setter. The length bound lives at the `set_session_card` handler
+    /// (#246) and at render, not here: the listing's hardening tests plant hostile values through
+    /// this method, so capping here would leave them green while proving nothing about the render
+    /// path. `directlyWrittenCardIsStillCappedAtRender` pins that.
     func setSessionCard(for conversationId: UUID, _ card: SessionCard) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
         conversations[idx].sessionCard = card

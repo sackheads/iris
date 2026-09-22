@@ -426,15 +426,30 @@ actor IrisEngine {
     ///
     /// Removed: every line break (Unicode ones included — `.newlines` covers U+0085/2028/2029, not
     /// just LF/CR), the `|` the listing delimits on, and the `"` that could close the framing's
-    /// quoting early. Capped because none of these fields has a length bound at the point a session
-    /// writes it, and an unbounded one is a context-flooding channel on its own.
+    /// quoting early. Capped as well: `set_session_card` now bounds the two fields it writes
+    /// (#246), but `workspace` still arrives unbounded and a stored card predating that fix is
+    /// still whatever its author sent, so the cap here is the one that holds for every field on
+    /// every path — an unbounded one is a context-flooding channel on its own.
     nonisolated static func flattenCardField(_ value: String, cap: Int) -> String {
         let flattened = value
             .replacingOccurrences(of: "\r\n", with: " ")            // one space, not two
             .components(separatedBy: .newlines).joined(separator: " ")
             .replacingOccurrences(of: "|", with: "/")                // the listing's row delimiter
             .replacingOccurrences(of: "\"", with: "'")
-        return flattened.count > cap ? String(flattened.prefix(cap)) + "…" : flattened
+        return capCardField(flattened, cap: cap)
+    }
+
+    /// Length alone, without the delimiter-flattening above. The two are separated because they
+    /// answer to different owners: `|` and `"` matter only to `renderPeerList`'s format, and a
+    /// different reader would escape differently — but an unbounded field is a cost to whoever
+    /// STORES it, so the length bound belongs at the write (#246), and the flattening does not.
+    ///
+    /// Idempotent, which is what lets both ends apply it: truncating `prefix(cap) + "…"` again
+    /// drops the ellipsis at index `cap` and re-appends it, returning the same string. So a card
+    /// capped at write survives `flattenCardField` at render unchanged rather than losing another
+    /// character to each hop.
+    nonisolated static func capCardField(_ value: String, cap: Int) -> String {
+        value.count > cap ? String(value.prefix(cap)) + "…" : value
     }
 
     /// Field caps. A name is a handle, a description is a sentence about current work, a workspace
@@ -1295,8 +1310,11 @@ actor IrisEngine {
                 name: "set_session_card",
                 description: "Describe this session to its peers: a short stable name and what you are working on right now. Update it when the work changes, so peers deciding whether to involve you are reading something current.",
                 parameters: Schema(type: "OBJECT", properties: [
-                    "name": Schema(type: "STRING", description: "Short handle, 1-3 words."),
-                    "description": Schema(type: "STRING", description: "One line: what this session is doing now.")
+                    // Interpolated, not spelled out: an agent-facing string naming a cap as a
+                    // literal is a second copy of it, and invariant 9's whole subject is the copy
+                    // nobody updates.
+                    "name": Schema(type: "STRING", description: "Short handle, 1-3 words. Truncated past \(Self.cardNameCap) characters."),
+                    "description": Schema(type: "STRING", description: "One line: what this session is doing now. Truncated past \(Self.cardDescriptionCap) characters.")
                 ], required: ["name", "description"])
             ))
         }
@@ -2361,11 +2379,25 @@ actor IrisEngine {
                 result = "A name is required."
                 return result
             }
+            // #246: bound what is STORED, not only what the listing renders. This card is
+            // persisted to the `sessionCard` column and decoded on every launch, so an unbounded
+            // one is a cost carried forever by every future reader. Capped here, at the point the
+            // model's bytes arrive, rather than in `setSessionCard` — the mutator is also how the
+            // listing's own hardening tests plant hostile values, and moving the bound there would
+            // leave them green while proving nothing about the render path.
+            let boundedName = Self.capCardField(name, cap: Self.cardNameCap)
+            let boundedDescription = Self.capCardField(description, cap: Self.cardDescriptionCap)
             await MainActor.run {
                 localState?.setSessionCard(for: conversationId,
-                                           SessionCard(name: name, description: description))
+                                           SessionCard(name: boundedName, description: boundedDescription))
             }
-            result = "Card updated."
+            // Say so when it was cut. There is no `get_session_card` and `list_sessions` shows a
+            // session its peers, never its own row, so silence here is the one thing that would
+            // leave a session permanently believing it advertises text peers cannot see.
+            let truncated = boundedName != name || boundedDescription != description
+            result = truncated
+                ? "Card updated — over-long fields were truncated to what the peer listing shows."
+                : "Card updated."
         } else if functionCall.name == "list_jobs" || functionCall.name == "get_job_run" {
             // Declaration gating stops a well-behaved model from being offered these; dispatch
             // reads the function name alone, so the invariant ("in no other conversation") is
