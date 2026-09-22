@@ -551,7 +551,7 @@ struct WatchCoordinatorTests {
         await coordinator.tick(now: Self.at(40))
         try await Task.sleep(for: .milliseconds(50))
         #expect(await recorder.count == 2, "no third fire for paths a run already has")
-        #expect(await coordinator.takeHeldPaths(jobId) == ["/new/b.txt", "/new/c.txt"],
+        #expect(await coordinator.takeHeldPaths(jobId).paths == ["/new/b.txt", "/new/c.txt"],
                 "the runner's held re-fire still finds them")
     }
 
@@ -735,11 +735,19 @@ struct WatchCoordinatorTests {
         #expect(await coordinator.snapshot(job.id)?.held == 1)
 
         clock.set(Self.at(4))
-        await coordinator.deliver(root: "/r", paths: ["/r/b.txt"])
+        await coordinator.deliver(root: "/r", paths: ["/r/b.txt", "/r/.DS_Store"])
         #expect(await coordinator.snapshot(job.id)?.fireOutstanding == true,
                 "the queued fire is still this coordinator's, until the runner takes it")
 
-        #expect(await coordinator.takeHeldPaths(job.id) == ["/r/a.txt", "/r/b.txt"])
+        // R-D4-9: the counts go with the paths, the queued fire's own included. A `.queued`
+        // admission writes no row, so the first fire's arithmetic has never been reported
+        // anywhere — dropping it here would leave the burst on no row at all.
+        let taken = await coordinator.takeHeldPaths(job.id)
+        #expect(taken.paths == ["/r/a.txt", "/r/b.txt"])
+        #expect(taken.summary == WatchSummary(delivered: 0, changed: 2, overflow: 0, coalesced: 2,
+                                              noise: 1, ownWrites: 0, ceilingFired: false,
+                                              pathsWithheld: false),
+                "the queued fire's summary plus everything accepted or absorbed since")
         let after = try #require(await coordinator.snapshot(job.id))
         #expect(after.held == 0)
         #expect(after.pending == 0)

@@ -88,16 +88,19 @@ actor JobRunner {
     /// catch-up burst ends, and the held fire is where that count goes: it is the same fire, taken
     /// later, so it arrives on the row and card that fire eventually writes.
     private var queuedNotes: [UUID: String] = [:]
-    /// What a watch has seen since the fire that was held — `WatchCoordinator.takeHeldPaths` in
-    /// the app, injected here because the coordinator owns the runner's fire handler and a
-    /// reference the other way would be a cycle (and, in a test, a real event source). Optional:
-    /// the `--run-job` process and every test that is not about watches has no coordinator at all,
-    /// and a held re-fire there is exactly what it was before this deliverable.
-    private var heldPathsSource: (@Sendable (UUID) async -> [String])?
+    /// What a watch has seen since the fire that was held, and what it counted seeing it —
+    /// `WatchCoordinator.takeHeldPaths` in the app, injected here because the coordinator owns the
+    /// runner's fire handler and a reference the other way would be a cycle (and, in a test, a
+    /// real event source). Optional: the `--run-job` process and every test that is not about
+    /// watches has no coordinator at all, and a held re-fire there is exactly what it was before
+    /// this deliverable — its paths, and a null summary column rather than invented arithmetic.
+    private var heldPathsSource: (@Sendable (UUID) async -> (paths: [String], summary: WatchSummary))?
 
     /// Wires the coordinator's held paths into the re-fire (#187 deliverable 4, §3). Set once at
     /// launch, alongside the fire handler it is the other half of.
-    func setHeldPathsSource(_ source: @escaping @Sendable (UUID) async -> [String]) {
+    func setHeldPathsSource(
+        _ source: @escaping @Sendable (UUID) async -> (paths: [String], summary: WatchSummary)
+    ) {
         heldPathsSource = source
     }
 
@@ -244,8 +247,10 @@ actor JobRunner {
     /// filesystem woke it when a person did.
     static func mergedWatcherOrigin(_ held: FireOrigin, taking extra: [String]) -> FireOrigin {
         guard held.isWatcher else { return held }
-        // Nothing to fold in: the hold comes back untouched rather than rebuilt, so a
-        // `.queued(from: .watcher(...))` hold keeps the shape it was stored with.
+        // Nothing to fold in: the hold comes back untouched rather than rebuilt. `isWatcher` and
+        // `paths` both read `root`, so a `.queued`-rooted hold that *does* get paths folded in
+        // comes back unwrapped — which changes nothing, because both callers re-wrap the result in
+        // `.queued` and neither `triggerKind` nor `root` counts the layers.
         guard !extra.isEmpty else { return held }
         return .watcher(paths: Set(held.paths).union(extra).sorted())
     }
@@ -396,7 +401,9 @@ actor JobRunner {
                 // A fire held while the gate was being evaluated is still owed an answer, and the
                 // gate is asked again for it: one held fire at a time, so this terminates.
                 guard let held = takeQueuedFire(job: current) else { return decided }
-                origin = .queued(from: await mergedHeldOrigin(held.origin, jobId: current.id))
+                let merged = await mergedHeldOrigin(held.origin, jobId: current.id)
+                origin = .queued(from: merged.origin)
+                watch = merged.watch
                 note = held.note
                 continue
             }
@@ -414,7 +421,11 @@ actor JobRunner {
             // The held fire's own origin, wrapped rather than replaced: what woke the job is what
             // the retry ladder decides on, and re-entering as a bare "queued" erased it (R7). Its
             // own catch-up count comes back with it, for the same reason: this pass *is* that fire.
-            origin = .queued(from: await mergedHeldOrigin(held.origin, jobId: current.id))
+            let merged = await mergedHeldOrigin(held.origin, jobId: current.id)
+            origin = .queued(from: merged.origin)
+            // The burst this fire stands in for, counted by the coordinator and reported by no
+            // row until this one: a `.queued` admission writes nothing (R-D4-9).
+            watch = merged.watch
             note = held.note
         }
     }
@@ -623,14 +634,19 @@ actor JobRunner {
         queuedNotes.removeValue(forKey: jobId)
     }
 
-    /// A held fire's origin plus everything the coordinator has been holding for the same job
-    /// (§3). Asked only of `.watcher`-rooted holds: see `mergedWatcherOrigin`. The result is
-    /// re-wrapped in `.queued` by both callers, so the row still records `queued` and the gate
-    /// still reads the root.
-    private func mergedHeldOrigin(_ held: FireOrigin, jobId: UUID) async -> FireOrigin {
-        guard held.isWatcher else { return held }
-        let taken = await heldPathsSource?(jobId) ?? []
-        return Self.mergedWatcherOrigin(held, taking: taken)
+    /// A held fire's origin plus everything the coordinator has been holding for the same job, and
+    /// the burst arithmetic that came with it (§3, R-D4-9). Asked only of `.watcher`-rooted holds:
+    /// see `mergedWatcherOrigin`. The origin is re-wrapped in `.queued` by both callers, so the row
+    /// still records `queued` and the gate still reads the root.
+    ///
+    /// The summary is `nil` for a non-watcher root and when no source is wired: a null column is
+    /// the honest answer when nobody counted, and `run` fills in `delivered`/`pathsWithheld` from
+    /// the prompt build for the summaries that do arrive.
+    private func mergedHeldOrigin(_ held: FireOrigin,
+                                  jobId: UUID) async -> (origin: FireOrigin, watch: WatchSummary?) {
+        guard held.isWatcher, let heldPathsSource else { return (held, nil) }
+        let taken = await heldPathsSource(jobId)
+        return (Self.mergedWatcherOrigin(held, taking: taken.paths), taken.summary)
     }
 
     /// Remembers the one trigger held back while this job is busy. One, never a queue of them: a
@@ -646,7 +662,9 @@ actor JobRunner {
         // leaves whatever a watch left rather than overwriting it with nothing, and a watch fire
         // held on top of a hand-started one takes over, because that one has no burst to lose.
         // Unbounded growth is not a risk: the coordinator offers no further fire once it has been
-        // answered `.queued`, so what lands here is bounded by `maxTrackedPaths`.
+        // answered `.queued`, so what lands *here* is bounded by `maxTrackedPaths`. The re-fire's
+        // own list is the union of two such sets — this hold and what `takeHeldPaths` returns — so
+        // up to twice that; the 100-path cap in `buildPrompt` is what bounds what a run sees.
         if let existing = queuedOrigins[job.id] {
             if existing.isWatcher {
                 queuedOrigins[job.id] = Self.mergedWatcherOrigin(existing, taking: origin.paths)
@@ -1507,8 +1525,10 @@ actor JobRunner {
         return PromptBuild(text: prompt, delivered: delivered, pathsWithheld: pathsWithheld)
     }
 
-    /// The text alone. `run` takes the whole build, because it has a summary to fill in; this is
-    /// for callers that want only the prompt.
+    /// The text alone. Test-only since deliverable 4: `run` takes the whole build, because it has
+    /// a summary to fill in, so the four remaining call sites are all in `Tests/`. Kept because
+    /// the tests that assert on the prompt's shape have no use for the figures, and pinned against
+    /// the build it wraps by `JobRunnerTests.promptCapsAtAHundredPaths`.
     static func prompt(job: Job, changedPaths: [String], gateOutput: String? = nil,
                        protectionEnabled: Bool? = nil) async -> String {
         await buildPrompt(job: job, changedPaths: changedPaths, gateOutput: gateOutput,

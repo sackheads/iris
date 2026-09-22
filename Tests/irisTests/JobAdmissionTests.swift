@@ -403,8 +403,11 @@ struct JobAdmissionTests {
                                config: config, protectionEnabled: false)
         // Standing in for `WatchCoordinator.takeHeldPaths`: what the watch saw while the run was
         // going and the runner never heard about, because the coordinator stopped offering fires
-        // the moment one was answered `.queued` (§3).
-        await runner.setHeldPathsSource { _ in ["/tmp/fromCoordinator"] }
+        // the moment one was answered `.queued` (§3). The counts come with the paths (R-D4-9) —
+        // the queued fire's own, which no row has reported, plus everything accepted since.
+        let heldSummary = WatchSummary(changed: 9, overflow: 2, coalesced: 11, noise: 4,
+                                       ownWrites: 1, ceilingFired: true)
+        await runner.setHeldPathsSource { _ in (["/tmp/fromCoordinator"], heldSummary) }
 
         let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/first"])) }
         await gate.waitForEntry()
@@ -432,6 +435,95 @@ struct JobAdmissionTests {
         #expect(prompt.contains("/tmp/second"), "the first held burst is not overwritten by the second")
         #expect(prompt.contains("/tmp/third"))
         #expect(prompt.contains("/tmp/fromCoordinator"), "nor is what the coordinator held")
+
+        // R-D4-9: and the burst it ran on is on its row, because nothing else will ever report it.
+        let stamped = try #require(queued.watchSummary)
+        #expect(stamped.changed == 9, "the whole burst, the queued fire's own share included")
+        #expect(stamped.delivered == 3, "the union's size, filled in by the prompt build")
+        #expect(stamped == WatchSummary(delivered: 3, changed: 9, overflow: 2, coalesced: 11,
+                                        noise: 4, ownWrites: 1, ceilingFired: true))
+    }
+
+    @Test("a held watch re-fire with no coordinator behind it stamps nothing on its row")
+    func aHeldReFireWithoutASourceStampsNoSummary() async throws {
+        // The `--run-job` process has no coordinator, and neither has any test that is not about
+        // watches: the paths the runner held are still carried, and the column stays null rather
+        // than inventing arithmetic nobody counted.
+        let gate = JobSchedulerTests.Gate()
+        let client = GatedClient(gate: gate, response: textResponse("tick"))
+        let (store, state, engine) = try harness(client: client)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        var job = self.job(name: "no-coordinator", overlap: .queue)
+        job.trigger = .fsEvent(FSWatch(path: "/tmp/lonely"))
+        try store.ledger.upsert(job)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               config: config, protectionEnabled: false)
+
+        let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/lonely/a"])) }
+        await gate.waitForEntry()
+        await runner.fire(job: job, origin: .watcher(paths: ["/tmp/lonely/b"]))
+        await gate.open()
+        await first.value
+
+        let queued = try #require(try store.ledger.runs(jobId: job.id, limit: 10)
+            .first { $0.triggerKind == "queued" })
+        #expect(queued.watchSummary == nil)
+        let transcript = try #require(state.conversations.first { $0.id == queued.transcriptConversationId })
+        let prompt = transcript.history.first?.parts.compactMap(\.text).joined() ?? ""
+        #expect(prompt.contains("/tmp/lonely/b"), "the paths still travel with the held fire")
+    }
+
+    /// The other re-fire point — the one after a gate refusal — which every test above leaves
+    /// untouched: a gated fire is parked inside its evaluation (an `await`) when a watch fire
+    /// arrives and is held, and the fire taken when the gate says "nothing changed" has to pick up
+    /// the coordinator's paths and counts exactly as the post-run one does. Two lines doing the
+    /// same job is two lines that can drift apart.
+    ///
+    /// The pairing is synthetic today — a gate lives on a `poll` trigger and watch fires reach
+    /// `.fsEvent` jobs — but the origin a fire carries is the caller's, not the trigger's, and this
+    /// branch decides on the origin.
+    @Test("a fire held while a gate was being evaluated takes the coordinator's paths too")
+    func aFireHeldAcrossAGateTakesTheHeldPaths() async throws {
+        let gate = JobSchedulerTests.Gate()
+        let (store, state, engine, client) = try harness([textResponse("tick")])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        var job = self.job(name: "gated-queue", overlap: .queue)
+        job.trigger = .poll(PollSpec(schedule: .interval(seconds: 60),
+                                     gate: .pathChanged(path: "/tmp/gated/stamp")))
+        try store.ledger.upsert(job)
+        // The first evaluation parks, so the second fire arrives while the job is in flight and is
+        // held; then it answers "nothing changed", which ends that fire on a row and sends the
+        // loop round to the held one. The second evaluation is never reached: a `.watcher` root is
+        // not a fire the gate gets a say in (R29).
+        let evaluated = SeamCounter()
+        let runner = JobRunner(
+            state: state, engine: engine, ledger: store.ledger, config: config,
+            protectionEnabled: false,
+            gateEvaluator: { _, _ in
+                if await evaluated.bump() == 1 { await gate.arriveAndWait() }
+                return .unchanged(signal: "same")
+            })
+        let heldSummary = WatchSummary(changed: 5, coalesced: 6, noise: 1)
+        await runner.setHeldPathsSource { _ in (["/tmp/gated/fromCoordinator"], heldSummary) }
+
+        let first = Task { await runner.fire(job: job, origin: .schedule) }
+        await gate.waitForEntry()
+        #expect(await runner.fire(job: job, origin: .watcher(paths: ["/tmp/gated/b"])) == .queued)
+        await gate.open()
+        #expect(await first.value == .gateUnchanged)
+
+        let queued = try #require(try store.ledger.runs(jobId: job.id, limit: 10)
+            .first { $0.triggerKind == "queued" })
+        let transcript = try #require(state.conversations.first { $0.id == queued.transcriptConversationId })
+        let prompt = transcript.history.first?.parts.compactMap(\.text).joined() ?? ""
+        #expect(prompt.contains("/tmp/gated/b"), "the held fire's own paths")
+        #expect(prompt.contains("/tmp/gated/fromCoordinator"), "and the coordinator's, unioned in")
+        #expect(queued.watchSummary?.changed == 5, "and the burst's arithmetic with them")
+        #expect(queued.watchSummary?.delivered == 2)
+        #expect(await evaluated.count == 1, "the held watch fire is not the gate's to decide")
+        #expect(client.callCount == 1, "one turn: the gated fire never ran")
     }
 
     @Test("the held-paths source is asked only for watcher-rooted holds")
@@ -451,7 +543,7 @@ struct JobAdmissionTests {
         let asked = SeamCounter()
         await runner.setHeldPathsSource { _ in
             await asked.bump()
-            return ["/tmp/neverAsked"]
+            return (["/tmp/neverAsked"], WatchSummary(changed: 3))
         }
 
         let first = Task { await runner.fire(job: job, origin: .schedule) }
@@ -467,6 +559,7 @@ struct JobAdmissionTests {
         let transcript = try #require(state.conversations.first { $0.id == queued.transcriptConversationId })
         let prompt = transcript.history.first?.parts.compactMap(\.text).joined() ?? ""
         #expect(!prompt.contains("/tmp/neverAsked"))
+        #expect(queued.watchSummary == nil, "and no burst's arithmetic lands on a hand-started row")
     }
 
     /// #187 deliverable 4, §6: the row is what `/jobs` and `get_job_run` read back, and it carries
@@ -958,5 +1051,9 @@ struct JobAdmissionTests {
 /// from whatever task the runner happens to be on.
 private actor SeamCounter {
     private(set) var count = 0
-    func bump() { count += 1 }
+    @discardableResult
+    func bump() -> Int {
+        count += 1
+        return count
+    }
 }

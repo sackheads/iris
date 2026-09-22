@@ -573,9 +573,27 @@ actor WatchCoordinator {
     /// window that no longer has a burst behind it. The burst counters go with the paths: they
     /// describe what is being taken, and leaving them would have the next fire report this burst
     /// twice.
-    func takeHeldPaths(_ jobId: UUID) -> [String] {
-        guard var subscriber = subscribers[jobId] else { return [] }
+    ///
+    /// The summary is the outstanding fire's plus everything accumulated since (R-D4-9), the same
+    /// arithmetic `reAsk` does and for a stronger reason: an admission of `.queued` writes no row,
+    /// so the queued fire's own counts have never been reported anywhere and this re-fire's row is
+    /// the only one that will ever carry them. (The `.run` case does not come through here at all
+    /// — `apply` clears `outstandingFire` when a run starts, and that run's row already has its
+    /// summary.) `delivered` and `pathsWithheld` stay at zero: only the runner's prompt build
+    /// knows how many paths got past the cap and the guard.
+    func takeHeldPaths(_ jobId: UUID) -> (paths: [String], summary: WatchSummary) {
+        guard var subscriber = subscribers[jobId] else { return ([], WatchSummary()) }
         let taken = subscriber.heldPaths.union(subscriber.pending).sorted()
+        let previous = subscriber.outstandingFire?.summary
+        let summary = WatchSummary(
+            delivered: 0,
+            changed: (previous?.changed ?? 0) + subscriber.changed,
+            overflow: (previous?.overflow ?? 0) + subscriber.overflow,
+            coalesced: (previous?.coalesced ?? 0) + subscriber.coalesced,
+            noise: (previous?.noise ?? 0) + subscriber.noise,
+            ownWrites: (previous?.ownWrites ?? 0) + subscriber.ownWrites,
+            ceilingFired: previous?.ceilingFired ?? false,
+            pathsWithheld: false)
         subscriber.heldPaths = []
         subscriber.pending = []
         subscriber.fireOutstanding = false
@@ -587,7 +605,7 @@ actor WatchCoordinator {
         subscriber.fireSeq = 0
         endBurst(&subscriber)
         subscribers[jobId] = subscriber
-        return taken
+        return (taken, summary)
     }
 
     /// The running total of what each watch has absorbed since the process started — `/jobs`'s
