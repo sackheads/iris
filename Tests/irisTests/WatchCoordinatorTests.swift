@@ -70,20 +70,23 @@ struct WatchCoordinatorTests {
     actor Gate {
         private var entered = false
         private var opened = false
-        private var entryWaiters: [CheckedContinuation<Void, Never>] = []
         private var openWaiters: [CheckedContinuation<Void, Never>] = []
 
         func arriveAndWait() async {
             entered = true
-            for waiter in entryWaiters { waiter.resume() }
-            entryWaiters = []
             if opened { return }
             await withCheckedContinuation { openWaiters.append($0) }
         }
 
-        func waitForEntry() async {
-            if entered { return }
-            await withCheckedContinuation { entryWaiters.append($0) }
+        /// Bounded, for `waitFor`'s reason: a regression that stops the fire being dispatched
+        /// should fail the test that waited, naming what it waited for, rather than park it
+        /// forever and turn `swift test` into a CI timeout with no test named.
+        func waitForEntry(sourceLocation: SourceLocation = #_sourceLocation) async {
+            for _ in 0..<500 {
+                if entered { return }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            Issue.record("waited 5s for a handler to enter the gate", sourceLocation: sourceLocation)
         }
 
         func open() {
@@ -552,9 +555,77 @@ struct WatchCoordinatorTests {
                 "the runner's held re-fire still finds them")
     }
 
+    /// RR1-F1. The same stale-admission failure through a third door: a pause removes the
+    /// subscriber outright and the resume builds a fresh one. A counter living on the `Subscriber`
+    /// struct restarts at 0 there, so the handler parked across the pause comes back holding a
+    /// number the *new* subscriber has since reissued — and its `.run` spends the newer fire's
+    /// hold. Pausing a noisy watch and resuming it while its run is going is an ordinary thing to
+    /// do, which is why the identity has to outlive the struct that issued it.
+    @Test("a handler parked across a pause and a resume cannot spend the newer fire's hold",
+          .timeLimit(.minutes(1)))
+    func aStaleAdmissionSurvivesNeitherAPauseNorAResume() async throws {
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        // Fire #1 answers `.run` from inside the gate; fire #2 answers `.queued`, so it is still
+        // outstanding and still holding its paths when the stale answer arrives.
+        let recorder = Recorder([.run, .queued])
+        let gate = Gate()
+        var job = Self.job("paused-mid-run", root: "/r")
+        try store.ledger.upsert(job)
+        let coordinator = WatchCoordinator(
+            ledger: store.ledger, now: { clock.now }, recentWrites: RecentWrites(now: { clock.now }),
+            fire: { j, f in
+                let admission = await recorder.record(j, f)
+                if f.paths == ["/r/a.txt"] { await gate.arriveAndWait() }
+                return admission
+            })
+        await coordinator.sync(with: [job])
+        let jobId = job.id
+
+        await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
+        clock.set(Self.at(3))
+        await coordinator.tick(now: Self.at(3))
+        await gate.waitForEntry()
+
+        // Paused while the run is going: `sync` takes the subscriber away entirely.
+        clock.set(Self.at(4))
+        job.pausedReason = "by hand"
+        try store.ledger.setPaused(jobId: jobId, reason: "by hand")
+        await coordinator.sync(with: [job])
+        #expect(await coordinator.snapshot(jobId) == nil)
+
+        // Resumed: a brand-new subscriber, which is where a per-subscriber counter would restart.
+        clock.set(Self.at(5))
+        job.pausedReason = nil
+        try store.ledger.setPaused(jobId: jobId, reason: nil)
+        await coordinator.sync(with: [job])
+
+        await coordinator.deliver(root: "/r", paths: ["/r/b.txt", "/r/c.txt"])
+        clock.set(Self.at(9))
+        await coordinator.tick(now: Self.at(9))
+        await recorder.waitFor(2)
+        #expect(await recorder.paths.last == ["/r/b.txt", "/r/c.txt"])
+
+        // Handler #1 finally answers, for a fire two subscribers ago.
+        await gate.open()
+        try await Task.sleep(for: .milliseconds(100))
+
+        let snapshot = try #require(await coordinator.snapshot(jobId))
+        #expect(snapshot.fireOutstanding == true, "the newer fire is still the runner's to answer")
+        #expect(snapshot.held == 2, "the stale `.run` did not spend the newer fire's paths")
+        #expect(snapshot.pending == 0, "nor re-queue them as a fresh burst")
+        #expect(snapshot.burstBegan == nil)
+
+        clock.set(Self.at(40))
+        await coordinator.tick(now: Self.at(40))
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await recorder.count == 2, "no third fire for paths a run already has")
+    }
+
     // MARK: The five admissions
 
-    @Test("a run takes the paths it was given and leaves everything accepted since")
+    @Test("a run takes the paths it was given and leaves everything accepted since",
+          .timeLimit(.minutes(1)))
     func runRemovesOnlyTheFiredPaths() async throws {
         let store = try ConversationStore.inMemory()
         let clock = Clock(Self.t0)
@@ -597,7 +668,8 @@ struct WatchCoordinatorTests {
     /// burst counters — `coalesced`, and since R-D4-6 `noise` and `ownWrites` too. When the run
     /// spends the whole hold there is no new burst to carry them, so they have to be zeroed here
     /// or the *next* burst's summary reports them a second time.
-    @Test("a run that empties its hold leaves no counters behind for the next burst")
+    @Test("a run that empties its hold leaves no counters behind for the next burst",
+          .timeLimit(.minutes(1)))
     func aRunThatEmptiesItsHoldZeroesTheCounters() async throws {
         let store = try ConversationStore.inMemory()
         let clock = Clock(Self.t0)

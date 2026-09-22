@@ -14,10 +14,16 @@ import Foundation
 /// Matching is case-insensitive (R-D4-7), for the same reason root coverage is: the default macOS
 /// volume is case-insensitive, `realpath` keeps whatever casing its caller used, and an ignore list
 /// that absorbs `.DS_Store` but not `.ds_store` — or `*.TMP` but not `*.tmp` — is a filter that
-/// works until the day something writes the other spelling. Patterns are lower-cased once at
-/// construction and candidates once per component, so the fold costs nothing per pattern. On a
-/// case-sensitive volume this absorbs a little more than it was asked to, which is the direction
-/// an ignore list should fail in.
+/// works until the day something writes the other spelling. Patterns are lower-cased once, at
+/// construction; a candidate path is lower-cased and split once per *path*, by `matcher`, and the
+/// components are then offered to every glob — so the eleven built-ins plus the watch's own cost
+/// one fold between them rather than one each. On a case-sensitive volume this absorbs a little
+/// more than it was asked to, which is the direction an ignore list should fail in.
+///
+/// The fold here is `lowercased()` while `WatchCoordinator.covers` uses
+/// `compare(options: .caseInsensitive)` — two algorithms for one rule. They agree on every path a
+/// filesystem will produce; the difference only shows on Unicode whose case mapping changes length,
+/// which no path component anyone types will contain.
 struct WatchGlob: Sendable {
     /// One component's pattern, or the `**` that stands for any number of components.
     private enum Segment: Sendable, Equatable {
@@ -47,10 +53,15 @@ struct WatchGlob: Sendable {
     }
 
     /// Whether `relativePath` — a path relative to the watch root, with no leading slash — is
-    /// absorbed by this pattern.
+    /// absorbed by this pattern. The one-glob entry point; `matcher` folds and splits once for a
+    /// whole list instead and calls `matches(components:)` directly.
     func matches(relativePath: String) -> Bool {
-        let components = relativePath.lowercased()
-            .split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        matches(components: Self.components(of: relativePath))
+    }
+
+    /// `relativePath` already lower-cased and split — the form `matcher` shares across every glob
+    /// in a list.
+    func matches(components: [String]) -> Bool {
         guard !components.isEmpty, let first = segments.first else { return false }
         if componentOnly {
             // A bare name is a name, wherever it appears: `.DS_Store` catches `a/b/.DS_Store`, and
@@ -106,11 +117,21 @@ struct WatchGlob: Sendable {
         return p == pattern.count
     }
 
-    /// The compiled form: patterns are parsed once and the closure is what the hot path calls, so
-    /// a batch of a thousand events does not re-parse eleven built-in patterns a thousand times.
+    /// The one form the hot path should use. Two things are amortised and both matter on a batch
+    /// of a thousand events: the patterns are parsed once at construction rather than per event,
+    /// and each candidate is lower-cased and split once for the whole list rather than once per
+    /// glob — which, with eleven built-ins plus the watch's own, is the difference between one
+    /// allocation per event and a dozen.
     static func matcher(_ patterns: [String]) -> @Sendable (String) -> Bool {
         let globs = patterns.map(WatchGlob.init)
-        return { path in globs.contains { $0.matches(relativePath: path) } }
+        return { path in
+            let components = Self.components(of: path)
+            return globs.contains { $0.matches(components: components) }
+        }
+    }
+
+    private static func components(of path: String) -> [String] {
+        path.lowercased().split(separator: "/", omittingEmptySubsequences: true).map(String.init)
     }
 
     /// The names a watch must still be able to fire on. Deliberately ordinary and deliberately

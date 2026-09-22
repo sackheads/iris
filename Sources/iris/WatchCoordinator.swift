@@ -82,10 +82,13 @@ actor WatchCoordinator {
         /// When a `.skipInFlight` subscriber may ask again (R-D4-2). One ask per ceiling, on the
         /// grid the burst's own ceiling sits on.
         var reAskDue: Date?
-        /// Which dispatch the outstanding handler belongs to. A handler runs in a task of its own
-        /// and may come back long after the subscriber moved on — a re-registration onto another
-        /// root, or the runner taking the hold — so the admission is applied only when the fire it
-        /// answers is still the current one. Bumped on every dispatch and on every abandonment.
+        /// Which dispatch the outstanding handler is answering; 0 for none. A handler runs in a
+        /// task of its own and may come back long after the subscriber moved on — a
+        /// re-registration onto another root, the runner taking the hold, or a pause and a resume
+        /// — so the admission is applied only when the fire it answers is still the current one.
+        /// The values come from the actor's `nextFireSeq`, never from here: a counter living on
+        /// this struct restarts at 0 when `sync` removes and later re-creates the subscriber, and
+        /// a handler parked across that pause would then hold a number the new subscriber reissues.
         var fireSeq: UInt64 = 0
 
         var quiet: TimeInterval { TimeInterval(watch.quietWindowSeconds) }
@@ -97,6 +100,11 @@ actor WatchCoordinator {
     private let recentWrites: RecentWrites
     private let fire: WatchFireHandler
     private var subscribers: [UUID: Subscriber] = [:]
+    /// Issues every dispatch's identity. On the actor rather than on `Subscriber`, and never reset:
+    /// a subscriber can be removed by a pause and re-created by the resume while a handler is still
+    /// inside its run, so the identity a dispatch carries has to outlive the struct that issued it.
+    /// 0 is never issued, which is what lets an abandoned fire be marked by setting `fireSeq = 0`.
+    private var nextFireSeq: UInt64 = 0
     private var loop: Task<Void, Never>?
 
     init(ledger: JobLedger, now: @escaping @Sendable () -> Date, recentWrites: RecentWrites,
@@ -141,9 +149,9 @@ actor WatchCoordinator {
                 existing.outstandingFire = nil
                 existing.lastAdmission = nil
                 existing.reAskDue = nil
-                // A handler may still be inside the run this abandons. Bumping the sequence is
+                // A handler may still be inside the run this abandons. Clearing the sequence is
                 // what stops its admission landing on whatever fires next for the new root.
-                existing.fireSeq &+= 1
+                existing.fireSeq = 0
                 subscribers[job.id] = existing
                 continue
             }
@@ -167,7 +175,7 @@ actor WatchCoordinator {
                 existing.outstandingFire = nil
                 existing.lastAdmission = nil
                 existing.reAskDue = nil
-                existing.fireSeq &+= 1
+                existing.fireSeq = 0
                 let at = now()
                 existing.burstBegan = at
                 existing.lastAccepted = at
@@ -432,8 +440,9 @@ actor WatchCoordinator {
         let outstanding = WatchFire(paths: paths, summary: summary)
         subscriber.outstandingFire = outstanding
         subscriber.lastAdmission = nil
-        subscriber.fireSeq &+= 1
-        let seq = subscriber.fireSeq
+        nextFireSeq &+= 1
+        subscriber.fireSeq = nextFireSeq
+        let seq = nextFireSeq
         // One ask per ceiling if the runner turns this down as a `skip` overlap (R-D4-2): the grid
         // is the burst's own ceiling, so a watch that fired on its window still waits the full
         // ceiling from the burst before it costs the ledger two more sums.
@@ -476,8 +485,9 @@ actor WatchCoordinator {
         subscriber.outstandingFire = offer
         subscriber.lastAdmission = nil
         subscriber.reAskDue = at.addingTimeInterval(subscriber.ceiling)
-        subscriber.fireSeq &+= 1
-        let seq = subscriber.fireSeq
+        nextFireSeq &+= 1
+        subscriber.fireSeq = nextFireSeq
+        let seq = nextFireSeq
         let job = subscriber.job
         subscribers[id] = subscriber
         dispatch(id, job: job, fire: offer, seq: seq)
@@ -496,9 +506,10 @@ actor WatchCoordinator {
     /// Step 3: what the runner said, applied to the hold.
     private func apply(_ admission: JobRunner.Admission?, to id: UUID, firedPaths: [String],
                        seq: UInt64) {
-        // The fire this answers must still be the subscriber's current one. Two windows make the
+        // The fire this answers must still be the subscriber's current one. Three windows make the
         // id alone insufficient: a `sync` that re-registered the job onto another root while the
-        // handler was inside its run, and a `takeHeldPaths` that beat the handler's return. In
+        // handler was inside its run, a `takeHeldPaths` that beat the handler's return, and a
+        // pause that removed the subscriber followed by a resume that re-created it. In
         // both, a stale `.run` would subtract its own paths from a *newer* fire's hold, clear that
         // fire's `fireOutstanding` and push its paths back into `pending` — the same paths run
         // twice, and the "at most one fire outstanding" invariant broken by the one code path that
@@ -573,7 +584,7 @@ actor WatchCoordinator {
         subscriber.reAskDue = nil
         // The runner owns these paths now. If the handler for the fire they came from has not
         // returned yet, its admission must not land on the burst that starts after this.
-        subscriber.fireSeq &+= 1
+        subscriber.fireSeq = 0
         endBurst(&subscriber)
         subscribers[jobId] = subscriber
         return taken
