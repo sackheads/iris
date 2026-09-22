@@ -542,7 +542,7 @@ struct WatchCoordinatorTests {
 
         let snapshot = try #require(await coordinator.snapshot(jobId))
         #expect(snapshot.fireOutstanding == true, "the newer fire is still the runner's to answer")
-        #expect(snapshot.held == 2, "the stale `.run` did not spend the newer fire's paths")
+        #expect(snapshot.outstanding == 2, "the stale `.run` did not spend the newer fire's paths")
         #expect(snapshot.pending == 0, "nor re-queue them as a fresh burst")
         #expect(snapshot.burstBegan == nil)
 
@@ -612,7 +612,7 @@ struct WatchCoordinatorTests {
 
         let snapshot = try #require(await coordinator.snapshot(jobId))
         #expect(snapshot.fireOutstanding == true, "the newer fire is still the runner's to answer")
-        #expect(snapshot.held == 2, "the stale `.run` did not spend the newer fire's paths")
+        #expect(snapshot.outstanding == 2, "the stale `.run` did not spend the newer fire's paths")
         #expect(snapshot.pending == 0, "nor re-queue them as a fresh burst")
         #expect(snapshot.burstBegan == nil)
 
@@ -624,9 +624,9 @@ struct WatchCoordinatorTests {
 
     // MARK: The five admissions
 
-    @Test("a run takes the paths it was given and leaves everything accepted since",
+    @Test("a run spends the paths it was given and leaves everything accepted since",
           .timeLimit(.minutes(1)))
-    func runRemovesOnlyTheFiredPaths() async throws {
+    func runSpendsOnlyTheFiredPaths() async throws {
         let store = try ConversationStore.inMemory()
         let clock = Clock(Self.t0)
         let recorder = Recorder([.run])
@@ -651,7 +651,9 @@ struct WatchCoordinatorTests {
         // `b` arrives while the run is going: it is held, never handed to this fire.
         clock.set(Self.at(4))
         await coordinator.deliver(root: "/r", paths: ["/r/b.txt"])
-        #expect(await coordinator.snapshot(job.id)?.held == 2, "a is still held until the handler returns")
+        let during = try #require(await coordinator.snapshot(job.id))
+        #expect(during.outstanding == 1, "a is the fire's until the handler returns")
+        #expect(during.held == 1, "and b is the hold's")
 
         clock.set(Self.at(9))
         await gate.open()
@@ -664,13 +666,15 @@ struct WatchCoordinatorTests {
         #expect(snapshot.burstBegan == Self.at(9), "and the window runs from the end of the run")
     }
 
-    /// F5. Events during a run on paths the fire already holds insert nothing but still bump the
-    /// burst counters — `coalesced`, and since R-D4-6 `noise` and `ownWrites` too. When the run
-    /// spends the whole hold there is no new burst to carry them, so they have to be zeroed here
-    /// or the *next* burst's summary reports them a second time.
-    @Test("a run that empties its hold leaves no counters behind for the next burst",
+    /// F5. Noise and own writes absorbed while a fire is out bump the burst counters (R-D4-6)
+    /// without putting anything in the hold. When nothing else arrives there is no new burst to
+    /// carry them, so they have to be zeroed when the run ends or the *next* burst's summary
+    /// reports them a second time. (A re-save of the fired path is not this case since R-D4-10:
+    /// it is an arrival, and the burst it begins carries the counters — see
+    /// `aFiredPathSavedAgainDuringItsRunFiresAgain`.)
+    @Test("a run whose hold stays empty leaves no counters behind for the next burst",
           .timeLimit(.minutes(1)))
-    func aRunThatEmptiesItsHoldZeroesTheCounters() async throws {
+    func aRunWithAnEmptyHoldZeroesTheCounters() async throws {
         let store = try ConversationStore.inMemory()
         let clock = Clock(Self.t0)
         let recorder = Recorder()
@@ -691,16 +695,16 @@ struct WatchCoordinatorTests {
         await coordinator.tick(now: Self.at(3))
         await gate.waitForEntry()
 
-        // During the run: a repeat of a path already held (coalesced, inserted nowhere) and some
-        // noise. Nothing here survives into a new burst, because the run spends the whole hold.
+        // During the run: nothing but noise. It is counted in the burst (the fire is out) and
+        // nothing of it survives into a new burst, because there is no arrival to begin one.
         clock.set(Self.at(4))
-        await coordinator.deliver(root: "/r", paths: ["/r/a.txt", "/r/.DS_Store", "/r/x.tmp"])
+        await coordinator.deliver(root: "/r", paths: ["/r/.DS_Store", "/r/x.tmp"])
         clock.set(Self.at(5))
         await gate.open()
         await Self.eventually("the run to be applied") {
             await coordinator.snapshot(job.id)?.fireOutstanding == false
         }
-        #expect(await coordinator.snapshot(job.id)?.pending == 0, "the hold was spent entirely")
+        #expect(await coordinator.snapshot(job.id)?.pending == 0, "nothing arrived, so no new burst")
 
         // The next burst reports itself and nothing else.
         clock.set(Self.at(10))
@@ -711,10 +715,94 @@ struct WatchCoordinatorTests {
 
         let second = try #require(await recorder.fires.last?.fire)
         #expect(second.summary.changed == 1)
-        #expect(second.summary.coalesced == 1, "the repeat during the run belonged to the run")
-        #expect(second.summary.noise == 0, "and so did the noise beside it")
+        #expect(second.summary.coalesced == 1)
+        #expect(second.summary.noise == 0, "the noise during the run belonged to the run")
         #expect(await coordinator.absorbedSinceLaunch()[job.id] == AbsorbedCounts(noise: 2),
-                "the running total still has them")
+                "the running total still has it")
+    }
+
+    /// H1 / R-D4-10. The most ordinary thing a person does while trying a watch: save the file,
+    /// see the run start, save it again. The run may have read the file before the second save,
+    /// so that save is a change the run did not see — a new arrival, carried to the next burst
+    /// and counted — and not a coalesced repeat of the one it did. Before the ruling the fired
+    /// paths sat in `heldPaths` for the length of the run, the re-save was indistinguishable from
+    /// a repeat, and `.run` erased it: no second fire, no count, nothing on any row.
+    @Test("a fired path saved again during its own run fires again", .timeLimit(.minutes(1)))
+    func aFiredPathSavedAgainDuringItsRunFiresAgain() async throws {
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder()
+        let gate = Gate()
+        let job = Self.job("resave", root: "/r")
+        try store.ledger.upsert(job)
+        let coordinator = WatchCoordinator(
+            ledger: store.ledger, now: { clock.now }, recentWrites: RecentWrites(now: { clock.now }),
+            fire: { j, f in
+                let admission = await recorder.record(j, f)
+                // Only the first fire parks: the second carries the same path.
+                if await recorder.count == 1 { await gate.arriveAndWait() }
+                return admission
+            })
+        await coordinator.sync(with: [job])
+
+        await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
+        clock.set(Self.at(3))
+        await coordinator.tick(now: Self.at(3))
+        await gate.waitForEntry()
+        #expect(await recorder.paths == [["/r/a.txt"]])
+
+        // The same file, saved again while the run is going.
+        clock.set(Self.at(20))
+        await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
+        let during = try #require(await coordinator.snapshot(job.id))
+        #expect(during.outstanding == 1, "the run's `a` is on the fire")
+        #expect(during.held == 1, "and the re-saved `a` is a new arrival in the hold")
+
+        clock.set(Self.at(43))
+        await gate.open()
+        await Self.eventually("the run to be applied") {
+            await coordinator.snapshot(job.id)?.fireOutstanding == false
+        }
+        let after = try #require(await coordinator.snapshot(job.id))
+        #expect(after.pending == 1, "the re-save begins the next burst")
+        #expect(after.held == 0)
+        #expect(after.burstBegan == Self.at(43), "from the end of the run")
+
+        clock.set(Self.at(46))
+        await coordinator.tick(now: Self.at(46))
+        await recorder.waitFor(2)
+        let second = try #require(await recorder.fires.last?.fire)
+        #expect(second.paths == ["/r/a.txt"])
+        #expect(second.summary.changed == 1)
+        #expect(second.summary.coalesced == 1)
+        #expect(second.summary.delivered == 1)
+    }
+
+    /// The same re-save under `queue`: the held re-fire names the file once and counts it twice
+    /// — the fire's change and the one made during it are two changes to the row (R-D4-10).
+    @Test("a fired path saved again while its fire is queued is taken once, and counted")
+    func aFiredPathSavedAgainWhileQueuedIsTakenOnceAndCounted() async throws {
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder([.queued])
+        let job = Self.job("requeued", root: "/r")
+        try store.ledger.upsert(job)
+        let coordinator = Self.coordinator(ledger: store.ledger, clock: clock,
+                                           writes: RecentWrites(now: { clock.now }), recorder: recorder)
+        await coordinator.sync(with: [job])
+
+        await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
+        clock.set(Self.at(3))
+        await coordinator.tick(now: Self.at(3))
+        await recorder.waitFor(1)
+
+        clock.set(Self.at(4))
+        await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
+        let taken = await coordinator.takeHeldPaths(job.id)
+        #expect(taken.paths == ["/r/a.txt"], "once: the prompt names the file, not two copies of it")
+        #expect(taken.summary?.changed == 2, "the fire's `a` and the re-saved `a` are two changes")
+        #expect(taken.summary?.coalesced == 2)
+        #expect(await coordinator.snapshot(job.id)?.outstanding == 0, "taking the paths ends the fire")
     }
 
     @Test("a queued fire keeps its paths, and takeHeldPaths returns the union")
@@ -732,10 +820,12 @@ struct WatchCoordinatorTests {
         clock.set(Self.at(3))
         await coordinator.tick(now: Self.at(3))
         await recorder.waitFor(1)
-        #expect(await coordinator.snapshot(job.id)?.held == 1)
+        #expect(await coordinator.snapshot(job.id)?.outstanding == 1)
+        #expect(await coordinator.snapshot(job.id)?.held == 0, "the fired path is the fire's, not the hold's")
 
         clock.set(Self.at(4))
         await coordinator.deliver(root: "/r", paths: ["/r/b.txt", "/r/.DS_Store"])
+        #expect(await coordinator.snapshot(job.id)?.held == 1)
         #expect(await coordinator.snapshot(job.id)?.fireOutstanding == true,
                 "the queued fire is still this coordinator's, until the runner takes it")
 
@@ -792,7 +882,10 @@ struct WatchCoordinatorTests {
         await coordinator.tick(now: Self.at(30))
         await recorder.waitFor(2)
         #expect(await recorder.count == 2, "the ceiling, not the window, is what re-asks")
-        #expect(await coordinator.snapshot(job.id)?.held == 2)
+        #expect(await recorder.paths.last == ["/r/a.txt", "/r/b.txt"], "the fire's path and the hold's")
+        let reAsked = try #require(await coordinator.snapshot(job.id))
+        #expect(reAsked.outstanding == 2, "the offer took over the hold")
+        #expect(reAsked.held == 0)
         await Self.eventually("the second skip to be applied") {
             await coordinator.nextDeadline() == Self.at(60)
         }
@@ -832,15 +925,22 @@ struct WatchCoordinatorTests {
         #expect(snapshot.burstBegan == nil)
     }
 
-    @Test("a handler that answers nil takes the subscriber with it")
-    func nilDropsTheSubscriber() async throws {
+    /// R-D4-11. `nil` is what the runner answers when the row is gone — and the row *is* gone
+    /// here, deleted inside the fire — so the subscriber goes with it and nothing is written.
+    @Test("a nil admission for a job that is gone from the ledger takes the subscriber with it")
+    func nilForAGoneJobDropsTheSubscriber() async throws {
         let store = try ConversationStore.inMemory()
         let clock = Clock(Self.t0)
         let recorder = Recorder([nil])
         let job = Self.job("gone", root: "/r")
         try store.ledger.upsert(job)
-        let coordinator = Self.coordinator(ledger: store.ledger, clock: clock,
-                                           writes: RecentWrites(now: { clock.now }), recorder: recorder)
+        let ledger = store.ledger
+        let coordinator = WatchCoordinator(
+            ledger: ledger, now: { clock.now }, recentWrites: RecentWrites(now: { clock.now }),
+            fire: { j, f in
+                try? ledger.delete(jobId: j.id)
+                return await recorder.record(j, f)
+            })
         await coordinator.sync(with: [job])
 
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
@@ -849,6 +949,52 @@ struct WatchCoordinatorTests {
         await recorder.waitFor(1)
         await Self.eventually("the subscriber to be dropped") { await coordinator.snapshot(job.id) == nil }
         #expect(await coordinator.absorbedSinceLaunch()[job.id] == nil)
+        #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty, "nothing left to write a row against")
+    }
+
+    /// R-D4-11. The other `nil`: the runner's own read of a row that is still there failed — a
+    /// transient ledger error a few microseconds after the coordinator's read succeeded, or the
+    /// runner itself gone. That is §7's read failure during a fire, and its fail direction is a
+    /// dropped burst with a row naming it, never a dropped subscriber: the watch stays alive and
+    /// the next burst tries again.
+    @Test("a nil admission for a job still in the ledger is a refusal with a row, not a vanished watch")
+    func nilForAJobStillInTheLedgerWritesARowAndKeepsTheSubscriber() async throws {
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder([nil])
+        let job = Self.job("unreadable", root: "/r")
+        try store.ledger.upsert(job)
+        let coordinator = Self.coordinator(ledger: store.ledger, clock: clock,
+                                           writes: RecentWrites(now: { clock.now }), recorder: recorder)
+        await coordinator.sync(with: [job])
+
+        await coordinator.deliver(root: "/r", paths: ["/r/a.txt", "/r/.DS_Store"])
+        clock.set(Self.at(3))
+        await coordinator.tick(now: Self.at(3))
+        await recorder.waitFor(1)
+        await Self.eventually("the refusal to be applied") {
+            await coordinator.snapshot(job.id)?.fireOutstanding == false
+        }
+
+        let snapshot = try #require(await coordinator.snapshot(job.id), "the subscriber survives")
+        #expect(snapshot.pending == 0, "the burst is dropped, not retried")
+        #expect(snapshot.held == 0)
+        #expect(snapshot.outstanding == 0)
+        #expect(await coordinator.absorbedSinceLaunch()[job.id] == AbsorbedCounts(noise: 1),
+                "and keeps its running total")
+        let runs = try store.ledger.runs(jobId: job.id, limit: 5)
+        #expect(runs.count == 1, "never a silent drop")
+        #expect(runs.first?.status == .interrupted)
+        #expect(runs.first?.failureReason == "watch fire dropped: the runner could not read the job")
+        #expect(runs.first?.triggerKind == Trigger.fsEventKind)
+
+        // The watch is alive: the next burst fires.
+        clock.set(Self.at(10))
+        await coordinator.deliver(root: "/r", paths: ["/r/b.txt"])
+        clock.set(Self.at(13))
+        await coordinator.tick(now: Self.at(13))
+        await recorder.waitFor(2)
+        #expect(await recorder.paths.last == ["/r/b.txt"])
     }
 
     // MARK: sync
@@ -906,7 +1052,7 @@ struct WatchCoordinatorTests {
         clock.set(Self.at(3))
         await coordinator.tick(now: Self.at(3))
         await recorder.waitFor(1)
-        #expect(await coordinator.snapshot(job.id)?.held == 1)
+        #expect(await coordinator.snapshot(job.id)?.outstanding == 1)
 
         // The runner will discard the queued fire it was holding, so nobody else would ever come
         // for these paths. The edit is re-applied until it takes: `sync` is idempotent, and the

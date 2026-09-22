@@ -27,10 +27,12 @@ typealias WatchFireHandler = @Sendable (Job, WatchFire) async -> JobRunner.Admis
 ///    returns immediately, so one watch's run cannot stall every other watch's window. At most one
 ///    fire is outstanding per subscriber, which is what makes "the run in flight" a single state
 ///    rather than a set.
-/// 2. **A path is in exactly one of `pending`, `heldPaths`, or a started run, at every instant.**
-///    The fired paths move into `heldPaths` *before* the handler is called, so the runner's held
-///    re-fire (§3) always finds them, and a run that ends before the coordinator has stashed
-///    anything is not a state that exists.
+/// 2. **A path is in exactly one of `pending`, `heldPaths`, or the outstanding fire, at every
+///    instant.** The fired paths leave `pending` for the fire itself *before* the handler is
+///    called, and `heldPaths` takes only what arrives while that fire is out (R-D4-10). So the
+///    runner's held re-fire (§3) always finds both; a path saved again during its own run is a
+///    new arrival — the run may have read it before the save — and not a repeat of one it holds;
+///    and a run that ends before the coordinator has stashed anything is not a state that exists.
 ///
 /// Time is injected (`now`) and evaluation is a method (`tick(now:)`), so every window, ceiling
 /// and re-ask in the tests is an instant the test chose. Nothing here sleeps on its own clock
@@ -64,6 +66,8 @@ actor WatchCoordinator {
         /// The built-in set plus this watch's own globs, compiled once per `sync`.
         var ignore: @Sendable (String) -> Bool
         var pending: Set<String> = []
+        /// Accepted while a fire is outstanding: arrivals since the fire, never the fire's own
+        /// paths — those live on `outstandingFire`. Empty whenever no fire is out.
         var heldPaths: Set<String> = []
         var fireOutstanding = false
         var burstBegan: Date?
@@ -76,8 +80,9 @@ actor WatchCoordinator {
         var absorbedSinceLaunch = AbsorbedCounts()
         /// What the handler answered for the outstanding fire, once it has answered.
         var lastAdmission: JobRunner.Admission?
-        /// The fire the handler is still holding, kept so a `.skipInFlight` re-ask can carry the
-        /// same burst's figures rather than inventing a new set.
+        /// The fire the handler is still holding — the paths in flight and the burst's figures —
+        /// so a `.skipInFlight` re-ask and the runner's `takeHeldPaths` carry the same paths and
+        /// the same arithmetic rather than inventing a new set.
         var outstandingFire: WatchFire?
         /// When a `.skipInFlight` subscriber may ask again (R-D4-2). One ask per ceiling, on the
         /// grid the burst's own ceiling sits on.
@@ -178,7 +183,12 @@ actor WatchCoordinator {
             // "simplify" this condition away.
             if overlapWas == .queue, job.policy.overlap == .skip, existing.fireOutstanding,
                existing.lastAdmission == .queued {
-                existing.pending.formUnion(existing.heldPaths)
+                // The queued fire's own paths and the hold behind it, cut back to one burst's
+                // bound with the cut counted as overflow.
+                var released = existing.pending.union(existing.heldPaths)
+                if let queued = existing.outstandingFire { released.formUnion(queued.paths) }
+                let kept = released.sorted().prefix(Self.maxTrackedPaths)
+                existing.pending = Set(kept)
                 existing.heldPaths = []
                 existing.fireOutstanding = false
                 existing.outstandingFire = nil
@@ -188,9 +198,9 @@ actor WatchCoordinator {
                 let at = now()
                 existing.burstBegan = at
                 existing.lastAccepted = at
-                existing.coalesced = existing.pending.count
-                existing.changed = existing.pending.count
-                existing.overflow = 0
+                existing.coalesced = released.count
+                existing.changed = released.count
+                existing.overflow = released.count - kept.count
                 existing.noise = 0
                 existing.ownWrites = 0
             }
@@ -236,7 +246,7 @@ actor WatchCoordinator {
         // The registry is another actor, so every answer is gathered before anything is applied:
         // a `sync` or a `tick` interleaving on the await must not find a half-updated subscriber,
         // and a copy written back afterwards would clobber it.
-        struct Decision { let id: UUID; let path: String; let verdict: Verdict }
+        struct Decision { let id: UUID; let root: String; let path: String; let verdict: Verdict }
         enum Verdict { case noise, ownWrite, accept }
         var decisions: [Decision] = []
         var ownWriteCache: [String: Bool] = [:]
@@ -254,7 +264,7 @@ actor WatchCoordinator {
             for path in canonical {
                 guard Self.covers(root: watchRoot, path: path) else { continue }
                 if subscriber.ignore(Self.relative(path, under: watchRoot)) {
-                    decisions.append(Decision(id: id, path: path, verdict: .noise))
+                    decisions.append(Decision(id: id, root: watchRoot, path: path, verdict: .noise))
                     continue
                 }
                 let key = "\(expiry)\u{0}\(path)"
@@ -266,12 +276,17 @@ actor WatchCoordinator {
                     ownWriteCache[key] = own
                 }
                 if !own { acceptedIn.insert(id) }
-                decisions.append(Decision(id: id, path: path, verdict: own ? .ownWrite : .accept))
+                decisions.append(Decision(id: id, root: watchRoot, path: path,
+                                          verdict: own ? .ownWrite : .accept))
             }
         }
 
         for decision in decisions {
-            guard var subscriber = subscribers[decision.id] else { continue }
+            // Re-fetched by id, and re-checked by root: a `sync` landing inside the registry
+            // round-trip can re-register this id onto another folder, and a decision taken under
+            // the old root must not put a path from it into the new root's burst.
+            guard var subscriber = subscribers[decision.id],
+                  subscriber.watch.path == decision.root else { continue }
             // R-D4-6: attribution is decided per *batch*, not per position within it. A batch that
             // accepts at least one path — or that arrives while a burst is already open — counts
             // its absorbed events in the burst as well as since launch; a batch that accepts
@@ -290,7 +305,9 @@ actor WatchCoordinator {
                 subscriber.coalesced += 1
                 if subscriber.fireOutstanding {
                     // The burst is over; these belong to whatever takes the hold, and the timers
-                    // are not restarted until the run's handler returns.
+                    // are not restarted until the run's handler returns. A path the fire itself
+                    // carries is a new arrival here, not a repeat (R-D4-10): the run may have read
+                    // it before this save.
                     Self.insert(decision.path, held: true, into: &subscriber)
                 } else {
                     Self.insert(decision.path, held: false, into: &subscriber)
@@ -446,12 +463,12 @@ actor WatchCoordinator {
         }
 
         subscriber.job = fresh
-        // `heldPaths` is empty whenever no fire is outstanding — `.run` moves the remainder into
-        // `pending`, every other refusal drops it — so this union cannot exceed the bound.
-        subscriber.heldPaths.formUnion(subscriber.pending)
+        // The burst's paths leave `pending` for the fire itself. `heldPaths` is empty here —
+        // every exit from a fire clears it — and from now until the handler returns it takes only
+        // what arrives meanwhile (R-D4-10).
+        let paths = subscriber.pending.sorted()
         subscriber.pending = []
         subscriber.fireOutstanding = true
-        let paths = subscriber.heldPaths.sorted()
         let summary = WatchSummary(delivered: Swift.min(paths.count, Self.maxDeliveredPaths),
                                    changed: subscriber.changed, overflow: subscriber.overflow,
                                    coalesced: subscriber.coalesced, noise: subscriber.noise,
@@ -487,14 +504,19 @@ actor WatchCoordinator {
     /// human-started run, not one per 3 s.
     private func reAsk(_ id: UUID, at: Date) {
         guard var subscriber = subscribers[id], let previous = subscriber.outstandingFire else { return }
-        let paths = subscriber.heldPaths.sorted()
-        // The same burst, plus whatever arrived while the run lasted. Keeping the previous summary
-        // verbatim would under-report a hold that grew — and those counters have nowhere else to
-        // be reported, because the burst that would have carried them ended at the first ask.
+        // The same burst, plus whatever arrived while the run lasted: the offer takes over the
+        // hold, so a `.run` on it spends both and the hold starts again from empty. Keeping the
+        // previous summary verbatim would under-report a hold that grew — and those counters have
+        // nowhere else to be reported, because the burst that would have carried them ended at
+        // the first ask. The union is cut back to the bound, and what it cuts is counted as
+        // overflow, so a hold that is re-asked for the length of a long run cannot grow past it.
+        let owed = Set(previous.paths).union(subscriber.heldPaths).sorted()
+        let paths = Array(owed.prefix(Self.maxTrackedPaths))
+        subscriber.heldPaths = []
         let summary = WatchSummary(
             delivered: Swift.min(paths.count, Self.maxDeliveredPaths),
             changed: previous.summary.changed + subscriber.changed,
-            overflow: previous.summary.overflow + subscriber.overflow,
+            overflow: previous.summary.overflow + subscriber.overflow + (owed.count - paths.count),
             coalesced: previous.summary.coalesced + subscriber.coalesced,
             noise: previous.summary.noise + subscriber.noise,
             ownWrites: previous.summary.ownWrites + subscriber.ownWrites,
@@ -520,41 +542,60 @@ actor WatchCoordinator {
         Task { [self] in
             let admission = await handler(job, offer)
             // No `await`: this task inherits the actor's isolation, so only the handler suspends.
-            apply(admission, to: id, firedPaths: offer.paths, seq: seq)
+            apply(admission, to: id, seq: seq)
         }
     }
 
     /// Step 3: what the runner said, applied to the hold.
-    private func apply(_ admission: JobRunner.Admission?, to id: UUID, firedPaths: [String],
-                       seq: UInt64) {
+    private func apply(_ admission: JobRunner.Admission?, to id: UUID, seq: UInt64) {
         // The fire this answers must still be the subscriber's current one. Three windows make the
         // id alone insufficient: a `sync` that re-registered the job onto another root while the
         // handler was inside its run, a `takeHeldPaths` that beat the handler's return, and a
-        // pause that removed the subscriber followed by a resume that re-created it. In
-        // both, a stale `.run` would subtract its own paths from a *newer* fire's hold, clear that
-        // fire's `fireOutstanding` and push its paths back into `pending` — the same paths run
-        // twice, and the "at most one fire outstanding" invariant broken by the one code path that
-        // exists to keep it.
+        // pause that removed the subscriber followed by a resume that re-created it. In each, a
+        // stale `.run` would end a *newer* fire under its handler's feet, clear that fire's
+        // `fireOutstanding` and start a burst from its hold — the same paths run twice, and the
+        // "at most one fire outstanding" invariant broken by the one code path that exists to
+        // keep it.
         guard var subscriber = subscribers[id], subscriber.fireSeq == seq else { return }
         guard let admission else {
-            // The job is gone or unreadable. Drop everything for this subscriber and count
-            // nothing: there is nothing left to show a count against.
-            subscribers[id] = nil
+            // `nil` has two meanings, and only one of them is "the job is gone". The runner
+            // answers it for a row it could not read as well as for one that is not there, and
+            // the handler answers it when the runner itself has gone. Re-read before dropping
+            // (R-D4-11): a row that is still here makes this a refusal, with the fail direction §7
+            // gives every other read failure during a fire — the burst is dropped, a row says why,
+            // the subscriber stays and the next burst tries again. Only a row that is genuinely
+            // missing takes the subscriber with it, which `sync` would do on the next ledger
+            // change anyway.
+            let gone: Bool
+            do { gone = try ledger.job(id: id) == nil } catch { gone = false }
+            if gone {
+                subscribers[id] = nil
+                return
+            }
+            do {
+                try JobRunner.recordStillborn(job: subscriber.job, ledger: ledger,
+                                              reason: "watch fire dropped: the runner could not read the job",
+                                              triggerKind: Trigger.fsEventKind, now: now(), note: nil)
+            } catch {
+                print("[WatchCoordinator] could not record the dropped fire of \(subscriber.job.name): \(error)")
+            }
+            dropHold(&subscriber)
+            subscribers[id] = subscriber
             return
         }
         subscriber.lastAdmission = admission
         switch admission {
         case .run:
-            // The handler returned, so the run is over. Only the paths it was given are spent.
-            subscriber.heldPaths.subtract(firedPaths)
+            // The handler returned, so the run is over and the fire's paths are spent. The hold
+            // is everything accepted since the fire — a fired path saved again during its own run
+            // included (R-D4-10) — and nothing is subtracted from it.
             subscriber.fireOutstanding = false
             subscriber.outstandingFire = nil
             subscriber.reAskDue = nil
             if subscriber.heldPaths.isEmpty {
-                // Nothing survived the run, but events on paths this fire already held may still
-                // have bumped `coalesced` (and, since R-D4-6, `noise` and `ownWrites`) while it
-                // was going. Those figures describe a burst that is over; leaving them would have
-                // the next burst's summary report them a second time.
+                // Nothing arrived, but noise and own writes absorbed while the fire was out have
+                // bumped the burst counters (R-D4-6). Those figures describe a burst that is over;
+                // leaving them would have the next burst's summary report them a second time.
                 zeroBurstCounters(&subscriber)
             } else {
                 // Anything accepted during the run begins a new burst, so the quiet window runs
@@ -577,23 +618,30 @@ actor WatchCoordinator {
              .gateUnchanged, .gateError:
             // A refused job will not be admitted a moment later, and re-offering would write a
             // row per burst for a job whose whole problem is that it is running too often.
-            subscriber.heldPaths = []
-            subscriber.fireOutstanding = false
-            subscriber.outstandingFire = nil
-            subscriber.reAskDue = nil
-            endBurst(&subscriber)
+            dropHold(&subscriber)
         }
         subscribers[id] = subscriber
     }
 
-    /// What the runner's held re-fire takes (§3): everything this subscriber is still owed, in one
+    /// A refusal's exit from a fire: the fire, its hold and the burst behind it are all dropped.
+    private func dropHold(_ subscriber: inout Subscriber) {
+        subscriber.heldPaths = []
+        subscriber.fireOutstanding = false
+        subscriber.outstandingFire = nil
+        subscriber.reAskDue = nil
+        endBurst(&subscriber)
+    }
+
+    /// What the runner's held re-fire takes (§3): everything this subscriber is still owed — the
+    /// outstanding fire's own paths, the hold that grew behind it, and any pending burst — in one
     /// sorted list, and the end of the outstanding fire.
     ///
-    /// The union rather than just the hold, because a `queue`d run's re-fire is the only thing
-    /// that will take either set — anything accepted since the fire would otherwise wait for a
-    /// window that no longer has a burst behind it. The burst counters go with the paths: they
-    /// describe what is being taken, and leaving them would have the next fire report this burst
-    /// twice.
+    /// The union rather than just the fire, because a `queue`d run's re-fire is the only thing
+    /// that will take any of the three — anything accepted since the fire would otherwise wait
+    /// for a window that no longer has a burst behind it. A fired path saved again during the
+    /// wait is in the fire and in the hold, and is named once (R-D4-10). The burst counters go
+    /// with the paths: they describe what is being taken, and leaving them would have the next
+    /// fire report this burst twice.
     ///
     /// The summary is the outstanding fire's plus everything accumulated since (R-D4-9), the same
     /// arithmetic `reAsk` does and for a stronger reason: an admission of `.queued` writes no row,
@@ -610,7 +658,9 @@ actor WatchCoordinator {
     /// re-fire for a watch the coordinator never fired, are both the second.
     func takeHeldPaths(_ jobId: UUID) -> (paths: [String], summary: WatchSummary?) {
         guard var subscriber = subscribers[jobId] else { return ([], nil) }
-        let taken = subscriber.heldPaths.union(subscriber.pending).sorted()
+        var owed = subscriber.heldPaths.union(subscriber.pending)
+        if let outstanding = subscriber.outstandingFire { owed.formUnion(outstanding.paths) }
+        let taken = owed.sorted()
         let counted = subscriber
         let summary = subscriber.outstandingFire.map { outstanding in
             WatchSummary(delivered: 0,
@@ -647,7 +697,10 @@ actor WatchCoordinator {
     /// on the summary a fire carried, which is what the row and the card will show.
     struct Snapshot: Equatable {
         let pending: Int
+        /// Arrivals since the fire, not the fire's own paths — those are `outstanding`.
         let held: Int
+        /// The paths on the fire the handler is still holding; 0 when none is.
+        let outstanding: Int
         let fireOutstanding: Bool
         let burstBegan: Date?
     }
@@ -655,6 +708,7 @@ actor WatchCoordinator {
     func snapshot(_ jobId: UUID) -> Snapshot? {
         guard let subscriber = subscribers[jobId] else { return nil }
         return Snapshot(pending: subscriber.pending.count, held: subscriber.heldPaths.count,
+                        outstanding: subscriber.outstandingFire?.paths.count ?? 0,
                         fireOutstanding: subscriber.fireOutstanding, burstBegan: subscriber.burstBegan)
     }
 

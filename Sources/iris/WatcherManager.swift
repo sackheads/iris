@@ -44,6 +44,11 @@ actor WatcherManager {
         let root: String
         let stop: @Sendable () -> Void
         let task: Task<Void, Never>
+        /// Which generation of the stream on this key this is. A stream that ends by itself
+        /// reports through `streamEnded` from its own task, and a `sync` can close it and open
+        /// a successor on the same key before that report reaches the actor; the report names
+        /// this token so it can tell its own entry from the successor's.
+        let token: UUID
     }
 
     private var ledger: JobLedger?
@@ -95,6 +100,10 @@ actor WatcherManager {
     /// The roots with a live stream, in the spelling each stream was opened on. Sorted, so a test
     /// and a diagnostic read the same both times.
     var activeRoots: [String] { live.values.map(\.root).sorted() }
+
+    /// The generation token of the live stream on `root`, for the test that delivers a stale end
+    /// by hand; `nil` when no stream is open there.
+    func streamToken(root: String) -> UUID? { live[root.lowercased()]?.token }
 
     /// The diff (§7): pause what has vanished, open a stream for each new root, stop the stream
     /// for each root nobody is left subscribed to, and touch nothing else.
@@ -218,6 +227,7 @@ actor WatcherManager {
 
     private func open(root: String, key: String) {
         let stream = streams(root)
+        let token = UUID()
         let task = Task { [weak self] in
             for await paths in stream.events {
                 if Task.isCancelled { return }
@@ -227,9 +237,9 @@ actor WatcherManager {
             // a stream FSEvents refused to create (`FileWatcher` finishes the stream immediately)
             // or one it tore down under us.
             if Task.isCancelled { return }
-            await self?.streamEnded(root: root, key: key)
+            await self?.streamEnded(root: root, key: key, token: token)
         }
-        live[key] = Live(root: root, stop: stream.stop, task: task)
+        live[key] = Live(root: root, stop: stream.stop, task: task, token: token)
     }
 
     private func close(_ key: String) {
@@ -252,8 +262,16 @@ actor WatcherManager {
     /// stop the next `sync` from ever trying again, and `/jobs resume` is meant to retry. For the
     /// length of the report, though, the key sits in `refused`, so the syncs each pause sets off
     /// do not reopen a stream FSEvents has just declined — one refusal, one report.
-    private func streamEnded(root: String, key: String) async {
-        guard live[key] != nil else { return }
+    ///
+    /// Matched by `token`, not by the key alone: the end is reported from the stream's own task,
+    /// and two `sync`s can close that stream and open its successor on the same key before the
+    /// report gets the actor. Dropping the successor's entry on the predecessor's word would
+    /// leave a stream nobody can stop forwarding every batch beside the one the next `sync`
+    /// opens — every subscriber on the root seeing each event twice until relaunch. Internal
+    /// rather than private only so the test can deliver that stale end by hand: `close` cancels
+    /// the task before it stops the stream, so the window cannot be produced through `sync`.
+    func streamEnded(root: String, key: String, token: UUID) async {
+        guard live[key]?.token == token else { return }
         live[key] = nil
         refused.insert(key)
         defer { refused.remove(key) }

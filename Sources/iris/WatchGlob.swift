@@ -5,8 +5,9 @@ import Foundation
 /// Written here rather than reached for through `fnmatch(3)` because the two rules that matter are
 /// rules `fnmatch` does not have in the shape this needs: `**` has to span components, and a
 /// pattern with no `/` in it has to match *any* component so `.DS_Store` catches `a/.DS_Store`
-/// without anybody writing `**/.DS_Store`. It is also the difference between a refusal Task 6 can
-/// compute (`ignoresEveryProbe`) and one it has to guess at by reading pattern text.
+/// without anybody writing `**/.DS_Store`. It is also the difference between a refusal the tool
+/// can compute (`ignoresEveryProbe`; spec §5, PR B) and one it has to guess at by reading pattern
+/// text.
 ///
 /// Leading dots are not special. A shell glob's `*` deliberately skips dotfiles; here the whole
 /// point of `*.swp` is to catch Vim's `.notes.md.swp`, so it does.
@@ -139,9 +140,10 @@ struct WatchGlob: Sendable {
     static let probes = ["a.txt", "dir/b.md", ".hidden", "x.swift", "sub/dir/c"]
 
     /// Whether `patterns` absorbs every probe — a watch that could never fire on anything, which
-    /// Task 6 refuses at the tool rather than creating in silence. Decided by the compiled matcher
-    /// and not by reading the pattern text, because the patterns that do this are not the ones
-    /// that look like it: `*.*` reads as all-consuming and is not (`sub/dir/c` has no dot).
+    /// the tool's ignore refusal (spec §5, PR B) turns down rather than creating in silence.
+    /// Decided by the compiled matcher and not by reading the pattern text, because the patterns
+    /// that do this are not the ones that look like it: `*.*` reads as all-consuming and is not
+    /// (`sub/dir/c` has no dot).
     static func ignoresEveryProbe(_ patterns: [String]) -> Bool {
         guard !patterns.isEmpty else { return false }
         let ignored = matcher(patterns)

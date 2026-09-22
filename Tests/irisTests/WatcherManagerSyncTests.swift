@@ -261,6 +261,41 @@ struct WatcherManagerSyncTests {
         await manager.stopAll()
     }
 
+    /// A stream's end is reported from its own task, and two syncs can close it and open a
+    /// successor on the same key before that report gets the actor. The report must recognise
+    /// its own generation: dropping the successor's entry on the predecessor's word leaves a
+    /// stream nobody can stop, forwarding beside the one the next sync opens. The window cannot
+    /// be produced through `sync` — `close` cancels the task before it stops the stream — so the
+    /// stale end is delivered by hand with the predecessor's token.
+    @Test("a stale end for an earlier stream on a root does not tear down its successor")
+    func aStaleStreamEndDoesNotTearDownTheSuccessor() async throws {
+        let fake = FakeStreams()
+        let sink = Sink()
+        let manager = await Self.manager(fake, present: ["/r"], sink: sink)
+        let job = Self.watchJob("one", root: "/r")
+
+        await manager.sync(with: [job])
+        let first = try #require(await manager.streamToken(root: "/r"))
+        await manager.sync(with: [])
+        #expect(fake.stoppedRoots == ["/r"], "the first generation was closed")
+        await manager.sync(with: [job])
+        let second = try #require(await manager.streamToken(root: "/r"))
+        #expect(second != first, "a reopened stream is a new generation")
+        #expect(fake.openedRoots == ["/r", "/r"])
+
+        // The first generation's end arrives late.
+        await manager.streamEnded(root: "/r", key: "/r", token: first)
+        #expect(await manager.activeRoots == ["/r"], "the successor is still live")
+        #expect(await manager.streamToken(root: "/r") == second)
+        #expect(await sink.unavailableCount == 0, "and nobody was told the watch died")
+
+        // The successor's own end is still honoured.
+        await manager.streamEnded(root: "/r", key: "/r", token: second)
+        #expect(await manager.activeRoots.isEmpty)
+        #expect(await sink.unavailableCount == 1)
+        await manager.stopAll()
+    }
+
     /// The pauses a handler applied, so the re-entrant sync can be handed the table as the ledger
     /// would show it.
     actor Paused {
