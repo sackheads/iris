@@ -294,6 +294,21 @@ struct JobsCommandTests {
                 == "`notes` — last burst: nothing fired yet · absorbed since launch: —")
     }
 
+    @Test("two watch lines are separate paragraphs, not one run-on line")
+    func twoWatchLinesStayApart() throws {
+        // Seen on screen: the block is markdown, and a single newline between two watch lines
+        // renders as a space, so `/jobs` showed "… 0 while paused `sub` — last burst: …" as one
+        // sentence. Each watch gets its own paragraph.
+        let a = job("alpha", trigger: .fsEvent(FSWatch(path: "/tmp/alpha")))
+        let b = job("beta", trigger: .fsEvent(FSWatch(path: "/tmp/beta")))
+        let out = JobsCommand.render(jobs: [a, b], lastRuns: [:], usage: .empty, unacknowledged: [],
+                                     unreadableJobs: 0, now: Date())
+        let first = try #require(out.range(of: "`alpha` — last burst:"))
+        let second = try #require(out.range(of: "`beta` — last burst:"))
+        let between = out[first.upperBound..<second.lowerBound]
+        #expect(between.contains("\n\n"), "the two lines were joined by a single newline:\n\(out)")
+    }
+
     @Test("a wider quiet window shows in the policy column and in the ceiling the line prints")
     func watchLineWithAWiderWindow() {
         let j = job("notes", trigger: .fsEvent(FSWatch(path: "/tmp/notes", quietWindowSeconds: 10)))

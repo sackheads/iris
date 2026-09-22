@@ -162,9 +162,11 @@ enum JobsCommand: Equatable {
                 return watchLine(job: job, lastBurst: lastBursts[job.id],
                                  absorbed: absorbed?[job.id], hasCoordinator: absorbed != nil)
             }
-            if !watchLines.isEmpty {
+            // One paragraph per watch: the block is markdown, where a single newline is a space,
+            // so two lines joined by one would read as a single sentence.
+            for line in watchLines {
                 rows.append("")
-                rows.append(contentsOf: watchLines)
+                rows.append(line)
             }
             if let global = usage.global {
                 rows.append("")
