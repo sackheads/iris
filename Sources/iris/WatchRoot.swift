@@ -2,12 +2,12 @@ import Foundation
 
 /// The one spelling of a watched directory (#187 deliverable 4, spec §1).
 ///
-/// A watch root is stored canonical and matched lexically: FSEvents reports paths under the root
-/// it was given, and a delete event names a path that no longer exists, so the events cannot be
-/// stat'ed one by one to find out where they really are. That only works if the root itself has
-/// been resolved once, up front — `/tmp/notes` and `/private/tmp/notes` are the same directory, and
-/// a watch stored under the first spelling silently matches nothing when FSEvents reports the
-/// second.
+/// A watch root is stored canonical and matched by lexical prefix against event paths that have
+/// been through `IrisPaths.canonicalPath` (R-D4-5) — the same helper this uses, so the two sides
+/// agree by construction, a delete event included (its gone leaf resolves through its parent).
+/// That only works if the root itself has been resolved once, up front — `/tmp/notes` and
+/// `/private/tmp/notes` are the same directory, and a watch stored under the first spelling
+/// silently matches nothing when FSEvents reports the second.
 enum WatchRoot {
     /// `raw` with `~` expanded, `..` resolved, symlinks resolved and the result standardised —
     /// or `nil` when nothing exists at that path.

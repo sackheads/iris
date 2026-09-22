@@ -12,20 +12,26 @@ and if there were any the app posts a one-time notice into the open conversation
 dropped and to recreate it with `schedule_job` or `register_directory_watcher` — a console line is
 not something anyone running a Mac app reads.
 
-This document covers deliverables 1 to 3 of `#187` (see `docs/agency/agency.md`,
-`docs/specs/2026-09-21-agency-model-and-ledger.md` and
-`docs/specs/2026-09-21-agency-runtime.md`): the job model, the cron subset, the schedule aliases,
+This document covers deliverables 1 to 4 of `#187` (see `docs/agency/agency.md`,
+`docs/specs/2026-09-21-agency-model-and-ledger.md`, `docs/specs/2026-09-21-agency-runtime.md` and
+`docs/specs/2026-09-22-agency-watches.md`): the job model, the cron subset, the schedule aliases,
 what happens on sleep, what a fire actually does — a run in a hidden conversation of its own, a row
-in the run ledger, and one event card — the gates, limits and retries around it, and
-`iris --run-job`, which fires one job from a terminal and prints the row it wrote.
+in the run ledger, and one event card — the gates, limits and retries around it, what a directory
+watch does with a burst of saves, and `iris --run-job`, which fires one job from a terminal and
+prints the row it wrote.
 
 ## Creating a job
 
 - `schedule_job` creates a job that fires on a schedule: a cron expression, a plain interval, or
   the older `minute`/`hour`/`day`/`month`/`weekday`/`weekdays` fields (below).
-- `register_directory_watcher` creates a job that fires when files under a directory change. Watch
-  jobs are named after the directory's last path component. Watching a path that is already
-  watched rewrites that job's instructions in place instead of adding a second one.
+- `register_directory_watcher` creates a job that fires once files under a directory have changed
+  and then gone quiet for a few seconds (see "Watches"). Watch jobs are named after the directory's
+  last path component. A watch belongs to the conversation that registered it: watching the same
+  directory again *from that conversation* updates its watch in place — only the arguments you
+  give are changed, and the watch is switched back on if it was paused — while watching it from
+  another conversation creates a second watch with a suffixed name, and the tool says how many
+  watches the folder now has. Two standing orders on one folder are two orders; each runs on every
+  change.
 - A `schedule_job` that also carries a gate (`gate_url`, `gate_path` or `gate_script`) is a
   **polled** job: the cadence decides how often the gate is checked, and the gate decides whether
   the job actually runs. See "Gates" below.
@@ -252,6 +258,96 @@ finished *is* asked: it is an ordinary tick whose gate never got a chance to ans
 unasked would spend the very turn the gate exists to save. `/jobs` shows a gated job's trigger as, for example, `poll every
 900 s (url gate)`, so a job that has been quiet for a week says why it might be.
 
+## Watches
+
+A watch is a job whose trigger is a directory. It does not fire on every filesystem event: it
+waits for the folder to go **quiet**, runs once with every path that changed in the burst, never
+runs alongside itself, and ignores both editor noise and the writes its own unattended runs make.
+What it saw and what it absorbed are printed on the card and in `/jobs`.
+
+**The quiet window and the ceiling.** A watch fires once its directory has been quiet for
+`quiet_window_seconds` (1 to 300; default 3; a value outside the range is clamped and the tool
+says which value it used), coalescing every path seen since the burst began into one run. If the
+changes never stop — a build writing output, a sync tool catching up — it fires anyway once the
+burst has lasted **ten times the window** (30 s at the default), and the next change starts a new
+burst with a new ceiling. The ceiling is derived from the window, not a second setting. A watch
+created before the window was enforced keeps the window it stored.
+
+**Noise.** Every watch ignores `.git/`, `.DS_Store`, `node_modules/`, `*~`, `*.swp`, `*.swx`,
+`.#*`, `4913` (Vim's directory probe), `*.tmp`, and the temporary files a macOS atomic save
+creates beside the real one (`.<name>.sb-*`, `(A Document Being Saved By …`). A watch can add its
+own patterns with `ignore` — globs relative to the watched folder, where `**` spans directories and
+a pattern with no `/` matches a name at any depth, so `*.log` catches `build/out.log`. Matching is
+case-insensitive, like the rest of the file system. An ignore list that would absorb everything —
+it is tried against a fixed handful of sample names before the job exists — is refused
+("that ignore list would ignore every change; drop the pattern or watch a narrower path") rather
+than creating a watch that never fires.
+
+**Iris's own writes.** A watch's point is usually to react to *your* changes, and the loop it must
+never fall into is reacting to its own: a run that summarises a folder into a file in that folder.
+So the writes made by an **unattended** conversation — a job run, or a subagent or evaluator
+descended from one — through the file tools (`write_file`, `create_skill`, `update_skill`,
+`delete_skill`) are remembered for a few seconds, and an event on such a path, or on the
+temporary file its atomic save produced, is absorbed and counted as an own write rather than
+delivered. A write you asked for in an ordinary conversation, or one you approved from a card, is
+not filtered: it is a change a person made, and a watch is expected to notice it ("index the note
+Iris just wrote"). The filter sees only the file tools, and you should know exactly what it
+**cannot** see: files written by `run_command`, on the host or in the container; anything an MCP
+tool writes; anything a plugin hook writes; the memory tools (`update_memory`, `save_fact`,
+`update_soul`), which write under `~/.iris` through their own managers — which is why `~/.iris`,
+and anything containing it, is refused as a watch root; and the writes of an `iris --run-job`
+process, which is another process altogether (no watch is live while it holds the store). A loop
+built from any of those is not silent and not unbounded: it ends in the job's **breaker** pause
+(six runs an hour by default) with a card naming the figure, the same backstop every job has.
+
+**Roots.** The path must be an existing directory; it is stored in its resolved spelling
+(`/tmp/notes` becomes `/private/tmp/notes`), which is what the file system reports events under.
+Some roots are refused: `/`, your home folder itself, `/System`, `/Library`, `/usr`, `/private`,
+`/var`, `/etc`, `/bin`, `/sbin`, `/Volumes` and any volume or mount point are "too broad to watch;
+name a specific folder", and `~/.iris` — or any folder above or below it — "is or contains Iris's
+own directory; a watch there would react to itself". A folder *inside* any of those is fine.
+
+**Overlap.** A watch never runs concurrently with itself. Its `overlap` defaults to `queue`: saves
+that land while a run is going are held — including a file the run itself was given, saved again —
+and when the run ends they are re-fired once, as a single run carrying the union of everything held.
+A watch created with `overlap: skip` holds the same way but is only offered again once per ceiling
+until a run lets it through. Neither writes a skip row.
+
+**One stream per folder.** However many watches cover a directory — two conversations watching
+`~/notes`, or one watching `~/notes` and another `~/notes/drafts` — the process opens one
+filesystem stream for it and hands each event to every watch it belongs to, once. A watch registered
+on a folder that is nested inside another watched folder is served by the outer stream. Registering,
+pausing, resuming or deleting a watch takes effect within the second; nothing else's stream is
+restarted for it.
+
+**A folder that disappears.** The file system does not stop a stream whose root is deleted,
+renamed or unmounted; it goes silent. Iris checks every watched root on every job change and once a
+minute besides, and a watch whose folder is gone is paused with the reason
+`watch path unavailable: <path>` and one card — the same answer a watch gets at launch when its
+folder is already missing, or when the stream cannot be created. `/jobs resume <name>` retries it.
+
+**What you can see.** A watch run's card carries, beside the tokens and the duration, `12 changes ·
+3 noise · 1 own writes`, each figure only when it is not zero, then `(cut at the ceiling)` when the
+burst never went quiet, `(N not kept)` when a burst exceeded the 1,000 distinct paths a watch keeps
+(the run still hears the true count), and `(paths withheld by the guard)` when the injection guard
+blocked the block of paths and the run got none of them. `/jobs` prints one line per watch beneath
+the table: `` `notes` — last burst: 12 changes · 3 noise · 1 own writes (cut at 30 s) · absorbed
+since launch: 41 noise · 7 own writes · 3 while paused `` — the first half from the newest run row,
+so it survives a relaunch ("nothing fired yet" when there is none), the second from memory, so it
+starts again at zero, and a dash from an `iris --run-job` process, which has no watch layer. The
+policy column shows `quiet 10 s` and `2 ignore` when a watch departs from the defaults. A burst in
+which *every* event was noise or an own write writes no row and no card: nothing happened, and the
+count is in the `absorbed since launch` figure. The run itself receives at most 100 paths, sorted,
+plus one line saying how many more changed.
+
+**Limits worth knowing.** A run started by a watch is not retried after a failure (see "Limits").
+After the Mac sleeps, the file system delivers what it can on wake and may fold a long gap into a
+"scan this directory" flag that Iris does not act on, so the detail of a backlog can be lost; the
+watch fires on the next real change. A watch whose creating conversation has been deleted keeps
+running — jobs outlive their conversations — but no conversation can update it any more, so
+re-registering the folder creates a second watch beside it; `/jobs delete <name>` is how the
+orphan goes.
+
 ## What happens on sleep
 
 A background scheduler polls the jobs table for due jobs every 10 seconds, and once more right
@@ -326,9 +422,12 @@ invitation to start a second one alongside it.
 A cadence that overlaps its own still-running fire is skipped rather than started a second time,
 and the skip is recorded as an `interrupted` run so `/jobs` can show it — unless the job's overlap
 policy is `queue`, which holds exactly one fire and takes it when the run ends (see Limits).
-A watch fire for a job that is already running is dropped instead, with no row at all: a single
-save can deliver a dozen filesystem events, and a row apiece would bury the ledger. Coalescing
-them into one run after a quiet window is deliverable 4's job.
+A watch never overlaps itself either, but it is not dropped: saves that land while a watch's run
+is going are held, and when the run ends they are re-fired once, as one run carrying everything
+that arrived — a watch's `overlap` defaults to `queue`. A watch created with `overlap: skip`
+holds the same way and is offered again once per ceiling until a run lets it through. Neither
+writes a skip row: a single save can deliver a dozen filesystem events, and a row apiece would
+bury the ledger. See "Watches".
 
 ## Job creation is never unattended
 
@@ -562,7 +661,7 @@ pause reason the table prints, on the `interrupted` row and on the card.
 
 | Form | What it does |
 | --- | --- |
-| `/jobs` | A table of every job — name, trigger (with its gate, if it has one), its policy where it departs from the defaults, when it next fires (or why it is paused), how its last run ended, its tokens today against its daily budget and its runs in the last hour against the breaker — then the day's spend across every job, then one line per unacknowledged failure with the first eight characters of the run's id |
+| `/jobs` | A table of every job — name, trigger (with its gate, if it has one), its policy where it departs from the defaults, when it next fires (or why it is paused), how its last run ended, its tokens today against its daily budget and its runs in the last hour against the breaker — then one line per watch with what its last burst saw and what it has absorbed since launch (see "Watches"), then the day's spend across every job, then one line per unacknowledged failure with the first eight characters of the run's id |
 | `/jobs ack <run id>` | Marks a failed or blocked run as seen: it leaves the failure list, and it stops being exempt from retention. Takes a full id or the first eight or more characters of one, as a card prints it; an ambiguous prefix is refused rather than guessed |
 | `/jobs pause <name>` | Stops a job firing, with "paused by user" as the reason the table shows |
 | `/jobs resume <name>` | Clears the pause *and* the retry ladder, and recomputes the next fire from the job's own schedule |
@@ -645,9 +744,12 @@ is threading the run's own state to those call sites.
 ## The job tools
 
 Two read-only tools let the model answer questions about jobs: `list_jobs` (every job, its trigger,
-its next fire, why it is paused, how its last run ended, its policy, profile and gate kind, and what
-it has spent today against its budgets and the breaker) and `get_job_run` (one run, by id or by the
-eight characters a card shows, including the last thing the run itself said). Neither can change
+its next fire, why it is paused, how its last run ended, its policy, profile and gate kind, what
+it has spent today against its budgets and the breaker, and — for a watch — its quiet window, its
+ignore globs, its last burst's figures and what it has absorbed since launch, `null` for anything
+else) and `get_job_run` (one run, by id or by the eight characters a card shows, including the
+last thing the run itself said and, for a watch run, the burst's `watchSummary` as the row stores
+it). Neither can change
 anything: creating, pausing and deleting a job are `schedule_job` and `/jobs`, and nothing a
 background run can reach.
 

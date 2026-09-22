@@ -227,6 +227,11 @@ watcher for every enabled `.fsEvent` job at launch and on job creation, and on a
 asks `JobRunner` to run the job with the changed paths appended to the prompt. The quiet window
 and self-write filter remain D4; today's 1 s stream latency is what there is.
 
+> *Superseded by D4* (`2026-09-22-agency-watches.md`): the manager no longer starts one watcher per
+> job. It keeps one stream per distinct canonical root, diffed by `sync(with:)` from a ledger hook,
+> and every batch goes to `WatchCoordinator`, which owns the quiet window, the ceiling, the held
+> paths and the self-write filter and fires through `JobRunner.fire(... watch:)`.
+
 ## 6. The run
 
 ### 6.1 Background conversation
@@ -429,7 +434,8 @@ Each is "what — why — cost if wrong".
    only seen when the user opens the archive.
 9. `WatcherManager` fires through `JobRunner` now (a D4 pull-forward) — otherwise watches keep
    landing in the selected conversation, the epic's headline complaint — the quiet window and
-   self-write filter still wait for D4.
+   self-write filter still wait for D4. *Superseded by D4:* a watch now fires through
+   `WatchCoordinator` → `JobRunner`; the manager only owns streams.
 10. Three due jobs per tick — bounds the wake stampede without designing `catchUp` — a long
     backlog drains at 18 jobs a minute.
 11. `costMicros` reserved and NULL — no pricing exists — a column nothing writes until it does.

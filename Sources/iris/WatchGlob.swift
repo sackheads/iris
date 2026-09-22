@@ -6,7 +6,7 @@ import Foundation
 /// rules `fnmatch` does not have in the shape this needs: `**` has to span components, and a
 /// pattern with no `/` in it has to match *any* component so `.DS_Store` catches `a/.DS_Store`
 /// without anybody writing `**/.DS_Store`. It is also the difference between a refusal the tool
-/// can compute (`ignoresEveryProbe`; spec §5, PR B) and one it has to guess at by reading pattern
+/// can compute (`ignoresEveryProbe`; spec §5) and one it has to guess at by reading pattern
 /// text.
 ///
 /// Leading dots are not special. A shell glob's `*` deliberately skips dotfiles; here the whole
@@ -140,7 +140,7 @@ struct WatchGlob: Sendable {
     static let probes = ["a.txt", "dir/b.md", ".hidden", "x.swift", "sub/dir/c"]
 
     /// Whether `patterns` absorbs every probe — a watch that could never fire on anything, which
-    /// the tool's ignore refusal (spec §5, PR B) turns down rather than creating in silence.
+    /// the tool's ignore refusal (spec §5) turns down rather than creating in silence.
     /// Decided by the compiled matcher and not by reading the pattern text, because the patterns
     /// that do this are not the ones that look like it: `*.*` reads as all-consuming and is not
     /// (`sub/dir/c` has no dot).
