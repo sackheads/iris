@@ -88,6 +88,23 @@ enum JobLimitSetting: String, CaseIterable, Sendable {
         }
     }
 
+    /// What the stepper *steps from*, which is not always what is held. A 0 means "use the figure
+    /// Iris ships with", and the row says so — so one click on "+" beside
+    /// "Runs per job per hour: default (6)" has to produce 7, not 1. Stepping from the 0 instead
+    /// tightened every limit by an order of magnitude with a gesture that reads as loosening it:
+    /// 6 → 1, 200,000 tokens → 50,000, a ten-minute run → sixty seconds. (`ConfigManager.init`
+    /// substitutes the default for a stored 0 at launch, so the row a session *starts* on shows
+    /// a real figure; the 0 is what winding one all the way down leaves behind.)
+    ///
+    /// Downwards it reaches `default - step`, and the range's own floor of 0 is the way back:
+    /// stepping down past the smallest real setting lands on 0, which reads as "default" again
+    /// and is exactly what `JobLimits.resolve` treats as unset. That is the reset affordance, and
+    /// it costs no extra control.
+    func effectiveValue(in config: ConfigManager) -> Int {
+        let stored = value(in: config)
+        return stored > 0 ? stored : defaultValue
+    }
+
     /// Clamped at zero on the way in. A negative figure is never a third answer — nobody writes -1
     /// to mean unlimited — and storing one would only have `JobLimits.resolve` read it back as the
     /// default anyway, from a stepper that claimed otherwise.
@@ -938,13 +955,16 @@ struct SettingsView: View {
                 // the whole background system.
                 Section(header: Text("Job Limits").font(.headline)) {
                     ForEach(JobLimitSetting.allCases, id: \.rawValue) { limit in
+                        // The label reads the *stored* figure, so a resting 0 still says
+                        // "default (6)"; the binding reads the *effective* one, so a click moves
+                        // from the 6 the row is showing rather than from the 0 behind it.
                         Stepper(limit.label(limit.value(in: config)),
-                                value: Binding(get: { limit.value(in: config) },
+                                value: Binding(get: { limit.effectiveValue(in: config) },
                                                set: { limit.set($0, in: config) }),
                                 in: limit.range, step: limit.step)
                             .help(limit.help)
                     }
-                    Text("A stepper at its default uses the figure Iris ships with. `/jobs` shows what each job has spent today against these numbers.")
+                    Text("A stepper at its default uses the figure Iris ships with, and steps up or down from it; wind one down to zero to go back to the default. `/jobs` shows what each job has spent today against these numbers.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

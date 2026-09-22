@@ -62,6 +62,55 @@ struct JobLimitSettingsTests {
         #expect(limits.runTimeoutSeconds == ConfigManager.JobDefaults.runTimeoutSeconds)
     }
 
+    @Test("a click steps from the default the row is showing, not from the zero behind it")
+    func stepsFromTheEffectiveValue() {
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        for limit in JobLimitSetting.allCases {
+            // Wound down to zero: the row now reads "default (N)" and the figure behind it is 0.
+            // (`ConfigManager.init` turns a stored 0 back into the default at the next launch, so
+            // this is the state a session reaches by using the reset, not the state it starts in.)
+            limit.set(0, in: config)
+            #expect(limit.label(limit.value(in: config)).contains("default"))
+            #expect(limit.effectiveValue(in: config) == limit.defaultValue,
+                    "\(limit.configKey): the stepper has to step from the figure it displays")
+
+            // Up. This is the click the review caught: from a stored 0 it used to produce one
+            // step — "Runs per job per hour: 1", a breaker that pauses every job on its second
+            // fire — from a gesture that means "give it a bit more room".
+            limit.set(limit.effectiveValue(in: config) + limit.step, in: config)
+            #expect(limit.value(in: config) == limit.defaultValue + limit.step,
+                    "\(limit.configKey): one click up from the default is default + step")
+
+            // Down, twice: back to the default's own figure (now stored verbatim rather than as
+            // a 0), and then one step below it.
+            limit.set(limit.effectiveValue(in: config) - limit.step, in: config)
+            #expect(limit.value(in: config) == limit.defaultValue)
+            limit.set(limit.effectiveValue(in: config) - limit.step, in: config)
+            #expect(limit.value(in: config) == limit.defaultValue - limit.step,
+                    "\(limit.configKey): one click down from the default is default - step")
+        }
+    }
+
+    @Test("the floor of the range is zero, which is the way back to the default")
+    func windingDownToZeroResets() {
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        for limit in JobLimitSetting.allCases {
+            #expect(limit.range.lowerBound == 0,
+                    "\(limit.configKey): the stepper's own floor is the reset")
+            // The last real setting before the floor, then one more click down.
+            limit.set(limit.step, in: config)
+            #expect(limit.effectiveValue(in: config) == limit.step)
+            limit.set(limit.effectiveValue(in: config) - limit.step, in: config)
+            #expect(limit.value(in: config) == 0)
+            #expect(limit.label(limit.value(in: config)).contains("default"),
+                    "\(limit.configKey): and the row says so")
+            #expect(limit.effectiveValue(in: config) == limit.defaultValue,
+                    "\(limit.configKey): so the next click up steps from the default again")
+        }
+    }
+
     @Test("a zero on the stepper reads as the default it will actually use")
     func labelsSayWhatZeroMeans() {
         for limit in JobLimitSetting.allCases {
