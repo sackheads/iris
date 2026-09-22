@@ -82,7 +82,12 @@ struct FSWatch: Codable, Equatable, Sendable {
     /// Globs, relative to `path`, whose changes this watch absorbs. Default empty.
     var ignore: [String]
 
-    init(path: String, quietWindowSeconds: Int = 3, ignore: [String] = []) {
+    /// The window a watch gets when none is asked for: long enough to swallow an editor's save
+    /// burst, short enough that the run still feels like an answer to the save.
+    static let defaultQuietWindowSeconds = 3
+
+    init(path: String, quietWindowSeconds: Int = FSWatch.defaultQuietWindowSeconds,
+         ignore: [String] = []) {
         self.path = path
         self.quietWindowSeconds = Self.clampQuietWindow(quietWindowSeconds)
         self.ignore = ignore
@@ -105,7 +110,8 @@ struct FSWatch: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         path = try container.decode(String.self, forKey: .path)
         quietWindowSeconds = Self.clampQuietWindow(
-            try container.decodeIfPresent(Int.self, forKey: .quietWindowSeconds) ?? 3)
+            try container.decodeIfPresent(Int.self, forKey: .quietWindowSeconds)
+                ?? Self.defaultQuietWindowSeconds)
         ignore = try container.decodeIfPresent([String].self, forKey: .ignore) ?? []
     }
 }

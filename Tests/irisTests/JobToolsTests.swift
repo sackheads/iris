@@ -185,6 +185,89 @@ struct JobToolsTests {
         #expect(body["tokensTodayAllJobs"] is NSNull)
     }
 
+    @Test("list_jobs carries the watch fields, null for a schedule and null absorbed without a coordinator")
+    func listJobsCarriesWatchFields() throws {
+        var watch = job("notes")
+        watch.trigger = .fsEvent(FSWatch(path: "/tmp/notes", quietWindowSeconds: 10,
+                                         ignore: ["*.log", "build/"]))
+        let schedule = job("pr-sweep")
+        let burst = WatchSummary(delivered: 12, changed: 12, overflow: 0, coalesced: 30, noise: 3,
+                                 ownWrites: 1, ceilingFired: true, pathsWithheld: false)
+
+        let json = IrisEngine.jobsListJSON([watch, schedule], lastStatuses: [:], usage: .empty,
+                                           unreadableJobs: 0, lastBursts: [watch.id: burst],
+                                           absorbed: nil)
+        let body = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let rows = try #require(body["jobs"] as? [[String: Any]])
+        let watchRow = try #require(rows.first { $0["name"] as? String == "notes" })
+        #expect(watchRow["quietWindowSeconds"] as? Int == 10)
+        #expect(watchRow["ignore"] as? [String] == ["*.log", "build/"])
+        let lastBurst = try #require(watchRow["lastBurst"] as? [String: Any])
+        #expect(lastBurst["changed"] as? Int == 12)
+        #expect(lastBurst["coalesced"] as? Int == 30)
+        #expect(lastBurst["noise"] as? Int == 3)
+        #expect(lastBurst["ownWrites"] as? Int == 1)
+        #expect(lastBurst["ceilingFired"] as? Bool == true)
+        #expect(lastBurst["pathsWithheld"] as? Bool == false)
+        // No coordinator in this process: null, never a zero that claims nothing was absorbed.
+        #expect(watchRow["absorbedSinceLaunch"] is NSNull)
+        #expect(watchRow["policy"] as? String == "quiet 10 s · 2 ignore")
+
+        let scheduleRow = try #require(rows.first { $0["name"] as? String == "pr-sweep" })
+        for key in ["quietWindowSeconds", "ignore", "lastBurst", "absorbedSinceLaunch"] {
+            #expect(scheduleRow[key] is NSNull, "\(key) should be null for a schedule")
+        }
+
+        // With a coordinator, the absorbed totals come through as fields; a watch with no burst
+        // yet has a null lastBurst.
+        let live = IrisEngine.jobsListJSON([watch], lastStatuses: [:], usage: .empty, unreadableJobs: 0,
+                                           absorbed: [watch.id: AbsorbedCounts(noise: 41, ownWrites: 7,
+                                                                                whilePaused: 3)])
+        let liveBody = try #require(JSONSerialization.jsonObject(with: Data(live.utf8)) as? [String: Any])
+        let liveRow = try #require((liveBody["jobs"] as? [[String: Any]])?.first)
+        let absorbed = try #require(liveRow["absorbedSinceLaunch"] as? [String: Any])
+        #expect(absorbed["noise"] as? Int == 41)
+        #expect(absorbed["ownWrites"] as? Int == 7)
+        #expect(absorbed["whilePaused"] as? Int == 3)
+        #expect(liveRow["lastBurst"] is NSNull)
+    }
+
+    @Test("get_job_run returns the watch summary as the row stores it, and null for a schedule's run")
+    func getJobRunReturnsWatchSummaryAsStored() async throws {
+        let (app, id) = pinnedApp()
+        var j = job("notes")
+        j.trigger = .fsEvent(FSWatch(path: "/tmp/notes"))
+        try app.store.ledger.upsert(j)
+        var r = JobRun(jobId: j.id, jobName: j.name, triggerKind: j.trigger.kind,
+                       startedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        r.watchSummary = WatchSummary(delivered: 10, changed: 12, overflow: 500, coalesced: 40,
+                                      noise: 3, ownWrites: 1, ceilingFired: true, pathsWithheld: true)
+        try app.store.ledger.begin(run: r)
+
+        let result = await runToolCall(
+            FunctionCall(name: "get_job_run", args: ["run_id": .string(r.id.uuidString)], id: "c1"),
+            on: app, as: id)
+        let row = try #require(JSONSerialization.jsonObject(with: Data(result.utf8)) as? [String: Any])
+        let summary = try #require(row["watchSummary"] as? [String: Any])
+        #expect(summary["delivered"] as? Int == 10)
+        #expect(summary["changed"] as? Int == 12)
+        #expect(summary["overflow"] as? Int == 500)
+        #expect(summary["coalesced"] as? Int == 40)
+        #expect(summary["noise"] as? Int == 3)
+        #expect(summary["ownWrites"] as? Int == 1)
+        #expect(summary["ceilingFired"] as? Bool == true)
+        #expect(summary["pathsWithheld"] as? Bool == true)
+
+        let plain = JobRun(jobId: j.id, jobName: j.name, triggerKind: "manual",
+                           startedAt: Date(timeIntervalSince1970: 1_700_000_100))
+        try app.store.ledger.begin(run: plain)
+        let plainResult = await runToolCall(
+            FunctionCall(name: "get_job_run", args: ["run_id": .string(plain.id.uuidString)], id: "c2"),
+            on: app, as: id)
+        let plainRow = try #require(JSONSerialization.jsonObject(with: Data(plainResult.utf8)) as? [String: Any])
+        #expect(plainRow["watchSummary"] is NSNull)
+    }
+
     @Test("list_jobs with no jobs is an empty array, not prose")
     func listJobsEmpty() async throws {
         let (app, id) = pinnedApp()

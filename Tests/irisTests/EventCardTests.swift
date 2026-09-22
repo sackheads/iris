@@ -18,7 +18,8 @@ struct EventCardTests {
                       totalTokens: Int = 4_200,
                       runId: UUID = UUID(),
                       transcript: UUID? = nil,
-                      catchUpNote: String? = nil) -> EventCard {
+                      catchUpNote: String? = nil,
+                      watchSummary: WatchSummary? = nil) -> EventCard {
         EventCard(runId: runId,
                   jobId: UUID(),
                   jobName: "pr-sweep",
@@ -29,7 +30,8 @@ struct EventCardTests {
                   finishedAt: Self.finished,
                   totalTokens: totalTokens,
                   transcriptConversationId: transcript,
-                  catchUpNote: catchUpNote)
+                  catchUpNote: catchUpNote,
+                  watchSummary: watchSummary)
     }
 
     @Test("encode/decode is a round trip")
@@ -73,6 +75,68 @@ struct EventCardTests {
         #expect(decoded?.transcriptConversationId == nil)
         #expect(decoded?.runId == runId)
         #expect(decoded?.totalTokens == 4_200)
+    }
+
+    // MARK: The watch figures (#187 deliverable 4, spec §6)
+
+    @Test("a card without a watch summary, or with one this build cannot read, decodes with nil")
+    func anOlderCardDecodesWithNilWatchSummary() {
+        let runId = UUID()
+        let older = """
+        {"runId":"\(runId.uuidString)","jobId":"\(UUID().uuidString)","jobName":"pr-sweep",\
+        "startedAt":"2023-11-14T22:13:20Z","finishedAt":"2023-11-14T22:14:35Z","totalTokens":4200}
+        """
+        let decoded = EventCard.decode(older)
+        #expect(decoded?.runId == runId)
+        #expect(decoded?.watchSummary == nil)
+        #expect(decoded?.watchMetadataText == nil)
+
+        // Invariant 1, the `blockedCall` idiom: a malformed blob costs the figures, not the card.
+        let junk = """
+        {"runId":"\(runId.uuidString)","jobId":"\(UUID().uuidString)","jobName":"pr-sweep",\
+        "startedAt":"2023-11-14T22:13:20Z","finishedAt":"2023-11-14T22:14:35Z","totalTokens":4200,\
+        "watchSummary":"junk"}
+        """
+        let lenient = EventCard.decode(junk)
+        #expect(lenient?.runId == runId)
+        #expect(lenient?.totalTokens == 4_200)
+        #expect(lenient?.watchSummary == nil)
+    }
+
+    @Test("a watch summary survives the card's encode/decode round trip")
+    func watchSummaryRoundTrips() {
+        let summary = WatchSummary(delivered: 10, changed: 12, overflow: 500, coalesced: 40,
+                                   noise: 3, ownWrites: 1, ceilingFired: true, pathsWithheld: true)
+        let original = card(watchSummary: summary)
+        let decoded = EventCard.decode(original.encodedContent())
+        #expect(decoded == original)
+        #expect(decoded?.watchSummary == summary)
+    }
+
+    @Test("the metadata line carries each figure only when it is non-zero")
+    func metadataLineWithFixedFigures() {
+        let base = "1m 15s · 4.2k tokens"
+
+        let busy = card(watchSummary: WatchSummary(changed: 12, overflow: 500, noise: 3, ownWrites: 1,
+                                                   ceilingFired: true, pathsWithheld: true))
+        // The card carries no window, so the ceiling is named, never a number that could be
+        // false for any other window.
+        let figures = "12 changes · 3 noise · 1 own writes (cut at the ceiling) (500 not kept) "
+            + "(paths withheld by the guard)"
+        #expect(busy.watchMetadataText == figures)
+        #expect(busy.metadataLine == "\(base) · \(figures)")
+        #expect(busy.transcriptLine.hasSuffix(" (\(figures))"))
+
+        // All zero and no flag: the line is exactly what an ordinary card prints today.
+        let quiet = card(watchSummary: WatchSummary())
+        #expect(quiet.watchMetadataText == nil)
+        #expect(quiet.metadataLine == base)
+        #expect(quiet.metadataLine == card().metadataLine)
+        #expect(quiet.transcriptLine == card().transcriptLine)
+
+        let changesOnly = card(watchSummary: WatchSummary(changed: 4))
+        #expect(changesOnly.watchMetadataText == "4 changes")
+        #expect(changesOnly.metadataLine == "\(base) · 4 changes")
     }
 
     /// Fix round 1: an unrecognised status is NOT the same as an absent one. A value this build

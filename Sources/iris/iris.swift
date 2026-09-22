@@ -2612,18 +2612,26 @@ actor IrisEngine {
                     // is the ledger's only newest-first-per-job read, and a jobs list is tens of
                     // rows, not thousands.
                     var lastStatuses: [UUID: String] = [:]
+                    var lastBursts: [UUID: WatchSummary] = [:]
                     for job in jobs {
                         lastStatuses[job.id] = try ledger.runs(jobId: job.id, limit: 1).first?.status.rawValue
+                        if case .fsEvent = job.trigger {
+                            lastBursts[job.id] = try ledger.lastWatchSummary(jobId: job.id)
+                        }
                     }
                     // The same figures `/jobs` prints, from the same seams (§0.1): a person and a
                     // model asking what a job has spent today get one answer, not two.
                     let usage = JobsCommand.usageSnapshot(jobs: jobs, ledger: ledger,
                                                           config: ConfigManager.shared, now: Date())
+                    // The watch totals are the coordinator's memory, not the ledger's; `nil` when
+                    // this process has none, and the field says so with a null.
+                    let absorbed = await watchCoordinator()?.absorbedSinceLaunch()
                     // Read after `jobs()` — that call is what publishes the skipped-row count —
                     // and reported, so the model's account of what is scheduled matches `/jobs`'s
                     // rather than silently omitting the same rows.
                     result = Self.jobsListJSON(jobs, lastStatuses: lastStatuses, usage: usage,
-                                               unreadableJobs: ledger.unreadableJobCount)
+                                               unreadableJobs: ledger.unreadableJobCount,
+                                               lastBursts: lastBursts, absorbed: absorbed)
                 } catch {
                     result = "Could not read the jobs: \(error)."
                 }
@@ -3445,12 +3453,24 @@ extension IrisEngine {
     /// two jobs" when `/jobs` says two jobs and a row it could not read.
     /// `usage` is required rather than defaulted: a caller that forgot it would answer every
     /// figure with `null`, which says "the ledger could not be read".
+    ///
+    /// `lastBursts` and `absorbed` are the watch figures `/jobs` prints beneath its table (§6):
+    /// `quietWindowSeconds`, `ignore`, `lastBurst` and `absorbedSinceLaunch` are `null` for
+    /// anything but a watch, and `absorbedSinceLaunch` is `null` too when there is no live
+    /// coordinator — a zero there would claim the watch absorbed nothing, which is not known.
     nonisolated static func jobsListJSON(_ jobs: [Job], lastStatuses: [UUID: String],
                                          usage: JobsCommand.UsageSnapshot,
-                                         unreadableJobs: Int) -> String {
+                                         unreadableJobs: Int,
+                                         lastBursts: [UUID: WatchSummary] = [:],
+                                         absorbed: [UUID: AbsorbedCounts]? = nil) -> String {
         let iso = ISO8601DateFormatter()
         let rows: [[String: Any]] = jobs.map { job in
             let figures = usage.perJob[job.id]
+            let watch: FSWatch?
+            if case .fsEvent(let spec) = job.trigger { watch = spec } else { watch = nil }
+            // A live coordinator that has no entry for a watch has absorbed nothing for it.
+            let absorbedForJob: Any = watch == nil ? NSNull()
+                : absorbed.map { jsonObject($0[job.id] ?? AbsorbedCounts()) } ?? NSNull()
             return [
                 "name": job.name,
                 "trigger": job.trigger.summary,
@@ -3470,6 +3490,10 @@ extension IrisEngine {
                 "dailyBudget": figures?.limits.dailyTokens ?? NSNull(),
                 "runsLastHour": figures?.runsLastHour ?? NSNull(),
                 "maxRunsPerHour": figures?.limits.maxRunsPerHour ?? NSNull(),
+                "quietWindowSeconds": watch?.quietWindowSeconds ?? NSNull(),
+                "ignore": watch?.ignore ?? NSNull(),
+                "lastBurst": watch == nil ? NSNull() : lastBursts[job.id].map(jsonObject) ?? NSNull(),
+                "absorbedSinceLaunch": absorbedForJob,
             ]
         }
         let body: [String: Any] = [
@@ -3514,8 +3538,20 @@ extension IrisEngine {
             "approvedAt": run.approvedAt.map { iso.string(from: $0) } ?? NSNull(),
             "parentRunId": run.parentRunId?.uuidString ?? NSNull(),
             "lastAgentMessage": lastAgentMessage ?? NSNull(),
+            // As stored, all eight figures (§6) — `coalesced` is read here and on the row only.
+            // Null for every run no burst started. Harness-written, so not guarded.
+            "watchSummary": run.watchSummary.map(jsonObject) ?? NSNull(),
         ]
         return jsonString(row) ?? "{}"
+    }
+
+    /// A `Codable` value as the JSON object `jsonString` can nest — the same keys the ledger's
+    /// column holds, so a model reads the figures under the names the row stores them under.
+    /// `NSNull` when it will not encode, which no value here can fail to.
+    private nonisolated static func jsonObject<T: Encodable>(_ value: T) -> Any {
+        guard let data = try? JSONEncoder().encode(value),
+              let object = try? JSONSerialization.jsonObject(with: data) else { return NSNull() }
+        return object
     }
 
     /// One model-written field of a run, guarded before it is put in front of another model:

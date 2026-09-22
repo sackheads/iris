@@ -60,6 +60,32 @@ struct WatchSummary: Codable, Sendable, Equatable {
     }
 }
 
+extension WatchSummary {
+    /// The figures a person reads, spelled once for the card, the `/jobs` watch line and the
+    /// transcript: `12 changes · 3 noise · 1 own writes`, then the flags in parentheses. Each
+    /// figure appears only when it is non-zero, and the whole is `nil` when there is nothing to
+    /// say — a card for a burst that changed, filtered and withheld nothing reads exactly as an
+    /// ordinary card does.
+    ///
+    /// The ceiling is `(cut at <ceilingSeconds> s)` when the caller knows the window and `(cut at
+    /// the ceiling)` when it does not: the card carries no window, and a literal `30 s` printed
+    /// from the default would be false for any watch with another one.
+    func figuresText(ceilingSeconds: Int? = nil) -> String? {
+        var figures: [String] = []
+        if changed > 0 { figures.append("\(changed) changes") }
+        if noise > 0 { figures.append("\(noise) noise") }
+        if ownWrites > 0 { figures.append("\(ownWrites) own writes") }
+        var text = figures.joined(separator: " · ")
+        if ceilingFired {
+            text += ceilingSeconds.map { " (cut at \($0) s)" } ?? " (cut at the ceiling)"
+        }
+        if overflow > 0 { text += " (\(overflow) not kept)" }
+        if pathsWithheld { text += " (paths withheld by the guard)" }
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 /// What a watch has absorbed since the process started — every burst's filtered events plus the
 /// ones that arrived while the job was paused (spec §2, §6). Memory only: it is a "how noisy is
 /// this folder" figure for `/jobs`, not a record worth surviving a relaunch, and persisting it

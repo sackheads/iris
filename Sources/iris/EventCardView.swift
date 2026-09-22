@@ -66,7 +66,7 @@ struct EventCardView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 8)
-            Text("\(card.elapsedText) · \(SessionActivity.formatTokenCount(card.totalTokens)) tokens")
+            Text(card.metadataLine)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()

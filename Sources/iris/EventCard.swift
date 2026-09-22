@@ -53,6 +53,11 @@ struct EventCard: Codable, Equatable, Sendable {
     /// burst — and every ordinary fire carries `nil`. It is on the card rather than in the run's
     /// outcome because it is news about the schedule, not about what the turn did.
     let catchUpNote: String?
+    /// What the watch burst that started this run saw and absorbed (#187 deliverable 4, spec §6),
+    /// copied from `JobRun.watchSummary` when the card is written. On the card rather than read
+    /// from the row because a card is persisted verbatim and never goes back to the ledger; `nil`
+    /// for every run no burst started, and for every card written before the figures existed.
+    let watchSummary: WatchSummary?
 
     init(kind: String = "job_run",
          runId: UUID,
@@ -69,7 +74,8 @@ struct EventCard: Codable, Equatable, Sendable {
          vibecopVerdict: String? = nil,
          vibecopReason: String? = nil,
          approvalBlockedReason: String? = nil,
-         catchUpNote: String? = nil) {
+         catchUpNote: String? = nil,
+         watchSummary: WatchSummary? = nil) {
         self.kind = kind
         self.runId = runId
         self.jobId = jobId
@@ -86,6 +92,7 @@ struct EventCard: Codable, Equatable, Sendable {
         self.vibecopReason = vibecopReason
         self.approvalBlockedReason = approvalBlockedReason
         self.catchUpNote = catchUpNote
+        self.watchSummary = watchSummary
     }
 
     /// A card that fails to decode renders as raw JSON in the transcript, so every field a future
@@ -129,6 +136,9 @@ struct EventCard: Codable, Equatable, Sendable {
         vibecopReason = try container.decodeIfPresent(String.self, forKey: .vibecopReason)
         approvalBlockedReason = try container.decodeIfPresent(String.self, forKey: .approvalBlockedReason)
         catchUpNote = try container.decodeIfPresent(String.self, forKey: .catchUpNote)
+        // The `blockedCall` idiom (invariant 1): a summary this build cannot read costs the
+        // figures, not the card — the run's outcome is the card's reason to exist.
+        watchSummary = try? container.decodeIfPresent(WatchSummary.self, forKey: .watchSummary)
     }
 
     private static let unknownId = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
@@ -353,6 +363,18 @@ struct EventCard: Codable, Equatable, Sendable {
     /// styles of elapsed time side by side.
     var elapsedText: String { SessionActivity.formatElapsed(finishedAt.timeIntervalSince(startedAt)) }
 
+    /// The watch figures, when there are any: `12 changes · 3 noise · 1 own writes (cut at the
+    /// ceiling)`. The card carries no quiet window, so the ceiling is named rather than numbered.
+    var watchMetadataText: String? { watchSummary?.figuresText() }
+
+    /// The card's right-hand line — `1m 15s · 4.2k tokens`, then the watch figures when the burst
+    /// had any. Pure so the view can render it without owning the wording.
+    var metadataLine: String {
+        let base = "\(elapsedText) · \(SessionActivity.formatTokenCount(totalTokens)) tokens"
+        guard let watchMetadataText else { return base }
+        return "\(base) · \(watchMetadataText)"
+    }
+
     /// `[job pr-sweep · completed · 4.2k tokens] swept 3 PRs` — what Copy Transcript and the
     /// Markdown export print in place of the card's JSON (spec §8.2).
     var transcriptLine: String {
@@ -362,6 +384,9 @@ struct EventCard: Codable, Equatable, Sendable {
         // Appended rather than dropped: the view reads this out as its accessibility label, and a
         // run that stands for thirty-two missed occurrences should not read as an ordinary one.
         if let catchUpNote, !catchUpNote.isEmpty { line += " (\(catchUpNote))" }
+        // The watch figures too, for the same reason: what a burst absorbed is part of what the
+        // run was.
+        if let watchMetadataText { line += " (\(watchMetadataText))" }
         return line
     }
 

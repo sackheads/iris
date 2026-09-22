@@ -600,6 +600,23 @@ extension JobLedger {
         }
     }
 
+    /// The newest watch summary the job has written — `/jobs`'s `last burst:` and `list_jobs`'s
+    /// `lastBurst`. Rows without one are skipped rather than answering `nil`: a hand-started fire
+    /// of a watch job writes a row and no summary, and the question is "what did the last burst
+    /// see?", which such a row does not answer. `nil` only when no burst has ever fired. Same
+    /// shape as `lastGateSignal`, and the same lenient decode as `run(from:)`: a blob this build
+    /// cannot read is no burst, not an error.
+    func lastWatchSummary(jobId: UUID) throws -> WatchSummary? {
+        let json = try writer.read { db in
+            try String.fetchOne(db, sql: """
+                SELECT watchSummary FROM job_runs WHERE jobId = ? AND watchSummary IS NOT NULL
+                ORDER BY startedAt DESC, rowid DESC LIMIT 1
+                """, arguments: [jobId.uuidString])
+        }
+        guard let json else { return nil }
+        return try? JSONDecoder().decode(WatchSummary.self, from: Data(json.utf8))
+    }
+
     private func decodeRuns(sql: String, arguments: StatementArguments) throws -> [JobRun] {
         let rows = try writer.read { db in try Row.fetchAll(db, sql: sql, arguments: arguments) }
         return Self.decodeRuns(rows)

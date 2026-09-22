@@ -2813,9 +2813,41 @@ class AppState {
         }
     }
 
+    /// The `/jobs` listing itself, once the coordinator has answered: every other figure is a
+    /// synchronous ledger read, rendered by `JobsCommand.render`.
+    private func emitJobsListing(ledger: JobLedger, absorbed: [UUID: AbsorbedCounts]?, to convId: UUID) {
+        do {
+            let now = Date()
+            let jobs = try ledger.jobs()
+            var lastRuns: [UUID: JobRun] = [:]
+            var lastBursts: [UUID: WatchSummary] = [:]
+            for job in jobs {
+                lastRuns[job.id] = try ledger.runs(jobId: job.id, limit: 1).first
+                // Only a watch has a burst to report; the query is skipped for the rest.
+                if case .fsEvent = job.trigger {
+                    lastBursts[job.id] = try ledger.lastWatchSummary(jobId: job.id)
+                }
+            }
+            // What each job has spent today and how hard it has been running (§0.1), against
+            // the same limits admission resolves. Read leniently — a figure that will not come
+            // back leaves its column blank rather than costing the listing.
+            let usage = JobsCommand.usageSnapshot(jobs: jobs, ledger: ledger,
+                                                  config: ConfigManager.shared, now: now)
+            // Read after `jobs()`: that call is what publishes the skipped-row count.
+            let body = JobsCommand.render(jobs: jobs, lastRuns: lastRuns, usage: usage,
+                                          unacknowledged: try ledger.unacknowledgedFailures(),
+                                          unreadableJobs: ledger.unreadableJobCount, now: now,
+                                          lastBursts: lastBursts, absorbed: absorbed)
+            emitCommandOutput(body, format: .markdown, to: convId)
+        } catch {
+            emitCommandOutput("Could not read the jobs: \(error).", format: .markdown, to: convId)
+        }
+    }
+
     /// `/jobs` (#187 §9). Works in every conversation, pinned or not, and never starts a turn:
     /// everything it says comes from the ledger through `JobsCommand`'s pure rendering. The
     /// ledger calls are synchronous, so the answer is in the transcript before this returns —
+    /// except the listing, which first awaits the watch coordinator for the absorbed totals (§6) —
     /// only the watcher reload after a delete is deferred.
     private func handleJobsCommand(_ trimmed: String, convId: UUID) {
         let ledger = store.ledger
@@ -2824,23 +2856,13 @@ class AppState {
             emitCommandOutput(JobsCommand.usageText, format: .markdown, to: convId)
 
         case .list:
-            do {
-                let now = Date()
-                let jobs = try ledger.jobs()
-                var lastRuns: [UUID: JobRun] = [:]
-                for job in jobs { lastRuns[job.id] = try ledger.runs(jobId: job.id, limit: 1).first }
-                // What each job has spent today and how hard it has been running (§0.1), against
-                // the same limits admission resolves. Read leniently — a figure that will not come
-                // back leaves its column blank rather than costing the listing.
-                let usage = JobsCommand.usageSnapshot(jobs: jobs, ledger: ledger,
-                                                      config: ConfigManager.shared, now: now)
-                // Read after `jobs()`: that call is what publishes the skipped-row count.
-                let body = JobsCommand.render(jobs: jobs, lastRuns: lastRuns, usage: usage,
-                                              unacknowledged: try ledger.unacknowledgedFailures(),
-                                              unreadableJobs: ledger.unreadableJobCount, now: now)
-                emitCommandOutput(body, format: .markdown, to: convId)
-            } catch {
-                emitCommandOutput("Could not read the jobs: \(error).", format: .markdown, to: convId)
+            // The one half of the listing that is not in the ledger — what each watch has absorbed
+            // since launch — lives in the coordinator's memory (§6), so the listing is a hop away.
+            // `nil` when this process has no coordinator, and the watch line prints `—`.
+            let engine = self.engine
+            Task { [weak self] in
+                let absorbed = await engine?.watchCoordinator()?.absorbedSinceLaunch()
+                self?.emitJobsListing(ledger: ledger, absorbed: absorbed, to: convId)
             }
 
         case .ack(let runId):

@@ -1013,7 +1013,8 @@ actor JobRunner {
                              vibecopVerdict: approval.verdict,
                              vibecopReason: approval.reason,
                              approvalBlockedReason: approval.refusal,
-                             catchUpNote: note)
+                             catchUpNote: note,
+                             watchSummary: run.watchSummary)
         await closeSession(conversationId, status: card.statusText)
         await deliver(card, for: job)
     }
@@ -1435,7 +1436,8 @@ actor JobRunner {
                              outcome: Self.cardOutcome(reason, retry: retry, now: finishedAt),
                              blockedTool: nil,
                              startedAt: run.startedAt, finishedAt: finishedAt, totalTokens: 0,
-                             transcriptConversationId: conversationId, catchUpNote: note)
+                             transcriptConversationId: conversationId, catchUpNote: note,
+                             watchSummary: run.watchSummary)
         await closeSession(conversationId, status: card.statusText)
         await deliver(card, for: job)
     }
