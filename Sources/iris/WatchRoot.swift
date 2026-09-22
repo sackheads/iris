@@ -17,11 +17,12 @@ enum WatchRoot {
     /// and the launch check pauses the job. Guessing a canonical form for a path nobody can stat
     /// would hide all three.
     ///
-    /// Resolution is lexical first: `..` is removed textually before symlinks are resolved, so
-    /// `/tmp/link/../notes` lands on `link`'s *parent*, not on the parent of what `link` points at,
-    /// and it is that path the existence check is run against. `IrisPaths.canonicalPath` has always
-    /// behaved this way and the two must agree, so this is consistency rather than a choice; a
-    /// caller that refuses roots should know the `..` in an argument was resolved on the spelling.
+    /// `..` is resolved *through the file system*, not lexically: `standardizedFileURL` — measured,
+    /// 2026-09-22 — follows a symlink before removing the `..` above it, so `/tmp/link/../notes`
+    /// lands beside what `link` points at, not beside `link`. (`URL.standardized` is the lexical
+    /// one; this is not it.) `IrisPaths.canonicalPath` resolves the same way and the two must
+    /// agree, so this is consistency rather than a choice — but a caller that refuses roots should
+    /// know that a `..` in an argument can walk out of the directory it appears to be in.
     ///
     /// - Parameter fileExists: the existence check, injectable so a test can decide the answer
     ///   without a directory on disk.

@@ -184,8 +184,16 @@ actor IrisEngine {
     /// whatever conversations happen to be sitting in it (#185 §6).
     private let sessionPeerCountOverride: Int?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil) {
+    /// Where this engine's unattended file-tool writes are remembered, so a watch does not fire on
+    /// Iris's own output (#187 §4). The app's is `RecentWrites.shared`, reached only through this
+    /// parameter — `SubagentManager` and `GoalEvaluator` thread theirs into the engines they build,
+    /// so a run and everything it delegates into feed one registry, and a test injects its own
+    /// (invariant 7).
+    let recentWrites: RecentWrites
+
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared) {
         self.state = state
+        self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
         self.injectedFactStore = factStore
         self.modelTier = tier
@@ -628,7 +636,8 @@ actor IrisEngine {
         if let graderApp = localState {
             evaluation = await GoalEvaluator.shared.evaluate(
                 contract: projected, workspace: gradeWorkspace,
-                originatingConversationId: conversationId, app: graderApp, client: self.client)
+                originatingConversationId: conversationId, app: graderApp, client: self.client,
+                recentWrites: self.recentWrites)
         }
 
         let ladderPos = "\(contract.currentMilestone + 1) of \(contract.milestones.count)"
@@ -2592,12 +2601,12 @@ actor IrisEngine {
             if let appState = self.state {
                 if isBackground {
                     Task {
-                        let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState).rendered
+                        let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState, recentWrites: self.recentWrites).rendered
                         await self.handleSystemEvent("Background subagent result:\n\(rendered)", source: "SubagentManager", conversationId: conversationId)
                     }
                     result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes."
                 } else {
-                    result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState).rendered
+                    result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState, recentWrites: self.recentWrites).rendered
                 }
             } else {
                 result = "Error: AppState not available for subagent execution."
@@ -2651,7 +2660,8 @@ actor IrisEngine {
             if let c = contractToGrade, !restrictToGoalComplete, let graderApp = localState {
                 let evaluation = await GoalEvaluator.shared.evaluate(
                     contract: c, workspace: gradeWorkspace,
-                    originatingConversationId: conversationId, app: graderApp, client: self.client)
+                    originatingConversationId: conversationId, app: graderApp, client: self.client,
+                    recentWrites: self.recentWrites)
                 let blocking = c.blockingCriteria(from: evaluation)
                 let cap = ConfigManager.shared.maxDoneGateRetries
 
@@ -2753,7 +2763,7 @@ actor IrisEngine {
             let outcome = await SubagentManager.shared.runSubagent(
                 role: role, task: task, effort: effort, parentConversationId: conversationId,
                 unit: DelegatedUnit(contract: unitContract, grade: false), client: self.client,
-                appState: appState)
+                appState: appState, recentWrites: self.recentWrites)
 
             // Only a `.completed` subagent reaches the checkpoint — it is the run that claimed the
             // milestone is done. Anything else claimed nothing: hand the outcome back to the loop
@@ -2848,12 +2858,12 @@ actor IrisEngine {
                     callerRole: principal == .evaluator ? .evaluator : .agent,
                     allowedCommands: evaluatorChecks) ?? false
                 if approved {
-                    result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox)
+                    result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended)
                 } else {
                     result = Self.deniedToolResult
                 }
             } else {
-                result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox)
+                result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended)
             }
         }
         
@@ -2899,6 +2909,10 @@ actor IrisEngine {
         guard call.toolName != "run_command" || useSandbox else {
             return Self.sandboxUnavailableRefusal(tool: call.toolName)
         }
+        // `isUnattended` defaults to false here, and that is the ruling rather than an oversight
+        // (#187 §4, R-D4-1): a person clicked "Approve and run" on this call a moment ago, so its
+        // write is the human-driven kind a watch is meant to notice, like any other foreground
+        // write. The filter is fed from the dispatcher's unattended branch only.
         return await executeToolWithHooks(name: call.toolName, args: call.args, cwd: call.cwd,
                                           conversationId: conversationId, useSandbox: useSandbox,
                                           origin: .approvedCall)
@@ -2932,7 +2946,69 @@ actor IrisEngine {
     /// has had its say about the arguments, which is the last point anything can change them.
     enum ToolCallOrigin: Sendable { case modelTurn, approvedCall }
 
-    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, origin: ToolCallOrigin = .modelTurn) async -> String {
+    // MARK: - The self-write filter's choke point (#187 §4, R-D4-1)
+
+    /// The declared tools that write a filesystem path. Every one of them has to be recomputable
+    /// by `writtenPaths` below, or an unattended run's own output looks to a watch like somebody
+    /// else's edit.
+    nonisolated static let pathWritingTools: Set<String> = [
+        "write_file", "create_skill", "update_skill", "delete_skill",
+    ]
+
+    /// Everything else in the declared surface, spelled out rather than derived: a tool added
+    /// later lands in neither set and `SelfWriteHookTests.everyDeclaredToolIsClassified` fails,
+    /// which is the point — the alternative is a new writing tool joining silently and a watch
+    /// looping on it.
+    ///
+    /// The surface pinned is `ToolExecutor.getTools(workspaceToolsEnabled: true)` plus the job
+    /// tools. Not here, deliberately: MCP tools, which are a user's servers rather than a
+    /// declaration in this repo and are not fed either way (§4), and the tools declared inline by
+    /// `buildRequest` (identity, memory, sessions, goals, delegation), which write through their
+    /// own managers rather than the file tools and are out of §4's scope.
+    nonisolated static let toolsThatWriteNoPath: Set<String> = [
+        "run_command", "read_file", "register_directory_watcher", "search_web",
+        "google_tasks_list_tasklists", "google_tasks_list_tasks", "google_tasks_create_task",
+        "google_calendar_list_events", "google_calendar_create_event",
+        "google_docs_get", "google_drive_search", "google_sheets_get",
+        "gmail_list_unread", "gmail_send_email",
+        "list_jobs", "get_job_run",
+    ]
+
+    /// What this call actually wrote, from its arguments and the sentence the tool returned.
+    ///
+    /// Reading the result rather than trusting the call is what keeps a refusal, a hook block or a
+    /// disk error out of the registry: a path recorded for a write that never happened would
+    /// filter a *real* change on that path for the next few seconds.
+    ///
+    /// The three skill tools take no path and no conversation id — they compute their folder from
+    /// the skill's name — so the folder is recomputed here through the same helper they use. A
+    /// skill write touches two paths, the folder and the `SKILL.md` inside it, and FSEvents
+    /// reports both.
+    nonisolated static func writtenPaths(tool: String, args: [String: JSONValue], cwd: String?,
+                                         result: String, paths: IrisPaths = .default) -> [String] {
+        switch tool {
+        case "write_file":
+            guard result.hasPrefix("Successfully wrote to "),
+                  let path = args["path"]?.stringValue else { return [] }
+            return [ToolExecutor.resolvePath(path, cwd: cwd)]
+        case "create_skill", "update_skill":
+            // `updateSkill` falls back to `createSkill` when the skill is not there yet, so a
+            // successful update can report either sentence.
+            guard result.hasPrefix("Successfully saved skill '")
+                    || result.hasPrefix("Successfully updated skill '"),
+                  let name = args["name"]?.stringValue else { return [] }
+            let folder = ToolExecutor.skillFolder(named: name, paths: paths)
+            return [folder.path, folder.appendingPathComponent("SKILL.md").path]
+        case "delete_skill":
+            guard result.hasPrefix("Successfully deleted skill '"),
+                  let name = args["name"]?.stringValue else { return [] }
+            return [ToolExecutor.skillFolder(named: name, paths: paths).path]
+        default:
+            return []
+        }
+    }
+
+    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn) async -> String {
         var execArgs: [String: JSONValue] = args
 
         // Session strip activity (#217/#19): the detail is derived from the tool's own arguments
@@ -2984,6 +3060,21 @@ actor IrisEngine {
             let resolved = ToolExecutor.resolvePath(path, cwd: cwd)
             let localState = state
             await MainActor.run { localState?.recordSubagentWrite(conversationId: cid, path: resolved) }
+        }
+
+        // #187 §4, R-D4-1: the self-write filter's one feed. Here, and not in `ToolExecutor`,
+        // because this is the only frame that has both the tool's result — a path is recorded
+        // only for a write that actually happened — and whether the conversation it ran in was
+        // unattended, which is what decides whether it is recorded at all. An attended write is a
+        // human-driven action a watch is expected to notice.
+        //
+        // After `execute` and before `fireAfterTool`: an `AfterTool` hook can rewrite the result
+        // sentence, and the file is on disk either way, so the hook layer must not be able to
+        // decide what the filter remembers.
+        if isUnattended {
+            for path in Self.writtenPaths(tool: name, args: execArgs, cwd: cwd, result: result) {
+                await recentWrites.record(path)
+            }
         }
 
         let afterDecision = await HookManager.shared.fireAfterTool(toolName: name, result: result, useSandbox: hooksSandbox)

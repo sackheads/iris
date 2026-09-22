@@ -517,13 +517,24 @@ except Exception as e:
         }
     }
 
-    func createSkill(name: String, description: String, body: String, paths: IrisPaths = .default) async -> String {
+    /// Where a skill of this name lives: the one spelling of the folder, for the three tools that
+    /// write it and for the dispatcher, which has to work out what a skill call wrote from its
+    /// arguments (the tools take no path, so there is nothing else to read; #187 §4).
+    ///
+    /// The name is slugged the same way for all three — lowercased, trimmed, spaces and
+    /// underscores to dashes. `deleteSkill` used to lowercase and trim but not replace, so
+    /// `delete_skill` with the name `my skill` looked for a folder `create_skill` had never made.
+    static func skillFolder(named name: String, paths: IrisPaths = .default) -> URL {
         let cleanName = name.lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: " ", with: "-")
             .replacingOccurrences(of: "_", with: "-")
-        
-        let skillFolder = paths.skillsDir.appendingPathComponent(cleanName)
+        return paths.skillsDir.appendingPathComponent(cleanName)
+    }
+
+    func createSkill(name: String, description: String, body: String, paths: IrisPaths = .default) async -> String {
+        let skillFolder = Self.skillFolder(named: name, paths: paths)
+        let cleanName = skillFolder.lastPathComponent
         let skillFile = skillFolder.appendingPathComponent("SKILL.md")
         
         let isoFormatter = ISO8601DateFormatter()
@@ -552,12 +563,8 @@ except Exception as e:
     }
 
     func updateSkill(name: String, description: String?, body: String?, paths: IrisPaths = .default) async -> String {
-        let cleanName = name.lowercased()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: " ", with: "-")
-            .replacingOccurrences(of: "_", with: "-")
-        
-        let skillFolder = paths.skillsDir.appendingPathComponent(cleanName)
+        let skillFolder = Self.skillFolder(named: name, paths: paths)
+        let cleanName = skillFolder.lastPathComponent
         let skillFile = skillFolder.appendingPathComponent("SKILL.md")
         let fileManager = FileManager.default
         
@@ -618,8 +625,8 @@ except Exception as e:
     }
 
     func deleteSkill(name: String, paths: IrisPaths = .default) async -> String {
-        let cleanName = name.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        let skillFolder = paths.skillsDir.appendingPathComponent(cleanName)
+        let skillFolder = Self.skillFolder(named: name, paths: paths)
+        let cleanName = skillFolder.lastPathComponent
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: skillFolder.path) else {
             return "Skill '\(cleanName)' not found."
