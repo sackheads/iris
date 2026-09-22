@@ -47,9 +47,8 @@ struct ToolExecutorWorkspaceTests {
     func relativeWatcherResolvesToWorkspace() async throws {
         // The tool now writes a job, so it needs a ledger to write into (nil declines instead).
         let store = try ConversationStore.inMemory()
-        let watchers = WatcherManager(ledger: store.ledger)
         var executor = ToolExecutor()
-        executor.jobToolsProvider = { JobTools(ledger: store.ledger, watchers: watchers, watcherCallback: { _, _ in }) }
+        executor.jobToolsProvider = { JobTools(ledger: store.ledger) }
 
         let result = await executor.execute(
             name: "register_directory_watcher",
@@ -61,7 +60,6 @@ struct ToolExecutorWorkspaceTests {
         #expect(!result.contains(FileManager.default.currentDirectoryPath + "/src"))
         // And the job it stored watches that same resolved path.
         #expect(try store.ledger.jobs().first?.trigger == .fsEvent(FSWatch(path: "/ws/src", quietWindowSeconds: 3)))
-        await watchers.stopAll()
     }
 
     @Test("register_directory_watcher stores the canonical root and a queueing watch")
@@ -75,9 +73,8 @@ struct ToolExecutorWorkspaceTests {
         defer { try? fm.removeItem(at: base) }
 
         let store = try ConversationStore.inMemory()
-        let watchers = WatcherManager(ledger: store.ledger)
         var executor = ToolExecutor()
-        executor.jobToolsProvider = { JobTools(ledger: store.ledger, watchers: watchers, watcherCallback: { _, _ in }) }
+        executor.jobToolsProvider = { JobTools(ledger: store.ledger) }
 
         _ = await executor.execute(
             name: "register_directory_watcher",
@@ -93,7 +90,6 @@ struct ToolExecutorWorkspaceTests {
         #expect(watch.path != link.path, "the symlinked spelling is not what is stored")
         // A watch never runs concurrently with itself: the burst that arrives mid-run waits.
         #expect(job.policy.overlap == .queue)
-        await watchers.stopAll()
     }
 
     @Test("registering the same directory twice rewrites the one job instead of doubling the watch")
@@ -104,9 +100,8 @@ struct ToolExecutorWorkspaceTests {
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
 
-        let watchers = WatcherManager(ledger: store.ledger)
         var executor = ToolExecutor()
-        executor.jobToolsProvider = { JobTools(ledger: store.ledger, watchers: watchers, watcherCallback: { _, _ in }) }
+        executor.jobToolsProvider = { JobTools(ledger: store.ledger) }
         let args: [String: JSONValue] = ["path": .string(tmp.path), "instructions": .string("first")]
         let firstConversation = UUID()
         let secondConversation = UUID()
@@ -128,8 +123,6 @@ struct ToolExecutorWorkspaceTests {
         // and firing into the conversation the latest registration was made from, not the first.
         #expect(jobs.first?.createdInConversationId == secondConversation)
         #expect(second.contains(tmp.path))
-        #expect(await watchers.activeJobIds.count == 1)
-        await watchers.stopAll()
     }
 
     @Test("register_directory_watcher declines when no ledger is wired up")

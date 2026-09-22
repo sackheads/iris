@@ -1,24 +1,70 @@
 import Foundation
 
-/// Runs the filesystem half of the job ledger: one `FileWatcher` per enabled `.fsEvent` job.
+/// The filesystem half of a watch: one FSEvents stream per distinct canonical root, and nothing
+/// else (#187 deliverable 4, spec §7).
 ///
-/// The watch list used to be its own array of rules in `UserDefaults`, invisible to the
-/// scheduler and to the UI. It is now just a query over the jobs table — `reload()` is the only
-/// way watchers change, so creating, disabling, or deleting a watch job is a ledger write plus a
-/// reload rather than a second store to keep in step.
+/// The split with `WatchCoordinator` is the whole design. Streams live here because they are a
+/// per-directory resource; windows, held paths and counts live there because they are per-job and
+/// must survive a stream being started or stopped for a reason that has nothing to do with the
+/// burst in progress. So this actor knows about *roots* and never about jobs' timing: a batch goes
+/// out tagged with the root its stream was started for, and the coordinator fans it out to the
+/// subscribers that root covers.
+///
+/// `sync(with:)` is a diff, not a rebuild. The reload it replaced stopped every stream and started
+/// them again on any change at all, which threw away each stream's place in the FSEvents history
+/// (and, before the coordinator existed, any timer the manager held) every time an unrelated job's
+/// cadence moved.
 actor WatcherManager {
+    /// One stream, as the manager consumes it: a batch of paths at a time, and a way to stop.
+    /// Injectable so tests drive the delivery and failure paths without an FSEvents stream to
+    /// provoke (invariant 7).
+    struct WatchStream: Sendable {
+        let events: AsyncStream<[String]>
+        let stop: @Sendable () -> Void
+    }
+
+    typealias StreamFactory = @Sendable (_ root: String) -> WatchStream
+
     /// The app-wide manager. Built without a ledger because the store is not open yet when this
-    /// initializer runs; `IrisEngine.start()` calls `configure(ledger:)` before its first
-    /// `reload()`. Tests construct their own with `init(ledger:)` instead.
+    /// initializer runs; `IrisEngine.start()` calls `configure(ledger:)` before its first `sync`.
+    /// Tests construct their own with `init(ledger:streams:fileExists:)` instead.
     static let shared = WatcherManager(ledger: nil)
 
-    private var ledger: JobLedger?
-    private var activeWatchers: [UUID: FileWatcher] = [:]
-    private var watchTasks: [UUID: Task<Void, Never>] = [:]
-    private var onEventCallback: (@Sendable (Job, [String]) async -> Void)?
+    /// The production factory: one `FileWatcher` per root. The `stop` closure retains the watcher,
+    /// which is what keeps the stream alive for as long as the manager wants it — nothing else
+    /// holds one.
+    static let fsEventsStream: StreamFactory = { root in
+        let watcher = FileWatcher()
+        return WatchStream(events: watcher.watch(paths: [root]), stop: { watcher.stop() })
+    }
 
-    init(ledger: JobLedger?) {
+    /// A live stream: the spelling of the root it was opened on, how to stop it, and the task
+    /// forwarding its batches.
+    private struct Live {
+        let root: String
+        let stop: @Sendable () -> Void
+        let task: Task<Void, Never>
+    }
+
+    private var ledger: JobLedger?
+    private let streams: StreamFactory
+    private let fileExists: @Sendable (String) -> Bool
+    /// Keyed by the case-folded root (R-D4-8), holding the spelling the stream was opened on.
+    private var live: [String: Live] = [:]
+    /// The jobs the last `sync` was given — the fallback answer to "who was this stream serving"
+    /// for a manager with no ledger.
+    private var syncedJobs: [Job] = []
+    private var batchHandler: (@Sendable (_ root: String, _ paths: [String]) async -> Void)?
+    private var unavailableHandler: (@Sendable (Job, String) async -> Void)?
+
+    init(ledger: JobLedger?,
+         streams: @escaping StreamFactory = WatcherManager.fsEventsStream,
+         fileExists: @escaping @Sendable (String) -> Bool = {
+             FileManager.default.fileExists(atPath: $0)
+         }) {
         self.ledger = ledger
+        self.streams = streams
+        self.fileExists = fileExists
     }
 
     /// Points the manager at the conversation store's ledger. Separate from the initializer so
@@ -27,76 +73,172 @@ actor WatcherManager {
         self.ledger = ledger
     }
 
-    /// The jobs currently being watched. Used by the tests and by anything that wants to know
-    /// whether a reload took effect.
-    var activeJobIds: [UUID] { Array(activeWatchers.keys) }
-
-    /// Where a fire goes: the job that was watching and the paths that changed. `IrisEngine.start`
-    /// points this straight at `JobRunner.run`, which owns the run, the ledger row and the overlap
-    /// guard; the manager itself knows nothing about what a fire turns into.
-    func setCallback(_ callback: @escaping @Sendable (Job, [String]) async -> Void) {
-        self.onEventCallback = callback
+    /// Where a batch goes: the root of the stream it arrived on, and the paths FSEvents named.
+    /// `IrisEngine.start()` points this at `WatchCoordinator.deliver(root:paths:)`.
+    func setBatchHandler(_ handler: @escaping @Sendable (_ root: String, _ paths: [String]) async -> Void) {
+        batchHandler = handler
     }
 
-    /// `reload()`, adopting the ledger and the fire callback first if either was never configured.
-    /// `shared` is configured in `IrisEngine.start()`, which a subagent, an evaluator or a scenario
-    /// run never calls — and the job tools resolve both per call precisely so those engines can
-    /// still register a watch. Without the ledger the registration wrote its job and then reloaded
-    /// a nil ledger, so the directory was never actually watched; without the callback it is
-    /// watched and every fire is dropped on the floor, which is the same inert watch one step
-    /// later. An already-configured manager keeps whatever it already has.
-    func reload(adoptingIfUnconfigured ledger: JobLedger,
-                callback: @escaping @Sendable (Job, [String]) async -> Void) async {
-        if self.ledger == nil { self.ledger = ledger }
-        if onEventCallback == nil { onEventCallback = callback }
-        await reload()
+    /// Where a watch whose directory is gone goes: `JobRunner.pauseUnavailable` in the app. A
+    /// pause, not a silent stop — a watch that looks live in `/jobs` and never fires is the
+    /// failure nobody notices (§7).
+    func setUnavailableHandler(_ handler: @escaping @Sendable (Job, String) async -> Void) {
+        unavailableHandler = handler
     }
 
-    /// Rebuilds the watch set from the ledger: stop everything, then start one watcher per enabled
-    /// `.fsEvent` job. Stopping first — rather than diffing — keeps a job whose path or enabled
-    /// flag changed from needing a special case; FSEvents streams are cheap to recreate.
-    func reload() async {
-        stopAll()
-        guard let ledger else { return }
-        let jobs: [Job]
-        do {
-            jobs = try ledger.jobs()
-        } catch {
-            print("[WatcherManager] could not read jobs: \(error)")
-            return
+    /// The roots with a live stream, in the spelling each stream was opened on. Sorted, so a test
+    /// and a diagnostic read the same both times.
+    var activeRoots: [String] { live.values.map(\.root).sorted() }
+
+    /// The diff (§7): pause what has vanished, open a stream for each new root, stop the stream
+    /// for each root nobody is left subscribed to, and touch nothing else.
+    ///
+    /// Called from the ledger's `onJobsChanged` hook — immediately *after* `WatchCoordinator.sync`,
+    /// so a batch can never arrive for a subscriber that does not exist yet — and once a minute
+    /// from the coordinator's loop, which is what makes the vanished-root check periodic rather
+    /// than only a launch check.
+    ///
+    /// The stream diff is applied before anything is reported, and deliberately: reporting awaits
+    /// the unavailable handler, whose pause is a `setPaused` that re-enters the hook and calls
+    /// this method again. Doing the diff first means the re-entrant call — which has the fresher
+    /// job list — is the one that lands last, rather than this call's older list overwriting it.
+    func sync(with jobs: [Job]) async {
+        syncedJobs = jobs
+        let gone = Self.vanished(in: jobs, fileExists: fileExists)
+        let goneIds = Set(gone.map(\.id))
+        let wanted = Self.roots(for: jobs.filter { !goneIds.contains($0.id) })
+
+        var wantedKeys: Set<String> = []
+        for root in wanted.sorted() {
+            let key = root.lowercased()
+            wantedKeys.insert(key)
+            guard live[key] == nil else { continue }
+            open(root: root, key: key)
         }
-        for job in jobs where job.enabled {
+        for key in Array(live.keys) where !wantedKeys.contains(key) { close(key) }
+
+        for job in gone {
             guard case .fsEvent(let watch) = job.trigger else { continue }
-            startWatcher(for: job, path: watch.path)
+            await unavailableHandler?(job, Self.unavailableReason(watch.path))
         }
     }
 
-    /// Stops every watcher and forgets it. Idempotent, so a test can call it in a `defer` after
-    /// having already torn down.
-    func stopAll() {
-        for task in watchTasks.values { task.cancel() }
-        watchTasks.removeAll()
-        for watcher in activeWatchers.values { watcher.stop() }
-        activeWatchers.removeAll()
-    }
-
-    private func startWatcher(for job: Job, path: String) {
-        if activeWatchers[job.id] != nil { return }
-
-        let watcher = FileWatcher()
-        activeWatchers[job.id] = watcher
-
-        watchTasks[job.id] = Task { [weak self] in
-            for await eventPaths in watcher.watch(paths: [path]) {
-                if Task.isCancelled { return }
-                await self?.deliver(job: job, paths: eventPaths)
+    /// The roots that need a stream: every enabled, unpaused `.fsEvent` job's root, with nested
+    /// roots collapsed onto their ancestor (§0.5 — an FSEvents stream is recursive and already
+    /// carries per-file events, so a second stream inside one would deliver every nested path
+    /// twice).
+    ///
+    /// Distinct is decided case-insensitively and the first spelling seen wins (R-D4-8), because
+    /// `realpath` is not case-normalising: two jobs registered as `~/Documents/NOTES` and
+    /// `~/Documents/Notes` are one directory on a case-insensitive volume (the default on APFS)
+    /// and must be one stream, or each subscriber sees every event twice. The cost, on a
+    /// case-sensitive volume: two genuinely distinct directories differing only by case share one
+    /// stream, and each of their subscribers is offered the other's events — which the
+    /// coordinator's own coverage test, case-insensitive for the same reason, then accepts.
+    static func roots(for jobs: [Job]) -> Set<String> {
+        var spelling: [String: String] = [:]
+        var order: [String] = []
+        for job in jobs {
+            guard job.enabled, job.pausedReason == nil,
+                  case .fsEvent(let watch) = job.trigger else { continue }
+            let key = watch.path.lowercased()
+            if spelling[key] == nil {
+                spelling[key] = watch.path
+                order.append(key)
             }
         }
+        var kept: Set<String> = []
+        for key in order {
+            let nested = order.contains { other in other != key && Self.contains(other, key) }
+            if !nested, let path = spelling[key] { kept.insert(path) }
+        }
+        return kept
     }
 
-    /// One fire. Internal rather than private so a test can drive the delivery path without an
-    /// FSEvents stream to provoke.
-    func deliver(job: Job, paths: [String]) async {
-        await onEventCallback?(job, paths)
+    /// Whether `ancestor` is a proper ancestor of `path`. Both are already case-folded by
+    /// `roots(for:)`; the comparison is lexical, on canonical forms, for the reason the
+    /// coordinator's `covers` is.
+    private static func contains(_ ancestor: String, _ path: String) -> Bool {
+        let prefix = ancestor.hasSuffix("/") ? ancestor : ancestor + "/"
+        return path.hasPrefix(prefix)
+    }
+
+    /// The watches whose directory is not there: deleted, renamed or unmounted. FSEvents does not
+    /// stop a stream whose root disappears — it keeps running and delivers nothing further — so
+    /// this stat is the only thing that ever notices (§7), and it runs on every job change and
+    /// once a minute besides.
+    static func vanished(in jobs: [Job], fileExists: (String) -> Bool) -> [Job] {
+        jobs.filter { job in
+            guard job.enabled, job.pausedReason == nil,
+                  case .fsEvent(let watch) = job.trigger else { return false }
+            return !fileExists(watch.path)
+        }
+    }
+
+    /// One wording for both ways a root can be unusable — gone when it was stat'd, and refused by
+    /// FSEvents when the stream was created — because they are the same thing to the person
+    /// reading `/jobs`.
+    static func unavailableReason(_ path: String) -> String { "watch path unavailable: \(path)" }
+
+    /// Stops every stream and forgets it. Idempotent, so a test can call it in a `defer` after
+    /// having already torn down.
+    func stopAll() {
+        for key in Array(live.keys) { close(key) }
+    }
+
+    private func open(root: String, key: String) {
+        let stream = streams(root)
+        let task = Task { [weak self] in
+            for await paths in stream.events {
+                if Task.isCancelled { return }
+                await self?.forward(root: root, paths: paths)
+            }
+            // The stream ended by itself. `close` cancels before it stops, so the only way here is
+            // a stream FSEvents refused to create (`FileWatcher` finishes the stream immediately)
+            // or one it tore down under us.
+            if Task.isCancelled { return }
+            await self?.streamEnded(root: root, key: key)
+        }
+        live[key] = Live(root: root, stop: stream.stop, task: task)
+    }
+
+    private func close(_ key: String) {
+        guard let entry = live.removeValue(forKey: key) else { return }
+        // Cancel first: stopping finishes the stream, and the task must already know that ending
+        // is what was asked for rather than a stream that died.
+        entry.task.cancel()
+        entry.stop()
+    }
+
+    private func forward(root: String, paths: [String]) async {
+        await batchHandler?(root, paths)
+    }
+
+    /// A stream that ended unprompted is a dead stream: every job it was serving — the one on its
+    /// own root and any nested underneath it — is paused, naming its own root rather than the
+    /// stream's, because the person registered that path and that is what `/jobs` shows.
+    ///
+    /// The entry is dropped rather than left in place: a dead stream that still looks live would
+    /// stop the next `sync` from ever trying again, and `/jobs resume` is meant to retry.
+    private func streamEnded(root: String, key: String) async {
+        guard live[key] != nil else { return }
+        live[key] = nil
+        let folded = root.lowercased()
+        for job in currentJobs() {
+            guard job.enabled, job.pausedReason == nil,
+                  case .fsEvent(let watch) = job.trigger else { continue }
+            let path = watch.path.lowercased()
+            guard path == folded || Self.contains(folded, path) else { continue }
+            await unavailableHandler?(job, Self.unavailableReason(watch.path))
+        }
+    }
+
+    /// Who a stream is serving, as of now. The ledger when there is one — a stream can die at any
+    /// moment, and the jobs that moment's pause should name are the ones in the table, not the
+    /// ones the last `sync` happened to see. A manager that was never configured (an engine that
+    /// never started) falls back to that snapshot.
+    private func currentJobs() -> [Job] {
+        if let ledger, let jobs = try? ledger.jobs() { return jobs }
+        return syncedJobs
     }
 }

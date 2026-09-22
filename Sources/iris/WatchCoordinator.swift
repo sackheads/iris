@@ -106,6 +106,12 @@ actor WatchCoordinator {
     /// 0 is never issued, which is what lets an abandoned fire be marked by setting `fireSeq = 0`.
     private var nextFireSeq: UInt64 = 0
     private var loop: Task<Void, Never>?
+    /// The loop, parked on its wait. Only ever one: `startLoop` refuses a second loop.
+    private var sleeper: CheckedContinuation<Void, Never>?
+    /// A wake that arrived while the loop was between waits. Without it, an event accepted in that
+    /// window would be answered by the *next* wait rather than by this one, which is the same
+    /// late fire the wake exists to prevent.
+    private var pendingWake = false
 
     init(ledger: JobLedger, now: @escaping @Sendable () -> Date, recentWrites: RecentWrites,
          fire: @escaping WatchFireHandler) {
@@ -287,6 +293,13 @@ actor WatchCoordinator {
             }
             subscribers[decision.id] = subscriber
         }
+
+        // §2: the loop sleeps to the earliest deadline *or until woken by an accepted event*. An
+        // accept is the only thing that can bring a deadline forward, so it is the only thing that
+        // wakes; a batch of nothing but noise leaves the loop where it was. A wake for an accept
+        // that only joined a hold (no deadline of its own yet) costs one no-op `tick`, which is
+        // cheaper than the arithmetic needed to be sure it did not.
+        if !acceptedIn.isEmpty { signalWake() }
     }
 
     /// Lexical, on canonical forms, and never a `stat`: FSEvents reports a path under the root it
@@ -499,7 +512,8 @@ actor WatchCoordinator {
         let handler = fire
         Task { [self] in
             let admission = await handler(job, offer)
-            await apply(admission, to: id, firedPaths: offer.paths, seq: seq)
+            // No `await`: this task inherits the actor's isolation, so only the handler suspends.
+            apply(admission, to: id, firedPaths: offer.paths, seq: seq)
         }
     }
 
@@ -577,23 +591,30 @@ actor WatchCoordinator {
     /// The summary is the outstanding fire's plus everything accumulated since (R-D4-9), the same
     /// arithmetic `reAsk` does and for a stronger reason: an admission of `.queued` writes no row,
     /// so the queued fire's own counts have never been reported anywhere and this re-fire's row is
-    /// the only one that will ever carry them. (The `.run` case does not come through here at all
-    /// — `apply` clears `outstandingFire` when a run starts, and that run's row already has its
-    /// summary.) `delivered` and `pathsWithheld` stay at zero: only the runner's prompt build
-    /// knows how many paths got past the cap and the guard.
-    func takeHeldPaths(_ jobId: UUID) -> (paths: [String], summary: WatchSummary) {
-        guard var subscriber = subscribers[jobId] else { return ([], WatchSummary()) }
+    /// the only one that will ever carry them. (A `.run` admission does not come through here with
+    /// a fire outstanding: `apply` clears `outstandingFire` when the handler returns, and what
+    /// stops a second fire for those paths is `tick` skipping `fireOutstanding` until it does.)
+    /// `delivered` and `pathsWithheld` stay at zero: only the runner's prompt build knows how many
+    /// paths got past the cap and the guard.
+    ///
+    /// `nil` — no subscriber, or no fire outstanding — rather than a summary of zeroes: there is a
+    /// difference between "this burst saw nothing" and "nobody counted", and only the second one
+    /// belongs in the row as a null column. A watch whose job was deleted mid-run, and a held
+    /// re-fire for a watch the coordinator never fired, are both the second.
+    func takeHeldPaths(_ jobId: UUID) -> (paths: [String], summary: WatchSummary?) {
+        guard var subscriber = subscribers[jobId] else { return ([], nil) }
         let taken = subscriber.heldPaths.union(subscriber.pending).sorted()
-        let previous = subscriber.outstandingFire?.summary
-        let summary = WatchSummary(
-            delivered: 0,
-            changed: (previous?.changed ?? 0) + subscriber.changed,
-            overflow: (previous?.overflow ?? 0) + subscriber.overflow,
-            coalesced: (previous?.coalesced ?? 0) + subscriber.coalesced,
-            noise: (previous?.noise ?? 0) + subscriber.noise,
-            ownWrites: (previous?.ownWrites ?? 0) + subscriber.ownWrites,
-            ceilingFired: previous?.ceilingFired ?? false,
-            pathsWithheld: false)
+        let counted = subscriber
+        let summary = subscriber.outstandingFire.map { outstanding in
+            WatchSummary(delivered: 0,
+                         changed: outstanding.summary.changed + counted.changed,
+                         overflow: outstanding.summary.overflow + counted.overflow,
+                         coalesced: outstanding.summary.coalesced + counted.coalesced,
+                         noise: outstanding.summary.noise + counted.noise,
+                         ownWrites: outstanding.summary.ownWrites + counted.ownWrites,
+                         ceilingFired: outstanding.summary.ceilingFired,
+                         pathsWithheld: false)
+        }
         subscriber.heldPaths = []
         subscriber.pending = []
         subscriber.fireOutstanding = false
@@ -645,22 +666,27 @@ actor WatchCoordinator {
         subscriber.ownWrites = 0
     }
 
-    // MARK: The production loop (wired by Task 5)
+    // MARK: The production loop
 
     /// Sleeps to the next deadline and ticks. Deliberately thin: every decision is in `tick`,
-    /// which is why the tests never start this.
+    /// which is why the unit tests call that instead.
     ///
-    /// `everyMinute` is the housekeeping the watch layer hangs off the same timer (Task 5 supplies
-    /// it); it is called at most once a minute however often the loop wakes for a window.
+    /// `everyMinute` is the housekeeping the watch layer hangs off the same timer — in the app,
+    /// the periodic re-stat of every watch root (§7). It is called at most once a minute however
+    /// often the loop wakes for a window.
     ///
-    /// **Not finished: there is no wake.** `nextDeadline()` is read once, before the sleep, so an
-    /// event accepted a second into an idle 60 s sleep is not evaluated until that sleep ends — a
-    /// 3 s window can fire nearly a minute late, and the ceiling means nothing for the first burst
-    /// after an idle period. §2 says the loop sleeps "until the earliest deadline **or until woken
-    /// by an accepted event**", and the waking half is Task 5's to wire (a continuation resumed
-    /// from `deliver` when a batch accepts anything, raced against the sleep). Recorded here
-    /// because the loop is here; nothing in production starts it yet.
-    func startLoop(everyMinute: @escaping @Sendable () async -> Void) {
+    /// The wait is `min(nextDeadline(), now + 60 s)` **or until an accepted event wakes it**
+    /// (§2). Both halves are needed: the deadline is read once, before the wait, so without the
+    /// wake the first save after a quiet period would sit through the rest of a 60 s sleep and its
+    /// 3 s window would fire nearly a minute late; and without the ceiling of 60 s a clock the
+    /// process cannot see moving (a laptop waking from sleep) would never be noticed.
+    ///
+    /// `sleep` is injected so a test can drive this loop on its own clock rather than in real
+    /// seconds — a wake is only observable from the loop, never from `tick`.
+    func startLoop(everyMinute: @escaping @Sendable () async -> Void,
+                   sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
+                       try? await Task.sleep(for: .seconds(seconds))
+                   }) {
         guard loop == nil else { return }
         loop = Task { [weak self] in
             var lastHousekeeping = Date.distantPast
@@ -668,7 +694,7 @@ actor WatchCoordinator {
                 guard let self else { return }
                 let at = await self.instant()
                 let wait = await self.nextDeadline().map { Swift.max($0.timeIntervalSince(at), 0) } ?? 60
-                try? await Task.sleep(for: .seconds(Swift.min(Swift.max(wait, 0.05), 60)))
+                await self.waitOrWake(Swift.min(Swift.max(wait, 0.05), 60), sleeping: sleep)
                 if Task.isCancelled { return }
                 await self.tick(now: await self.instant())
                 let cycled = await self.instant()
@@ -683,6 +709,46 @@ actor WatchCoordinator {
     func stopLoop() {
         loop?.cancel()
         loop = nil
+        // A cancelled task parked on a continuation stays parked: nothing resumes it and the loop
+        // never returns. Releasing it here is what makes `stopLoop` actually stop.
+        resumeSleeper()
+    }
+
+    /// The loop's one wait: whichever comes first, the deadline or a wake.
+    ///
+    /// A timer task races a continuation rather than a task group racing two children, because the
+    /// wake side parks indefinitely — a group would have to cancel it and then wait for it, which
+    /// is the deadlock this avoids. `pendingWake` closes the window where the wake arrives (or the
+    /// timer fires, for a zero-length wait) before the loop has parked.
+    private func waitOrWake(_ seconds: TimeInterval,
+                            sleeping sleep: @escaping @Sendable (TimeInterval) async -> Void) async {
+        let timer = Task { [weak self] in
+            await sleep(seconds)
+            if Task.isCancelled { return }
+            await self?.signalWake()
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            if pendingWake {
+                pendingWake = false
+                continuation.resume()
+            } else {
+                sleeper = continuation
+            }
+        }
+        timer.cancel()
+    }
+
+    /// Wakes the loop, or remembers that it should not park when it next tries to. Called for a
+    /// batch that accepted at least one path — the only thing that can move the earliest deadline
+    /// earlier — and by the timer when the wait runs out.
+    private func signalWake() {
+        if sleeper != nil { resumeSleeper() } else { pendingWake = true }
+    }
+
+    private func resumeSleeper() {
+        guard let sleeper else { return }
+        self.sleeper = nil
+        sleeper.resume()
     }
 
     private func instant() -> Date { now() }

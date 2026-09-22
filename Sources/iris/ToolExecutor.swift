@@ -1,34 +1,22 @@
 import Foundation
 
-/// What the job-creating tools need from the app: the ledger to write into, and the watcher
-/// manager to reload once the write lands. They travel together because a watch job that is
-/// stored but not reloaded does nothing until the next launch.
+/// What the job-creating tools need from the app: the ledger to write into. Nothing else —
+/// storing a job is the whole of registering a watch now, because the ledger's `onJobsChanged`
+/// hook is what tells the watch layer to catch up (#187 deliverable 4, §7), and an engine that
+/// never called `start()` has no watch layer for a second handle to reach.
 struct JobTools: Sendable {
     let ledger: JobLedger
-    let watchers: WatcherManager
-    /// What one watch fire does. Carried alongside the ledger because a `WatcherManager` gets both
-    /// or neither: `setCallback` has a single caller, `IrisEngine.start()`, three lines from its
-    /// `configure(ledger:)`. A manager adopted by an engine that never started would otherwise run
-    /// a live FSEvents stream whose fires go nowhere. No default — every caller has to say.
-    let watcherCallback: @Sendable (Job, [String]) async -> Void
-
-    init(ledger: JobLedger, watchers: WatcherManager,
-         watcherCallback: @escaping @Sendable (Job, [String]) async -> Void) {
-        self.ledger = ledger
-        self.watchers = watchers
-        self.watcherCallback = watcherCallback
-    }
 }
 
 struct ToolExecutor {
     static let shared = ToolExecutor()
 
-    /// How `register_directory_watcher` reaches the jobs table and the watchers running off it.
-    /// The executor is a value type built long before the conversation store opens, so the engine
-    /// hands it a closure that resolves both on demand rather than a ledger at construction — an
-    /// engine that never calls `start()` (a subagent, an evaluator, a scenario run) still gets a
-    /// working tool. nil — the case for `ToolExecutor.shared` and for the plugin auth runner's
-    /// throwaway executor — means the tool declines instead of registering a watch nothing runs.
+    /// How `register_directory_watcher` and `schedule_job` reach the jobs table. The executor is a
+    /// value type built long before the conversation store opens, so the engine hands it a closure
+    /// that resolves the ledger on demand rather than one at construction — an engine that never
+    /// calls `start()` (a subagent, an evaluator, a scenario run) still gets a working tool. nil —
+    /// the case for `ToolExecutor.shared` and for the plugin auth runner's throwaway executor —
+    /// means the tool declines instead of registering a watch nothing runs.
     var jobToolsProvider: (@Sendable () async -> JobTools?)?
 
     /// How the sandboxed branch of `run_command` reaches the container session. Injectable so a
@@ -219,9 +207,9 @@ struct ToolExecutor {
         }
     }
     
-    /// Stores a `.fsEvent` job for `path` and restarts the watch set. The job is named after the
-    /// directory being watched rather than the instructions, because that is what a user scanning
-    /// the jobs list is looking for.
+    /// Stores a `.fsEvent` job for `path`. The job is named after the directory being watched
+    /// rather than the instructions, because that is what a user scanning the jobs list is looking
+    /// for.
     ///
     /// Re-registering a path already watched rewrites that job's instructions and destination in
     /// place rather than adding a second one: the model re-states a standing instruction often (a
@@ -260,8 +248,11 @@ struct ToolExecutor {
                     // queued, not dropped. An existing job keeps whatever policy it was given.
                     policy: JobPolicy(overlap: .queue))
             }
+            // The write is the registration: in the app, `onJobsChanged` syncs the coordinator
+            // and the stream set within the same second. An engine that never started (a subagent,
+            // an evaluator, a scenario run) has no hook installed and no watcher running, so there
+            // is nothing here to reload — the job is stored and the next launch picks it up.
             try tools.ledger.upsert(job)
-            await tools.watchers.reload(adoptingIfUnconfigured: tools.ledger, callback: tools.watcherCallback)
             return "Watching \(path) as job '\(job.name)'. It runs in the background when files change; you will be notified automatically."
         } catch {
             return "Could not save the watcher job."

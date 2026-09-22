@@ -1040,4 +1040,100 @@ struct WatchCoordinatorTests {
         await coordinator.tick(now: Self.at(7200))
         #expect(await recorder.count == 1, "and nothing fires a second time on the same burst")
     }
+
+    // MARK: The production loop
+
+    /// The injected sleep. Short waits move the clock and return; the idle 60 s wait parks until
+    /// the loop cancels it, which is what a wake looks like from here.
+    actor Sleeps {
+        private let clock: Clock
+        private(set) var requested: [TimeInterval] = []
+        init(clock: Clock) { self.clock = clock }
+
+        func wait(_ seconds: TimeInterval) async {
+            requested.append(seconds)
+            guard seconds < 30 else {
+                while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
+                return
+            }
+            clock.set(clock.now.addingTimeInterval(seconds))
+        }
+
+        var parkedOnTheIdleWait: Bool { requested.contains { $0 >= 30 } }
+        var shortWaits: [TimeInterval] { requested.filter { $0 < 30 } }
+    }
+
+    @Test("an accepted event wakes the loop instead of waiting out the idle sleep")
+    func theLoopIsWokenByAnAcceptedEvent() async throws {
+        // F3. `nextDeadline()` is read before the sleep, so a watch that has been quiet is parked
+        // on a 60 s wait when the first save of a burst lands. Without a wake, its 3 s window
+        // expires unnoticed and the run happens up to a minute late — §2 promises the loop sleeps
+        // "until the earliest deadline or until woken by an accepted event". This test drives the
+        // loop, not `tick`: `tick` is the unit seam and cannot see the bug.
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder()
+        let job = Self.job("notes", root: "/r")
+        try store.ledger.upsert(job)
+        let coordinator = Self.coordinator(ledger: store.ledger, clock: clock,
+                                           writes: RecentWrites(now: { clock.now }), recorder: recorder)
+        await coordinator.sync(with: [job])
+
+        let sleeps = Sleeps(clock: clock)
+        await coordinator.startLoop(everyMinute: {}, sleep: { await sleeps.wait($0) })
+        await Self.eventually("the loop to park on its idle wait") { await sleeps.parkedOnTheIdleWait }
+
+        await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
+
+        await recorder.waitFor(1)
+        #expect(await recorder.paths == [["/r/a.txt"]])
+        #expect(await sleeps.shortWaits.contains { $0 > 2.9 && $0 <= 3.0 } == true,
+                "woken, the loop sleeps to the window's deadline rather than to the minute")
+        await coordinator.stopLoop()
+    }
+
+    @Test("stopping the loop releases it even while it is parked on a wait")
+    func stopLoopReleasesAParkedLoop() async throws {
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder()
+        let coordinator = Self.coordinator(ledger: store.ledger, clock: clock,
+                                           writes: RecentWrites(now: { clock.now }), recorder: recorder)
+        let sleeps = Sleeps(clock: clock)
+        await coordinator.startLoop(everyMinute: {}, sleep: { await sleeps.wait($0) })
+        await Self.eventually("the loop to park on its idle wait") { await sleeps.parkedOnTheIdleWait }
+
+        await coordinator.stopLoop()
+        // A second `startLoop` proves the first one let go of the slot rather than leaving a task
+        // parked on a continuation nobody will resume.
+        await coordinator.startLoop(everyMinute: {}, sleep: { await sleeps.wait($0) })
+        await Self.eventually("the new loop to park in turn") { await sleeps.requested.count >= 2 }
+        await coordinator.stopLoop()
+    }
+
+    @Test("takeHeldPaths answers nil when nobody counted, not a summary of zeroes")
+    func takeHeldPathsSummaryIsNilWithoutAFire() async throws {
+        // The row's column is nullable for this exact distinction: "the burst saw nothing" and
+        // "no coordinator was counting" are different facts, and only the second is a null.
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder()
+        let job = Self.job("notes", root: "/r")
+        try store.ledger.upsert(job)
+        let coordinator = Self.coordinator(ledger: store.ledger, clock: clock,
+                                           writes: RecentWrites(now: { clock.now }), recorder: recorder)
+        await coordinator.sync(with: [job])
+
+        // No subscriber at all.
+        let unknown = await coordinator.takeHeldPaths(UUID())
+        #expect(unknown.paths.isEmpty)
+        #expect(unknown.summary == nil)
+
+        // A subscriber mid-burst, but no fire outstanding: the paths are owed to the re-fire, the
+        // arithmetic belongs to the fire that never happened.
+        await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
+        let quiet = await coordinator.takeHeldPaths(job.id)
+        #expect(quiet.paths == ["/r/a.txt"])
+        #expect(quiet.summary == nil)
+    }
 }

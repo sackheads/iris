@@ -104,20 +104,16 @@ actor IrisEngine {
     }
 
     /// How an engine that never called `start()` — a subagent, an evaluator, a scenario run —
-    /// still gets working job tools: both the ledger and the watch-fire callback are resolved per
-    /// call off this engine, rather than read from whatever `start()` happened to configure.
-    /// Resolved per call, not at `start()`: an engine that never starts otherwise answers "Jobs
-    /// are not available yet." to a tool whose ledger is sitting right there on its state.
+    /// still gets working job tools: the ledger is resolved per call off this engine's own state,
+    /// rather than read from whatever `start()` happened to configure. An engine that never starts
+    /// otherwise answers "Jobs are not available yet." to a tool whose ledger is sitting right
+    /// there on its state.
     private func jobToolsProvider() -> @Sendable () async -> JobTools? {
-        { [weak self, weak state] in
-            guard let self,
-                  let ledger = await MainActor.run(resultType: JobLedger?.self, body: { state?.store.ledger })
+        { [weak state] in
+            guard let ledger = await MainActor.run(resultType: JobLedger?.self,
+                                                   body: { state?.store.ledger })
             else { return nil }
-            // The fire callback travels with the ledger: `WatcherManager.shared` is handed both in
-            // `start()` or neither, so a watch registered through an unstarted engine would
-            // otherwise run a live FSEvents stream with nowhere to deliver to. Same closure
-            // `start()` installs.
-            return JobTools(ledger: ledger, watchers: .shared, watcherCallback: await self.watcherCallback())
+            return JobTools(ledger: ledger)
         }
     }
     let manager = SkillManager.shared
@@ -162,6 +158,9 @@ actor IrisEngine {
     private(set) var jobScheduler: JobScheduler?
     /// Built lazily by `jobRunner()`; see there.
     private var jobRunnerInstance: JobRunner?
+    /// The watch layer's clock and bookkeeping (#187 deliverable 4). Built by `start()` and only
+    /// there: a subagent or an evaluator must not run a second set of windows over the same jobs.
+    private var watchCoordinatorInstance: WatchCoordinator?
     /// Whether this launch has already swept runs left `running` by the previous one.
     private var closedInterruptedRuns = false
 
@@ -521,12 +520,10 @@ actor IrisEngine {
         let pluginConfigs = await PluginManager.shared.mcpConfigs()
         await MCPManager.shared.setPluginConfigs(pluginConfigs)
         await MCPManager.shared.startServers()
-        await WatcherManager.shared.setCallback(watcherCallback())
 
         if let ledger = jobLedger {
-            await WatcherManager.shared.configure(ledger: ledger)
+            await startWatching(ledger: ledger)
         }
-        await WatcherManager.shared.reload()
 
         // Check whether Ollama is reachable when any auxiliary engine depends on it.
         // A silent failure here means Vibecop / PromptGuard timeouts with no user-visible cause.
@@ -2122,21 +2119,81 @@ actor IrisEngine {
         }
     }
 
-    /// What one watch fire does, as `start()` wires it into `WatcherManager.shared`. Factored out
-    /// for the same reason `fireHandler()` was: the job tools hand this to a manager an unstarted
-    /// engine adopts (`JobTools.watcherCallback`), and the two paths must install one definition.
+    /// The watch layer's live coordinator, or nil in a process that never called `start()`.
+    /// `/jobs` reads the absorbed counts off it; nothing else should reach into it.
+    func watchCoordinator() -> WatchCoordinator? { watchCoordinatorInstance }
+
+    /// Brings watches up (#187 deliverable 4, §7). Three seams and one hook:
     ///
-    /// Straight to the runner, NOT through `JobScheduler`: a watch fire has no cadence to advance.
-    /// It meets the same admission as a scheduled one all the same — `JobRunner.fire` is where
-    /// overlap, the breaker and the budgets are decided (§4) — and a watch fire that overlaps is
-    /// dropped without a row, because FSEvents delivers a burst per save and one `interrupted` row
-    /// per event would be noisier than the overlap itself. Deliverable 4 owns
-    /// `FSWatch.quietWindowSeconds` and turns that into coalescing.
-    func watcherCallback() -> @Sendable (Job, [String]) async -> Void {
-        { [weak self] job, paths in
-            guard let runner = await self?.jobRunner() else { return }
-            await runner.fire(job: job, origin: .watcher(paths: paths))
+    /// - the **coordinator** owns every watch's time and fires straight at the runner, NOT through
+    ///   `JobScheduler` — a watch fire has no cadence to advance. It meets the same admission as a
+    ///   scheduled fire all the same: `JobRunner.fire` is where overlap, the breaker and the
+    ///   budgets are decided (§4), and its answer is what the coordinator branches on;
+    /// - the **manager** owns one FSEvents stream per root and tags every batch with it;
+    /// - the **held-paths source** is the other half of overlap `queue`: what the watch saw while
+    ///   a run was going, taken by the re-fire that run releases (§3);
+    /// - and `onJobsChanged` keeps all of it in step with the jobs table, so a pause, a resume, a
+    ///   delete or a registration takes effect within the second rather than at the next launch.
+    ///
+    /// The engine owns the coordinator, so the handlers installed on the process-wide manager hold
+    /// it and the runner weakly: a singleton must not be what keeps an engine's objects alive.
+    private func startWatching(ledger: JobLedger) async {
+        // `AppState.start()` runs from `onAppear` and can run more than once. A second watch layer
+        // would be a second set of windows over the same jobs, and the second hook would replace
+        // the first — so the first coordinator would go on firing from a loop nothing can stop.
+        guard watchCoordinatorInstance == nil, let runner = await jobRunner() else { return }
+        let coordinator = WatchCoordinator(
+            ledger: ledger, now: Date.init, recentWrites: recentWrites,
+            fire: { [weak runner] job, fire in
+                await runner?.fire(job: job, origin: .watcher(paths: fire.paths),
+                                   watch: fire.summary)
+            })
+        watchCoordinatorInstance = coordinator
+        await runner.setHeldPathsSource { [weak coordinator] jobId in
+            await coordinator?.takeHeldPaths(jobId) ?? (paths: [], summary: nil)
         }
+
+        let manager = WatcherManager.shared
+        await manager.configure(ledger: ledger)
+        await manager.setBatchHandler { [weak coordinator] root, paths in
+            await coordinator?.deliver(root: root, paths: paths)
+        }
+        await manager.setUnavailableHandler { [weak runner] job, reason in
+            await runner?.pauseUnavailable(job: job, reason: reason)
+        }
+
+        ledger.onJobsChanged { [weak self, weak ledger] in
+            // A task, because the hook runs on whatever thread finished the write and must not
+            // wait on an actor — least of all one whose fire handler writes to this same ledger.
+            Task {
+                guard let self, let ledger else { return }
+                await self.syncWatches(ledger: ledger)
+            }
+        }
+        await syncWatches(ledger: ledger)
+        // The minute hand of §7's vanished-root check: FSEvents never reports a root that was
+        // deleted, so nothing but a periodic re-stat would ever notice.
+        await coordinator.startLoop(everyMinute: { [weak self, weak ledger] in
+            guard let self, let ledger else { return }
+            await self.syncWatches(ledger: ledger)
+        })
+    }
+
+    /// The two syncs, in the order §7 fixes: the coordinator first, so a batch can never arrive
+    /// for a subscriber that does not exist yet. A ledger read that fails leaves both exactly as
+    /// they are — the streams that are running keep running, and the next job change tries again;
+    /// tearing the watch set down because one read failed is the worse of the two answers.
+    private func syncWatches(ledger: JobLedger) async {
+        guard let coordinator = watchCoordinatorInstance else { return }
+        let jobs: [Job]
+        do {
+            jobs = try ledger.jobs()
+        } catch {
+            print("[Iris] could not read jobs to sync watches: \(error)")
+            return
+        }
+        await coordinator.sync(with: jobs)
+        await WatcherManager.shared.sync(with: jobs)
     }
 
     /// The scheduler `schedule_job` writes through: the one `start()` built, or one made here over

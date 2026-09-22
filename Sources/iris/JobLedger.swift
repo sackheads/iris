@@ -24,9 +24,29 @@ protocol JobUsageReading: Sendable {
 final class JobLedger: JobUsageReading, Sendable {
     private let writer: any DatabaseWriter
     private let skippedCount = OSAllocatedUnfairLock(initialState: 0)
+    /// What to tell when the *set* of jobs changes (#187 deliverable 4, §7). A lock rather than a
+    /// `var` because this class is `Sendable` by being immutable, and one hook rather than a list
+    /// because there is exactly one caller: `IrisEngine.start()`, wiring the watch layer.
+    private let jobsChanged = OSAllocatedUnfairLock<(@Sendable () -> Void)?>(initialState: nil)
 
     init(writer: any DatabaseWriter) {
         self.writer = writer
+    }
+
+    /// Installs the hook that runs after every write that can change which directories are
+    /// watched. Set once, at launch; a second call replaces the first.
+    func onJobsChanged(_ hook: @escaping @Sendable () -> Void) {
+        jobsChanged.withLock { $0 = hook }
+    }
+
+    /// Runs the hook, if there is one. Called **after** `writer.write` returns and never inside
+    /// it: the hook reads `jobs()`, and a read from inside the write would re-enter the writer
+    /// this thread is already holding. Only the three writes that can change the watch set call
+    /// it — `upsert`, `delete`, `setPaused` — so the cadence writers, which run every few seconds
+    /// for every scheduled job, cost nothing. A write that threw never gets here: nothing changed,
+    /// so there is nothing to resync.
+    private func notifyJobsChanged() {
+        jobsChanged.withLock { $0 }?()
     }
 
     /// How many rows the most recent `jobs()` call could not decode. Reset by each `jobs()` call.
@@ -90,6 +110,7 @@ final class JobLedger: JobUsageReading, Sendable {
                                arguments: [job.id.uuidString])
             }
         }
+        notifyJobsChanged()
     }
 
     /// The gate inside a stored `trigger` column, or `nil` — for a trigger that carries none, and
@@ -102,6 +123,7 @@ final class JobLedger: JobUsageReading, Sendable {
         try writer.write { db in
             try db.execute(sql: "DELETE FROM jobs WHERE id = ?", arguments: [jobId.uuidString])
         }
+        notifyJobsChanged()
     }
 
     /// Records the outcome of a fire: when this job next runs and when it last ran. Leaves
@@ -125,6 +147,7 @@ final class JobLedger: JobUsageReading, Sendable {
                            arguments: [reason, jobId.uuidString])
             guard db.changesCount > 0 else { throw JobLedgerError.unknownJob(jobId) }
         }
+        notifyJobsChanged()
     }
 
     /// Stamps when a job last actually started a turn, without touching its cadence. The runner

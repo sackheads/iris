@@ -94,12 +94,14 @@ actor JobRunner {
     /// real event source). Optional: the `--run-job` process and every test that is not about
     /// watches has no coordinator at all, and a held re-fire there is exactly what it was before
     /// this deliverable — its paths, and a null summary column rather than invented arithmetic.
-    private var heldPathsSource: (@Sendable (UUID) async -> (paths: [String], summary: WatchSummary))?
+    private var heldPathsSource: (@Sendable (UUID) async -> (paths: [String], summary: WatchSummary?))?
 
     /// Wires the coordinator's held paths into the re-fire (#187 deliverable 4, §3). Set once at
-    /// launch, alongside the fire handler it is the other half of.
+    /// launch, alongside the fire handler it is the other half of. The summary is optional for the
+    /// same reason the column is: the coordinator answers `nil` when it never counted this fire,
+    /// and a null column is the honest record of that.
     func setHeldPathsSource(
-        _ source: @escaping @Sendable (UUID) async -> (paths: [String], summary: WatchSummary)
+        _ source: @escaping @Sendable (UUID) async -> (paths: [String], summary: WatchSummary?)
     ) {
         heldPathsSource = source
     }
@@ -264,8 +266,8 @@ actor JobRunner {
     /// property of the job, so it lives where every fire passes.
     ///
     /// Every decision is made on the row read back here, not on the `Job` the caller was handed.
-    /// A watcher fire carries the copy `WatcherManager.reload()` captured when the stream was
-    /// started, which can be minutes or days old: deciding on it would re-admit a job that has
+    /// A watcher fire carries the copy the coordinator's subscriber was built from at the last
+    /// `sync`, which can be minutes or days old: deciding on it would re-admit a job that has
     /// since been paused — writing a pause row and a card per filesystem event — and would run a
     /// prompt the user has edited since. A job deleted out from under a fire drops silently: there
     /// is nothing left to run, record or report on.
