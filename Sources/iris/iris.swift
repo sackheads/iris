@@ -3245,12 +3245,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct IrisApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     init() {
+        // First, before anything else in the launch sequence: this claims the store for this app
+        // instance, and `iris --run-job` refuses while the file names a live process (#187 §8).
+        // Nothing above it may touch `conversations.sqlite` — today nothing here does, and keeping
+        // the acquire first is what stops that becoming a window rather than a rule.
+        // Best-effort, deliberately: a lock that cannot be written must not stop the app
+        // launching. `AppDelegate.applicationWillTerminate` gives it back.
+        GUILock.acquire()
         IrisMigrator.migrate(.default)
         ShippedSkills.seedIfNeeded(.default)
-        // Claim the store for this app instance: `iris --run-job` refuses while this file names a
-        // live process (#187 §8). Best-effort, and deliberately so — a lock that cannot be written
-        // must not stop the app launching; `AppDelegate.applicationWillTerminate` gives it back.
-        GUILock.acquire()
         Task {
             await SandboxSessionManager.shared.reapOrphans()
             while true {

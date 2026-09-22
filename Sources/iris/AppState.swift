@@ -518,23 +518,34 @@ class AppState {
     /// so tests can pin `.provisioned`/`.unprovisioned` without depending on whether this machine
     /// happens to have the real guard models under `~/.iris/models`. `tier2Provisioning` mirrors
     /// `tier3Provisioning` (#202) for the tier-2 CoreML model (#210).
+    ///
+    /// `createIfEmpty` and `emitLaunchNotices` are both things a *window* needs and a headless
+    /// caller must not do to somebody's store: `iris --run-job` (#187 §8) opens the real database,
+    /// fires one job and flushes, so without these it would commit an empty "New Conversation" and
+    /// a guard-provisioning notice on every measurement. Neither affects a run, its row, its card
+    /// or its approvals; only the app passes true.
     init(store: ConversationStore = .makeDefault(),
          tier2Provisioning: InjectionGuard.Tier2Provisioning? = nil,
-         tier3Provisioning: InjectionGuard.Tier3Provisioning? = nil) {
+         tier3Provisioning: InjectionGuard.Tier3Provisioning? = nil,
+         createIfEmpty: Bool = true,
+         emitLaunchNotices: Bool = true) {
         self.store = store
         self.engine = IrisEngine(state: self)
         loadConversations()
         // `selectedConversationId == nil` covers more than an empty store: #187's background job
         // conversations are loaded but never selected, so a store holding nothing else still has
         // to open in a fresh conversation.
-        if conversations.isEmpty || selectedConversationId == nil {
+        if createIfEmpty, conversations.isEmpty || selectedConversationId == nil {
             createNewConversation()
         }
+        // Where a launch notice goes, or nowhere. One expression rather than a condition on each
+        // of the six below, so a notice added later cannot miss the switch.
+        let noticeTarget = emitLaunchNotices ? selectedConversationId : nil
         // Every launch notice below goes through `appendLaunchNotice`, which persists it like any
         // other system message but skips it when the same wording is already in the conversation.
         // Several of these conditions recur on every launch until a human intervenes, so dedup by
         // content is what keeps them from stacking up.
-        if !loadedSkippedRows.isEmpty, let target = selectedConversationId {
+        if !loadedSkippedRows.isEmpty, let target = noticeTarget {
             // Two different things end up in `skipped`, and they need different wording. A bad
             // message/history row belonging to a conversation that still loaded was moved to
             // `quarantine` and the conversation came back without it. Rows belonging to a
@@ -572,19 +583,19 @@ class AppState {
         // The legacy UserDefaults blob existed but couldn't be decoded (spec §6): the backup key
         // is already set and the live key already removed (LegacyConversationBlob does both), so
         // this fires exactly once — say so in the app, not just the console log.
-        if legacyBlobUndecodable, let target = selectedConversationId {
+        if legacyBlobUndecodable, let target = noticeTarget {
             appendLaunchNotice("The saved conversations from an earlier version could not be read. A copy was kept in the app settings under a key beginning iris_conversations_backup_.",
                                to: target)
         }
         // The blob decoded fine but the write into the store failed: the live key is left in
         // place by `LegacyConversationBlob` for a retry, so say that instead of "could not be read".
-        if legacyBlobImportFailed, let target = selectedConversationId {
+        if legacyBlobImportFailed, let target = noticeTarget {
             appendLaunchNotice("The saved conversations from an earlier version could not be imported; they will be retried at the next launch.",
                                to: target)
         }
         // `store.loadAll()` itself threw (not a per-row skip): logged in `loadConversations()`;
         // say so here too so the loss is visible, not only in the console log.
-        if let headline = loadFailureHeadline, let target = selectedConversationId {
+        if let headline = loadFailureHeadline, let target = noticeTarget {
             appendLaunchNotice("Saved conversations could not be loaded (\(headline)). Starting with an empty list; the database was left untouched.",
                                to: target)
         }
@@ -592,7 +603,7 @@ class AppState {
         // neither guard model downloaded, and the guard silently skips the model-backed tiers
         // rather than blocking — say so once, visibly, naming whichever tier(s) are missing,
         // instead of leaving that only to the P2/P3 LEDs' tooltips.
-        if let target = selectedConversationId {
+        if let target = noticeTarget {
             let resolvedTier2Provisioning = tier2Provisioning ?? InjectionGuard.tier2Provisioning(
                 modelName: ConfigManager.shared.promptGuardCoreMLModel,
                 modelsDir: IrisPaths.default.modelsDir)
@@ -610,7 +621,7 @@ class AppState {
         // read-only database): the conversation is left out of this load entirely, untouched on
         // disk, rather than returned with its in-memory array compacted past ordinals the disk
         // still has gaps in.
-        if !loadedRepairFailed.isEmpty, let target = selectedConversationId {
+        if !loadedRepairFailed.isEmpty, let target = noticeTarget {
             let n = loadedRepairFailed.count
             appendLaunchNotice("\(n) conversation\(n == 1 ? "" : "s") need\(n == 1 ? "s" : "") a repair that could not be written to \(IrisPaths.default.conversationsDB.lastPathComponent); \(n == 1 ? "it was" : "they were") left untouched and will be retried at the next launch.",
                                to: target)

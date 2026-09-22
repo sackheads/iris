@@ -40,6 +40,22 @@ struct RunJobCLITests {
                        usageMetadata: nil)
     }
 
+    /// A client that reports what it saw the instant it is asked — the one moment that is
+    /// unambiguously "during the run".
+    final class ProbingLLMClient: LLMClientProtocol, @unchecked Sendable {
+        private let reply: String
+        private let probe: @Sendable () -> Void
+        init(reply: String, probe: @escaping @Sendable () -> Void) {
+            self.reply = reply
+            self.probe = probe
+        }
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            probe()
+            return GeminiResponse(candidates: [Candidate(content: Content(
+                role: "model", parts: [Part(text: reply)]))], usageMetadata: nil)
+        }
+    }
+
     /// A lock path of this test's own, under the temp directory — never beside the real store.
     private func lockPath() -> URL {
         FileManager.default.temporaryDirectory
@@ -105,6 +121,17 @@ struct RunJobCLITests {
         #expect(err.text.contains(RunJobCLI.usage))
     }
 
+    @Test("the exit codes are the numbers, not whatever the constants happen to say")
+    func exitCodesArePinnedToTheirLiterals() {
+        // R35 and the docs promise 0/1/2/3 to scripts, and every other assertion in this file
+        // compares the implementation against its own constants — so all of them still pass with
+        // `notCompleted` set to 55. These four literals are the contract.
+        #expect(RunJobCLI.Exit.completed == 0)
+        #expect(RunJobCLI.Exit.usage == 1)
+        #expect(RunJobCLI.Exit.notCompleted == 2)
+        #expect(RunJobCLI.Exit.gateUnchanged == 3)
+    }
+
     // MARK: The GUI lock (ruling R35, spec §8)
 
     @Test("the CLI refuses while the GUI holds the lock, and says so")
@@ -154,6 +181,70 @@ struct RunJobCLITests {
         #expect(GUILock.state(at: path) == .app(pid: ProcessInfo.processInfo.processIdentifier))
         GUILock.release(at: path)
         #expect(!FileManager.default.fileExists(atPath: path.path))
+    }
+
+    @Test("the state a CLI run fires through never auto-approves, and is not a launch")
+    func theCLIStateFailsClosedAndLeavesNothingBehind() throws {
+        let store = try ConversationStore.inMemory()
+        let state = RunJobCLI.makeState(store: store)
+        // §8: approvals fail closed exactly as unattended. Set in `makeState`, read back here,
+        // because a flag that is only ever written is a flag whose default can change underneath.
+        #expect(state.autoApproveTools == false)
+        // And an empty store is left empty: a measurement command must not commit a "New
+        // Conversation" (or a launch notice) to somebody's real database on its way past.
+        #expect(state.conversations.isEmpty)
+        #expect(state.selectedConversationId == nil)
+    }
+
+    @Test("a CLI run over an empty store leaves only the run's own conversations behind")
+    func aRunAddsNoLaunchConversation() async throws {
+        let store = try ConversationStore.inMemory()
+        let job = self.job(name: "tidy")
+        try store.ledger.upsert(job)
+        _ = await RunJobCLI.run(RunJobCLI.Invocation(target: "tidy"), store: store,
+                                client: FakeLLMClient(responses: [textResponse("done")]),
+                                lockPath: lockPath(), protectionEnabled: false,
+                                out: { _ in }, err: { _ in })
+
+        let reloaded = try store.loadAll().conversations
+        // Exactly two, both the run's: its hidden transcript and the Activity conversation the
+        // card was delivered to. No "New Conversation", no launch notice.
+        #expect(reloaded.count == 2, "found: \(reloaded.map(\.title))")
+        #expect(reloaded.contains { $0.isBackground })
+        #expect(reloaded.contains { $0.title == AppState.activityConversationTitle })
+    }
+
+    @Test("a lock file that cannot be read at all is held, not free")
+    func anUnreadableLockFileIsHeld() throws {
+        let path = lockPath()
+        defer { try? FileManager.default.removeItem(at: path) }
+        // Not valid UTF-8: `try? String(contentsOf:)` answers nil for this exactly as it does for
+        // a file that is not there, and only one of those two is free.
+        try Data([0xFF, 0xFE, 0x00, 0x01]).write(to: path)
+        #expect(GUILock.state(at: path) == .unreadable(path: path.path))
+    }
+
+    @Test("a run takes the lock for its own length, so a second CLI run is refused")
+    func aRunHoldsTheLockWhileItRuns() async throws {
+        let store = try ConversationStore.inMemory()
+        let job = self.job(name: "holder")
+        try store.ledger.upsert(job)
+        let path = lockPath()
+        defer { try? FileManager.default.removeItem(at: path) }
+        let seen = Output()
+
+        // The fake client is asked mid-run, which is the only moment a second invocation could
+        // arrive: the lock has to be held *then*, not merely checked at the start.
+        let client = ProbingLLMClient(reply: "done") { seen.write("\(GUILock.state(at: path))") }
+        let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "holder"), store: store,
+                                       client: client, lockPath: path, protectionEnabled: false,
+                                       out: { _ in }, err: { _ in })
+
+        #expect(code == RunJobCLI.Exit.completed)
+        #expect(seen.text.contains("app(pid: \(ProcessInfo.processInfo.processIdentifier))"),
+                "the run must hold the lock while it runs, not only check it")
+        #expect(!FileManager.default.fileExists(atPath: path.path),
+                "and give it back when it is over")
     }
 
     // MARK: Lookup
@@ -377,6 +468,34 @@ struct RunJobCLITests {
         #expect(code == RunJobCLI.Exit.usage)
         #expect(err.text.contains("no gate"))
         #expect(client.callCount == 0)
+        #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty)
+    }
+
+    @Test("--dry-run with nothing injected asks the real evaluator, on the real host")
+    func dryRunUsesTheProductionEvaluator() async throws {
+        // The one dry-run test that does NOT inject `gate:`. Every other one does, which left
+        // `gate ?? JobRunner.liveGateEvaluator(...)` — the branch every real invocation takes —
+        // dead under `swift test`: an injectable default needs at least one test that does not
+        // inject. A `pathChanged` gate answers on the host with no container and no network, and
+        // with no previous signal the first look is a change by definition.
+        let store = try ConversationStore.inMemory()
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-runjob-gate-\(UUID().uuidString).txt")
+        try Data("hello".utf8).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let job = self.job(name: "real-gate",
+                           trigger: .poll(PollSpec(schedule: .interval(seconds: 60),
+                                                   gate: .pathChanged(path: file.path))))
+        try store.ledger.upsert(job)
+        let out = Output()
+
+        let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "real-gate", dryRun: true),
+                                       store: store, client: FakeLLMClient(responses: []),
+                                       lockPath: lockPath(), protectionEnabled: false,
+                                       out: { out.write($0) }, err: { out.write($0) })
+
+        #expect(code == RunJobCLI.Exit.completed)
+        #expect(out.text.contains("verdict: changed"))
         #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty)
     }
 

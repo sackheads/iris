@@ -67,7 +67,7 @@ Lands after `#163` and `#177`.
 
 ### Observability
 
-`/jobs` in any conversation lists jobs with last status and next fire. A run log view shows the ledger with the transcript one click away. `iris --run-job <id-or-name> [--dry-run] [--json]` runs one job headlessly against the real store and prints its ledger row, so the eval harness can measure a gate's false-positive rate and a job's cost before the job is trusted; nothing lands unmeasured, same as every other Iris feature. It exits 0 for a completed run, 2 for a failed, blocked or refused one, 3 for a `--dry-run` gate that saw nothing change, and 1 for usage, an unknown job or the app holding the store's lock file — it refuses to write behind a live app. See `docs/jobs.md`.
+`/jobs` in any conversation lists jobs with last status and next fire. A run log view shows the ledger with the transcript one click away. `iris --run-job <id-or-name> [--dry-run] [--json]` runs one job headlessly against the real store and prints its ledger row, so the eval harness can measure a gate's false-positive rate and a job's cost before the job is trusted; nothing lands unmeasured, same as every other Iris feature. It exits 0 for a completed run, 2 for one that did not complete (failed, blocked on approval, interrupted, refused by admission, or a gate that could not answer), 3 for a `--dry-run` gate that saw nothing change, and 1 for usage, an unknown job, `--dry-run` on an ungated job, or the store's lock being held — it refuses to write behind a live app, and holds the same lock itself for the length of a run. See `docs/jobs.md` for the full table.
 
 ### Native surfaces (later)
 

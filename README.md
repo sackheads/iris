@@ -203,10 +203,12 @@ fail closed exactly as they do unattended, and the run's event card is delivered
 Iris Activity conversation shows it the next time you open the app. It **refuses while the app is
 running** (a pid lock file beside the store) rather than writing behind a live `AppState`.
 
-Exit codes: `0` completed (or a `--dry-run` gate that saw a change), `2` failed, blocked on
-approval or refused by admission, `3` a `--dry-run` gate that saw no change, `1` usage, an unknown
-job, or the app holding the lock. Full detail, including what a dry run does and does not record,
-is in **[docs/jobs.md](docs/jobs.md)**.
+Exit codes: `0` completed (or a `--dry-run` gate that saw a change); `2` failed, blocked on
+approval, interrupted, or refused by admission (and a gate that could not answer); `3` a
+`--dry-run` gate that saw no change; `1` usage, an unknown job, `--dry-run` on a job with no gate,
+a store that would not open, or the lock being held. Full detail, including what a dry run does
+and does not record and what the lock does and does not protect, is in
+**[docs/jobs.md](docs/jobs.md)**.
 
 ### Updates & Releases
 

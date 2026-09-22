@@ -553,23 +553,44 @@ settings copy. A tool call a read-only profile denies, or one that would need a 
 as a `blocked on approval` run with the call on it — the same row and the same card a scheduled
 fire would leave, so the card is in the Activity conversation the next time you open the app.
 
+Apart from the run's own two conversations — its hidden transcript and the Activity conversation
+the card lands in — the command leaves nothing behind. The things a *launch* does and a
+measurement must not (creating an empty conversation in a store with nothing selected, appending
+the guard-provisioning and unreadable-row notices) are suppressed for a CLI run; the fire, its
+row, its card and its approvals are untouched by that.
+
 **It refuses while the app is running.** The app writes a lock file holding its pid beside the
-store (`conversations.sqlite.lock`) at launch and removes it at exit. GRDB's WAL would survive two
-writers, but `AppState` keeps conversation state in memory, so a CLI write behind a live app
-desyncs the UI and the app then saves its stale copy over the top. A lock left behind by a crash
-names a process that no longer exists and is ignored; one that cannot be parsed is treated as held,
-and the message names the file to delete.
+store (`conversations.sqlite.lock`) at launch and removes it at exit; `--run-job` takes the same
+lock for the length of its run and gives it back. GRDB's WAL would survive two writers, but
+`AppState` keeps conversation state in memory, so a CLI write behind a live app desyncs the UI and
+the app then saves its stale copy over the top. A lock left behind by a crash names a process that
+no longer exists and is ignored; one that cannot be read or parsed is treated as held, and the
+message names the file to delete.
+
+What that covers, exactly: a CLI run started while the app is up, and a second CLI run started
+while the first one is going. What it does **not** cover is the app being launched *during* a CLI
+run — the app never checks the lock, it simply takes it — so do not start Iris while a `--run-job`
+is in flight. (An app that starts mid-run also keeps the lock afterwards: the CLI's release is
+pid-guarded and will not delete somebody else's.)
 
 | Exit | Meaning |
 | --- | --- |
 | `0` | The run `completed` — or, with `--dry-run`, the gate says something changed |
-| `1` | Usage, no job with that id or name, a store that would not open, or the app holding the lock |
-| `2` | The run did not complete: `failed`, `blocked on approval`, an admission refusal (paused, overlap, breaker, budget), or a gate that could not answer |
+| `1` | Usage; no job with that id or name; `--dry-run` on a job that has no gate; a store that would not open; the app (or another `--run-job`) holding the lock; or the job being deleted out from under the fire |
+| `2` | The run did not complete: `failed`, `blocked on approval`, `interrupted`, an admission refusal (paused, disabled, overlap, breaker, budget), or a gate that could not answer |
 | `3` | The gate looked and nothing had changed (`--dry-run`) |
 
 Without `--json` the row prints one field per line (`job`, `run`, `status`, `trigger`, `started`,
 `duration`, `tokens`, `gate`, then `outcome` / `reason` / `blocked tool` when there is one). With
-`--json` it is a single object with sorted keys, which is what a script or `jq` should read.
+`--json` it is a single object with sorted keys, which is what a script or `jq` should read; a
+refusal or an error prints its sentence to stderr and, under `--json`, a `{"error": …,
+"exitCode": …}` object on stdout too, so a pipeline is never handed an empty stdout.
+
+One known gap, and it is pre-existing rather than new: a few tool implementations reach
+`AppState.shared` directly (skill curation, plugin auth). In the app that is the app's own state;
+in a `--run-job` process it would open a *second* `AppState` over the same store. A read-only job
+cannot reach any of those tools, so this is only in play for a `mutating` job, and the durable fix
+is threading the run's own state to those call sites.
 
 ## The job tools
 

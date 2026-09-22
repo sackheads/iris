@@ -27,8 +27,12 @@ enum GUILock {
     }
 
     static func state(at url: URL) -> State {
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return .free }
-        guard let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0 else {
+        // Existence and readability are two questions, and `try?` answers both with the same nil:
+        // no file, a file that is not valid UTF-8, and a file this user may not read all looked
+        // alike, and only the first of them is free.
+        guard FileManager.default.fileExists(atPath: url.path) else { return .free }
+        guard let text = try? String(contentsOf: url, encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0 else {
             return .unreadable(path: url.path)
         }
         // Signal 0 asks the kernel whether the process exists without sending anything. `EPERM`
@@ -135,8 +139,9 @@ enum RunJobCLI {
     ///
     /// `store` is an autoclosure because the order matters: usage and the lock are decided
     /// *before* anything opens a database file, so a run refused behind a live app never touches
-    /// the store at all. `runner` is nil in production — the CLI builds the same `AppState`,
-    /// engine and `JobRunner` the app fires through.
+    /// the store at all. The lock is then *taken* for the length of the run, which is what keeps
+    /// two CLI runs off one store. `runner` is nil in production — the CLI builds the same
+    /// `AppState`, engine and `JobRunner` the app fires through.
     @MainActor
     static func run(_ invocation: Invocation,
                     store openStore: @autoclosure () throws -> ConversationStore,
@@ -148,41 +153,49 @@ enum RunJobCLI {
                     out: (String) -> Void = { print($0) },
                     err: (String) -> Void = { FileHandle.standardError.write(Data(($0 + "\n").utf8)) })
         async -> Int32 {
+        func refuse(_ message: String, appendingUsage: Bool = false) -> Int32 {
+            fail(message, code: Exit.usage, json: invocation.json, dryRun: invocation.dryRun,
+                 usage: appendingUsage, out: out, err: err)
+        }
         guard let target = invocation.target, invocation.problem == nil else {
-            err("iris --run-job: \(invocation.problem ?? "--run-job needs a job id or name")\n\(usage)")
-            return Exit.usage
+            return refuse(invocation.problem ?? "--run-job needs a job id or name",
+                          appendingUsage: true)
         }
         switch GUILock.state(at: lockPath) {
         case .free:
             break
         case .app(let pid):
-            err("iris --run-job: the Iris app is running (pid \(pid)); quit it and try again — "
-                + "the CLI will not write to the store behind a live app.")
-            return Exit.usage
+            return refuse("the Iris app is running (pid \(pid)); quit it and try again — "
+                          + "the CLI will not write to the store behind a live app.")
         case .unreadable(let path):
-            err("iris --run-job: the Iris app is running, or left \(path) behind; the CLI will not "
-                + "write to the store behind a live app. Delete that file if the app is not running.")
-            return Exit.usage
+            return refuse("the Iris app is running, or left \(path) behind; the CLI will not "
+                          + "write to the store behind a live app. Delete that file if the app "
+                          + "is not running.")
         }
+        // Take the lock the check just found free. Two `--run-job` invocations would otherwise
+        // both read `.free` and both build an `AppState` over the same file — the same two
+        // in-memory copies of one store that the GUI check exists to prevent, over a window as
+        // long as a model turn. It does not close the other direction: the GUI never checks, so
+        // an app launched *during* a run still races (and, acquiring second, keeps the lock —
+        // `release` below is pid-guarded and will not take the app's).
+        GUILock.acquire(at: lockPath)
+        defer { GUILock.release(at: lockPath) }
 
         let store: ConversationStore
         do {
             store = try openStore()
         } catch {
-            err("iris --run-job: could not open the conversation store: \(error)")
-            return Exit.usage
+            return refuse("could not open the conversation store: \(error)")
         }
         let ledger = store.ledger
         let job: Job?
         do {
             job = try lookUp(target, in: ledger)
         } catch {
-            err("iris --run-job: could not read the jobs table: \(error)")
-            return Exit.usage
+            return refuse("could not read the jobs table: \(error)")
         }
         guard let job else {
-            err("iris --run-job: no job with the id or name '\(target)'.")
-            return Exit.usage
+            return refuse("no job with the id or name '\(target)'.")
         }
 
         if invocation.dryRun {
@@ -200,6 +213,27 @@ enum RunJobCLI {
         let trimmed = target.trimmingCharacters(in: .whitespaces)
         if let id = UUID(uuidString: trimmed), let job = try ledger.job(id: id) { return job }
         return try ledger.job(named: trimmed)
+    }
+
+    /// The `AppState` a CLI run fires through: the real one, over the store the caller opened,
+    /// minus the two things about a launch that are the *window's* and not the run's.
+    ///
+    /// `autoApproveTools` is spelled out rather than left to the default, because it is the whole
+    /// of §8's "approvals fail closed exactly as unattended": with it on, every tool call in a CLI
+    /// run would be auto-approved and the measurement would be of a different system. A separate
+    /// function so a test can read the flag back off it — set-and-never-verified is how a default
+    /// that changes underneath you goes unnoticed.
+    ///
+    /// The launch notices and the empty-store conversation are suppressed: they are UI
+    /// affordances, and `flushSave()` at the end of a run would commit them to the user's real
+    /// store. A command whose whole purpose is measuring must not leave a "New Conversation" and a
+    /// guard-provisioning notice behind. Nothing about the fire, the row, the card or the approval
+    /// path depends on either.
+    @MainActor
+    static func makeState(store: ConversationStore) -> AppState {
+        let state = AppState(store: store, createIfEmpty: false, emitLaunchNotices: false)
+        state.autoApproveTools = false
+        return state
     }
 
     /// The ordinary run: one fire, with origin `.manual`.
@@ -222,16 +256,12 @@ enum RunJobCLI {
         if let injectedRunner {
             runner = injectedRunner
         } else {
-            let appState = AppState(store: store)
-            // Spelled out rather than left to the default, because it is the whole of §8's
-            // "approvals fail closed exactly as unattended": with this on, every tool call in a
-            // CLI run would be auto-approved and the measurement would be of a different system.
-            appState.autoApproveTools = false
+            let appState = makeState(store: store)
             let irisEngine = IrisEngine(state: appState, client: client,
                                         protectionEnabled: protectionEnabled)
             guard let built = await irisEngine.jobRunner() else {
-                err("iris --run-job: could not bring up the job runner.")
-                return Exit.notCompleted
+                return fail("could not bring up the job runner.", code: Exit.notCompleted,
+                            json: json, dryRun: false, out: out, err: err)
             }
             runner = built
             state = appState
@@ -240,8 +270,17 @@ enum RunJobCLI {
 
         // What the newest row was before the fire, so the row this run wrote can be told from the
         // one a previous run left — an admission refusal writes no row at all, and printing the
-        // last run's would report a fire that never happened as if it had.
-        let previousRunId = (try? ledger.runs(jobId: job.id, limit: 1))?.first?.id
+        // last run's would report a fire that never happened as if it had. A read that *failed*
+        // is not "there was none": swallowing it to nil would make an earlier row satisfy the
+        // `!=` below and print exactly the fiction this exists to prevent, so it is remembered
+        // and suppresses the attribution entirely.
+        var previousRunId: UUID?
+        var previousKnown = true
+        do {
+            previousRunId = try ledger.runs(jobId: job.id, limit: 1).first?.id
+        } catch {
+            previousKnown = false
+        }
         let admission = await runner.fire(job: job, origin: .manual)
         // The card, the transcript and the run's own conversation are in `AppState`'s debounced
         // save queue; the app flushes at terminate (`AppDelegate`) and so must this, or "the
@@ -252,20 +291,28 @@ enum RunJobCLI {
         withExtendedLifetime(engine) {}
 
         guard let admission else {
-            err("iris --run-job: '\(job.name)' is no longer in the jobs table.")
-            return Exit.usage
+            return fail("'\(job.name)' is no longer in the jobs table.", code: Exit.usage,
+                        json: json, dryRun: false, out: out, err: err)
         }
         var row: JobRun?
-        if let newest = (try? ledger.runs(jobId: job.id, limit: 1))?.first, newest.id != previousRunId {
+        if previousKnown, let newest = (try? ledger.runs(jobId: job.id, limit: 1))?.first,
+           newest.id != previousRunId {
             row = newest
         }
         if let row {
             out(json ? renderJSON(row: row) : render(row: row))
+        } else if !previousKnown {
+            let detail = "the ledger could not be read before the fire, so this run's row cannot "
+                + "be told apart from an earlier one; read it with /jobs in the app"
+            out(json ? renderJSON(job: job, refusal: detail) : "\(job.name): \(detail).")
         } else {
             let refusal = JobRunner.refusalText(admission) ?? "admission refused the fire"
             out(json ? renderJSON(job: job, refusal: refusal)
                      : "\(job.name) was not started: \(refusal).")
         }
+        // Unreachable by construction, and kept as a belt: this fire is `.manual`, and
+        // `JobRunner.gateApplies` gives a gate a say only over a fresh cadence fire (R29). If that
+        // rule ever widens to a hand-started run, the exit code is already right.
         if case .gateUnchanged = admission { return Exit.gateUnchanged }
         guard let row else { return Exit.notCompleted }
         return row.status == .completed ? Exit.completed : Exit.notCompleted
@@ -283,13 +330,17 @@ enum RunJobCLI {
                                gate: (@Sendable (Gate, String?) async -> GateResult)?,
                                out: (String) -> Void, err: (String) -> Void) async -> Int32 {
         guard let jobGate = job.trigger.gate else {
-            err("iris --run-job: '\(job.name)' has no gate to evaluate; run it without --dry-run.")
-            return Exit.usage
+            return fail("'\(job.name)' has no gate to evaluate; run it without --dry-run.",
+                        code: Exit.usage, json: json, dryRun: true, out: out, err: err)
         }
         let previous = (try? ledger.lastGateSignal(jobId: job.id)) ?? nil
+        // Exactly as `JobRunner` builds it (`liveGateEvaluator`'s own default): the closure it
+        // hands back is nonisolated `@Sendable`, so awaiting it from here hops off the main actor
+        // and anything inside it that asserted main-actor isolation would trap. `ConfigManager` is
+        // `@unchecked Sendable`, so it is read bare, from wherever the evaluation runs.
         let evaluate = gate ?? JobRunner.liveGateEvaluator(
             sandboxAvailable: { SandboxPolicy.mutatingJobCanRun(config: .shared) },
-            image: { MainActor.assumeIsolated { ConfigManager.shared.sandboxImage } })
+            image: { ConfigManager.shared.sandboxImage })
         let result = await evaluate(jobGate, previous)
 
         let verdict: String
@@ -315,6 +366,21 @@ enum RunJobCLI {
             if let detail { lines.append("detail: \(detail)") }
             lines.append("(a dry run asks the gate only: no run, no row, no card)")
             out(lines.joined(separator: "\n"))
+        }
+        return code
+    }
+
+    /// Every way this command can refuse, said once. The prose goes to stderr, where an error
+    /// belongs; under `--json` the same sentence also goes to stdout as one object, because the
+    /// docs tell a script to read stdout and handing it nothing but an exit code on the failure
+    /// paths would make that a half-truth.
+    @discardableResult
+    private static func fail(_ message: String, code: Int32, json: Bool, dryRun: Bool,
+                             usage appendUsage: Bool = false,
+                             out: (String) -> Void, err: (String) -> Void) -> Int32 {
+        err("iris --run-job: \(message)" + (appendUsage ? "\n\(usage)" : ""))
+        if json {
+            out(jsonLine(["error": message, "exitCode": Int(code), "dryRun": dryRun]))
         }
         return code
     }
