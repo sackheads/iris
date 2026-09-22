@@ -10,6 +10,14 @@ import Foundation
 ///
 /// Leading dots are not special. A shell glob's `*` deliberately skips dotfiles; here the whole
 /// point of `*.swp` is to catch Vim's `.notes.md.swp`, so it does.
+///
+/// Matching is case-insensitive (R-D4-7), for the same reason root coverage is: the default macOS
+/// volume is case-insensitive, `realpath` keeps whatever casing its caller used, and an ignore list
+/// that absorbs `.DS_Store` but not `.ds_store` — or `*.TMP` but not `*.tmp` — is a filter that
+/// works until the day something writes the other spelling. Patterns are lower-cased once at
+/// construction and candidates once per component, so the fold costs nothing per pattern. On a
+/// case-sensitive volume this absorbs a little more than it was asked to, which is the direction
+/// an ignore list should fail in.
 struct WatchGlob: Sendable {
     /// One component's pattern, or the `**` that stands for any number of components.
     private enum Segment: Sendable, Equatable {
@@ -34,13 +42,15 @@ struct WatchGlob: Sendable {
         let parts = text.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         subtree = trailingSlash
         componentOnly = parts.count <= 1
-        segments = parts.map { $0 == "**" ? .anyComponents : .pattern(Array($0)) }
+        // Folded once, here: `matches` then folds only the candidate's components.
+        segments = parts.map { $0 == "**" ? .anyComponents : .pattern(Array($0.lowercased())) }
     }
 
     /// Whether `relativePath` — a path relative to the watch root, with no leading slash — is
     /// absorbed by this pattern.
     func matches(relativePath: String) -> Bool {
-        let components = relativePath.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        let components = relativePath.lowercased()
+            .split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         guard !components.isEmpty, let first = segments.first else { return false }
         if componentOnly {
             // A bare name is a name, wherever it appears: `.DS_Store` catches `a/b/.DS_Store`, and

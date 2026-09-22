@@ -82,6 +82,11 @@ actor WatchCoordinator {
         /// When a `.skipInFlight` subscriber may ask again (R-D4-2). One ask per ceiling, on the
         /// grid the burst's own ceiling sits on.
         var reAskDue: Date?
+        /// Which dispatch the outstanding handler belongs to. A handler runs in a task of its own
+        /// and may come back long after the subscriber moved on — a re-registration onto another
+        /// root, or the runner taking the hold — so the admission is applied only when the fire it
+        /// answers is still the current one. Bumped on every dispatch and on every abandonment.
+        var fireSeq: UInt64 = 0
 
         var quiet: TimeInterval { TimeInterval(watch.quietWindowSeconds) }
         var ceiling: TimeInterval { quiet * TimeInterval(WatchCoordinator.ceilingMultiplier) }
@@ -136,6 +141,9 @@ actor WatchCoordinator {
                 existing.outstandingFire = nil
                 existing.lastAdmission = nil
                 existing.reAskDue = nil
+                // A handler may still be inside the run this abandons. Bumping the sequence is
+                // what stops its admission landing on whatever fires next for the new root.
+                existing.fireSeq &+= 1
                 subscribers[job.id] = existing
                 continue
             }
@@ -144,6 +152,13 @@ actor WatchCoordinator {
             // `queue` → `skip` with a queued fire outstanding: the runner will discard the queued
             // fire it was holding, so nobody else would ever take these paths. Release them into a
             // fresh burst rather than lose an edit session to a policy edit.
+            //
+            // The `lastAdmission == .queued` guard is the *invariant*, not a flag: it is what says
+            // the handler has already answered. Releasing while a handler is genuinely inside its
+            // run would clear `fireOutstanding` under it and put two fires in flight for one
+            // subscriber — the break F2 closes. `sync` runs on every jobs change and is
+            // idempotent, so an edit that lands in the gap is applied by the next one. Do not
+            // "simplify" this condition away.
             if overlapWas == .queue, job.policy.overlap == .skip, existing.fireOutstanding,
                existing.lastAdmission == .queued {
                 existing.pending.formUnion(existing.heldPaths)
@@ -152,6 +167,7 @@ actor WatchCoordinator {
                 existing.outstandingFire = nil
                 existing.lastAdmission = nil
                 existing.reAskDue = nil
+                existing.fireSeq &+= 1
                 let at = now()
                 existing.burstBegan = at
                 existing.lastAccepted = at
@@ -176,8 +192,15 @@ actor WatchCoordinator {
     ///
     /// The batch is fanned out once to every subscriber the path is under, so a watch nested
     /// inside another watch is served by the ancestor's stream and never gets a second copy
-    /// (§0.5). `root` is what the stream was started for; coverage is decided per *path*, because
-    /// one stream serves several subscribers at different depths.
+    /// (§0.5).
+    ///
+    /// `root` is the stream's own contract with `WatcherManager` — what the stream was started for
+    /// — and is deliberately *not* the coverage test: coverage is decided per path, because one
+    /// stream serves several subscribers at different depths. The manager's side of that contract
+    /// is that exactly one live stream covers any given path (it re-keys by canonical root and
+    /// drops a root nested under another). Two overlapping streams delivering the same path would
+    /// hand every subscriber the same event twice and double its `coalesced`; that is the
+    /// manager's invariant to keep, not something this method can check.
     ///
     /// Every path is normalised with `IrisPaths.canonicalPath` before anything else (R-D4-5). A
     /// bare `standardizingPath` would not do: its `/private` strip is conditional on the leaf
@@ -196,13 +219,20 @@ actor WatchCoordinator {
         enum Verdict { case noise, ownWrite, accept }
         var decisions: [Decision] = []
         var ownWriteCache: [String: Bool] = [:]
+        /// Whether each subscriber already had a burst under way when this batch arrived — a
+        /// pending burst, or a hold whose counters the next fire (or `reAsk`'s merged summary)
+        /// will carry.
+        var burstOpen: [UUID: Bool] = [:]
+        /// Which subscribers this batch accepted at least one path for.
+        var acceptedIn: Set<UUID> = []
 
         for (id, subscriber) in subscribers {
-            let root = subscriber.watch.path
+            burstOpen[id] = subscriber.burstBegan != nil || subscriber.fireOutstanding
+            let watchRoot = subscriber.watch.path
             let expiry = RecentWrites.expiry(quietWindowSeconds: subscriber.watch.quietWindowSeconds)
             for path in canonical {
-                guard Self.covers(root: root, path: path) else { continue }
-                if subscriber.ignore(Self.relative(path, under: root)) {
+                guard Self.covers(root: watchRoot, path: path) else { continue }
+                if subscriber.ignore(Self.relative(path, under: watchRoot)) {
                     decisions.append(Decision(id: id, path: path, verdict: .noise))
                     continue
                 }
@@ -214,21 +244,27 @@ actor WatchCoordinator {
                     own = await recentWrites.isOwn(path, within: expiry)
                     ownWriteCache[key] = own
                 }
+                if !own { acceptedIn.insert(id) }
                 decisions.append(Decision(id: id, path: path, verdict: own ? .ownWrite : .accept))
             }
         }
 
         for decision in decisions {
             guard var subscriber = subscribers[decision.id] else { continue }
+            // R-D4-6: attribution is decided per *batch*, not per position within it. A batch that
+            // accepts at least one path — or that arrives while a burst is already open — counts
+            // its absorbed events in the burst as well as since launch; a batch that accepts
+            // nothing counts them since launch only. One callback's internal ordering is something
+            // no user can see, reproduce or reason about, and §6's card ("40 changed, 12 noise
+            // absorbed") must not depend on it.
+            let inBurst = burstOpen[decision.id] == true || acceptedIn.contains(decision.id)
             switch decision.verdict {
             case .noise:
                 subscriber.absorbedSinceLaunch.noise += 1
-                // Only a burst in progress has burst counters to add to; absorbed events between
-                // bursts are a running total and nothing else (§2).
-                if subscriber.burstBegan != nil { subscriber.noise += 1 }
+                if inBurst { subscriber.noise += 1 }
             case .ownWrite:
                 subscriber.absorbedSinceLaunch.ownWrites += 1
-                if subscriber.burstBegan != nil { subscriber.ownWrites += 1 }
+                if inBurst { subscriber.ownWrites += 1 }
             case .accept:
                 subscriber.coalesced += 1
                 if subscriber.fireOutstanding {
@@ -247,10 +283,31 @@ actor WatchCoordinator {
 
     /// Lexical, on canonical forms, and never a `stat`: FSEvents reports a path under the root it
     /// was given, and a delete names a leaf that is already gone.
+    ///
+    /// Case-insensitive (R-D4-7), because `realpath` is not case-normalising: measured on APFS,
+    /// `/tmp/CaseProbe` resolves to `/private/tmp/CaseProbe` and keeps the *caller's* spelling. So
+    /// a root registered as `~/Documents/NOTES` against a directory spelled `Notes` is stored with
+    /// the user's casing while FSEvents reports the disk's, and a case-sensitive `hasPrefix` would
+    /// have every event miss — a watch that silently never fires, with `/jobs` showing zero
+    /// absorbed as well as zero fired, so even §0.7's diagnostic says nothing. The stored root
+    /// keeps its own spelling: the canonical form is what the migration wrote and what
+    /// `WatcherManager` keys streams by, and case-folding it here would make those two disagree.
+    ///
+    /// The cost, on a case-sensitive volume: two directories in one parent differing only by case
+    /// are one watch as far as this test is concerned, so a watch on `src/` also absorbs events
+    /// under a sibling `SRC/`. That is the rarer configuration by a wide margin, and it
+    /// over-delivers (a run with paths it did not ask for) where the alternative under-delivers to
+    /// nothing at all.
     private static func covers(root: String, path: String) -> Bool {
-        path == root || path.hasPrefix(root.hasSuffix("/") ? root : root + "/")
+        if path.compare(root, options: .caseInsensitive) == .orderedSame { return true }
+        let prefix = root.hasSuffix("/") ? root : root + "/"
+        guard path.count >= prefix.count else { return false }
+        return path.prefix(prefix.count).compare(prefix, options: .caseInsensitive) == .orderedSame
     }
 
+    /// The path relative to its root, in the *event's* spelling — the root's casing may differ
+    /// (see `covers`), and the set, the prompt and the run row should all carry the name the
+    /// filesystem reported.
     private static func relative(_ path: String, under root: String) -> String {
         guard path.count > root.count else { return "" }
         return String(path.dropFirst(root.count).drop(while: { $0 == "/" }))
@@ -375,6 +432,8 @@ actor WatchCoordinator {
         let outstanding = WatchFire(paths: paths, summary: summary)
         subscriber.outstandingFire = outstanding
         subscriber.lastAdmission = nil
+        subscriber.fireSeq &+= 1
+        let seq = subscriber.fireSeq
         // One ask per ceiling if the runner turns this down as a `skip` overlap (R-D4-2): the grid
         // is the burst's own ceiling, so a watch that fired on its window still waits the full
         // ceiling from the burst before it costs the ledger two more sums.
@@ -385,7 +444,7 @@ actor WatchCoordinator {
         subscriber.lastAccepted = nil
         subscribers[id] = subscriber
 
-        dispatch(id, job: fresh, fire: outstanding)
+        dispatch(id, job: fresh, fire: outstanding, seq: seq)
     }
 
     /// R-D4-2. A `.skipInFlight` subscriber offers its held set again once the ceiling has passed.
@@ -417,24 +476,34 @@ actor WatchCoordinator {
         subscriber.outstandingFire = offer
         subscriber.lastAdmission = nil
         subscriber.reAskDue = at.addingTimeInterval(subscriber.ceiling)
+        subscriber.fireSeq &+= 1
+        let seq = subscriber.fireSeq
         let job = subscriber.job
         subscribers[id] = subscriber
-        dispatch(id, job: job, fire: offer)
+        dispatch(id, job: job, fire: offer, seq: seq)
     }
 
     /// Step 2's last line: the run goes out in a task of its own, and the loop carries on. The
     /// admission comes back through `apply`.
-    private func dispatch(_ id: UUID, job: Job, fire offer: WatchFire) {
+    private func dispatch(_ id: UUID, job: Job, fire offer: WatchFire, seq: UInt64) {
         let handler = fire
         Task { [self] in
             let admission = await handler(job, offer)
-            await apply(admission, to: id, firedPaths: offer.paths)
+            await apply(admission, to: id, firedPaths: offer.paths, seq: seq)
         }
     }
 
     /// Step 3: what the runner said, applied to the hold.
-    private func apply(_ admission: JobRunner.Admission?, to id: UUID, firedPaths: [String]) {
-        guard var subscriber = subscribers[id] else { return }
+    private func apply(_ admission: JobRunner.Admission?, to id: UUID, firedPaths: [String],
+                       seq: UInt64) {
+        // The fire this answers must still be the subscriber's current one. Two windows make the
+        // id alone insufficient: a `sync` that re-registered the job onto another root while the
+        // handler was inside its run, and a `takeHeldPaths` that beat the handler's return. In
+        // both, a stale `.run` would subtract its own paths from a *newer* fire's hold, clear that
+        // fire's `fireOutstanding` and push its paths back into `pending` — the same paths run
+        // twice, and the "at most one fire outstanding" invariant broken by the one code path that
+        // exists to keep it.
+        guard var subscriber = subscribers[id], subscriber.fireSeq == seq else { return }
         guard let admission else {
             // The job is gone or unreadable. Drop everything for this subscriber and count
             // nothing: there is nothing left to show a count against.
@@ -449,7 +518,13 @@ actor WatchCoordinator {
             subscriber.fireOutstanding = false
             subscriber.outstandingFire = nil
             subscriber.reAskDue = nil
-            if !subscriber.heldPaths.isEmpty {
+            if subscriber.heldPaths.isEmpty {
+                // Nothing survived the run, but events on paths this fire already held may still
+                // have bumped `coalesced` (and, since R-D4-6, `noise` and `ownWrites`) while it
+                // was going. Those figures describe a burst that is over; leaving them would have
+                // the next burst's summary report them a second time.
+                zeroBurstCounters(&subscriber)
+            } else {
                 // Anything accepted during the run begins a new burst, so the quiet window runs
                 // from the end of the run rather than from an edit made in the middle of it.
                 subscriber.pending = subscriber.heldPaths
@@ -496,6 +571,9 @@ actor WatchCoordinator {
         subscriber.outstandingFire = nil
         subscriber.lastAdmission = nil
         subscriber.reAskDue = nil
+        // The runner owns these paths now. If the handler for the fire they came from has not
+        // returned yet, its admission must not land on the burst that starts after this.
+        subscriber.fireSeq &+= 1
         endBurst(&subscriber)
         subscribers[jobId] = subscriber
         return taken
@@ -545,6 +623,14 @@ actor WatchCoordinator {
     ///
     /// `everyMinute` is the housekeeping the watch layer hangs off the same timer (Task 5 supplies
     /// it); it is called at most once a minute however often the loop wakes for a window.
+    ///
+    /// **Not finished: there is no wake.** `nextDeadline()` is read once, before the sleep, so an
+    /// event accepted a second into an idle 60 s sleep is not evaluated until that sleep ends — a
+    /// 3 s window can fire nearly a minute late, and the ceiling means nothing for the first burst
+    /// after an idle period. §2 says the loop sleeps "until the earliest deadline **or until woken
+    /// by an accepted event**", and the waking half is Task 5's to wire (a continuation resumed
+    /// from `deliver` when a batch accepts anything, raced against the sleep). Recorded here
+    /// because the loop is here; nothing in production starts it yet.
     func startLoop(everyMinute: @escaping @Sendable () async -> Void) {
         guard loop == nil else { return }
         loop = Task { [weak self] in

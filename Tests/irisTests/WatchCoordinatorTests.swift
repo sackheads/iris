@@ -33,8 +33,6 @@ struct WatchCoordinatorTests {
         private(set) var fires: [(job: Job, fire: WatchFire)] = []
         private var script: [JobRunner.Admission?]
         private let fallback: JobRunner.Admission?
-        private var waiters: [(wanted: Int, continuation: CheckedContinuation<Void, Never>)] = []
-
         init(_ script: [JobRunner.Admission?] = [], fallback: JobRunner.Admission? = .run) {
             self.script = script
             self.fallback = fallback
@@ -42,12 +40,6 @@ struct WatchCoordinatorTests {
 
         func record(_ job: Job, _ fire: WatchFire) -> JobRunner.Admission? {
             fires.append((job, fire))
-            let reached = fires.count
-            var still: [(wanted: Int, continuation: CheckedContinuation<Void, Never>)] = []
-            for waiter in waiters {
-                if waiter.wanted <= reached { waiter.continuation.resume() } else { still.append(waiter) }
-            }
-            waiters = still
             return script.isEmpty ? fallback : script.removeFirst()
         }
 
@@ -55,12 +47,21 @@ struct WatchCoordinatorTests {
         var paths: [[String]] { fires.map(\.fire.paths) }
         var summaries: [WatchSummary] { fires.map(\.fire.summary) }
 
-        /// Parks until at least `n` fires have been handed over. Every caller is inside a
-        /// `.timeLimit`ed test or follows a `tick` that set `fireOutstanding` synchronously, so a
-        /// coordinator that never dispatches fails as a timeout rather than a hang.
-        func waitFor(_ n: Int) async {
-            if fires.count >= n { return }
-            await withCheckedContinuation { waiters.append((n, $0)) }
+        /// Waits until at least `n` fires have been handed over, or five seconds pass — the same
+        /// bounded shape as `eventually`, and for the same reason.
+        ///
+        /// The deadline is the point. An unbounded continuation turns a timing regression into a
+        /// hung `swift test`: a mutation of `ceilingMultiplier` left two tests here running for
+        /// four minutes instead of failing, and in CI that is a job timeout naming no test at all.
+        /// With the deadline, a coordinator that stops firing fails on the assertion that follows,
+        /// with the count it actually reached.
+        func waitFor(_ n: Int, sourceLocation: SourceLocation = #_sourceLocation) async {
+            for _ in 0..<500 {
+                if fires.count >= n { return }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            Issue.record("waited 5s for \(n) fires and saw \(fires.count)",
+                         sourceLocation: sourceLocation)
         }
     }
 
@@ -240,9 +241,8 @@ struct WatchCoordinatorTests {
                                            recorder: recorder)
         await coordinator.sync(with: [job])
 
-        // Order is the batch's own: the `.DS_Store` arrives before any burst exists, so it is
-        // absorbed since launch and nowhere else; `a.swift` begins the burst; `summary.md` is
-        // absorbed *inside* it and is the one the run's summary reports.
+        // The batch accepts `a.swift`, so both of its absorbed events belong to the burst that
+        // acceptance began — wherever in the batch they happened to sit (R-D4-6).
         await coordinator.deliver(root: "/r",
                                   paths: ["/r/.DS_Store", "/r/a.swift", "/r/summary.md"])
         clock.set(Self.at(3))
@@ -253,10 +253,90 @@ struct WatchCoordinatorTests {
         #expect(fire.paths == ["/r/a.swift"])
         #expect(fire.summary.changed == 1)
         #expect(fire.summary.coalesced == 1)
-        #expect(fire.summary.noise == 0, "the noise arrived before the burst did")
+        #expect(fire.summary.noise == 1)
         #expect(fire.summary.ownWrites == 1)
         #expect(await coordinator.absorbedSinceLaunch()[job.id] == AbsorbedCounts(noise: 1, ownWrites: 1),
                 "since launch counts both, burst or no burst")
+    }
+
+    /// R-D4-6. §6's card says "40 changed, 12 noise absorbed"; which of the two counters an
+    /// absorbed event lands in must not depend on where FSEvents happened to put it inside one
+    /// callback, because that is an ordering no user can see, reproduce or reason about.
+    @Test("an absorbed event is attributed by its batch, not by its position in it")
+    func absorbedAttributionIsPerBatchNotPerPosition() async throws {
+        for order in [["/r/.DS_Store", "/r/a.swift"], ["/r/a.swift", "/r/.DS_Store"]] {
+            let store = try ConversationStore.inMemory()
+            let clock = Clock(Self.t0)
+            let recorder = Recorder()
+            let job = Self.job("ordering", root: "/r")
+            try store.ledger.upsert(job)
+            let coordinator = Self.coordinator(ledger: store.ledger, clock: clock,
+                                               writes: RecentWrites(now: { clock.now }), recorder: recorder)
+            await coordinator.sync(with: [job])
+
+            await coordinator.deliver(root: "/r", paths: order)
+            clock.set(Self.at(3))
+            await coordinator.tick(now: Self.at(3))
+            await recorder.waitFor(1)
+
+            let fire = try #require(await recorder.fires.first?.fire)
+            #expect(fire.paths == ["/r/a.swift"], "order: \(order)")
+            #expect(fire.summary.noise == 1, "the batch accepted a path, so its noise is this burst's: \(order)")
+            #expect(fire.summary.changed == 1, "order: \(order)")
+            #expect(await coordinator.absorbedSinceLaunch()[job.id] == AbsorbedCounts(noise: 1),
+                    "since launch counts it either way: \(order)")
+        }
+    }
+
+    @Test("a batch that accepts nothing at all counts only since launch")
+    func aFullyAbsorbedBatchCountsOnlySinceLaunch() async throws {
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder()
+        let job = Self.job("allnoise", root: "/r")
+        try store.ledger.upsert(job)
+        let coordinator = Self.coordinator(ledger: store.ledger, clock: clock,
+                                           writes: RecentWrites(now: { clock.now }), recorder: recorder)
+        await coordinator.sync(with: [job])
+
+        await coordinator.deliver(root: "/r", paths: ["/r/.DS_Store", "/r/x.tmp"])
+        // A burst that starts afterwards reports its own noise and not the earlier batch's.
+        clock.set(Self.at(1))
+        await coordinator.deliver(root: "/r", paths: ["/r/a.swift", "/r/b~"])
+        clock.set(Self.at(4))
+        await coordinator.tick(now: Self.at(4))
+        await recorder.waitFor(1)
+
+        let fire = try #require(await recorder.fires.first?.fire)
+        #expect(fire.summary.noise == 1, "only the batch that accepted something")
+        #expect(await coordinator.absorbedSinceLaunch()[job.id] == AbsorbedCounts(noise: 3))
+    }
+
+    /// R-D4-7. `realpath` is not case-normalising — measured on APFS, `/tmp/CaseProbe` resolves to
+    /// `/private/tmp/CaseProbe` and keeps the caller's spelling — so a root registered with the
+    /// user's casing and events reported with the disk's would never meet.
+    @Test("a mis-cased root still covers its events, and the event keeps its own spelling")
+    func aMisCasedRootStillCoversItsEvents() async throws {
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder()
+        let job = Self.job("cased", root: "/r/NOTES", ignore: ["Drafts/"])
+        try store.ledger.upsert(job)
+        let coordinator = Self.coordinator(ledger: store.ledger, clock: clock,
+                                           writes: RecentWrites(now: { clock.now }), recorder: recorder)
+        await coordinator.sync(with: [job])
+
+        await coordinator.deliver(root: "/r/NOTES", paths: ["/r/notes/a.swift",
+                                                            "/r/Notes/.ds_store",
+                                                            "/r/notes/drafts/b.md"])
+        clock.set(Self.at(3))
+        await coordinator.tick(now: Self.at(3))
+        await recorder.waitFor(1)
+
+        let fire = try #require(await recorder.fires.first?.fire)
+        #expect(fire.paths == ["/r/notes/a.swift"], "the event's own spelling, not the root's")
+        #expect(fire.summary.noise == 2, "the built-in set and the watch's own glob fold case too")
+        #expect(await coordinator.snapshot(job.id) != nil)
     }
 
     // MARK: Fan-out
@@ -359,9 +439,10 @@ struct WatchCoordinatorTests {
         let fire = try #require(await recorder.fires.first?.fire)
         #expect(fire.paths == ["\(root)/edited.txt"], "both were attributed to the root, in its spelling")
         #expect(fire.summary.changed == 1, "the modify was accepted and the delete was not")
-        // The delete arrived before anything had started a burst, so it is counted where an
-        // absorbed event outside a burst is counted — and counted at all, which is what says the
-        // `/private` spelling reached the registry entry the write recorded.
+        // Counted in both, which is what says the `/private` spelling reached the registry entry
+        // the write recorded: the batch accepted the modify, so its absorbed delete is this
+        // burst's as well as the running total's (R-D4-6).
+        #expect(fire.summary.ownWrites == 1, "the delete matched the registry entry recorded for it")
         #expect(await coordinator.absorbedSinceLaunch()[job.id] == AbsorbedCounts(ownWrites: 1))
     }
 
@@ -406,6 +487,71 @@ struct WatchCoordinatorTests {
         }
     }
 
+    /// F2. The admission is applied by fire *identity*, not by job id. A handler still inside its
+    /// run when `sync` re-registers the job onto another root is answering a fire that no longer
+    /// exists; without the identity check its `.run` subtracts its own paths from the newer fire's
+    /// hold, clears the newer fire's `fireOutstanding` and pushes that hold back into `pending` —
+    /// so the newer paths get a second run and "at most one fire outstanding" is broken by the one
+    /// code path that exists to keep it.
+    @Test("a stale admission never lands on the fire that replaced it", .timeLimit(.minutes(1)))
+    func aStaleAdmissionNeverLandsOnANewerFire() async throws {
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        // Fire #1 answers `.run` (late, from inside the gate); fire #2 answers `.queued`, so it is
+        // still outstanding and still holding its paths when the stale answer arrives.
+        let recorder = Recorder([.run, .queued])
+        let gate = Gate()
+        var job = Self.job("moving", root: "/old")
+        try store.ledger.upsert(job)
+        let coordinator = WatchCoordinator(
+            ledger: store.ledger, now: { clock.now }, recentWrites: RecentWrites(now: { clock.now }),
+            fire: { j, f in
+                let admission = await recorder.record(j, f)
+                if f.paths.first?.hasPrefix("/old") == true { await gate.arriveAndWait() }
+                return admission
+            })
+        await coordinator.sync(with: [job])
+
+        await coordinator.deliver(root: "/old", paths: ["/old/a.txt"])
+        clock.set(Self.at(3))
+        await coordinator.tick(now: Self.at(3))
+        await gate.waitForEntry()
+
+        // Re-registered onto another root while handler #1 is still inside its run.
+        clock.set(Self.at(4))
+        job.trigger = .fsEvent(FSWatch(path: "/new", quietWindowSeconds: 3))
+        try store.ledger.upsert(job)
+        await coordinator.sync(with: [job])
+        let jobId = job.id
+        #expect(await coordinator.snapshot(jobId)?.fireOutstanding == false)
+
+        // A second fire goes out for the new root and is queued behind a run.
+        await coordinator.deliver(root: "/new", paths: ["/new/b.txt", "/new/c.txt"])
+        clock.set(Self.at(8))
+        await coordinator.tick(now: Self.at(8))
+        await recorder.waitFor(2)
+        #expect(await recorder.paths.last == ["/new/b.txt", "/new/c.txt"])
+
+        // Now handler #1 answers `.run` for a fire that no longer exists.
+        await gate.open()
+        // It arrives on a task of its own; give it every chance to land on the wrong subscriber.
+        try await Task.sleep(for: .milliseconds(100))
+
+        let snapshot = try #require(await coordinator.snapshot(jobId))
+        #expect(snapshot.fireOutstanding == true, "the newer fire is still the runner's to answer")
+        #expect(snapshot.held == 2, "the stale `.run` did not spend the newer fire's paths")
+        #expect(snapshot.pending == 0, "nor re-queue them as a fresh burst")
+        #expect(snapshot.burstBegan == nil)
+
+        // And no tick can turn them into a second run for the same paths.
+        clock.set(Self.at(40))
+        await coordinator.tick(now: Self.at(40))
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await recorder.count == 2, "no third fire for paths a run already has")
+        #expect(await coordinator.takeHeldPaths(jobId) == ["/new/b.txt", "/new/c.txt"],
+                "the runner's held re-fire still finds them")
+    }
+
     // MARK: The five admissions
 
     @Test("a run takes the paths it was given and leaves everything accepted since")
@@ -445,6 +591,58 @@ struct WatchCoordinatorTests {
         #expect(snapshot.held == 0)
         #expect(snapshot.pending == 1, "what arrived during the run begins the next burst")
         #expect(snapshot.burstBegan == Self.at(9), "and the window runs from the end of the run")
+    }
+
+    /// F5. Events during a run on paths the fire already holds insert nothing but still bump the
+    /// burst counters — `coalesced`, and since R-D4-6 `noise` and `ownWrites` too. When the run
+    /// spends the whole hold there is no new burst to carry them, so they have to be zeroed here
+    /// or the *next* burst's summary reports them a second time.
+    @Test("a run that empties its hold leaves no counters behind for the next burst")
+    func aRunThatEmptiesItsHoldZeroesTheCounters() async throws {
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder()
+        let gate = Gate()
+        let job = Self.job("leaky", root: "/r")
+        try store.ledger.upsert(job)
+        let coordinator = WatchCoordinator(
+            ledger: store.ledger, now: { clock.now }, recentWrites: RecentWrites(now: { clock.now }),
+            fire: { j, f in
+                let admission = await recorder.record(j, f)
+                if f.paths == ["/r/a.txt"] { await gate.arriveAndWait() }
+                return admission
+            })
+        await coordinator.sync(with: [job])
+
+        await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
+        clock.set(Self.at(3))
+        await coordinator.tick(now: Self.at(3))
+        await gate.waitForEntry()
+
+        // During the run: a repeat of a path already held (coalesced, inserted nowhere) and some
+        // noise. Nothing here survives into a new burst, because the run spends the whole hold.
+        clock.set(Self.at(4))
+        await coordinator.deliver(root: "/r", paths: ["/r/a.txt", "/r/.DS_Store", "/r/x.tmp"])
+        clock.set(Self.at(5))
+        await gate.open()
+        await Self.eventually("the run to be applied") {
+            await coordinator.snapshot(job.id)?.fireOutstanding == false
+        }
+        #expect(await coordinator.snapshot(job.id)?.pending == 0, "the hold was spent entirely")
+
+        // The next burst reports itself and nothing else.
+        clock.set(Self.at(10))
+        await coordinator.deliver(root: "/r", paths: ["/r/b.txt"])
+        clock.set(Self.at(13))
+        await coordinator.tick(now: Self.at(13))
+        await recorder.waitFor(2)
+
+        let second = try #require(await recorder.fires.last?.fire)
+        #expect(second.summary.changed == 1)
+        #expect(second.summary.coalesced == 1, "the repeat during the run belonged to the run")
+        #expect(second.summary.noise == 0, "and so did the noise beside it")
+        #expect(await coordinator.absorbedSinceLaunch()[job.id] == AbsorbedCounts(noise: 2),
+                "the running total still has them")
     }
 
     @Test("a queued fire keeps its paths, and takeHeldPaths returns the union")
