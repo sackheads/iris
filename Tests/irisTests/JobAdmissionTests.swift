@@ -734,6 +734,93 @@ struct JobAdmissionTests {
                 "a transient read error is not worth a pause only a person can undo")
     }
 
+    // MARK: fire — the catch-up count follows whatever ended the fire (§5, R44)
+
+    /// The scheduler hands the first slot of a `replay` burst a note saying how many older
+    /// occurrences the cap dropped. Whatever admission then does with that fire, the count has to
+    /// land somewhere a person can find it: the pause card and the gate row were threaded first,
+    /// and these three are the rest of the ways a burst's first slot ends. Two of them are
+    /// *ordinary* on a wake, which is exactly when a catch-up happens — the job still running from
+    /// before the sleep, and the `queue` policy holding the fire it could not start.
+    private static let dropped = JobScheduler.skippedNote(27)
+
+    @Test("a fire that overlaps a run records the catch-up count on the skip row")
+    func anOverlapSkipCarriesTheCatchUpCount() async throws {
+        let gate = JobSchedulerTests.Gate()
+        let client = GatedClient(gate: gate, response: textResponse("tick"))
+        let (store, state, engine) = try harness(client: client)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let job = self.job(name: "still-going")
+        try store.ledger.upsert(job)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               config: config, protectionEnabled: false)
+
+        // The job woke still running the turn it started before the Mac slept.
+        let first = Task { await runner.fire(job: job, origin: .schedule) }
+        await gate.waitForEntry()
+        let overlapped = await runner.fire(job: job, origin: .schedule, note: Self.dropped)
+        await gate.open()
+        await first.value
+
+        #expect(overlapped == .skipInFlight)
+        let skip = try #require(try store.ledger.runs(jobId: job.id, limit: 10)
+            .first { ($0.failureReason ?? "").hasPrefix(JobRunner.skipReason) })
+        #expect(skip.failureReason == "\(JobRunner.skipReason) (\(Self.dropped))",
+                "the skip row is the only thing this outcome writes, so the count goes on it")
+    }
+
+    @Test("a fire the queue policy holds keeps the catch-up count and spends it on the run it becomes")
+    func aHeldFireCarriesTheCatchUpCount() async throws {
+        let gate = JobSchedulerTests.Gate()
+        let client = GatedClient(gate: gate, response: textResponse("tick"))
+        let (store, state, engine) = try harness(client: client)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let job = self.job(name: "queue-on-wake", overlap: .queue)
+        try store.ledger.upsert(job)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               config: config, protectionEnabled: false)
+
+        let first = Task { await runner.fire(job: job, origin: .schedule) }
+        await gate.waitForEntry()
+        // Held, not dropped: nothing is written now, so the count has to wait with the fire.
+        let held = await runner.fire(job: job, origin: .schedule, note: Self.dropped)
+        #expect(held == .queued)
+        await gate.open()
+        await first.value
+
+        let runs = try store.ledger.runs(jobId: job.id, limit: 10)
+        let queued = try #require(runs.first { $0.triggerKind == "queued" })
+        let cards = state.conversations
+            .first { $0.id == state.activityConversationId() }?
+            .messages.compactMap { EventCard.decode($0.content) } ?? []
+        #expect(cards.count == 2)
+        #expect(cards.first { $0.runId == queued.id }?.catchUpNote == Self.dropped,
+                "the held fire *is* that fire, so it arrives with what it was carrying")
+        #expect(cards.filter { $0.catchUpNote != nil }.count == 1,
+                "and the run that was already going says nothing about a burst it was not part of")
+    }
+
+    @Test("a fire a ledger that cannot answer refuses still records the catch-up count")
+    func anUnreadableLedgerCarriesTheCatchUpCount() async throws {
+        let (store, state, engine, client) = try harness([textResponse("tick")])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let job = self.job(name: "unreadable-on-wake")
+        try store.ledger.upsert(job)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               config: config, protectionEnabled: false,
+                               usageSource: UnreadableUsage())
+
+        let admission = await runner.fire(job: job, origin: .schedule, note: Self.dropped)
+
+        #expect(client.callCount == 0)
+        #expect(admission == .dropUnavailable(reason: "admission unavailable: database is locked"))
+        let row = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(row.failureReason == "admission unavailable: database is locked (\(Self.dropped))")
+    }
+
     @Test("a refused hand-started fire writes a row that says manual, not the job's trigger")
     func aRefusedManualFireSaysManual() async throws {
         let (store, state, engine, client) = try harness([textResponse("tick")])

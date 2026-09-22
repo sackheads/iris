@@ -245,6 +245,10 @@ enum RunJobCLI {
             return refuse(invocation.problem ?? "--run-job needs a job id or name",
                           appendingUsage: true)
         }
+        // Taken for a `--dry-run` too, which writes no row: `ConversationStore.onDisk` may *migrate*
+        // the file it opens, and a schema migration running under a live app is a worse failure
+        // than the refusal. Stricter than §8 asks for, and the stricter direction is the cheap one.
+        //
         // Claim the lock, rather than check it and then take it: the two have to be one syscall or
         // two `--run-job` invocations started together both read "free" and both build an
         // `AppState` over the same file — the two in-memory copies of one store that this exists

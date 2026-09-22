@@ -69,6 +69,23 @@ struct JobPolicyTests {
         #expect(none.catchUp == .replay(cap: 0))
     }
 
+    @Test("a replay cap past the ceiling decodes as the ceiling")
+    func hugeReplayCapDecodesAsTheCeiling() throws {
+        // The tool clamps what a model asks for; this is the other door — a hand-edited policy
+        // column, or one written by a build whose ceiling was higher. `replay:5000` is not a spend
+        // hazard (three fires a tick, the breaker at six an hour, and a failure ends the burst),
+        // but it is a job that walks its breaker open, pauses and does it again for hours.
+        let huge = try decoder.decode(JobPolicy.self, from: Data(#"{"catchUp":{"kind":"replay","cap":5000}}"#.utf8))
+        #expect(huge.catchUp == .replay(cap: JobPolicy.maxReplayCap))
+        // Exactly at the ceiling is kept, and the figure below it is untouched.
+        let atTheCeiling = try decoder.decode(
+            JobPolicy.self,
+            from: Data(#"{"catchUp":{"kind":"replay","cap":100}}"#.utf8))
+        #expect(atTheCeiling.catchUp == .replay(cap: 100))
+        #expect(JobPolicy.replayCap(99) == 99)
+        #expect(JobPolicy.maxReplayCap == 100)
+    }
+
     @Test("an unknown overlap decodes as skip rather than failing the row")
     func unknownOverlap() throws {
         let policy = try decoder.decode(JobPolicy.self, from: Data(#"{"overlap":"stampede"}"#.utf8))

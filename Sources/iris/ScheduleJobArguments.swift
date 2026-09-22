@@ -39,6 +39,9 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// a later change to that default reaches every job that never had an opinion.
     let overlap: JobPolicy.Overlap?
     let catchUp: JobPolicy.CatchUp?
+    /// What the parse had to change about what was asked for, in the words the answer uses. Not a
+    /// refusal and not a silent fix: the job is created and the tool's sentence says what it got.
+    var notes: [String] = []
 
     /// Reads the tool call's arguments. The only hard requirement is a prompt: a schedule that
     /// resolves to nothing is `makeJob`'s refusal, not this one, so the caller can report the
@@ -88,16 +91,18 @@ struct ScheduleJobArguments: Equatable, Sendable {
             overlap = value
         }
         var catchUp: JobPolicy.CatchUp?
+        var notes: [String] = []
         if let asked = given(args["catch_up"]) {
-            guard let value = self.catchUp(asked) else { return .failure(Self.catchUpShape) }
-            catchUp = value
+            guard let parsed = self.catchUp(asked) else { return .failure(Self.catchUpShape) }
+            catchUp = parsed.value
+            if let note = parsed.note { notes.append(note) }
         }
         return .success(ScheduleJobArguments(
             prompt: prompt, name: text(args["name"]), alias: alias, profile: text(args["profile"]),
             gateURL: text(args["gate_url"]), gatePath: text(args["gate_path"]),
             gateScript: text(args["gate_script"]), gateMounts: gateMounts,
             gateTimeoutSeconds: integer(args["gate_timeout_seconds"]),
-            overlap: overlap, catchUp: catchUp))
+            overlap: overlap, catchUp: catchUp, notes: notes))
     }
 
     /// Builds the job to store, or the sentence explaining why there is none. `existingNames` is
@@ -238,31 +243,55 @@ struct ScheduleJobArguments: Equatable, Sendable {
     ///
     /// A negative cap clamps to the default exactly as `JobPolicy`'s decoder clamps a stored one
     /// (R15): nobody writes "replay -1 occurrences", so it is a typo, and a job is not worth
-    /// refusing over one when the cap it meant is knowable. Zero is kept: replay nothing.
-    private static func catchUp(_ value: JSONValue?) -> JobPolicy.CatchUp? {
+    /// refusing over one when the cap it meant is knowable. Zero is kept: replay nothing. A cap
+    /// above `JobPolicy.maxReplayCap` clamps too (R44) — and unlike the others it is *said*, in
+    /// the sentence the tool returns, because a model that asked for 5,000 has a plan that the
+    /// stored 100 does not carry out.
+    private struct ParsedCatchUp {
+        let value: JobPolicy.CatchUp
+        let note: String?
+        init(_ value: JobPolicy.CatchUp, note: String? = nil) {
+            self.value = value
+            self.note = note
+        }
+        /// A requested cap, clamped, with the sentence for the clamp when there was one.
+        static func replay(asked cap: Int) -> ParsedCatchUp {
+            let stored = JobPolicy.replayCap(cap)
+            return ParsedCatchUp(.replay(cap: stored),
+                                 note: cap > JobPolicy.maxReplayCap ? cappedReplay(asked: cap) : nil)
+        }
+    }
+
+    /// Said in the answer, not refused: the job exists, with the cap it actually has.
+    static func cappedReplay(asked: Int) -> String {
+        "Catch-up replay was capped at \(JobPolicy.maxReplayCap) occurrences rather than the \(asked) asked for; "
+            + "that is the most a job may replay after a sleep."
+    }
+
+    private static func catchUp(_ value: JSONValue?) -> ParsedCatchUp? {
         if let word = text(value) {
             let lowered = word.lowercased()
             switch lowered {
-            case "coalesce": return .coalesce
-            case "skip": return .skip
-            case "replay": return .replay(cap: JobPolicy.defaultReplayCap)
+            case "coalesce": return ParsedCatchUp(.coalesce)
+            case "skip": return ParsedCatchUp(.skip)
+            case "replay": return ParsedCatchUp(.replay(cap: JobPolicy.defaultReplayCap))
             default:
                 guard lowered.hasPrefix("replay:"),
                       let cap = Int(lowered.dropFirst("replay:".count).trimmingCharacters(in: .whitespaces))
                 else { return nil }
-                return .replay(cap: cap >= 0 ? cap : JobPolicy.defaultReplayCap)
+                return .replay(asked: cap)
             }
         }
         guard case .object(let fields)? = value else { return nil }
         guard let kind = text(fields["kind"])?.lowercased() else { return nil }
         switch kind {
-        case "coalesce": return .coalesce
-        case "skip": return .skip
+        case "coalesce": return ParsedCatchUp(.coalesce)
+        case "skip": return ParsedCatchUp(.skip)
         case "replay":
-            guard let cap = integer(fields["cap"]), cap >= 0 else {
-                return .replay(cap: JobPolicy.defaultReplayCap)
+            guard let cap = integer(fields["cap"]) else {
+                return ParsedCatchUp(.replay(cap: JobPolicy.defaultReplayCap))
             }
-            return .replay(cap: cap)
+            return .replay(asked: cap)
         default: return nil
         }
     }
@@ -271,7 +300,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// model that guessed wrong can fix the call rather than drop the field.
     static let overlapShape: ToolMessage = "overlap must be 'skip' (a fire while the previous run is still going is dropped) or 'queue' (one fire is held and taken when that run ends)."
 
-    static let catchUpShape: ToolMessage = "catch_up must be 'coalesce' (one fire on wake, whatever was missed), 'skip' (no fire; jump to the next occurrence), or 'replay' to run the most recent missed occurrences one at a time — with a cap, if you want one other than 5, as 'replay:3'."
+    static let catchUpShape: ToolMessage = "catch_up must be 'coalesce' (one fire on wake, whatever was missed), 'skip' (no fire; jump to the next occurrence), or 'replay' to run the most recent missed occurrences one at a time — with a cap, if you want one other than 5, as 'replay:3' (100 is the most a job may replay)."
 
     static let gateOptionsNeedAScript = "gate_mounts and gate_timeout_seconds only apply to gate_script."
 
@@ -313,14 +342,19 @@ struct ScheduleJobArguments: Equatable, Sendable {
 
     /// The sentence a stored job's tool call returns. Pure, so both halves — the one that fires and
     /// the one that never will — are testable without a scheduler or a database.
-    static func resultSentence(for stored: Job) -> String {
-        guard let next = stored.nextFireAt, stored.pausedReason == nil else {
-            return "Saved '\(stored.name)' but it will never fire: \(stored.pausedReason ?? JobScheduler.unmatchableReason)."
+    /// `notes` is anything the parse changed about what was asked for — a clamped replay cap,
+    /// today — appended so the answer describes the job that exists rather than the one requested.
+    static func resultSentence(for stored: Job, notes: [String] = []) -> String {
+        let sentence: String
+        if let next = stored.nextFireAt, stored.pausedReason == nil {
+            // A gated job's cadence is how often its gate is *looked at*, not how often it runs:
+            // "next run" would promise a turn that, if the gate is doing its job, is not coming.
+            let label = stored.trigger.gate == nil ? "Next run" : "Next check"
+            sentence = "Scheduled '\(stored.name)' (\(stored.trigger.summary)). \(label): \(formatFire(next, zone: stored.trigger.timeZoneIdentifier))."
+        } else {
+            sentence = "Saved '\(stored.name)' but it will never fire: \(stored.pausedReason ?? JobScheduler.unmatchableReason)."
         }
-        // A gated job's cadence is how often its gate is *looked at*, not how often it runs:
-        // "next run" would promise a turn that, if the gate is doing its job, is not coming.
-        let label = stored.trigger.gate == nil ? "Next run" : "Next check"
-        return "Scheduled '\(stored.name)' (\(stored.trigger.summary)). \(label): \(formatFire(next, zone: stored.trigger.timeZoneIdentifier))."
+        return ([sentence] + notes).joined(separator: " ")
     }
 
     /// A job's next fire, written for the model: minute precision in the zone the job's own cadence

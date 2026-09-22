@@ -129,6 +129,39 @@ struct ScheduleJobArgumentsTests {
         #expect(try parsed(.object(["kind": .string("replay"), "cap": .int(0)])) == .replay(cap: 0))
     }
 
+    @Test("a replay cap past the ceiling is lowered to it, and the answer says so")
+    func aHugeReplayCapIsCappedAndSaidSo() throws {
+        func arguments(_ value: JSONValue) throws -> ScheduleJobArguments {
+            try ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9),
+                                            "catch_up": value]).get()
+        }
+        // Not a refusal: the job is worth creating, and a model that asked for 5,000 needs to be
+        // told it got 100 rather than left believing the plan it wrote.
+        for value in [JSONValue.string("replay:5000"),
+                      .object(["kind": .string("replay"), "cap": .int(5000)])] {
+            let a = try arguments(value)
+            #expect(a.catchUp == .replay(cap: JobPolicy.maxReplayCap))
+            #expect(a.notes == [ScheduleJobArguments.cappedReplay(asked: 5000)])
+            #expect(a.notes.first?.contains("100") == true)
+            let job = try a.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: []).get()
+            #expect(job.policy.catchUp == .replay(cap: JobPolicy.maxReplayCap))
+            // The sentence the tool returns carries it, after the one about the next run.
+            let stored = Job(name: job.name, prompt: job.prompt, trigger: job.trigger,
+                             nextFireAt: Date(timeIntervalSince1970: 1_700_000_000),
+                             policy: job.policy)
+            let sentence = ScheduleJobArguments.resultSentence(for: stored, notes: a.notes)
+            #expect(sentence.hasPrefix("Scheduled '\(stored.name)'"))
+            #expect(sentence.contains("capped at 100 occurrences"))
+            #expect(!sentence.lowercased().contains("deliverable"))
+        }
+        // A cap under the ceiling is stored as asked and says nothing extra.
+        let ordinary = try arguments(.string("replay:7"))
+        #expect(ordinary.catchUp == .replay(cap: 7) && ordinary.notes.isEmpty)
+        #expect(ScheduleJobArguments.resultSentence(for: Job(
+            name: "j", prompt: "p", trigger: .schedule(.interval(seconds: 60)),
+            nextFireAt: Date(timeIntervalSince1970: 1_700_000_000))).contains("capped") == false)
+    }
+
     @Test("a policy value this build does not know is refused with somewhere to go")
     func policyRefusals() {
         let bad = ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9),

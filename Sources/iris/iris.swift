@@ -1129,7 +1129,7 @@ actor IrisEngine {
                     "gate_mounts": Schema(type: "ARRAY", description: "Directories the gate script can read, as '/host/dir' or '/host/dir:/path/in/container'. Always mounted read-only, and recorded as the directory the path resolves to. A single file cannot be mounted — give its directory. The whole filesystem and Iris's own configuration cannot be mounted at all, so name the narrowest directory the check needs.", items: Schema(type: "STRING")),
                     "gate_timeout_seconds": Schema(type: "INTEGER", description: "How long the gate script may take before it is killed and counted as a failure (default 60, clamped to 5-600)."),
                     "overlap": Schema(type: "STRING", description: "What a fire does when the previous run has not finished: 'skip' (default — the fire is dropped and recorded) or 'queue' (one fire is held and taken as soon as that run ends; never more than one)."),
-                    "catch_up": Schema(type: "STRING", description: "What a wake does with occurrences missed while the Mac slept: 'coalesce' (default — one fire now), 'skip' (none; jump to the next occurrence), or 'replay' to run the most recent missed ones one at a time, up to a cap (default 5) — write a cap as 'replay:3'. A replayed fire is an ordinary one, so it asks the gate and counts against the breaker and the budgets, and the burst stops at the first fire that is refused or fails.")
+                    "catch_up": Schema(type: "STRING", description: "What a wake does with occurrences missed while the Mac slept: 'coalesce' (default — one fire now), 'skip' (none; jump to the next occurrence), or 'replay' to run the most recent missed ones one at a time, up to a cap (default 5, at most 100) — write a cap as 'replay:3'. A replayed fire is an ordinary one, so it asks the gate and counts against the breaker and the budgets, and the burst stops at the first fire that is refused or fails.")
                 ],
                 required: ["prompt"]
             )
@@ -1905,7 +1905,8 @@ actor IrisEngine {
                     // Stored through the scheduler, not the ledger, so the first fire is computed
                     // by the code the polling loop uses — and a cadence that matches nothing comes
                     // back paused rather than looking scheduled.
-                    return ScheduleJobArguments.resultSentence(for: try await scheduler.schedule(job))
+                    return ScheduleJobArguments.resultSentence(for: try await scheduler.schedule(job),
+                                                                notes: args.notes)
                 } catch {
                     taken.insert(job.name)
                 }

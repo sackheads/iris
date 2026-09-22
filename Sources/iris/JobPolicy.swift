@@ -46,6 +46,24 @@ struct JobPolicy: Codable, Equatable, Sendable {
     /// The cap a `replay` written without one takes (spec §0.1).
     static let defaultReplayCap = 5
 
+    /// The most occurrences a `replay` may ever be asked for (R44).
+    ///
+    /// A hundred is far past any cadence worth replaying — a quarter-hourly job asleep for a day
+    /// is 96 — and the figure has to stop somewhere: `replay:5000` stored happily and turned the
+    /// job into one that walks its breaker open, pauses, is resumed and walks it open again for
+    /// hours. It is not a spend hazard (three fires a tick, six runs an hour, and a failure ends
+    /// the burst), which is why this is a ceiling and not a refusal: the number is clamped, the
+    /// job is created, and the tool's answer says the cap it actually got.
+    static let maxReplayCap = 100
+
+    /// The cap to store for the one that was asked for: below zero is a typo and takes the
+    /// default (nobody writes "replay -1 occurrences"), above the ceiling takes the ceiling, and
+    /// zero is kept because it is a real answer — replay nothing, drop the lot.
+    static func replayCap(_ requested: Int) -> Int {
+        guard requested >= 0 else { return defaultReplayCap }
+        return min(requested, maxReplayCap)
+    }
+
     init(overlap: Overlap = .skip, catchUp: CatchUp = .coalesce, runTimeoutSeconds: Int = 600,
          perRunTokenBudget: Int? = nil, dailyTokenBudget: Int? = nil, maxRunsPerHour: Int? = nil,
          retry: Bool = true) {
@@ -113,11 +131,13 @@ extension JobPolicy.CatchUp {
         case "skip":
             self = .skip
         case "replay":
-            // Clamped like the four limits above (R15): a negative cap is a typo, and the wake
-            // handling that will read this must not have to decide what "replay -1 occurrences"
-            // means. Zero is kept and is a real answer: replay nothing, drop the lot.
-            let cap = JobPolicy.notNegative(try c.decodeIfPresent(Int.self, forKey: .cap))
-            self = .replay(cap: cap ?? JobPolicy.defaultReplayCap)
+            // Clamped at both ends like the four limits above (R15, R44): a negative cap is a
+            // typo, and the wake handling that will read this must not have to decide what
+            // "replay -1 occurrences" means; above `maxReplayCap` is clamped rather than honoured,
+            // so a hand-edited column cannot ask for more than the tool would create. Zero is kept
+            // and is a real answer: replay nothing, drop the lot.
+            let cap = try c.decodeIfPresent(Int.self, forKey: .cap) ?? JobPolicy.defaultReplayCap
+            self = .replay(cap: JobPolicy.replayCap(cap))
         default:
             self = .coalesce
         }
