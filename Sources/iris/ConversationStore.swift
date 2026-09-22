@@ -800,10 +800,35 @@ final class ConversationStore: Sendable {
                 let sandbox = text("mainAgentSandbox")
                 let tokenUsage = text("tokenUsage")
                 let goalContract = text("goalContract")
-                let subagentResult = text("subagentResult")
-                let checkpointHistory = text("checkpointHistory")
-                let lastGoalEvaluation = text("lastGoalEvaluation")
-                let lastGoalCompletionReport = text("lastGoalCompletionReport")
+                // Supplementary columns lose themselves rather than the conversation (#233).
+                //
+                // Their *JSON* decode failures were already soft — #182 made a corrupt
+                // `checkpointHistory` non-fatal on the grounds that "the contract *is* the goal,
+                // whereas the history is supplementary". The raw-byte path was missed, because
+                // `text` fails a column before anything gets as far as decoding it: one bad byte
+                // in an audit trail took the whole conversation — its messages, its contract, its
+                // workspace. That is the trade #182 rejected, reached by a different door.
+                //
+                // The line is drawn at what the conversation *is* versus what happened in it.
+                // `title`, `workspacePath`, `activeGoal` and `position` are identity. `sandbox`
+                // is a safety setting, and reading it as absent would run commands on the host
+                // that were meant to be contained. `tokenUsage` is not a display counter: per-run
+                // budgets compare against it, so silently zeroing it hands a job an unbounded one.
+                // `goalContract` is the goal. None of those may be quietly dropped.
+                var softLosses: [String] = []
+                func supplementary(_ column: String) -> String? {
+                    switch Self.readTextValue(row, column) {
+                    case .null: return nil
+                    case .invalid:
+                        softLosses.append(column)
+                        return nil
+                    case .text(let s): return s
+                    }
+                }
+                let subagentResult = supplementary("subagentResult")
+                let checkpointHistory = supplementary("checkpointHistory")
+                let lastGoalEvaluation = supplementary("lastGoalEvaluation")
+                let lastGoalCompletionReport = supplementary("lastGoalCompletionReport")
                 // `position` only orders the `SELECT` above and is never decoded into `Conversation`,
                 // but an unconvertible value is exactly the same class of damage as an unreadable
                 // text column, so it is checked the same way (#189).
@@ -815,6 +840,12 @@ final class ConversationStore: Sendable {
                 if let column = unreadableColumn {
                     out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable \(column)"))
                     continue
+                }
+                // Reported only once the conversation is known to survive: a row dropped for a
+                // fatal column above should not also claim it lost an audit trail it took with it.
+                for column in softLosses {
+                    out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil,
+                                                  reason: "unreadable \(column); the conversation was kept without it"))
                 }
 
                 var c: Conversation
