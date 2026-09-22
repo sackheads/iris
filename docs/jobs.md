@@ -271,7 +271,7 @@ says which value it used), coalescing every path seen since the burst began into
 changes never stop — a build writing output, a sync tool catching up — it fires anyway once the
 burst has lasted **ten times the window** (30 s at the default), and the next change starts a new
 burst with a new ceiling. The ceiling is derived from the window, not a second setting. A watch
-created before the window was enforced keeps the window it stored.
+created before the window was configurable keeps the 3 s it was given.
 
 **Noise.** Every watch ignores `.git/`, `.DS_Store`, `node_modules/`, `*~`, `*.swp`, `*.swx`,
 `.#*`, `4913` (Vim's directory probe), `*.tmp`, and the temporary files a macOS atomic save
@@ -305,7 +305,8 @@ built from any of those is not silent and not unbounded: it ends in the job's **
 Some roots are refused: `/`, your home folder itself, `/System`, `/Library`, `/usr`, `/private`,
 `/var`, `/etc`, `/bin`, `/sbin`, `/Volumes` and any volume or mount point are "too broad to watch;
 name a specific folder", and `~/.iris` — or any folder above or below it — "is or contains Iris's
-own directory; a watch there would react to itself". A folder *inside* any of those is fine.
+own directory; a watch there would react to itself". A folder *inside* one of the too-broad
+roots is fine (`/private/tmp/notes`, `~/Notes`); a folder inside `~/.iris` is not.
 
 **Overlap.** A watch never runs concurrently with itself. Its `overlap` defaults to `queue`: saves
 that land while a run is going are held — including a file the run itself was given, saved again —
@@ -334,7 +335,8 @@ blocked the block of paths and the run got none of them. `/jobs` prints one line
 the table: `` `notes` — last burst: 12 changes · 3 noise · 1 own writes (cut at 30 s) · absorbed
 since launch: 41 noise · 7 own writes · 3 while paused `` — the first half from the newest run row,
 so it survives a relaunch ("nothing fired yet" when there is none), the second from memory, so it
-starts again at zero, and a dash from an `iris --run-job` process, which has no watch layer. The
+starts again at zero, and a dash when this process has no watch layer up (before the engine
+starts; `list_jobs` answers `null` for the same reason in an `iris --run-job` run). The
 policy column shows `quiet 10 s` and `2 ignore` when a watch departs from the defaults. A burst in
 which *every* event was noise or an own write writes no row and no card: nothing happened, and the
 count is in the `absorbed since launch` figure. The run itself receives at most 100 paths, sorted,

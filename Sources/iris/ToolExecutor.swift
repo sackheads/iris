@@ -221,10 +221,10 @@ struct ToolExecutor {
         }
     }
     
-    /// The declaration, two sentences (invariant 6): what the tool does and that its own writes are
-    /// safe. The built-in ignore set, the ×10 ceiling and the never-concurrent rule are said once,
+    /// The declaration, two sentences (invariant 6): what the tool does and that its own runs'
+    /// writes are safe — only those (R-D4-1), so the sentence must not say "Iris's". The built-in ignore set, the ×10 ceiling and the never-concurrent rule are said once,
     /// in the result the model reads after calling it, not paid for on every turn.
-    static let watchDescription = "Watch a directory for file changes and run your instructions in the background once it has been quiet for a few seconds (default 3). Iris's own file-tool writes into the folder are ignored, so a watch can safely write there."
+    static let watchDescription = "Watch a directory for file changes and run your instructions in the background once it has been quiet for a few seconds (default 3). The watch ignores its runs' own file-tool writes, so a run can safely write into the folder."
 
     static let allIgnoredRefusal = "that ignore list would ignore every change; drop the pattern or watch a narrower path"
 

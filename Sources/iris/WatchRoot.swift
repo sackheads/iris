@@ -24,6 +24,11 @@ enum WatchRoot {
     /// agree, so this is consistency rather than a choice — but a caller that refuses roots should
     /// know that a `..` in an argument can walk out of the directory it appears to be in.
     ///
+    /// Firmlinks too: `resolvingSymlinksInPath` maps `/System/Volumes/Data/<x>` back to `/<x>`
+    /// (measured 2026-09-22), and that is the only reason the firmlinked spelling of `~/.iris`
+    /// meets the refusals at all. `realpath(3)` returns the firmlink spelling unchanged, so do not
+    /// swap it in; `WatchRootTests` pins the behaviour.
+    ///
     /// - Parameter fileExists: the existence check, injectable so a test can decide the answer
     ///   without a directory on disk.
     static func canonical(_ raw: String,

@@ -85,4 +85,33 @@ struct WatchRootTests {
         #expect(WatchRoot.refusal(for: f.base.appendingPathComponent("sibling").path,
                                   paths: f.paths, home: f.home) == nil)
     }
+
+    /// The whole boundary rests on Foundation mapping a firmlinked spelling back to its `/`-side
+    /// one — `realpath(3)` does not — so the behaviour is pinned here against the test's own temp
+    /// root, which lives on the data volume like everything else.
+    @Test("the firmlinked spelling of a path is the same path, so it meets the same refusals")
+    func firmlinkSpellingIsNotAWayRound() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let sibling = f.base.appendingPathComponent("sibling")
+        try FileManager.default.createDirectory(at: sibling, withIntermediateDirectories: true)
+        // realpath(3) keeps the firmlink prefix, which makes it the right tool for building one.
+        func firmlinked(_ path: String) throws -> String {
+            var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+            let real = try #require(realpath(path, &buffer).map { String(cString: $0) })
+            let spelling = "/System/Volumes/Data" + real
+            #expect(FileManager.default.fileExists(atPath: spelling), "\(spelling) should exist")
+            return spelling
+        }
+        let canonical = try #require(WatchRoot.canonical(f.base.path))
+        #expect(!canonical.hasPrefix("/System/Volumes/Data"))
+        #expect(WatchRoot.canonical(try firmlinked(f.base.path)) == canonical)
+        // And so the refusals hold under that spelling: Iris's root, a folder under it, and the
+        // folder that contains it are all protected; a folder beside it is a folder like any other.
+        for root in [f.paths.root.path, f.paths.configDir.path, f.base.path] {
+            #expect(WatchRoot.refusal(for: try firmlinked(root), paths: f.paths, home: f.home)
+                    == WatchRoot.protectedRefusal, "\(root) should be protected under its firmlinked spelling")
+        }
+        #expect(WatchRoot.refusal(for: try firmlinked(sibling.path), paths: f.paths, home: f.home) == nil)
+    }
 }
