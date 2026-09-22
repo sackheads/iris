@@ -268,7 +268,12 @@ there is nothing to coalesce, skip or replay.
 | -------- | -------------------------------- |
 | `coalesce` (default) | one fire now, against the world as it is, rescheduled from now |
 | `skip` | no fire at all; the cadence jumps to the first occurrence still in the future |
-| `replay(cap)` | one fire per missed occurrence, up to `cap` (5 unless the job says otherwise) |
+| `replay(cap)` | one fire per missed occurrence, up to `cap` (5 unless the job says otherwise; 100 at most) |
+
+A cap above **100** is lowered to 100, and `schedule_job` says so in its answer rather than
+refusing the job: a hundred is far past any cadence worth replaying — a quarter-hourly job asleep
+for a whole day is 96 occurrences — and an uncapped figure only buys a job that walks its breaker
+open, pauses, is resumed and does it again.
 
 `replay` runs the **most recent** `N` missed occurrences, oldest of those first — a job that slept
 through eight hours of quarter-hours wants the last five states of the world, not five from this
@@ -299,7 +304,13 @@ a catch-up, and one fire against the present is what a restart wants; the card f
 
 When the first replayed fire is refused before it can run — a gate that found nothing, an open
 breaker, an exhausted budget — the count still gets recorded: on the gate's ledger row, or on the
-pause card.
+pause card. The same is true of the two answers a wake gives most often. If the job is **still
+running** the turn it started before the sleep, the count goes on the overlap skip row
+("skipped: previous run still in progress (27 earlier occurrences skipped)"); if the job's
+`overlap` is `queue`, the fire is held and the count is held with it, so it arrives on the card of
+the run that fire becomes when the previous one ends. The count is only dropped where the job
+itself has stopped — paused or disabled — and there the pause reason is what a person needs, and
+the scheduler would not have planned the burst in the first place.
 
 At most three fires start per tick, counting every job's rather than counting jobs — so one job's
 replay cannot start more work in a tick than any three ordinary fires would. It does take the whole
@@ -588,7 +599,9 @@ measurement must not (creating an empty conversation in a store with nothing sel
 the guard-provisioning and unreadable-row notices) are suppressed for a CLI run; the fire, its
 row, its card and its approvals are untouched by that.
 
-**It refuses while another Iris process holds the store.** The app writes a lock file holding its
+**It refuses while another Iris process holds the store**, `--dry-run` included — a dry run
+writes nothing, but opening the store may *migrate* it, and a schema migration under a live app is
+a worse failure than being told to try again. The app writes a lock file holding its
 pid beside the store (`conversations.sqlite.lock`) at launch and removes it at exit; `--run-job`
 takes the same lock for the length of its run and gives it back. The file holds a pid and nothing
 else, so the refusal names both possibilities — "another Iris process holds the store (pid N) —
