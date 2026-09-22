@@ -33,6 +33,19 @@ in the run ledger, and one event card — the gates, limits and retries around i
 Every job needs a unique name. If the requested name (or a slug of the prompt) is already taken,
 `-2`, `-3`, … is appended until it isn't.
 
+Two of the job's policies can be set at creation, and both default to the quieter answer:
+
+| `schedule_job` argument | Values | What it decides |
+| --- | --- | --- |
+| `overlap` | `skip` (default), `queue` | What a fire does when the previous run is still going: drop it and record the drop, or hold exactly one and take it when that run ends |
+| `catch_up` | `coalesce` (default), `skip`, `replay`, `replay:N`, `{"kind": "replay", "cap": N}` | What a wake does with occurrences missed while the Mac slept (see "What happens on sleep"). A bare `replay` uses the cap of 5; a negative cap is read as the typo it is and takes that default |
+
+A value neither field recognizes is refused with a sentence naming the ones that work, rather than
+quietly creating a job that behaves differently from the one that was asked for. The rest of a job's
+policy is not settable from the tool: the budgets, the breaker and the run timeout are global
+settings with a per-job override in the stored `policy` column, and `retry` is per job and on (see
+"Limits").
+
 ## The cron subset
 
 Five space-separated fields, in order: `minute hour day-of-month month day-of-week`. Each field
@@ -494,8 +507,10 @@ recomputes the next fire from the job's own schedule.
 
 The five global numbers are `ConfigManager` keys — `JOB_MAX_RUNS_PER_HOUR`,
 `JOB_DAILY_TOKEN_BUDGET`, `JOB_GLOBAL_DAILY_TOKEN_BUDGET`, `JOB_PER_RUN_TOKEN_BUDGET` and
-`JOB_RUN_TIMEOUT_SECONDS` — and Settings → Advanced grows a stepper for each of them later in this
-deliverable; today they are defaults with per-job overrides.
+`JOB_RUN_TIMEOUT_SECONDS` — and **Settings → Advanced → Job Limits** has a stepper for each. A
+stepper wound down to zero reads as "default": the figure above is what the runner then uses, and
+the row says so rather than claiming a budget of nothing. A job's own `policy` column overrides any
+of them except the global daily budget.
 
 **What zero means depends on which number it is.** An unset settings key — which is how a `0` reads
 — is simply the default above. In a job's own `JobPolicy`, `0` is an answer rather than a gap, and
@@ -507,14 +522,18 @@ whole section exists to prevent. A **negative** figure is not a third answer —
 mean unlimited — so it is read as the typo it is and takes the default, wherever it was written: a
 settings key, or a hand-edited `policy` column.
 
-**What you can see of all this today.** `/jobs` shows a job's place on the retry ladder
-(`retry 1/3`) beside its next fire, and any pause names the figure that caused it — the breaker
-count, or the budget and the spend that reached it — in the pause reason the table prints, on the
-`interrupted` row and on the card. `list_jobs` shows the model less: name, trigger, whether the job
-is enabled, its next fire and how its last run ended. Neither shows a **running** total — there is
-no per-job token figure and no runs-this-hour count in either — so between pauses, what a job is
-spending has to be read off its run rows (`get_job_run`, or the token counts on a card). Both
-figures land with the last PR of this deliverable.
+**What you can see of all this.** Every one of these numbers is readable before it bites, not only
+in the pause that names it. `/jobs` prints, per job, what it has spent today against its own daily
+budget (`620k / 1M (62%)`), how many runs it has started in the last hour against the breaker
+(`2 / 6`), its place on the retry ladder (`retry 1/3`) beside its next fire, and a policy column
+naming whatever it does differently from the defaults; under the table is the whole unattended
+system's spend for the day against the global ceiling. `list_jobs` carries the same figures as
+fields — `tokensToday`, `dailyBudget`, `runsLastHour`, `maxRunsPerHour`, `retryAttempt`, `policy`,
+`gateKind`, `profile`, and `tokensTodayAllJobs` against `globalDailyBudget` — so the model answers
+"what is this job costing?" from the same arithmetic admission decides on. A figure that could not
+be read is a dash in the table and a `null` in the tool, never a zero: "nothing spent today" is a
+claim, and an unreadable ledger is not one. A pause still names the figure that caused it, in the
+pause reason the table prints, on the `interrupted` row and on the card.
 
 ## `/jobs`
 
@@ -522,7 +541,7 @@ figures land with the last PR of this deliverable.
 
 | Form | What it does |
 | --- | --- |
-| `/jobs` | A table of every job — name, trigger, when it next fires (or why it is paused), how its last run ended — then one line per unacknowledged failure, with the first eight characters of the run's id |
+| `/jobs` | A table of every job — name, trigger, its policy where it departs from the defaults, when it next fires (or why it is paused), how its last run ended, its tokens today against its daily budget and its runs in the last hour against the breaker — then the day's spend across every job, then one line per unacknowledged failure with the first eight characters of the run's id |
 | `/jobs ack <run id>` | Marks a failed or blocked run as seen: it leaves the failure list, and it stops being exempt from retention. Takes a full id or the first eight or more characters of one, as a card prints it; an ambiguous prefix is refused rather than guessed |
 | `/jobs pause <name>` | Stops a job firing, with "paused by user" as the reason the table shows |
 | `/jobs resume <name>` | Clears the pause *and* the retry ladder, and recomputes the next fire from the job's own schedule |
@@ -595,8 +614,11 @@ is threading the run's own state to those call sites.
 ## The job tools
 
 Two read-only tools let the model answer questions about jobs: `list_jobs` (every job, its trigger,
-its next fire, how its last run ended) and `get_job_run` (one run, by id or by the eight characters
-a card shows, including the last thing the run itself said).
+its next fire, why it is paused, how its last run ended, its policy, profile and gate kind, and what
+it has spent today against its budgets and the breaker) and `get_job_run` (one run, by id or by the
+eight characters a card shows, including the last thing the run itself said). Neither can change
+anything: creating, pausing and deleting a job are `schedule_job` and `/jobs`, and nothing a
+background run can reach.
 
 Both are declared **only in a pinned conversation**, and refused at dispatch anywhere else even if
 a call arrives regardless. The reason is cost, not secrecy: two extra tool declarations are a tax on

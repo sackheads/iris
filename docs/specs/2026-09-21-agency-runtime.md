@@ -1,6 +1,6 @@
 # Agency: Runtime (deliverable 3 of #187) — Design
 
-**Status:** APPROVED IN PRINCIPLE 2026-09-21 (morning review; §0 records the decisions); nothing here is implemented.
+**Status:** IMPLEMENTED 2026-09-22. Approved in principle 2026-09-21 (morning review; §0 records the decisions); everything here is built, with the amendments in §11 recording where the implementation changed the design. User-facing documentation: `docs/jobs.md`.
 **Issue:** #187 (`docs/agency/agency.md` deliverable 3)
 **Builds on:** #249 (job model and ledger spec), #252 (deliverable 1), #253 (deliverable 2). Facts about the code as it stands after #253: `.superpowers/briefs/agency-d3-facts.md` in the main checkout.
 **Does not touch:** the quiet window and self-write filter (D4), the pinned main conversation's briefing and read tools (D5), native surfaces (D6).
