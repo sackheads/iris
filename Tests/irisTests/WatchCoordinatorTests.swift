@@ -1275,6 +1275,53 @@ struct WatchCoordinatorTests {
         await coordinator.stopLoop()
     }
 
+    @Test("a path saved during its own run fires one window after the run, not on the minute wake")
+    func theLoopIsWokenWhenARunEndsWithAHold() async throws {
+        // Found on screen: a file saved while its watch's run was in flight ran again 62 s later
+        // with `ceilingFired` set. The save is accepted into the hold while the fire is out, so it
+        // wakes the loop to a no-op `tick`; the burst it belongs to only begins when the handler
+        // returns `.run`, and that return happened with the loop parked on its 60 s wait. Nothing
+        // woke it, so the window expired unnoticed and the minute wake fired the burst late — and
+        // past its ceiling, so the row blamed a save that never stopped. As above, this drives the
+        // loop: `tick` cannot see a missing wake.
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder()
+        let gate = Gate()
+        let job = Self.job("notes", root: "/r")
+        try store.ledger.upsert(job)
+        let coordinator = WatchCoordinator(ledger: store.ledger, now: { clock.now },
+                                           recentWrites: RecentWrites(now: { clock.now }),
+                                           fire: { job, fire in
+            // The first fire is the run; it stays open until the test lets it return.
+            if await recorder.count == 0 { await gate.arriveAndWait() }
+            return await recorder.record(job, fire)
+        })
+        await coordinator.sync(with: [job])
+
+        let sleeps = Sleeps(clock: clock)
+        await coordinator.startLoop(everyMinute: {}, sleep: { await sleeps.wait($0) })
+        await Self.eventually("the loop to park on its idle wait") { await sleeps.parkedOnTheIdleWait }
+
+        await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
+        await gate.waitForEntry()
+        // Saved again mid-run: held, and the loop is back on its idle wait.
+        await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
+        await Self.eventually("the loop to park again behind the outstanding fire") {
+            await sleeps.requested.filter { $0 >= 30 }.count >= 2
+        }
+
+        await gate.open()
+
+        await recorder.waitFor(2)
+        #expect(await recorder.paths == [["/r/a.txt"], ["/r/a.txt"]])
+        #expect(await recorder.summaries.last?.ceilingFired == false,
+                "one window after the run ended, not a minute later and past the ceiling")
+        #expect(await sleeps.shortWaits.filter { $0 > 2.9 && $0 <= 3.0 }.count == 2,
+                "the run's end woke the loop to the new burst's window")
+        await coordinator.stopLoop()
+    }
+
     @Test("stopping the loop releases it even while it is parked on a wait")
     func stopLoopReleasesAParkedLoop() async throws {
         let store = try ConversationStore.inMemory()

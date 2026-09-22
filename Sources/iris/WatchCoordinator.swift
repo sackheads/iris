@@ -323,10 +323,11 @@ actor WatchCoordinator {
         }
 
         // §2: the loop sleeps to the earliest deadline *or until woken by an accepted event*. An
-        // accept is the only thing that can bring a deadline forward, so it is the only thing that
-        // wakes; a batch of nothing but noise leaves the loop where it was. A wake for an accept
-        // that only joined a hold (no deadline of its own yet) costs one no-op `tick`, which is
-        // cheaper than the arithmetic needed to be sure it did not.
+        // accept is what brings a deadline forward (the other source of a new deadline is an
+        // admission, which `apply` wakes for), so it is what wakes here; a batch of nothing but
+        // noise leaves the loop where it was. A wake for an accept that only joined a hold (no
+        // deadline of its own yet) costs one no-op `tick`, which is cheaper than the arithmetic
+        // needed to be sure it did not.
         if !acceptedIn.isEmpty { signalWake() }
     }
 
@@ -631,6 +632,12 @@ actor WatchCoordinator {
             dropHold(&subscriber)
         }
         subscribers[id] = subscriber
+        // An admission can leave a deadline behind — the new burst's window, or a `.skipInFlight`
+        // re-ask — with the loop parked on the 60 s wait it took when the fire went out and
+        // `nextDeadline()` had nothing to offer. Seen on screen: a file saved during its own run
+        // ran again a minute later, and past the ceiling, because nothing here woke the loop when
+        // the run returned. The wake costs one `tick` when there is nothing to do.
+        if !subscriber.pending.isEmpty || admission == .skipInFlight { signalWake() }
     }
 
     /// A refusal's exit from a fire: the fire, its hold and the burst behind it are all dropped.
@@ -748,11 +755,13 @@ actor WatchCoordinator {
     /// the periodic re-stat of every watch root (§7). It is called at most once a minute however
     /// often the loop wakes for a window.
     ///
-    /// The wait is `min(nextDeadline(), now + 60 s)` **or until an accepted event wakes it**
-    /// (§2). Both halves are needed: the deadline is read once, before the wait, so without the
-    /// wake the first save after a quiet period would sit through the rest of a 60 s sleep and its
-    /// 3 s window would fire nearly a minute late; and without the ceiling of 60 s a clock the
-    /// process cannot see moving (a laptop waking from sleep) would never be noticed.
+    /// The wait is `min(nextDeadline(), now + 60 s)` **or until a wake** (§2) — from an accepted
+    /// event, or from an admission that left a deadline behind. Both halves are needed: the
+    /// deadline is read once, before the wait, so without the wake the first save after a quiet
+    /// period would sit through the rest of a 60 s sleep and its 3 s window would fire nearly a
+    /// minute late (and a save during a run would do the same when the run returned); and without
+    /// the ceiling of 60 s a clock the process cannot see moving (a laptop waking from sleep) would
+    /// never be noticed.
     ///
     /// `sleep` is injected so a test can drive this loop on its own clock rather than in real
     /// seconds — a wake is only observable from the loop, never from `tick`.
@@ -821,8 +830,9 @@ actor WatchCoordinator {
     }
 
     /// Wakes the loop, or remembers that it should not park when it next tries to. Called for a
-    /// batch that accepted at least one path — the only thing that can move the earliest deadline
-    /// earlier — and by the timer when the wait runs out.
+    /// batch that accepted at least one path, for an admission that left a deadline behind (a
+    /// burst begun from a run's hold, or a `.skipInFlight` re-ask) — the two things that can move
+    /// the earliest deadline earlier — and by the timer when the wait runs out.
     private func signalWake() {
         if sleeper != nil { resumeSleeper() } else { pendingWake = true }
     }
