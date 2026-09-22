@@ -778,8 +778,9 @@ struct WatchCoordinatorTests {
         #expect(second.summary.delivered == 1)
     }
 
-    /// The same re-save under `queue`: the held re-fire names the file once and counts it twice
-    /// — the fire's change and the one made during it are two changes to the row (R-D4-10).
+    /// The same re-save under `queue`: the held re-fire names the file once and counts it once
+    /// in `changed` (R-D4-12) — it is one changed file, however many times it was saved — while
+    /// `coalesced` keeps both events (R-D4-10).
     @Test("a fired path saved again while its fire is queued is taken once, and counted")
     func aFiredPathSavedAgainWhileQueuedIsTakenOnceAndCounted() async throws {
         let store = try ConversationStore.inMemory()
@@ -800,8 +801,8 @@ struct WatchCoordinatorTests {
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
         let taken = await coordinator.takeHeldPaths(job.id)
         #expect(taken.paths == ["/r/a.txt"], "once: the prompt names the file, not two copies of it")
-        #expect(taken.summary?.changed == 2, "the fire's `a` and the re-saved `a` are two changes")
-        #expect(taken.summary?.coalesced == 2)
+        #expect(taken.summary?.changed == 1, "one file, however many saves: never `2 changed, 1 delivered`")
+        #expect(taken.summary?.coalesced == 2, "the event count keeps both saves")
         #expect(await coordinator.snapshot(job.id)?.outstanding == 0, "taking the paths ends the fire")
     }
 
@@ -899,6 +900,42 @@ struct WatchCoordinatorTests {
             await coordinator.snapshot(job.id)?.fireOutstanding == false
         }
         #expect(await coordinator.snapshot(job.id)?.held == 0)
+    }
+
+    /// R-D4-12's `skip` mirror: the ceiling re-ask merges the fire and the hold the same way the
+    /// held re-fire does, so a fired file saved again during the skip is offered once and counted
+    /// once in `changed`, with `coalesced` keeping both saves.
+    @Test("a re-ask names a fired path saved again once, and counts it once")
+    func aReAskCountsAReSavedFiredPathOnce() async throws {
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder([.skipInFlight, .skipInFlight])
+        let job = Self.job("reskipper", root: "/r", overlap: .skip)
+        try store.ledger.upsert(job)
+        let coordinator = Self.coordinator(ledger: store.ledger, clock: clock,
+                                           writes: RecentWrites(now: { clock.now }), recorder: recorder)
+        await coordinator.sync(with: [job])
+
+        await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
+        clock.set(Self.at(3))
+        await coordinator.tick(now: Self.at(3))
+        await recorder.waitFor(1)
+        await Self.eventually("the skip to be applied") { await coordinator.nextDeadline() == Self.at(30) }
+
+        // The fired file, saved again while the run it was refused for is still going.
+        clock.set(Self.at(10))
+        await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
+        #expect(await coordinator.snapshot(job.id)?.held == 1, "a new arrival, not a repeat")
+
+        clock.set(Self.at(30))
+        await coordinator.tick(now: Self.at(30))
+        await recorder.waitFor(2)
+        let offer = try #require(await recorder.fires.last?.fire)
+        #expect(offer.paths == ["/r/a.txt"], "named once")
+        #expect(offer.summary.changed == 1, "one changed file")
+        #expect(offer.summary.coalesced == 2, "two saves")
+        #expect(offer.summary.delivered == 1)
+        #expect(offer.summary.overflow == 0)
     }
 
     @Test("any other refusal drops the held paths")

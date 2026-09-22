@@ -27,12 +27,16 @@ typealias WatchFireHandler = @Sendable (Job, WatchFire) async -> JobRunner.Admis
 ///    returns immediately, so one watch's run cannot stall every other watch's window. At most one
 ///    fire is outstanding per subscriber, which is what makes "the run in flight" a single state
 ///    rather than a set.
-/// 2. **A path is in exactly one of `pending`, `heldPaths`, or the outstanding fire, at every
-///    instant.** The fired paths leave `pending` for the fire itself *before* the handler is
-///    called, and `heldPaths` takes only what arrives while that fire is out (R-D4-10). So the
-///    runner's held re-fire (§3) always finds both; a path saved again during its own run is a
-///    new arrival — the run may have read it before the save — and not a repeat of one it holds;
-///    and a run that ends before the coordinator has stashed anything is not a state that exists.
+/// 2. **An accepted arrival lands in exactly one of `pending`, `heldPaths`, or the outstanding
+///    fire; `pending` and `heldPaths` are never both non-empty; and a fire out means no pending
+///    burst** (`outstandingFire != nil ⟹ pending == ∅`, `fireOutstanding == (outstandingFire !=
+///    nil)`). The fired paths leave `pending` for the fire itself *before* the handler is called,
+///    and `heldPaths` takes only what arrives while that fire is out (R-D4-10). So the runner's
+///    held re-fire (§3) always finds both; a path saved again during its own run is a new arrival
+///    — the run may have read it before the save — and not a repeat of one it holds; and a run
+///    that ends before the coordinator has stashed anything is not a state that exists. The fire
+///    and the hold may therefore name the same path, which is why every consumer of the two
+///    unions them and counts the union once (R-D4-12).
 ///
 /// Time is injected (`now`) and evaluation is a method (`tick(now:)`), so every window, ceiling
 /// and re-ask in the tests is an instant the test chose. Nothing here sleeps on its own clock
@@ -510,12 +514,18 @@ actor WatchCoordinator {
         // nowhere else to be reported, because the burst that would have carried them ended at
         // the first ask. The union is cut back to the bound, and what it cuts is counted as
         // overflow, so a hold that is re-asked for the length of a long run cannot grow past it.
+        //
+        // `changed` is the merged set plus what each segment had already overflowed (R-D4-12):
+        // a file saved before the fire and again during it is one changed file named once, not
+        // two, and `changed − overflow == paths.count` holds here as it does for a single burst.
+        // Overflowed paths were never stored, so they cannot be de-duplicated and count once
+        // each, as they always did. `coalesced` stays the event count.
         let owed = Set(previous.paths).union(subscriber.heldPaths).sorted()
         let paths = Array(owed.prefix(Self.maxTrackedPaths))
         subscriber.heldPaths = []
         let summary = WatchSummary(
             delivered: Swift.min(paths.count, Self.maxDeliveredPaths),
-            changed: previous.summary.changed + subscriber.changed,
+            changed: owed.count + previous.summary.overflow + subscriber.overflow,
             overflow: previous.summary.overflow + subscriber.overflow + (owed.count - paths.count),
             coalesced: previous.summary.coalesced + subscriber.coalesced,
             noise: previous.summary.noise + subscriber.noise,
@@ -639,9 +649,11 @@ actor WatchCoordinator {
     /// The union rather than just the fire, because a `queue`d run's re-fire is the only thing
     /// that will take any of the three — anything accepted since the fire would otherwise wait
     /// for a window that no longer has a burst behind it. A fired path saved again during the
-    /// wait is in the fire and in the hold, and is named once (R-D4-10). The burst counters go
-    /// with the paths: they describe what is being taken, and leaving them would have the next
-    /// fire report this burst twice.
+    /// wait is in the fire and in the hold, and is named once — and counted once in `changed`,
+    /// which is the merged set plus both segments' overflow, so `changed − overflow` is the
+    /// number of paths handed over (R-D4-12); `coalesced` keeps both events. The burst counters
+    /// go with the paths: they describe what is being taken, and leaving them would have the
+    /// next fire report this burst twice.
     ///
     /// The summary is the outstanding fire's plus everything accumulated since (R-D4-9), the same
     /// arithmetic `reAsk` does and for a stronger reason: an admission of `.queued` writes no row,
@@ -664,7 +676,7 @@ actor WatchCoordinator {
         let counted = subscriber
         let summary = subscriber.outstandingFire.map { outstanding in
             WatchSummary(delivered: 0,
-                         changed: outstanding.summary.changed + counted.changed,
+                         changed: taken.count + outstanding.summary.overflow + counted.overflow,
                          overflow: outstanding.summary.overflow + counted.overflow,
                          coalesced: outstanding.summary.coalesced + counted.coalesced,
                          noise: outstanding.summary.noise + counted.noise,
