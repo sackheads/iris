@@ -3230,6 +3230,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Flush BEFORE _exit: it runs no atexit handlers, so it would kill the pending debounced
         // save and skip the cfprefsd flush, losing every unwritten change (#62).
         MainActor.assumeIsolated { AppState.shared.flushSave() }
+        // And give the store back to the command line (#187 §8). `_exit` below runs no atexit
+        // handler, so this is the only orderly release; a crash instead leaves a lock naming a
+        // dead pid, which `GUILock` reads as stale.
+        GUILock.release()
         // Conversations live in their own database now (#163), but settings and other state
         // still ride on UserDefaults, and `_exit` skips the cfprefsd flush for those too.
         IrisDefaults.store.synchronize()
@@ -3243,6 +3247,10 @@ struct IrisApp: App {
     init() {
         IrisMigrator.migrate(.default)
         ShippedSkills.seedIfNeeded(.default)
+        // Claim the store for this app instance: `iris --run-job` refuses while this file names a
+        // live process (#187 §8). Best-effort, and deliberately so — a lock that cannot be written
+        // must not stop the app launching; `AppDelegate.applicationWillTerminate` gives it back.
+        GUILock.acquire()
         Task {
             await SandboxSessionManager.shared.reapOrphans()
             while true {

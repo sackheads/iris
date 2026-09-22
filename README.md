@@ -188,6 +188,26 @@ For repeatable performance tracking over time, run `perf/run.sh`: it executes th
 comparison against a bare provider call), and compares against promoted baselines. See
 [perf/README.md](perf/README.md).
 
+### Running one job headlessly (`--run-job`)
+
+```bash
+swift run iris --run-job pr-sweep              # fire one job now, print its ledger row
+swift run iris --run-job pr-sweep --dry-run    # ask only its gate; write nothing
+swift run iris --run-job <job id> --json       # the same row as one JSON object
+```
+
+`--run-job` opens your real conversation store and the real model client, fires one job the way
+`/jobs run` does (admission applies, the gate does not), prints the run's ledger row — status,
+reason, tokens, duration, gate signal — and exits: no scheduler, no watchers, no window. Approvals
+fail closed exactly as they do unattended, and the run's event card is delivered as usual, so the
+Iris Activity conversation shows it the next time you open the app. It **refuses while the app is
+running** (a pid lock file beside the store) rather than writing behind a live `AppState`.
+
+Exit codes: `0` completed (or a `--dry-run` gate that saw a change), `2` failed, blocked on
+approval or refused by admission, `3` a `--dry-run` gate that saw no change, `1` usage, an unknown
+job, or the app holding the lock. Full detail, including what a dry run does and does not record,
+is in **[docs/jobs.md](docs/jobs.md)**.
+
 ### Updates & Releases
 
 - **Auto-Updates**: Iris automatically checks GitHub Releases for new updates. You can also manually check for updates and view release notes at any time via the **Updates** tab in Settings.

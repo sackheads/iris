@@ -82,6 +82,12 @@ struct IrisPaths: Sendable {
     /// which is the choice `IrisDefaults.perfSeed` already made for the old blob.
     var conversationsDB: URL { root.appendingPathComponent("conversations.sqlite") }
 
+    /// The lock the running app holds beside the store, so `iris --run-job` refuses rather than
+    /// writing behind a live `AppState` (#187 §8). Held by `GUILock`; created at launch and
+    /// removed at exit, with a dead pid in it treated as stale. Beside the database on purpose:
+    /// it guards *that file*, and a volatile copy gets its own lock for its own store.
+    var guiLockFile: URL { conversationsDB.appendingPathExtension("lock") }
+
     // memory/
     var memoryDir: URL { root.appendingPathComponent("memory") }
     var soulMd: URL { memoryDir.appendingPathComponent("SOUL.md") }

@@ -16,8 +16,8 @@ This document covers deliverables 1 to 3 of `#187` (see `docs/agency/agency.md`,
 `docs/specs/2026-09-21-agency-model-and-ledger.md` and
 `docs/specs/2026-09-21-agency-runtime.md`): the job model, the cron subset, the schedule aliases,
 what happens on sleep, what a fire actually does — a run in a hidden conversation of its own, a row
-in the run ledger, and one event card — and the gates, limits and retries around it.
-`iris --run-job` is still to come.
+in the run ledger, and one event card — the gates, limits and retries around it, and
+`iris --run-job`, which fires one job from a terminal and prints the row it wrote.
 
 ## Creating a job
 
@@ -528,6 +528,48 @@ figures land with the last PR of this deliverable.
 | `/jobs resume <name>` | Clears the pause *and* the retry ladder, and recomputes the next fire from the job's own schedule |
 | `/jobs run <name>` | Fires the job now, through the same admission a scheduled fire meets. Says it is starting straight away, then reports what admission decided once the fire is over — an overlap, the breaker or an exhausted budget is named rather than reported as a run. The result itself arrives as a card. A paused or disabled job is refused up front |
 | `/jobs delete <name>` | Deletes a job and its ledger rows. Refused while a run is in flight. The transcripts are left for retention to clear, so a card you are still reading keeps working |
+
+## Running one job from a terminal (`iris --run-job`)
+
+```
+iris --run-job <id-or-name> [--dry-run] [--json]
+```
+
+One job, fired once, against your real store (`~/.iris/conversations.sqlite`) with the real model
+client — then the process exits. No scheduler starts, no watchers, no window. What it is for is
+**measuring a job before you trust it**: run a new job or a new gate on demand and read its row —
+status, tokens, duration, gate signal — instead of waiting for its cadence, feed a gate's verdicts
+to an eval harness, or debug a misbehaving job under exactly the rules it has unattended. It is a
+measurement and debugging tool, not a way to run jobs in production.
+
+It behaves like `/jobs run`, not like a scheduled tick: the fire's origin is `manual`, so it meets
+the same admission checks (paused, disabled, overlap, breaker, budgets) and **skips the gate** — a
+person asking for a run does not get outvoted by one. `--dry-run` is where the gate is the
+question: it evaluates the gate and nothing else, prints the verdict and the signal, and writes no
+run row, no card and no stored signal.
+
+Approvals fail closed exactly as they do at 3 a.m.: no auto-approve, no headless mode, no volatile
+settings copy. A tool call a read-only profile denies, or one that would need a human, is recorded
+as a `blocked on approval` run with the call on it — the same row and the same card a scheduled
+fire would leave, so the card is in the Activity conversation the next time you open the app.
+
+**It refuses while the app is running.** The app writes a lock file holding its pid beside the
+store (`conversations.sqlite.lock`) at launch and removes it at exit. GRDB's WAL would survive two
+writers, but `AppState` keeps conversation state in memory, so a CLI write behind a live app
+desyncs the UI and the app then saves its stale copy over the top. A lock left behind by a crash
+names a process that no longer exists and is ignored; one that cannot be parsed is treated as held,
+and the message names the file to delete.
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | The run `completed` — or, with `--dry-run`, the gate says something changed |
+| `1` | Usage, no job with that id or name, a store that would not open, or the app holding the lock |
+| `2` | The run did not complete: `failed`, `blocked on approval`, an admission refusal (paused, overlap, breaker, budget), or a gate that could not answer |
+| `3` | The gate looked and nothing had changed (`--dry-run`) |
+
+Without `--json` the row prints one field per line (`job`, `run`, `status`, `trigger`, `started`,
+`duration`, `tokens`, `gate`, then `outcome` / `reason` / `blocked tool` when there is one). With
+`--json` it is a single object with sorted keys, which is what a script or `jq` should read.
 
 ## The job tools
 
