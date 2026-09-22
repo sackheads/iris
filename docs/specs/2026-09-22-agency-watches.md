@@ -1,6 +1,6 @@
 # Agency deliverable 4: Watches
 
-Status: **implemented** (2026-09-22; proposed and revised the same day after an adversarial pre-review, then amended in review as the code landed — see §10). Shipped in two PRs: PR A of deliverable 4 (behaviour: §1–§4, §7, the runner seam of §3) and PR B of deliverable 4 (visibility: §5, §6, the docs of §9). Where a section below names a departure the code forced, the ruling in §10 is the record and the text has been brought to match it. Deliverable 4 of #187, after deliverables 1–3 (`2026-09-21-agency-model-and-ledger.md`, `2026-09-21-agency-runtime.md`). Argued from `docs/agency/agency.md` ("Watches. Fold `WatcherManager` onto the trigger model; quiet window; self-write filter; poll trigger" — the poll trigger landed in deliverable 3).
+Status: **implemented** (2026-09-22; proposed and revised the same day after an adversarial pre-review, then amended in review as the code landed — see §10). Shipped in two PRs: #279 (behaviour: §1–§4, §7, the runner seam of §3) and #280 (visibility: §5, §6, the docs of §9). Where a section below names a departure the code forced, the ruling in §10 is the record and the text has been brought to match it. Deliverable 4 of #187, after deliverables 1–3 (`2026-09-21-agency-model-and-ledger.md`, `2026-09-21-agency-runtime.md`). Argued from `docs/agency/agency.md` ("Watches. Fold `WatcherManager` onto the trigger model; quiet window; self-write filter; poll trigger" — the poll trigger landed in deliverable 3).
 
 ## 0. Decided
 
