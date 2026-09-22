@@ -417,6 +417,38 @@ struct JobRunnerTests {
         #expect(destination.messages.filter { $0.role == .event }.count == 1)
     }
 
+    /// #187 deliverable 4, §7: the watched folder was deleted or unmounted, so the stream is gone
+    /// and nothing will ever wake this job again. Stopping it quietly would leave a watch that
+    /// looks live in `/jobs` and never fires, which is the failure mode hardest to notice.
+    @Test("pauseUnavailable stops the job, says why on a stillborn row, and tells the user once")
+    func pauseUnavailableWritesTheReasonAndACard() async throws {
+        let (store, state, engine, client, _) = try harness([textResponse("tick")])
+        var job = self.job(name: "vanished")
+        job.trigger = .fsEvent(FSWatch(path: "/gone"))
+        try store.ledger.upsert(job)
+        let at = Date(timeIntervalSince1970: 1_700_000_900)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { at },
+                               config: config)
+        let reason = "watch path unavailable: /gone"
+
+        await runner.pauseUnavailable(job: job, reason: reason)
+
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == reason)
+        let runs = try store.ledger.runs(jobId: job.id, limit: 10)
+        #expect(runs.count == 1, "one stillborn row, not one per failed event")
+        #expect(runs.first?.status == .interrupted)
+        #expect(runs.first?.failureReason == reason)
+        #expect(runs.first?.transcriptConversationId == nil)
+        #expect(runs.first?.triggerKind == "fsEvent", "the filesystem is still what this job is")
+        let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
+        let cards = activity.messages.filter { $0.role == .event }
+        #expect(cards.count == 1)
+        #expect(EventCard.decode(cards[0].content)?.outcome == reason)
+        #expect(client.callCount == 0, "a paused job runs nothing")
+    }
+
     // MARK: overlap and launch bookkeeping
 
     @Test("a skipped overlap is recorded as an interrupted run with no transcript")
