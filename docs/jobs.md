@@ -38,7 +38,7 @@ Two of the job's policies can be set at creation, and both default to the quiete
 | `schedule_job` argument | Values | What it decides |
 | --- | --- | --- |
 | `overlap` | `skip` (default), `queue` | What a fire does when the previous run is still going: drop it and record the drop, or hold exactly one and take it when that run ends |
-| `catch_up` | `coalesce` (default), `skip`, `replay`, `replay:N`, `{"kind": "replay", "cap": N}` | What a wake does with occurrences missed while the Mac slept (see "What happens on sleep"). A bare `replay` uses the cap of 5; a negative cap is read as the typo it is and takes that default |
+| `catch_up` | `coalesce` (default), `skip`, `replay`, `replay:N` | What a wake does with occurrences missed while the Mac slept (see "What happens on sleep"). A bare `replay` uses the cap of 5; a negative cap is read as the typo it is and takes that default. The object form the policy itself stores, `{"kind": "replay", "cap": N}`, is also accepted, but the argument is declared a string, so prefer `replay:N` |
 
 A value neither field recognizes is refused with a sentence naming the ones that work, rather than
 quietly creating a job that behaves differently from the one that was asked for. The rest of a job's
@@ -541,7 +541,7 @@ pause reason the table prints, on the `interrupted` row and on the card.
 
 | Form | What it does |
 | --- | --- |
-| `/jobs` | A table of every job — name, trigger, its policy where it departs from the defaults, when it next fires (or why it is paused), how its last run ended, its tokens today against its daily budget and its runs in the last hour against the breaker — then the day's spend across every job, then one line per unacknowledged failure with the first eight characters of the run's id |
+| `/jobs` | A table of every job — name, trigger (with its gate, if it has one), its policy where it departs from the defaults, when it next fires (or why it is paused), how its last run ended, its tokens today against its daily budget and its runs in the last hour against the breaker — then the day's spend across every job, then one line per unacknowledged failure with the first eight characters of the run's id |
 | `/jobs ack <run id>` | Marks a failed or blocked run as seen: it leaves the failure list, and it stops being exempt from retention. Takes a full id or the first eight or more characters of one, as a card prints it; an ambiguous prefix is refused rather than guessed |
 | `/jobs pause <name>` | Stops a job firing, with "paused by user" as the reason the table shows |
 | `/jobs resume <name>` | Clears the pause *and* the retry ladder, and recomputes the next fire from the job's own schedule |
@@ -578,9 +578,12 @@ measurement must not (creating an empty conversation in a store with nothing sel
 the guard-provisioning and unreadable-row notices) are suppressed for a CLI run; the fire, its
 row, its card and its approvals are untouched by that.
 
-**It refuses while the app is running.** The app writes a lock file holding its pid beside the
-store (`conversations.sqlite.lock`) at launch and removes it at exit; `--run-job` takes the same
-lock for the length of its run and gives it back. GRDB's WAL would survive two writers, but
+**It refuses while another Iris process holds the store.** The app writes a lock file holding its
+pid beside the store (`conversations.sqlite.lock`) at launch and removes it at exit; `--run-job`
+takes the same lock for the length of its run and gives it back. The file holds a pid and nothing
+else, so the refusal names both possibilities — "another Iris process holds the store (pid N) —
+the app, or another `--run-job`" — rather than sending you off to quit an app that may not be
+running. GRDB's WAL would survive two writers, but
 `AppState` keeps conversation state in memory, so a CLI write behind a live app desyncs the UI and
 the app then saves its stale copy over the top. A lock left behind by a crash names a process that
 no longer exists and is ignored; one that cannot be read or parsed is treated as held, and the

@@ -200,13 +200,14 @@ swift run iris --run-job <job id> --json       # the same row as one JSON object
 `/jobs run` does (admission applies, the gate does not), prints the run's ledger row — status,
 reason, tokens, duration, gate signal — and exits: no scheduler, no watchers, no window. Approvals
 fail closed exactly as they do unattended, and the run's event card is delivered as usual, so the
-Iris Activity conversation shows it the next time you open the app. It **refuses while the app is
-running** (a pid lock file beside the store) rather than writing behind a live `AppState`.
+Iris Activity conversation shows it the next time you open the app. It **refuses while another Iris process holds the
+store** — the app, or another `--run-job` (a pid lock file beside the store) — rather than writing
+behind a live `AppState`.
 
 Exit codes: `0` completed (or a `--dry-run` gate that saw a change); `2` failed, blocked on
 approval, interrupted, or refused by admission (and a gate that could not answer); `3` a
 `--dry-run` gate that saw no change; `1` usage, an unknown job, `--dry-run` on a job with no gate,
-a store that would not open, or the lock being held. Full detail, including what a dry run does
+a store that would not open, or the lock being held by the app or another `--run-job`. Full detail, including what a dry run does
 and does not record and what the lock does and does not protect, is in
 **[docs/jobs.md](docs/jobs.md)**.
 

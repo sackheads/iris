@@ -77,7 +77,7 @@ Lands after `#163` and `#177`.
 
 1. **Policies and model.** Write the two decisions above into the spec; define the unified trigger, profile, and ledger schema; drop the old `UserDefaults` records (decision: no importer — nothing real existed to carry over, and the two keys are deleted, with a count logged, on first launch of a build with migration v9). Adopt a cron subset with lists, ranges, steps, and a timezone per job (closes `#156` properly). — landed: see `docs/specs/2026-09-21-agency-model-and-ledger.md`; PR pending
 2. **Ledger and delivery.** `job_runs` beside the conversation store; background conversations hidden from the sidebar; event cards; steer-inbox delivery; `get_job_run`; stop writing job output into `messages`. — landed: see `docs/specs/2026-09-21-agency-model-and-ledger.md`; PR pending
-3. **Runtime.** Gate execution, background profile, fail-closed approvals with proposal cards, budgets, breaker, overlap policy, retry and pause, sleep assertion and `catchUp`, `iris --run-job`. — landed: see `docs/specs/2026-09-21-agency-runtime.md` and `docs/jobs.md`
+3. **Runtime.** Gate execution, background profile, fail-closed approvals with proposal cards, budgets, breaker, overlap policy, retry and pause, sleep assertion and `catchUp`, `iris --run-job`. — landed: see `docs/specs/2026-09-21-agency-runtime.md` and `docs/jobs.md`; final PR pending
 4. **Watches.** Fold `WatcherManager` onto the trigger model; quiet window; self-write filter; poll trigger.
 5. **Main conversation.** Pin, briefing, tools, anchoring. After `#163` and `#177`.
 6. **Native surfaces.** Notifications, status item, URL scheme, run log view.
