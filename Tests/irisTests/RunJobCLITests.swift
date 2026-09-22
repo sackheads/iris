@@ -156,7 +156,86 @@ struct RunJobCLITests {
         #expect(err.text.contains("another Iris process holds the store"))
         #expect(err.text.contains("--run-job"))
         #expect(err.text.contains("\(ProcessInfo.processInfo.processIdentifier)"))
+        // And the file, because a pid the kernel has since handed to something unrelated leaves
+        // nothing to wait for and no app to quit — only a file to delete.
+        #expect(err.text.contains(path.path), "the refusal has to name the lock file")
         #expect(try store.ledger.runs(jobId: job.id, limit: 5).isEmpty, "and nothing was run")
+    }
+
+    /// Releases every racer at once, so the claims below really do collide rather than queueing.
+    private final class StartLine: @unchecked Sendable {
+        private let gate = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var arrived = 0
+        private let racers: Int
+        init(racers: Int) { self.racers = racers }
+        func arrive() {
+            lock.lock(); arrived += 1; let last = arrived == racers; lock.unlock()
+            if last { for _ in 0..<racers { gate.signal() } }
+            gate.wait()
+        }
+    }
+
+    private final class Claims: @unchecked Sendable {
+        private let lock = NSLock()
+        private var all: [GUILock.Claim] = []
+        func add(_ claim: GUILock.Claim) { lock.withLock { all.append(claim) } }
+        var value: [GUILock.Claim] { lock.withLock { all } }
+    }
+
+    @Test("two CLI runs starting at the same instant: exactly one takes the lock")
+    func simultaneousAcquiresHaveOneWinner() throws {
+        // The scenario the command is documented *for*: an eval harness that launches several
+        // `--run-job` at once. A check-then-write lock passes them all — both read "free", both
+        // write, both open the store — so the claim has to be the check: `O_CREAT | O_EXCL`.
+        let path = lockPath()
+        defer { try? FileManager.default.removeItem(at: path) }
+        let startLine = StartLine(racers: 2)
+        let claims = Claims()
+        let finished = DispatchGroup()
+        for _ in 0..<2 {
+            DispatchQueue.global().async(group: finished) {
+                startLine.arrive()
+                claims.add(GUILock.acquireExclusively(at: path))
+            }
+        }
+        #expect(finished.wait(timeout: .now() + 30) == .success)
+
+        let all = claims.value
+        #expect(all.filter { $0 == .acquired }.count == 1, "exactly one claim, whoever gets there first")
+        // Both racers are this test process, so the pid the loser is told about is this one — it
+        // is the winner's pid, which is the fact the message has to carry.
+        #expect(all.filter { $0 == .held(pid: ProcessInfo.processInfo.processIdentifier) }.count == 1,
+                "and the loser is told who has it: \(all)")
+        #expect(GUILock.state(at: path) == .held(pid: ProcessInfo.processInfo.processIdentifier))
+    }
+
+    @Test("a lock file left by a crashed process is taken over, once")
+    func aStaleLockIsTakenOver() throws {
+        let path = lockPath()
+        defer { try? FileManager.default.removeItem(at: path) }
+        // Above any pid macOS will hand out, so the file names nothing that exists.
+        try Data("999999\n".utf8).write(to: path)
+
+        #expect(GUILock.acquireExclusively(at: path) == .acquired,
+                "a crash must not brick the command until somebody finds the file")
+        #expect(GUILock.state(at: path) == .held(pid: ProcessInfo.processInfo.processIdentifier))
+        // And having taken it over, this process holds it against itself too: a second claim is
+        // refused rather than quietly overwriting the first.
+        #expect(GUILock.acquireExclusively(at: path)
+                == .held(pid: ProcessInfo.processInfo.processIdentifier))
+        GUILock.release(at: path)
+        #expect(!FileManager.default.fileExists(atPath: path.path))
+    }
+
+    @Test("a lock file that says nothing usable is not taken over")
+    func garbageIsNotTakenOver() throws {
+        let path = lockPath()
+        defer { try? FileManager.default.removeItem(at: path) }
+        try Data("not a pid".utf8).write(to: path)
+        #expect(GUILock.acquireExclusively(at: path) == .blocked(detail: nil))
+        #expect(try String(contentsOf: path, encoding: .utf8) == "not a pid",
+                "refusing is recoverable; overwriting somebody else's file is not")
     }
 
     @Test("a lock left behind by a crashed GUI is stale, not a refusal")

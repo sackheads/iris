@@ -320,6 +320,55 @@ struct CatchUpTests {
         func next() -> Int { lock.withLock { n += 1; return n } }
     }
 
+    // MARK: The retry ladder outranks the burst
+
+    @Test("a replayed run that fails hands the job to the retry ladder and the burst stops")
+    func aFailedReplayedRunEndsTheBurst() async throws {
+        // Admission said `.run` and the run happened — so the handler answers true, and on the
+        // face of it the burst should carry on. But the run *failed*, and `JobRunner` has just
+        // written the first rung of the ladder onto the row: attempt 1, next fire a minute out.
+        // Firing the four remaining slots now would spend the whole 1 m / 5 m / 25 m backoff at
+        // burst speed and end in "failed 3 times; paused" before the provider has had a minute
+        // to come back.
+        let store = try ConversationStore.inMemory()
+        let ledger = store.ledger
+        let scheduler = JobScheduler(ledger: ledger, now: { Self.now }, maxFiresPerTick: 10)
+        let counted = Counter()
+        let retryAt = Self.now.addingTimeInterval(60)
+        await scheduler.setFireHandler { job, _ in
+            if counted.next() == 1 {
+                try? ledger.setRetry(jobId: job.id, attempt: 1, nextFireAt: retryAt)
+            }
+            return true
+        }
+        try ledger.upsert(Self.job(.replay(cap: 5)))
+
+        #expect(await scheduler.tick() == 1, "one fire, and the four occurrences still owed are dropped")
+        let back = try #require(try ledger.job(named: "behind"))
+        #expect(back.retryAttempt == 1)
+        #expect(back.nextFireAt == retryAt,
+                "the ladder's backoff is left exactly where the failed run put it")
+        #expect(await scheduler.tick() == 0, "and nothing is due until the retry instant")
+    }
+
+    @Test("a job that slept mid-retry is one ordinary fire, not a catch-up")
+    func aRetryInstantIsNotAMissedOccurrence() async throws {
+        // `nextFireAt` here is a *retry* instant the ladder wrote, not a cadence slot, so the
+        // occurrences between it and now were never owed: counting them would replay a job that
+        // is halfway up the ladder and report a dropped count that is off by one besides.
+        let store = try ConversationStore.inMemory()
+        let scheduler = JobScheduler(ledger: store.ledger, now: { Self.now }, maxFiresPerTick: 10)
+        let fires = Handovers()
+        await scheduler.setFireHandler(fires.handler())
+        var retrying = Self.job(.replay(cap: 5))
+        retrying.retryAttempt = 2
+        try store.ledger.upsert(retrying)
+
+        #expect(await scheduler.tick() == 1, "one fire — the retry the ladder asked for")
+        #expect(fires.notes == [nil], "and nothing to say about occurrences nobody missed")
+        #expect(try store.ledger.job(named: "behind")?.nextFireAt == Self.at(9, 0))
+    }
+
     // MARK: Behind by exactly one occurrence is not behind
 
     @Test("a job that missed a single occurrence fires it, whatever its catch-up policy says")

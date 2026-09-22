@@ -182,11 +182,21 @@ actor JobScheduler {
                     var started = 0
                     for fire in entry.fires {
                         started += 1
-                        if await handler(entry.job, fire) { continue }
-                        // R32: the burst ends at the first refusal, and what is left of it is
-                        // abandoned rather than tried again on the next tick.
-                        await self?.abandonCatchUp(of: entry.job, at: now)
-                        break
+                        guard await handler(entry.job, fire) else {
+                            // R32: the burst ends at the first refusal, and what is left of it is
+                            // abandoned rather than tried again on the next tick.
+                            await self?.abandonCatchUp(of: entry.job)
+                            break
+                        }
+                        // Admitted and run — but a run that *failed* has just handed the job to
+                        // the retry ladder, and a run that exhausted a budget may have paused it.
+                        // Either way the row now says when the job fires next, and the burst's
+                        // pre-planned slots must not be fired over the top of it: four failures
+                        // at burst speed would spend the whole 1 m / 5 m / 25 m backoff in a
+                        // moment and end in a pause the user has to lift by hand. No
+                        // `abandonCatchUp` — what the ladder wrote is already in the future and
+                        // is not the burst's to move.
+                        if await self?.scheduleTakenOver(entry.job) == true { break }
                     }
                     // Whichever way the burst ended — run out, refused, abandoned — the job is
                     // the loop's again.
@@ -225,6 +235,14 @@ actor JobScheduler {
         // case `catchUp` has an opinion about (§5). One missed occurrence is an ordinary fire
         // whatever the policy says, because there is nothing to coalesce, skip or replay.
         guard let due = job.nextFireAt, let second = cadence.next(after: due), second <= now else {
+            return single(advanceCadence(for: job, at: now), kind)
+        }
+        // A job halfway up the retry ladder is not a job that fell behind: its `nextFireAt` is a
+        // retry instant the ladder wrote, not a cadence slot, so the occurrences between it and
+        // now were never owed. Catching one of them up would replay a job that is still failing —
+        // and counting the retry instant as occurrence one of the window puts the "N earlier
+        // occurrences skipped" figure out by one besides. The retry is one ordinary fire.
+        guard job.retryAttempt == 0 else {
             return single(advanceCadence(for: job, at: now), kind)
         }
 
@@ -285,6 +303,21 @@ actor JobScheduler {
         return Plan(fires: fires, resumes: next <= now)
     }
 
+    /// Whether the run that just finished took the schedule away from the burst behind it.
+    ///
+    /// Two ways that happens, and both are the same fact: the row now says when this job fires
+    /// next, and it is not what `plan` wrote. A failed run is on the retry ladder
+    /// (`retryAttempt > 0`, `nextFireAt` a backoff instant); a run that exhausted a budget or
+    /// opened the breaker is paused. Either outranks the occurrences the burst still owed.
+    ///
+    /// A read that *failed* is not evidence of anything, so it answers no: the next slot's
+    /// admission reads the same row and refuses it if the job really has been paused, which ends
+    /// the burst the ordinary way.
+    private func scheduleTakenOver(_ job: Job) -> Bool {
+        guard let stored = try? ledger.job(id: job.id) else { return false }
+        return stored.retryAttempt > 0 || stored.pausedReason != nil
+    }
+
     /// Releases a job whose truncated burst has ended, so the loop can plan it again.
     private func burstEnded(_ jobId: UUID) {
         burstsInFlight.remove(jobId)
@@ -299,7 +332,13 @@ actor JobScheduler {
     /// `lastRunAt` back over the stamp a held `queue` fire may have left while the tick waited.
     /// A job the fire itself paused is left alone for the same reason the tick loop leaves one
     /// alone: a paused job must not be bumped along a cadence it is no longer following.
-    private func abandonCatchUp(of job: Job, at now: Date) {
+    ///
+    /// Read from the wall clock rather than the tick's `now`, because a burst can run for as long
+    /// as the model turns inside it take: rescheduling from the instant the tick *started* can
+    /// write a `nextFireAt` that is already in the past, leaving the job due on the very next tick
+    /// for an occurrence the burst was abandoned rather than owed.
+    private func abandonCatchUp(of job: Job) {
+        let now = self.now()
         guard let cadence = Self.cadence(of: job.trigger) else { return }
         guard let stored = try? ledger.job(id: job.id), stored.pausedReason == nil,
               let owed = stored.nextFireAt, owed <= now else { return }

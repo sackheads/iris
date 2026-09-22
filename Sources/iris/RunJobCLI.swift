@@ -44,7 +44,61 @@ enum GUILock {
         return errno == ESRCH ? .free : .held(pid: pid)
     }
 
-    /// Claims the lock for this process. Called once, at app launch.
+    /// What an exclusive claim came back with.
+    enum Claim: Equatable, Sendable {
+        /// The file is this process's: it was created by this call, and `release` will remove it.
+        case acquired
+        /// A live Iris process — the app, or another `--run-job` — already has it.
+        case held(pid: Int32)
+        /// The file is there and says nothing a pid check can be made of, or could not be created
+        /// at all. `detail` is what the kernel said, when it said anything.
+        case blocked(detail: String?)
+    }
+
+    /// Claims the lock for a process that must **refuse** rather than race: the CLI.
+    ///
+    /// `O_CREAT | O_EXCL` is the whole point — the create and the "is it free?" are one syscall,
+    /// so of two `--run-job` invocations started at the same instant exactly one gets the file.
+    /// Checking `state(at:)` and then writing cannot do that: both read `.free`, both write, both
+    /// open the store, and the documented eval-harness use (`xargs -P 4 iris --run-job …`) is
+    /// precisely that shape.
+    ///
+    /// A leftover from a crash still has to be recoverable, so `EEXIST` is not the end of it: a
+    /// file naming a pid the kernel no longer knows about is unlinked and the exclusive create is
+    /// tried **once** more. Once, not in a loop — a second `EEXIST` means another process took the
+    /// file in between, and that process is alive by construction, so this one is the loser.
+    static func acquireExclusively(at url: URL) -> Claim {
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        for attempt in 0...1 {
+            let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
+            if descriptor >= 0 {
+                let pid = Array("\(ProcessInfo.processInfo.processIdentifier)\n".utf8)
+                _ = pid.withUnsafeBufferPointer { write(descriptor, $0.baseAddress, $0.count) }
+                close(descriptor)
+                return .acquired
+            }
+            // Anything other than "it is already there" is this process's own problem — a
+            // directory it may not write, a full disk — and it is still a refusal: a CLI that
+            // cannot take the lock cannot know whether the app has it, and two writers at one
+            // store is the thing this exists to prevent.
+            guard errno == EEXIST else { return .blocked(detail: String(cString: strerror(errno))) }
+            switch state(at: url) {
+            case .held(let pid): return .held(pid: pid)
+            case .unreadable: return .blocked(detail: nil)
+            case .free:
+                guard attempt == 0 else { return .blocked(detail: nil) }
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        return .blocked(detail: nil)
+    }
+
+    /// Claims the lock for this process, whatever was there before. Called once, at app launch.
+    ///
+    /// The app overwrites rather than claiming exclusively, and deliberately: it is the owner of
+    /// the store, and a lock file left behind by a killed build must never stop it launching.
+    /// `--run-job` is the side that has to yield, and it does — see `acquireExclusively`.
     static func acquire(at url: URL = IrisPaths.default.guiLockFile) {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                  withIntermediateDirectories: true)
@@ -164,29 +218,32 @@ enum RunJobCLI {
             return refuse(invocation.problem ?? "--run-job needs a job id or name",
                           appendingUsage: true)
         }
-        switch GUILock.state(at: lockPath) {
-        case .free:
+        // Claim the lock, rather than check it and then take it: the two have to be one syscall or
+        // two `--run-job` invocations started together both read "free" and both build an
+        // `AppState` over the same file — the two in-memory copies of one store that this exists
+        // to prevent, for as long as a model turn. It does not close the other direction: the GUI
+        // never checks, it overwrites, so an app launched *during* a run still races (and,
+        // acquiring second, keeps the lock — `release` below is pid-guarded and will not take the
+        // app's).
+        switch GUILock.acquireExclusively(at: lockPath) {
+        case .acquired:
             break
         case .held(let pid):
             // Named as what the lock file can actually prove: a live Iris process. It is the app
             // most of the time, but a second `--run-job` takes the same lock and writes the same
             // bare pid, and telling that user to quit an app that is not running is worse than
-            // telling them the truth.
+            // telling them the truth. The file is named too, because a pid the kernel has since
+            // handed to something else entirely leaves nothing to wait for and no app to quit.
             return refuse("another Iris process holds the store (pid \(pid)) — the app, or another "
                           + "--run-job. Wait for it to finish, or quit the app, and try again; the "
-                          + "CLI will not write to the store behind a live one.")
-        case .unreadable(let path):
-            return refuse("another Iris process holds the store, or left \(path) behind; the CLI "
-                          + "will not write to the store behind a live one. Delete that file if "
-                          + "nothing is running.")
+                          + "CLI will not write to the store behind a live one. If nothing "
+                          + "Iris-shaped is running, that pid belongs to something else now: "
+                          + "delete \(lockPath.path).")
+        case .blocked(let detail):
+            return refuse("another Iris process holds the store, or left \(lockPath.path) behind"
+                          + (detail.map { " (\($0))" } ?? "") + "; the CLI will not write to the "
+                          + "store behind a live one. Delete that file if nothing is running.")
         }
-        // Take the lock the check just found free. Two `--run-job` invocations would otherwise
-        // both read `.free` and both build an `AppState` over the same file — the same two
-        // in-memory copies of one store that the GUI check exists to prevent, over a window as
-        // long as a model turn. It does not close the other direction: the GUI never checks, so
-        // an app launched *during* a run still races (and, acquiring second, keeps the lock —
-        // `release` below is pid-guarded and will not take the app's).
-        GUILock.acquire(at: lockPath)
         defer { GUILock.release(at: lockPath) }
 
         let store: ConversationStore

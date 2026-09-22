@@ -17,7 +17,8 @@ struct EventCardTests {
                       blockedTool: String? = nil,
                       totalTokens: Int = 4_200,
                       runId: UUID = UUID(),
-                      transcript: UUID? = nil) -> EventCard {
+                      transcript: UUID? = nil,
+                      catchUpNote: String? = nil) -> EventCard {
         EventCard(runId: runId,
                   jobId: UUID(),
                   jobName: "pr-sweep",
@@ -27,7 +28,8 @@ struct EventCardTests {
                   startedAt: Self.started,
                   finishedAt: Self.finished,
                   totalTokens: totalTokens,
-                  transcriptConversationId: transcript)
+                  transcriptConversationId: transcript,
+                  catchUpNote: catchUpNote)
     }
 
     @Test("encode/decode is a round trip")
@@ -110,6 +112,23 @@ struct EventCardTests {
         let runId = UUID(uuidString: "1A2B3C4D-1111-2222-3333-444455556666")!
         #expect(card(status: .interrupted, outcome: nil, runId: runId).historyLine
                 == "[Event] job pr-sweep interrupted (run 1a2b3c4d)")
+    }
+
+    @Test("historyLine carries the catch-up note, so the model knows what was dropped")
+    func historyLineCarriesTheCatchUpNote() {
+        let runId = UUID(uuidString: "1A2B3C4D-1111-2222-3333-444455556666")!
+        // Without this the first replayed run reads to the model exactly like an ordinary one, and
+        // "did the overnight sweeps all happen?" gets answered from the one line that knows they
+        // did not.
+        #expect(card(runId: runId, catchUpNote: "27 earlier occurrences skipped").historyLine
+                == "[Event] job pr-sweep completed: swept 3 PRs (run 1a2b3c4d) "
+                   + "(27 earlier occurrences skipped)")
+        #expect(card(status: .interrupted, outcome: nil, runId: runId,
+                     catchUpNote: "27 earlier occurrences skipped").historyLine
+                == "[Event] job pr-sweep interrupted (run 1a2b3c4d) (27 earlier occurrences skipped)")
+        #expect(card(runId: runId, catchUpNote: "").historyLine
+                == "[Event] job pr-sweep completed: swept 3 PRs (run 1a2b3c4d)",
+                "an empty note is no note, as the transcript line has it")
     }
 
     @Test("headline reads job · status, naming the blocked tool")

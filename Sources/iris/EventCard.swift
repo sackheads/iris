@@ -371,8 +371,13 @@ struct EventCard: Codable, Equatable, Sendable {
     var historyLine: String {
         let runPrefix = runId.uuidString.lowercased().prefix(8)
         let head = "[Event] job \(jobName) \(statusText)"
-        guard let outcome, !outcome.isEmpty else { return "\(head) (run \(runPrefix))" }
-        return "\(head): \(outcome) (run \(runPrefix))"
+        // The catch-up note rides along for the same reason the transcript carries it: this is the
+        // line a model reads out of history, and a run that stands for thirty-two occurrences the
+        // cap dropped must not answer "did the overnight sweeps all happen?" as an ordinary one.
+        // `EventDelivery` puts it through `InjectionGuard.sanitize` like the rest of the line.
+        let tail = catchUpNote.flatMap { $0.isEmpty ? nil : " (\($0))" } ?? ""
+        guard let outcome, !outcome.isEmpty else { return "\(head) (run \(runPrefix))\(tail)" }
+        return "\(head): \(outcome) (run \(runPrefix))\(tail)"
     }
 }
 
