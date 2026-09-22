@@ -374,19 +374,24 @@ actor JobRunner {
         }
     }
 
-    /// Whether this fire is one the gate gets a say in (R29). Only a **fresh cadence** fire.
+    /// Whether this fire is one the gate gets a say in (R29). A **cadence** fire that is not a
+    /// retry — including one the `queue` policy held.
     ///
-    /// Everything else has already had the question answered for it. A retry re-runs work the gate
-    /// authorised a minute ago, and asking again would get "nothing has changed since the run that
-    /// failed" — the work would be dropped, the row would read `completed`, and the ladder would
-    /// sit at attempt 1 for ever, which is the retry silently disabled for exactly the jobs that
-    /// were gated to avoid wasted turns. A held `queue` re-fire stands in for a fire that was
-    /// admitted. And `/jobs run` is a person saying "run it now", which a gate does not get a vote
-    /// on; `--dry-run` is where someone asks what the gate thinks.
+    /// The two that skip it have already had the question answered for them. A retry re-runs work
+    /// the gate authorised a minute ago, and asking again would get "nothing has changed since the
+    /// run that failed" — the work would be dropped, the row would read `completed`, and the ladder
+    /// would sit at attempt 1 for ever, which is the retry silently disabled for exactly the jobs
+    /// that were gated to avoid wasted turns. And `/jobs run` is a person saying "run it now",
+    /// which a gate does not get a vote on; `--dry-run` is where someone asks what the gate thinks.
+    ///
+    /// A held `queue` re-fire is not one of them: it is a cadence fire whose gate was never asked,
+    /// held before the question could be put — or held *because* the gate had just said nothing
+    /// had changed. Running it unasked spends the full model turn the gate exists to avoid. So the
+    /// root of the origin decides, not its wrapper.
     ///
     /// Pure, so the table of origins can be read and tested without a fire.
     static func gateApplies(origin: FireOrigin, job: Job) -> Bool {
-        guard case .cadence = origin else { return false }
+        guard case .cadence = origin.root else { return false }
         return job.retryAttempt == 0
     }
 

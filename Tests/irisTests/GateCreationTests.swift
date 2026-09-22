@@ -15,9 +15,12 @@ struct GateCreationTests {
     }
 
     private func make(_ args: [String: JSONValue], sandboxAvailable: Bool = true,
-                      fileManager: FileManager = .default) throws -> Result<Job, ToolMessage> {
+                      fileManager: FileManager = .default,
+                      directoryEntryLimit: Int = GateEvaluator.directoryEntryLimit)
+        throws -> Result<Job, ToolMessage> {
         try parse(args).makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: [],
-                                sandboxAvailable: sandboxAvailable, fileManager: fileManager)
+                                sandboxAvailable: sandboxAvailable, fileManager: fileManager,
+                                directoryEntryLimit: directoryEntryLimit)
     }
 
     private func temporaryDirectory() throws -> URL {
@@ -136,6 +139,54 @@ struct GateCreationTests {
                                    "gate_mounts": .array([.string(entry)])])
             #expect(result.failureText != nil, "'\(entry)' must be refused")
         }
+    }
+
+    /// M2: a directory too large to walk on a cadence is refused here, in the conversation that
+    /// asked for it, rather than becoming a job that spends minutes of a thread every tick.
+    @Test("a gate_path with more entries than the cap is refused while someone is reading")
+    func pathTooLargeToWatch() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for i in 0..<4 {
+            try "\(i)".write(to: dir.appendingPathComponent("f\(i).txt"), atomically: true, encoding: .utf8)
+        }
+
+        let refused = try make(["prompt": .string("p"), "intervalSeconds": .int(900),
+                                "gate_path": .string(dir.path)], directoryEntryLimit: 3)
+        let text = try #require(refused.failureText)
+        #expect(text.contains(dir.path))
+        #expect(text.contains("narrower path"), "and it says what to do instead")
+        #expect(!text.contains("#187") && !text.contains("deliverable"))
+
+        // The same directory under a cap it fits in is an ordinary gate.
+        #expect(try make(["prompt": .string("p"), "intervalSeconds": .int(900),
+                          "gate_path": .string(dir.path)], directoryEntryLimit: 4).failureText == nil)
+    }
+
+    /// O4: an empty list is how a model spells "no mounts", and the refusal it used to get named
+    /// the shape it had already sent. A non-string element is the opposite case: dropping it would
+    /// store a gate with fewer inputs than was asked for.
+    @Test("an empty gate_mounts reads as none; a non-string element is refused")
+    func emptyAndUnreadableMounts() throws {
+        let job = try make(["prompt": .string("p"), "intervalSeconds": .int(60),
+                            "gate_script": .string("echo UNCHANGED"),
+                            "gate_mounts": .array([])]).get()
+        guard case .script(_, let mounts, _) = gate(of: job) else {
+            Issue.record("expected a script gate"); return
+        }
+        #expect(mounts.isEmpty)
+
+        // And an empty list beside a gate that has no script is not a refusal either: nothing was
+        // asked for, so nothing is dropped.
+        #expect(try make(["prompt": .string("p"), "intervalSeconds": .int(60),
+                          "gate_url": .string("https://example.com/"),
+                          "gate_mounts": .array([])]).failureText == nil)
+
+        let refused = ScheduleJobArguments.parse(["prompt": .string("p"), "intervalSeconds": .int(60),
+                                                  "gate_script": .string("echo UNCHANGED"),
+                                                  "gate_mounts": .array([.string("/tmp"), .bool(true)])])
+        #expect(refused.failureText?.contains("gate_mounts") == true,
+                "a mount that is not a path is refused, not dropped")
     }
 
     @Test("a gate_url that is not a URL, and a gate_path that is not there, are refused")

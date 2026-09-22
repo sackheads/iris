@@ -47,15 +47,29 @@ enum GateEvaluator {
     /// cadence pays for, and a file this large that changed almost certainly changed its size or
     /// its mtime too.
     static let hashSizeLimit = 64 * 1_024 * 1_024
-    /// The ceiling on starting a gate's container. `createDetached` is deliberately unbounded
-    /// (R27: a cold image pull is legitimately minutes), which is the right call for a person
-    /// waiting at a keyboard and the wrong one here: this is an unattended, repeating caller, and
-    /// an await with no bound inside a job's in-flight mark is a job that goes quiet forever —
-    /// every later tick dropped as an overlap, no row, no card, and the three-error pause never
-    /// reached. Generous, because a legitimate pull is slow; finite, because nobody is watching.
+    /// The ceiling on starting a gate's container. `createDetached` has one of its own (R31,
+    /// twenty minutes), pitched for a person waiting at a keyboard through a cold image pull; that
+    /// is far too long here. This is an unattended, repeating caller, and a long await inside a
+    /// job's in-flight mark is a job that goes quiet — every later tick dropped as an overlap, no
+    /// row, no card, and the three-error pause never reached. Generous, because a legitimate pull
+    /// is slow; short, because nobody is watching this one.
     static let createCeilingSeconds = 300
     /// The longest the one line of somebody else's output that a gate error quotes may be.
     static let detailLimit = 160
+    /// How many entries a directory gate will walk before it gives up on the whole path.
+    ///
+    /// A `gate_path` of `/Users/me` or `/` is a plausible thing to ask for ("watch my home
+    /// folder") and the walk behind it is synchronous and stats every entry: on a real home
+    /// directory that is minutes of a cooperative thread, every tick, inside the job's in-flight
+    /// mark — which drops every later tick as an overlap and never errors, so the three-error
+    /// pause never rescues it. Past the cap the evaluation is an error instead, which does pause
+    /// the job, and `schedule_job` refuses such a path while there is still someone to read why.
+    static let directoryEntryLimit = 20_000
+
+    /// What a path too large to watch is told, at creation and at evaluation alike.
+    static func tooManyEntriesDetail(_ path: String, limit: Int = directoryEntryLimit) -> String {
+        "\(path) holds more than \(limit) entries, which is too many to check on a cadence; watch a narrower path, or use gate_script"
+    }
 
     /// What a script gate is told when the VM it must run in is not there (R28). A gate script
     /// never falls back to the host: it is model-written code that runs unattended forever, and
@@ -76,12 +90,14 @@ enum GateEvaluator {
                          http session: URLSession = .shared,
                          fileManager: FileManager = .default,
                          image: String? = nil,
-                         createCeilingSeconds: Int = GateEvaluator.createCeilingSeconds) async -> GateResult {
+                         createCeilingSeconds: Int = GateEvaluator.createCeilingSeconds,
+                         directoryEntryLimit: Int = GateEvaluator.directoryEntryLimit) async -> GateResult {
         switch gate {
         case .urlChanged(let url):
             return await evaluateURL(url, previous: previous, session: session)
         case .pathChanged(let path):
-            return evaluatePath(path, previous: previous, fileManager: fileManager)
+            return evaluatePath(path, previous: previous, fileManager: fileManager,
+                                entryLimit: directoryEntryLimit)
         case .script(let command, let mounts, let timeoutSeconds):
             return await evaluateScript(command, mounts: mounts, timeoutSeconds: timeoutSeconds,
                                         runtime: runtime,
@@ -157,20 +173,28 @@ enum GateEvaluator {
 
     // MARK: pathChanged
 
-    private static func evaluatePath(_ path: String, previous: String?, fileManager: FileManager) -> GateResult {
+    private static func evaluatePath(_ path: String, previous: String?, fileManager: FileManager,
+                                     entryLimit: Int) -> GateResult {
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory) else {
             return .error("there is nothing at \(path)")
         }
         do {
             let signal = isDirectory.boolValue
-                ? try directorySignal(path, fileManager: fileManager)
+                ? try directorySignal(path, fileManager: fileManager, entryLimit: entryLimit)
                 : try fileSignal(path, fileManager: fileManager)
             return verdict(signal: signal, previous: previous)
+        } catch is DirectoryTooLarge {
+            // An error, not a silent "unchanged": it counts towards the three-error pause, so a
+            // job pointed at a tree nobody can walk stops and says so instead of going quiet.
+            return .error(tooManyEntriesDetail(path, limit: entryLimit))
         } catch {
             return .error("could not read \(path): \(error.localizedDescription)")
         }
     }
+
+    /// A directory gate given more than `directoryEntryLimit` entries to look at.
+    private struct DirectoryTooLarge: Error {}
 
     /// A file's mtime, its size and (up to `hashSizeLimit`) the hash of its contents. All three,
     /// because each catches what the others miss: a touch moves the mtime without changing a byte,
@@ -194,26 +218,39 @@ enum GateEvaluator {
     /// removed directly inside it, and it is almost always the latest thing in a fresh tree — so
     /// folding it into the maximum would swallow every change deeper down. The count is what
     /// notices a deletion that left every surviving mtime where it was.
-    private static func directorySignal(_ path: String, fileManager: FileManager) throws -> String {
-        let root = URL(fileURLWithPath: path)
-        let keys: [URLResourceKey] = [.contentModificationDateKey]
+    private static func directorySignal(_ path: String, fileManager: FileManager,
+                                        entryLimit: Int) throws -> String {
         let rootModified = (try fileManager.attributesOfItem(atPath: path)[.modificationDate] as? Date)
             ?? Date(timeIntervalSince1970: 0)
+        let walked = walk(path, fileManager: fileManager, limit: entryLimit)
+        guard !walked.overLimit else { throw DirectoryTooLarge() }
+        return "root=\(Int(rootModified.timeIntervalSince1970.rounded()))"
+            + "; newest=\(Int(walked.newest.timeIntervalSince1970.rounded())); entries=\(walked.entries)"
+    }
+
+    /// Everything under `path`, up to the cap: how many entries there are and the newest
+    /// modification among them. `overLimit` says the walk stopped early, which is the one thing
+    /// both callers do with it — the evaluation turns it into a gate error, `schedule_job` into a
+    /// refusal. One entry past the cap is enough to know; nothing counts the rest.
+    static func walk(_ path: String, fileManager: FileManager, limit: Int = directoryEntryLimit)
+        -> (entries: Int, newest: Date, overLimit: Bool) {
+        let keys: [URLResourceKey] = [.contentModificationDateKey]
         var newest = Date(timeIntervalSince1970: 0)
         var entries = 0
         // Errors on the way down are skipped rather than failing the gate: one unreadable
         // subdirectory in a large tree must not read as "the whole path is broken".
-        let enumerator = fileManager.enumerator(at: root, includingPropertiesForKeys: keys,
+        let enumerator = fileManager.enumerator(at: URL(fileURLWithPath: path),
+                                                includingPropertiesForKeys: keys,
                                                 options: [], errorHandler: { _, _ in true })
         while let url = enumerator?.nextObject() as? URL {
             entries += 1
+            if entries > limit { return (entries, newest, true) }
             if let modified = try? url.resourceValues(forKeys: Set(keys)).contentModificationDate,
                modified > newest {
                 newest = modified
             }
         }
-        return "root=\(Int(rootModified.timeIntervalSince1970.rounded()))"
-            + "; newest=\(Int(newest.timeIntervalSince1970.rounded())); entries=\(entries)"
+        return (entries, newest, false)
     }
 
     private static func hex(_ digest: SHA256Digest) -> String {
@@ -234,6 +271,12 @@ enum GateEvaluator {
                                        createCeiling: Int) async -> GateResult {
         // R28, and the reason this parameter is optional at all.
         guard let runtime else { return .error(sandboxUnavailableDetail) }
+        // A legacy `PollSpec` row with no gate at all decodes to a script gate with an empty
+        // command (invariant 1: decode leniently). Answered here rather than by three container
+        // create/remove cycles that each run `bash -c ""` and hear nothing back.
+        guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .error("this job's gate has no script to run")
+        }
         let seconds = clampedTimeout(timeoutSeconds)
         let name = "\(SandboxSessionManager.namePrefix)gate-\(UUID().uuidString.lowercased())"
         do {

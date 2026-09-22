@@ -65,8 +65,10 @@ struct ScheduleJobArguments: Equatable, Sendable {
                 return .failure(ToolMessage("\(key) must be a non-empty string."))
             }
         }
-        if present(args["gate_mounts"]), stringList(args["gate_mounts"]) == nil {
-            return .failure("gate_mounts must be a directory path, or a list of them.")
+        let gateMounts: [String]?
+        switch stringList(args["gate_mounts"]) {
+        case .failure(let message): return .failure(message)
+        case .success(let values): gateMounts = values
         }
         if present(args["gate_timeout_seconds"]), integer(args["gate_timeout_seconds"]) == nil {
             return .failure("gate_timeout_seconds must be a number of seconds.")
@@ -74,7 +76,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
         return .success(ScheduleJobArguments(
             prompt: prompt, name: text(args["name"]), alias: alias, profile: text(args["profile"]),
             gateURL: text(args["gate_url"]), gatePath: text(args["gate_path"]),
-            gateScript: text(args["gate_script"]), gateMounts: stringList(args["gate_mounts"]),
+            gateScript: text(args["gate_script"]), gateMounts: gateMounts,
             gateTimeoutSeconds: integer(args["gate_timeout_seconds"])))
     }
 
@@ -96,14 +98,16 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// with the gate deciding at each occurrence whether there is anything to run.
     func makeJob(defaultTimeZone: String, createdIn: UUID?, existingNames: Set<String>,
                  sandboxAvailable: Bool = SandboxPolicy.mutatingJobCanRun(),
-                 fileManager: FileManager = .default) -> Result<Job, ToolMessage> {
+                 fileManager: FileManager = .default,
+                 directoryEntryLimit: Int = GateEvaluator.directoryEntryLimit) -> Result<Job, ToolMessage> {
         // Anything that is not the word `mutating` reads as read-only, including a value this
         // build does not recognize: the narrow surface is the safe guess, and a refusal over a
         // spelling would cost a retry to arrive at the same job.
         let wantsMutating = profile?.lowercased() == JobProfile.mutating.rawValue.lowercased()
         if wantsMutating, !sandboxAvailable { return .failure(ToolMessage(Self.noRuntimeForMutating)) }
         let gate: Gate?
-        switch resolvedGate(sandboxAvailable: sandboxAvailable, fileManager: fileManager) {
+        switch resolvedGate(sandboxAvailable: sandboxAvailable, fileManager: fileManager,
+                            directoryEntryLimit: directoryEntryLimit) {
         case .failure(let message): return .failure(message)
         case .success(let resolved): gate = resolved
         }
@@ -128,7 +132,8 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// no usable one. Everything a gate can be wrong about is decided here, while there is still a
     /// person in the conversation to read the answer: the alternative is a job that fails silently
     /// on a cadence until three errors pause it.
-    func resolvedGate(sandboxAvailable: Bool, fileManager: FileManager = .default) -> Result<Gate?, ToolMessage> {
+    func resolvedGate(sandboxAvailable: Bool, fileManager: FileManager = .default,
+                      directoryEntryLimit: Int = GateEvaluator.directoryEntryLimit) -> Result<Gate?, ToolMessage> {
         let asked = [gateURL, gatePath, gateScript].compactMap { $0 }
         guard asked.count <= 1 else { return .failure(ToolMessage(Self.oneGateOnly)) }
         // The two script-only options, given without one — or beside a gate that cannot use them.
@@ -147,8 +152,17 @@ struct ScheduleJobArguments: Equatable, Sendable {
             guard gatePath.hasPrefix("/") else {
                 return .failure("gate_path must be an absolute path (got '\(gatePath)').")
             }
-            guard fileManager.fileExists(atPath: gatePath) else {
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: gatePath, isDirectory: &isDirectory) else {
                 return .failure("There is nothing at \(gatePath), so a gate watching it could never answer.")
+            }
+            // Walked here, with the cap the evaluation uses, so "my home folder" is refused in the
+            // conversation that asked for it rather than becoming a job that errors on a cadence.
+            // The walk stops one entry past the cap, so the refusal costs the same as the check.
+            if isDirectory.boolValue,
+               GateEvaluator.walk(gatePath, fileManager: fileManager, limit: directoryEntryLimit).overLimit {
+                return .failure(ToolMessage(
+                    "gate_path: \(GateEvaluator.tooManyEntriesDetail(gatePath, limit: directoryEntryLimit))."))
             }
             return .success(.pathChanged(path: gatePath))
         }
@@ -184,6 +198,8 @@ struct ScheduleJobArguments: Equatable, Sendable {
     static let oneGateOnly = "Give one gate: gate_url, gate_path or gate_script — not more than one."
 
     static let gateOptionsNeedAScript = "gate_mounts and gate_timeout_seconds only apply to gate_script."
+
+    static let gateMountsShape: ToolMessage = "gate_mounts must be a directory path, or a list of them."
 
     /// `base`, or `base-2`, `base-3`, … — the first form not already taken.
     static func uniqueName(_ base: String, existing: Set<String>) -> String {
@@ -296,13 +312,23 @@ struct ScheduleJobArguments: Equatable, Sendable {
     }
 
     /// A list of non-empty strings — `gate_mounts`. A model that sends one mount as a bare string
-    /// rather than a one-element array means the same thing, so both are read; anything else in
-    /// the array is dropped, because a mount that is not a string is not a path.
-    private static func stringList(_ value: JSONValue?) -> [String]? {
-        if let single = text(value) { return [single] }
-        guard case .array(let items) = value else { return nil }
-        let values = items.compactMap { text($0) }
-        return values.isEmpty ? nil : values
+    /// rather than a one-element array means the same thing, so both are read.
+    ///
+    /// An empty array is *absent*, not a refusal: it is a common way for a model to say "none",
+    /// and "gate_mounts must be a directory path, or a list of them" is no help to a caller that
+    /// sent a list. An element that is not a string **is** a refusal, for the same reason the
+    /// `gate_*` keys above are: dropping it stores a gate with fewer inputs than was asked for,
+    /// and nothing in the answer would say so.
+    private static func stringList(_ value: JSONValue?) -> Result<[String]?, ToolMessage> {
+        guard present(value) else { return .success(nil) }
+        if let single = text(value) { return .success([single]) }
+        guard case .array(let items) = value else { return .failure(Self.gateMountsShape) }
+        var values: [String] = []
+        for item in items {
+            guard let path = text(item) else { return .failure(Self.gateMountsShape) }
+            values.append(path)
+        }
+        return .success(values.isEmpty ? nil : values)
     }
 
     /// The `weekdays` array. An element that is not a number is a refusal, not a silent drop:

@@ -248,6 +248,44 @@ struct GateEvaluatorTests {
         }
     }
 
+    /// M2: a `gate_path` of a home folder or `/` is a plausible ask, and the walk behind it stats
+    /// every entry on every tick. Past the cap the gate says so — an error, which counts towards
+    /// the three-error pause — rather than quietly spending minutes of a thread each time.
+    @Test("a directory with more entries than the cap is a gate error, not a long walk")
+    func pathDirectoryTooLarge() async throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for i in 0..<4 {
+            try "\(i)".write(to: dir.appendingPathComponent("f\(i).txt"), atomically: true, encoding: .utf8)
+        }
+
+        let result = await GateEvaluator.evaluate(.pathChanged(path: dir.path), previous: nil,
+                                                  runtime: nil, directoryEntryLimit: 3)
+        guard case .error(let detail) = result else {
+            Issue.record("a tree past the cap is an error, got \(result)"); return
+        }
+        #expect(detail.contains(dir.path))
+        #expect(detail.contains("gate_script"), "and it says what to do instead")
+
+        // Just inside the cap it is an ordinary gate again.
+        guard case .changed = await GateEvaluator.evaluate(.pathChanged(path: dir.path), previous: nil,
+                                                           runtime: nil, directoryEntryLimit: 4) else {
+            Issue.record("four entries under a cap of four is fine"); return
+        }
+    }
+
+    @Test("the walk stops at the cap rather than counting the rest")
+    func walkStopsAtTheCap() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for i in 0..<20 {
+            try "\(i)".write(to: dir.appendingPathComponent("f\(i).txt"), atomically: true, encoding: .utf8)
+        }
+        let walked = GateEvaluator.walk(dir.path, fileManager: .default, limit: 5)
+        #expect(walked.overLimit)
+        #expect(walked.entries == 6, "one past the cap is enough to know")
+    }
+
     @Test("a path that is not there is an error, not 'nothing changed'")
     func pathMissing() async throws {
         let result = await GateEvaluator.evaluate(.pathChanged(path: "/nope/\(UUID().uuidString)"),
@@ -259,6 +297,17 @@ struct GateEvaluatorTests {
     }
 
     // MARK: script
+
+    /// L8: a legacy row with no gate decodes to a script gate with an empty command. It is a gate
+    /// error either way, but it need not cost three container create/remove cycles to find out.
+    @Test("a script gate with no script says so without starting a container")
+    func emptyScriptStartsNothing() async {
+        let runtime = GateRuntime()
+        let result = await GateEvaluator.evaluate(.script(command: "  ", mounts: [], timeoutSeconds: 60),
+                                                  previous: nil, runtime: runtime, image: "img")
+        guard case .error = result else { Issue.record("expected an error, got \(result)"); return }
+        #expect(runtime.creates.isEmpty)
+    }
 
     @Test("the verdict is the last line of stdout, and the rest is the payload")
     func scriptTokens() async throws {
@@ -586,7 +635,7 @@ struct JobGateAdmissionTests {
 
     // MARK: Which fires the gate decides (R29)
 
-    @Test("only a fresh cadence fire is the gate's to decide")
+    @Test("a cadence fire that is not a retry is the gate's to decide, held or not")
     func gateApplicability() {
         let fresh = polled()
         var retrying = polled(); retrying.retryAttempt = 1
@@ -594,9 +643,38 @@ struct JobGateAdmissionTests {
         #expect(!JobRunner.gateApplies(origin: .cadence(kind: "poll"), job: retrying),
                 "a retry re-runs work the gate already authorised")
         #expect(!JobRunner.gateApplies(origin: .manual, job: fresh), "a person asked for this one")
-        #expect(!JobRunner.gateApplies(origin: .queued(from: .cadence(kind: "poll")), job: fresh),
-                "a held fire stands in for one that was already admitted")
+        #expect(JobRunner.gateApplies(origin: .queued(from: .cadence(kind: "poll")), job: fresh),
+                "a held cadence fire is one whose gate was never asked")
+        #expect(!JobRunner.gateApplies(origin: .queued(from: .manual), job: fresh),
+                "but a held hand-started fire is still the person's")
         #expect(!JobRunner.gateApplies(origin: .watcher(paths: ["/tmp/a"]), job: fresh))
+    }
+
+    /// R29 as amended: the fire the `queue` policy held is a cadence fire whose gate was never
+    /// asked — it was held before the question could be put, or held *because* the gate had just
+    /// said nothing had changed. Re-entering without asking spends the whole model turn the gate
+    /// exists to avoid, immediately after the gate said not to.
+    @Test("a fire the queue policy held is still the gate's to decide")
+    func queuedCadenceFireAsksTheGate() async throws {
+        let (store, state, engine, client) = try harness([textResponse("tick")])
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let job = polled()
+        try store.ledger.upsert(job)
+        let asked = Locked(0)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               protectionEnabled: false,
+                               gateEvaluator: { _, _ in
+                                   asked.mutate { $0 += 1 }
+                                   return .unchanged(signal: "etag=one")
+                               })
+
+        await runner.fire(job: job, origin: .queued(from: .cadence(kind: "poll")))
+
+        #expect(asked.value == 1, "the held fire's gate is asked, exactly once")
+        #expect(client.callCount == 0, "and nothing had changed, so no turn was spent")
+        let runs = try store.ledger.runs(jobId: job.id, limit: 10)
+        #expect(runs.first?.outcome == JobRunner.gateUnchangedOutcome)
     }
 
     @Test("a gated run that fails is retried, and the retry does the work")

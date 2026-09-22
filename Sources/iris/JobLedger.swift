@@ -385,9 +385,9 @@ extension JobLedger {
         }
     }
 
-    /// Records what this run's gate saw, for the next run to compare against. Throws
-    /// `JobLedgerError.unknownRun` for an id that is not in the table. Nothing evaluates a gate
-    /// yet (see `Gate`), so nothing writes one either: PR C is the first.
+    /// Records what this run's gate saw, for the next run to compare against — the built-in gates
+    /// are handed it back as `previous` at the next tick, and the comparison is the verdict. Throws
+    /// `JobLedgerError.unknownRun` for an id that is not in the table.
     func setGateSignal(runId: UUID, _ signal: String?) throws {
         try writer.write { db in
             try db.execute(sql: "UPDATE job_runs SET gateSignal = ? WHERE id = ?",
@@ -556,8 +556,8 @@ extension JobLedger {
         }
     }
 
-    /// The newest gate signal this job recorded, or `nil` if it has never recorded one — which is
-    /// every job today: PR C's gate evaluation is the first thing to ask. Rows with
+    /// The newest gate signal this job recorded, or `nil` if it has never recorded one — a job
+    /// whose first tick has not happened yet, or one with no gate at all. Rows with
     /// no signal are skipped rather than answering `nil`: a gate that errored or a run that
     /// predates the gate writes nothing, and the question being asked is "what did we last see?",
     /// which such a row does not answer.
