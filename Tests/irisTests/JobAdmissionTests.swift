@@ -304,7 +304,7 @@ struct JobAdmissionTests {
         await gate.waitForEntry()
         await runner.fire(job: job, origin: .schedule)
         await gate.open()
-        await first.value
+        _ = await first.value
 
         #expect(client.callCount == 1, "one run, not two")
         let runs = try store.ledger.runs(jobId: job.id, limit: 10)
@@ -341,7 +341,7 @@ struct JobAdmissionTests {
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/b"]))
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/c"]))
         await gate.open()
-        await first.value
+        _ = await first.value
 
         #expect(client.callCount == 1)
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1,
@@ -417,7 +417,7 @@ struct JobAdmissionTests {
         #expect(try store.ledger.job(id: job.id)?.queuedFire != nil, "the pending trigger is durable")
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1, "and it writes no row")
         await gate.open()
-        await first.value
+        _ = await first.value
 
         let runs = try store.ledger.runs(jobId: job.id, limit: 10)
         #expect(runs.count == 2, "exactly one more run, not one per held trigger")
@@ -464,7 +464,7 @@ struct JobAdmissionTests {
         await gate.waitForEntry()
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/lonely/b"]))
         await gate.open()
-        await first.value
+        _ = await first.value
 
         let queued = try #require(try store.ledger.runs(jobId: job.id, limit: 10)
             .first { $0.triggerKind == "queued" })
@@ -550,7 +550,7 @@ struct JobAdmissionTests {
         await gate.waitForEntry()
         await runner.fire(job: job, origin: .manual)
         await gate.open()
-        await first.value
+        _ = await first.value
 
         #expect(await asked.count == 0, "a `.manual` hold never asks the coordinator")
         let runs = try store.ledger.runs(jobId: job.id, limit: 10)
@@ -645,7 +645,7 @@ struct JobAdmissionTests {
         flipped.policy.overlap = .skip
         try store.ledger.upsert(flipped)
         await gate.open()
-        await first.value
+        _ = await first.value
 
         #expect(client.callCount == 1, "the held fire is abandoned, not deferred")
         #expect(try store.ledger.job(id: job.id)?.queuedFire == nil,
@@ -964,7 +964,7 @@ struct JobAdmissionTests {
         await gate.waitForEntry()
         let overlapped = await runner.fire(job: job, origin: .schedule, note: Self.dropped)
         await gate.open()
-        await first.value
+        _ = await first.value
 
         #expect(overlapped == .skipInFlight)
         let skip = try #require(try store.ledger.runs(jobId: job.id, limit: 10)
@@ -991,7 +991,7 @@ struct JobAdmissionTests {
         let held = await runner.fire(job: job, origin: .schedule, note: Self.dropped)
         #expect(held == .queued)
         await gate.open()
-        await first.value
+        _ = await first.value
 
         let runs = try store.ledger.runs(jobId: job.id, limit: 10)
         let queued = try #require(runs.first { $0.triggerKind == "queued" })

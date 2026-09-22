@@ -423,7 +423,7 @@ struct JobRetryTests {
                 "the assertion is held while the turn is in flight")
 
         client.release()
-        await fire.value
+        _ = await fire.value
         #expect(activity.events == [.begin("Iris job pr-sweep"), .end])
     }
 
@@ -589,7 +589,7 @@ struct JobRetryTests {
         // nowhere near it — but far enough inside it that a loaded machine cannot invert the two.
         try await Task.sleep(nanoseconds: 1_000_000_000)
         client.release()
-        await fire.value
+        _ = await fire.value
 
         let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
         #expect(run.status == .completed)
@@ -637,7 +637,7 @@ struct JobRetryTests {
         await gate.waitForEntry()
         await runner.fire(job: j, origin: .watcher(paths: ["/tmp/in/b.txt"]))
         await gate.open()
-        await first.value
+        _ = await first.value
 
         let runs = try store.ledger.runs(jobId: j.id, limit: 10)
         #expect(runs.count == 2, "the held fire ran")
@@ -648,6 +648,7 @@ struct JobRetryTests {
         // And it carried the paths, which is the other half of the same carry.
         let queued = try #require(runs.first { $0.triggerKind == "queued" })
         let transcript = try #require(state.conversations.first { $0.id == queued.transcriptConversationId })
-        #expect((transcript.history.first?.parts.compactMap(\.text).joined() ?? "").contains("/tmp/in/b.txt"))
+        let prompt = transcript.history.first?.parts.compactMap(\.text).joined() ?? ""
+        #expect(prompt.contains("/tmp/in/b.txt"))
     }
 }
