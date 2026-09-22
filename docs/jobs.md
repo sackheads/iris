@@ -275,7 +275,7 @@ created before the window was configurable keeps the 3 s it was given.
 
 **Noise.** Every watch ignores `.git/`, `.DS_Store`, `node_modules/`, `*~`, `*.swp`, `*.swx`,
 `.#*`, `4913` (Vim's directory probe), `*.tmp`, and the temporary files a macOS atomic save
-creates beside the real one (`.<name>.sb-*`, `(A Document Being Saved By …`). A watch can add its
+creates beside the real one (`<name>.sb-*`, `(A Document Being Saved By …`). A watch can add its
 own patterns with `ignore` — globs relative to the watched folder, where `**` spans directories and
 a pattern with no `/` matches a name at any depth, so `*.log` catches `build/out.log`. Matching is
 case-insensitive, like the rest of the file system. An ignore list that would absorb everything —
