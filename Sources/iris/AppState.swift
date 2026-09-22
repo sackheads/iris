@@ -418,6 +418,10 @@ class AppState {
     /// the count back to nil and drains an inbox that has nothing in it.
     func claimPeerDelivery(for conversationId: UUID) -> Bool {
         guard !hasTurnInFlight(for: conversationId) else { return false }
+        // Side effect worth naming: going 0→1 also stamps `mainStartTimeByConversation`, so the
+        // strip's elapsed time for a peer-delivered turn starts at the claim rather than at the
+        // turn. That is the unarchive hop and the handoff — microseconds — and the alternative is
+        // a second start-time concept for one case.
         beginEngineTurn(for: conversationId)
         return true
     }
@@ -427,6 +431,14 @@ class AppState {
         endEngineTurn(for: conversationId)
     }
 
+    /// Whether a turn is running on `conversationId` — **or reserved** for one.
+    ///
+    /// The reservation half arrived with #240: `claimPeerDelivery` takes a turn count to hold a
+    /// conversation between deciding it is idle and the turn actually registering. Every reader
+    /// here treats a reservation as busy, and in each case that is the answer the caller wants: a
+    /// user message typed in that window takes the #172 inbox and is drained when the turn ends
+    /// rather than starting a second one beside it; an event line waits for the same flush;
+    /// archiving refuses; `list_sessions` reports busy; the session strip counts it as running.
     func hasTurnInFlight(for conversationId: UUID) -> Bool {
         if (engineTurnCounts[conversationId] ?? 0) > 0 { return true }
         return activeTasks.values.contains { $0.conversationId == conversationId }

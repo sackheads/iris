@@ -339,8 +339,17 @@ struct PeerDeliveryTests {
         let app = AppState(); app.conversations.removeAll()
         let a = UUID(), b = UUID(), target = UUID()
         for id in [a, b, target] { app.createNewConversation(id: id) }
-        let engine = IrisEngine(state: app, tier: .medium, client: FakeLLMClient(responses: []),
-                                protectionEnabled: false)
+        // The winner's turn is parked, so the release — and the inbox drain that follows it —
+        // cannot run while the assertions below are being taken. Asserting after both calls
+        // return instead would race that drain: the winner's turn finishes instantly against an
+        // empty scripted client, releases the claim, takes the count to nil and drains the loser's
+        // message straight back out. Many hops against one, so it passes in practice; that is
+        // exactly the kind of "passes in practice" this file does not accept.
+        let gate = PeerDeliveryGate()
+        let client = ScriptedStreamClient([
+            [.block { await gate.wait() }, .event(.textDelta("ok")), .event(.done(finishReason: nil))]
+        ])
+        let engine = IrisEngine(state: app, tier: .medium, client: client, protectionEnabled: false)
 
         async let first = engine.deliverPeerMessage("from a", from: a, senderName: "a", to: target)
         async let second = engine.deliverPeerMessage("from b", from: b, senderName: "b", to: target)
@@ -350,9 +359,15 @@ struct PeerDeliveryTests {
         #expect(queued.filter { $0 }.count == 1,
                 "exactly one send may take the turn; got \(queued)")
         #expect(queued.filter { !$0 }.count == 1)
-        // And the loser is really in the inbox rather than dropped — a send that is neither
-        // delivered nor queued is worse than one that raced.
-        let pending = await MainActor.run { app.pendingUserMessageCount(for: target) }
-        #expect(pending == 1, "the send that lost the claim must be waiting, not gone")
+        // The loser is really in the inbox rather than dropped — a send that is neither delivered
+        // nor queued is worse than one that raced. Read while the winner's turn is still parked.
+        let parked = await eventually { app.pendingUserMessageCount(for: target) == 1 }
+        #expect(parked, "the send that lost the claim must be waiting, not gone")
+
+        // And it is delivered, not merely held: releasing the winner ends its turn, which releases
+        // the claim, takes the count to nil and drains the inbox.
+        await gate.release()
+        let drained = await eventually { app.pendingUserMessageCount(for: target) == 0 }
+        #expect(drained, "the queued send must reach the target once the turn it waited on ends")
     }
 }

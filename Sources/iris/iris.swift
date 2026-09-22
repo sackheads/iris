@@ -360,12 +360,17 @@ actor IrisEngine {
             return true
         }
         Task {
+            let wasArchived = await MainActor.run { localState?.unarchiveConversation(targetId) ?? false }
+            await self.deliverSanitizedSystemEvent(safe, source: Self.peerSource, conversationId: targetId, wasArchived: wasArchived)
             // The claim is given back only once the turn it authorised is over. Releasing at
             // handoff instead would reopen a gap between this function returning and
             // `withEngineTurn` registering the turn — the very gap the claim exists to close.
-            defer { Task { @MainActor in localState?.releasePeerDelivery(for: targetId) } }
-            let wasArchived = await MainActor.run { localState?.unarchiveConversation(targetId) ?? false }
-            await self.deliverSanitizedSystemEvent(safe, source: Self.peerSource, conversationId: targetId, wasArchived: wasArchived)
+            //
+            // A plain trailing statement rather than a `defer`: nothing above it throws or returns
+            // early, so the two are equivalent today, and this one is structured — the release
+            // finishes before the task does. A `defer` here would need re-reading the moment
+            // someone adds an early exit, which is when it would matter most.
+            await MainActor.run { localState?.releasePeerDelivery(for: targetId) }
         }
         return false
     }
