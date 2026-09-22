@@ -258,27 +258,52 @@ struct CLIProcessRunner: Sendable {
         }
     }
 
+    /// What the kill ladder needs of the child, and the only things it does to it.
+    ///
+    /// A seam rather than the `Process` itself, so the ladder can be driven against a child that
+    /// was never launched — `processIdentifier == 0` — without anything real being signalled. That
+    /// case is not hypothetical: when a task is already cancelled on entry, Swift runs
+    /// `withTaskCancellationHandler`'s `onCancel` *before* the operation, so the ladder can reach
+    /// a process that has not been started yet.
+    struct Child: Sendable {
+        /// Read afresh at every rung rather than captured once: a pid read before the launch is 0,
+        /// and `kill(0, …)` is not a no-op — it signals every process in Iris's own process group,
+        /// which is the app and, under `scripts/run-dev.sh`, the shell that started it.
+        let pid: @Sendable () -> pid_t
+        let isRunning: @Sendable () -> Bool
+        let terminate: @Sendable () -> Void
+        let killChildren: @Sendable (pid_t) async -> Void
+        let signal: @Sendable (pid_t, Int32) -> Void
+    }
+
     /// The kill ladder, and the answer at the end of it. Children first — they inherited the pipes,
     /// and one left alive keeps the read open for as long as it lives — then SIGTERM, then a grace,
     /// then children again and SIGKILL. Whatever survives that is a leaked process; it does not get
     /// to decide when the caller hears back.
-    private static func enforce(_ reason: @escaping @Sendable () -> Error, on box: Box, collector: Collector) async {
-        let pid = box.process.processIdentifier
-        if box.process.isRunning {
-            await killChildren(of: pid)
-            box.process.terminate()                                     // SIGTERM
+    ///
+    /// Nothing is signalled while the pid is not a pid. A rung needs both a running process *and* a
+    /// positive pid, and the pid is re-read between the rungs, because the two reads are seconds
+    /// apart and the first one can predate the launch entirely.
+    static func enforce(_ reason: @escaping @Sendable () -> Error, on child: Child,
+                        hasAnswered: @escaping @Sendable () -> Bool,
+                        fail: @escaping @Sendable (Error) -> Void) async {
+        let launched = child.pid()
+        if child.isRunning(), launched > 0 {
+            await child.killChildren(launched)
+            child.terminate()                                           // SIGTERM
         }
-        await waitUntil(Self.killGraceSeconds) { !box.process.isRunning }
-        if box.process.isRunning {
-            await killChildren(of: pid)                                 // anything it spawned since
-            kill(pid, SIGKILL)
+        await waitUntil(Self.killGraceSeconds) { !child.isRunning() }
+        let pid = child.pid()
+        if child.isRunning(), pid > 0 {
+            await child.killChildren(pid)                               // anything it spawned since
+            child.signal(pid, SIGKILL)
         }
         // A moment for the ordinary path to land with the real output, then the ladder answers.
         // Load bearing on the cancellation path, where a promptly-exiting child's real result is
         // what the caller gets. On the deadline path it only costs latency: `run` throws
         // `.timedOut` below whether or not the result landed, because the deadline did fire.
-        await waitUntil(Self.postKillSettleSeconds) { collector.hasAnswered }
-        collector.fail(reason())
+        await waitUntil(Self.postKillSettleSeconds) { hasAnswered() }
+        fail(reason())
     }
 
     /// Polls `condition` until it holds or `seconds` elapse. Sleeping in slices rather than for
@@ -308,6 +333,11 @@ struct CLIProcessRunner: Sendable {
         let collector = Collector(stdout: out, stderr: err)
         let deadline = Deadline()
         let started = Date()
+        let child = Child(pid: { box.process.processIdentifier },
+                          isRunning: { box.process.isRunning },
+                          terminate: { box.process.terminate() },
+                          killChildren: { await Self.killChildren(of: $0) },
+                          signal: { kill($0, $1) })
 
         // The watchdog kills; it never abandons. Racing the wait with a `withTimeout` and walking
         // away would leave the child running and unreaped — a zombie holding a pid and, for
@@ -322,7 +352,8 @@ struct CLIProcessRunner: Sendable {
                 guard !Task.isCancelled, !collector.hasAnswered else { return }
                 deadline.fire()
                 await Self.enforce({ ContainerRuntimeError.timedOut(elapsedSeconds: Date().timeIntervalSince(started)) },
-                                   on: box, collector: collector)
+                                   on: child, hasAnswered: { collector.hasAnswered },
+                                   fail: { collector.fail($0) })
             }
         }
         defer { watchdog?.cancel() }
@@ -330,6 +361,16 @@ struct CLIProcessRunner: Sendable {
         let result: (stdout: String, stderr: String, exitCode: Int32) = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { cont in
                 collector.start(cont)
+                // Checked here, on the calling task, and not before the cancellation handler was
+                // installed: when a task is already cancelled on entry, `onCancel` runs *first*,
+                // against a child that does not exist yet, and a ladder cannot kill what was never
+                // launched. So the launch is what must not happen — otherwise the command runs on
+                // in the VM with nobody reading its pipes, no deadline, and a caller already told
+                // it was cancelled.
+                guard !Task.isCancelled else {
+                    collector.fail(CancellationError())
+                    return
+                }
                 // Installed before `run()`: a process that exits first would never call a handler
                 // attached after the fact, and this continuation would never resume.
                 process.terminationHandler = { collector.noteExit($0.terminationStatus) }
@@ -343,7 +384,11 @@ struct CLIProcessRunner: Sendable {
         } onCancel: {
             // The same ladder the deadline uses, for the same reason: a cancelled call that waits
             // on a survivor is a cancelled call that never returns.
-            Task { await Self.enforce({ CancellationError() }, on: box, collector: collector) }
+            Task {
+                await Self.enforce({ CancellationError() }, on: child,
+                                   hasAnswered: { collector.hasAnswered },
+                                   fail: { collector.fail($0) })
+            }
         }
 
         if deadline.didFire {
@@ -373,6 +418,14 @@ struct CLIContainerRuntime: ContainerRuntime {
     /// and nothing there is watching to notice that it never came back.
     static let housekeepingTimeoutSeconds = 60
 
+    /// The ceiling on a create. A cold pull of an image is legitimately minutes, so this is not a
+    /// deadline anybody should ever meet — it is the difference between "slow" and "a turn wedged
+    /// until the app is quit". A breach comes back as an ordinary timeout, the same error any other
+    /// call gets, and the caller reports it like any other failed create. An unattended caller
+    /// needs a tighter one of its own: `GateEvaluator.createCeilingSeconds` is five minutes,
+    /// because nobody is watching a gate.
+    static let createTimeoutSeconds = 1_200
+
     private let launch: Launch
 
     init(launch: @escaping Launch = CLIContainerRuntime.spawnCLI) {
@@ -387,10 +440,12 @@ struct CLIContainerRuntime: ContainerRuntime {
             args += ["--mount", try ContainerMount.argument(for: entry)]
         }
         args += ["-w", workdir, image, "sleep", "infinity"]
-        // No deadline: a cold create pulls the image, which can legitimately take minutes. It is
-        // still not open-ended — the collector answers on the exit plus a grace, so this cannot
-        // wait on a file descriptor somebody else is holding.
-        let r = try await launch(args, nil)
+        // Generous, because a cold create pulls the image and that is legitimately minutes; finite,
+        // because a `container run` that never answers would otherwise wedge the first sandboxed
+        // command of a turn with nothing to end it. Separately from the deadline, the collector
+        // answers on the child's exit plus a grace, so this cannot wait on a file descriptor
+        // somebody else is holding either.
+        let r = try await launch(args, Self.createTimeoutSeconds)
         if r.exitCode != 0 {
             throw ContainerRuntimeError.createFailed((r.stdout + r.stderr).trimmingCharacters(in: .whitespacesAndNewlines))
         }

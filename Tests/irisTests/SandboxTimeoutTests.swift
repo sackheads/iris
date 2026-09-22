@@ -125,24 +125,75 @@ struct SandboxTimeoutTests {
         #expect(wall < 10)
     }
 
-    /// R27: a call with no deadline — `createDetached`, because a cold image pull is legitimately
-    /// minutes — still must not wait on a stranger's file descriptor. The child exits; whatever is
-    /// still holding the read open gets the post-exit grace and no more.
-    @Test("an unbounded call returns after its child exits, orphan or no orphan", .timeLimit(.minutes(1)))
+    /// R27: a call with no deadline at all — `exec` takes an optional one, and a session command
+    /// that declares none gets here — still must not wait on a stranger's file descriptor. The
+    /// child exits; whatever is still holding the read open gets the post-exit grace and no more.
+    @Test("a call with no deadline returns after its child exits, orphan or no orphan", .timeLimit(.minutes(1)))
     func unboundedCallReturnsAfterExit() async throws {
         let marker = "60.\(Int.random(in: 100_000...999_999))"
         let script = "(sleep \(marker) &) ; echo created"
         defer { Self.killAll(matching: "sleep \(marker)") }
 
-        // The runtime's own seam, wired to a real child: `createDetached` passes no deadline, so
-        // nothing but the collector can end this call.
-        let runtime = CLIContainerRuntime(launch: { _, timeoutSeconds in
-            #expect(timeoutSeconds == nil)
-            return try await CLIProcessRunner(executable: "/bin/sh").run(["-c", script], timeoutSeconds: timeoutSeconds)
-        })
         let started = Date()
-        try await runtime.createDetached(name: "iris-x", image: "img", mounts: [], workdir: "/")
+        let r = try await CLIProcessRunner(executable: "/bin/sh").run(["-c", script], timeoutSeconds: nil)
+        #expect(r.stdout.contains("created"))
         #expect(Date().timeIntervalSince(started) < 10)
+    }
+
+    /// H1: a call entered on a task that was *already* cancelled. Swift runs a cancellation
+    /// handler's `onCancel` before the operation in that case, so the kill ladder has already been
+    /// down and up against a process that does not exist. The launch must then not happen at all:
+    /// a child started after its own ladder has nobody reading its pipes, no deadline, and a caller
+    /// who has already been told the call was cancelled.
+    @Test("a call entered on an already-cancelled task launches nothing", .timeLimit(.minutes(1)))
+    func preCancelledCallLaunchesNothing() async throws {
+        let marker = "41.\(Int.random(in: 100_000...999_999))"
+        defer { Self.killAll(matching: "sleep \(marker)") }
+        let task = Task {
+            // Enters `run` only once the cancellation has landed, so this is the already-cancelled
+            // case every time rather than whenever the scheduler happens to oblige.
+            while !Task.isCancelled { try? await Task.sleep(nanoseconds: 1_000_000) }
+            return try await CLIProcessRunner(executable: "/bin/sh").run(["-c", "sleep \(marker)"])
+        }
+        task.cancel()
+
+        let started = Date()
+        var thrown: Error?
+        do { _ = try await task.value } catch { thrown = error }
+
+        #expect(thrown is CancellationError)
+        #expect(Date().timeIntervalSince(started) < 10, "and it says so promptly")
+        #expect(!Self.processExists(matching: "sleep \(marker)"),
+                "the child was never launched, so there is nothing to outlive the call")
+    }
+
+    /// H1, the other half: the ladder must not signal a pid that is not a pid. `kill(0, …)` is not
+    /// a no-op — it reaches every process in Iris's own process group, which is the app and, under
+    /// `scripts/run-dev.sh`, the shell that started it. Driven through the ladder's own seam, so
+    /// nothing real is signalled even when the guard is missing.
+    @Test("the kill ladder signals nothing while there is no pid to signal", .timeLimit(.minutes(1)))
+    func ladderNeverSignalsPidZero() async {
+        let signalled = Locked<[Int32]>([])
+        let children = Locked<[pid_t]>([])
+        let terminated = Locked(0)
+        let child = CLIProcessRunner.Child(
+            pid: { 0 },
+            // The window the guard exists for: a process that reads as running while its pid is
+            // still 0, which is where the old code reached `kill(0, SIGKILL)`.
+            isRunning: { true },
+            terminate: { terminated.mutate { $0 += 1 } },
+            killChildren: { pid in children.mutate { $0.append(pid) } },
+            signal: { _, sig in signalled.mutate { $0.append(sig) } })
+        let answered = Locked<Error?>(nil)
+
+        await CLIProcessRunner.enforce({ CancellationError() }, on: child,
+                                       hasAnswered: { false },
+                                       fail: { error in answered.mutate { $0 = error } })
+
+        #expect(children.value.isEmpty, "no pkill -P 0")
+        #expect(signalled.value.isEmpty, "and no kill(0, SIGKILL)")
+        #expect(terminated.value == 0)
+        #expect(answered.value is CancellationError, "the caller is still answered")
     }
 
     @Test("a child that finishes inside its deadline returns normally", .timeLimit(.minutes(1)))
@@ -201,6 +252,20 @@ struct SandboxTimeoutTests {
         #expect(rt.createdCount == 1)
         #expect(rt.removedNames.isEmpty)
         #expect(await m.hasSession(id))
+    }
+
+    /// R31: a create that outlives its own ceiling arrives as an ordinary timeout, and is said in
+    /// minutes rather than as the error's description.
+    @Test("a create that times out is reported in words, not as a Swift error")
+    func createTimeoutReadsAsASentence() async {
+        let rt = MockRuntime()
+        rt.nextCreateError = ContainerRuntimeError.timedOut(elapsedSeconds: 1_200.4)
+        let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" })
+
+        let out = await m.run(command: "a", conversationId: UUID(), workspace: "/ws")
+
+        #expect(out.contains("did not start within 20 minutes"))
+        #expect(!out.contains("timedOut"))
     }
 
     @Test("a sandboxed timeout reads exactly like a host timeout")
@@ -301,6 +366,69 @@ struct SandboxTimeoutTests {
         for built in rt.createdMounts {
             #expect(sets.contains { built == ["/ws:/ws", $0] })
         }
+    }
+
+    /// A runtime whose first create parks until it is released, so the interleaving the mount
+    /// agreement exists for happens on purpose rather than when the scheduler obliges.
+    private final class HeldCreateRuntime: ContainerRuntime, @unchecked Sendable {
+        private let lock = NSLock()
+        private var held = false
+        private var releaseFlag = false
+        private(set) var created: [[String]] = []
+        private(set) var removed: [String] = []
+
+        func release() { lock.withLock { releaseFlag = true } }
+
+        func createDetached(name: String, image: String, mounts: [String], workdir: String) async throws {
+            let first = lock.withLock { () -> Bool in
+                if held { return false }
+                held = true
+                return true
+            }
+            if first {
+                while !lock.withLock({ releaseFlag }) {
+                    try? await Task.sleep(nanoseconds: 5_000_000)
+                }
+            }
+            lock.withLock { created.append(mounts) }
+        }
+        func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws
+            -> (stdout: String, stderr: String, exitCode: Int32) { ("ok", "", 0) }
+        func remove(name: String) async { lock.withLock { removed.append(name) } }
+        func list(prefix: String) async -> [String] { [] }
+
+        var createdMounts: [[String]] { lock.withLock { created } }
+        var removedNames: [String] { lock.withLock { removed } }
+    }
+
+    /// L19: the refusal branch, forced rather than hoped for. The winner parks inside its create;
+    /// the loser joins the barrier behind it and is handed a container with somebody else's
+    /// mounts. It must be refused — and, per L16, it must not take the winner's container down on
+    /// its way out, which would cost a caller that did nothing wrong a recreate and a reset notice.
+    @Test("a caller that cannot have its own mounts is refused and leaves the winner's container alone",
+          .timeLimit(.minutes(1)))
+    func contendedMountsRefuseWithoutCollateral() async {
+        let rt = HeldCreateRuntime()
+        // One attempt, so the first disagreement is the give-up branch. Two racing callers reach it
+        // only on a bad day; this test is about what happens when they do.
+        let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" }, mountAgreementAttempts: 1)
+        let id = UUID()
+
+        async let winner = m.run(command: "w", conversationId: id, workspace: "/ws",
+                                 extraMounts: ["/a:/a:ro"])
+        try? await Task.sleep(nanoseconds: 150_000_000)      // the winner reaches its create
+        async let loser = m.run(command: "l", conversationId: id, workspace: "/ws",
+                                extraMounts: ["/b:/b:ro"])
+        try? await Task.sleep(nanoseconds: 150_000_000)      // the loser joins the barrier behind it
+        rt.release()
+        let outcomes = await (winner, loser)
+
+        #expect(outcomes.0 == "ok")
+        #expect(outcomes.1 == SandboxSessionManager.mountsContendedError,
+                "the loser ran nothing rather than running in the winner's mounts")
+        #expect(rt.createdMounts == [["/ws:/ws", "/a:/a:ro"]], "and no second container was built")
+        #expect(rt.removedNames.isEmpty, "the winner's container is still standing")
+        #expect(await m.hasSession(id), "and its session with it")
     }
 
     /// L13: a cancelled command is not a dead container, and it says so in its own words rather

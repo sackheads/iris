@@ -141,8 +141,9 @@ struct ContainerRuntimeTests {
     }
 
     /// R27: the calls that are not the user's command are bounded, so `reapOrphans()` on the
-    /// launch path cannot be the thing that never comes back.
-    @Test("housekeeping calls carry a deadline; create does not")
+    /// launch path cannot be the thing that never comes back. R31: a create is bounded too, far
+    /// more loosely — a cold image pull is legitimately minutes — but bounded.
+    @Test("housekeeping calls carry a deadline, and so does a create")
     func housekeepingDeadlines() async throws {
         let launcher = RecordingLauncher(result: ("[]", "", 0))
         let rt = CLIContainerRuntime(launch: launcher.launch)
@@ -154,7 +155,8 @@ struct ContainerRuntimeTests {
         let creator = RecordingLauncher()
         try await CLIContainerRuntime(launch: creator.launch)
             .createDetached(name: "iris-a", image: "img", mounts: [], workdir: "/")
-        #expect(creator.timeouts == [nil])
+        #expect(creator.timeouts == [CLIContainerRuntime.createTimeoutSeconds])
+        #expect(CLIContainerRuntime.createTimeoutSeconds == 1_200, "twenty minutes, per R31")
     }
 
     @Test("a non-zero create exit becomes createFailed carrying the CLI's output")

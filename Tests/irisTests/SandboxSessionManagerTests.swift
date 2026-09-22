@@ -14,10 +14,14 @@ final class MockRuntime: ContainerRuntime, @unchecked Sendable {
     var execResult: (String, String, Int32) = ("ok", "", 0)
     var failNextExec = false                     // throw once, then succeed
     var nextExecError: Error?                    // throw this once, then succeed
+    var nextCreateError: Error?                  // throw this once, then succeed
 
     func createDetached(name: String, image: String, mounts: [String], workdir: String) async throws {
         await Task.yield()
         try? await Task.sleep(nanoseconds: 10_000_000) // 10ms: let all concurrent callers park here before any completes
+        if let scripted = lock.withLock({ () -> Error? in let e = nextCreateError; nextCreateError = nil; return e }) {
+            throw scripted
+        }
         lock.withLock { created.append(name); mountsPerCreate.append(mounts) }
     }
     func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws -> (stdout: String, stderr: String, exitCode: Int32) {

@@ -30,9 +30,11 @@ actor SandboxSessionManager {
     static let shared = SandboxSessionManager(runtime: CLIContainerRuntime(),
                                               image: { ConfigManager.shared.sandboxImage })
 
-    init(runtime: ContainerRuntime, image: @escaping @Sendable () -> String) {
+    init(runtime: ContainerRuntime, image: @escaping @Sendable () -> String,
+         mountAgreementAttempts: Int = SandboxSessionManager.mountAgreementAttempts) {
         self.runtime = runtime
         self.image = image
+        self.mountAgreementAttempts = mountAgreementAttempts
     }
 
     func hasSession(_ id: UUID) -> Bool { sessions[id] != nil }
@@ -49,8 +51,11 @@ actor SandboxSessionManager {
     ///
     /// `extraMounts` are mounted alongside the workspace, in `source[:target][:ro]` form; a call
     /// that asks for a different set than the live container has gets a fresh container, because
-    /// mounts are fixed when a container is created. `timeoutSeconds` bounds the command itself —
-    /// past it the command is killed and the result reads exactly like a host timeout.
+    /// mounts are fixed when a container is created. Nothing in the app passes any yet — a gate
+    /// builds its own container rather than borrowing a conversation's session, and `run_command`
+    /// mounts only the workspace — so the mount-agreement machinery below is here for the caller
+    /// the spec asked for, not one that exists. `timeoutSeconds` bounds the command itself — past
+    /// it the command is killed and the result reads exactly like a host timeout.
     func run(command: String, conversationId id: UUID, workspace: String?,
              extraMounts: [String] = [], timeoutSeconds: Int? = nil) async -> String {
         let wasLost = lostSessions.contains(id)
@@ -82,9 +87,11 @@ actor SandboxSessionManager {
                 catch { return creationError(error) }
                 guard let s = sessions[id], s.mounts != mounts || s.mountedWorkspace != workspace else { break }
                 attempts += 1
-                if attempts >= Self.mountAgreementAttempts {
-                    await runtime.remove(name: s.name)
-                    sessions[id] = nil
+                if attempts >= mountAgreementAttempts {
+                    // Left standing on the way out. It is the *winner's* container — tearing it
+                    // down here would fail their next command and cost them a recreate and a reset
+                    // notice for a contention they had no part in. This call runs nothing, which
+                    // is the whole of what it is owed.
                     return Self.mountsContendedError
                 }
                 await runtime.remove(name: s.name)
@@ -142,11 +149,16 @@ actor SandboxSessionManager {
     /// than because any particular number is right.
     static let mountAgreementAttempts = 3
 
+    /// The bound this manager actually uses. Injected only so a test can force the give-up branch,
+    /// which two racing callers otherwise reach by luck and a scheduler in the right mood.
+    private let mountAgreementAttempts: Int
+
     /// What a call gets when it could not be given a container with the mounts it asked for. It
     /// is not run in the mounts it was handed: for a gate that would be the isolation the mounts
     /// exist to provide, quietly not happening.
     static let mountsContendedError = """
-    Error: could not start a sandbox container with the requested mounts — another command in this     conversation is using different ones. Nothing was run; try again.
+    Error: could not start a sandbox container with the requested mounts — another command in this \
+    conversation is using different ones. Nothing was run; try again.
     """
 
     /// The workspace mount (read-write — the agent edits the files it is working on) followed by
@@ -236,6 +248,12 @@ actor SandboxSessionManager {
         if case ContainerRuntimeError.createFailed(let msg) = error,
            let hint = ToolExecutor.sandboxSetupHint(for: msg) {
             return hint
+        }
+        // A create has a ceiling of its own now, and a breach arrives here like any other failure.
+        // Said in minutes and in the caller's terms: "timedOut(elapsedSeconds: 1200.4)" is the
+        // error's description, not an answer.
+        if case ContainerRuntimeError.timedOut = error {
+            return "Error: the sandbox container did not start within \(CLIContainerRuntime.createTimeoutSeconds / 60) minutes. Try again, or check the container runtime in Settings → Sandboxing."
         }
         if case ContainerRuntimeError.invalidMount(let entry, let reason) = error {
             return "Error: the mount `\(entry)` cannot be used — \(reason)."
