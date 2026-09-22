@@ -34,6 +34,19 @@ struct JobRunLedgerTests {
         #expect(try store.ledger.run(id: UUID()) == nil)
     }
 
+    @Test("begin writes the watch summary and run(id:) reads it back")
+    func beginPersistsWatchSummary() throws {
+        let store = try ConversationStore.inMemory()
+        let job = try seedJob(store, "w")
+        var run = makeRun(job, at: t0)
+        run.watchSummary = WatchSummary(delivered: 4, changed: 6, overflow: 2, coalesced: 9,
+                                        noise: 3, ownWrites: 1, ceilingFired: true,
+                                        pathsWithheld: true)
+        try store.ledger.begin(run: run)
+        #expect(try store.ledger.run(id: run.id) == run)
+        #expect(try store.ledger.run(id: run.id)?.watchSummary == run.watchSummary)
+    }
+
     // MARK: finish
 
     @Test("finish sets status, outcome, tokens and finishedAt, truncating outcome to 200 characters")

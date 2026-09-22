@@ -50,6 +50,9 @@ struct JobRun: Identifiable, Equatable, Sendable {
     /// The run this one was dispatched from — set on the row an approved `blockedCall` runs as, so
     /// the follow-up card can be traced back to the run that asked.
     var parentRunId: UUID?
+    /// What the burst that started this run saw and absorbed (#187 deliverable 4, spec §6). Set
+    /// when the run began; `nil` on every run a watch did not start.
+    var watchSummary: WatchSummary?
 
     init(id: UUID = UUID(), jobId: UUID, jobName: String, triggerKind: String, startedAt: Date,
          status: Status = .running, transcriptConversationId: UUID? = nil) {
@@ -73,6 +76,7 @@ struct JobRun: Identifiable, Equatable, Sendable {
         self.blockedCall = nil
         self.approvedAt = nil
         self.parentRunId = nil
+        self.watchSummary = nil
     }
 }
 

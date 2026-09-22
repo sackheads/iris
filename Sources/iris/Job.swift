@@ -67,24 +67,46 @@ extension JobProfile {
     }
 }
 
-/// A filesystem watch trigger on `path`. `quietWindowSeconds` is the window a burst of edits is
-/// meant to be coalesced into one run over: stored now, enforced by deliverable 4 — deliverable
-/// 1's watcher fires on the events it sees.
+/// A filesystem watch trigger on `path`, which is stored canonical and absolute (`WatchRoot`).
+///
+/// `quietWindowSeconds` is the window a burst of edits is coalesced into one run over: the watch
+/// fires once the directory has been quiet for that long, and — because a directory under
+/// continuous change must not starve — once the burst has lasted `ceilingSeconds` regardless.
+/// `ignore` is the per-watch glob list, relative to `path`, on top of the built-in set of editor
+/// and VCS noise.
 struct FSWatch: Codable, Equatable, Sendable {
     var path: String
+    /// 1…300 seconds; clamped here, on decode and at the tool, so no other layer has to ask
+    /// whether a stored window is sane.
     var quietWindowSeconds: Int
+    /// Globs, relative to `path`, whose changes this watch absorbs. Default empty.
+    var ignore: [String]
 
-    init(path: String, quietWindowSeconds: Int = 3) {
+    init(path: String, quietWindowSeconds: Int = 3, ignore: [String] = []) {
         self.path = path
-        self.quietWindowSeconds = quietWindowSeconds
+        self.quietWindowSeconds = Self.clampQuietWindow(quietWindowSeconds)
+        self.ignore = ignore
     }
 
-    private enum CodingKeys: String, CodingKey { case path, quietWindowSeconds }
+    /// The bounds in one place: a window under a second is a busy-wait and one over five minutes
+    /// is a job nobody can tell has stopped working.
+    static func clampQuietWindow(_ seconds: Int) -> Int { min(max(seconds, 1), 300) }
 
+    /// How long a burst may last before it fires anyway: a fixed multiple of the window, derived
+    /// and never stored, so there is only ever one knob to get wrong.
+    var ceilingSeconds: Int { quietWindowSeconds * 10 }
+
+    private enum CodingKeys: String, CodingKey { case path, quietWindowSeconds, ignore }
+
+    /// Invariant 1 — an absent window is the default and an absent ignore list is empty — and the
+    /// clamp applies here too: a row written before the bounds existed, or by hand, must not hand
+    /// the coordinator a zero-second window.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         path = try container.decode(String.self, forKey: .path)
-        quietWindowSeconds = try container.decodeIfPresent(Int.self, forKey: .quietWindowSeconds) ?? 3
+        quietWindowSeconds = Self.clampQuietWindow(
+            try container.decodeIfPresent(Int.self, forKey: .quietWindowSeconds) ?? 3)
+        ignore = try container.decodeIfPresent([String].self, forKey: .ignore) ?? []
     }
 }
 

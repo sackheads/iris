@@ -262,14 +262,15 @@ extension JobLedger {
     /// job: deleting the job cascades its runs away.
     func begin(run: JobRun) throws {
         let blockedCallJSON = try run.blockedCall.map { try Self.encodeBlockedCall($0) }
+        let watchSummaryJSON = try run.watchSummary.map { try Self.encodeJSON($0) }
         try writer.write { db in
             try db.execute(sql: """
                 INSERT INTO job_runs (
                     id, jobId, jobName, triggerKind, startedAt, finishedAt, status, outcome,
                     failureReason, blockedTool, promptTokens, candidateTokens, totalTokens,
                     costMicros, gateSignal, transcriptConversationId, acknowledgedAt,
-                    blockedCall, approvedAt, parentRunId)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    blockedCall, approvedAt, parentRunId, watchSummary)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     run.id.uuidString, run.jobId.uuidString, run.jobName, run.triggerKind,
                     run.startedAt, run.finishedAt, run.status.rawValue, run.outcome,
@@ -277,6 +278,7 @@ extension JobLedger {
                     run.totalTokens, run.costMicros, run.gateSignal,
                     run.transcriptConversationId?.uuidString, run.acknowledgedAt,
                     blockedCallJSON, run.approvedAt, run.parentRunId?.uuidString,
+                    watchSummaryJSON,
                 ])
         }
     }
@@ -397,9 +399,15 @@ extension JobLedger {
     }
 
     private static func encodeBlockedCall(_ call: BlockedCall) throws -> String {
+        try encodeJSON(call)
+    }
+
+    /// One JSON column's value, keys sorted the way `upsert` writes `trigger` and `policy` — so a
+    /// column that did not change is byte-identical from one write to the next.
+    static func encodeJSON<T: Encodable>(_ value: T) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        return String(decoding: try encoder.encode(call), as: UTF8.self)
+        return String(decoding: try encoder.encode(value), as: UTF8.self)
     }
 
     /// Closes out every run still marked `running` — at launch, those are runs the last process
@@ -620,6 +628,12 @@ extension JobLedger {
         }
         run.approvedAt = try r.read("approvedAt", Date.self)
         run.parentRunId = try r.uuid("parentRunId")
+        // Same idiom as `blockedCall`, and for the same reason: the figures a burst produced are
+        // worth less than the run itself, so a summary that will not decode reads as absent and
+        // the card simply shows no watch line.
+        if let json = try r.read("watchSummary", String.self) {
+            run.watchSummary = try? JSONDecoder().decode(WatchSummary.self, from: Data(json.utf8))
+        }
         return run
     }
 

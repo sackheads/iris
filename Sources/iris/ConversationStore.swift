@@ -424,6 +424,32 @@ final class ConversationStore: Sendable {
                 t.add(column: "jobProfile", .text)
             }
         }
+        // #187 deliverable 4: the figures a watch fire produced (spec §6), plus a one-time rewrite
+        // of every stored watch root to its canonical spelling. The rewrite is the load-bearing
+        // half: from here on, FSEvents paths are matched against the root lexically, never stat'ed,
+        // so a root stored as `/tmp/notes` when the events say `/private/tmp/notes` would match
+        // nothing and the watch would go quiet without saying why. A root that no longer exists is
+        // left exactly as stored — there is nothing to resolve it against, and the launch check
+        // pauses the job with a reason instead.
+        m.registerMigration("v11_watches") { db in
+            try db.alter(table: "job_runs") { t in
+                t.add(column: "watchSummary", .text)
+            }
+            let rows = try Row.fetchAll(db, sql: "SELECT id, trigger FROM jobs WHERE triggerKind = ?",
+                                        arguments: [Trigger.fsEventKind])
+            for row in rows {
+                guard let id = String.fromDatabaseValue(row["id"]),
+                      let json: String = String.fromDatabaseValue(row["trigger"]),
+                      case .fsEvent(var watch)? = try? JSONDecoder()
+                        .decode(Trigger.self, from: Data(json.utf8))
+                else { continue }
+                if let canonical = WatchRoot.canonical(watch.path) { watch.path = canonical }
+                guard let rewritten = try? JobLedger.encodeJSON(Trigger.fsEvent(watch)),
+                      rewritten != json else { continue }
+                try db.execute(sql: "UPDATE jobs SET trigger = ? WHERE id = ?",
+                               arguments: [rewritten, id])
+            }
+        }
         return m
     }
 

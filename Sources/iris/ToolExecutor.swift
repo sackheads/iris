@@ -227,8 +227,12 @@ struct ToolExecutor {
     /// place rather than adding a second one: the model re-states a standing instruction often (a
     /// new turn, a rephrasing), and two jobs on one directory means two watchers and two turns per
     /// save.
-    private func registerWatcher(path: String, instructions: String, conversationId: UUID?) async -> String {
+    private func registerWatcher(path rawPath: String, instructions: String, conversationId: UUID?) async -> String {
         guard let tools = await jobToolsProvider?() else { return "Jobs are not available yet." }
+        // The canonical spelling is what gets stored and what event paths are matched against; a
+        // path that is not there yet falls back to the best resolution available so it still
+        // round-trips, rather than being stored under two spellings.
+        let path = WatchRoot.canonical(rawPath) ?? IrisPaths.canonicalPath(rawPath)
         do {
             let jobs = try tools.ledger.jobs()
             var job: Job
@@ -251,7 +255,10 @@ struct ToolExecutor {
                         existing: Set(jobs.map(\.name))),
                     prompt: instructions,
                     trigger: .fsEvent(FSWatch(path: path, quietWindowSeconds: 3)),
-                    createdInConversationId: conversationId)
+                    createdInConversationId: conversationId,
+                    // A watch never runs concurrently with itself: a save that lands mid-run is
+                    // queued, not dropped. An existing job keeps whatever policy it was given.
+                    policy: JobPolicy(overlap: .queue))
             }
             try tools.ledger.upsert(job)
             await tools.watchers.reload(adoptingIfUnconfigured: tools.ledger, callback: tools.watcherCallback)

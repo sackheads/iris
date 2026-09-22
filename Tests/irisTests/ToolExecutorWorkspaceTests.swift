@@ -64,6 +64,38 @@ struct ToolExecutorWorkspaceTests {
         await watchers.stopAll()
     }
 
+    @Test("register_directory_watcher stores the canonical root and a queueing watch")
+    func watcherStoresCanonicalPathAndQueueOverlap() async throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("iris-watch-canon-\(UUID().uuidString)")
+        let real = base.appendingPathComponent("real")
+        let link = base.appendingPathComponent("link")
+        try fm.createDirectory(at: real, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: link, withDestinationURL: real)
+        defer { try? fm.removeItem(at: base) }
+
+        let store = try ConversationStore.inMemory()
+        let watchers = WatcherManager(ledger: store.ledger)
+        var executor = ToolExecutor()
+        executor.jobToolsProvider = { JobTools(ledger: store.ledger, watchers: watchers, watcherCallback: { _, _ in }) }
+
+        _ = await executor.execute(
+            name: "register_directory_watcher",
+            args: ["path": .string(link.path), "instructions": .string("note changes")])
+
+        let job = try #require(try store.ledger.jobs().first)
+        guard case .fsEvent(let watch) = job.trigger else {
+            Issue.record("expected a watch trigger"); return
+        }
+        let expected = URL(fileURLWithPath: link.path).resolvingSymlinksInPath()
+            .standardizedFileURL.path
+        #expect(watch.path == expected)
+        #expect(watch.path != link.path, "the symlinked spelling is not what is stored")
+        // A watch never runs concurrently with itself: the burst that arrives mid-run waits.
+        #expect(job.policy.overlap == .queue)
+        await watchers.stopAll()
+    }
+
     @Test("registering the same directory twice rewrites the one job instead of doubling the watch")
     func watcherReregistration() async throws {
         let store = try ConversationStore.inMemory()
