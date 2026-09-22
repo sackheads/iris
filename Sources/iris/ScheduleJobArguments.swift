@@ -383,10 +383,14 @@ struct GateScriptReview: Sendable {
         }
         let inputs = rendered.isEmpty
             ? "  (none \u{2014} the script can read nothing of yours)" : rendered.joined(separator: "\n")
-        return script + "\n\n" + """
+        // The capability block comes first and the script last, under its own label: a script is
+        // free text, and one that ended with a forged "What it can read: (none)" would otherwise
+        // sit exactly where the real list is expected. Put the fixed part where nothing the model
+        // wrote can precede it.
+        return """
             This script runs unattended inside the sandbox VM every time the job's schedule comes \
             round, for as long as the job exists. What it can read:
-            """ + "\n" + inputs + "\n" + "It is stopped after \(timeoutSeconds) seconds."
+            """ + "\n" + inputs + "\n" + "It is stopped after \(timeoutSeconds) seconds." + "\n\nScript:\n" + script
     }
 
     /// `APPROVE` creates the job; `DENY` refuses it and says why; anything else — an `ESCALATE`, a
