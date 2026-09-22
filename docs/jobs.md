@@ -279,6 +279,14 @@ breaker and the daily budgets. The burst therefore ends at the first refusal: if
 or a budget runs out on the second of five, the other three are abandoned and the job goes back on
 its ordinary cadence rather than spending the next tick being refused four more times.
 
+A replayed run that **fails** ends the burst too. The failure puts the job on the retry ladder — a
+minute, then five, then twenty-five, then a pause — and that is now the schedule; the occurrences
+the burst still owed are dropped rather than fired over the top of it. Without that, a provider
+outage during a catch-up would spend the whole ladder in the time it takes to make four failing
+runs and leave the job paused, where an ordinary failed fire costs one run now and one a minute
+later. For the same reason a job that was asleep *mid-retry* is an ordinary single fire whatever
+its catch-up policy says: the time it was waiting for was a retry, not a missed occurrence.
+
 On a **gated** job, `replay` will usually produce a single run whatever the cap says, and that is
 the right answer: the first replayed fire stamps the fresh gate signal, so the second asks the gate
 and is told nothing has changed since a moment ago, which ends the burst. There was one change to
@@ -509,8 +517,10 @@ The five global numbers are `ConfigManager` keys — `JOB_MAX_RUNS_PER_HOUR`,
 `JOB_DAILY_TOKEN_BUDGET`, `JOB_GLOBAL_DAILY_TOKEN_BUDGET`, `JOB_PER_RUN_TOKEN_BUDGET` and
 `JOB_RUN_TIMEOUT_SECONDS` — and **Settings → Advanced → Job Limits** has a stepper for each. A
 stepper wound down to zero reads as "default": the figure above is what the runner then uses, and
-the row says so rather than claiming a budget of nothing. A job's own `policy` column overrides any
-of them except the global daily budget.
+the row says so rather than claiming a budget of nothing. Each stepper moves from the figure its
+row is showing, so one click up from "default (6)" is 7 and one click down is 5 — and winding one
+back down to zero is how you give that number to the default again. A job's own `policy` column
+overrides any of them except the global daily budget.
 
 **What zero means depends on which number it is.** An unset settings key — which is how a `0` reads
 — is simply the default above. In a job's own `JobPolicy`, `0` is an answer rather than a gap, and
@@ -586,14 +596,19 @@ the app, or another `--run-job`" — rather than sending you off to quit an app 
 running. GRDB's WAL would survive two writers, but
 `AppState` keeps conversation state in memory, so a CLI write behind a live app desyncs the UI and
 the app then saves its stale copy over the top. A lock left behind by a crash names a process that
-no longer exists and is ignored; one that cannot be read or parsed is treated as held, and the
-message names the file to delete.
+no longer exists and is taken over; one that cannot be read or parsed is treated as held, and the
+message names the file to delete. Very occasionally a crashed holder's pid has since been handed
+to some unrelated process, and then there is nothing to wait for and no app to quit: the refusal
+names the lock file for that case too, and deleting it is the fix.
 
-What that covers, exactly: a CLI run started while the app is up, and a second CLI run started
-while the first one is going. What it does **not** cover is the app being launched *during* a CLI
-run — the app never checks the lock, it simply takes it — so do not start Iris while a `--run-job`
-is in flight. (An app that starts mid-run also keeps the lock afterwards: the CLI's release is
-pid-guarded and will not delete somebody else's.)
+What that covers, exactly: a CLI run started while the app is up, a second CLI run started while
+the first one is going, and — because the CLI *creates* the lock file rather than checking and
+then writing it — several `--run-job` launched at the same instant, of which exactly one proceeds
+and the rest refuse. A harness may therefore run them in parallel and read the refusals. What it
+does **not** cover is the app being launched *during* a CLI run — the app never checks the lock,
+it simply takes it — so do not start Iris while a `--run-job` is in flight. (An app that starts
+mid-run also keeps the lock afterwards: the CLI's release is pid-guarded and will not delete
+somebody else's.)
 
 | Exit | Meaning |
 | --- | --- |
