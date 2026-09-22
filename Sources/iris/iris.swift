@@ -459,14 +459,24 @@ actor IrisEngine {
     /// `NAME_MAX` on Darwin, also bytes: the per-component limit.
     nonisolated static let maxPathComponentLength = 255
 
-    /// `~` and `~/…` expanded without Foundation's PATH_MAX truncation, so a length check can see
-    /// the real length. `~user/…` is rare enough to hand to Foundation, where the truncation only
-    /// bites at lengths this function's caller refuses anyway.
+    /// Tilde expansion without Foundation's PATH_MAX truncation, so a length check can see the
+    /// real length. `~user/…` goes through `homeDirectory(forUser:)` rather than
+    /// `expandingTildeInPath` for the same reason plus one more: Foundation returns the input
+    /// UNCHANGED when the expansion would exceed PATH_MAX, which is indistinguishable from the
+    /// unknown-user case and made an over-long `~realuser/…` report "no such user".
+    ///
+    /// An unknown user still returns the path unchanged — the caller distinguishes it by the
+    /// leading `~` that survives.
     nonisolated static func expandTilde(_ path: String) -> String {
+        guard path.hasPrefix("~") else { return path }
         if path == "~" { return NSHomeDirectory() }
         if path.hasPrefix("~/") { return NSHomeDirectory() + path.dropFirst(1) }
-        if path.hasPrefix("~") { return (path as NSString).expandingTildeInPath }
-        return path
+        let afterTilde = path.index(after: path.startIndex)
+        let slash = path[afterTilde...].firstIndex(of: "/") ?? path.endIndex
+        guard let home = FileManager.default.homeDirectory(forUser: String(path[afterTilde..<slash]))?.path else {
+            return path
+        }
+        return home + path[slash...]
     }
 
     /// Why a workspace path is unusable, or nil if it is fine (#273). Shape only: whether the
@@ -488,7 +498,10 @@ actor IrisEngine {
         // fine, and then every consumer got ENAMETOOLONG — the deferred failure this rule exists
         // to prevent. Any non-ASCII folder name shrinks the margin 2-4x.
         if expanded.utf8.count > maxWorkspacePathLength {
-            return "Refused — that path is \(expanded.utf8.count) bytes; the maximum is \(maxWorkspacePathLength)."
+            // "expands to" when the number is not one the model can count in what it sent — a
+            // tilde path is told 1035 bytes for the 1023 it wrote, and the extra needs a source.
+            let how = expanded == path ? "is" : "expands to"
+            return "Refused — that path \(how) \(expanded.utf8.count) bytes; the maximum is \(maxWorkspacePathLength)."
         }
         // Same rule one level down: a single component over NAME_MAX cannot be created either,
         // however short the whole path is.

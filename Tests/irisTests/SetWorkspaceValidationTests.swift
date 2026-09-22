@@ -147,6 +147,37 @@ struct SetWorkspaceValidationTests {
         let result = await setWorkspace("~nosuchuser273/proj", on: app, as: id)
         #expect(result.contains("Refused"))
         #expect(result.contains("no such user"), "the hint must not tell it to do what it just did")
+        #expect(app.conversations.first { $0.id == id }?.workspacePath == nil)
+    }
+
+    /// The other half of that branch. `expandingTildeInPath` returns `~user/…` UNCHANGED when the
+    /// expansion would pass PATH_MAX, which looks exactly like an unknown user — so an over-long
+    /// path under a REAL user reported "no such user". `homeDirectory(forUser:)` has no such cap.
+    @Test("an over-long path under a real ~user reports its length, not a missing user")
+    func overLongRealTildeUserReportsLength() async throws {
+        let (app, id) = fresh()
+        // The fixture has to be over PATH_MAX only AFTER expansion: a path that is over it raw is
+        // refused by the length rule whichever way `~user` expands, so it cannot tell the two
+        // apart. Sized from the real home directory so the margin does not depend on the machine,
+        // and chunked so no single component trips NAME_MAX first.
+        let rawPrefix = "~\(NSUserName())/"
+        let grow = (NSHomeDirectory() + "/").utf8.count - rawPrefix.utf8.count
+        try #require(grow > 0, "expanding ~user must lengthen the path for this test to mean anything")
+        let tailLength = IrisEngine.maxWorkspacePathLength - rawPrefix.utf8.count
+        let chunk = String(repeating: "a", count: 200) + "/"
+        let tail = String(String(repeating: chunk, count: tailLength / chunk.count + 1).prefix(tailLength))
+        let path = rawPrefix + tail
+
+        #expect(path.utf8.count <= IrisEngine.maxWorkspacePathLength, "raw: within the cap")
+        #expect(path.utf8.count + grow > IrisEngine.maxWorkspacePathLength, "expanded: over it")
+        #expect(path.split(separator: "/").allSatisfy { $0.utf8.count <= IrisEngine.maxPathComponentLength },
+                "so NAME_MAX cannot be what refuses it")
+
+        let result = await setWorkspace(path, on: app, as: id)
+        #expect(result.contains("Refused"))
+        #expect(result.contains("bytes"), "the reason is length")
+        #expect(!result.contains("no such user"))
+        #expect(app.conversations.first { $0.id == id }?.workspacePath == nil)
     }
 
     /// Set, but say so. A model that names a directory it is about to create is plausible, so
