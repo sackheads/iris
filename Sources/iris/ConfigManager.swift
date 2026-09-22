@@ -46,6 +46,17 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(streamResponses, forKey: "STREAM_RESPONSES") }
     }
 
+    /// #261 — show the model-activity LED bar above the composer. Off hides it and gives the space
+    /// back; it does not reserve a gap.
+    ///
+    /// Hides the LEDs only. The spectrum line above them is the thinking indicator rather than
+    /// model status, and it is the only sign a turn is running. A guard tier that is installed but
+    /// broken (#218) still announces itself in the conversation with this off — the toggle is
+    /// about a status light, not about suppressing a fault.
+    var showModelLEDs: Bool {
+        didSet { store.set(showModelLEDs, forKey: "SHOW_MODEL_LEDS") }
+    }
+
     /// Slice D3 — when true (the default), a checkpoint the grader passes cleanly advances without
     /// stopping the human. False forces every checkpoint to pause, which is pre-D3 behaviour.
     var checkpointAutoAdvance: Bool {
@@ -291,6 +302,13 @@ class ConfigManager: @unchecked Sendable {
             self.copyChatsAsMarkdown = true
         }
 
+        // Defaults on: the LEDs are what the window has always had, so an existing install keeps
+        // them without touching Settings.
+        if store.object(forKey: "SHOW_MODEL_LEDS") != nil {
+            self.showModelLEDs = store.bool(forKey: "SHOW_MODEL_LEDS")
+        } else {
+            self.showModelLEDs = true
+        }
         if store.object(forKey: "STREAM_RESPONSES") != nil {
             self.streamResponses = store.bool(forKey: "STREAM_RESPONSES")
         } else {

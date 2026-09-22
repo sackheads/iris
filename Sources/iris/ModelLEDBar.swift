@@ -22,9 +22,12 @@ struct ModelLED: View {
     /// Passed explicitly by `ModelLEDBar` rather than derived from `label` so the tooltip text
     /// isn't coupled to the display string (#210 fix round 1).
     var tierNumber: Int? = nil
+    /// The error text behind an `.error` state, for the tooltip. Passed alongside rather than
+    /// carried in the case so `LEDState` stays `CaseIterable` — several tests enumerate it.
+    var failure: String? = nil
 
     enum LEDState: CaseIterable {
-        case off, configured, ready, active, downloading, unprovisioned
+        case off, configured, ready, active, downloading, unprovisioned, error
 
         var color: Color {
             switch self {
@@ -38,6 +41,11 @@ struct ModelLED: View {
             // loaded yet", and the tooltip should not be the only way to tell the two apart
             // (#202 fix round 4).
             case .unprovisioned: Color(red: 0.95, green: 0.35, blue: 0.1).opacity(0.65)
+            // Full red, full opacity: `.unprovisioned` means a tier is being skipped, which is a
+            // choice the user can live with; this means a tier is installed, broken, and blocking
+            // real output. It is the only state on this bar that is someone's problem right now
+            // (#218), so it does not share the orange band with "not set up yet".
+            case .error:         Color(red: 0.9, green: 0.15, blue: 0.15)
             }
         }
         var glowRadius: CGFloat {
@@ -78,7 +86,10 @@ struct ModelLED: View {
         .help(tooltip)
     }
 
-    private var tooltip: String {
+    /// Internal rather than private for the same reason the state functions are (see
+    /// `ModelLEDBar`): the `.error` tooltip carries the only copy of *why* a tier is failing, and
+    /// a test that cannot read it can only check the colour.
+    var tooltip: String {
         switch state {
         case .off:           return "\(label) — disabled"
         case .configured:    return "\(label) — enabled, not loaded"
@@ -90,6 +101,16 @@ struct ModelLED: View {
             // represents via the explicit `tierNumber`, not by pattern-matching `label`.
             let tier = tierNumber.map(String.init) ?? "?"
             return "\(label) — enabled, model not downloaded; tier \(tier) skipped"
+        case .error:
+            // The error itself, not just "failed": a half-unzipped model directory and a truncated
+            // gguf are the same LED and completely different fixes (#218).
+            //
+            // Deliberately does not say "installed": tier 3 reaches this state for cloud, Ollama
+            // and MLX too, where nothing was ever downloaded. The conversation notice carries the
+            // engine-specific remedy; a tooltip's job here is to name the error.
+            let tier = tierNumber.map(String.init) ?? "?"
+            let detail = failure.map { ": \($0)" } ?? ""
+            return "\(label) — failing; tier \(tier) is blocking output rather than checking it\(detail)"
         }
     }
 }
@@ -99,14 +120,19 @@ struct ModelLED: View {
 struct ModelLEDBar: View {
     @Bindable var config = ConfigManager.shared
     var isThinking: Bool = false
+    /// Injected so a test can assert on a broken tier without writing the process-global one
+    /// (#237's lesson applied ahead of time). Production reads `shared`.
+    var health: GuardTierHealth = .shared
 
     var body: some View {
         HStack(spacing: 16) {
             ModelLED(label: "PRI", state: primaryState())
             ModelLED(label: "VC",  state: vibecopState())
             ModelLED(label: "P1",  state: tier1State())
-            ModelLED(label: "P2",  state: tier2State(), tierNumber: 2)
-            ModelLED(label: "P3",  state: tier3State(), tierNumber: 3)
+            ModelLED(label: "P2", state: tier2State(failure: health.tier2Failure),
+                     tierNumber: 2, failure: health.tier2Failure)
+            ModelLED(label: "P3", state: tier3State(failure: health.tier3Failure),
+                     tierNumber: 3, failure: health.tier3Failure)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
@@ -148,11 +174,19 @@ struct ModelLEDBar: View {
         config.enableAdvancedPromptInjectionProtection ? .ready : .off
     }
 
-    func tier2State() -> ModelLED.LEDState {
+    func tier2State(failure: String? = nil) -> ModelLED.LEDState {
         guard config.enableAdvancedPromptInjectionProtection else { return .off }
+        // `.downloading` first, and only for *this* tier's model: the notice a failure posts tells
+        // the user to re-download, and showing `.error` while they are doing exactly that leaves
+        // the one action they were asked to take with no progress anywhere (#218 review). The
+        // failure returns if the next evaluation still fails once the download finishes.
         let d = ModelDownloader.shared
         let fn = ModelDownloader.resolvedFilename(for: config.promptGuardCoreMLModel)
         if d.isDownloading && d.currentDownloadName == fn { return .downloading }
+        // Otherwise a tier that is installed and failing is blocking output right now, which
+        // outranks any answer about what is on disk. `.off` still wins — a disabled tier blocks
+        // nothing, and a stale failure from before the user turned it off is not news.
+        if let failure, !failure.isEmpty { return .error }
         // Delegate to the same predicate the guard itself evaluates (#210, mirror of tier 3's
         // #202 fix round 4) instead of re-deriving "downloaded" here — the two must never drift
         // apart on what counts as provisioned.
@@ -169,10 +203,12 @@ struct ModelLEDBar: View {
         }
     }
 
-    func tier3State() -> ModelLED.LEDState {
+    func tier3State(failure: String? = nil) -> ModelLED.LEDState {
         guard config.enableAdvancedPromptInjectionProtection else { return .off }
+        // Same precedence as tier 2 above, and for the same reasons.
         let d = ModelDownloader.shared
         if d.isDownloading && d.currentDownloadName == config.promptGuardModel { return .downloading }
+        if let failure, !failure.isEmpty { return .error }
         // Delegate to the same predicate the guard itself evaluates (#202 fix round 4) instead of
         // re-deriving "downloaded" via `ModelDownloader` here — the two must never drift apart on
         // what counts as provisioned.

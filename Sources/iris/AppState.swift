@@ -1550,6 +1550,27 @@ class AppState {
     /// a legacy import that keeps failing), and an unconditional append would stack one copy per
     /// launch. The text is the dedup key on purpose: a changed count is a genuinely different
     /// report and earns its own line.
+    /// Points `GuardTierHealth` at this `AppState`, so a tier that is installed but failing says
+    /// so once in whichever conversation the user is looking at (#218).
+    ///
+    /// Called by `IrisApp`, not by `init`: `init` runs for every `AppState` a test builds — 79
+    /// files construct one — and each would overwrite the sink on the process-global health box.
+    /// `InjectionGuardTests` and `GuardTestIsolationTests` deliberately drive both tiers into
+    /// `.error`, so an installed sink would have them persisting a system message into whichever
+    /// suite's store happened to own the live `AppState`. That is the #237 shape exactly, and the
+    /// app has one `AppState` while the suite has hundreds — so the app installs it explicitly.
+    func installGuardHealthSink() {
+        GuardTierHealth.shared.announce = { [weak self] text in
+            guard let self else { return false }
+            // The selected conversation when there is one; otherwise Activity, which is where
+            // background runs already put their user-facing lines. A headless `--run-job` selects
+            // nothing, and "no selection" must not mean "swallow the warning".
+            let target = self.selectedConversationId ?? self.activityConversationId()
+            self.appendLaunchNotice(text, to: target)
+            return true
+        }
+    }
+
     func appendLaunchNotice(_ text: String, to conversationId: UUID) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return }
         guard !conversations[idx].messages.contains(where: { $0.role == .system && $0.content == text }) else { return }
