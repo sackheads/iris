@@ -530,6 +530,18 @@ class AppState {
         if conversations.isEmpty || selectedConversationId == nil {
             createNewConversation()
         }
+        // #218: a guard tier that is installed but fails to load or infer says so once, in
+        // whichever conversation the user is looking at when it first happens. Not a launch
+        // notice like the ones below, because nothing has tried to load a guard model yet at this
+        // point — the state does not exist until the first guarded output asks for it.
+        //
+        // Deliberately independent of the LEDs' visibility setting (#261): the toggle hides a
+        // status light, and a tier that is silently replacing every tool result with
+        // `[CONTENT BLOCKED …]` is not a status light.
+        GuardTierHealth.shared.announce = { [weak self] text in
+            guard let self, let target = self.selectedConversationId else { return }
+            self.appendLaunchNotice(text, to: target)
+        }
         // Every launch notice below goes through `appendLaunchNotice`, which persists it like any
         // other system message but skips it when the same wording is already in the conversation.
         // Several of these conditions recur on every launch until a human intervenes, so dedup by

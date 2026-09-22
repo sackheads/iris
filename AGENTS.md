@@ -56,6 +56,7 @@ Sources/iris/
   SubagentManager.swift   # spawns isolated IrisEngine instances for parallel subagent tasks
   GoalEvaluator.swift     # grades completed work against a GoalContract using a fresh engine
   SandboxSessionManager.swift  # routes run_command through apple/container VMs when enabled
+  GuardTierHealth.swift        # last load/inference failure per guard tier, for the P2/P3 error LED (#218)
   MemoryManager.swift     # SOUL.md, USER.md, memory.md read/write
   MCPManager.swift        # MCP client: tool discovery and call forwarding
   HookManager.swift       # before/after agent hooks (shell scripts)

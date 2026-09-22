@@ -381,6 +381,7 @@ public struct InjectionGuard {
             try await CoreMLEvaluator.shared.loadModelIfNeeded()
         } catch {
             print("[InjectionGuard] Tier 2 CoreML load error: \(error). Failing closed.")
+            await MainActor.run { GuardTierHealth.shared.recordTier2Failure("\(error)") }
             return .error
         }
 
@@ -388,12 +389,19 @@ public struct InjectionGuard {
         // different shape (#210) — never let it fall through to `evaluate`'s silent 0.0 default.
         guard CoreMLEvaluator.shared.hasModelLoaded else {
             print("[InjectionGuard] Tier 2 CoreML: loadModelIfNeeded returned without a model loaded. Failing closed.")
+            await MainActor.run {
+                GuardTierHealth.shared.recordTier2Failure("the model loaded without leaving a model in place")
+            }
             return .error
         }
 
         let startTime = Date()
         do {
             let probability = try await CoreMLEvaluator.shared.evaluate(text: input)
+            // A tier that reached a verdict is working, whatever the verdict says about the
+            // content (#218). Cleared here rather than on `.safe` alone: `.malicious` is the tier
+            // doing its job, and leaving the LED red for it would be a lie about the model.
+            await MainActor.run { GuardTierHealth.shared.clearTier2() }
             let durationMs = Date().timeIntervalSince(startTime) * 1000
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier2, modelName: "CoreML", durationMs: durationMs, success: true)
 
@@ -406,6 +414,7 @@ public struct InjectionGuard {
             let durationMs = Date().timeIntervalSince(startTime) * 1000
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier2, modelName: "CoreML", durationMs: durationMs, success: false)
             print("[InjectionGuard] Tier 2 CoreML error: \(error). Failing closed.")
+            await MainActor.run { GuardTierHealth.shared.recordTier2Failure("\(error)") }
             return .error
         }
     }
@@ -464,6 +473,9 @@ public struct InjectionGuard {
             """
             
             let response = try await engine.generate(prompt: prompt, jsonSchema: nil)
+            // As tier 2 above: the canary answered, so the model is fine — what it answered is a
+            // statement about the content, not about the model (#218).
+            await MainActor.run { GuardTierHealth.shared.clearTier3() }
             let durationMs = Date().timeIntervalSince(startTime) * 1000
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier3, modelName: modelName, durationMs: durationMs, success: true)
             return (response.contains("SAFE") && !response.contains("MALICIOUS")) ? .safe : .malicious
@@ -471,6 +483,7 @@ public struct InjectionGuard {
             let durationMs = Date().timeIntervalSince(startTime) * 1000
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier3, modelName: modelName, durationMs: durationMs, success: false)
             print("[InjectionGuard] Canary execution failed: \(error). Failing closed for canary.")
+            await MainActor.run { GuardTierHealth.shared.recordTier3Failure("\(error)") }
             return .error
         }
     }

@@ -359,7 +359,11 @@ struct ChatView: View {
 
                     SpectrumLine(active: state.isThinking)
 
-                    ModelLEDBar(isThinking: state.isThinking)
+                    // #261: absent, not hidden — a `.hidden()` or a zero-opacity bar would keep
+                    // its slot in the stack and give the space back to nothing.
+                    if config.showModelLEDs {
+                        ModelLEDBar(isThinking: state.isThinking)
+                    }
 
                     messageInputBar
 
