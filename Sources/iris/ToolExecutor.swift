@@ -31,6 +31,12 @@ struct ToolExecutor {
     /// throwaway executor — means the tool declines instead of registering a watch nothing runs.
     var jobToolsProvider: (@Sendable () async -> JobTools?)?
 
+    /// How the sandboxed branch of `run_command` reaches the container session. Injectable so a
+    /// test can assert what that branch forwards — the command, the workspace, and the deadline —
+    /// without a `container` binary, a daemon or a VM. nil, the case everywhere in the app, means
+    /// the one `SandboxSessionManager` the process shares.
+    var sandboxSession: (@Sendable (_ command: String, _ conversationId: UUID, _ workspace: String?, _ timeoutSeconds: Int) async -> String)?
+
     /// Merges the captured login-shell PATH (`loginPath`) ahead of `base`'s own `PATH`, so host
     /// `run_command` invocations see pyenv/nvm/Homebrew shims that only `.zprofile`/`.zshrc` set up
     /// (#69) without spawning a login shell per command (which prints profile banners and can have
@@ -257,11 +263,19 @@ struct ToolExecutor {
 
     private func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false, timeoutSeconds: Double = 600) async -> String {
         if useSandbox, let conversationId {
+            let expandedCwd = cwd.map { ($0 as NSString).expandingTildeInPath }
+            // The same deadline the host branch enforces, in seconds — the container runtime kills
+            // the command on it. It used to be dropped here, which left a sandboxed command with
+            // no bound at all while the model believed it had set one.
+            let deadline = Int(timeoutSeconds)
+            if let sandboxSession {
+                return await sandboxSession(command, conversationId, expandedCwd, deadline)
+            }
             guard SandboxingManager.shared.isContainerInstalled else {
                 return "Error: sandboxing is on but the container runtime isn't installed. Open Iris Settings → Sandboxing to install it, or turn sandboxing off."
             }
-            let expandedCwd = cwd.map { ($0 as NSString).expandingTildeInPath }
-            return await SandboxSessionManager.shared.run(command: command, conversationId: conversationId, workspace: expandedCwd)
+            return await SandboxSessionManager.shared.run(command: command, conversationId: conversationId,
+                                                          workspace: expandedCwd, timeoutSeconds: deadline)
         }
         // Hoist process/pipes so the cancellation handler can capture them.
         let process = Process()
@@ -275,6 +289,9 @@ struct ToolExecutor {
             var containerArgs = ["run", "--rm", ConfigManager.shared.sandboxImage, "bash", "-c", command]
             if let cwd = cwd {
                 let expandedPath = (cwd as NSString).expandingTildeInPath
+                // `-v`, where the session path uses `--mount` (see `ContainerMount`). The CLI
+                // lowers both to the same virtiofs bind; this one is the ephemeral no-conversation
+                // path and is left as it was rather than changed for symmetry alone.
                 containerArgs.insert(contentsOf: ["-v", "\(expandedPath):\(expandedPath)", "--workdir", expandedPath], at: 2)
             }
             process.arguments = containerArgs
@@ -342,8 +359,15 @@ struct ToolExecutor {
                 }
             }
         } catch {
-            return "Error: command timed out after \(Int(timeoutSeconds)) seconds"
+            return Self.commandTimedOutMessage(seconds: timeoutSeconds)
         }
+    }
+
+    /// What a command that outlived its deadline reports. One sentence for both routes: a command
+    /// killed in the container reads exactly like one killed on the host, because which side of
+    /// the VM boundary ran out of time is not the model's problem.
+    static func commandTimedOutMessage(seconds: Double) -> String {
+        "Error: command timed out after \(Int(seconds)) seconds"
     }
     
     /// Maps a failed sandboxed `container run` output to an actionable setup message, or nil if

@@ -57,6 +57,13 @@ actor JobRunner {
     /// runtime or turn sandboxing off at any point, and `SandboxPolicy.resolve` would then quietly
     /// downgrade the run's pinned `.sandboxed` to the host. Injected so a test can pin the answer.
     private let sandboxAvailable: @Sendable () -> Bool
+    /// What asks a job's gate whether anything changed (§7). Injected so a test can answer for it
+    /// without a network, a file or a VM; in the app it is `GateEvaluator` over the real three.
+    private let gateEvaluator: @Sendable (Gate, String?) async -> GateResult
+    /// The ledger's own `lastGateSignal`, except where a test needs that one read to fail — the
+    /// same reason `usageSource` exists. A gate whose previous signal cannot be read is a gate
+    /// error like any other, and there is no other way to make only that read fail.
+    private let lastGateSignal: @Sendable (UUID) throws -> String?
     /// The jobs with a run in flight right now. Every fire goes through `fire`, so one set here is
     /// the whole overlap story, whatever woke the job.
     private var inFlight: Set<UUID> = []
@@ -72,6 +79,8 @@ actor JobRunner {
          activity: any ActivityAPI = ProcessInfoActivity(),
          usageSource: (any JobUsageReading)? = nil,
          sandboxAvailable: (@Sendable () -> Bool)? = nil,
+         gateEvaluator: (@Sendable (Gate, String?) async -> GateResult)? = nil,
+         lastGateSignal: (@Sendable (UUID) throws -> String?)? = nil,
          watchdogSlice: TimeInterval = JobRunner.defaultWatchdogSlice) {
         self.state = state
         self.engine = engine
@@ -82,7 +91,11 @@ actor JobRunner {
         self.config = config
         self.protectionEnabled = protectionEnabled
         self.activity = activity
-        self.sandboxAvailable = sandboxAvailable ?? { SandboxPolicy.mutatingJobCanRun(config: config) }
+        let resolvedSandboxAvailable = sandboxAvailable ?? { SandboxPolicy.mutatingJobCanRun(config: config) }
+        self.sandboxAvailable = resolvedSandboxAvailable
+        self.gateEvaluator = gateEvaluator ?? Self.liveGateEvaluator(
+            sandboxAvailable: resolvedSandboxAvailable, image: { config.sandboxImage })
+        self.lastGateSignal = lastGateSignal ?? { [ledger] in try ledger.lastGateSignal(jobId: $0) }
         self.watchdogSlice = watchdogSlice
     }
 
@@ -102,6 +115,11 @@ actor JobRunner {
         /// The ledger could not say what this job has spent, so admission could not be decided.
         /// Not a pause: see `unavailableReason`.
         case dropUnavailable(reason: String)
+        /// The job's gate looked and nothing had moved (§4 step 5). A row, no card, no turn.
+        case gateUnchanged
+        /// The gate could not answer. `paused` is the third such answer in a row, which stops the
+        /// job.
+        case gateError(detail: String, paused: Bool)
     }
 
     /// Why a fire was not started, as a person reads it — `nil` for `.run`. `/jobs run` prints it:
@@ -117,6 +135,11 @@ actor JobRunner {
         case .pauseBudget(let scope, let used, let limit):
             return budgetReason(scope: scope, used: used, limit: limit)
         case .dropUnavailable(let reason): return reason
+        case .gateUnchanged: return "its gate found nothing changed"
+        case .gateError(let detail, let paused):
+            return paused
+                ? "\(gateErrorReason(detail)) — \(consecutiveGateErrorsToPause) in a row, so the job is now paused"
+                : gateErrorReason(detail)
         }
     }
 
@@ -249,9 +272,15 @@ actor JobRunner {
                                        runsLastHour: usage.runsLastHour,
                                        tokensTodayJob: usage.tokensToday,
                                        tokensTodayAll: tokensAll, limits: limits)
-            if decided == nil { decided = admission }
+            // Whether this pass is the fire the caller asked about — the first one round the loop.
+            // A held `queue` fire that follows must not overwrite the answer given for it.
+            let isCallersFire = decided == nil
+            if isCallersFire { decided = admission }
             switch admission {
-            case .dropPaused, .dropDisabled, .dropUnavailable:
+            // The two gate answers are not `admit`'s to reach — it is a pure function of four
+            // numbers, and a gate is I/O — so they cannot arrive here. Listed rather than
+            // defaulted, so adding a branch to `Admission` still has to come past this switch.
+            case .dropPaused, .dropDisabled, .dropUnavailable, .gateUnchanged, .gateError:
                 return decided
             case .skipInFlight:
                 guard !origin.isWatcher else { return decided }
@@ -278,7 +307,24 @@ actor JobRunner {
             }
 
             inFlight.insert(current.id)
-            await run(job: current, origin: origin, limits: limits)
+            // §4 step 5, and the last thing asked before a turn starts: a gated job runs only when
+            // its gate says something moved. Asked with the job already marked in flight, because
+            // a gate does I/O — a HEAD request, a container — and a fire that arrives while it is
+            // thinking is the overlap it is, not a second admitted run.
+            let gate: GateContext?
+            switch await gateDecision(for: current, origin: origin, at: at) {
+            case .proceed(let context):
+                gate = context
+            case .refuse(let refusal):
+                inFlight.remove(current.id)
+                if isCallersFire { decided = refusal }
+                // A fire held while the gate was being evaluated is still owed an answer, and the
+                // gate is asked again for it: one held fire at a time, so this terminates.
+                guard let held = takeQueuedFire(job: current) else { return decided }
+                origin = .queued(from: held)
+                continue
+            }
+            await run(job: current, origin: origin, limits: limits, gate: gate)
             inFlight.remove(current.id)
 
             guard let held = takeQueuedFire(job: current) else { return decided }
@@ -286,6 +332,187 @@ actor JobRunner {
             // the retry ladder decides on, and re-entering as a bare "queued" erased it (R7).
             origin = .queued(from: held)
         }
+    }
+
+    // MARK: The gate (#187 §7)
+
+    /// What a gate that said "changed" hands the run it let through: the signal to stamp on the
+    /// row, and (a script gate only) the output to put in the prompt as untrusted context.
+    struct GateContext: Equatable, Sendable {
+        let signal: String
+        let payload: String?
+    }
+
+    /// The gate's answer, as a fire needs it. `.refuse` has already written whatever the ledger
+    /// and the user are owed — a row for "nothing changed", a row for an error, and on the third
+    /// consecutive error the pause and its card.
+    private enum GateDecision {
+        case proceed(GateContext?)
+        case refuse(Admission)
+    }
+
+    /// The outcome recorded on the row a gate's "nothing changed" leaves (§0.4 step 5).
+    static let gateUnchangedOutcome = "gate: no change"
+    /// The pause a gate nobody can evaluate earns, spelled exactly as the spec does.
+    static let gateFailingReason = "gate failing"
+    /// How a gate error reads on the row it writes. The prefix is load bearing: it is how the
+    /// streak below recognises its own rows, and the pause row deliberately does not carry it, so
+    /// a resumed job starts counting from zero again rather than being paused by its own history.
+    static let gateErrorPrefix = "gate error"
+    static func gateErrorReason(_ detail: String) -> String {
+        "\(gateErrorPrefix): \(firstLine(of: detail) ?? "the gate could not be evaluated")"
+    }
+    /// Three, per spec §7.
+    static let consecutiveGateErrorsToPause = 3
+
+    /// What a gate whose last signal could not be read says. The one gate error that is Iris's own
+    /// fault rather than the world's, and the reason it is worded as the gate's failure anyway is
+    /// that the consequence is identical: nothing can be decided, and after three of them a person
+    /// has to look.
+    static func gateUnreadableDetail(_ error: any Error) -> String {
+        "the last gate signal could not be read: \(error)"
+    }
+
+    /// The real evaluator, over the real three gates. The runtime is handed over only when the
+    /// sandbox is resolvable *at this evaluation* (R28) — installed and switched on — so a script
+    /// gate on a machine that has lost either is a gate error rather than a command on the host.
+    /// Asked afresh every time for the same reason the fire asks about the profile: a check made
+    /// when the job was created only describes the day it was made.
+    static func liveGateEvaluator(sandboxAvailable: @escaping @Sendable () -> Bool,
+                                  image: @escaping @Sendable () -> String)
+        -> @Sendable (Gate, String?) async -> GateResult {
+        { gate, previous in
+            let runtime: (any ContainerRuntime)? = sandboxAvailable() ? CLIContainerRuntime() : nil
+            return await GateEvaluator.evaluate(gate, previous: previous, runtime: runtime,
+                                                image: image())
+        }
+    }
+
+    /// Whether this fire is one the gate gets a say in (R29). A **cadence** fire that is not a
+    /// retry — including one the `queue` policy held.
+    ///
+    /// The two that skip it have already had the question answered for them. A retry re-runs work
+    /// the gate authorised a minute ago, and asking again would get "nothing has changed since the
+    /// run that failed" — the work would be dropped, the row would read `completed`, and the ladder
+    /// would sit at attempt 1 for ever, which is the retry silently disabled for exactly the jobs
+    /// that were gated to avoid wasted turns. And `/jobs run` is a person saying "run it now",
+    /// which a gate does not get a vote on; `--dry-run` is where someone asks what the gate thinks.
+    ///
+    /// A held `queue` re-fire is not one of them: it is a cadence fire whose gate was never asked,
+    /// held before the question could be put — or held *because* the gate had just said nothing
+    /// had changed. Running it unasked spends the full model turn the gate exists to avoid. So the
+    /// root of the origin decides, not its wrapper.
+    ///
+    /// Pure, so the table of origins can be read and tested without a fire.
+    static func gateApplies(origin: FireOrigin, job: Job) -> Bool {
+        guard case .cadence = origin.root else { return false }
+        return job.retryAttempt == 0
+    }
+
+    /// Asks this job's gate, if it has one and this fire is one it decides, and records what it
+    /// said.
+    private func gateDecision(for job: Job, origin: FireOrigin, at: Date) async -> GateDecision {
+        guard let gate = job.trigger.gate, Self.gateApplies(origin: origin, job: job) else {
+            return .proceed(nil)
+        }
+        let previous: String?
+        do {
+            previous = try lastGateSignal(job.id)
+        } catch {
+            // A gate error, not a quiet drop. Without the last signal the gate cannot be decided,
+            // so nothing runs either way — but a ledger that stays unreadable is not a passing
+            // flake, and anything quieter than this leaves the job writing a row every tick for
+            // ever: never running, never pausing, never carded. Carrying `gateErrorPrefix` is what
+            // makes it count towards the three-error pause like any other gate that cannot answer.
+            let detail = Self.gateUnreadableDetail(error)
+            print("[JobRunner] not firing \(job.name): \(detail)")
+            return .refuse(await noteGateError(detail, job: job, origin: origin, at: at))
+        }
+
+        switch await gateEvaluator(gate, previous) {
+        case .changed(let signal, let payload):
+            return .proceed(GateContext(signal: signal, payload: payload))
+        case .unchanged(let signal):
+            await recordGateSkip(job: job, origin: origin, signal: signal, at: at)
+            return .refuse(.gateUnchanged)
+        case .error(let detail):
+            return .refuse(await noteGateError(detail, job: job, origin: origin, at: at))
+        }
+    }
+
+    /// The row a gate's "nothing changed" leaves: a run that correctly did not happen. `completed`
+    /// rather than `interrupted` — the job did exactly what it was asked to — carrying the signal
+    /// it saw, with no transcript (so the breaker counts it as the non-event it is) and no card:
+    /// cards are for things that happened, and a quiet job checked every five minutes would
+    /// otherwise bury the Activity conversation (§11 ruling 4).
+    private func recordGateSkip(job: Job, origin: FireOrigin, signal: String, at: Date) async {
+        await recordGateRow(job: job, origin: origin, at: at, status: .completed,
+                            outcome: Self.gateUnchangedOutcome, reason: nil, signal: signal)
+    }
+
+    /// Every row the gate path writes goes through here, and every one of them then goes through
+    /// `apply` (R29). The rows are stillborn — begun and finished at the same instant, with no
+    /// transcript, so `runsStarted` and the breaker read them as the non-events they are — but a
+    /// gated job's ladder bookkeeping has to be identical to an ungated one's, and the way to
+    /// guarantee that is for no gate-path row to be written anywhere else. Today `apply` is a
+    /// no-op on all of them (the gate is only consulted at attempt 0, and neither `completed` nor
+    /// `interrupted` starts a ladder); it is here so that stays true when `gateApplies` changes.
+    ///
+    /// The pause on the third error is the exception, and deliberately so: it goes through
+    /// `pause`, which is the one writer of a pause row, the same as the breaker's and the budget's.
+    private func recordGateRow(job: Job, origin: FireOrigin, at: Date, status: JobRun.Status,
+                               outcome: String?, reason: String?, signal: String?) async {
+        do {
+            let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: origin.triggerKind,
+                             startedAt: at, status: status)
+            try ledger.begin(run: run)
+            if let signal { try ledger.setGateSignal(runId: run.id, signal) }
+            try ledger.finish(runId: run.id, status: status, outcome: outcome,
+                              failureReason: reason, blockedTool: nil, tokens: TokenUsage(),
+                              finishedAt: at)
+        } catch {
+            print("[JobRunner] could not record the gate's answer for \(job.name): \(error)")
+        }
+        await apply(Self.retryDecision(status: status, attempt: job.retryAttempt,
+                                       retryEnabled: job.policy.retry,
+                                       watcherFire: Self.isPathDriven(origin: origin, job: job),
+                                       now: at),
+                    job: job, status: status)
+    }
+
+    /// Records a gate that could not answer, and pauses the job on the third in a row (§7).
+    ///
+    /// The first two are quiet rows — a flaky server or a machine off the network is not worth a
+    /// card apiece — and the third is the pause, which gets one, because at that point the job has
+    /// stopped and only a person can start it again.
+    private func noteGateError(_ detail: String, job: Job, origin: FireOrigin, at: Date) async -> Admission {
+        var previousErrors = 0
+        do {
+            previousErrors = Self.gateErrorStreak(
+                in: try ledger.runs(jobId: job.id, limit: Self.consecutiveGateErrorsToPause))
+        } catch {
+            // Counting is what decides the pause, and a failed count must not be read as "this is
+            // the third": leave the streak at zero and let the next tick ask again.
+            print("[JobRunner] could not count \(job.name)'s gate errors: \(error)")
+        }
+        guard previousErrors + 1 < Self.consecutiveGateErrorsToPause else {
+            await pause(job: job, origin: origin, reason: Self.gateFailingReason, at: at)
+            return .gateError(detail: detail, paused: true)
+        }
+        await recordGateRow(job: job, origin: origin, at: at, status: .interrupted, outcome: nil,
+                            reason: Self.gateErrorReason(detail), signal: nil)
+        return .gateError(detail: detail, paused: false)
+    }
+
+    /// How many of the newest rows, in a row, are gate errors. Newest first, stopping at the first
+    /// row that is anything else: a run that happened, a quiet tick, or the pause row itself.
+    ///
+    /// The rows come from `decodeRuns`, which drops one it cannot read — so an unreadable row
+    /// between two errors collapses the streak and the pause takes an extra tick. That is the fail
+    /// direction to have: it narrows towards pausing late rather than pausing a job nothing is
+    /// wrong with.
+    static func gateErrorStreak(in runs: [JobRun]) -> Int {
+        runs.prefix { ($0.failureReason ?? "").hasPrefix(gateErrorPrefix) }.count
     }
 
     /// Forgets everything held in memory for a job that is gone. `/jobs delete` calls it: the
@@ -390,7 +617,7 @@ actor JobRunner {
     /// to tell.
     ///
     /// Private: `fire` is the only way in, so nothing can start a run that skipped admission.
-    private func run(job: Job, origin: FireOrigin, limits: JobLimits) async {
+    private func run(job: Job, origin: FireOrigin, limits: JobLimits, gate: GateContext? = nil) async {
         let startedAt = now()
         let title = "\(job.name) · \(ISO8601DateFormatter().string(from: startedAt))"
         guard let conversationId = await openConversation(for: job, titled: title,
@@ -418,6 +645,13 @@ actor JobRunner {
         } catch {
             print("[JobRunner] could not stamp the last run of \(job.name): \(error)")
         }
+        if let gate {
+            // What the gate saw, on the row of the run it let through: this is what the next
+            // evaluation compares against (`JobLedger.lastGateSignal`), so a run that happens
+            // without it would ask the same question again next tick and get the same answer.
+            do { try ledger.setGateSignal(runId: run.id, gate.signal) }
+            catch { print("[JobRunner] could not record the gate signal for \(job.name): \(error)") }
+        }
 
         // R12: a mutating job runs in the container or not at all. The conversation is pinned
         // `.sandboxed`, but a pin is an intent — with the runtime gone or sandboxing switched off
@@ -436,6 +670,7 @@ actor JobRunner {
             return
         }
         let prompt = await Self.prompt(job: job, changedPaths: origin.paths,
+                                       gateOutput: gate?.payload,
                                        protectionEnabled: protectionEnabled)
 
         // The wall clock, not the injected `now`: this deadline bounds a turn that is happening
@@ -1061,16 +1296,28 @@ actor JobRunner {
     /// D1 put every fire through `handleSystemEvent`, which sanitized it. So each path goes
     /// through the structural pass and the whole block through the tiered guard, arriving wrapped
     /// in `<untrusted_context>` after the instructions rather than concatenated into them.
-    static func prompt(job: Job, changedPaths: [String], protectionEnabled: Bool? = nil) async -> String {
-        guard !changedPaths.isEmpty else { return job.prompt }
-        let listed = changedPaths
-            .map { "- " + PromptInjectionGuard.sanitizeUntrustedInput($0) }
-            .joined(separator: "\n")
-        let block = await InjectionGuard.sanitize("Changed paths:\n" + listed,
-                                                  contextTag: "fs_event_paths",
-                                                  maxTier: .tier3_canary,
-                                                  protectionEnabled: protectionEnabled)
-        return job.prompt + "\n\n" + block
+    static func prompt(job: Job, changedPaths: [String], gateOutput: String? = nil,
+                       protectionEnabled: Bool? = nil) async -> String {
+        var prompt = job.prompt
+        if !changedPaths.isEmpty {
+            let listed = changedPaths
+                .map { "- " + PromptInjectionGuard.sanitizeUntrustedInput($0) }
+                .joined(separator: "\n")
+            prompt += "\n\n" + (await InjectionGuard.sanitize("Changed paths:\n" + listed,
+                                                              contextTag: "fs_event_paths",
+                                                              maxTier: .tier3_canary,
+                                                              protectionEnabled: protectionEnabled))
+        }
+        // A gate script's output is the least trusted thing in a run: model-written code read
+        // whatever it was pointed at and printed it. Same treatment as the paths, under its own
+        // tag (§7).
+        if let gateOutput, !gateOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            prompt += "\n\n" + (await InjectionGuard.sanitize(gateOutput,
+                                                              contextTag: "gate_output",
+                                                              maxTier: .tier3_canary,
+                                                              protectionEnabled: protectionEnabled))
+        }
+        return prompt
     }
 
     /// The first line of the last thing the agent said, capped at 200 characters — the one line a

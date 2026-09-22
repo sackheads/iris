@@ -66,6 +66,17 @@ struct UnattendedJobCreationTests {
         #expect(result.contains(IrisEngine.unattendedJobCreationRefusal))
     }
 
+    @Test("a forged schedule_job carrying a gate script is refused before any review happens")
+    func gatedScheduleJobRefused() async {
+        // The gate-script review ends in an approval dialog nobody would be there to answer, so
+        // the refusal has to come first — it does, at the dispatcher, before the handler runs.
+        let result = await dispatchResult(for: FunctionCall(
+            name: "schedule_job", args: ["prompt": .string("watch it"),
+                                         "intervalSeconds": .int(600),
+                                         "gate_script": .string("echo CHANGED")]))
+        #expect(result.contains(IrisEngine.unattendedJobCreationRefusal))
+    }
+
     @Test("a forged register_directory_watcher in a background run is refused")
     func registerWatcherRefused() async {
         let result = await dispatchResult(for: FunctionCall(

@@ -8,27 +8,47 @@ final class MockRuntime: ContainerRuntime, @unchecked Sendable {
     private(set) var created: [String] = []
     private(set) var removed: [String] = []
     private(set) var execCount = 0
+    private var mountsPerCreate: [[String]] = []
+    private var execTimeouts: [Int?] = []
     var existing: [String] = []                 // returned by list()
     var execResult: (String, String, Int32) = ("ok", "", 0)
     var failNextExec = false                     // throw once, then succeed
+    var nextExecError: Error?                    // throw this once, then succeed
+    var nextCreateError: Error?                  // throw this once, then succeed
 
-    func createDetached(name: String, image: String, mount: String?, workdir: String) async throws {
+    func createDetached(name: String, image: String, mounts: [String], workdir: String) async throws {
         await Task.yield()
         try? await Task.sleep(nanoseconds: 10_000_000) // 10ms: let all concurrent callers park here before any completes
-        lock.withLock { created.append(name) }
-    }
-    func exec(name: String, workdir: String, command: String) async throws -> (stdout: String, stderr: String, exitCode: Int32) {
-        let (fail, r) = lock.withLock { () -> (Bool, (String, String, Int32)) in
-            execCount += 1; let f = failNextExec; failNextExec = false; return (f, execResult)
+        if let scripted = lock.withLock({ () -> Error? in let e = nextCreateError; nextCreateError = nil; return e }) {
+            throw scripted
         }
+        lock.withLock { created.append(name); mountsPerCreate.append(mounts) }
+    }
+    func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws -> (stdout: String, stderr: String, exitCode: Int32) {
+        let (fail, scripted, r) = lock.withLock { () -> (Bool, Error?, (String, String, Int32)) in
+            execCount += 1
+            execTimeouts.append(timeoutSeconds)
+            let f = failNextExec; failNextExec = false
+            let e = nextExecError; nextExecError = nil
+            return (f, e, execResult)
+        }
+        if let scripted { throw scripted }
         if fail { throw ContainerRuntimeError.launchFailed("boom") }
         return r
     }
-    func remove(name: String) async { lock.withLock { removed.append(name) } }
+    /// Refuses on a cancelled task, exactly as `CLIProcessRunner.run` does: it will not launch a
+    /// child for a caller that has already given up, so a cleanup that goes down the ordinary path
+    /// from a cancelled create spawns neither `stop` nor `delete`.
+    func remove(name: String) async {
+        guard !Task.isCancelled else { return }
+        lock.withLock { removed.append(name) }
+    }
     func list(prefix: String) async -> [String] { lock.withLock { existing.filter { $0.hasPrefix(prefix) } } }
 
     var createdCount: Int { lock.withLock { created.count } }
     var removedNames: [String] { lock.withLock { removed } }
+    var createdMounts: [[String]] { lock.withLock { mountsPerCreate } }
+    var lastExecTimeout: Int? { lock.withLock { execTimeouts.last ?? nil } }
 }
 
 @Suite("SandboxSessionManager")
@@ -45,6 +65,30 @@ struct SandboxSessionManagerTests {
         _ = await m.run(command: "echo hi", conversationId: id, workspace: "/ws")
         #expect(rt.createdCount == 1)
         #expect(await m.hasSession(id))
+    }
+
+    /// A create that failed can still have left a container behind — it has a ceiling now, and a
+    /// create killed at it may go on to finish daemon-side. The name is a pure function of the
+    /// conversation, so anything left under it would fail every later command in that conversation
+    /// with "already exists" until the next launch sweeps it.
+    @Test("a failed create is swept up, and the next command can still start a container")
+    func failedCreateRemovesWhatItMayHaveLeft() async {
+        let rt = MockRuntime()
+        let m = mgr(rt)
+        let id = UUID()
+        rt.nextCreateError = ContainerRuntimeError.timedOut(elapsedSeconds: 1_200.4)
+
+        let first = await m.run(command: "a", conversationId: id, workspace: "/ws")
+
+        #expect(first.hasPrefix("Error:"))
+        #expect(rt.removedNames == ["\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())"],
+                "the name the create was given, removed exactly once")
+        #expect(!(await m.hasSession(id)))
+
+        // And the conversation is not poisoned: the next command creates and runs.
+        let second = await m.run(command: "b", conversationId: id, workspace: "/ws")
+        #expect(second == "ok")
+        #expect(rt.createdCount == 1, "one container, built by the second command")
     }
 
     @Test("concurrent first commands still create exactly one container")
@@ -116,6 +160,45 @@ struct SandboxSessionManagerTests {
         let m = mgr(rt)
         await m.reapOrphans()
         #expect(rt.removedNames.sorted() == ["iris-aaa", "iris-bbb"])
+    }
+
+    /// The `iris-` prefix is shared on purpose — a gate's container carries it so that one left by
+    /// a crash is swept too — which means the prefix alone does not mean "an orphan". A sweep must
+    /// leave alone the sessions this manager is holding and the gates that are mid-evaluation.
+    @Test("reapOrphans spares a live session and a gate container that is in flight")
+    func reapOrphansSparesLiveWork() async {
+        let rt = MockRuntime()
+        let m = mgr(rt)
+        let id = UUID()
+        _ = await m.run(command: "a", conversationId: id, workspace: "/ws")
+        let live = "\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())"
+        let gate = "\(SandboxSessionManager.namePrefix)gate-\(UUID().uuidString.lowercased())"
+        rt.existing = [live, gate, "iris-orphan"]
+
+        await m.reapOrphans(inFlightGates: [gate])
+
+        #expect(rt.removedNames == ["iris-orphan"], "only what nobody is using")
+        #expect(await m.hasSession(id), "the live conversation still has its container")
+    }
+
+    /// R34: cleanup must survive the caller's cancellation, because that is exactly when a
+    /// container is left behind — `CLIProcessRunner` will not launch a child for a task that has
+    /// already given up, so `stop` and `delete` never spawn. Asserted on the mechanism itself:
+    /// `SandboxSessionManager.create`'s own cleanup is insulated from this today by the create
+    /// barrier's unstructured task, and a gate's is not (`GateEvaluatorTests`).
+    @Test("a remove issued from a cancelled task still reaches the runtime")
+    func removeSurvivesCancellation() async {
+        let rt = MockRuntime()
+        let call = Task {
+            while !Task.isCancelled { try? await Task.sleep(nanoseconds: 5_000_000) }
+            await rt.remove(name: "iris-plain")
+            await rt.removeIgnoringCancellation(name: "iris-cleanup")
+        }
+        call.cancel()
+        await call.value
+
+        #expect(rt.removedNames == ["iris-cleanup"],
+                "the ordinary route launches nothing from a cancelled task; the cleanup route does")
     }
 
     @Test("reapIdle removes only stale sessions; next run recreates with a reset notice")

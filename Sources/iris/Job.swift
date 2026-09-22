@@ -95,7 +95,7 @@ struct FSWatch: Codable, Equatable, Sendable {
 ///
 /// A script gate's verdict is a token on stdout's last line (`CHANGED`/`UNCHANGED`), never the exit
 /// code — `diff -q` and `grep -q` disagree about what zero means, so any exit-code convention makes
-/// a plausible gate fire every tick or never. Nothing evaluates a gate yet; this is the stored
+/// a plausible gate fire every tick or never. `GateEvaluator` is what asks; this is the stored
 /// shape.
 enum Gate: Codable, Equatable, Sendable {
     /// A HEAD request whose ETag, Last-Modified or Content-Length changed since the last signal.
@@ -110,6 +110,16 @@ enum Gate: Codable, Equatable, Sendable {
         switch self {
         case .urlChanged: return "urlChanged"
         case .pathChanged: return "pathChanged"
+        case .script: return "script"
+        }
+    }
+
+    /// One word for a job listing: what this gate looks at. Not `kind`, which is the stored
+    /// discriminator and must not change to suit a table.
+    var summary: String {
+        switch self {
+        case .urlChanged: return "url"
+        case .pathChanged: return "path"
         case .script: return "script"
         }
     }
@@ -154,8 +164,8 @@ enum Gate: Codable, Equatable, Sendable {
 }
 
 /// A polled trigger: on `schedule`'s cadence, evaluates `gate` and only fires the job when it says
-/// something changed. Stored and scheduled on its cadence today, but nothing runs the gate and no
-/// tool creates one: polls are not creatable until deliverable 3 (gates).
+/// something changed. `schedule_job` creates one from `gate_url`, `gate_path` or `gate_script`;
+/// `JobRunner.fire` evaluates it as the last thing asked before a turn starts (spec §4 step 5).
 struct PollSpec: Codable, Equatable, Sendable {
     var schedule: Schedule
     var gate: Gate
@@ -261,13 +271,24 @@ enum Trigger: Codable, Equatable, Sendable {
         case .fsEvent(let watch):
             return "watch \(watch.path)"
         case .poll(let spec):
+            // The gate's kind, not just the cadence: "poll every 900 s" says how often this job
+            // *looks*, and someone asking why it has not run in a week needs to know that a check
+            // stands between the cadence and the work, and which one.
             switch spec.schedule {
             case .cron(let cron):
-                return "poll cron \(cron.expression) \(cron.timeZone)"
+                return "poll cron \(cron.expression) \(cron.timeZone) (\(spec.gate.summary) gate)"
             case .interval(let seconds):
-                return "poll every \(seconds) s"
+                return "poll every \(seconds) s (\(spec.gate.summary) gate)"
             }
         }
+    }
+
+    /// The gate this trigger carries, if it has one — only a `poll` does. Read where a fire
+    /// decides whether to run (`JobRunner.fire`) and where an edited job's recorded signals are
+    /// dropped (`JobLedger.upsert`): a signal recorded under one gate cannot answer for another.
+    var gate: Gate? {
+        if case .poll(let spec) = self { return spec.gate }
+        return nil
     }
 
     /// The IANA time zone identifier governing this trigger's cadence, when it has one. `nil` for

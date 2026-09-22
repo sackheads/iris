@@ -38,12 +38,20 @@ final class JobLedger: JobUsageReading, Sendable {
     /// Inserts `job`, or replaces the row with the same id. A rename onto another job's name
     /// surfaces as the UNIQUE violation on `name` rather than silently clobbering that job, which
     /// is why this is an `ON CONFLICT(id)` upsert and not `INSERT OR REPLACE`.
+    ///
+    /// Editing a job's **gate** also drops every signal its runs recorded, in the same write (#187
+    /// §7). A signal is a reading taken by one gate: an ETag cannot answer for an mtime, and
+    /// leaving the old one behind would have the new gate compare against something it never saw —
+    /// silently "unchanged" forever, or one spurious run. Every path that changes a job goes
+    /// through here, so this is the one place it has to be done.
     func upsert(_ job: Job) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let triggerJSON = String(decoding: try encoder.encode(job.trigger), as: UTF8.self)
         let policyJSON = String(decoding: try encoder.encode(job.policy), as: UTF8.self)
         try writer.write { db in
+            let storedTrigger = try String.fetchOne(db, sql: "SELECT trigger FROM jobs WHERE id = ?",
+                                                    arguments: [job.id.uuidString])
             try db.execute(sql: """
                 INSERT INTO jobs (
                     id, name, prompt, triggerKind, trigger, profile, destinationConversationId,
@@ -73,7 +81,21 @@ final class JobLedger: JobUsageReading, Sendable {
                     job.nextFireAt, job.lastRunAt, job.pausedReason,
                     policyJSON, job.retryAttempt, job.queuedFire,
                 ])
+            if let storedTrigger, Self.storedGate(storedTrigger) != job.trigger.gate {
+                // A stored trigger this build cannot read decodes as "no gate", so a job that
+                // *gains* one clears — the safe direction, since a signal nobody can vouch for
+                // costs one run rather than a gate that never fires. A job that had no gate and
+                // still has none clears nothing, because there is nothing to compare against.
+                try db.execute(sql: "UPDATE job_runs SET gateSignal = NULL WHERE jobId = ?",
+                               arguments: [job.id.uuidString])
+            }
         }
+    }
+
+    /// The gate inside a stored `trigger` column, or `nil` — for a trigger that carries none, and
+    /// for one this build cannot read.
+    private static func storedGate(_ json: String) -> Gate? {
+        (try? JSONDecoder().decode(Trigger.self, from: Data(json.utf8)))?.gate
     }
 
     func delete(jobId: UUID) throws {
@@ -363,9 +385,9 @@ extension JobLedger {
         }
     }
 
-    /// Records what this run's gate saw, for the next run to compare against. Throws
-    /// `JobLedgerError.unknownRun` for an id that is not in the table. Nothing evaluates a gate
-    /// yet (see `Gate`), so nothing writes one either: PR C is the first.
+    /// Records what this run's gate saw, for the next run to compare against — the built-in gates
+    /// are handed it back as `previous` at the next tick, and the comparison is the verdict. Throws
+    /// `JobLedgerError.unknownRun` for an id that is not in the table.
     func setGateSignal(runId: UUID, _ signal: String?) throws {
         try writer.write { db in
             try db.execute(sql: "UPDATE job_runs SET gateSignal = ? WHERE id = ?",
@@ -534,8 +556,8 @@ extension JobLedger {
         }
     }
 
-    /// The newest gate signal this job recorded, or `nil` if it has never recorded one — which is
-    /// every job today: PR C's gate evaluation is the first thing to ask. Rows with
+    /// The newest gate signal this job recorded, or `nil` if it has never recorded one — a job
+    /// whose first tick has not happened yet, or one with no gate at all. Rows with
     /// no signal are skipped rather than answering `nil`: a gate that errored or a run that
     /// predates the gate writes nothing, and the question being asked is "what did we last see?",
     /// which such a row does not answer.

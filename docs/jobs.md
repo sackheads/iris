@@ -12,11 +12,12 @@ and if there were any the app posts a one-time notice into the open conversation
 dropped and to recreate it with `schedule_job` or `register_directory_watcher` — a console line is
 not something anyone running a Mac app reads.
 
-This document covers deliverables 1 and 2 of `#187` (see `docs/agency/agency.md` and
-`docs/specs/2026-09-21-agency-model-and-ledger.md`): the job model, the cron subset, the schedule
-aliases, what happens on sleep, and what a fire actually does — a run in a hidden conversation of
-its own, a row in the run ledger, and one event card. Gates, budgets, retries and `iris --run-job`
-are deliverable 3.
+This document covers deliverables 1 to 3 of `#187` (see `docs/agency/agency.md`,
+`docs/specs/2026-09-21-agency-model-and-ledger.md` and
+`docs/specs/2026-09-21-agency-runtime.md`): the job model, the cron subset, the schedule aliases,
+what happens on sleep, what a fire actually does — a run in a hidden conversation of its own, a row
+in the run ledger, and one event card — and the gates, limits and retries around it.
+`iris --run-job` is still to come.
 
 ## Creating a job
 
@@ -25,6 +26,9 @@ are deliverable 3.
 - `register_directory_watcher` creates a job that fires when files under a directory change. Watch
   jobs are named after the directory's last path component. Watching a path that is already
   watched rewrites that job's instructions in place instead of adding a second one.
+- A `schedule_job` that also carries a gate (`gate_url`, `gate_path` or `gate_script`) is a
+  **polled** job: the cadence decides how often the gate is checked, and the gate decides whether
+  the job actually runs. See "Gates" below.
 
 Every job needs a unique name. If the requested name (or a slug of the prompt) is already taken,
 `-2`, `-3`, … is appended until it isn't.
@@ -169,6 +173,72 @@ closed inside the VM: unattended means unattended whatever the profile. A `readO
 sandbox choice alone, so it follows the per-workspace default rather than being pinned to the
 host.
 
+## Gates
+
+A gate is a check, run on the job's cadence, that answers one question: has anything changed since
+the last time we looked? A job with a gate only spends a model turn when the answer is yes. There
+are three kinds.
+
+| Argument | What it checks | Needs the VM |
+| --- | --- | --- |
+| `gate_url` | A HEAD request to an `http(s)` URL: its `ETag`, `Last-Modified` and `Content-Length` | no |
+| `gate_path` | An absolute path: a file's mtime, size and content hash, or a directory's own mtime, the newest modification under it, and how many entries it holds — up to 20,000 of them, past which the path is refused when the job is created and reads as a gate failure if it grows into one | no |
+| `gate_script` | A shell script, run inside the sandbox VM with `gate_mounts` attached read-only, under `gate_timeout_seconds` (default 60, clamped to 5–600) | yes |
+
+What the gate saw is stored on the run's ledger row as its **signal** and compared with the
+previous one. The first look has nothing to compare against, so it counts as a change: a new job
+runs once and records its baseline.
+
+**A script gate's verdict is the last line of its standard output — exactly `CHANGED` or
+`UNCHANGED` — and never its exit code.** Exit codes are ambiguous here: `diff -q` returns 0 for
+"identical" and `grep -q` returns 0 for "found", so any exit-code convention makes a plausible gate
+fire every tick or never. Everything the script printed before that line is the gate's payload: the
+first 4,000 characters of it go into the run's prompt as untrusted context, wrapped and tagged
+`gate_output` like any other text Iris did not write.
+
+A script gate is the only model-written code in Iris that runs repeatedly with nobody watching, so
+it is fenced in:
+
+- it runs **only** inside the `apple/container` VM, in a container created and removed around that
+  one command, never on the host — with the runtime uninstalled or sandboxing switched off, the
+  evaluation is a gate failure rather than a command on your Mac;
+- *starting* that container is bounded as well as running the script in it, so a daemon that never
+  answers shows up as a gate failure — and, after three, a paused job that says so — rather than a
+  job that goes quiet with nobody to notice;
+- its mounts are **always read-only**, whatever was written, and each one is checked when the job is
+  created: an absolute path, no commas, and an existing directory (a single file cannot be mounted
+  — give its directory). Neither `/` nor Iris's own `config/` and `plugins/` can be one, however
+  they are spelled;
+- a mount is recorded as the directory it **resolves to**, not the name it was given: `..` is
+  removed and symlinks are followed, so what you are shown at creation is what will actually be
+  read. The same check runs on every tick — a source that has since been pointed somewhere else,
+  or is no longer a directory, is a gate failure and nothing is started;
+- it is reviewed once, at creation, by Vibecop, with the ordinary approval dialog for anything
+  Vibecop escalates or cannot answer. Both are shown the same thing: the script, every mount as
+  `source → target, read-only`, and the timeout — the mounts are the standing permission being
+  granted, and the script is only what is done with them. That review is the last time a human sees
+  it, which is why the sandbox, the read-only mounts and the timeout are not negotiable.
+
+What each answer costs:
+
+| The gate says | What happens |
+| --- | --- |
+| changed | The job runs, and the signal is recorded on that run's row |
+| nothing changed | A `completed` row with the outcome `gate: no change`, and **no card** — cards are for things that happened, and a five-minute poll would otherwise bury the Activity conversation. It costs no model turn and does not count towards the breaker |
+| it could not tell (a 404 or 5xx, a response with none of the three headers, a missing path, a mount that has moved, a non-zero exit, a timeout, or any other last line — and a ledger Iris could not read the last signal out of) | An `interrupted` row whose reason starts `gate error`. Three of those **in a row** pause the job with the reason `gate failing`, and that pause gets a card |
+
+If a job's gate is ever changed — no tool does this today — the signals its runs recorded are
+dropped: a signal is a reading taken by one particular gate, and an ETag cannot answer for an
+mtime. The new gate would take its own baseline on the next tick.
+
+**A cadence tick asks the gate; a retry and a hand-started fire do not.** A retry after a failed
+run is re-running work the gate already authorised, and asking again would get "nothing has changed
+since the run that failed" and quietly drop it. `/jobs run <name>` runs the job whatever the gate
+would have said, because you asked for it. A fire the `queue` policy held while the previous run
+finished *is* asked: it is an ordinary tick whose gate never got a chance to answer, and running it
+unasked would spend the very turn the gate exists to save. `/jobs` shows a gated job's trigger as, for example, `poll every
+900 s (url gate)`, so a job that has been quiet for a week says why it might be.
+
 ## What happens on sleep
 
 A background scheduler polls the jobs table for due jobs every 10 seconds, and once more right
@@ -219,10 +289,10 @@ A run ends in one of five statuses:
 | Status | Meaning |
 | --- | --- |
 | `running` | in flight right now |
-| `completed` | the turn finished and said something |
+| `completed` | the turn finished and said something — or the job's gate found nothing to do, in which case the outcome says `gate: no change` and there was no turn |
 | `failed` | the model call errored, the loop was cut short, or the turn ended having said nothing at all |
 | `blocked on approval` | the run wanted a tool it is not allowed to use unattended, and stopped (see below) |
-| `interrupted` | nothing finished it: the app quit mid-run and the next launch closed the row out, a cadence came round while the previous run of the same job was still going so this trigger was dropped rather than started twice, or a limit refused the fire before it started (the breaker, a budget, or a ledger that could not say what the job has spent) |
+| `interrupted` | nothing finished it: the app quit mid-run and the next launch closed the row out, a cadence came round while the previous run of the same job was still going so this trigger was dropped rather than started twice, a gate could not answer, or a limit refused the fire before it started (the breaker, a budget, or a ledger that could not say what the job has spent) |
 
 A run that says nothing is a failure, not a success: "it worked and had nothing to report" and "it
 never got as far as a reply" must not look the same on a card.
@@ -356,6 +426,18 @@ Whichever bound bit, the row and the card say `budget: tokens exceeded` or `budg
 The budget stop does not summarize — there is nothing left to spend on a summary — and any message
 you steered in mid-run is written to the transcript before the turn ends, without starting another
 turn.
+
+**One command inside the VM is bounded on its own**, by the number `run_command` was given —
+`timeout_seconds`, clamped to between 10 seconds and an hour, 10 minutes if it says nothing. That
+number used to be dropped the moment a command was routed to the container, so a sandboxed command
+had no bound at all while the model believed it had set one; it is honoured now. At the deadline
+the command is killed — politely first, then not — and the result reads exactly as it does on the
+host: `Error: command timed out after N seconds`. The container itself is left alone, because a
+deadline is the command's answer and not a sign of a dead container: the session, its installed
+packages and its files are all still there for the next command. Stopping a run mid-command reads
+differently — `Error: the command was cancelled.` — and leaves the session alone for the same
+reason. This is a bound on a command, not on the run: a turn that spends its ten
+minutes on six timed-out commands still ends on the run's own deadline, above.
 
 **After a run**, a failure climbs the retry ladder: **1 minute, 5 minutes, 25 minutes**, and the
 fourth consecutive failure pauses the job ("failed 3 times; paused"). A run that finally works
