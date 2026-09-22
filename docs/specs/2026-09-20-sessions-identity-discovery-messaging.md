@@ -352,8 +352,9 @@ precedent it cited: a bad byte cost the card, but the same bad byte in an audit 
 messages, the contract and the workspace with it.
 
 #233 moved `checkpointHistory`, `lastGoalEvaluation`, `lastGoalCompletionReport` and
-`subagentResult` onto the card's behaviour, so the sentence above is now simply true for all of
-them. The line it drew instead is between what a conversation *is* and what happened in it:
+`subagentResult` onto the card's behaviour — on *both* paths, so a column never disagrees with
+itself about whether a bad byte and bad JSON cost the same thing. The sentence above is now simply
+true for all of them. The line it drew instead is between what a conversation *is* and what happened in it:
 `title`, `workspacePath`, `activeGoal` and `position` are identity; `mainAgentSandbox` governs
 whether commands are contained; `tokenUsage` is what per-run budgets compare against, so reading it
 as zero hands a job an unbounded one; `goalContract` is the goal. Those still take the conversation

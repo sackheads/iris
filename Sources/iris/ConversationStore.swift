@@ -68,6 +68,14 @@ struct SkippedRow: Sendable, Equatable {
     let table: String
     let ordinal: Int?
     let reason: String
+    /// Whether the conversation survived this loss (#233).
+    ///
+    /// A field rather than a suffix on `reason`, because the launch notice has to tell "this
+    /// conversation could not be read" apart from "this conversation lost an audit trail", and
+    /// substring-matching prose to decide which sentence a user sees is a way to get it wrong
+    /// later. Defaults to `false`: a row that does not say it was kept is a row that cost the
+    /// conversation.
+    var kept: Bool = false
 }
 
 struct LoadResult: Sendable {
@@ -802,25 +810,23 @@ final class ConversationStore: Sendable {
                 let goalContract = text("goalContract")
                 // Supplementary columns lose themselves rather than the conversation (#233).
                 //
-                // Their *JSON* decode failures were already soft — #182 made a corrupt
-                // `checkpointHistory` non-fatal on the grounds that "the contract *is* the goal,
-                // whereas the history is supplementary". The raw-byte path was missed, because
-                // `text` fails a column before anything gets as far as decoding it: one bad byte
-                // in an audit trail took the whole conversation — its messages, its contract, its
-                // workspace. That is the trade #182 rejected, reached by a different door.
-                //
-                // The line is drawn at what the conversation *is* versus what happened in it.
-                // `title`, `workspacePath`, `activeGoal` and `position` are identity. `sandbox`
-                // is a safety setting, and reading it as absent would run commands on the host
-                // that were meant to be contained. `tokenUsage` is not a display counter: per-run
-                // budgets compare against it, so silently zeroing it hands a job an unbounded one.
-                // `goalContract` is the goal. None of those may be quietly dropped.
-                var softLosses: [String] = []
+                // The line is what the conversation *is* versus what happened in it. `title`,
+                // `workspacePath`, `activeGoal` and `position` are identity. `mainAgentSandbox`
+                // read as absent means "no preference", which would run on the host what was meant
+                // to be contained. `tokenUsage` read as absent is a fresh `TokenUsage()`, which a
+                // per-run budget compares against as an unspent allowance. `goalContract` is the
+                // goal. Those four still take the conversation with them.
+                // Collected, not appended: a loss is only reported once the conversation is known
+                // to survive it. Three later paths still drop the row — the metadata decode
+                // `catch` below, the bulk message/history breaker, and the repair-failure rollback
+                // — and a row that reported "kept without its audit trail" and then vanished would
+                // tell someone reading the log the opposite of what happened.
+                var localSoftLosses: [(column: String, detail: String)] = []
                 func supplementary(_ column: String) -> String? {
                     switch Self.readTextValue(row, column) {
                     case .null: return nil
                     case .invalid:
-                        softLosses.append(column)
+                        localSoftLosses.append((column, "invalid text encoding"))
                         return nil
                     case .text(let s): return s
                     }
@@ -840,12 +846,6 @@ final class ConversationStore: Sendable {
                 if let column = unreadableColumn {
                     out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable \(column)"))
                     continue
-                }
-                // Reported only once the conversation is known to survive: a row dropped for a
-                // fatal column above should not also claim it lost an audit trail it took with it.
-                for column in softLosses {
-                    out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil,
-                                                  reason: "unreadable \(column); the conversation was kept without it"))
                 }
 
                 var c: Conversation
@@ -869,7 +869,6 @@ final class ConversationStore: Sendable {
                     c.mainAgentSandbox = sandbox.flatMap(SandboxPref.init(rawValue:))
                     c.tokenUsage = try tokenUsage.map { try decoder.decode(TokenUsage.self, from: Data($0.utf8)) } ?? TokenUsage()
                     if let s = goalContract { c.goalContract = try decoder.decode(GoalContract.self, from: Data(s.utf8)) }
-                    if let s = subagentResult { c.subagentResult = try decoder.decode(SubagentResult.self, from: Data(s.utf8)) }
                 } catch {
                     // Whole-conversation skip: nothing in memory represents this conversation, so
                     // nothing can ever write to it again. No quarantine/renumber needed.
@@ -882,9 +881,20 @@ final class ConversationStore: Sendable {
                 // conversation: it's slice D3's supplementary audit trail of past checkpoint
                 // resolutions, not the goal itself. Degrade to `[]` and record the loss rather
                 // than dropping every message, contract, and workspace the row also carries.
+                // #233 round 2: this decode used to sit in the fatal `do` above, so the column was
+                // soft on bad bytes and fatal on bad JSON — the asymmetry #233 exists to remove,
+                // with the two halves swapped. Bad JSON is the likelier corruption of the two, and
+                // the argument for the column being supplementary does not change with which byte
+                // went wrong: it records a run that already finished, and the parent reads its
+                // result from `SubagentManager`'s return value rather than from here.
+                if let s = subagentResult {
+                    do { c.subagentResult = try decoder.decode(SubagentResult.self, from: Data(s.utf8)) }
+                    catch { localSoftLosses.append(("subagentResult", "\(error)")) }
+                }
+
                 if let s = checkpointHistory {
                     do { c.checkpointHistory = try decoder.decode([CheckpointOutcome].self, from: Data(s.utf8)) }
-                    catch { out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable checkpointHistory: \(error)")) }
+                    catch { localSoftLosses.append(("checkpointHistory", "\(error)")) }
                 }
 
                 // #191: the pause's surfacing state follows the `checkpointHistory` policy, not the
@@ -892,11 +902,11 @@ final class ConversationStore: Sendable {
                 // lost conversation (spec §4). The `SkippedRow` reaches the launch notice.
                 if let s = lastGoalEvaluation {
                     do { c.lastGoalEvaluation = try decoder.decode(GoalEvaluation.self, from: Data(s.utf8)) }
-                    catch { out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable lastGoalEvaluation: \(error)")) }
+                    catch { localSoftLosses.append(("lastGoalEvaluation", "\(error)")) }
                 }
                 if let s = lastGoalCompletionReport {
                     do { c.lastGoalCompletionReport = try decoder.decode(JSONValue.self, from: Data(s.utf8)) }
-                    catch { out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable lastGoalCompletionReport: \(error)")) }
+                    catch { localSoftLosses.append(("lastGoalCompletionReport", "\(error)")) }
                 }
 
                 // A garbled flag must not cost the user a conversation: default to active and
@@ -961,10 +971,10 @@ final class ConversationStore: Sendable {
                 case .null:
                     break
                 case .invalid:
-                    out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable sessionCard: invalid encoding"))
+                    localSoftLosses.append(("sessionCard", "invalid text encoding"))
                 case .text(let s):
                     do { c.sessionCard = try decoder.decode(SessionCard.self, from: Data(s.utf8)) }
-                    catch { out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil, reason: "unreadable sessionCard: \(error)")) }
+                    catch { localSoftLosses.append(("sessionCard", "\(error)")) }
                 }
 
                 // Per-conversation, so the bulk breaker below can throw the lot away.
@@ -1047,6 +1057,11 @@ final class ConversationStore: Sendable {
                 }
 
                 out.skipped.append(contentsOf: localSkipped)
+                // The one point the conversation is genuinely known to survive.
+                for loss in localSoftLosses {
+                    out.skipped.append(SkippedRow(conversationId: id, table: "conversations", ordinal: nil,
+                                                  reason: "unreadable \(loss.column): \(loss.detail)", kept: true))
+                }
                 candidates.append(contentsOf: localCandidates)
                 out.conversations.append(c)
             }
