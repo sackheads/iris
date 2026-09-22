@@ -118,14 +118,44 @@ struct BlockedCall: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey { case toolName, args, cwd, reason, at }
 
-    /// Invariant 1 throughout, and an unrecognized `reason` reads as `.approval`: the conservative
-    /// guess, since an approval is the case that still needs a human either way.
+    /// Invariant 1 throughout, and an unrecognized `reason` reads as `.profile` — the fail-closed
+    /// direction, because `reason` is what three layers ask "can a click run this?" and `.profile`
+    /// is the answer none of them will act on (`EventCard.approvalRefusal` hides the button,
+    /// `JobLedger.markApproved` refuses the claim, `JobRunner.runApproved` refuses the click). A
+    /// reason a newer build wrote and this one cannot read is exactly the call not to offer.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         toolName = try c.decodeIfPresent(String.self, forKey: .toolName) ?? ""
         args = try c.decodeIfPresent([String: JSONValue].self, forKey: .args) ?? [:]
         cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
-        reason = Reason(rawValue: try c.decodeIfPresent(String.self, forKey: .reason) ?? "") ?? .approval
+        reason = Reason(rawValue: try c.decodeIfPresent(String.self, forKey: .reason) ?? "") ?? .profile
         at = try c.decodeIfPresent(Date.self, forKey: .at) ?? Date(timeIntervalSince1970: 0)
+    }
+
+    /// The one string that says what a call would actually do — the command, the path — and `nil`
+    /// for a tool that never goes through an approval at all.
+    ///
+    /// Spelled once because three places have to agree on it: the dispatcher, which asks the
+    /// permission layer and Vibecop about a call before it runs; the card, which asks Vibecop
+    /// about the same call afterwards; and the re-dispatch. Two spellings would mean a call judged
+    /// on one string when it was refused and another when it was approved.
+    static func approvalDetails(toolName: String, args: [String: JSONValue]) -> String? {
+        switch toolName {
+        case "run_command": return args["command"]?.stringValue
+        case "read_file", "write_file": return args["path"]?.stringValue
+        default: return nil
+        }
+    }
+
+    /// This call's own `approvalDetails`, empty for a tool that has none.
+    var details: String { Self.approvalDetails(toolName: toolName, args: args) ?? "" }
+
+    /// The file this call would write, resolved against its `cwd` — `nil` when it writes nothing.
+    /// Resolved rather than taken raw: a relative path is decided against the run's directory, and
+    /// the protected-directory check (R10) must see the location, not the spelling.
+    var writeTarget: String? {
+        guard toolName == "write_file", let path = args["path"]?.stringValue, !path.isEmpty
+        else { return nil }
+        return ToolExecutor.resolvePath(path, cwd: cwd)
     }
 }

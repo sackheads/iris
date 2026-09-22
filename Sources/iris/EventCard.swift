@@ -34,6 +34,20 @@ struct EventCard: Codable, Equatable, Sendable {
     /// this can name a conversation that is already gone (the card then says "transcript pruned"
     /// rather than offering a dead button).
     let transcriptConversationId: UUID?
+    /// The exact call the run failed closed on (#187 §6), so the card can show what was refused —
+    /// the command, the path, a preview of the body — rather than a tool name. An approval given
+    /// without sight of the payload is worse than no button.
+    let blockedCall: BlockedCall?
+    /// What Vibecop made of `blockedCall`, taken when the card was written and shown beside the
+    /// button. `APPROVE` / `ESCALATE` / `DENY`, or nil when it was not consulted (it is disabled,
+    /// it failed, or the call is one no click can authorise anyway). Advisory, never a veto: a
+    /// person clicking through a `DENY` is the case the verdict exists to inform, not to prevent.
+    let vibecopVerdict: String?
+    let vibecopReason: String?
+    /// Why this build refuses to offer "Approve and run" for `blockedCall`, decided when the card
+    /// was written — today, a write into a protected directory (#187 R10). `nil` means nothing
+    /// stored objected; `approvalRefusal` is what the view asks, and it has the last word.
+    let approvalBlockedReason: String?
 
     init(kind: String = "job_run",
          runId: UUID,
@@ -45,7 +59,11 @@ struct EventCard: Codable, Equatable, Sendable {
          startedAt: Date,
          finishedAt: Date,
          totalTokens: Int = 0,
-         transcriptConversationId: UUID? = nil) {
+         transcriptConversationId: UUID? = nil,
+         blockedCall: BlockedCall? = nil,
+         vibecopVerdict: String? = nil,
+         vibecopReason: String? = nil,
+         approvalBlockedReason: String? = nil) {
         self.kind = kind
         self.runId = runId
         self.jobId = jobId
@@ -57,6 +75,10 @@ struct EventCard: Codable, Equatable, Sendable {
         self.finishedAt = finishedAt
         self.totalTokens = totalTokens
         self.transcriptConversationId = transcriptConversationId
+        self.blockedCall = blockedCall
+        self.vibecopVerdict = vibecopVerdict
+        self.vibecopReason = vibecopReason
+        self.approvalBlockedReason = approvalBlockedReason
     }
 
     /// A card that fails to decode renders as raw JSON in the transcript, so every field a future
@@ -92,6 +114,13 @@ struct EventCard: Codable, Equatable, Sendable {
         finishedAt = try container.decodeIfPresent(Date.self, forKey: .finishedAt) ?? startedAt
         totalTokens = try container.decodeIfPresent(Int.self, forKey: .totalTokens) ?? 0
         transcriptConversationId = try container.decodeIfPresent(UUID.self, forKey: .transcriptConversationId)
+        // A blocked call this build cannot read is no blocked call: "there is something here and I
+        // do not know what it is" must never become a button. Same direction `JobLedger`'s
+        // `markApproved` takes for an undecodable stored call.
+        blockedCall = try? container.decodeIfPresent(BlockedCall.self, forKey: .blockedCall)
+        vibecopVerdict = try container.decodeIfPresent(String.self, forKey: .vibecopVerdict)
+        vibecopReason = try container.decodeIfPresent(String.self, forKey: .vibecopReason)
+        approvalBlockedReason = try container.decodeIfPresent(String.self, forKey: .approvalBlockedReason)
     }
 
     private static let unknownId = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
@@ -155,6 +184,162 @@ struct EventCard: Codable, Equatable, Sendable {
 
     /// `pr-sweep · blocked on approval: run_command` — the card's title, also its tooltip.
     var headline: String { "\(jobName) · \(statusDetail)" }
+
+    // MARK: The blocked call (#187 §6)
+
+    /// Why "Approve and run" is not offered for this card's blocked call — `nil` when it is, and
+    /// `nil` for a card with no blocked call, which has nothing to offer either way.
+    ///
+    /// A read-only job's refusal is decided here rather than read out of `approvalBlockedReason`,
+    /// so a card written by a build that did not store one still cannot offer a button for it
+    /// (R13). `JobLedger.markApproved` refuses the same call at the data layer: three layers,
+    /// because each can be reached without the others.
+    var approvalRefusal: String? {
+        guard let blockedCall else { return nil }
+        if blockedCall.reason == .profile { return Self.profileNotApprovable }
+        return approvalBlockedReason
+    }
+
+    /// Whether the card shows an "Approve and run" button at all.
+    var offersApproval: Bool { blockedCall != nil && approvalRefusal == nil }
+
+    /// Shown in place of the button for a call the read-only profile refused: no approval widens a
+    /// profile, so the honest answer is what the person would have to change instead.
+    static let profileNotApprovable =
+        "This job is read-only, so nothing can approve this call. Recreate the job as mutating if it should be able to do this."
+
+    /// Shown in place of the button for a write into `~/.iris/config` or `~/.iris/plugins` (R10):
+    /// a write there grants further permission, so it is not a thing a click can authorise.
+    static let protectedNotApprovable =
+        "This writes into a protected directory (`config/` or `plugins/`), which grants permission rather than editing a file. Make the change yourself if you want it."
+
+    /// How much of one *content-like* argument a card shows. A `write_file` body is the argument
+    /// that matters most and the one that can be a megabyte; 500 characters is enough to see what
+    /// is being written without pasting the file into the transcript (spec §6). Execution-bearing
+    /// arguments are exempt — see `executionBearingArguments`.
+    static let argumentPreviewLimit = 500
+
+    /// How many lines of one argument a card shows, whatever kind of argument it is. The character
+    /// cap says nothing about newlines, so 500 blank lines used to pass it untouched and stretch
+    /// the card to 500 rows in the transcript. Runs of blank lines collapse to one and what is
+    /// left is capped here, with the remainder counted rather than silently dropped.
+    static let argumentPreviewLines = 12
+
+    /// Arguments a tool *executes* rather than stores, exempt from `argumentPreviewLimit`: cutting
+    /// one of these hides the thing the click authorises, and nobody can approve the 100
+    /// characters they were not shown. The ledger's untruncated copy is what runs either way — the
+    /// question here is only what a person can read before clicking.
+    ///
+    /// | argument      | tools that execute it                                   | why it is never cut                                                          |
+    /// | ------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------- |
+    /// | `command`     | `run_command`                                            | the string the shell runs; a trailing `&& rm -rf ~` is exactly what a cut hides |
+    /// | `path`        | `read_file`, `write_file`, `edit_file`, `set_workspace`  | names the target — the body is the safe half to cut, the path is the risk      |
+    /// | `cwd`         | `run_command` (also carried on `BlockedCall.cwd`)        | where the command lands; a suffix changes the directory                        |
+    /// | `destination` | a move/copy-shaped tool                                  | the write target under another name                                            |
+    ///
+    /// Everything else is content-like — `content`, `text`, `body`, `prompt`, a query, an MCP
+    /// tool's opaque payload — data the tool stores or sends, where 500 characters is enough to
+    /// judge the call. Capping is the default so an unknown argument on a tool added later cannot
+    /// stretch the card; adding a name here is a deliberate decision, like `readOnlyAllowed`.
+    static let executionBearingArguments: Set<String> = ["command", "path", "cwd", "destination"]
+
+    /// One rendered argument of the blocked call.
+    struct BlockedArgument: Identifiable, Equatable, Sendable {
+        var id: String { key }
+        let key: String
+        let value: String
+    }
+
+    /// Every argument of the blocked call, sorted by key and cut to `argumentPreviewLimit`, so the
+    /// person approving sees the whole call and two renders of it read the same. Empty when there
+    /// is no blocked call.
+    var blockedArguments: [BlockedArgument] {
+        guard let blockedCall else { return [] }
+        return blockedCall.args.keys.sorted().map { key in
+            BlockedArgument(key: key, value: Self.preview(key: key, value: blockedCall.args[key] ?? .null))
+        }
+    }
+
+    /// `Vibecop: DENY — recursive delete` — its opinion of the call, or `nil` when it was not
+    /// consulted. Information for the person deciding; the button is offered regardless.
+    var vibecopLine: String? {
+        guard let vibecopVerdict, !vibecopVerdict.isEmpty else { return nil }
+        guard let vibecopReason, !vibecopReason.isEmpty else { return "Vibecop: \(vibecopVerdict)" }
+        return "Vibecop: \(vibecopVerdict) — \(vibecopReason)"
+    }
+
+    /// The call as a CARD keeps it: every argument already through `preview`. A card is a display
+    /// snapshot living in a message row, and "Approve and run" re-dispatches the LEDGER's copy of
+    /// the call, never this one — so storing a megabyte `write_file` body here would write the
+    /// whole file into the transcript for nothing. Values that fit are untouched, and keep their
+    /// type.
+    ///
+    /// Execution-bearing arguments are carried whole, which is the deliberate side of the trade:
+    /// the argument that can be a megabyte is the content-like one and it is still capped, while a
+    /// command or a path is bounded in practice by what a shell or a filesystem accepts. A card
+    /// with a pathologically long single-line command is a tall card in a scrolling transcript —
+    /// preferable to an approver reading 500 characters of a command and authorising 600.
+    static func displayCopy(of call: BlockedCall) -> BlockedCall {
+        var args: [String: JSONValue] = [:]
+        for (key, value) in call.args {
+            let shown = preview(key: key, value: value)
+            args[key] = shown == value.stringValue ? value : .string(shown)
+        }
+        return BlockedCall(toolName: call.toolName, args: args,
+                           cwd: call.cwd, reason: call.reason, at: call.at)
+    }
+
+    /// One argument as a card shows it. Four passes: render it (compact JSON for a structure, so a
+    /// nested argument reads as itself rather than `{...}`), collapse runs of blank lines, bound
+    /// its height to `argumentPreviewLines`, and cut it to `argumentPreviewLimit` characters
+    /// *unless* `key` is execution-bearing.
+    ///
+    /// Lines are cut before characters, and both notes are collected into one `… (N characters,
+    /// M more lines)` suffix at the end. Order matters: cutting characters first puts the note
+    /// dozens of lines down, where the line cut then throws it away, and a truncation the reader
+    /// cannot see is the one thing this must not do. The character count is of the whole
+    /// (blank-collapsed) text, so it answers "how much was there", not "how much of the top
+    /// twelve lines was there".
+    static func preview(key: String, value: JSONValue) -> String {
+        let text = collapsingBlankLines(renderedText(value))
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let hiddenLines = max(0, lines.count - argumentPreviewLines)
+        var shown = hiddenLines == 0 ? text : lines.prefix(argumentPreviewLines).joined(separator: "\n")
+        var notes: [String] = []
+        if !executionBearingArguments.contains(key), shown.count > argumentPreviewLimit {
+            shown = String(shown.prefix(argumentPreviewLimit))
+            notes.append("\(text.count) characters")
+        }
+        if hiddenLines > 0 { notes.append("\(hiddenLines) more \(hiddenLines == 1 ? "line" : "lines")") }
+        guard !notes.isEmpty else { return shown }
+        return shown + "… (" + notes.joined(separator: ", ") + ")"
+    }
+
+    private static func renderedText(_ value: JSONValue) -> String {
+        switch value {
+        case .object, .array:
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            return (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) }
+                ?? value.stringValue
+        default:
+            return value.stringValue
+        }
+    }
+
+    /// Any run of blank lines becomes one. A file with paragraph breaks still reads as one; a
+    /// thousand newlines becomes a single gap.
+    private static func collapsingBlankLines(_ text: String) -> String {
+        var kept: [Substring] = []
+        var inBlankRun = false
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let isBlank = line.trimmingCharacters(in: .whitespaces).isEmpty
+            if isBlank && inBlankRun { continue }
+            inBlankRun = isBlank
+            kept.append(line)
+        }
+        return kept.joined(separator: "\n")
+    }
 
     /// The run's wall time, in the same format the session strip uses so the two never show two
     /// styles of elapsed time side by side.

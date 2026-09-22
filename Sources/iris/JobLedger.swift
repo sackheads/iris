@@ -315,8 +315,9 @@ extension JobLedger {
 
     /// Persists (or clears, with `nil`) the exact call this run failed closed on, so the card can
     /// show every argument and "Approve and run" can dispatch it. Throws
-    /// `JobLedgerError.unknownRun` for an id that is not in the table. Nothing blocks a run on an
-    /// approval yet; this is the stored shape, and PR B is the first writer.
+    /// `JobLedgerError.unknownRun` for an id that is not in the table. `JobRunner` writes one when
+    /// a run ends `blockedOnApproval`, whether nobody was there to approve the call or the job's
+    /// `readOnly` profile forbade it outright.
     func setBlockedCall(runId: UUID, _ call: BlockedCall?) throws {
         let json = try call.map { try Self.encodeBlockedCall($0) }
         try writer.write { db in
@@ -327,14 +328,37 @@ extension JobLedger {
     }
 
     /// Claims this run's blocked call for exactly one dispatch. `true` means the caller won the
-    /// claim and owns running the call; `false` means it was already approved (or the row is gone).
-    /// The `approvedAt IS NULL` guard is in the `UPDATE` itself rather than a read-then-write, so
-    /// two clicks on the same card — or two processes — cannot both see it unapproved and run the
-    /// call twice. Nothing claims one yet: PR B's "Approve and run" is the first caller.
+    /// claim and owns running the call; `false` means it was already approved, the row is gone, or
+    /// the call is one no approval can authorise. The `approvedAt IS NULL` guard is in the
+    /// `UPDATE` itself rather than a read-then-write, so two clicks on the same card — or two
+    /// processes — cannot both see it unapproved and run the call twice.
+    ///
+    /// A `.profile` blocked call is refused outright (R13): it was not refused for want of a human
+    /// but because the job is `readOnly`, and re-dispatching it would reopen the profile gate
+    /// through the ledger. So is a stored call this build cannot read: "there is a blocked call
+    /// and I do not know what it is" is not a thing to approve, and the same direction is what
+    /// `ConversationStore` takes for an unreadable `jobProfile`. So, finally, is a row with no
+    /// blocked call at all — a completed run, or one whose call failed to store — because burning
+    /// `approvedAt` on a row with nothing to approve turns the one-shot into a wasted shot. The
+    /// refusals live here rather than only in whatever UI offers the button, so a second caller
+    /// cannot get them wrong.
+    ///
+    /// Winning the claim also acknowledges the row, in the same `UPDATE`: approving a blocked call
+    /// is a stronger "I have seen this" than Dismiss is, and without it an approved-and-executed
+    /// run would sit in `/jobs`'s failure list and stay exempt from retention forever, its card
+    /// still offering a button that now answers "it has already been approved once". `COALESCE`
+    /// so a row the user dismissed first keeps the time they dismissed it.
     func markApproved(runId: UUID, at: Date) throws -> Bool {
         try writer.write { db in
-            try db.execute(sql: "UPDATE job_runs SET approvedAt = ? WHERE id = ? AND approvedAt IS NULL",
-                           arguments: [at, runId.uuidString])
+            let json = try String.fetchOne(db, sql: "SELECT blockedCall FROM job_runs WHERE id = ?",
+                                           arguments: [runId.uuidString])
+            guard let json else { return false }
+            let call = try? JSONDecoder().decode(BlockedCall.self, from: Data(json.utf8))
+            guard let call, call.reason != .profile else { return false }
+            try db.execute(sql: """
+                UPDATE job_runs SET approvedAt = ?, acknowledgedAt = COALESCE(acknowledgedAt, ?)
+                WHERE id = ? AND approvedAt IS NULL
+                """, arguments: [at, at, runId.uuidString])
             return db.changesCount > 0
         }
     }

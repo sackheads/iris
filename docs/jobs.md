@@ -109,13 +109,65 @@ Monday-only job nobody asked for.
 
 ## Profiles
 
-Every job has a profile, `readOnly` or `mutating`. `readOnly` is the default and, right now, the
-only one `schedule_job` will create — asking for `profile: mutating` is refused with a message
-saying it arrives with deliverable 3. The runner already honours the profile — a `mutating` job's
-run conversation is pinned to the `apple/container` sandbox — but the model around it (the waiver,
-the declared mounts, the budget) is not built, which is why the tool will not create one. A
-`readOnly` run leaves the sandbox choice alone, so it follows the per-workspace default rather than
-being pinned to the host.
+Every job has a profile, `readOnly` or `mutating`, and `readOnly` is the default.
+
+**A read-only run's tool surface is an allowlist, not a denylist.** `JobProfile.readOnlyAllowed`
+names every tool such a run may call — today `read_file`, `search_web`, `search_memory`, `reflect`,
+the two job-reading tools, and the Google read tools (list, get, search) — and everything else is
+refused, including every tool added to Iris after this was written. The allowlist is a ceiling, not
+a promise: what a run is actually *offered* is the intersection of it with the declarations that
+conversation builds, and the two job-reading tools are declared only in a pinned conversation (see
+"The job tools" below) while a run's hidden conversation never is. So a read-only fire's surface
+today is `read_file`, `search_web`, `search_memory` and `reflect`, plus a sandboxed `run_command`
+and whatever read-only MCP tools are connected — it cannot read its own job records, and nothing
+here offers to widen that. That direction is deliberate: a
+denylist's default answer is "allowed", and the first draft of this gate was a denylist that let a
+read-only run rewrite `SOUL.md`, `USER.md`, `memory.md` and the fact store because nobody had
+thought to name those four tools. Widening the surface is now a one-line decision with a test to
+change, rather than something that happens by omission.
+
+Two tools are judged per run rather than listed. `run_command` is available only when it resolves
+to the container; on the host it is refused. An MCP tool is available only when its server
+annotated it `readOnlyHint` — that is the server's own claim, not something Iris verifies, but it
+is the only signal the protocol offers, and a tool that says nothing about itself is denied rather
+than assumed harmless. `set_workspace` is deliberately *not* on the list: a workspace is what gives
+a sandboxed `run_command` a read-write bind mount of that directory, so a read-only run that could
+set one could write to the host through the very sandbox that is meant to contain it. Which is also
+the honest statement of the `run_command` guarantee *for this profile*: a read-only run's sandboxed
+command cannot write to the host *because its conversation has no workspace and therefore no
+mount*, not because the mount is read-only. Anyone who gives read-only runs a workspace has to come
+back to this paragraph. It does not carry over to `mutating`, which has `set_workspace` and can
+therefore give itself a workspace mid-turn, after which a command gets that directory bind-mounted
+read-write — no wider than the allowlist or the approval that let the command run at all (in an
+attended chat that same command runs on the host), and the card's `in <cwd>` line says where.
+
+Declaration is only the cheap half. A call that reaches the dispatcher anyway — a stale
+declaration, a forged name — is refused there too, recorded as the whole call (name, arguments,
+working directory) on the run's ledger row, and the run finishes `blocked on approval` with a card
+naming the tool. The tool result the refusal writes into the transcript says the job is
+read-only and that no other tool will do it either — but the turn ends on the first such refusal
+before another model round can read it, which is the order that matters: no approval is coming and
+nothing else would do the same thing, so a further round could only spend the run's budget
+arriving at the same answer. The sentence is the record; the ending is the enforcement.
+
+A `mutating` job keeps the whole tool surface, and its *commands* always run in the
+`apple/container` VM — that is what pays for the wider surface. Commands, precisely: `run_command`
+is what the VM routes, and `write_file`, `read_file` and the rest of the native tools execute on
+the host as they do in any run, behind the user's allowlist and the same fail-closed approval.
+"Always" is enforced twice: `schedule_job` refuses to create one
+unless the VM is available (the runtime installed *and* sandboxing switched on — with the master
+switch off, the sandbox resolution returns the host however the conversation is pinned), and the
+runner asks the same question again at every fire. A fire with no VM to run in is refused before
+the turn starts: a `failed` run with the reason `sandbox unavailable`, a card, and the usual retry
+ladder. It is never run on the host instead. Nor is it run on the host when the VM goes away
+*during* a turn — turn sandboxing off or uninstall the runtime while a run is in flight and the
+next `run_command` is refused where it stands, with the command recorded on the run's card, so the
+"Always allow" rule you once clicked on that command in an ordinary chat cannot quietly stand in
+for the container. That rule holds for any unattended run, not just a job's own: a subagent the run
+delegates into is unattended too. Everything outside the user's allowlist still fails
+closed inside the VM: unattended means unattended whatever the profile. A `readOnly` run leaves the
+sandbox choice alone, so it follows the per-workspace default rather than being pinned to the
+host.
 
 ## What happens on sleep
 
@@ -157,8 +209,10 @@ are reading.
 Every fire writes a row to `job_runs`, in the same database as the jobs and the conversations: job,
 trigger kind, start and finish, status, outcome (the first line of the last thing the run said,
 capped at 200 characters), token counts, the background conversation it ran in, and — for a
-failure — the reason and the tool it wanted. The row is written *before* the turn, so a run the app
-died inside leaves evidence behind.
+failure — the reason and the tool it wanted. A run that stopped on a call it was not allowed to
+make also stores the whole call (name, every argument, working directory, and why it was refused),
+which is what "Approve and run" re-dispatches. The row is written *before* the turn, so a run the
+app died inside leaves evidence behind.
 
 A run ends in one of five statuses:
 
@@ -178,7 +232,9 @@ never got as far as a reply" must not look the same on a card.
 When a run ends, one **event card** is delivered: job name, status, the one-line outcome, tokens,
 and a "View run" button onto the transcript. It goes to the job's destination conversation if it
 has one, and otherwise to **Iris Activity** — a pinned conversation Iris creates on first use and
-keeps at the top of the sidebar. (Pinned conversations refuse `/clear`.)
+keeps at the top of the sidebar. (Pinned conversations refuse `/clear`.) A run that stopped on a
+refused call gets a second half as well — the call in full, and what you can do about it; see
+"Approve and run" below.
 
 Delivery never wakes a model turn. The card is a `ChatRole.event` message, drawn as a card and
 never indexed for search; alongside it the card's one-line summary is appended to the destination's
@@ -192,8 +248,9 @@ five-minute agent loop. Raw run output never enters the destination's messages.
 Nobody is watching a background run, so it never blocks on an approval dialog. A tool call from a
 background conversation is checked against the deterministic allowlist — a call that is already
 permitted needs no human, so it runs — and anything else is denied on the spot, without consulting
-Vibecop and without a dialog. The denial is recorded, the run ends `blocked on approval`, and the
-card names the tool that was refused so you can decide in the morning.
+Vibecop and without a dialog. The whole call is recorded, the run ends `blocked on approval`, and
+the card shows what was refused — with an "Approve and run" button, below — so you can decide in
+the morning.
 
 This outranks everything, including the headless auto-approve used by scenario runs, and it is
 inherited: a subagent or an evaluator a run spawns is a background conversation too, so delegating
@@ -216,6 +273,59 @@ message starts a real turn in an attended conversation — which would run the w
 conversation's approval path — and the roster is how a sender picks its target. A run reports
 through its card; it does not ask a peer to act for it, and it does not advertise itself to peers
 that cannot reach it.
+
+## Approve and run
+
+The card for a run that stopped on an approval shows the **whole call** — the tool, every argument,
+and a long body cut to the first 500 characters — because an approval given without sight of the
+payload is worse than no button. Vibecop is asked about that same persisted call when the card is
+written, and its verdict and reason sit beside the button. A verdict is information, not a veto: a
+`DENY` still leaves the button there, and clicking it is you overruling Vibecop, not skipping it.
+
+**Approve and run** dispatches exactly that one call, once, as a tracked run of its own: a fresh
+hidden conversation titled `<job> · approved <tool>`, a `job_runs` row with the trigger kind
+`approval` and a pointer back to the run that asked, and a follow-up card with what the call
+returned. It is not "resume the job": the original turn is over, and what the model would have done
+next with the result is unknowable. If the job needs to go further, its next fire takes it there.
+
+Approving is one-shot, and the claim is stamped in the database *before* the call runs — so a
+second click, a second window, or the app dying between the click and the execution all get the
+same refusal rather than running the call twice. The approved run is an ordinary row, so it counts
+towards the breaker and the daily budgets the next fire is judged against; admission is not re-run
+over it, because a person clicking a button is not an unattended fire.
+
+The job's **profile is re-asked at the moment you click**, not inherited from the run that was
+blocked. Between the two you can have uninstalled the container runtime or turned sandboxing off,
+and the answer to "may this job do this?" changes with that. In particular, a `run_command` that
+came out of a background run — read-only or mutating — runs in the container or not at all: with no
+VM to run it in the click is refused with `sandbox unavailable`, the claim is left unspent, and it
+is never run on the host instead. A click authorises the command; it does not authorise dropping
+the isolation.
+
+Precisely: *model-issued* commands. A hook is the other way a command leaves an unattended run, and
+it does not follow this rule — a `BeforeTool` or command hook runs under the hooks sandbox setting
+and executes on the host when no container resolves. That is deliberate rather than a gap: a hook is
+configuration the user wrote, in a file only the user edits, so it is not something an unattended
+model can reach for. The rule above is about what the model can issue.
+
+A refusal is said in the conversation the card is in — the job's destination, or Iris Activity —
+because a sentence in a conversation you do not have open is the same as silence.
+
+Two calls are never offered the button at all, and are refused again by the runner and by the
+ledger if one is reached another way:
+
+- a call a **read-only** job's profile refused. It was not stopped for want of a human, so no human
+  can grant it; the job would have to be created `mutating`.
+- a **write into a protected directory** (`~/.iris/config`, `~/.iris/plugins`). A write there grants
+  further permission rather than editing a file, and a click says a person vouches for the call —
+  it does not change what may be written. Make that change yourself if you want it.
+
+**Dismiss** acknowledges the run: it leaves `/jobs`'s failure list and stops being exempt from
+retention. The card stays in the transcript, because it is a record of what happened. Approving
+acknowledges it too, in the same write that claims the call — clicking **Approve and run** is a
+stronger "I have seen this" than Dismiss is, so an approved run does not sit in the failure list
+waiting for a second click on a button that would now only answer "it has already been approved
+once".
 
 ## Limits
 

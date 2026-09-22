@@ -895,7 +895,9 @@ struct MessageView: View {
                     }
                 } else if message.role == .event {
                     if let card = EventCard.decode(message.content) {
-                        EventCardView(card: card, onViewRun: viewRunAction(for: card))
+                        EventCardView(card: card, onViewRun: viewRunAction(for: card),
+                                      onApprove: approveAction(for: card),
+                                      onDismiss: dismissAction(for: card))
                     } else {
                         // A card written by a newer build, or a hand-edited row: show the raw
                         // content as plain text rather than running it through Markdown.
@@ -948,6 +950,22 @@ struct MessageView: View {
     private func viewRunAction(for card: EventCard) -> (() -> Void)? {
         guard transcriptAvailable, let convId = card.transcriptConversationId else { return nil }
         return { state.transcriptSheetConversationId = convId }
+    }
+
+    /// The "Approve and run" action, or nil when this card offers no approval — it has no blocked
+    /// call, or the call is one no click can authorise (`EventCard.approvalRefusal` is what the
+    /// card shows instead). The refusal is re-checked in `JobRunner.runApproved` and again in the
+    /// ledger: a card is a snapshot, and this one may have been written by an older build.
+    private func approveAction(for card: EventCard) -> (() -> Void)? {
+        guard card.offersApproval else { return nil }
+        return { state.approveBlockedCall(runId: card.runId) }
+    }
+
+    /// The "Dismiss" action — acknowledging the run. Offered only where there is something to
+    /// acknowledge, which is the same place the approval half of the card is drawn.
+    private func dismissAction(for card: EventCard) -> (() -> Void)? {
+        guard card.blockedCall != nil else { return nil }
+        return { state.dismissEventCard(runId: card.runId) }
     }
 
     private var backgroundColor: Color {

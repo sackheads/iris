@@ -22,6 +22,24 @@ public enum SandboxDecision: Equatable, Sendable {
 }
 
 public enum SandboxPolicy {
+    /// Whether a `mutating` job (#187 §0.2) has a VM to run in: the container runtime installed
+    /// AND the master switch on. Both halves, because `resolve` below returns `.host` the moment
+    /// `masterEnabled` is false — without even the missing-runtime warning — so a job pinned
+    /// `.sandboxed` on a machine with sandboxing off runs unsandboxed and says nothing. Asked at
+    /// creation (`ScheduleJobArguments.makeJob`) and again at every fire, in `JobRunner.run`: a
+    /// check made once, on a thing that fires forever, only describes the day it was made.
+    ///
+    /// Where in `run` matters. The re-check sits *after* `ledger.begin` and `setLastRun`, so a
+    /// refused fire is a real fire: it has a `failed` row with the reason `sandbox unavailable`, it
+    /// bumps the job's `lastRun`, and it counts towards the breaker and the retry ladder like any
+    /// other failure. That is the intended shape — a job whose VM has gone should be visible in
+    /// `/jobs` and should pause itself rather than retry forever — but it does mean the refusal
+    /// costs the job a slot in its hourly allowance.
+    static func mutatingJobCanRun(config: ConfigManager = .shared,
+                                  runtimeAvailable: Bool = SandboxingManager.shared.isContainerInstalled) -> Bool {
+        config.enableSandboxing && runtimeAvailable
+    }
+
     /// Pure resolution — no I/O. See the plan's Global Constraints for the cascade.
     public static func resolve(masterEnabled: Bool,
                                principal: Principal,

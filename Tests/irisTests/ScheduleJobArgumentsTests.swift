@@ -17,17 +17,19 @@ struct ScheduleJobArgumentsTests {
         #expect(a.alias.cron == "*/5 * * * *" && a.alias.timeZone == "Asia/Tokyo" && a.name == "Five Min")
     }
 
-    @Test("missing prompt and mutating profile are refused with a message")
+    @Test("missing prompt, and a mutating profile with nowhere safe to run it, are refused")
     func refusals() {
         #expect(ScheduleJobArguments.parse(["hour": .int(9)]) == .failure("schedule_job needs a prompt."))
+        // Creatable since D3 — but only where the container runtime its commands always run in exists.
+        // Injected, so the answer does not depend on what this machine has installed.
         let a = try? ScheduleJobArguments.parse(["prompt": .string("p"), "hour": .int(9), "profile": .string("mutating")]).get()
-        #expect(a?.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: [])
-                == .failure(ScheduleJobArguments.mutatingUnavailable))
-        // The refusal has to leave the model somewhere to go, and it cannot send it to a milestone
-        // only the people building this can date (invariant 9).
-        let text = ScheduleJobArguments.mutatingUnavailable.text
-        #expect(text.contains("read-only") && text.contains("ask the user"))
-        #expect(!text.lowercased().contains("deliverable"))
+        #expect(a?.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: [], sandboxAvailable: false)
+                == .failure(ToolMessage(ScheduleJobArguments.noRuntimeForMutating)))
+        let made = try? a?.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: [],
+                                   sandboxAvailable: true).get()
+        #expect(made?.profile == .mutating)
+        // The refusal must leave the model somewhere to go and name no milestone (invariant 9).
+        #expect(!ScheduleJobArguments.noRuntimeForMutating.lowercased().contains("deliverable"))
     }
 
     @Test("name is slugged and made unique against existing names")

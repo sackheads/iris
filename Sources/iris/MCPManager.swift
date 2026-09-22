@@ -222,7 +222,7 @@ actor MCPManager {
         for (serverName, server) in servers {
             for tool in server.availableTools {
                 // Prepend server name to tool name to avoid collisions
-                let uniqueName = "\(serverName)___\(tool.name)"
+                let uniqueName = Self.qualifiedName(server: serverName, tool: tool.name)
 
                 // Convert MCP JSONSchema to Gemini Schema
                 var properties: [String: Schema] = [:]
@@ -271,9 +271,32 @@ actor MCPManager {
         }
         return declarations
     }
-    
+
+    /// How a tool is named once it leaves its server: `<server>___<tool>`, so two servers offering
+    /// `search` do not collide. One spelling, used by the declarations, the call router and the
+    /// read-only set alike — they were three literals, and a set joined differently from the names
+    /// it is matched against fails silently.
+    static func qualifiedName(server: String, tool: String) -> String {
+        "\(server)\(JobProfile.mcpNameSeparator)\(tool)"
+    }
+
+    /// The prefixed names of the MCP tools whose server annotated them `readOnlyHint: true` — the
+    /// only MCP tools a `readOnly` job run may call (#187 §0.2). A server that says nothing about
+    /// a tool is not making a claim this harness can act on, so that tool is denied rather than
+    /// assumed harmless; see `JobProfile.readOnlyDenies`.
+    func readOnlyToolNames() -> Set<String> {
+        Self.readOnlyToolNames(in: servers.flatMap { serverName, server in
+            server.availableTools.map { (serverName, $0.name, $0.annotations.readOnlyHint) }
+        })
+    }
+
+    /// The rule above, over what the servers reported, so it is testable without a live server.
+    static func readOnlyToolNames(in tools: [(server: String, tool: String, readOnly: Bool?)]) -> Set<String> {
+        Set(tools.filter { $0.readOnly == true }.map { qualifiedName(server: $0.server, tool: $0.tool) })
+    }
+
     func callTool(name: String, args: [String: JSONValue]) async -> String {
-        let parts = name.components(separatedBy: "___")
+        let parts = name.components(separatedBy: JobProfile.mcpNameSeparator)
         guard parts.count == 2, let serverName = parts.first, let toolName = parts.last else {
             return "Error: Invalid MCP tool name format."
         }

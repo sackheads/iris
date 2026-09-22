@@ -93,9 +93,10 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// conversation event cards are delivered to is the first user of this.
     var isPinned: Bool = false
     /// #187 deliverable 3 — the profile of the job whose run this background conversation holds.
-    /// Stored only: nothing writes it and nothing reads it yet. PR B is what stamps it when the
-    /// runner opens the conversation and narrows a `readOnly` run's tool surface from it. `nil` on
-    /// every conversation that is not a job run.
+    /// Stamped by `JobRunner.openConversation`; the engine's tool-list builder narrows a
+    /// `readOnly` run's declarations by it and the dispatcher fails closed on a denied call
+    /// (§0.2, §4). `nil` on every conversation that is not a job run, which is the unnarrowed
+    /// surface — never use it as a synonym for `readOnly`.
     var jobProfile: JobProfile?
     var goalContract: GoalContract? = nil
     var lastGoalCompletionReport: JSONValue? = nil
@@ -210,14 +211,6 @@ struct ToolApprovalRequest: Identifiable {
     let continuation: CheckedContinuation<Bool, Never>
 }
 
-/// A tool call denied without a human because it ran in a background conversation (#187). Recorded
-/// per-conversation so Task 6's ledger can surface `blockedOnApproval` for the run.
-struct BlockedToolCall: Equatable, Sendable {
-    let toolName: String
-    let details: String
-    let at: Date
-}
-
 @MainActor
 @Observable
 class AppState {
@@ -267,9 +260,11 @@ class AppState {
     var subagentWriteLedger: [UUID: [String]] = [:]
     var pendingApprovals: [ToolApprovalRequest] = []
     /// Fail-closed denials recorded for background (unattended) conversations (#187) — never
-    /// enqueued in `pendingApprovals`, since nobody is watching to resolve them. Task 6's ledger
-    /// drains this per run via `takeBackgroundDenials(for:)` to mark it `blockedOnApproval`.
-    private(set) var backgroundDenials: [UUID: [BlockedToolCall]] = [:]
+    /// enqueued in `pendingApprovals`, since nobody is watching to resolve them. The ledger drains
+    /// this per run via `takeBackgroundDenials(for:)` to mark it `blockedOnApproval`. The whole
+    /// call is kept, not just its name: a card cannot ask anyone to approve a name, and "Approve
+    /// and run" re-dispatches these arguments (spec §6).
+    private(set) var backgroundDenials: [UUID: [BlockedCall]] = [:]
     /// Which background run a spawned conversation belongs to. A subagent or an evaluator
     /// descended from an unattended run is unattended too, and what it was refused is the RUN's
     /// denial: the ledger row and the event card belong to the job, not to the scratch
@@ -943,6 +938,15 @@ class AppState {
     func setWorkspace(for conversationId: UUID, path: String) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].workspacePath = path
+            markChanged(conversationId, .metadata)
+        }
+    }
+
+    /// Stamps the profile of the job whose run this conversation holds (#187 §4). Persisted, so a
+    /// transcript reopened after a relaunch still says what the run was allowed to do.
+    func setJobProfile(for conversationId: UUID, _ profile: JobProfile?) {
+        if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
+            conversations[idx].jobProfile = profile
             markChanged(conversationId, .metadata)
         }
     }
@@ -2098,10 +2102,21 @@ class AppState {
         case alwaysAllowProject
     }
     
-    func requestApproval(toolName: String, details: String, workspace: String? = nil,
+    /// `args` is what the model sent for this call, carried only so a background denial can record
+    /// the whole call rather than its name (spec §6); nothing on the approval path reads it.
+    func requestApproval(toolName: String, details: String, args: [String: JSONValue] = [:],
+                         workspace: String? = nil,
                          conversationId: UUID? = nil, origin: String = "Main agent",
                          inSandbox: Bool = false, callerRole: VibecopCallerRole = .agent,
                          allowedCommands: [String] = [], vibecopEnabled: Bool? = nil) async -> Bool {
+        // No pre-granted-approval branch here, deliberately (#187 R21, 2026-09-21): a call a
+        // person clicked "Approve and run" on is dispatched by `IrisEngine.executeApprovedCall`,
+        // which runs the tool through the hook layer directly and never enters this function. The
+        // one-shot lives in the ledger (`approvedAt`), and the R10/R13/R20 checks that stand in
+        // for this gate live in `JobRunner.runApproved` and `executeApprovedCall`. Anything that
+        // does reach here from a background conversation fails closed below, including a second
+        // ask made from inside an approved call's own conversation.
+        //
         // Fail closed for background (unattended) conversations, before every other path —
         // including `autoApproveTools` — since nobody is watching to see the approval dialog and a
         // gated tool must never run unattended (#187). The deterministic allowlist still applies
@@ -2112,9 +2127,9 @@ class AppState {
                                      isBackground: true) {
                 return true
             }
-            backgroundDenials[backgroundRunRoot(of: id), default: []]
-                .append(BlockedToolCall(toolName: toolName, details: details, at: Date()))
-            appendMessage(role: .system, content: String(format: Self.unattendedDenialNotice, toolName), to: id)
+            recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace,
+                                                     reason: .approval),
+                                   in: id)
             return false
         }
         // Headless drivers auto-approve so a scenario run never blocks on a human or a local model.
@@ -2176,6 +2191,60 @@ class AppState {
         }
     }
 
+    /// What Vibecop makes of a call a person is about to be offered "Approve and run" for (#187
+    /// §6). Asked when the CARD IS BUILT, not when the button is clicked: the verdict is there to
+    /// inform the person deciding, and a click overrides a `DENY` rather than skipping the
+    /// evaluation. `nil` when Vibecop is off, failed or timed out — the card then shows no verdict
+    /// line, which is honest; it does not mean "approved".
+    ///
+    /// `vibecopEnabled` comes from the runner's own `ConfigManager`, so a test never has to mutate
+    /// the process-global one (invariant 7).
+    func vibecopVerdict(for call: BlockedCall, inSandbox: Bool,
+                        vibecopEnabled: Bool?) async -> VibecopDecision? {
+        await consultVibecop(toolName: call.toolName, details: call.details, workspace: call.cwd,
+                             inSandbox: inSandbox, callerRole: .agent, allowedCommands: [],
+                             vibecopEnabled: vibecopEnabled)
+    }
+
+    /// Dispatches the call an event card's "Approve and run" was clicked for. The work is the
+    /// runner's — one call, once, as a tracked run of its own — and everything the user hears back
+    /// about it arrives as a follow-up card, or as a line saying why nothing happened.
+    ///
+    /// The runner says why it refused, because it is the half that knows which conversation the
+    /// card went to. Only the case it cannot reach — there is no runner at all — is answered here,
+    /// and Activity is the only destination left to answer it in.
+    func approveBlockedCall(runId: UUID) {
+        let engine = self.engine
+        Task { [weak self] in
+            guard let runner = await engine?.jobRunner() else {
+                guard let self else { return }
+                self.appendMessage(role: .system,
+                                   content: JobRunner.refusalNotice(JobRunner.runnerUnavailableRefusal),
+                                   to: self.activityConversationId())
+                return
+            }
+            await runner.runApproved(runId: runId)
+        }
+    }
+
+    /// The card's "Dismiss": marks the run seen, which takes it out of `/jobs`'s failure list and
+    /// off retention's exemption. The card itself stays in the transcript — it is a record of what
+    /// happened, not a notification to be cleared.
+    ///
+    /// Off the main actor, like every other write to the store: the row is tiny and the button
+    /// would almost certainly not stutter on it, but a synchronous SQLite write in a view action
+    /// is the shape that eventually does.
+    func dismissEventCard(runId: UUID) {
+        let ledger = store.ledger
+        Task.detached {
+            do {
+                try ledger.acknowledge(runId: runId, at: Date())
+            } catch {
+                print("[AppState] could not acknowledge run \(runId): \(error)")
+            }
+        }
+    }
+
     /// Appends an approval request and awaits the user's decision. The queue/continuation seam,
     /// separated from `requestApproval`'s permission/Vibecop fast paths so it is unit-testable.
     func enqueueUserApproval(toolName: String, details: String, workspace: String?,
@@ -2203,10 +2272,32 @@ class AppState {
     /// fail-closed denial, formatted with the tool name.
     static let unattendedDenialNotice = "Not run: `%@` needs approval, and this is an unattended run."
 
+    /// The same line for a call a `readOnly` job's profile forbids outright (#187 §0.2). Separate
+    /// from the approval notice because the two are not the same news: nobody can approve this one
+    /// into running as it stands — the job would have to be created `mutating`.
+    static let profileDenialNotice = "Not run: `%@` is not available to a read-only job."
+
+    /// Records a call a background run failed closed on, and says so in its transcript (#187 §6).
+    /// The record is attributed to the background RUN, not to whatever subagent or evaluator the
+    /// run spawned, so it drains with the run; the transcript line goes where the call was made.
+    func recordBackgroundDenial(call: BlockedCall, in conversationId: UUID) {
+        backgroundDenials[backgroundRunRoot(of: conversationId), default: []].append(call)
+        let notice = call.reason == .profile ? Self.profileDenialNotice : Self.unattendedDenialNotice
+        appendMessage(role: .system, content: String(format: notice, call.toolName), to: conversationId)
+    }
+
+    /// The first fail-closed denial recorded for a background run, without draining it. The
+    /// engine's turn-stop line reads this rather than keeping a name of its own, so the sentence
+    /// in the transcript always names the call the ledger row and the card will name: with two
+    /// refusals in one concurrent tool batch, two copies of "the denied tool" disagreed.
+    func firstBackgroundDenial(for conversationId: UUID) -> BlockedCall? {
+        backgroundDenials[backgroundRunRoot(of: conversationId)]?.first
+    }
+
     /// Returns and clears the recorded fail-closed denials for a background conversation (#187).
-    /// Task 6's ledger drains this per run to mark it `blockedOnApproval`.
+    /// The ledger drains this per run to mark it `blockedOnApproval`.
     @discardableResult
-    func takeBackgroundDenials(for conversationId: UUID) -> [BlockedToolCall] {
+    func takeBackgroundDenials(for conversationId: UUID) -> [BlockedCall] {
         let denials = backgroundDenials[conversationId] ?? []
         backgroundDenials.removeValue(forKey: conversationId)
         // The run is over, so nothing it spawned can be refused anything more.

@@ -282,11 +282,53 @@ struct JobLedgerPolicyTests {
         let job = try seedJob(store, "j")
         let run = makeRun(job, at: t0, status: .blockedOnApproval)
         try store.ledger.begin(run: run)
+        // Nothing to approve yet: a row with no blocked call must not burn its one claim.
+        #expect(try store.ledger.markApproved(runId: run.id, at: t0) == false)
+        #expect(try store.ledger.run(id: run.id)?.approvedAt == nil)
+        try store.ledger.setBlockedCall(runId: run.id, BlockedCall(
+            toolName: "run_command", args: ["command": .string("ls")], at: t0))
         #expect(try store.ledger.markApproved(runId: run.id, at: t0) == true)
         #expect(try store.ledger.run(id: run.id)?.approvedAt == t0)
         #expect(try store.ledger.markApproved(runId: run.id, at: t0.addingTimeInterval(60)) == false)
         #expect(try store.ledger.run(id: run.id)?.approvedAt == t0)
         #expect(try store.ledger.markApproved(runId: UUID(), at: t0) == false)
+    }
+
+    @Test("markApproved refuses a call the profile denied, however the caller asks")
+    func markApprovedRefusesAProfileDenial() throws {
+        let store = try ConversationStore.inMemory()
+        let job = try seedJob(store, "j")
+        let run = makeRun(job, at: t0, status: .blockedOnApproval)
+        try store.ledger.begin(run: run)
+        try store.ledger.setBlockedCall(runId: run.id, BlockedCall(
+            toolName: "write_file", args: ["path": .string("/tmp/x")], reason: .profile, at: t0))
+
+        // Nothing can approve this into running: the job is read-only, so the answer does not
+        // depend on a human. The refusal lives at the data layer so a UI is not the only thing
+        // standing between a `.profile` row and a re-dispatch.
+        #expect(try store.ledger.markApproved(runId: run.id, at: t0) == false)
+        #expect(try store.ledger.run(id: run.id)?.approvedAt == nil)
+
+        // The same row with an approval-reason call is claimable as before.
+        try store.ledger.setBlockedCall(runId: run.id, BlockedCall(
+            toolName: "run_command", args: ["command": .string("ls")], reason: .approval, at: t0))
+        #expect(try store.ledger.markApproved(runId: run.id, at: t0) == true)
+    }
+
+    @Test("markApproved refuses a blocked call it cannot read")
+    func markApprovedRefusesAnUnreadableCall() throws {
+        let store = try ConversationStore.inMemory()
+        let job = try seedJob(store, "j")
+        let run = makeRun(job, at: t0, status: .blockedOnApproval)
+        try store.ledger.begin(run: run)
+        try store.writer.write { db in
+            try db.execute(sql: "UPDATE job_runs SET blockedCall = ? WHERE id = ?",
+                           arguments: ["{not json at all", run.id.uuidString])
+        }
+        // There is a blocked call here and this build cannot tell what it is. The guard exists
+        // because it is the last line before a re-dispatch, so it fails closed.
+        #expect(try store.ledger.markApproved(runId: run.id, at: t0) == false)
+        #expect(try store.ledger.run(id: run.id)?.approvedAt == nil)
     }
 
     @Test("parentRunId round-trips on a run")

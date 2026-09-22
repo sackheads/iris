@@ -11,6 +11,7 @@ struct BackgroundApprovalTests {
         let cid = app.createNewConversation(isBackground: true, select: false)
 
         let approved = await app.requestApproval(toolName: "run_command", details: "rm -rf x",
+                                                 args: ["command": .string("rm -rf x")],
                                                  workspace: nil, conversationId: cid)
         #expect(approved == false)
         #expect(app.pendingApprovals.isEmpty)
@@ -18,7 +19,9 @@ struct BackgroundApprovalTests {
         let denials = app.takeBackgroundDenials(for: cid)
         #expect(denials.count == 1)
         #expect(denials.first?.toolName == "run_command")
-        #expect(denials.first?.details == "rm -rf x")
+        // The whole call, so a card can show what was refused (#187 §6), not just its name.
+        #expect(denials.first?.args["command"]?.stringValue == "rm -rf x")
+        #expect(denials.first?.reason == .approval)
         #expect(app.takeBackgroundDenials(for: cid).isEmpty, "takeBackgroundDenials must clear on read")
 
         let notice = String(format: AppState.unattendedDenialNotice, "run_command")

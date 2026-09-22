@@ -55,15 +55,22 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// Builds the job to store, or the sentence explaining why there is none. `existingNames` is
     /// every job name already in the ledger, so a second "check the PR queue" becomes
     /// `check-the-pr-queue-2` instead of colliding with the first on the ledger's UNIQUE index.
-    func makeJob(defaultTimeZone: String, createdIn: UUID?, existingNames: Set<String>) -> Result<Job, ToolMessage> {
-        // A job that may write is a job nobody is watching, and the sandbox and approval path it
-        // would need is not built yet, so the tool declines rather than quietly downgrading what
-        // was asked for. The refusal says what to do instead and names no milestone: a model has
-        // no idea what a deliverable is or when one lands, and this sentence is read on every
-        // refusal.
-        if profile?.lowercased() == JobProfile.mutating.rawValue.lowercased() {
-            return .failure(Self.mutatingUnavailable)
-        }
+    /// `sandboxAvailable` is whether a `mutating` job would actually get the VM it is promised —
+    /// the runtime installed AND sandboxing switched on, since `SandboxPolicy.resolve`
+    /// short-circuits to the host when the master switch is off, however the conversation is
+    /// pinned. Injected so the refusal can be tested on a machine either way. A `mutating` job's
+    /// *commands* always run in that VM (spec §0.2) — the rest of its tools run on the host behind
+    /// the user's allowlist, as in any run — so without the VM there is nowhere safe to run a
+    /// command and the tool says so rather than creating a job whose commands would quietly fall
+    /// back to the host.
+    /// `JobRunner` asks the same question again at every fire: this one can only speak for today.
+    func makeJob(defaultTimeZone: String, createdIn: UUID?, existingNames: Set<String>,
+                 sandboxAvailable: Bool = SandboxPolicy.mutatingJobCanRun()) -> Result<Job, ToolMessage> {
+        // Anything that is not the word `mutating` reads as read-only, including a value this
+        // build does not recognize: the narrow surface is the safe guess, and a refusal over a
+        // spelling would cost a retry to arrive at the same job.
+        let wantsMutating = profile?.lowercased() == JobProfile.mutating.rawValue.lowercased()
+        if wantsMutating, !sandboxAvailable { return .failure(ToolMessage(Self.noRuntimeForMutating)) }
         switch alias.resolve(defaultTimeZone: defaultTimeZone) {
         case .failure(let failure):
             return .failure(Self.message(for: failure))
@@ -72,18 +79,16 @@ struct ScheduleJobArguments: Equatable, Sendable {
                 name: Self.uniqueName(Job.slug(from: name ?? prompt), existing: existingNames),
                 prompt: prompt,
                 trigger: .schedule(schedule),
+                profile: wantsMutating ? .mutating : .readOnly,
                 createdInConversationId: createdIn))
         }
     }
 
-    /// Why a `mutating` job cannot be scheduled in this build, in the two forms the model can act
-    /// on: schedule it read-only, or hand the writing step back to the user.
-    static let mutatingUnavailable: ToolMessage =
-        """
-        The 'mutating' profile is not available in this build: a scheduled job cannot be given \
-        write access yet. Schedule the job as read-only (omit `profile`) so it can report what it \
-        finds, or ask the user to run the step that writes themselves.
-        """
+    /// The refusal a `mutating` job gets when the VM its commands would run in is unavailable —
+    /// the runtime is not installed, or sandboxing is switched off. One sentence for both causes,
+    /// because Settings → Sandboxing is where either is fixed. Spelled once: the test that pins it
+    /// and the tool that returns it read the same string.
+    static let noRuntimeForMutating = "A mutating job's commands always run in the apple/container VM, and that VM is not available: install the runtime and turn sandboxing on in Settings → Sandboxing, or create the job read-only."
 
     /// `base`, or `base-2`, `base-3`, … — the first form not already taken.
     static func uniqueName(_ base: String, existing: Set<String>) -> String {

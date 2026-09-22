@@ -127,7 +127,11 @@ struct BackgroundDescendantTests {
         ])
         let engine = IrisEngine(state: state, tier: .medium, client: client,
                                 protectionEnabled: false, sessionPeerCount: 0)
-        let job = Job(name: "delegator", prompt: "Clean up.", trigger: .schedule(.interval(seconds: 60)))
+        // `mutating`, because delegation is one of the things a `readOnly` run may not do at all
+        // (#187 §0.2) — a read-only job would be blocked on `invoke_subagent` and never reach the
+        // descendant this test is about.
+        let job = Job(name: "delegator", prompt: "Clean up.", trigger: .schedule(.interval(seconds: 60)),
+                      profile: .mutating)
         try store.ledger.upsert(job)
         // A settings store of this test's own: the runner resolves job limits through a
         // `ConfigManager`, and the default is the process-global one (AGENTS invariant 7).
@@ -138,7 +142,8 @@ struct BackgroundDescendantTests {
             IrisDefaults.removeSuiteFile(named: suite, in: IrisDefaults.preferencesDirectory)
         }
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
-                               config: ConfigManager(store: defaults))
+                               config: ConfigManager(store: defaults),
+                               sandboxAvailable: { true })
 
         await runner.fire(job: job, origin: .schedule)
 
