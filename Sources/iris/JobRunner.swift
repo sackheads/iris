@@ -301,11 +301,12 @@ actor JobRunner {
                 return decided
             case .pauseBreaker(let count):
                 await pause(job: current, origin: origin,
-                            reason: Self.breakerReason(count: count), at: at)
+                            reason: Self.breakerReason(count: count), at: at, note: note)
                 return decided
             case .pauseBudget(let scope, let used, let limit):
                 await pause(job: current, origin: origin,
-                            reason: Self.budgetReason(scope: scope, used: used, limit: limit), at: at)
+                            reason: Self.budgetReason(scope: scope, used: used, limit: limit),
+                            at: at, note: note)
                 return decided
             case .run:
                 break
@@ -317,12 +318,15 @@ actor JobRunner {
             // a gate does I/O — a HEAD request, a container — and a fire that arrives while it is
             // thinking is the overlap it is, not a second admitted run.
             let gate: GateContext?
-            switch await gateDecision(for: current, origin: origin, at: at) {
+            switch await gateDecision(for: current, origin: origin, at: at, note: note) {
             case .proceed(let context):
                 gate = context
             case .refuse(let refusal):
                 inFlight.remove(current.id)
                 if isCallersFire { decided = refusal }
+                // Recorded by the branch above, on the row it wrote; a held fire taken next is a
+                // different fire and must not claim the count again.
+                note = nil
                 // A fire held while the gate was being evaluated is still owed an answer, and the
                 // gate is asked again for it: one held fire at a time, so this terminates.
                 guard let held = takeQueuedFire(job: current) else { return decided }
@@ -417,7 +421,8 @@ actor JobRunner {
 
     /// Asks this job's gate, if it has one and this fire is one it decides, and records what it
     /// said.
-    private func gateDecision(for job: Job, origin: FireOrigin, at: Date) async -> GateDecision {
+    private func gateDecision(for job: Job, origin: FireOrigin, at: Date,
+                              note: String? = nil) async -> GateDecision {
         guard let gate = job.trigger.gate, Self.gateApplies(origin: origin, job: job) else {
             return .proceed(nil)
         }
@@ -432,17 +437,17 @@ actor JobRunner {
             // makes it count towards the three-error pause like any other gate that cannot answer.
             let detail = Self.gateUnreadableDetail(error)
             print("[JobRunner] not firing \(job.name): \(detail)")
-            return .refuse(await noteGateError(detail, job: job, origin: origin, at: at))
+            return .refuse(await noteGateError(detail, job: job, origin: origin, at: at, note: note))
         }
 
         switch await gateEvaluator(gate, previous) {
         case .changed(let signal, let payload):
             return .proceed(GateContext(signal: signal, payload: payload))
         case .unchanged(let signal):
-            await recordGateSkip(job: job, origin: origin, signal: signal, at: at)
+            await recordGateSkip(job: job, origin: origin, signal: signal, at: at, note: note)
             return .refuse(.gateUnchanged)
         case .error(let detail):
-            return .refuse(await noteGateError(detail, job: job, origin: origin, at: at))
+            return .refuse(await noteGateError(detail, job: job, origin: origin, at: at, note: note))
         }
     }
 
@@ -451,9 +456,11 @@ actor JobRunner {
     /// it saw, with no transcript (so the breaker counts it as the non-event it is) and no card:
     /// cards are for things that happened, and a quiet job checked every five minutes would
     /// otherwise bury the Activity conversation (§11 ruling 4).
-    private func recordGateSkip(job: Job, origin: FireOrigin, signal: String, at: Date) async {
+    private func recordGateSkip(job: Job, origin: FireOrigin, signal: String, at: Date,
+                                note: String? = nil) async {
         await recordGateRow(job: job, origin: origin, at: at, status: .completed,
-                            outcome: Self.gateUnchangedOutcome, reason: nil, signal: signal)
+                            outcome: Self.gateUnchangedOutcome, reason: nil, signal: signal,
+                            note: note)
     }
 
     /// Every row the gate path writes goes through here, and every one of them then goes through
@@ -466,8 +473,19 @@ actor JobRunner {
     ///
     /// The pause on the third error is the exception, and deliberately so: it goes through
     /// `pause`, which is the one writer of a pause row, the same as the breaker's and the budget's.
+    ///
+    /// `note` is the scheduler's catch-up count (§5). A gate row carries no card, so a replay
+    /// burst whose first occurrence the gate refused has nowhere else to say that 27 occurrences
+    /// were dropped — it rides on whichever line this row already has, rather than being lost.
     private func recordGateRow(job: Job, origin: FireOrigin, at: Date, status: JobRun.Status,
-                               outcome: String?, reason: String?, signal: String?) async {
+                               outcome: String?, reason: String?, signal: String?,
+                               note: String? = nil) async {
+        var outcome = outcome
+        var reason = reason
+        if note != nil {
+            if reason != nil { reason = Self.withNote(reason, note) }
+            else { outcome = Self.withNote(outcome, note) }
+        }
         do {
             let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: origin.triggerKind,
                              startedAt: at, status: status)
@@ -491,7 +509,8 @@ actor JobRunner {
     /// The first two are quiet rows — a flaky server or a machine off the network is not worth a
     /// card apiece — and the third is the pause, which gets one, because at that point the job has
     /// stopped and only a person can start it again.
-    private func noteGateError(_ detail: String, job: Job, origin: FireOrigin, at: Date) async -> Admission {
+    private func noteGateError(_ detail: String, job: Job, origin: FireOrigin, at: Date,
+                               note: String? = nil) async -> Admission {
         var previousErrors = 0
         do {
             previousErrors = Self.gateErrorStreak(
@@ -502,11 +521,11 @@ actor JobRunner {
             print("[JobRunner] could not count \(job.name)'s gate errors: \(error)")
         }
         guard previousErrors + 1 < Self.consecutiveGateErrorsToPause else {
-            await pause(job: job, origin: origin, reason: Self.gateFailingReason, at: at)
+            await pause(job: job, origin: origin, reason: Self.gateFailingReason, at: at, note: note)
             return .gateError(detail: detail, paused: true)
         }
         await recordGateRow(job: job, origin: origin, at: at, status: .interrupted, outcome: nil,
-                            reason: Self.gateErrorReason(detail), signal: nil)
+                            reason: Self.gateErrorReason(detail), signal: nil, note: note)
         return .gateError(detail: detail, paused: false)
     }
 
@@ -585,6 +604,13 @@ actor JobRunner {
         return queuedOrigins.removeValue(forKey: job.id) ?? .schedule
     }
 
+    /// One line with the catch-up count folded in, for the paths that have no card to put it on.
+    private static func withNote(_ text: String?, _ note: String?) -> String? {
+        guard let note else { return text }
+        guard let text, !text.isEmpty else { return note }
+        return "\(text) (\(note))"
+    }
+
     /// Drops a held fire that nothing is going to take, column and origin together.
     private func discardQueuedFire(job: Job) {
         queuedOrigins.removeValue(forKey: job.id)
@@ -600,7 +626,12 @@ actor JobRunner {
     /// zero-length `interrupted` row and on a card. Both, because they answer different questions
     /// — `/jobs` shows the row, and the card is the only thing that reaches someone who is not
     /// looking for it.
-    private func pause(job: Job, origin: FireOrigin, reason: String, at: Date) async {
+    ///
+    /// `note` is the scheduler's catch-up count (§5), which goes on the card and not into
+    /// `pausedReason`: the reason is what `/jobs` prints and `/jobs resume` clears, and it has to
+    /// keep saying why the job stopped rather than how far behind it happened to be.
+    private func pause(job: Job, origin: FireOrigin, reason: String, at: Date,
+                       note: String? = nil) async {
         do {
             try ledger.setPaused(jobId: job.id, reason: reason)
         } catch {
@@ -611,7 +642,7 @@ actor JobRunner {
                                                triggerKind: origin.triggerKind, now: at)
             await deliver(EventCard(runId: run.id, jobId: job.id, jobName: job.name,
                                     status: .interrupted, outcome: reason, startedAt: at,
-                                    finishedAt: at), for: job)
+                                    finishedAt: at, catchUpNote: note), for: job)
         } catch {
             print("[JobRunner] could not record the pause for \(job.name): \(error)")
         }

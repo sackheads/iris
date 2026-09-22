@@ -266,13 +266,30 @@ breaker and the daily budgets. The burst therefore ends at the first refusal: if
 or a budget runs out on the second of five, the other three are abandoned and the job goes back on
 its ordinary cadence rather than spending the next tick being refused four more times.
 
+On a **gated** job, `replay` will usually produce a single run whatever the cap says, and that is
+the right answer: the first replayed fire stamps the fresh gate signal, so the second asks the gate
+and is told nothing has changed since a moment ago, which ends the burst. There was one change to
+react to, not five.
+
 A job so far behind that catching up would mean stepping through more than 10,000 occurrences — a
 per-minute cadence and a fortnight with the app closed — coalesces instead. That is a restart, not
-a catch-up, and one fire against the present is what a restart wants.
+a catch-up, and one fire against the present is what a restart wants; the card for that fire says
+"too far behind to replay; ran once instead", and the job's policy is untouched for the next time.
 
-At most three fires start per tick, counting every job's, so one job's replay cannot crowd the
-loop out; what does not fit is still due and the next tick takes it, including the rest of a
-replay burst.
+When the first replayed fire is refused before it can run — a gate that found nothing, an open
+breaker, an exhausted budget — the count still gets recorded: on the gate's ledger row, or on the
+pause card.
+
+At most three fires start per tick, counting every job's rather than counting jobs — so one job's
+replay cannot start more work in a tick than any three ordinary fires would. It does take the whole
+tick while it lasts: due jobs are served furthest-behind first, so a job catching up goes first and
+anything that does not fit waits. Nothing is lost by waiting — what did not fit is still due and
+the next tick takes it, including the rest of the replay burst — and the wait is bounded by how
+many ticks the burst needs, two at the default cap of five.
+
+A job whose burst is still running is not planned again while it runs, even though its next fire
+is deliberately left in the past: that is what brings a later tick back to finish the burst, not an
+invitation to start a second one alongside it.
 
 A cadence that overlaps its own still-running fire is skipped rather than started a second time,
 and the skip is recorded as an `interrupted` run so `/jobs` can show it — unless the job's overlap

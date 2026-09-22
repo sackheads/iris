@@ -45,23 +45,33 @@ struct CatchUpTests {
         private var entries: [(name: String, note: String?)] = []
         private var inFlight = Set<String>()
         private var refuseFrom = Int.max
+        private var park: Gate?
         private(set) var overlapped = false
 
         /// The handler refuses every fire from the `n`th onwards (1-based), the way admission
-        /// refuses a paused job, an open breaker or a gate that found nothing.
-        init(refusingFrom refuseFrom: Int = .max) { self.refuseFrom = refuseFrom }
+        /// refuses a paused job, an open breaker or a gate that found nothing. `parkingFirstFireOn`
+        /// holds the first fire open — a model turn outlasting the ten-second poll — so a test can
+        /// drive a second tick while a burst is still running.
+        init(refusingFrom refuseFrom: Int = .max, parkingFirstFireOn park: Gate? = nil) {
+            self.refuseFrom = refuseFrom
+            self.park = park
+        }
 
         func handler() -> JobScheduler.FireHandler {
             { [self] job, fire in
-                let admitted: Bool = lock.withLock {
+                let (admitted, first): (Bool, Bool) = lock.withLock {
                     entries.append((job.name, fire.note))
                     if inFlight.contains(job.name) { overlapped = true }
                     inFlight.insert(job.name)
-                    return entries.count < refuseFrom
+                    return (entries.count < refuseFrom, entries.count == 1)
                 }
-                // A suspension point inside the fire, so two concurrent fires of one job would
-                // actually interleave rather than being serialised by luck.
-                await Task.yield()
+                if first, let park {
+                    await park.arriveAndWait()
+                } else {
+                    // A suspension point inside the fire, so two concurrent fires of one job would
+                    // actually interleave rather than being serialised by luck.
+                    await Task.yield()
+                }
                 lock.withLock { _ = inFlight.remove(job.name) }
                 return admitted
             }
@@ -70,6 +80,35 @@ struct CatchUpTests {
         var names: [String] { lock.withLock { entries.map(\.name) } }
         var notes: [String?] { lock.withLock { entries.map(\.note) } }
         var count: Int { lock.withLock { entries.count } }
+    }
+
+    /// A one-shot rendezvous: the handler signals it has started, then parks until the test opens
+    /// the gate. Lets a test hold a fire open and drive an overlapping tick, which is how the poll
+    /// loop and the wake observer both behave — each dispatches `tick()` detached.
+    actor Gate {
+        private var entered = false
+        private var opened = false
+        private var entryWaiters: [CheckedContinuation<Void, Never>] = []
+        private var openWaiters: [CheckedContinuation<Void, Never>] = []
+
+        func arriveAndWait() async {
+            entered = true
+            for waiter in entryWaiters { waiter.resume() }
+            entryWaiters = []
+            if opened { return }
+            await withCheckedContinuation { openWaiters.append($0) }
+        }
+
+        func waitForEntry() async {
+            if entered { return }
+            await withCheckedContinuation { entryWaiters.append($0) }
+        }
+
+        func open() {
+            opened = true
+            for waiter in openWaiters { waiter.resume() }
+            openWaiters = []
+        }
     }
 
     // MARK: The three policies over one eight-hour sleep
@@ -146,8 +185,45 @@ struct CatchUpTests {
         #expect(await scheduler.tick() == 0)
     }
 
-    @Test("the tick's cap is shared across jobs: one job's replay does not starve the loop")
-    func theTicksCapIsSharedAcrossJobs() async throws {
+    @Test("a burst still running is not planned a second time by an overlapping tick")
+    func aTruncatedBurstIsNotPlannedTwice() async throws {
+        // The shipped defaults: `maxFiresPerTick` 3 against a cap of 5, so the burst is cut short
+        // and `nextFireAt` is deliberately left in the past — which is what lets a later tick
+        // finish it. The poll loop and the wake observer both dispatch `tick()` detached, and a
+        // model turn routinely outlasts the ten-second poll, so the next tick arrives while the
+        // burst is still running and must not start a second one on top of it.
+        let store = try ConversationStore.inMemory()
+        let scheduler = JobScheduler(ledger: store.ledger, now: { Self.now }, maxFiresPerTick: 3)
+        let gate = Gate()
+        let fires = Handovers(parkingFirstFireOn: gate)
+        await scheduler.setFireHandler(fires.handler())
+        try store.ledger.upsert(Self.job(.replay(cap: 5)))
+
+        let firstTick = Task { await scheduler.tick() }
+        await gate.waitForEntry()
+        #expect(try store.ledger.job(named: "behind")?.nextFireAt == Self.at(8, 30),
+                "the row is due again on purpose: three of the five slots have been handed over")
+
+        let overlapping = await scheduler.tick()
+        await gate.open()
+        let started = await firstTick.value
+
+        #expect(overlapping == 0, "the burst in flight owns the job until it ends")
+        #expect(fires.overlapped == false, "and a job never runs beside itself")
+        #expect(started == 3)
+
+        // Once the burst is over the job is planned again and finishes what it owed — five fires
+        // in total, the cap, with the dropped count still counted once.
+        #expect(await scheduler.tick() == 2)
+        #expect(fires.count == 5)
+        #expect(fires.notes.first == "27 earlier occurrences skipped")
+        #expect(fires.notes.dropFirst().allSatisfy { $0 == nil })
+        #expect(try store.ledger.job(named: "behind")?.nextFireAt == Self.at(9, 0))
+        #expect(await scheduler.tick() == 0)
+    }
+
+    @Test("the tick's cap counts fires across jobs, so a replay crowds out what does not fit")
+    func theTicksCapCountsFiresAcrossJobs() async throws {
         let store = try ConversationStore.inMemory()
         let scheduler = JobScheduler(ledger: store.ledger, now: { Self.now }, maxFiresPerTick: 3)
         let fires = Handovers()
@@ -160,8 +236,11 @@ struct CatchUpTests {
                                     nextFireAt: Self.at(8, 45)))
 
         #expect(await scheduler.tick() == 3)
+        // `dueJobs` orders by nextFireAt, so the job furthest behind is always the one that takes
+        // the budget: a replaying job does crowd the rest of the tick out.
         #expect(fires.names == ["replaying", "replaying", "replaying"],
                 "three fires is three fires, whoever they belong to")
+        // Bounded at ceil(cap / maxFiresPerTick) ticks, and nothing is lost meanwhile.
         #expect(try store.ledger.job(named: "plain")?.nextFireAt == Self.at(8, 45),
                 "the job that did not fit is left due for the next tick")
     }
@@ -324,6 +403,9 @@ struct CatchUpTests {
 
         #expect(await scheduler.tick() == 1)
         #expect(fires.count == 1)
+        // And it says so where the user will see it. A `print` is not a notice in a GUI app, and
+        // this quietly turns a `replay` job into a `coalesce` one for the fire.
+        #expect(fires.notes == ["too far behind to replay; ran once instead"])
         #expect(try store.ledger.job(named: "ancient")?.nextFireAt == later.addingTimeInterval(60))
     }
 
@@ -346,6 +428,84 @@ struct CatchUpTests {
         #expect(missed.replay == [midnightEDT.addingTimeInterval(3 * 3600),
                                   midnightEDT.addingTimeInterval(4 * 3600),
                                   fourEST])
+    }
+
+    // MARK: The count survives a refused first fire (#187 §5)
+
+    @MainActor
+    @Test("a gate that refuses the first replayed fire still records what the catch-up dropped")
+    func aRefusedFirstFireStillSaysWhatWasDropped() async throws {
+        // A gated poll job is the commonest `replay` subject, and a gate row carries no card — so
+        // without this the user sees a job that went quiet for eight hours and then did nothing,
+        // with the 30 dropped occurrences recorded nowhere at all.
+        let store = try ConversationStore.inMemory()
+        let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        state.conversations.removeAll()
+        let engine = IrisEngine(state: state, tier: .medium, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false, sessionPeerCount: 0)
+        let (config, teardown) = Self.isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               protectionEnabled: false,
+                               gateEvaluator: { _, _ in .unchanged(signal: "etag=aaa") })
+        let job = Self.job(.replay(cap: 2),
+                           trigger: .poll(PollSpec(schedule: .cron(CronSchedule(expression: "*/15 * * * *", timeZone: "UTC")),
+                                                   gate: .urlChanged(url: "https://example.invalid/f"))))
+        try store.ledger.upsert(job)
+
+        let admission = await runner.fire(job: job, origin: .cadence(kind: "poll"),
+                                          note: JobScheduler.skippedNote(30))
+
+        #expect(admission == .gateUnchanged)
+        let row = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(row.outcome == "\(JobRunner.gateUnchangedOutcome) (30 earlier occurrences skipped)")
+    }
+
+    @MainActor
+    @Test("a budget that pauses the first replayed fire puts the count on the pause card")
+    func aPauseOnTheFirstFireStillSaysWhatWasDropped() async throws {
+        let store = try ConversationStore.inMemory()
+        let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        state.conversations.removeAll()
+        let engine = IrisEngine(state: state, tier: .medium, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false, sessionPeerCount: 0)
+        let (config, teardown) = Self.isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+                               protectionEnabled: false)
+        // A daily budget of one token, already spent by a finished run, so the next fire pauses.
+        var job = Self.job(.replay(cap: 2))
+        job.policy.dailyTokenBudget = 1
+        try store.ledger.upsert(job)
+        let spent = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule", startedAt: Self.now)
+        try store.ledger.begin(run: spent)
+        try store.ledger.finish(runId: spent.id, status: .completed, outcome: "done",
+                                failureReason: nil, blockedTool: nil,
+                                tokens: TokenUsage(promptTokenCount: 0, candidatesTokenCount: 0,
+                                                   totalTokenCount: 50),
+                                finishedAt: Self.now)
+
+        let admission = await runner.fire(job: job, origin: .schedule,
+                                          note: JobScheduler.skippedNote(30))
+
+        guard case .pauseBudget = admission else {
+            Issue.record("expected a budget pause, got \(String(describing: admission))")
+            return
+        }
+        let card = try #require(state.conversations.first { $0.id == state.activityConversationId() }?
+            .messages.compactMap { EventCard.decode($0.content) }.last)
+        #expect(card.catchUpNote == "30 earlier occurrences skipped")
+        #expect(try store.ledger.job(named: "behind")?.pausedReason?.contains("earlier occurrences") == false,
+                "the pause reason says why the job stopped, not how far behind it was")
+    }
+
+    static func isolatedConfig() -> (ConfigManager, () -> Void) {
+        let name = "iris-catchup-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        return (ConfigManager(store: store), {
+            store.removePersistentDomain(forName: name)
+            IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory)
+        })
     }
 
     // MARK: The note, on a real card

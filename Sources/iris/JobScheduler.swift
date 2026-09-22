@@ -48,6 +48,20 @@ actor JobScheduler {
     private let maxFiresPerTick: Int
 
     private var fireHandler: FireHandler?
+    /// Jobs whose catch-up burst the tick's cap cut short and which are still firing it.
+    ///
+    /// Those rows are left due on purpose — a `nextFireAt` still in the past is what brings the
+    /// next tick back to finish the burst — but `tick()` suspends inside its task group while the
+    /// handlers run, and the poll loop and the wake observer both dispatch it detached. Without
+    /// this, a tick arriving ten seconds into a model turn would plan a *second* burst for the
+    /// same job alongside the first: the runner's in-flight check would turn each of its fires
+    /// into an `interrupted` row for a run nothing interrupted, and the refusal that followed
+    /// would abandon the occurrences the first burst still owed.
+    ///
+    /// Deliberately narrow. Overlap in general is the runner's call (§4) and the loop still hands
+    /// over an ordinary fire while its predecessor runs — this covers only the one case the loop
+    /// itself creates, a row it knowingly left in the past.
+    private var burstsInFlight: Set<UUID> = []
     /// Called at most once every `maintenanceInterval`, from the same loop that polls for due jobs
     /// (#187 §10: retention runs "at launch and once a day"). The loop is the only thing in the
     /// app that already ticks forever, so a daily chore hangs off it rather than off a second
@@ -104,6 +118,9 @@ actor JobScheduler {
     /// already moved before the handler is called and the runner refuses a job it is already
     /// running (§4) — overlap is the runner's, so a watch fire is covered by the same set.
     ///
+    /// A truncated `replay` burst is the one exception to "`nextFireAt` has already moved": it is
+    /// left in the past on purpose, so `burstsInFlight` holds the job until the burst is over.
+    ///
     /// A job is usually one fire. A `replay` catch-up is the exception (§5): it hands over one
     /// fire per missed occurrence, in order, **sequentially** — a job must never run beside
     /// itself, and firing a burst into a task group would ask the runner's in-flight check to turn
@@ -121,7 +138,7 @@ actor JobScheduler {
             return 0
         }
 
-        var planned: [(job: Job, fires: [Fire])] = []
+        var planned: [(job: Job, fires: [Fire], resumes: Bool)] = []
         var handovers = 0
         for job in due {
             // The tick's cap counts fires, not jobs: a five-occurrence replay is five of them, so
@@ -134,6 +151,9 @@ actor JobScheduler {
             // says it must not run, so honour it here rather than in the query. The runner drops
             // a paused fire too; this is what stops the cadence from drifting while it is quiet.
             if job.pausedReason != nil { continue }
+            // A burst this loop cut short is still running; its row is due because the burst is
+            // not finished, not because a fresh one is owed.
+            if burstsInFlight.contains(job.id) { continue }
 
             guard handler != nil else {
                 // Nothing to fire into: leave the job due rather than advancing past it, or every
@@ -147,10 +167,11 @@ actor JobScheduler {
                 continue
             }
 
-            let fires = plan(for: job, at: now, budget: maxFiresPerTick - handovers)
-            guard !fires.isEmpty else { continue }
-            planned.append((job, fires))
-            handovers += fires.count
+            let outcome = plan(for: job, at: now, budget: maxFiresPerTick - handovers)
+            guard !outcome.fires.isEmpty else { continue }
+            if outcome.resumes { burstsInFlight.insert(job.id) }
+            planned.append((job, outcome.fires, outcome.resumes))
+            handovers += outcome.fires.count
         }
 
         guard !planned.isEmpty, let handler else { return 0 }
@@ -167,6 +188,9 @@ actor JobScheduler {
                         await self?.abandonCatchUp(of: entry.job, at: now)
                         break
                     }
+                    // Whichever way the burst ended — run out, refused, abandoned — the job is
+                    // the loop's again.
+                    if entry.resumes { await self?.burstEnded(entry.job.id) }
                     return started
                 }
             }
@@ -177,70 +201,93 @@ actor JobScheduler {
     }
 
     /// What this tick hands over for one due job, with `nextFireAt` already moved past all of it.
-    /// Empty means nothing fires — the row is gone, the cadence is dead, or the job's `catchUp`
-    /// says these occurrences are not worth running.
     ///
+    /// `fires` empty means nothing fires — the row is gone, the cadence is dead, or the job's
+    /// `catchUp` says these occurrences are not worth running. `resumes` means the written
+    /// `nextFireAt` is still at or before `now`, so the row stays due and a later tick has to come
+    /// back and finish the burst; only a `replay` the tick's cap cut short does that, and it is
+    /// what `burstsInFlight` locks on.
+    private struct Plan {
+        var fires: [Fire] = []
+        var resumes = false
+    }
+
     /// `budget` is what is left of `maxFiresPerTick`, and is at least one.
-    private func plan(for job: Job, at now: Date, budget: Int) -> [Fire] {
+    private func plan(for job: Job, at now: Date, budget: Int) -> Plan {
         let kind = job.trigger.kind
         // Cadence-less triggers (fsEvent) have no next occurrence to compute and nothing to fall
         // behind on; clear the stray nextFireAt that made this row due rather than pausing a job
         // the filesystem drives.
         guard let cadence = Self.cadence(of: job.trigger) else {
-            return record(jobId: job.id, nextFireAt: nil, lastRunAt: job.lastRunAt) ? [Fire(reason: kind)] : []
+            return single(record(jobId: job.id, nextFireAt: nil, lastRunAt: job.lastRunAt), kind)
         }
         // Behind by more than one cadence — the Mac slept, or the app was closed — is the only
         // case `catchUp` has an opinion about (§5). One missed occurrence is an ordinary fire
         // whatever the policy says, because there is nothing to coalesce, skip or replay.
         guard let due = job.nextFireAt, let second = cadence.next(after: due), second <= now else {
-            return advanceCadence(for: job, at: now) ? [Fire(reason: kind)] : []
+            return single(advanceCadence(for: job, at: now), kind)
         }
 
         switch job.policy.catchUp {
         case .coalesce:
             // One fire now, rescheduled from now: the job does its work once against the world as
             // it is, rather than N times against a world that has moved on.
-            return advanceCadence(for: job, at: now) ? [Fire(reason: kind)] : []
+            return single(advanceCadence(for: job, at: now), kind)
         case .skip:
             // Not a fault and not a pause: the job asked for the missed work to be dropped, so
             // the cadence moves on and nothing is recorded.
             _ = advanceCadence(for: job, at: now)
-            return []
+            return Plan()
         case .replay(let cap):
             return replay(job: job, cadence: cadence, from: due, at: now, cap: cap, budget: budget)
         }
     }
 
+    /// One ordinary fire, or none when the write that had to precede it did not land.
+    private func single(_ written: Bool, _ kind: String, note: String? = nil) -> Plan {
+        Plan(fires: written ? [Fire(reason: kind, note: note)] : [])
+    }
+
     /// The `replay(cap:)` arm of `plan`, split out because it is the only one that writes a
     /// `nextFireAt` the tick may still be behind on.
     private func replay(job: Job, cadence: Schedule, from due: Date, at now: Date,
-                        cap: Int, budget: Int) -> [Fire] {
+                        cap: Int, budget: Int) -> Plan {
+        let kind = job.trigger.kind
         guard let missed = Self.missedOccurrences(of: cadence, from: due, to: now, keeping: cap) else {
             // Further behind than the walk will enumerate. See `maxMissedOccurrences`: that is a
             // restart, not a catch-up, and one fire against the present is what a restart wants.
-            print("[JobScheduler] \(job.name) is too far behind to replay; firing once instead")
-            return advanceCadence(for: job, at: now) ? [Fire(reason: job.trigger.kind)] : []
+            // Said on the card, not just to a console nobody running a GUI app is reading: this
+            // quietly turns a `replay` job into a `coalesce` one for this fire, and everything
+            // else in this subsystem that changes what a job does leaves a trace the user can find.
+            return single(advanceCadence(for: job, at: now), kind, note: Self.tooFarBehindNote)
         }
         // What the tick has room for. A cap of zero is a real answer — replay nothing, drop the
         // lot — and reads the same here as a window that came back empty.
         let slots = missed.replay.prefix(budget)
         guard let lastPlanned = slots.last else {
             _ = advanceCadence(for: job, at: now)
-            return []
+            return Plan()
         }
         // Past the slots this tick hands over, and before any of them is fired: a crash mid-burst
         // then loses the rest rather than replaying them, the same direction every other fire
         // takes. When the tick's cap cut the burst short this is still in the past, which is what
-        // leaves the job due for the next tick to finish.
+        // leaves the job due for the next tick to finish — and what `burstsInFlight` has to cover
+        // until this burst is done.
         guard let next = cadence.next(after: lastPlanned) else {
             pauseUnmatchable(job)
-            return []
+            return Plan()
         }
-        guard record(jobId: job.id, nextFireAt: next, lastRunAt: job.lastRunAt) else { return [] }
-        return slots.enumerated().map { index, _ in
-            Fire(reason: job.trigger.kind,
+        guard record(jobId: job.id, nextFireAt: next, lastRunAt: job.lastRunAt) else { return Plan() }
+        let fires = slots.enumerated().map { index, _ in
+            Fire(reason: kind,
                  note: index == 0 && missed.dropped > 0 ? Self.skippedNote(missed.dropped) : nil)
         }
+        return Plan(fires: fires, resumes: next <= now)
+    }
+
+    /// Releases a job whose truncated burst has ended, so the loop can plan it again.
+    private func burstEnded(_ jobId: UUID) {
+        burstsInFlight.remove(jobId)
     }
 
     /// Gives up on the rest of a catch-up burst and puts the job back on its ordinary cadence.
@@ -310,6 +357,10 @@ actor JobScheduler {
         }
         return (window, dropped)
     }
+
+    /// What the one fire of a job past `maxMissedOccurrences` says for itself. Its `replay` policy
+    /// is intact and its next ordinary catch-up will honour it; this fire alone coalesced.
+    static let tooFarBehindNote = "too far behind to replay; ran once instead"
 
     /// What the first fire of a replay burst says about the occurrences the cap dropped.
     static func skippedNote(_ count: Int) -> String {
