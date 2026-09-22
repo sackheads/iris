@@ -1,5 +1,18 @@
 import Foundation
 
+/// A run's prompt and what the untrusted half of it cost (#187 deliverable 4, spec §2).
+///
+/// Two figures rather than one, because the row and the card have to tell the two apart: a watch
+/// fire that delivered 100 of 1,500 changed paths is working as designed, and one that delivered
+/// none because the guard blocked the block is a thing a person needs to know happened.
+struct PromptBuild: Sendable, Equatable {
+    let text: String
+    /// Paths that actually reached the prompt — 0 when the guard withheld the block.
+    let delivered: Int
+    /// The guard blocked the block, so the run got the marker and no paths at all.
+    let pathsWithheld: Bool
+}
+
 /// One firing of a job, start to finish (#187 §6). Replaces deliverable 1's fire handler, which
 /// pushed a system event into whatever conversation the job was created in — so a five-minute
 /// cadence wrote into the chat the user was reading, and a run that needed an approval parked on a
@@ -1359,24 +1372,38 @@ actor JobRunner {
         }
     }
 
-    /// The job's prompt, plus the paths that woke it when a watch did.
+    /// The job's prompt, plus the paths that woke it when a watch did — and what became of them.
     ///
     /// The job's own prompt is trusted — the user (or the agent on their behalf) wrote it. The
     /// paths are not: a filename is chosen by whoever can write into the watched directory, and
     /// D1 put every fire through `handleSystemEvent`, which sanitized it. So each path goes
     /// through the structural pass and the whole block through the tiered guard, arriving wrapped
     /// in `<untrusted_context>` after the instructions rather than concatenated into them.
-    static func prompt(job: Job, changedPaths: [String], gateOutput: String? = nil,
-                       protectionEnabled: Bool? = nil) async -> String {
+    ///
+    /// The cap is applied **before** the guard (#187 deliverable 4, §2): at most
+    /// `WatchCoordinator.maxDeliveredPaths` paths plus one line of arithmetic, so a build dropping
+    /// ten thousand files into a watched directory costs the classifier a bounded block rather
+    /// than an unbounded one. `delivered` and `pathsWithheld` are what the run row and the card
+    /// report — a guard that blocked the block used to be silent, which left a run that got no
+    /// paths looking exactly like a run whose burst had none.
+    static func buildPrompt(job: Job, changedPaths: [String], gateOutput: String? = nil,
+                            protectionEnabled: Bool? = nil) async -> PromptBuild {
         var prompt = job.prompt
+        var delivered = 0
+        var pathsWithheld = false
         if !changedPaths.isEmpty {
-            let listed = changedPaths
+            let sorted = changedPaths.sorted()
+            let shown = sorted.prefix(WatchCoordinator.maxDeliveredPaths)
+            var block = "Changed paths:\n" + shown
                 .map { "- " + PromptInjectionGuard.sanitizeUntrustedInput($0) }
                 .joined(separator: "\n")
-            prompt += "\n\n" + (await InjectionGuard.sanitize("Changed paths:\n" + listed,
-                                                              contextTag: "fs_event_paths",
-                                                              maxTier: .tier3_canary,
-                                                              protectionEnabled: protectionEnabled))
+            let withheld = sorted.count - shown.count
+            if withheld > 0 { block += "\nand \(withheld) more changed paths" }
+            let outcome = await InjectionGuard.classify(block, contextTag: "fs_event_paths",
+                                                        maxTier: .tier3_canary,
+                                                        protectionEnabled: protectionEnabled)
+            if case .passed = outcome { delivered = shown.count } else { pathsWithheld = true }
+            prompt += "\n\n" + InjectionGuard.wrapped(outcome, contextTag: "fs_event_paths")
         }
         // A gate script's output is the least trusted thing in a run: model-written code read
         // whatever it was pointed at and printed it. Same treatment as the paths, under its own
@@ -1387,7 +1414,14 @@ actor JobRunner {
                                                               maxTier: .tier3_canary,
                                                               protectionEnabled: protectionEnabled))
         }
-        return prompt
+        return PromptBuild(text: prompt, delivered: delivered, pathsWithheld: pathsWithheld)
+    }
+
+    /// The text alone, for every caller that has no watch summary to stamp.
+    static func prompt(job: Job, changedPaths: [String], gateOutput: String? = nil,
+                       protectionEnabled: Bool? = nil) async -> String {
+        await buildPrompt(job: job, changedPaths: changedPaths, gateOutput: gateOutput,
+                          protectionEnabled: protectionEnabled).text
     }
 
     /// The first line of the last thing the agent said, capped at 200 characters — the one line a

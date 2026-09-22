@@ -268,6 +268,47 @@ struct JobRunnerTests {
         #expect(prompt == "Review the change.")
     }
 
+    /// #187 deliverable 4, spec §2. The cap is applied *before* the guard, so a build dropping ten
+    /// thousand files into a watched directory costs the classifier one bounded block rather than
+    /// an unbounded one — and the run is still told the true figure.
+    @Test("a hundred paths reach the prompt and the rest are counted")
+    func promptCapsAtAHundredPaths() async {
+        let paths = (0..<150).map { String(format: "/tmp/watched/f%03d.swift", $0) }
+        let build = await JobRunner.buildPrompt(job: job(prompt: "Review the change."),
+                                                changedPaths: paths.shuffled(),
+                                                protectionEnabled: false)
+
+        #expect(build.delivered == 100)
+        #expect(build.pathsWithheld == false)
+        #expect(build.text.contains("- /tmp/watched/f000.swift"), "sorted, so the cap is not arbitrary")
+        #expect(build.text.contains("- /tmp/watched/f099.swift"))
+        #expect(!build.text.contains("/tmp/watched/f100.swift"))
+        #expect(build.text.contains("and 50 more changed paths"))
+        #expect(build.text.components(separatedBy: "\n- ").count == 101, "a hundred listed paths")
+        #expect(await JobRunner.prompt(job: job(prompt: "Review the change."),
+                                       changedPaths: paths.shuffled(),
+                                       protectionEnabled: false) == build.text,
+                "`prompt` is `buildPrompt(...).text`, unchanged for every caller that has one")
+    }
+
+    /// The case that used to be silent: the guard blocked the block of paths, the run got the
+    /// marker and no paths, and nothing anywhere said so. Now the build reports it and the
+    /// coordinator's summary carries it onto the row and the card.
+    @Test("a block the guard refuses is withheld, and says it was")
+    func aBlockedPathBlockIsWithheld() async {
+        let build = await CoreMLEvaluator.$scopedModel.withValue(.init(MockCoreMLModel(probability: 0.99))) {
+            await JobRunner.buildPrompt(job: job(prompt: "Review the change."),
+                                        changedPaths: ["/tmp/watched/a.swift"],
+                                        protectionEnabled: true)
+        }
+
+        #expect(build.delivered == 0)
+        #expect(build.pathsWithheld)
+        #expect(build.text.hasPrefix("Review the change."))
+        #expect(build.text.contains("[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]"))
+        #expect(!build.text.contains("a.swift"), "no path survives a blocked block")
+    }
+
     @Test("a gated tool nobody can approve blocks the run and names the tool")
     func blockedOnApproval() async throws {
         // Unique, and outside every allowlist by construction: `PermissionManager` matches a rule

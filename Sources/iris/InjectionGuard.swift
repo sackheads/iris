@@ -208,10 +208,19 @@ public struct InjectionGuard {
                                 protectionEnabled: Bool? = nil,
                                 tier2ModelsDir: URL? = nil,
                                 tier3ModelsDir: URL? = nil) async -> String {
+        return wrapped(await classify(rawInput, contextTag: contextTag, maxTier: maxTier,
+                                      protectionEnabled: protectionEnabled,
+                                      tier2ModelsDir: tier2ModelsDir, tier3ModelsDir: tier3ModelsDir),
+                       contextTag: contextTag)
+    }
+
+    /// `sanitize`'s second half on its own: the `<untrusted_context>` wrapper around whatever the
+    /// tiers decided. A caller that needs to *know* which way a verdict went — `JobRunner`'s watch
+    /// paths, whose row and card have to report that the block was withheld (#187 deliverable 4) —
+    /// uses `classify` and then this, so the wrapping stays in one place.
+    static func wrapped(_ outcome: GuardOutcome, contextTag: String) -> String {
         let source = sanitizeSourceLabel(contextTag)
-        switch await classify(rawInput, contextTag: contextTag, maxTier: maxTier,
-                              protectionEnabled: protectionEnabled,
-                              tier2ModelsDir: tier2ModelsDir, tier3ModelsDir: tier3ModelsDir) {
+        switch outcome {
         case .passed(let clean): return wrap(clean, source: source)
         case .blocked(let marker): return wrapBlocked(marker, source: source)
         }
