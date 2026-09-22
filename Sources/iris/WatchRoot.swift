@@ -77,15 +77,21 @@ enum WatchRoot {
     ///   - paths: where Iris's own directory is; injected so a test can refuse a temp root.
     ///   - home: the user's home directory, injected for the same reason.
     ///   - isVolume: whether a canonical path is a mount point; injected so a test can make a temp
-    ///     directory one without mounting anything. The default asks the file system.
+    ///     directory one without mounting anything. The default asks the file system. A throw is a
+    ///     root we cannot ask about, and a root we cannot ask about is not one we watch: it is
+    ///     refused as too broad rather than let through.
     static func refusal(for canonical: String, paths: IrisPaths, home: String,
-                        isVolume: (String) -> Bool = { isMountPoint($0) }) -> String? {
-        let root = IrisPaths.canonicalPath(canonical).lowercased()
+                        isVolume: (String) throws -> Bool = { try isMountPoint($0) }) -> String? {
+        // The string comparisons are case-insensitive; the file system is asked with the spelling
+        // the path actually has, because on a case-sensitive volume the lower-cased spelling is a
+        // path that does not exist and the question would fail for the wrong reason.
+        let canonicalRoot = IrisPaths.canonicalPath(canonical)
+        let root = canonicalRoot.lowercased()
         let broad = (tooBroad + [home]).map { IrisPaths.canonicalPath($0).lowercased() }
         if broad.contains(root) { return tooBroadRefusal }
         let components = URL(fileURLWithPath: root).pathComponents
         if components.count == 3, components[1] == "volumes" { return tooBroadRefusal }
-        if isVolume(root) { return tooBroadRefusal }
+        if (try? isVolume(canonicalRoot)) ?? true { return tooBroadRefusal }
         let iris = IrisPaths.canonicalPath(paths.root.path).lowercased()
         if root == iris || root.hasPrefix(iris + "/") || iris.hasPrefix(root + "/") {
             return protectedRefusal
@@ -94,8 +100,11 @@ enum WatchRoot {
     }
 
     /// What the file system says: `true` for `/`, `/System/Volumes/Data`, anything under `/Volumes`
-    /// that is mounted, and any other mount point; `false` for a path that is not there.
-    static func isMountPoint(_ path: String) -> Bool {
-        (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.isVolumeKey]))?.isVolume == true
+    /// that is mounted, and any other mount point; `false` for a path that is not there (the
+    /// lexical rule in `refusal` speaks for those). A path that is there but will not answer
+    /// throws, so the caller can fail closed instead of taking silence for "not a mount".
+    static func isMountPoint(_ path: String) throws -> Bool {
+        guard FileManager.default.fileExists(atPath: path) else { return false }
+        return try URL(fileURLWithPath: path).resourceValues(forKeys: [.isVolumeKey]).isVolume ?? false
     }
 }

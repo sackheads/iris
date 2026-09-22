@@ -38,9 +38,12 @@ struct WatchRootTests {
     func mountPointsAreRefusedWhereverTheyAreMounted() throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.base) }
-        let share = f.base.appendingPathComponent("share")
+        // Mixed case on purpose: the file system is asked with the spelling it has, because on a
+        // case-sensitive volume the lower-cased spelling is a path that does not exist.
+        let share = f.base.appendingPathComponent("Share")
         try FileManager.default.createDirectory(at: share, withIntermediateDirectories: true)
-        let canonical = IrisPaths.canonicalPath(share.path).lowercased()
+        let canonical = IrisPaths.canonicalPath(share.path)
+        #expect(canonical != canonical.lowercased(), "the fixture needs a capital letter to prove the spelling")
         #expect(WatchRoot.refusal(for: share.path, paths: f.paths, home: f.home,
                                   isVolume: { $0 == canonical }) == WatchRoot.tooBroadRefusal)
         #expect(WatchRoot.refusal(for: share.path, paths: f.paths, home: f.home,
@@ -48,11 +51,15 @@ struct WatchRootTests {
         // An unmounted volume is judged by its spelling, whatever the file system says.
         #expect(WatchRoot.refusal(for: "/Volumes/NotMounted", paths: f.paths, home: f.home,
                                   isVolume: { _ in false }) == WatchRoot.tooBroadRefusal)
-        // And the real answer for the real paths.
-        #expect(WatchRoot.isMountPoint("/"))
-        #expect(WatchRoot.isMountPoint("/System/Volumes/Data"))
-        #expect(!WatchRoot.isMountPoint(share.path))
-        #expect(!WatchRoot.isMountPoint(f.base.appendingPathComponent("absent").path))
+        // A root the file system will not answer for is refused, not watched: fail closed.
+        struct Unreadable: Error {}
+        #expect(WatchRoot.refusal(for: share.path, paths: f.paths, home: f.home,
+                                  isVolume: { _ in throw Unreadable() }) == WatchRoot.tooBroadRefusal)
+        // And the real answer for the real paths; a path that is not there is simply not a mount.
+        #expect(try WatchRoot.isMountPoint("/"))
+        #expect(try WatchRoot.isMountPoint("/System/Volumes/Data"))
+        #expect(try !WatchRoot.isMountPoint(share.path))
+        #expect(try !WatchRoot.isMountPoint(f.base.appendingPathComponent("absent").path))
     }
 
     /// `IrisPaths.isUnderProtectedWriteDir` covers only the "is under" direction; a watch root
