@@ -395,6 +395,67 @@ struct SessionToolsTests {
         #expect(card?.description == "drafting D3")
     }
 
+    /// #246. `renderPeerList` caps every field it interpolates, but that is a bound at the point
+    /// of USE — the stored value was whatever the model sent, persisted to the `sessionCard`
+    /// column and decoded on every launch. Length is a storage concern, so it belongs where the
+    /// model's bytes arrive. The render caps stay regardless: a second reader of `sessionCard`
+    /// must not have to rediscover the obligation.
+    @Test("set_session_card bounds what it stores, not only what the listing shows")
+    func setSessionCardBoundsTheStoredCard() async {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID()
+        app.createNewConversation(id: me)
+
+        let call = FunctionCall(name: "set_session_card",
+                                args: ["name": .string(String(repeating: "n", count: 5_000)),
+                                       "description": .string(String(repeating: "d", count: 5_000))],
+                                id: "c1")
+        _ = await runToolCall(call, on: app, as: me)
+
+        let card = app.conversations.first { $0.id == me }?.sessionCard
+        #expect((card?.name.count ?? 0) <= IrisEngine.cardNameCap + 1,
+                "stored name must not exceed the cap the listing would apply (+1 for the ellipsis)")
+        #expect((card?.description.count ?? 0) <= IrisEngine.cardDescriptionCap + 1)
+        #expect(card?.name.hasSuffix("\u{2026}") == true, "and the truncation must be visible, not silent")
+    }
+
+    /// `capCardField`'s doc comment claims it is idempotent, and the write-then-render design
+    /// depends on that: a card capped by the handler passes through `flattenCardField` at every
+    /// listing, and if each hop shaved another character a long-lived card would erode.
+    @Test("capping is idempotent, so a stored card does not erode on each render")
+    func cappingIsIdempotent() {
+        let once = IrisEngine.capCardField(String(repeating: "n", count: 5_000), cap: IrisEngine.cardNameCap)
+        #expect(IrisEngine.capCardField(once, cap: IrisEngine.cardNameCap) == once)
+        #expect(IrisEngine.flattenCardField(once, cap: IrisEngine.cardNameCap) == once,
+                "the render path must leave an already-capped field alone")
+        #expect(once.count == IrisEngine.cardNameCap + 1)
+        // The assertion that catches the likely mutation — dropping the length guard and
+        // appending the ellipsis unconditionally is idempotent on a LONG value, so only a short
+        // one distinguishes it.
+        #expect(IrisEngine.capCardField("ab", cap: IrisEngine.cardNameCap) == "ab",
+                "a field under the cap must be stored exactly as written")
+    }
+
+    /// Capping at write must not quietly become the only bound: the two tests above that prove the
+    /// LISTING is hardened write their hostile values straight to `setSessionCard`, so they keep
+    /// exercising the render path. Fixing length at the mutator instead of the handler would leave
+    /// them green while testing nothing.
+    @Test("a card written directly is still bounded by the listing, not by the write path")
+    func directlyWrittenCardIsStillCappedAtRender() async {
+        let app = AppState(); app.conversations.removeAll()
+        let me = UUID(), other = UUID()
+        app.createNewConversation(id: me)
+        app.createNewConversation(id: other)
+        app.setSessionCard(for: other, SessionCard(name: String(repeating: "n", count: 5_000),
+                                                   description: String(repeating: "d", count: 5_000)))
+
+        #expect((app.conversations.first { $0.id == other }?.sessionCard?.name.count ?? 0) == 5_000,
+                "the mutator is a plain setter — the bound is at the handler and at render")
+        let listing = await runToolCall(FunctionCall(name: "list_sessions", args: [:], id: "c1"),
+                                        on: app, as: me)
+        #expect(listing.count < 1_000)
+    }
+
     @Test("set_session_card refuses an empty name rather than advertising a blank handle")
     func setSessionCardRefusesEmptyName() async {
         let app = AppState(); app.conversations.removeAll()
