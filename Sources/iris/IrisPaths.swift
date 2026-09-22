@@ -4,6 +4,10 @@ import Foundation
 ///
 /// Storage is segregated by owner: `memory/` (bot-authored, mutable, guard-sanitized),
 /// `config/` (human/app config), and `models/` (downloaded bundles). Every consumer resolves
+/// NOTE: `expandingTildeInPath` silently truncates its result to PATH_MAX, so it cannot be used
+/// to measure a path's length — `IrisEngine.expandTilde` does the common shapes without that, and
+/// `IrisEngine.workspaceRefusal` is where the resulting length rule lives (#273).
+///
 /// paths through here instead of re-deriving `("~/.iris" as NSString).expandingTildeInPath`,
 /// which removes the duplication that produced the SOUL split-brain bug. `root` is injectable
 /// so `IrisMigrator` and the memory managers can be unit-tested against a temp directory.
