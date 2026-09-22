@@ -286,7 +286,8 @@ struct ToolExecutor {
                         Job.slug(from: URL(fileURLWithPath: path).lastPathComponent),
                         existing: Set(jobs.map(\.name))),
                     prompt: parsed.instructions,
-                    trigger: .fsEvent(FSWatch(path: path, quietWindowSeconds: window ?? 3, ignore: parsed.ignore ?? [])),
+                    trigger: .fsEvent(FSWatch(path: path, quietWindowSeconds: window ?? FSWatch.defaultQuietWindowSeconds,
+                                              ignore: parsed.ignore ?? [])),
                     createdInConversationId: conversationId,
                     // A watch never runs concurrently with itself; by default a save that lands
                     // mid-run is queued, not dropped.

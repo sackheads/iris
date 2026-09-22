@@ -67,6 +67,23 @@ struct JobRunLedgerTests {
         #expect(try store.ledger.lastWatchSummary(jobId: other.id) == nil)
     }
 
+    @Test("lastWatchSummary skips a newest blob that will not decode rather than answering nil")
+    func lastWatchSummarySkipsAnUnreadableNewestBlob() throws {
+        let store = try ConversationStore.inMemory()
+        let job = try seedJob(store, "w")
+        var older = makeRun(job, at: t0)
+        older.watchSummary = WatchSummary(changed: 4, ownWrites: 1)
+        var newest = makeRun(job, at: t0.addingTimeInterval(60))
+        newest.watchSummary = WatchSummary(changed: 9)
+        for run in [older, newest] { try store.ledger.begin(run: run) }
+        try store.writer.write { db in
+            try db.execute(sql: "UPDATE job_runs SET watchSummary = ? WHERE id = ?",
+                           arguments: ["{not json", newest.id.uuidString])
+        }
+        // The newest *readable* burst, not "nothing fired yet" over a history that decodes.
+        #expect(try store.ledger.lastWatchSummary(jobId: job.id) == older.watchSummary)
+    }
+
     // MARK: finish
 
     @Test("finish sets status, outcome, tokens and finishedAt, truncating outcome to 200 characters")

@@ -98,8 +98,9 @@ struct FSWatch: Codable, Equatable, Sendable {
     static func clampQuietWindow(_ seconds: Int) -> Int { min(max(seconds, 1), 300) }
 
     /// How long a burst may last before it fires anyway: a fixed multiple of the window, derived
-    /// and never stored, so there is only ever one knob to get wrong.
-    var ceilingSeconds: Int { quietWindowSeconds * 10 }
+    /// and never stored, so there is only ever one knob to get wrong. The multiple is the
+    /// coordinator's, spelled once, so the figure `/jobs` prints is the one the burst was cut at.
+    var ceilingSeconds: Int { quietWindowSeconds * WatchCoordinator.ceilingMultiplier }
 
     private enum CodingKeys: String, CodingKey { case path, quietWindowSeconds, ignore }
 
