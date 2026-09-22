@@ -344,17 +344,21 @@ conversation. The *policy* matches `checkpointHistory`'s: a JSON decode failure 
 (`ConversationStore.swift` ~771-773 for `checkpointHistory`, ~814-821 for `sessionCard`) is recorded
 as a skipped row and leaves the field absent, never the conversation.
 
-The *mechanism* is not merely a copy of that precedent — it is strictly more defensive, and that is
-worth stating precisely rather than claiming it "follows" `checkpointHistory`. `checkpointHistory` is
-read through the shared `text(_:)` closure in `loadAll` (~705-713), whose `.invalid` case — bytes
-that are not valid UTF-8 — sets `unreadableColumn` and quarantines the **entire conversation**
-(~732-735), the same trap `title`, `workspacePath`, and `goalContract` fall into. `sessionCard`
-deliberately bypasses that closure and reads through `Self.readTextValue` directly (~814), so an
-invalid encoding on the card degrades to an absent card plus a reported loss — never a dropped
-conversation. Only a *decode* failure (valid UTF-8, bad JSON) behaves the same way for both fields;
-an *encoding* failure does not. `sessionCard`'s own precedent comment in the source (`~809-813`)
-states this directly: "opposite of `goalContract`... here even non-UTF8 bytes degrade to
-'uncarded' plus a reported loss, never a dropped conversation."
+The *mechanism* used to differ, and no longer does (#233). `checkpointHistory` was read through the
+shared `text(_:)` closure in `loadAll`, whose `.invalid` case — bytes that are not valid UTF-8 — set
+`unreadableColumn` and quarantined the **entire conversation**, while `sessionCard` bypassed that
+closure and read through `readTextValue` directly. So the card was strictly more defensive than the
+precedent it cited: a bad byte cost the card, but the same bad byte in an audit trail cost the
+messages, the contract and the workspace with it.
+
+#233 moved `checkpointHistory`, `lastGoalEvaluation`, `lastGoalCompletionReport` and
+`subagentResult` onto the card's behaviour — on *both* paths, so a column never disagrees with
+itself about whether a bad byte and bad JSON cost the same thing. The sentence above is now simply
+true for all of them. The line it drew instead is between what a conversation *is* and what happened in it:
+`title`, `workspacePath`, `activeGoal` and `position` are identity; `mainAgentSandbox` governs
+whether commands are contained; `tokenUsage` is what per-run budgets compare against, so reading it
+as zero hands a job an unbounded one; `goalContract` is the goal. Those still take the conversation
+with them, deliberately. Everything else loses only itself, and says so in `skipped`.
 
 ## 7. The cascade cap
 

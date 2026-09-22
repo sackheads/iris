@@ -598,10 +598,22 @@ class AppState {
                 guard let id = row.conversationId, loadedIds.contains(id) else { return false }
                 return (row.table == "messages" || row.table == "history") && row.ordinal != nil
             }
+            // A kept row is a conversation that loaded fine and lost one saved detail (#233). It
+            // belongs in neither bucket below: it was read, so "could not be read" is false, and
+            // it is not left in place either — the next metadata write rewrites the whole row, so
+            // the corrupt bytes are gone within a turn rather than waiting on disk for recovery.
+            let keptLosses = loadedSkippedRows.filter { $0.kept }
             let leftInPlace = loadedSkippedRows.filter { row in
+                if row.kept { return false }
                 if let id = row.conversationId, repairFailedIds.contains(id) { return false }
                 guard let id = row.conversationId, loadedIds.contains(id) else { return true }
                 return !((row.table == "messages" || row.table == "history") && row.ordinal != nil)
+            }
+            if !keptLosses.isEmpty {
+                let convs = Set(keptLosses.compactMap(\.conversationId)).count
+                let one = keptLosses.count == 1
+                appendLaunchNotice("\(keptLosses.count) saved detail\(one ? "" : "s") (an audit trail or a summary) in \(convs) conversation\(convs == 1 ? "" : "s") could not be read and \(one ? "was" : "were") dropped; the conversation\(convs == 1 ? "" : "s") loaded normally. The unreadable value is replaced on the next save. See the console for details.",
+                                   to: target)
             }
             if !quarantined.isEmpty {
                 let convs = Set(quarantined.compactMap(\.conversationId)).count

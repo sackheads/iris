@@ -493,9 +493,14 @@ struct ConversationStoreTests {
         #expect(try store.quarantineCount(for: c.id) == 0)
     }
 
+    /// The fatal half of #233's line: these say what the conversation *is*, or govern how it runs.
+    /// `sandbox` read as absent would run commands on the host that were meant to be contained,
+    /// and `tokenUsage` read as zero hands a job an unbounded per-run budget — neither may be
+    /// quietly dropped. `subagentResult` moved to the soft list below (it is a record of a run
+    /// that already finished; the parent reads its result from `SubagentManager`, not this column).
     @Test("a non-UTF8 metadata column skips the whole conversation rather than loading it half-read")
     func nonUTF8MetadataSkipsTheConversation() throws {
-        for column in ["title", "goalContract", "subagentResult", "tokenUsage", "workspacePath", "activeGoal", "mainAgentSandbox"] {
+        for column in ["title", "goalContract", "tokenUsage", "workspacePath", "activeGoal", "mainAgentSandbox"] {
             let store = try ConversationStore.inMemory()
             let a = Self.sample(title: "a"), b = Self.sample(title: "b")
             try store.apply([Self.created(a), Self.created(b)])
@@ -505,6 +510,62 @@ struct ConversationStoreTests {
             #expect(loaded.skipped == [SkippedRow(conversationId: a.id, table: "conversations", ordinal: nil,
                                                   reason: "unreadable \(column)")], "\(column)")
         }
+    }
+
+    /// #233: a bad byte in an audit trail used to cost the whole conversation — its messages, its
+    /// contract, its workspace. Their *JSON* decode failures were already soft (#182: "the contract
+    /// *is* the goal, whereas the history is supplementary"); the raw-byte path was missed because
+    /// `text` fails a column before anything decodes it.
+    @Test("a non-UTF8 supplementary column loses itself, not the conversation")
+    func nonUTF8SupplementaryColumnIsSurvivable() throws {
+        for column in ["subagentResult", "checkpointHistory", "lastGoalEvaluation", "lastGoalCompletionReport"] {
+            let store = try ConversationStore.inMemory()
+            let a = Self.sample(title: "a"), b = Self.sample(title: "b")
+            try store.apply([Self.created(a), Self.created(b)])
+            try store.rawWrite("UPDATE conversations SET \(column) = X'FFFE' WHERE id = ?", arguments: [a.id.uuidString])
+            let loaded = try store.loadAll()
+            #expect(loaded.conversations.map(\.title) == ["a", "b"], "\(column) must not cost the conversation")
+            // The loss is reported rather than silent: an audit trail that vanished without a word
+            // is the same problem one row down.
+            #expect(loaded.skipped == [SkippedRow(conversationId: a.id, table: "conversations", ordinal: nil,
+                                                  reason: "unreadable \(column): invalid text encoding", kept: true)],
+                    "\(column)")
+        }
+    }
+
+    /// The same columns on the JSON path, which is the likelier corruption. `subagentResult`'s
+    /// decode used to sit in the fatal block, so the column was soft on bad bytes and fatal on bad
+    /// JSON — #233's asymmetry with the halves swapped.
+    @Test("bad JSON in a supplementary column loses itself, not the conversation")
+    func badJSONInSupplementaryColumnIsSurvivable() throws {
+        for column in ["subagentResult", "checkpointHistory", "lastGoalEvaluation", "lastGoalCompletionReport"] {
+            let store = try ConversationStore.inMemory()
+            let a = Self.sample(title: "a"), b = Self.sample(title: "b")
+            try store.apply([Self.created(a), Self.created(b)])
+            try store.rawWrite("UPDATE conversations SET \(column) = '{not json' WHERE id = ?", arguments: [a.id.uuidString])
+            let loaded = try store.loadAll()
+            #expect(loaded.conversations.map(\.title) == ["a", "b"], "\(column) must not cost the conversation")
+            #expect(loaded.skipped.count == 1 && loaded.skipped.first?.kept == true, "\(column)")
+        }
+    }
+
+    /// A conversation dropped for a fatal column must not *also* claim it lost an audit trail —
+    /// it took that with it, and two rows would read as two separate losses.
+    @Test("a fatal column and a supplementary one together report only the fatal loss")
+    func fatalColumnSuppressesTheSoftReport() throws {
+        let store = try ConversationStore.inMemory()
+        let a = Self.sample(title: "a"), b = Self.sample(title: "b")
+        try store.apply([Self.created(a), Self.created(b)])
+        // `goalContract`, not a non-UTF-8 `title`: the title case passes even with the flush in
+        // the wrong place, because it is caught by the same `unreadableColumn` check the flush sat
+        // under. Bad JSON in a fatal column drops the conversation *after* that check, which is
+        // the ordering that actually has to hold.
+        try store.rawWrite("UPDATE conversations SET goalContract = '{not json', checkpointHistory = X'FFFE' WHERE id = ?",
+                           arguments: [a.id.uuidString])
+        let loaded = try store.loadAll()
+        #expect(loaded.conversations.map(\.title) == ["b"])
+        #expect(loaded.skipped.count == 1, "the dropped conversation must not also report a loss it took with it")
+        #expect(loaded.skipped.first?.kept == false)
     }
 
     @Test("a corrupted metadata row skips only that conversation")
