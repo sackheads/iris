@@ -130,8 +130,15 @@ enum JobsCommand: Equatable {
     /// "this job has spent nothing today", which is a different and wrong claim. Required rather
     /// than defaulted for exactly that reason: a caller that forgot the figures would render a
     /// table of dashes and claim the ledger could not be read.
+    ///
+    /// `lastBursts` and `absorbed` are the watch figures (#187 deliverable 4, spec §6): the newest
+    /// `watchSummary` per job from the ledger, and what each watch has absorbed since launch from
+    /// the coordinator's memory. `absorbed == nil` means there is no live coordinator in this
+    /// process — `iris --run-job` — and the line says `—` rather than a zero it cannot vouch for.
     static func render(jobs: [Job], lastRuns: [UUID: JobRun], usage: UsageSnapshot,
-                       unacknowledged: [JobRun], unreadableJobs: Int, now: Date) -> String {
+                       unacknowledged: [JobRun], unreadableJobs: Int, now: Date,
+                       lastBursts: [UUID: WatchSummary] = [:],
+                       absorbed: [UUID: AbsorbedCounts]? = nil) -> String {
         var blocks: [String] = []
 
         if jobs.isEmpty {
@@ -147,6 +154,19 @@ enum JobsCommand: Equatable {
                             + "\(cell(nextText(for: job, now: now))) | \(cell(last)) | "
                             + "\(figures.map(tokensCell) ?? missingFigure) | "
                             + "\(figures.map(runsCell) ?? missingFigure) |")
+            }
+            // One line per watch, directly beneath the table and in its order: a markdown table
+            // row cannot carry a second line, and the figures are too long for a column.
+            let watchLines = jobs.compactMap { job -> String? in
+                guard case .fsEvent = job.trigger else { return nil }
+                return watchLine(job: job, lastBurst: lastBursts[job.id],
+                                 absorbed: absorbed?[job.id], hasCoordinator: absorbed != nil)
+            }
+            // One paragraph per watch: the block is markdown, where a single newline is a space,
+            // so two lines joined by one would read as a single sentence.
+            for line in watchLines {
+                rows.append("")
+                rows.append(line)
             }
             if let global = usage.global {
                 rows.append("")
@@ -230,7 +250,40 @@ enum JobsCommand: Equatable {
         case .skip: parts.append("catch-up skip")
         case .replay(let cap): parts.append("catch-up replay \(cap)")
         }
+        // A watch's own knobs (spec §6): the quiet window when it is not the default, and how
+        // many globs it ignores — the count, since the globs themselves are too long for a cell.
+        if case .fsEvent(let watch) = job.trigger {
+            if watch.quietWindowSeconds != FSWatch.defaultQuietWindowSeconds {
+                parts.append("quiet \(watch.quietWindowSeconds) s")
+            }
+            if !watch.ignore.isEmpty { parts.append("\(watch.ignore.count) ignore") }
+        }
         return parts.isEmpty ? "default" : parts.joined(separator: " · ")
+    }
+
+    /// The watch line beneath the table (spec §6), two halves from two sources:
+    /// `` `notes` — last burst: 12 changes · 3 noise · 1 own writes (cut at 30 s) · absorbed since
+    /// launch: 41 noise · 7 own writes · 3 while paused ``. The first half is the ledger's newest
+    /// summary for the job and survives a relaunch; the second is the coordinator's memory and
+    /// starts again at zero. The job is at hand here, so the ceiling is printed as the number the
+    /// window makes it — the card, which has no window, says `(cut at the ceiling)` instead.
+    ///
+    /// `hasCoordinator == false` prints `—` for the second half: with no coordinator in the
+    /// process (the `--run-job` process) a zero would claim the watch absorbed nothing, which is
+    /// not known. With one, a watch it has no entry for has absorbed nothing, and says so.
+    static func watchLine(job: Job, lastBurst: WatchSummary?, absorbed: AbsorbedCounts?,
+                          hasCoordinator: Bool) -> String {
+        let ceiling: Int?
+        if case .fsEvent(let watch) = job.trigger { ceiling = watch.ceilingSeconds } else { ceiling = nil }
+        let burst = lastBurst?.figuresText(ceilingSeconds: ceiling) ?? "nothing fired yet"
+        let since: String
+        if hasCoordinator {
+            let counts = absorbed ?? AbsorbedCounts()
+            since = "\(counts.noise) noise · \(counts.ownWrites) own writes · \(counts.whilePaused) while paused"
+        } else {
+            since = missingFigure
+        }
+        return "`\(job.name)` — last burst: \(burst) · absorbed since launch: \(since)"
     }
 
     /// What a column says when the figure behind it could not be read.

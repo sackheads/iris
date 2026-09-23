@@ -62,7 +62,7 @@ Lands after `#163` and `#177`.
 - Retry: failed runs back off exponentially up to three attempts, then the job pauses and the main conversation gets a card. A paused job stays paused until I say otherwise.
 - Budget: tokens per run and per day, per job, plus a global daily background budget. Exceeding any of them pauses the job with a card. The ledger's token column is how we know.
 - Breaker: more than N runs per hour pauses the job. N defaults low.
-- Loop guard: a watch ignores events on paths Iris itself wrote in the last quiet window, and every fs watch has a quiet window (default 3 s) on top of the stream latency.
+- Loop guard: a watch ignores events on paths Iris's own unattended runs wrote through the file tools in the last few seconds (a foreground write, or one a person approved, is a change the watch should notice), and every fs watch has a quiet window (default 3 s, with a ceiling of ten windows for a folder that never goes quiet) on top of the stream latency. What the filter cannot see — commands, MCP tools, hooks — is bounded by the breaker.
 - Digest: a deterministic daily job summarizes the ledger into one card. "Failing silently for a week" cannot happen without someone deleting that job.
 
 ### Observability
@@ -78,7 +78,7 @@ Lands after `#163` and `#177`.
 1. **Policies and model.** Write the two decisions above into the spec; define the unified trigger, profile, and ledger schema; drop the old `UserDefaults` records (decision: no importer — nothing real existed to carry over, and the two keys are deleted, with a count logged, on first launch of a build with migration v9). Adopt a cron subset with lists, ranges, steps, and a timezone per job (closes `#156` properly). — landed: see `docs/specs/2026-09-21-agency-model-and-ledger.md`; PR pending
 2. **Ledger and delivery.** `job_runs` beside the conversation store; background conversations hidden from the sidebar; event cards; steer-inbox delivery; `get_job_run`; stop writing job output into `messages`. — landed: see `docs/specs/2026-09-21-agency-model-and-ledger.md`; PR pending
 3. **Runtime.** Gate execution, background profile, fail-closed approvals with proposal cards, budgets, breaker, overlap policy, retry and pause, sleep assertion and `catchUp`, `iris --run-job`. — landed: see `docs/specs/2026-09-21-agency-runtime.md` and `docs/jobs.md`; final PR pending
-4. **Watches.** Fold `WatcherManager` onto the trigger model; quiet window; self-write filter; poll trigger.
+4. **Watches.** Fold `WatcherManager` onto the trigger model; quiet window; self-write filter; poll trigger. — landed: see `docs/specs/2026-09-22-agency-watches.md` and `docs/jobs.md` (the poll trigger landed with deliverable 3)
 5. **Main conversation.** Pin, briefing, tools, anchoring. After `#163` and `#177`.
 6. **Native surfaces.** Notifications, status item, URL scheme, run log view.
 

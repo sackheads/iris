@@ -19,6 +19,14 @@ struct ToolExecutor {
     /// means the tool declines instead of registering a watch nothing runs.
     var jobToolsProvider: (@Sendable () async -> JobTools?)?
 
+    /// Where Iris's own directory and the user's home are, for `register_directory_watcher`'s
+    /// refusals (`WatchRoot.refusal`). nil — the case in the app — means the real ones, resolved
+    /// when the tool runs rather than when the executor is built, so a headless run that installs
+    /// a volatile copy after this value exists is still refused on the copy. A test sets both so
+    /// that nothing it does resolves through `~/.iris`.
+    var irisPaths: IrisPaths?
+    var homeDirectory: String?
+
     /// How the sandboxed branch of `run_command` reaches the container session. Injectable so a
     /// test can assert what that branch forwards — the command, the workspace, and the deadline —
     /// without a `container` binary, a daemon or a VM. nil, the case everywhere in the app, means
@@ -82,12 +90,15 @@ struct ToolExecutor {
         ),
         FunctionDeclaration(
             name: "register_directory_watcher",
-            description: "Watch a directory for file changes. This creates a job that persists across restarts and runs your instructions in the background whenever files under the path are modified. Each run happens in a hidden conversation of its own and reports one card into the pinned 'Iris Activity' conversation rather than interrupting this one; nobody is there to approve a gated tool, so a run whose work needs approval stops and says so. Use this when the user asks you to monitor a folder.",
+            description: Self.watchDescription,
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
                     "path": Schema(type: "STRING", description: "Absolute, tilde (~), or workspace-relative path to watch. A relative path resolves against the conversation's bound workspace, not the app's directory."),
-                    "instructions": Schema(type: "STRING", description: "The instructions to execute when a file is modified")
+                    "instructions": Schema(type: "STRING", description: "The instructions to execute when a file is modified"),
+                    "quiet_window_seconds": Schema(type: "INTEGER", description: "1 to 300; outside is clamped"),
+                    "ignore": Schema(type: "ARRAY", description: "glob patterns relative to the path, e.g. `*.log`, `build/`", items: Schema(type: "STRING")),
+                    "overlap": Schema(type: "STRING", description: "`queue` or `skip`")
                 ],
                 required: ["path", "instructions"]
             )
@@ -173,8 +184,11 @@ struct ToolExecutor {
             guard let path = args["path"]?.stringValue, let content = args["content"]?.stringValue else { return "Error: Missing path or content" }
             return await writeFile(path, content: content, cwd: cwd)
         case "register_directory_watcher":
-            guard let path = args["path"]?.stringValue, let instructions = args["instructions"]?.stringValue else { return "Error: Missing path or instructions" }
-            return await registerWatcher(path: Self.resolvePath(path, cwd: cwd), instructions: instructions, conversationId: conversationId)
+            switch RegisterWatcherArguments.parse(args) {
+            case .failure(let message): return message.text
+            case .success(let parsed):
+                return await registerWatcher(parsed, resolved: Self.resolvePath(parsed.path, cwd: cwd), conversationId: conversationId)
+            }
         case "search_web":
             guard let query = args["query"]?.stringValue else { return "Error: Missing query" }
             return await searchWeb(query: query)
@@ -207,53 +221,100 @@ struct ToolExecutor {
         }
     }
     
-    /// Stores a `.fsEvent` job for `path`. The job is named after the directory being watched
-    /// rather than the instructions, because that is what a user scanning the jobs list is looking
-    /// for.
+    /// The declaration, two sentences (invariant 6): what the tool does and that its own runs'
+    /// writes are safe — only those (R-D4-1), so the sentence must not say "Iris's". The built-in ignore set, the ×10 ceiling and the never-concurrent rule are said once,
+    /// in the result the model reads after calling it, not paid for on every turn.
+    static let watchDescription = "Watch a directory for file changes and run your instructions in the background once it has been quiet for a few seconds (default 3). The watch ignores its runs' own file-tool writes, so a run can safely write into the folder."
+
+    static let allIgnoredRefusal = "that ignore list would ignore every change; drop the pattern or watch a narrower path"
+
+    /// Stores a `.fsEvent` job for the directory (#187 deliverable 4, spec §5). The job is named
+    /// after the directory being watched rather than the instructions, because that is what a user
+    /// scanning the jobs list is looking for.
     ///
-    /// Re-registering a path already watched rewrites that job's instructions and destination in
-    /// place rather than adding a second one: the model re-states a standing instruction often (a
-    /// new turn, a rephrasing), and two jobs on one directory means two watchers and two turns per
-    /// save.
-    private func registerWatcher(path rawPath: String, instructions: String, conversationId: UUID?) async -> String {
+    /// A watch belongs to the conversation that registered it. Re-registering the same directory
+    /// from that conversation updates its job in place — the model re-states a standing instruction
+    /// often (a new turn, a rephrasing) — and an argument it does not re-state keeps its stored
+    /// value; being asked for again is also being asked to be on, so `enabled` and `pausedReason`
+    /// are reset whatever was said. Another conversation registering the same directory gets a
+    /// watch of its own, suffixed, and is told how many now cover the folder: two standing orders
+    /// on one folder are two orders, and silently rewriting someone else's is the worse surprise.
+    /// The match is by canonical path, case-insensitively (R-D4-8) — the same rule
+    /// `WatcherManager` keys its streams by, and the reason the cost of being wrong (two genuinely
+    /// distinct directories on a case-sensitive volume sharing one watch) is accepted there too.
+    private func registerWatcher(_ parsed: RegisterWatcherArguments, resolved: String, conversationId: UUID?) async -> String {
         guard let tools = await jobToolsProvider?() else { return "Jobs are not available yet." }
-        // The canonical spelling is what gets stored and what event paths are matched against; a
-        // path that is not there yet falls back to the best resolution available so it still
-        // round-trips, rather than being stored under two spellings.
-        let path = WatchRoot.canonical(rawPath) ?? IrisPaths.canonicalPath(rawPath)
+        // The canonical spelling is what is stored and what event paths are matched against
+        // (`WatchRoot`); a path that is not a directory has no canonical form worth storing.
+        var isDirectory: ObjCBool = false
+        guard let path = WatchRoot.canonical(resolved),
+              FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return "That path does not exist or is not a directory: \(resolved)"
+        }
+        if let refusal = WatchRoot.refusal(for: path, paths: irisPaths ?? .default,
+                                           home: homeDirectory ?? NSHomeDirectory()) {
+            return "Not watching \(path): \(refusal)."
+        }
+        if let ignore = parsed.ignore, WatchGlob.ignoresEveryProbe(ignore) {
+            return "Not watching \(path): \(Self.allIgnoredRefusal)."
+        }
+        let window = parsed.quietWindowSeconds.map(FSWatch.clampQuietWindow)
+        let clamped = window != nil && window != parsed.quietWindowSeconds
         do {
             let jobs = try tools.ledger.jobs()
-            var job: Job
-            let watchesPath: (Job) -> Bool = { job in
+            let key = path.lowercased()
+            let watching = jobs.filter { job in
                 guard case .fsEvent(let watch) = job.trigger else { return false }
-                return watch.path == path
+                return watch.path.lowercased() == key
             }
-            if var existing = jobs.first(where: watchesPath) {
-                // An explicit "watch this" is also a request for it to be on, and for the fires
-                // to land where it was asked for — the latest registration wins the destination
-                // the same way it wins the instructions.
-                existing.prompt = instructions
+            var job: Job
+            let opening: String
+            if var existing = watching.first(where: { $0.createdInConversationId == conversationId }),
+               case .fsEvent(var watch) = existing.trigger {
+                existing.prompt = parsed.instructions
+                if let window { watch.quietWindowSeconds = window }
+                if let ignore = parsed.ignore { watch.ignore = ignore }
+                existing.trigger = .fsEvent(watch)
+                if let overlap = parsed.overlap { existing.policy.overlap = overlap }
                 existing.enabled = true
-                existing.createdInConversationId = conversationId
+                existing.pausedReason = nil
                 job = existing
+                opening = "updated your watch `\(job.name)`"
             } else {
                 job = Job(
                     name: ScheduleJobArguments.uniqueName(
                         Job.slug(from: URL(fileURLWithPath: path).lastPathComponent),
                         existing: Set(jobs.map(\.name))),
-                    prompt: instructions,
-                    trigger: .fsEvent(FSWatch(path: path, quietWindowSeconds: 3)),
+                    prompt: parsed.instructions,
+                    trigger: .fsEvent(FSWatch(path: path, quietWindowSeconds: window ?? FSWatch.defaultQuietWindowSeconds,
+                                              ignore: parsed.ignore ?? [])),
                     createdInConversationId: conversationId,
-                    // A watch never runs concurrently with itself: a save that lands mid-run is
-                    // queued, not dropped. An existing job keeps whatever policy it was given.
-                    policy: JobPolicy(overlap: .queue))
+                    // A watch never runs concurrently with itself; by default a save that lands
+                    // mid-run is queued, not dropped.
+                    policy: JobPolicy(overlap: parsed.overlap ?? .queue))
+                let others = watching.map { "`\($0.name)`" }
+                let named = others.count <= 2 ? others.joined(separator: " and ")
+                    : others.dropLast().joined(separator: ", ") + " and " + others[others.count - 1]
+                opening = "created `\(job.name)`" + (others.isEmpty ? "" :
+                    "; \(named) \(others.count == 1 ? "belongs to another conversation" : "belong to other conversations")"
+                    + " — this folder now has \(others.count + 1) watches, each of which runs on every change")
             }
             // The write is the registration: in the app, `onJobsChanged` syncs the coordinator
             // and the stream set within the same second. An engine that never started (a subagent,
             // an evaluator, a scenario run) has no hook installed and no watcher running, so there
             // is nothing here to reload — the job is stored and the next launch picks it up.
             try tools.ledger.upsert(job)
-            return "Watching \(path) as job '\(job.name)'. It runs in the background when files change; you will be notified automatically."
+            guard case .fsEvent(let stored) = job.trigger else { return "Could not save the watcher job." }
+            var sentences = ["Watching \(path): \(opening)."]
+            var runs = "It runs once the folder has been quiet for \(stored.quietWindowSeconds) s"
+                + " (\(stored.ceilingSeconds) s when changes never stop) and never alongside its own previous run;"
+                + " it ignores .git/, .DS_Store, node_modules/, *~, *.swp, *.swx, .#*, 4913, *.tmp and Foundation's atomic-write temp files"
+            if !stored.ignore.isEmpty {
+                runs += ", plus your \(stored.ignore.count) pattern\(stored.ignore.count == 1 ? "" : "s")"
+            }
+            sentences.append(runs + ".")
+            if clamped, let window { sentences.append("The window was clamped to \(window) s.") }
+            return sentences.joined(separator: " ")
         } catch {
             return "Could not save the watcher job."
         }

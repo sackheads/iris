@@ -255,6 +255,79 @@ struct JobsCommandTests {
         let out = JobsCommand.render(jobs: [j], lastRuns: [:], usage: .empty, unacknowledged: [],
                                      unreadableJobs: 0, now: now)
         #expect(out.contains("| inbox | watch /tmp/in | default | — | never | — | — |"))
+        // The watch line sits beneath the table (a table row cannot carry a second line): no
+        // row with a summary yet, and no coordinator handed in, so both halves say so.
+        #expect(out.contains("`inbox` — last burst: nothing fired yet · absorbed since launch: —"))
+    }
+
+    // MARK: The watch line and the policy column (#187 deliverable 4, spec §6)
+
+    @Test("the watch line reads the last burst from the ledger and the absorbed totals from the coordinator")
+    func watchLineWithBothHalves() throws {
+        let now = Date()
+        let j = job("notes", trigger: .fsEvent(FSWatch(path: "/tmp/notes")))
+        let burst = WatchSummary(delivered: 12, changed: 12, coalesced: 30, noise: 3, ownWrites: 1,
+                                 ceilingFired: true)
+        let absorbed = AbsorbedCounts(noise: 41, ownWrites: 7, whilePaused: 3)
+        let expected = "`notes` — last burst: 12 changes · 3 noise · 1 own writes (cut at 30 s) · "
+            + "absorbed since launch: 41 noise · 7 own writes · 3 while paused"
+        #expect(JobsCommand.watchLine(job: j, lastBurst: burst, absorbed: absorbed,
+                                      hasCoordinator: true) == expected)
+
+        // Through `render`, the line follows the table and precedes the daily footer.
+        let usage = JobsCommand.UsageSnapshot(
+            perJob: [:], global: JobsCommand.GlobalUsage(tokensToday: 10, dailyBudget: 100))
+        let out = JobsCommand.render(jobs: [j], lastRuns: [:], usage: usage, unacknowledged: [],
+                                     unreadableJobs: 0, now: now,
+                                     lastBursts: [j.id: burst], absorbed: [j.id: absorbed])
+        let table = try #require(out.range(of: "| notes |"))
+        let line = try #require(out.range(of: expected))
+        let footer = try #require(out.range(of: "Tokens today, all jobs:"))
+        #expect(table.lowerBound < line.lowerBound && line.lowerBound < footer.lowerBound)
+
+        // A live coordinator that has absorbed nothing says zero; with no coordinator at all
+        // the half is a dash, since "0" would be a claim the process cannot make.
+        #expect(JobsCommand.watchLine(job: j, lastBurst: nil, absorbed: nil, hasCoordinator: true)
+                == "`notes` — last burst: nothing fired yet · absorbed since launch: "
+                   + "0 noise · 0 own writes · 0 while paused")
+        #expect(JobsCommand.watchLine(job: j, lastBurst: nil, absorbed: nil, hasCoordinator: false)
+                == "`notes` — last burst: nothing fired yet · absorbed since launch: —")
+    }
+
+    @Test("two watch lines are separate paragraphs, not one run-on line")
+    func twoWatchLinesStayApart() throws {
+        // Seen on screen: the block is markdown, and a single newline between two watch lines
+        // renders as a space, so `/jobs` showed "… 0 while paused `sub` — last burst: …" as one
+        // sentence. Each watch gets its own paragraph.
+        let a = job("alpha", trigger: .fsEvent(FSWatch(path: "/tmp/alpha")))
+        let b = job("beta", trigger: .fsEvent(FSWatch(path: "/tmp/beta")))
+        let out = JobsCommand.render(jobs: [a, b], lastRuns: [:], usage: .empty, unacknowledged: [],
+                                     unreadableJobs: 0, now: Date())
+        let first = try #require(out.range(of: "`alpha` — last burst:"))
+        let second = try #require(out.range(of: "`beta` — last burst:"))
+        let between = out[first.upperBound..<second.lowerBound]
+        #expect(between.contains("\n\n"), "the two lines were joined by a single newline:\n\(out)")
+    }
+
+    @Test("a wider quiet window shows in the policy column and in the ceiling the line prints")
+    func watchLineWithAWiderWindow() {
+        let j = job("notes", trigger: .fsEvent(FSWatch(path: "/tmp/notes", quietWindowSeconds: 10)))
+        #expect(JobsCommand.policySummary(for: j) == "quiet 10 s")
+        let line = JobsCommand.watchLine(job: j, lastBurst: WatchSummary(changed: 2, ceilingFired: true),
+                                         absorbed: nil, hasCoordinator: false)
+        #expect(line.contains("last burst: 2 changes (cut at 100 s)"))
+        // The default window is the default: nothing to say in the policy column.
+        #expect(JobsCommand.policySummary(for: job("x", trigger: .fsEvent(FSWatch(path: "/tmp/x"))))
+                == "default")
+    }
+
+    @Test("the policy column counts the watch's own ignore globs")
+    func ignoreCountInThePolicyColumn() {
+        var j = job("notes", trigger: .fsEvent(FSWatch(path: "/tmp/notes", ignore: ["*.log", "build/"])))
+        #expect(JobsCommand.policySummary(for: j) == "2 ignore")
+        j.profile = .mutating
+        j.trigger = .fsEvent(FSWatch(path: "/tmp/notes", quietWindowSeconds: 10, ignore: ["*.log", "build/"]))
+        #expect(JobsCommand.policySummary(for: j) == "mutating · quiet 10 s · 2 ignore")
     }
 
     @Test("a fire already due, and one days out, both read as time")
@@ -478,15 +551,27 @@ struct JobsCommandTests {
     }
 
     @Test("/jobs lists the ledger's jobs in the current conversation, without a model turn")
-    func listCommand() {
+    func listCommand() async {
         let j = job(nextFireAt: Date().addingTimeInterval(120))
         let (app, id) = makeApp(with: [j])
 
         app.sendMessage("/jobs")
 
-        #expect(output(app, id).contains("pr-sweep"))
+        // The listing is one hop away: it awaits the watch coordinator for the absorbed totals
+        // before it renders (spec §6), so the transcript fills in a moment after the send.
+        #expect(await eventually { output(app, id).contains("pr-sweep") })
         #expect(app.conversations.first { $0.id == id }?.history.isEmpty == true,
                 "a deterministic command never enters the model's history")
+    }
+
+    /// Polls the main actor until `condition` holds or `timeoutMs` passes.
+    private func eventually(_ timeoutMs: Int = 3000, _ condition: @MainActor () -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(timeoutMs))
+        while ContinuousClock.now < deadline {
+            if await condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return await condition()
     }
 
     @Test("/jobs ack clears the failure from the unacknowledged list")

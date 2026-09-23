@@ -18,8 +18,9 @@ import Foundation
 /// turn is a human-driven action a watch is supposed to notice; filtering it would be a knob
 /// nobody asked for, pointing the wrong way.
 ///
-/// Matching is lexical and never stats the filesystem: a delete event names a path that no longer
-/// exists, so the only spelling both sides can agree on is the one resolved at record time.
+/// `isOwn` compares strings; the caller has already put the event path through
+/// `IrisPaths.canonicalPath` (R-D4-5), the helper `record` uses, so a delete event — whose leaf is
+/// gone — still resolves (through its parent) to the spelling recorded here.
 actor RecentWrites {
     /// The process's registry. Never mutated from a test; injected everywhere else.
     static let shared = RecentWrites()

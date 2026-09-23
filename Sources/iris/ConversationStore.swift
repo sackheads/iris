@@ -425,10 +425,11 @@ final class ConversationStore: Sendable {
             }
         }
         // #187 deliverable 4: the figures a watch fire produced (spec §6), plus a one-time rewrite
-        // of every stored watch root to its canonical spelling. The rewrite is the load-bearing
-        // half: from here on, FSEvents paths are matched against the root lexically, never stat'ed,
-        // so a root stored as `/tmp/notes` when the events say `/private/tmp/notes` would match
-        // nothing and the watch would go quiet without saying why. A root that no longer exists is
+        // of each stored watch root whose canonical spelling differs from what is stored. The
+        // rewrite is the load-bearing half: from here on, FSEvents paths are canonicalised and
+        // matched against the root by lexical prefix, so a root stored as `/tmp/notes` when the
+        // events say `/private/tmp/notes` would match nothing and the watch would go quiet without
+        // saying why. A root that no longer exists is
         // left exactly as stored — there is nothing to resolve it against, and the launch check
         // pauses the job with a reason instead.
         //

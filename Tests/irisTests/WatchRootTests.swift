@@ -1,0 +1,117 @@
+import Testing
+import Foundation
+@testable import iris
+
+/// The roots a watch is turned down on (#187 deliverable 4, spec §5). A volatile `IrisPaths` root
+/// and an injected home: nothing here reads or writes `~/.iris`.
+@Suite("WatchRoot refusals")
+struct WatchRootTests {
+    private func fixture() throws -> (paths: IrisPaths, home: String, base: URL) {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-watchroot-\(UUID().uuidString)")
+        let irisRoot = base.appendingPathComponent("dot-iris")
+        try FileManager.default.createDirectory(at: irisRoot.appendingPathComponent("config"),
+                                                withIntermediateDirectories: true)
+        return (IrisPaths(root: irisRoot), base.appendingPathComponent("home").path, base)
+    }
+
+    @Test("the listed roots, the home directory, a volume root and a resolved alias are too broad")
+    func tooBroadRootsAreRefused() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        // `/System/Volumes/Data` is the data volume on every supported macOS: it is a mount point
+        // Foundation leaves unchanged, and it is the real container of `~/.iris`.
+        for root in WatchRoot.tooBroad + [f.home, "/Volumes/Data", "/private/var", "/System/Volumes/Data"] {
+            #expect(WatchRoot.refusal(for: root, paths: f.paths, home: f.home) == WatchRoot.tooBroadRefusal,
+                    "\(root) should be too broad")
+        }
+        // Being under a broad root is not the same as being one: a folder in /private/tmp is fine.
+        #expect(WatchRoot.refusal(for: "/private/tmp/notes", paths: f.paths, home: f.home) == nil)
+        // Case is not a way round the list.
+        #expect(WatchRoot.refusal(for: "/SYSTEM", paths: f.paths, home: f.home) == WatchRoot.tooBroadRefusal)
+    }
+
+    /// The mount-point rule is the file system's answer, not a spelling: the same temp directory
+    /// is refused when it is a mount and allowed when it is not. The lexical `/Volumes/<name>`
+    /// rule stays alongside it for a volume that is not mounted and cannot be asked.
+    @Test("a mount point anywhere is too broad; the same path unmounted is a folder like any other")
+    func mountPointsAreRefusedWhereverTheyAreMounted() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        // Mixed case on purpose: the file system is asked with the spelling it has, because on a
+        // case-sensitive volume the lower-cased spelling is a path that does not exist.
+        let share = f.base.appendingPathComponent("Share")
+        try FileManager.default.createDirectory(at: share, withIntermediateDirectories: true)
+        let canonical = IrisPaths.canonicalPath(share.path)
+        #expect(canonical != canonical.lowercased(), "the fixture needs a capital letter to prove the spelling")
+        #expect(WatchRoot.refusal(for: share.path, paths: f.paths, home: f.home,
+                                  isVolume: { $0 == canonical }) == WatchRoot.tooBroadRefusal)
+        #expect(WatchRoot.refusal(for: share.path, paths: f.paths, home: f.home,
+                                  isVolume: { _ in false }) == nil)
+        // An unmounted volume is judged by its spelling, whatever the file system says.
+        #expect(WatchRoot.refusal(for: "/Volumes/NotMounted", paths: f.paths, home: f.home,
+                                  isVolume: { _ in false }) == WatchRoot.tooBroadRefusal)
+        // A root the file system will not answer for is refused, not watched: fail closed.
+        struct Unreadable: Error {}
+        #expect(WatchRoot.refusal(for: share.path, paths: f.paths, home: f.home,
+                                  isVolume: { _ in throw Unreadable() }) == WatchRoot.tooBroadRefusal)
+        // And the real answer for the real paths; a path that is not there is simply not a mount.
+        #expect(try WatchRoot.isMountPoint("/"))
+        #expect(try WatchRoot.isMountPoint("/System/Volumes/Data"))
+        #expect(try !WatchRoot.isMountPoint(share.path))
+        #expect(try !WatchRoot.isMountPoint(f.base.appendingPathComponent("absent").path))
+    }
+
+    /// `IrisPaths.isUnderProtectedWriteDir` covers only the "is under" direction; a watch root
+    /// that *contains* Iris's directory would see every memory write too, so both directions
+    /// are refused here.
+    @Test("a root that is, is under, or contains Iris's own directory is refused")
+    func protectedRootsInBothDirections() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let refused = [
+            f.paths.configDir.path,
+            f.paths.configDir.appendingPathComponent("child").path,
+            f.paths.pluginsDir.path,
+            f.paths.memoryDir.path,
+            f.paths.root.path,
+            f.base.path,   // contains the Iris root
+        ]
+        for root in refused {
+            #expect(WatchRoot.refusal(for: root, paths: f.paths, home: f.home) == WatchRoot.protectedRefusal,
+                    "\(root) should be protected")
+        }
+        #expect(WatchRoot.refusal(for: f.home + "/Notes", paths: f.paths, home: f.home) == nil)
+        #expect(WatchRoot.refusal(for: f.base.appendingPathComponent("sibling").path,
+                                  paths: f.paths, home: f.home) == nil)
+    }
+
+    /// The whole boundary rests on Foundation mapping a firmlinked spelling back to its `/`-side
+    /// one — `realpath(3)` does not — so the behaviour is pinned here against the test's own temp
+    /// root, which lives on the data volume like everything else.
+    @Test("the firmlinked spelling of a path is the same path, so it meets the same refusals")
+    func firmlinkSpellingIsNotAWayRound() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let sibling = f.base.appendingPathComponent("sibling")
+        try FileManager.default.createDirectory(at: sibling, withIntermediateDirectories: true)
+        // realpath(3) keeps the firmlink prefix, which makes it the right tool for building one.
+        func firmlinked(_ path: String) throws -> String {
+            var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+            let real = try #require(realpath(path, &buffer).map { String(cString: $0) })
+            let spelling = "/System/Volumes/Data" + real
+            #expect(FileManager.default.fileExists(atPath: spelling), "\(spelling) should exist")
+            return spelling
+        }
+        let canonical = try #require(WatchRoot.canonical(f.base.path))
+        #expect(!canonical.hasPrefix("/System/Volumes/Data"))
+        #expect(WatchRoot.canonical(try firmlinked(f.base.path)) == canonical)
+        // And so the refusals hold under that spelling: Iris's root, a folder under it, and the
+        // folder that contains it are all protected; a folder beside it is a folder like any other.
+        for root in [f.paths.root.path, f.paths.configDir.path, f.base.path] {
+            #expect(WatchRoot.refusal(for: try firmlinked(root), paths: f.paths, home: f.home)
+                    == WatchRoot.protectedRefusal, "\(root) should be protected under its firmlinked spelling")
+        }
+        #expect(WatchRoot.refusal(for: try firmlinked(sibling.path), paths: f.paths, home: f.home) == nil)
+    }
+}

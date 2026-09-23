@@ -4,6 +4,14 @@ import Foundation
 
 @Suite("ToolExecutor workspace path resolution")
 struct ToolExecutorWorkspaceTests {
+    /// An executor whose watch refusals resolve against `sandbox`, not the real `~/.iris` or home.
+    private func watchExecutor(store: ConversationStore, sandbox: URL) -> ToolExecutor {
+        var executor = ToolExecutor()
+        executor.jobToolsProvider = { JobTools(ledger: store.ledger) }
+        executor.irisPaths = IrisPaths(root: sandbox.appendingPathComponent("dot-iris"))
+        executor.homeDirectory = sandbox.appendingPathComponent("home").path
+        return executor
+    }
 
     @Test("resolvePath joins relative paths onto the workspace; leaves absolute and tilde alone")
     func resolve() {
@@ -45,21 +53,28 @@ struct ToolExecutorWorkspaceTests {
 
     @Test("register_directory_watcher with a relative path resolves against the bound workspace")
     func relativeWatcherResolvesToWorkspace() async throws {
+        // A real workspace: the tool refuses a directory that is not there, and what it stores is
+        // the canonical spelling of the one that is.
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-ws-\(UUID().uuidString)")
+        let src = workspace.appendingPathComponent("src")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
         // The tool now writes a job, so it needs a ledger to write into (nil declines instead).
         let store = try ConversationStore.inMemory()
-        var executor = ToolExecutor()
-        executor.jobToolsProvider = { JobTools(ledger: store.ledger) }
+        let executor = watchExecutor(store: store, sandbox: workspace)
 
         let result = await executor.execute(
             name: "register_directory_watcher",
             args: ["path": .string("src"), "instructions": .string("note changes")],
-            cwd: "/ws"
+            cwd: workspace.path
         )
         // The confirmation echoes the resolved path — under the workspace, not the process cwd.
-        #expect(result.contains("/ws/src"))
+        let canonical = try #require(WatchRoot.canonical(src.path))
+        #expect(result.contains(canonical))
         #expect(!result.contains(FileManager.default.currentDirectoryPath + "/src"))
         // And the job it stored watches that same resolved path.
-        #expect(try store.ledger.jobs().first?.trigger == .fsEvent(FSWatch(path: "/ws/src", quietWindowSeconds: 3)))
+        #expect(try store.ledger.jobs().first?.trigger == .fsEvent(FSWatch(path: canonical, quietWindowSeconds: 3)))
     }
 
     @Test("register_directory_watcher stores the canonical root and a queueing watch")
@@ -73,8 +88,7 @@ struct ToolExecutorWorkspaceTests {
         defer { try? fm.removeItem(at: base) }
 
         let store = try ConversationStore.inMemory()
-        var executor = ToolExecutor()
-        executor.jobToolsProvider = { JobTools(ledger: store.ledger) }
+        let executor = watchExecutor(store: store, sandbox: base)
 
         _ = await executor.execute(
             name: "register_directory_watcher",
@@ -92,16 +106,19 @@ struct ToolExecutorWorkspaceTests {
         #expect(job.policy.overlap == .queue)
     }
 
-    @Test("registering the same directory twice rewrites the one job instead of doubling the watch")
-    func watcherReregistration() async throws {
+    @Test("registering the same directory from another conversation forks a second watch")
+    func reregistrationFromAnotherConversationForks() async throws {
+        // A watch belongs to the conversation that asked for it (spec §0.5): a second conversation
+        // saying "watch this too" gets its own job with its own instructions, not a rewrite of
+        // someone else's standing order.
         let store = try ConversationStore.inMemory()
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("iris-watch-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
 
-        var executor = ToolExecutor()
-        executor.jobToolsProvider = { JobTools(ledger: store.ledger) }
+        let executor = watchExecutor(store: store, sandbox: tmp.deletingLastPathComponent()
+            .appendingPathComponent("iris-watch-seams-\(UUID().uuidString)"))
         let args: [String: JSONValue] = ["path": .string(tmp.path), "instructions": .string("first")]
         let firstConversation = UUID()
         let secondConversation = UUID()
@@ -116,13 +133,16 @@ struct ToolExecutorWorkspaceTests {
             conversationId: secondConversation)
 
         let jobs = try store.ledger.jobs()
-        #expect(jobs.count == 1)                      // one directory, one job
-        #expect(jobs.first?.id == firstJob.id)        // the same job, rewritten
-        #expect(jobs.first?.name == firstJob.name)
-        #expect(jobs.first?.prompt == "second")       // with the latest standing instructions
-        // and firing into the conversation the latest registration was made from, not the first.
-        #expect(jobs.first?.createdInConversationId == secondConversation)
-        #expect(second.contains(tmp.path))
+        #expect(jobs.count == 2)                                        // one directory, two watches
+        #expect(Set(jobs.map(\.id)).count == 2)
+        let first = try #require(jobs.first { $0.id == firstJob.id })
+        #expect(first.prompt == "first")                                // untouched
+        #expect(first.createdInConversationId == firstConversation)
+        let forked = try #require(jobs.first { $0.id != firstJob.id })
+        #expect(forked.prompt == "second")
+        #expect(forked.createdInConversationId == secondConversation)
+        #expect(forked.name == firstJob.name + "-2")
+        #expect(second.contains("now has 2 watches"))
     }
 
     @Test("register_directory_watcher declines when no ledger is wired up")
