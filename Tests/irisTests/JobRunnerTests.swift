@@ -268,6 +268,47 @@ struct JobRunnerTests {
         #expect(prompt == "Review the change.")
     }
 
+    /// #187 deliverable 4, spec §2. The cap is applied *before* the guard, so a build dropping ten
+    /// thousand files into a watched directory costs the classifier one bounded block rather than
+    /// an unbounded one — and the run is still told the true figure.
+    @Test("a hundred paths reach the prompt and the rest are counted")
+    func promptCapsAtAHundredPaths() async {
+        let paths = (0..<150).map { String(format: "/tmp/watched/f%03d.swift", $0) }
+        let build = await JobRunner.buildPrompt(job: job(prompt: "Review the change."),
+                                                changedPaths: paths.shuffled(),
+                                                protectionEnabled: false)
+
+        #expect(build.delivered == 100)
+        #expect(build.pathsWithheld == false)
+        #expect(build.text.contains("- /tmp/watched/f000.swift"), "sorted, so the cap is not arbitrary")
+        #expect(build.text.contains("- /tmp/watched/f099.swift"))
+        #expect(!build.text.contains("/tmp/watched/f100.swift"))
+        #expect(build.text.contains("and 50 more changed paths"))
+        #expect(build.text.components(separatedBy: "\n- ").count == 101, "a hundred listed paths")
+        #expect(await JobRunner.prompt(job: job(prompt: "Review the change."),
+                                       changedPaths: paths.shuffled(),
+                                       protectionEnabled: false) == build.text,
+                "`prompt` is `buildPrompt(...).text`, unchanged for every caller that has one")
+    }
+
+    /// The case that used to be silent: the guard blocked the block of paths, the run got the
+    /// marker and no paths, and nothing anywhere said so. Now the build reports it and the
+    /// coordinator's summary carries it onto the row and the card.
+    @Test("a block the guard refuses is withheld, and says it was")
+    func aBlockedPathBlockIsWithheld() async {
+        let build = await CoreMLEvaluator.$scopedModel.withValue(.init(MockCoreMLModel(probability: 0.99))) {
+            await JobRunner.buildPrompt(job: job(prompt: "Review the change."),
+                                        changedPaths: ["/tmp/watched/a.swift"],
+                                        protectionEnabled: true)
+        }
+
+        #expect(build.delivered == 0)
+        #expect(build.pathsWithheld)
+        #expect(build.text.hasPrefix("Review the change."))
+        #expect(build.text.contains("[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]"))
+        #expect(!build.text.contains("a.swift"), "no path survives a blocked block")
+    }
+
     @Test("a gated tool nobody can approve blocks the run and names the tool")
     func blockedOnApproval() async throws {
         // Unique, and outside every allowlist by construction: `PermissionManager` matches a rule
@@ -374,6 +415,104 @@ struct JobRunnerTests {
 
         let destination = try #require(state.conversations.first { $0.id == userConversation })
         #expect(destination.messages.filter { $0.role == .event }.count == 1)
+    }
+
+    /// #187 deliverable 4, §7: the watched folder was deleted or unmounted, so the stream is gone
+    /// and nothing will ever wake this job again. Stopping it quietly would leave a watch that
+    /// looks live in `/jobs` and never fires, which is the failure mode hardest to notice.
+    @Test("pauseUnavailable stops the job, says why on a stillborn row, and tells the user once")
+    func pauseUnavailableWritesTheReasonAndACard() async throws {
+        let (store, state, engine, client, _) = try harness([textResponse("tick")])
+        var job = self.job(name: "vanished")
+        job.trigger = .fsEvent(FSWatch(path: "/gone"))
+        try store.ledger.upsert(job)
+        let at = Date(timeIntervalSince1970: 1_700_000_900)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { at },
+                               config: config)
+        let reason = "watch path unavailable: /gone"
+
+        await runner.pauseUnavailable(job: job, reason: reason)
+
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == reason)
+        let runs = try store.ledger.runs(jobId: job.id, limit: 10)
+        #expect(runs.count == 1, "one stillborn row, not one per failed event")
+        #expect(runs.first?.status == .interrupted)
+        #expect(runs.first?.failureReason == reason)
+        #expect(runs.first?.transcriptConversationId == nil)
+        #expect(runs.first?.triggerKind == "fsEvent", "the filesystem is still what this job is")
+        let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
+        let cards = activity.messages.filter { $0.role == .event }
+        #expect(cards.count == 1)
+        #expect(EventCard.decode(cards[0].content)?.outcome == reason)
+        #expect(client.callCount == 0, "a paused job runs nothing")
+    }
+
+    @Test("pauseUnavailable on a job that is already paused writes nothing: one deletion, one card")
+    func pauseUnavailableIsIdempotent() async throws {
+        let (store, state, engine, _, _) = try harness([])
+        var job = self.job(name: "vanished")
+        job.trigger = .fsEvent(FSWatch(path: "/gone"))
+        try store.ledger.upsert(job)
+        let at = Date(timeIntervalSince1970: 1_700_000_900)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { at },
+                               config: config)
+        let reason = "watch path unavailable: /gone"
+
+        await runner.pauseUnavailable(job: job, reason: reason)
+        await runner.pauseUnavailable(job: job, reason: reason)
+        await runner.pauseUnavailable(job: job, reason: "watch path unavailable: /gone (again)")
+
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == reason, "the first reason stands")
+        #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1)
+        let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
+        #expect(activity.messages.filter { $0.role == .event }.count == 1)
+    }
+
+    @Test("two watches vanishing together are each paused once, with one card and one row apiece")
+    func twoVanishedRootsAreEachPausedOnce() async throws {
+        // The manager reports every vanished root in turn, awaiting the pause for each. The pause
+        // is a `setPaused`, which fires the ledger's hook, which syncs the manager again with the
+        // fresher table — and that second sync pauses the *next* vanished job before the first
+        // report loop reaches it. In production the hook's sync is a task and whether it overtakes
+        // the loop is the scheduler's call; here it runs inline in the handler so the overtaking
+        // interleaving is the one that happens every time.
+        let (store, state, engine, _, _) = try harness([])
+        var first = self.job(name: "first")
+        first.trigger = .fsEvent(FSWatch(path: "/gone/first"))
+        var second = self.job(name: "second")
+        second.trigger = .fsEvent(FSWatch(path: "/gone/second"))
+        try store.ledger.upsert(first)
+        try store.ledger.upsert(second)
+        let at = Date(timeIntervalSince1970: 1_700_000_900)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { at },
+                               config: config)
+        let streams = WatcherManagerSyncTests.FakeStreams()
+        let manager = WatcherManager(ledger: store.ledger, streams: streams.factory,
+                                     fileExists: { _ in false })
+        await manager.setUnavailableHandler { job, reason in
+            await runner.pauseUnavailable(job: job, reason: reason)
+            await manager.sync(with: (try? store.ledger.jobs()) ?? [])
+        }
+
+        await manager.sync(with: try store.ledger.jobs())
+
+        for (job, root) in [(first, "/gone/first"), (second, "/gone/second")] {
+            #expect(try store.ledger.job(id: job.id)?.pausedReason == "watch path unavailable: \(root)")
+            #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1,
+                    "\(job.name): one interrupted row for one deletion")
+        }
+        let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
+        let cards = activity.messages.filter { $0.role == .event }.compactMap { EventCard.decode($0.content) }
+        #expect(cards.filter { $0.jobId == first.id }.count == 1, "one card for the first watch")
+        #expect(cards.filter { $0.jobId == second.id }.count == 1, "one card for the second watch")
+        #expect(streams.openedRoots.isEmpty, "a vanished root gets no stream")
+        await manager.stopAll()
     }
 
     // MARK: overlap and launch bookkeeping

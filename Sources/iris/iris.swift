@@ -104,20 +104,16 @@ actor IrisEngine {
     }
 
     /// How an engine that never called `start()` — a subagent, an evaluator, a scenario run —
-    /// still gets working job tools: both the ledger and the watch-fire callback are resolved per
-    /// call off this engine, rather than read from whatever `start()` happened to configure.
-    /// Resolved per call, not at `start()`: an engine that never starts otherwise answers "Jobs
-    /// are not available yet." to a tool whose ledger is sitting right there on its state.
+    /// still gets working job tools: the ledger is resolved per call off this engine's own state,
+    /// rather than read from whatever `start()` happened to configure. An engine that never starts
+    /// otherwise answers "Jobs are not available yet." to a tool whose ledger is sitting right
+    /// there on its state.
     private func jobToolsProvider() -> @Sendable () async -> JobTools? {
-        { [weak self, weak state] in
-            guard let self,
-                  let ledger = await MainActor.run(resultType: JobLedger?.self, body: { state?.store.ledger })
+        { [weak state] in
+            guard let ledger = await MainActor.run(resultType: JobLedger?.self,
+                                                   body: { state?.store.ledger })
             else { return nil }
-            // The fire callback travels with the ledger: `WatcherManager.shared` is handed both in
-            // `start()` or neither, so a watch registered through an unstarted engine would
-            // otherwise run a live FSEvents stream with nowhere to deliver to. Same closure
-            // `start()` installs.
-            return JobTools(ledger: ledger, watchers: .shared, watcherCallback: await self.watcherCallback())
+            return JobTools(ledger: ledger)
         }
     }
     let manager = SkillManager.shared
@@ -162,6 +158,17 @@ actor IrisEngine {
     private(set) var jobScheduler: JobScheduler?
     /// Built lazily by `jobRunner()`; see there.
     private var jobRunnerInstance: JobRunner?
+    /// The watch layer's clock and bookkeeping (#187 deliverable 4). Built by `start()` and only
+    /// there: a subagent or an evaluator must not run a second set of windows over the same jobs.
+    private var watchCoordinatorInstance: WatchCoordinator?
+    /// Claimed by `startWatching` before its first suspension, so two overlapping `start()`s
+    /// cannot both find the coordinator slot empty and both fill it.
+    private var watchLayerStarting = false
+    /// The tail of the watch-sync queue. Every sync — the hook's, the loop's, the first — runs
+    /// behind the one before it and reads the jobs table only when its turn comes, so the sync
+    /// that lands last is the one that saw the latest table. Two free-running hook tasks would
+    /// promise nothing of the kind: each would read its own snapshot, and either could land last.
+    private var watchSyncChain: Task<Void, Never>?
     /// Whether this launch has already swept runs left `running` by the previous one.
     private var closedInterruptedRuns = false
 
@@ -184,8 +191,16 @@ actor IrisEngine {
     /// whatever conversations happen to be sitting in it (#185 §6).
     private let sessionPeerCountOverride: Int?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil) {
+    /// Where this engine's unattended file-tool writes are remembered, so a watch does not fire on
+    /// Iris's own output (#187 §4). The app's is `RecentWrites.shared`, reached only through this
+    /// parameter — `SubagentManager` and `GoalEvaluator` thread theirs into the engines they build,
+    /// so a run and everything it delegates into feed one registry, and a test injects its own
+    /// (invariant 7).
+    let recentWrites: RecentWrites
+
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared) {
         self.state = state
+        self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
         self.injectedFactStore = factStore
         self.modelTier = tier
@@ -584,12 +599,10 @@ actor IrisEngine {
         let pluginConfigs = await PluginManager.shared.mcpConfigs()
         await MCPManager.shared.setPluginConfigs(pluginConfigs)
         await MCPManager.shared.startServers()
-        await WatcherManager.shared.setCallback(watcherCallback())
 
         if let ledger = jobLedger {
-            await WatcherManager.shared.configure(ledger: ledger)
+            await startWatching(ledger: ledger)
         }
-        await WatcherManager.shared.reload()
 
         // Check whether Ollama is reachable when any auxiliary engine depends on it.
         // A silent failure here means Vibecop / PromptGuard timeouts with no user-visible cause.
@@ -699,7 +712,8 @@ actor IrisEngine {
         if let graderApp = localState {
             evaluation = await GoalEvaluator.shared.evaluate(
                 contract: projected, workspace: gradeWorkspace,
-                originatingConversationId: conversationId, app: graderApp, client: self.client)
+                originatingConversationId: conversationId, app: graderApp, client: self.client,
+                recentWrites: self.recentWrites)
         }
 
         let ladderPos = "\(contract.currentMilestone + 1) of \(contract.milestones.count)"
@@ -2184,21 +2198,100 @@ actor IrisEngine {
         }
     }
 
-    /// What one watch fire does, as `start()` wires it into `WatcherManager.shared`. Factored out
-    /// for the same reason `fireHandler()` was: the job tools hand this to a manager an unstarted
-    /// engine adopts (`JobTools.watcherCallback`), and the two paths must install one definition.
+    /// The watch layer's live coordinator, or nil in a process that never called `start()`.
+    /// `/jobs` reads the absorbed counts off it; nothing else should reach into it.
+    func watchCoordinator() -> WatchCoordinator? { watchCoordinatorInstance }
+
+    /// Brings watches up (#187 deliverable 4, §7). Three seams and one hook:
     ///
-    /// Straight to the runner, NOT through `JobScheduler`: a watch fire has no cadence to advance.
-    /// It meets the same admission as a scheduled one all the same — `JobRunner.fire` is where
-    /// overlap, the breaker and the budgets are decided (§4) — and a watch fire that overlaps is
-    /// dropped without a row, because FSEvents delivers a burst per save and one `interrupted` row
-    /// per event would be noisier than the overlap itself. Deliverable 4 owns
-    /// `FSWatch.quietWindowSeconds` and turns that into coalescing.
-    func watcherCallback() -> @Sendable (Job, [String]) async -> Void {
-        { [weak self] job, paths in
-            guard let runner = await self?.jobRunner() else { return }
-            await runner.fire(job: job, origin: .watcher(paths: paths))
+    /// - the **coordinator** owns every watch's time and fires straight at the runner, NOT through
+    ///   `JobScheduler` — a watch fire has no cadence to advance. It meets the same admission as a
+    ///   scheduled fire all the same: `JobRunner.fire` is where overlap, the breaker and the
+    ///   budgets are decided (§4), and its answer is what the coordinator branches on;
+    /// - the **manager** owns one FSEvents stream per root and tags every batch with it;
+    /// - the **held-paths source** is the other half of overlap `queue`: what the watch saw while
+    ///   a run was going, taken by the re-fire that run releases (§3);
+    /// - and `onJobsChanged` keeps all of it in step with the jobs table, so a pause, a resume, a
+    ///   delete or a registration takes effect within the second rather than at the next launch.
+    ///
+    /// The engine owns the coordinator, so the handlers installed on the process-wide manager hold
+    /// it and the runner weakly: a singleton must not be what keeps an engine's objects alive.
+    private func startWatching(ledger: JobLedger) async {
+        // `AppState.start()` runs from `onAppear` and can run more than once. A second watch layer
+        // would be a second set of windows over the same jobs, and the second hook would replace
+        // the first — so the first coordinator would go on firing from a loop nothing can stop.
+        // The slot is claimed before the `await`: a guard on the coordinator alone would let two
+        // starts through, both suspended in `jobRunner()` with the check already passed.
+        guard !watchLayerStarting else { return }
+        watchLayerStarting = true
+        guard let runner = await jobRunner() else { watchLayerStarting = false; return }
+        let coordinator = WatchCoordinator(
+            ledger: ledger, now: Date.init, recentWrites: recentWrites,
+            fire: { [weak runner] job, fire in
+                await runner?.fire(job: job, origin: .watcher(paths: fire.paths),
+                                   watch: fire.summary)
+            })
+        watchCoordinatorInstance = coordinator
+        await runner.setHeldPathsSource { [weak coordinator] jobId in
+            await coordinator?.takeHeldPaths(jobId) ?? (paths: [], summary: nil)
         }
+
+        let manager = WatcherManager.shared
+        await manager.configure(ledger: ledger)
+        await manager.setBatchHandler { [weak coordinator] root, paths in
+            await coordinator?.deliver(root: root, paths: paths)
+        }
+        await manager.setUnavailableHandler { [weak runner] job, reason in
+            await runner?.pauseUnavailable(job: job, reason: reason)
+        }
+
+        ledger.onJobsChanged { [weak self, weak ledger] in
+            // A task, because the hook runs on whatever thread finished the write and must not
+            // wait on an actor — least of all one whose fire handler writes to this same ledger.
+            Task {
+                guard let self, let ledger else { return }
+                await self.scheduleWatchSync(ledger: ledger).value
+            }
+        }
+        await scheduleWatchSync(ledger: ledger).value
+        // The minute hand of §7's vanished-root check: FSEvents never reports a root that was
+        // deleted, so nothing but a periodic re-stat would ever notice.
+        await coordinator.startLoop(everyMinute: { [weak self, weak ledger] in
+            guard let self, let ledger else { return }
+            await self.scheduleWatchSync(ledger: ledger).value
+        })
+    }
+
+    /// Queues one `syncWatches` behind whichever is already queued or running. Single-flight in
+    /// order, not deduplicated: a sync that has started may have read the table before the write
+    /// that prompted the next one, so the next one still has to run.
+    private func scheduleWatchSync(ledger: JobLedger) -> Task<Void, Never> {
+        let previous = watchSyncChain
+        let next = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            await self.syncWatches(ledger: ledger)
+        }
+        watchSyncChain = next
+        return next
+    }
+
+    /// The two syncs, in the order §7 fixes: the coordinator first, so a batch can never arrive
+    /// for a subscriber that does not exist yet. A ledger read that fails leaves both exactly as
+    /// they are — the streams that are running keep running, and the next job change tries again;
+    /// tearing the watch set down because one read failed is the worse of the two answers.
+    /// Reached only through `scheduleWatchSync`, which is what orders one call after another.
+    private func syncWatches(ledger: JobLedger) async {
+        guard let coordinator = watchCoordinatorInstance else { return }
+        let jobs: [Job]
+        do {
+            jobs = try ledger.jobs()
+        } catch {
+            print("[Iris] could not read jobs to sync watches: \(error)")
+            return
+        }
+        await coordinator.sync(with: jobs)
+        await WatcherManager.shared.sync(with: jobs)
     }
 
     /// The scheduler `schedule_job` writes through: the one `start()` built, or one made here over
@@ -2693,12 +2786,12 @@ actor IrisEngine {
             if let appState = self.state {
                 if isBackground {
                     Task {
-                        let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState).rendered
+                        let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState, recentWrites: self.recentWrites).rendered
                         await self.handleSystemEvent("Background subagent result:\n\(rendered)", source: "SubagentManager", conversationId: conversationId)
                     }
                     result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes."
                 } else {
-                    result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState).rendered
+                    result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState, recentWrites: self.recentWrites).rendered
                 }
             } else {
                 result = "Error: AppState not available for subagent execution."
@@ -2752,7 +2845,8 @@ actor IrisEngine {
             if let c = contractToGrade, !restrictToGoalComplete, let graderApp = localState {
                 let evaluation = await GoalEvaluator.shared.evaluate(
                     contract: c, workspace: gradeWorkspace,
-                    originatingConversationId: conversationId, app: graderApp, client: self.client)
+                    originatingConversationId: conversationId, app: graderApp, client: self.client,
+                    recentWrites: self.recentWrites)
                 let blocking = c.blockingCriteria(from: evaluation)
                 let cap = ConfigManager.shared.maxDoneGateRetries
 
@@ -2854,7 +2948,7 @@ actor IrisEngine {
             let outcome = await SubagentManager.shared.runSubagent(
                 role: role, task: task, effort: effort, parentConversationId: conversationId,
                 unit: DelegatedUnit(contract: unitContract, grade: false), client: self.client,
-                appState: appState)
+                appState: appState, recentWrites: self.recentWrites)
 
             // Only a `.completed` subagent reaches the checkpoint — it is the run that claimed the
             // milestone is done. Anything else claimed nothing: hand the outcome back to the loop
@@ -2949,12 +3043,12 @@ actor IrisEngine {
                     callerRole: principal == .evaluator ? .evaluator : .agent,
                     allowedCommands: evaluatorChecks) ?? false
                 if approved {
-                    result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox)
+                    result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended)
                 } else {
                     result = Self.deniedToolResult
                 }
             } else {
-                result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox)
+                result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended)
             }
         }
         
@@ -3000,6 +3094,10 @@ actor IrisEngine {
         guard call.toolName != "run_command" || useSandbox else {
             return Self.sandboxUnavailableRefusal(tool: call.toolName)
         }
+        // `isUnattended` defaults to false here, and that is the ruling rather than an oversight
+        // (#187 §4, R-D4-1): a person clicked "Approve and run" on this call a moment ago, so its
+        // write is the human-driven kind a watch is meant to notice, like any other foreground
+        // write. The filter is fed from the dispatcher's unattended branch only.
         return await executeToolWithHooks(name: call.toolName, args: call.args, cwd: call.cwd,
                                           conversationId: conversationId, useSandbox: useSandbox,
                                           origin: .approvedCall)
@@ -3033,7 +3131,69 @@ actor IrisEngine {
     /// has had its say about the arguments, which is the last point anything can change them.
     enum ToolCallOrigin: Sendable { case modelTurn, approvedCall }
 
-    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, origin: ToolCallOrigin = .modelTurn) async -> String {
+    // MARK: - The self-write filter's choke point (#187 §4, R-D4-1)
+
+    /// The declared tools that write a filesystem path. Every one of them has to be recomputable
+    /// by `writtenPaths` below, or an unattended run's own output looks to a watch like somebody
+    /// else's edit.
+    nonisolated static let pathWritingTools: Set<String> = [
+        "write_file", "create_skill", "update_skill", "delete_skill",
+    ]
+
+    /// Everything else in the declared surface, spelled out rather than derived: a tool added
+    /// later lands in neither set and `SelfWriteHookTests.everyDeclaredToolIsClassified` fails,
+    /// which is the point — the alternative is a new writing tool joining silently and a watch
+    /// looping on it.
+    ///
+    /// The surface pinned is `ToolExecutor.getTools(workspaceToolsEnabled: true)` plus the job
+    /// tools. Not here, deliberately: MCP tools, which are a user's servers rather than a
+    /// declaration in this repo and are not fed either way (§4), and the tools declared inline by
+    /// `buildRequest` (identity, memory, sessions, goals, delegation), which write through their
+    /// own managers rather than the file tools and are out of §4's scope.
+    nonisolated static let toolsThatWriteNoPath: Set<String> = [
+        "run_command", "read_file", "register_directory_watcher", "search_web",
+        "google_tasks_list_tasklists", "google_tasks_list_tasks", "google_tasks_create_task",
+        "google_calendar_list_events", "google_calendar_create_event",
+        "google_docs_get", "google_drive_search", "google_sheets_get",
+        "gmail_list_unread", "gmail_send_email",
+        "list_jobs", "get_job_run",
+    ]
+
+    /// What this call actually wrote, from its arguments and the sentence the tool returned.
+    ///
+    /// Reading the result rather than trusting the call is what keeps a refusal, a hook block or a
+    /// disk error out of the registry: a path recorded for a write that never happened would
+    /// filter a *real* change on that path for the next few seconds.
+    ///
+    /// The three skill tools take no path and no conversation id — they compute their folder from
+    /// the skill's name — so the folder is recomputed here through the same helper they use. A
+    /// skill write touches two paths, the folder and the `SKILL.md` inside it, and FSEvents
+    /// reports both.
+    nonisolated static func writtenPaths(tool: String, args: [String: JSONValue], cwd: String?,
+                                         result: String, paths: IrisPaths = .default) -> [String] {
+        switch tool {
+        case "write_file":
+            guard result.hasPrefix("Successfully wrote to "),
+                  let path = args["path"]?.stringValue else { return [] }
+            return [ToolExecutor.resolvePath(path, cwd: cwd)]
+        case "create_skill", "update_skill":
+            // `updateSkill` falls back to `createSkill` when the skill is not there yet, so a
+            // successful update can report either sentence.
+            guard result.hasPrefix("Successfully saved skill '")
+                    || result.hasPrefix("Successfully updated skill '"),
+                  let name = args["name"]?.stringValue else { return [] }
+            let folder = ToolExecutor.skillFolder(named: name, paths: paths)
+            return [folder.path, folder.appendingPathComponent("SKILL.md").path]
+        case "delete_skill":
+            guard result.hasPrefix("Successfully deleted skill '"),
+                  let name = args["name"]?.stringValue else { return [] }
+            return [ToolExecutor.skillFolder(named: name, paths: paths).path]
+        default:
+            return []
+        }
+    }
+
+    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn) async -> String {
         var execArgs: [String: JSONValue] = args
 
         // Session strip activity (#217/#19): the detail is derived from the tool's own arguments
@@ -3085,6 +3245,21 @@ actor IrisEngine {
             let resolved = ToolExecutor.resolvePath(path, cwd: cwd)
             let localState = state
             await MainActor.run { localState?.recordSubagentWrite(conversationId: cid, path: resolved) }
+        }
+
+        // #187 §4, R-D4-1: the self-write filter's one feed. Here, and not in `ToolExecutor`,
+        // because this is the only frame that has both the tool's result — a path is recorded
+        // only for a write that actually happened — and whether the conversation it ran in was
+        // unattended, which is what decides whether it is recorded at all. An attended write is a
+        // human-driven action a watch is expected to notice.
+        //
+        // After `execute` and before `fireAfterTool`: an `AfterTool` hook can rewrite the result
+        // sentence, and the file is on disk either way, so the hook layer must not be able to
+        // decide what the filter remembers.
+        if isUnattended {
+            for path in Self.writtenPaths(tool: name, args: execArgs, cwd: cwd, result: result) {
+                await recentWrites.record(path)
+            }
         }
 
         let afterDecision = await HookManager.shared.fireAfterTool(toolName: name, result: result, useSandbox: hooksSandbox)

@@ -25,8 +25,14 @@ final class GoalEvaluator: Sendable {
     /// `client` is injectable so tests can drive the grader with a `FakeLLMClient` instead of
     /// hitting the network.
     @discardableResult
+    ///
+    /// `recentWrites` is the graded run's self-write registry (#187 §4), threaded for the same
+    /// reason `isBackground` is inherited a few lines below: a grader run for an unattended run is
+    /// itself unattended, so anything it writes through a file tool is the run's own output, and
+    /// one registry per process only holds if every engine is handed the same one.
     func evaluate(contract: GoalContract, workspace: String?, originatingConversationId originId: UUID,
-                  app: AppState, client: any LLMClientProtocol = LLMClient()) async -> GoalEvaluation {
+                  app: AppState, client: any LLMClientProtocol = LLMClient(),
+                  recentWrites: RecentWrites = .shared) async -> GoalEvaluation {
 
         // The directory the grader inspects. Callers resolve this to the main agent's effective
         // working directory (its bound workspace, or the process cwd it actually ran in), so the
@@ -48,7 +54,7 @@ final class GoalEvaluator: Sendable {
 
         // Fresh engine, evaluator principal. It never sees the working transcript.
         let checks = contract.criteria.compactMap { $0.kind == .executable ? $0.check : nil }
-        let engine = IrisEngine(state: app, tier: .hard, principal: .evaluator, roleLabel: "evaluator", client: client, evaluatorChecks: checks)
+        let engine = IrisEngine(state: app, tier: .hard, principal: .evaluator, roleLabel: "evaluator", client: client, evaluatorChecks: checks, recentWrites: recentWrites)
         let prompt = Self.systemPrompt(for: contract, workspaceDir: workspaceDir)
         await engine.setSystemPrompt(text: prompt)
 

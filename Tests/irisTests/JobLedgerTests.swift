@@ -126,6 +126,72 @@ struct JobLedgerTests {
         #expect(try store.writer.read { db in try Int.fetchOne(db, sql: "SELECT count(*) FROM job_runs") } == 0)
     }
 
+    // MARK: The jobs-changed hook (#187 deliverable 4, §7)
+
+    /// What the hook did, counted from whatever thread the write returned on.
+    final class HookCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+        private var reads = 0
+        func bump(readable: Bool) { lock.withLock { calls += 1; if readable { reads += 1 } } }
+        var count: Int { lock.withLock { calls } }
+        var readCount: Int { lock.withLock { reads } }
+    }
+
+    @Test("onJobsChanged fires after upsert, delete and setPaused, with the table readable")
+    func onJobsChangedFiresAfterUpsertDeleteAndSetPaused() throws {
+        let store = try ConversationStore.inMemory()
+        let ledger = store.ledger
+        let counter = HookCounter()
+        // Weak, so the hook the ledger holds does not hold the ledger back. The read inside the
+        // hook is the assertion that matters: called from inside `writer.write`, a `jobs()` read
+        // would re-enter the writer this thread already holds.
+        ledger.onJobsChanged { [weak ledger] in
+            counter.bump(readable: ((try? ledger?.jobs()) ?? nil) != nil)
+        }
+
+        let job = makeJob("hooked")
+        try ledger.upsert(job)
+        #expect(counter.count == 1)
+        try ledger.setPaused(jobId: job.id, reason: "watch path unavailable: /gone")
+        #expect(counter.count == 2)
+        try ledger.delete(jobId: job.id)
+        #expect(counter.count == 3)
+        #expect(counter.readCount == 3, "every call read the table after the write returned")
+    }
+
+    @Test("the cadence writers never fire the hook")
+    func cadenceWritersDoNotFireTheHook() throws {
+        // A watch set that resynced on every `setNextFire` would resync every few seconds for the
+        // lifetime of the process, for writes that cannot change which directories are watched.
+        let store = try ConversationStore.inMemory()
+        let job = makeJob("cadence")
+        try store.ledger.upsert(job)
+        let counter = HookCounter()
+        store.ledger.onJobsChanged { counter.bump(readable: true) }
+
+        try store.ledger.setNextFire(jobId: job.id, at: Date(), lastRunAt: nil)
+        try store.ledger.setLastRun(jobId: job.id, at: Date())
+        try store.ledger.setRetry(jobId: job.id, attempt: 1, nextFireAt: Date())
+        try store.ledger.setQueuedFire(jobId: job.id, at: Date())
+
+        #expect(counter.count == 0)
+    }
+
+    @Test("a write that failed does not fire the hook")
+    func aFailedWriteDoesNotFireTheHook() throws {
+        let store = try ConversationStore.inMemory()
+        try store.ledger.upsert(makeJob("taken"))
+        let counter = HookCounter()
+        store.ledger.onJobsChanged { counter.bump(readable: true) }
+
+        // A rename onto another job's name, and a pause for an id that is not there.
+        #expect(throws: (any Error).self) { try store.ledger.upsert(self.makeJob("taken")) }
+        #expect(throws: (any Error).self) { try store.ledger.setPaused(jobId: UUID(), reason: "why") }
+
+        #expect(counter.count == 0, "nothing changed, so there is nothing to resync")
+    }
+
     @Test("v8 database migrates to v9 with conversations intact and the new columns NULL on the old row")
     func migrateFromV8() throws {
         let queue = try DatabaseQueue()

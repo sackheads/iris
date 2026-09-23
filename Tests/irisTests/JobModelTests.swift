@@ -35,10 +35,34 @@ struct JobModelTests {
         #expect(throws: DecodingError.self) { try JSONDecoder().decode(Trigger.self, from: Data(json.utf8)) }
     }
 
-    @Test("FSWatch quiet window defaults to 3")
+    @Test("FSWatch quiet window defaults to 3 and its ignore list to empty")
     func fsWatchDefault() throws {
         let w = try JSONDecoder().decode(FSWatch.self, from: Data(#"{"path":"/tmp"}"#.utf8))
         #expect(w.quietWindowSeconds == 3)
+        #expect(w.ignore == [])
+        #expect(w.ceilingSeconds == 30)
+    }
+
+    @Test("a quiet window outside 1…300 clamps on decode and on the initializer")
+    func fsWatchClampsOnDecode() throws {
+        let low = try JSONDecoder().decode(
+            FSWatch.self, from: Data(#"{"path":"/tmp","quietWindowSeconds":0}"#.utf8))
+        #expect(low.quietWindowSeconds == 1)
+        let high = try JSONDecoder().decode(
+            FSWatch.self, from: Data(#"{"path":"/tmp","quietWindowSeconds":999}"#.utf8))
+        #expect(high.quietWindowSeconds == 300)
+        #expect(FSWatch(path: "/tmp", quietWindowSeconds: -5).quietWindowSeconds == 1)
+        #expect(FSWatch(path: "/tmp", quietWindowSeconds: 10_000).quietWindowSeconds == 300)
+        #expect(FSWatch.clampQuietWindow(42) == 42)
+        #expect(high.ceilingSeconds == 3000)
+    }
+
+    @Test("FSWatch ignore globs round-trip through the trigger")
+    func fsWatchIgnoreRoundTrips() throws {
+        let trigger = Trigger.fsEvent(FSWatch(path: "/tmp/x", quietWindowSeconds: 5,
+                                              ignore: ["build/*", "*.log"]))
+        let data = try JSONEncoder().encode(trigger)
+        #expect(try JSONDecoder().decode(Trigger.self, from: data) == trigger)
     }
 
     @Test("slug from prompt")

@@ -424,6 +424,41 @@ final class ConversationStore: Sendable {
                 t.add(column: "jobProfile", .text)
             }
         }
+        // #187 deliverable 4: the figures a watch fire produced (spec §6), plus a one-time rewrite
+        // of every stored watch root to its canonical spelling. The rewrite is the load-bearing
+        // half: from here on, FSEvents paths are matched against the root lexically, never stat'ed,
+        // so a root stored as `/tmp/notes` when the events say `/private/tmp/notes` would match
+        // nothing and the watch would go quiet without saying why. A root that no longer exists is
+        // left exactly as stored — there is nothing to resolve it against, and the launch check
+        // pauses the job with a reason instead.
+        //
+        // The decision is "did the root move?", never "does the re-encoded JSON differ?" (ruling
+        // R-D4-3). Every row whose root was already canonical is left byte for byte as it was,
+        // including one whose stored `quietWindowSeconds` is out of range: the clamp is a rule the
+        // decoder applies on read, and a data migration that quietly wrote it back would be doing
+        // a second, unannounced thing. That keeps the set of rows this touches auditable — exactly
+        // the ones that moved — which matters because the rewrite is a round-trip through
+        // `Trigger`/`FSWatch` and so drops any key a future build had written into the blob.
+        m.registerMigration("v11_watches") { db in
+            try db.alter(table: "job_runs") { t in
+                t.add(column: "watchSummary", .text)
+            }
+            let rows = try Row.fetchAll(db, sql: "SELECT id, trigger FROM jobs WHERE triggerKind = ?",
+                                        arguments: [Trigger.fsEventKind])
+            for row in rows {
+                guard let id = String.fromDatabaseValue(row["id"]),
+                      let json: String = String.fromDatabaseValue(row["trigger"]),
+                      case .fsEvent(var watch)? = try? JSONDecoder()
+                        .decode(Trigger.self, from: Data(json.utf8)),
+                      let canonical = WatchRoot.canonical(watch.path),
+                      canonical != watch.path
+                else { continue }
+                watch.path = canonical
+                guard let rewritten = try? JobLedger.encodeJSON(Trigger.fsEvent(watch)) else { continue }
+                try db.execute(sql: "UPDATE jobs SET trigger = ? WHERE id = ?",
+                               arguments: [rewritten, id])
+            }
+        }
         return m
     }
 

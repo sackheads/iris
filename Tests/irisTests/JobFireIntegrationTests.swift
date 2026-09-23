@@ -88,11 +88,12 @@ struct JobFireIntegrationTests {
         #expect(await scheduler.tick() == 0, "the same now does not fire it twice")
     }
 
-    @Test("the job tools an engine hands out carry its watcher fire callback, not just its ledger")
-    func jobToolsCarryTheWatcherCallback() async throws {
-        // `WatcherManager.shared` gets both its ledger and its callback in `start()` or neither,
-        // so an engine that never started has to supply both through the tools — a ledger without
-        // a callback is a live FSEvents stream whose fires are dropped on the floor.
+    @Test("an engine that never started still resolves job tools, and a watch fire on it is a run")
+    func jobToolsCarryTheLedger() async throws {
+        // The tools resolve the ledger per call off the engine's own state, so a subagent, an
+        // evaluator or a scenario run — none of which call `start()` — can still register a watch.
+        // What the watch turns into is the runner's, and that path is the same one the coordinator
+        // fires through in the app.
         let store = try ConversationStore.inMemory()
         let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         state.conversations.removeAll()
@@ -110,7 +111,8 @@ struct JobFireIntegrationTests {
                       trigger: .fsEvent(FSWatch(path: "/tmp/notes")),
                       createdInConversationId: conversationId)
         try store.ledger.upsert(job)
-        await tools.watcherCallback(job, ["/tmp/notes/a.txt"])
+        #expect(tools.ledger === store.ledger, "the tools write into the engine's own ledger")
+        await engine.jobRunner()?.fire(job: job, origin: .watcher(paths: ["/tmp/notes/a.txt"]))
 
         // #187 §6: the fire is a run, not a turn in the conversation the watch was created in —
         // its own background conversation, its own ledger row, and a card in Activity.

@@ -1,5 +1,18 @@
 import Foundation
 
+/// A run's prompt and what the untrusted half of it cost (#187 deliverable 4, spec §2).
+///
+/// Two figures rather than one, because the row and the card have to tell the two apart: a watch
+/// fire that delivered 100 of 1,500 changed paths is working as designed, and one that delivered
+/// none because the guard blocked the block is a thing a person needs to know happened.
+struct PromptBuild: Sendable, Equatable {
+    let text: String
+    /// Paths that actually reached the prompt — 0 when the guard withheld the block.
+    let delivered: Int
+    /// The guard blocked the block, so the run got the marker and no paths at all.
+    let pathsWithheld: Bool
+}
+
 /// One firing of a job, start to finish (#187 §6). Replaces deliverable 1's fire handler, which
 /// pushed a system event into whatever conversation the job was created in — so a five-minute
 /// cadence wrote into the chat the user was reading, and a run that needed an approval parked on a
@@ -75,6 +88,23 @@ actor JobRunner {
     /// catch-up burst ends, and the held fire is where that count goes: it is the same fire, taken
     /// later, so it arrives on the row and card that fire eventually writes.
     private var queuedNotes: [UUID: String] = [:]
+    /// What a watch has seen since the fire that was held, and what it counted seeing it —
+    /// `WatchCoordinator.takeHeldPaths` in the app, injected here because the coordinator owns the
+    /// runner's fire handler and a reference the other way would be a cycle (and, in a test, a
+    /// real event source). Optional: the `--run-job` process and every test that is not about
+    /// watches has no coordinator at all, and a held re-fire there is exactly what it was before
+    /// this deliverable — its paths, and a null summary column rather than invented arithmetic.
+    private var heldPathsSource: (@Sendable (UUID) async -> (paths: [String], summary: WatchSummary?))?
+
+    /// Wires the coordinator's held paths into the re-fire (#187 deliverable 4, §3). Set once at
+    /// launch, alongside the fire handler it is the other half of. The summary is optional for the
+    /// same reason the column is: the coordinator answers `nil` when it never counted this fire,
+    /// and a null column is the honest record of that.
+    func setHeldPathsSource(
+        _ source: @escaping @Sendable (UUID) async -> (paths: [String], summary: WatchSummary?)
+    ) {
+        heldPathsSource = source
+    }
 
     init(state: AppState, engine: IrisEngine, ledger: JobLedger,
          now: @escaping @Sendable () -> Date = Date.init,
@@ -208,6 +238,25 @@ actor JobRunner {
         origin.isWatcher || job.trigger.kind == Trigger.fsEventKind
     }
 
+    /// The held fire's origin with more watch paths folded into it (§3): a union, sorted and
+    /// deduplicated, **never** a replacement. Two things are held at once while a watch job runs —
+    /// the fire the runner kept and whatever the coordinator has accepted since — and each of them
+    /// is a save the run is supposed to see. Taking the later lot alone would silently drop the
+    /// earlier one, which is how a watch ends up running on half a burst.
+    ///
+    /// A hold whose root is not a watcher comes back untouched: a scheduled or hand-started fire
+    /// has no burst behind it, and stapling a watch's paths to it would tell that run the
+    /// filesystem woke it when a person did.
+    static func mergedWatcherOrigin(_ held: FireOrigin, taking extra: [String]) -> FireOrigin {
+        guard held.isWatcher else { return held }
+        // Nothing to fold in: the hold comes back untouched rather than rebuilt. `isWatcher` and
+        // `paths` both read `root`, so a `.queued`-rooted hold that *does* get paths folded in
+        // comes back unwrapped — which changes nothing, because both callers re-wrap the result in
+        // `.queued` and neither `triggerKind` nor `root` counts the layers.
+        guard !extra.isEmpty else { return held }
+        return .watcher(paths: Set(held.paths).union(extra).sorted())
+    }
+
     /// The single admission point for every fire, scheduled or watcher-driven (§4). Decides, acts
     /// on the decision (a row, a pause, a card), runs the turn when it is allowed, and afterwards
     /// takes the one trigger the `queue` policy held back.
@@ -217,8 +266,8 @@ actor JobRunner {
     /// property of the job, so it lives where every fire passes.
     ///
     /// Every decision is made on the row read back here, not on the `Job` the caller was handed.
-    /// A watcher fire carries the copy `WatcherManager.reload()` captured when the stream was
-    /// started, which can be minutes or days old: deciding on it would re-admit a job that has
+    /// A watcher fire carries the copy the coordinator's subscriber was built from at the last
+    /// `sync`, which can be minutes or days old: deciding on it would re-admit a job that has
     /// since been paused — writing a pause row and a card per filesystem event — and would run a
     /// prompt the user has edited since. A job deleted out from under a fire drops silently: there
     /// is nothing left to run, record or report on.
@@ -236,10 +285,17 @@ actor JobRunner {
     /// follows every outcome that ends the fire to whatever that outcome writes (R44): the pause
     /// card, the gate row, the skip row, the stillborn row — and when the outcome is "held", the
     /// note is held with it and arrives when that fire is finally taken.
+    ///
+    /// `watch` is the arithmetic of the burst that woke this fire (#187 deliverable 4, §6), which
+    /// only `WatchCoordinator` can count. It is stamped on the row this fire begins, with
+    /// `delivered` and `pathsWithheld` filled in from the prompt build — and, like `note`, it
+    /// belongs to the caller's fire alone: a held fire taken afterwards is a different burst.
     @discardableResult
-    func fire(job: Job, origin: FireOrigin, note: String? = nil) async -> Admission? {
+    func fire(job: Job, origin: FireOrigin, note: String? = nil,
+              watch: WatchSummary? = nil) async -> Admission? {
         var origin = origin
         var note = note
+        var watch = watch
         var decided: Admission?
         // A loop, not recursion: the `queue` policy can hand this straight back a trigger, and a
         // busy job would otherwise grow one stack frame per held fire.
@@ -340,24 +396,38 @@ actor JobRunner {
                 inFlight.remove(current.id)
                 if isCallersFire { decided = refusal }
                 // Recorded by the branch above, on the row it wrote; a held fire taken next is a
-                // different fire and must not claim the count again.
+                // different fire and must not claim the count again. The burst summary goes with
+                // it, for the same reason.
                 note = nil
+                watch = nil
                 // A fire held while the gate was being evaluated is still owed an answer, and the
                 // gate is asked again for it: one held fire at a time, so this terminates.
                 guard let held = takeQueuedFire(job: current) else { return decided }
-                origin = .queued(from: held.origin)
+                let merged = await mergedHeldOrigin(held.origin, jobId: current.id)
+                origin = .queued(from: merged.origin)
+                watch = merged.watch
                 note = held.note
                 continue
             }
-            await run(job: current, origin: origin, limits: limits, gate: gate, note: note)
+            await run(job: current, origin: origin, limits: limits, gate: gate, note: note,
+                      watch: watch)
             note = nil
+            // The summary describes the burst the *caller* handed over, and it is now on that
+            // run's row. A held fire taken next is a different burst, whose arithmetic only the
+            // coordinator knows; claiming this one's counts for it would report the same changes
+            // twice.
+            watch = nil
             inFlight.remove(current.id)
 
             guard let held = takeQueuedFire(job: current) else { return decided }
             // The held fire's own origin, wrapped rather than replaced: what woke the job is what
             // the retry ladder decides on, and re-entering as a bare "queued" erased it (R7). Its
             // own catch-up count comes back with it, for the same reason: this pass *is* that fire.
-            origin = .queued(from: held.origin)
+            let merged = await mergedHeldOrigin(held.origin, jobId: current.id)
+            origin = .queued(from: merged.origin)
+            // The burst this fire stands in for, counted by the coordinator and reported by no
+            // row until this one: a `.queued` admission writes nothing (R-D4-9).
+            watch = merged.watch
             note = held.note
         }
     }
@@ -566,15 +636,46 @@ actor JobRunner {
         queuedNotes.removeValue(forKey: jobId)
     }
 
+    /// A held fire's origin plus everything the coordinator has been holding for the same job, and
+    /// the burst arithmetic that came with it (§3, R-D4-9). Asked only of `.watcher`-rooted holds:
+    /// see `mergedWatcherOrigin`. The origin is re-wrapped in `.queued` by both callers, so the row
+    /// still records `queued` and the gate still reads the root.
+    ///
+    /// The summary is `nil` for a non-watcher root and when no source is wired: a null column is
+    /// the honest answer when nobody counted, and `run` fills in `delivered`/`pathsWithheld` from
+    /// the prompt build for the summaries that do arrive.
+    private func mergedHeldOrigin(_ held: FireOrigin,
+                                  jobId: UUID) async -> (origin: FireOrigin, watch: WatchSummary?) {
+        guard held.isWatcher, let heldPathsSource else { return (held, nil) }
+        let taken = await heldPathsSource(jobId)
+        return (Self.mergedWatcherOrigin(held, taking: taken.paths), taken.summary)
+    }
+
     /// Remembers the one trigger held back while this job is busy. One, never a queue of them: a
     /// job that fell far behind should run once when it is free, not N times in a row.
     private func hold(fire at: Date, for job: Job, origin: FireOrigin, note: String? = nil) {
         // The origin is the runner's own, not a column: the paths in it are what a watch saw
         // seconds ago, so they are worth carrying into the held fire but not worth surviving a
         // restart — and a second column would be a second thing to keep in step with `queuedFire`.
-        // The latest burst wins; a fire with no paths (a scheduled one) leaves whatever a watch
-        // left rather than overwriting it with less.
-        if !origin.paths.isEmpty || queuedOrigins[job.id] == nil { queuedOrigins[job.id] = origin }
+        //
+        // Watch paths accumulate rather than replace (§3): the latest burst used to win, which
+        // meant a second save while the run was going threw away the first one's paths and the
+        // held fire ran on less than it was given. A fire with no paths (a scheduled one) still
+        // leaves whatever a watch left rather than overwriting it with nothing, and a watch fire
+        // held on top of a hand-started one takes over, because that one has no burst to lose.
+        // Unbounded growth is not a risk: the coordinator offers no further fire once it has been
+        // answered `.queued`, so what lands *here* is bounded by `maxTrackedPaths`. The re-fire's
+        // own list is the union of two such sets — this hold and what `takeHeldPaths` returns — so
+        // up to twice that; the 100-path cap in `buildPrompt` is what bounds what a run sees.
+        if let existing = queuedOrigins[job.id] {
+            if existing.isWatcher {
+                queuedOrigins[job.id] = Self.mergedWatcherOrigin(existing, taking: origin.paths)
+            } else if !origin.paths.isEmpty {
+                queuedOrigins[job.id] = origin
+            }
+        } else {
+            queuedOrigins[job.id] = origin
+        }
         // The catch-up count travels with the held fire (R44). One burst per job, so there is
         // never a second count to argue with; a later ordinary fire held on top of this one
         // carries no note and must not wipe the one already waiting, or the occurrences a sleep
@@ -677,6 +778,22 @@ actor JobRunner {
         }
     }
 
+    /// Stops a watch whose folder is gone (§7): deleted, renamed or unmounted, so the stream is
+    /// dead and no save will ever wake this job again. A pause, not a silent stop, because a watch
+    /// that looks live in `/jobs` and never fires is the failure nobody notices — and `reason` is
+    /// the caller's to word, since only the stream knows which path vanished.
+    ///
+    /// The origin is a watcher with no paths: nothing changed, the watch itself did.
+    ///
+    /// Idempotent on the row, not on the argument: the manager can report one vanished root twice
+    /// — the hook its first pause fires re-enters `sync`, which pauses the next vanished job before
+    /// the report loop that woke it gets there — and a second card for one deletion is a second
+    /// thing to explain. A row that is gone is nothing to pause either.
+    func pauseUnavailable(job: Job, reason: String) async {
+        guard let current = try? ledger.job(id: job.id), current.pausedReason == nil else { return }
+        await pause(job: current, origin: .watcher(paths: []), reason: reason, at: now())
+    }
+
     /// Creates the background conversation, records the run, runs the turn, closes the row and
     /// delivers the card. Never throws: a fire is unattended, so every failure here is logged and
     /// the run is still accounted for in the ledger rather than surfacing to a caller with no one
@@ -684,7 +801,7 @@ actor JobRunner {
     ///
     /// Private: `fire` is the only way in, so nothing can start a run that skipped admission.
     private func run(job: Job, origin: FireOrigin, limits: JobLimits, gate: GateContext? = nil,
-                     note: String? = nil) async {
+                     note: String? = nil, watch: WatchSummary? = nil) async {
         let startedAt = now()
         let title = "\(job.name) · \(ISO8601DateFormatter().string(from: startedAt))"
         guard let conversationId = await openConversation(for: job, titled: title,
@@ -693,8 +810,22 @@ actor JobRunner {
             return
         }
 
-        let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: origin.triggerKind,
+        // Before the row, not after it: two of the eight figures a watch summary carries are the
+        // build's — how many paths got past the cap, and whether the guard withheld the block —
+        // and a row inserted first would have to be updated with them a moment later. One write,
+        // so a crash between the two cannot leave a run row whose summary contradicts its prompt.
+        let promptBuild = await Self.buildPrompt(job: job, changedPaths: origin.paths,
+                                                 gateOutput: gate?.payload,
+                                                 protectionEnabled: protectionEnabled)
+        var summary = watch
+        summary?.delivered = promptBuild.delivered
+        summary?.pathsWithheld = promptBuild.pathsWithheld
+
+        var run = JobRun(jobId: job.id, jobName: job.name, triggerKind: origin.triggerKind,
                          startedAt: startedAt, transcriptConversationId: conversationId)
+        // Nil for every fire no burst started, which is what leaves the column null on the rows
+        // §6 says it should be null on.
+        run.watchSummary = summary
         do {
             try ledger.begin(run: run)
         } catch {
@@ -736,9 +867,7 @@ actor JobRunner {
             await closeInterrupted(run: run, conversationId: conversationId, at: now())
             return
         }
-        let prompt = await Self.prompt(job: job, changedPaths: origin.paths,
-                                       gateOutput: gate?.payload,
-                                       protectionEnabled: protectionEnabled)
+        let prompt = promptBuild.text
 
         // The wall clock, not the injected `now`: this deadline bounds a turn that is happening
         // right now, so a test (or a replayed occurrence) that pins the ledger's clock to another
@@ -1359,24 +1488,38 @@ actor JobRunner {
         }
     }
 
-    /// The job's prompt, plus the paths that woke it when a watch did.
+    /// The job's prompt, plus the paths that woke it when a watch did — and what became of them.
     ///
     /// The job's own prompt is trusted — the user (or the agent on their behalf) wrote it. The
     /// paths are not: a filename is chosen by whoever can write into the watched directory, and
     /// D1 put every fire through `handleSystemEvent`, which sanitized it. So each path goes
     /// through the structural pass and the whole block through the tiered guard, arriving wrapped
     /// in `<untrusted_context>` after the instructions rather than concatenated into them.
-    static func prompt(job: Job, changedPaths: [String], gateOutput: String? = nil,
-                       protectionEnabled: Bool? = nil) async -> String {
+    ///
+    /// The cap is applied **before** the guard (#187 deliverable 4, §2): at most
+    /// `WatchCoordinator.maxDeliveredPaths` paths plus one line of arithmetic, so a build dropping
+    /// ten thousand files into a watched directory costs the classifier a bounded block rather
+    /// than an unbounded one. `delivered` and `pathsWithheld` are what the run row and the card
+    /// report — a guard that blocked the block used to be silent, which left a run that got no
+    /// paths looking exactly like a run whose burst had none.
+    static func buildPrompt(job: Job, changedPaths: [String], gateOutput: String? = nil,
+                            protectionEnabled: Bool? = nil) async -> PromptBuild {
         var prompt = job.prompt
+        var delivered = 0
+        var pathsWithheld = false
         if !changedPaths.isEmpty {
-            let listed = changedPaths
+            let sorted = changedPaths.sorted()
+            let shown = sorted.prefix(WatchCoordinator.maxDeliveredPaths)
+            var block = "Changed paths:\n" + shown
                 .map { "- " + PromptInjectionGuard.sanitizeUntrustedInput($0) }
                 .joined(separator: "\n")
-            prompt += "\n\n" + (await InjectionGuard.sanitize("Changed paths:\n" + listed,
-                                                              contextTag: "fs_event_paths",
-                                                              maxTier: .tier3_canary,
-                                                              protectionEnabled: protectionEnabled))
+            let withheld = sorted.count - shown.count
+            if withheld > 0 { block += "\nand \(withheld) more changed paths" }
+            let outcome = await InjectionGuard.classify(block, contextTag: "fs_event_paths",
+                                                        maxTier: .tier3_canary,
+                                                        protectionEnabled: protectionEnabled)
+            if case .passed = outcome { delivered = shown.count } else { pathsWithheld = true }
+            prompt += "\n\n" + InjectionGuard.wrapped(outcome, contextTag: "fs_event_paths")
         }
         // A gate script's output is the least trusted thing in a run: model-written code read
         // whatever it was pointed at and printed it. Same treatment as the paths, under its own
@@ -1387,7 +1530,17 @@ actor JobRunner {
                                                               maxTier: .tier3_canary,
                                                               protectionEnabled: protectionEnabled))
         }
-        return prompt
+        return PromptBuild(text: prompt, delivered: delivered, pathsWithheld: pathsWithheld)
+    }
+
+    /// The text alone. Test-only since deliverable 4: `run` takes the whole build, because it has
+    /// a summary to fill in, so the four remaining call sites are all in `Tests/`. Kept because
+    /// the tests that assert on the prompt's shape have no use for the figures, and pinned against
+    /// the build it wraps by `JobRunnerTests.promptCapsAtAHundredPaths`.
+    static func prompt(job: Job, changedPaths: [String], gateOutput: String? = nil,
+                       protectionEnabled: Bool? = nil) async -> String {
+        await buildPrompt(job: job, changedPaths: changedPaths, gateOutput: gateOutput,
+                          protectionEnabled: protectionEnabled).text
     }
 
     /// The first line of the last thing the agent said, capped at 200 characters — the one line a

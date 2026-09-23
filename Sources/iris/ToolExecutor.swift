@@ -1,34 +1,22 @@
 import Foundation
 
-/// What the job-creating tools need from the app: the ledger to write into, and the watcher
-/// manager to reload once the write lands. They travel together because a watch job that is
-/// stored but not reloaded does nothing until the next launch.
+/// What the job-creating tools need from the app: the ledger to write into. Nothing else —
+/// storing a job is the whole of registering a watch now, because the ledger's `onJobsChanged`
+/// hook is what tells the watch layer to catch up (#187 deliverable 4, §7), and an engine that
+/// never called `start()` has no watch layer for a second handle to reach.
 struct JobTools: Sendable {
     let ledger: JobLedger
-    let watchers: WatcherManager
-    /// What one watch fire does. Carried alongside the ledger because a `WatcherManager` gets both
-    /// or neither: `setCallback` has a single caller, `IrisEngine.start()`, three lines from its
-    /// `configure(ledger:)`. A manager adopted by an engine that never started would otherwise run
-    /// a live FSEvents stream whose fires go nowhere. No default — every caller has to say.
-    let watcherCallback: @Sendable (Job, [String]) async -> Void
-
-    init(ledger: JobLedger, watchers: WatcherManager,
-         watcherCallback: @escaping @Sendable (Job, [String]) async -> Void) {
-        self.ledger = ledger
-        self.watchers = watchers
-        self.watcherCallback = watcherCallback
-    }
 }
 
 struct ToolExecutor {
     static let shared = ToolExecutor()
 
-    /// How `register_directory_watcher` reaches the jobs table and the watchers running off it.
-    /// The executor is a value type built long before the conversation store opens, so the engine
-    /// hands it a closure that resolves both on demand rather than a ledger at construction — an
-    /// engine that never calls `start()` (a subagent, an evaluator, a scenario run) still gets a
-    /// working tool. nil — the case for `ToolExecutor.shared` and for the plugin auth runner's
-    /// throwaway executor — means the tool declines instead of registering a watch nothing runs.
+    /// How `register_directory_watcher` and `schedule_job` reach the jobs table. The executor is a
+    /// value type built long before the conversation store opens, so the engine hands it a closure
+    /// that resolves the ledger on demand rather than one at construction — an engine that never
+    /// calls `start()` (a subagent, an evaluator, a scenario run) still gets a working tool. nil —
+    /// the case for `ToolExecutor.shared` and for the plugin auth runner's throwaway executor —
+    /// means the tool declines instead of registering a watch nothing runs.
     var jobToolsProvider: (@Sendable () async -> JobTools?)?
 
     /// How the sandboxed branch of `run_command` reaches the container session. Injectable so a
@@ -219,16 +207,20 @@ struct ToolExecutor {
         }
     }
     
-    /// Stores a `.fsEvent` job for `path` and restarts the watch set. The job is named after the
-    /// directory being watched rather than the instructions, because that is what a user scanning
-    /// the jobs list is looking for.
+    /// Stores a `.fsEvent` job for `path`. The job is named after the directory being watched
+    /// rather than the instructions, because that is what a user scanning the jobs list is looking
+    /// for.
     ///
     /// Re-registering a path already watched rewrites that job's instructions and destination in
     /// place rather than adding a second one: the model re-states a standing instruction often (a
     /// new turn, a rephrasing), and two jobs on one directory means two watchers and two turns per
     /// save.
-    private func registerWatcher(path: String, instructions: String, conversationId: UUID?) async -> String {
+    private func registerWatcher(path rawPath: String, instructions: String, conversationId: UUID?) async -> String {
         guard let tools = await jobToolsProvider?() else { return "Jobs are not available yet." }
+        // The canonical spelling is what gets stored and what event paths are matched against; a
+        // path that is not there yet falls back to the best resolution available so it still
+        // round-trips, rather than being stored under two spellings.
+        let path = WatchRoot.canonical(rawPath) ?? IrisPaths.canonicalPath(rawPath)
         do {
             let jobs = try tools.ledger.jobs()
             var job: Job
@@ -251,10 +243,16 @@ struct ToolExecutor {
                         existing: Set(jobs.map(\.name))),
                     prompt: instructions,
                     trigger: .fsEvent(FSWatch(path: path, quietWindowSeconds: 3)),
-                    createdInConversationId: conversationId)
+                    createdInConversationId: conversationId,
+                    // A watch never runs concurrently with itself: a save that lands mid-run is
+                    // queued, not dropped. An existing job keeps whatever policy it was given.
+                    policy: JobPolicy(overlap: .queue))
             }
+            // The write is the registration: in the app, `onJobsChanged` syncs the coordinator
+            // and the stream set within the same second. An engine that never started (a subagent,
+            // an evaluator, a scenario run) has no hook installed and no watcher running, so there
+            // is nothing here to reload — the job is stored and the next launch picks it up.
             try tools.ledger.upsert(job)
-            await tools.watchers.reload(adoptingIfUnconfigured: tools.ledger, callback: tools.watcherCallback)
             return "Watching \(path) as job '\(job.name)'. It runs in the background when files change; you will be notified automatically."
         } catch {
             return "Could not save the watcher job."
@@ -510,13 +508,24 @@ except Exception as e:
         }
     }
 
-    func createSkill(name: String, description: String, body: String, paths: IrisPaths = .default) async -> String {
+    /// Where a skill of this name lives: the one spelling of the folder, for the three tools that
+    /// write it and for the dispatcher, which has to work out what a skill call wrote from its
+    /// arguments (the tools take no path, so there is nothing else to read; #187 §4).
+    ///
+    /// The name is slugged the same way for all three — lowercased, trimmed, spaces and
+    /// underscores to dashes. `deleteSkill` used to lowercase and trim but not replace, so
+    /// `delete_skill` with the name `my skill` looked for a folder `create_skill` had never made.
+    static func skillFolder(named name: String, paths: IrisPaths = .default) -> URL {
         let cleanName = name.lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: " ", with: "-")
             .replacingOccurrences(of: "_", with: "-")
-        
-        let skillFolder = paths.skillsDir.appendingPathComponent(cleanName)
+        return paths.skillsDir.appendingPathComponent(cleanName)
+    }
+
+    func createSkill(name: String, description: String, body: String, paths: IrisPaths = .default) async -> String {
+        let skillFolder = Self.skillFolder(named: name, paths: paths)
+        let cleanName = skillFolder.lastPathComponent
         let skillFile = skillFolder.appendingPathComponent("SKILL.md")
         
         let isoFormatter = ISO8601DateFormatter()
@@ -545,12 +554,8 @@ except Exception as e:
     }
 
     func updateSkill(name: String, description: String?, body: String?, paths: IrisPaths = .default) async -> String {
-        let cleanName = name.lowercased()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: " ", with: "-")
-            .replacingOccurrences(of: "_", with: "-")
-        
-        let skillFolder = paths.skillsDir.appendingPathComponent(cleanName)
+        let skillFolder = Self.skillFolder(named: name, paths: paths)
+        let cleanName = skillFolder.lastPathComponent
         let skillFile = skillFolder.appendingPathComponent("SKILL.md")
         let fileManager = FileManager.default
         
@@ -611,8 +616,8 @@ except Exception as e:
     }
 
     func deleteSkill(name: String, paths: IrisPaths = .default) async -> String {
-        let cleanName = name.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        let skillFolder = paths.skillsDir.appendingPathComponent(cleanName)
+        let skillFolder = Self.skillFolder(named: name, paths: paths)
+        let cleanName = skillFolder.lastPathComponent
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: skillFolder.path) else {
             return "Skill '\(cleanName)' not found."

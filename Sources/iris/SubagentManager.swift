@@ -30,10 +30,15 @@ final class SubagentManager: @unchecked Sendable {
     /// `appState` is injected rather than read from a global. It used to live in a weak
     /// process-wide property that `AppState.init` wrote to, so constructing an AppState anywhere —
     /// including in an unrelated test — swapped it, and letting one deallocate nilled it (#171).
+    /// `recentWrites` is the parent run's self-write registry, threaded rather than defaulted at
+    /// the engine: a subagent of an unattended run is unattended too, and its writes have to reach
+    /// the same registry the watch coordinator consults, or a run that delegates its file writing
+    /// escapes the filter (#187 §4).
     func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID,
                      unit: DelegatedUnit? = nil, maxIterations: Int = 3000,
                      client: (any LLMClientProtocol)? = nil,
-                     appState: AppState) async -> (rendered: String, status: SubagentTerminalStatus) {
+                     appState: AppState,
+                     recentWrites: RecentWrites = .shared) async -> (rendered: String, status: SubagentTerminalStatus) {
         let startedAt = Date()
 
         // 1. Create a new conversation for the subagent
@@ -68,7 +73,7 @@ final class SubagentManager: @unchecked Sendable {
 
         // 2. Instantiate a fresh IrisEngine linked to this conversation
         let engine = IrisEngine(state: appState, tier: tier, principal: .subagent, roleLabel: role,
-                                client: client ?? LLMClient())
+                                client: client ?? LLMClient(), recentWrites: recentWrites)
 
         // 3. Craft the role-specific prompt
         let customPromptText = generateRolePrompt(role: role)
@@ -170,7 +175,8 @@ final class SubagentManager: @unchecked Sendable {
             } ?? FileManager.default.currentDirectoryPath
             verdict = await GoalEvaluator.shared.evaluate(contract: unit.contract, workspace: workspace,
                                                           originatingConversationId: subagentId,
-                                                          app: appState, client: client ?? LLMClient())
+                                                          app: appState, client: client ?? LLMClient(),
+                                                          recentWrites: recentWrites)
         }
 
         let result = SubagentResult(role: role, status: termination.status,

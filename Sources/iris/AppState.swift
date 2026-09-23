@@ -2308,7 +2308,7 @@ class AppState {
                                    to: self.activityConversationId())
                 return
             }
-            await runner.runApproved(runId: runId)
+            _ = await runner.runApproved(runId: runId)
         }
     }
 
@@ -2969,13 +2969,11 @@ class AppState {
                 // card they are still reading.
                 let runCount = try ledger.runCount(jobId: job.id)
                 try ledger.delete(jobId: job.id)
-                // A watch job's FSEvents stream would otherwise keep firing for a job that is gone,
-                // and the runner would otherwise keep the origin of a fire it held for it.
+                // The delete fires the ledger's `onJobsChanged` hook, which drops the job's
+                // subscriber and stops its stream if nothing else is watching that directory. What
+                // the hook cannot reach is the runner's own memory of a fire it held for this job.
                 let engine = self.engine
-                Task {
-                    await WatcherManager.shared.reload()
-                    await engine?.jobRunner()?.forget(jobId: job.id)
-                }
+                Task { await engine?.jobRunner()?.forget(jobId: job.id) }
                 emitCommandOutput("Deleted **\(job.name)** and its \(runCount) run(s). Transcripts are left for retention to clear.",
                                   format: .markdown, to: convId)
             } catch {
