@@ -29,7 +29,11 @@ enum WatchRoot {
     static func canonical(_ raw: String,
                           fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) })
     -> String? {
-        let expanded = (raw as NSString).expandingTildeInPath
+        // `IrisEngine.expandTilde`, not `expandingTildeInPath`: Foundation's truncates to PATH_MAX
+        // and returns a plausible path (#275), and a watch on a truncated root would be a watch on
+        // a directory other than the one named. What refuses an over-long root is that no such
+        // directory can exist, and that has to be asked of the full path.
+        let expanded = IrisEngine.expandTilde(raw)
         let standardized = URL(fileURLWithPath: expanded).standardizedFileURL
         guard fileExists(standardized.path) else { return nil }
         return standardized.resolvingSymlinksInPath().standardizedFileURL.path

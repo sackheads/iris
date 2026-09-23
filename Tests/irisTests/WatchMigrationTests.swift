@@ -159,6 +159,14 @@ struct WatchMigrationTests {
     @Test("canonical resolves a symlink and is nil for a path that does not exist")
     func canonicalResolvesAndRefusesMissing() {
         #expect(WatchRoot.canonical("/tmp/x", fileExists: { _ in false }) == nil)
+        // #275's trap: `expandingTildeInPath` truncates to PATH_MAX and hands back a plausible
+        // path — a watch on it would be a watch on a different directory than the one named. The
+        // expansion must keep every character, so the only thing that refuses an over-long root
+        // is that no such directory can exist.
+        let overLong = "~/" + String(repeating: "a", count: 2_000)
+        #expect((WatchRoot.canonical(overLong, fileExists: { _ in true })?.utf8.count ?? 0) > 2_000,
+                "the tilde expansion must not truncate")
+        #expect(WatchRoot.canonical(overLong) == nil, "and on disk such a root is refused")
         #expect(WatchRoot.canonical("/a/../b", fileExists: { _ in true }) == "/b")
         #expect(WatchRoot.canonical("~", fileExists: { _ in true })
                 == NSHomeDirectory().standardizedAndResolved)
