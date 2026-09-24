@@ -282,9 +282,14 @@ struct GateCreationTests {
             #expect(parsed.failureText?.contains(key) == true,
                     "\(key) as \(value) must be refused, not silently ungated")
         }
-        // A number reads as its text everywhere else in this parser, so `gate_mounts: 3` is the
-        // path "3" and is refused downstream for not being absolute. A container is not a path at
-        // all, and dropping it would build a script gate with no inputs.
+        // A mount is never a number: unlike the rest of this parser, a `gate_mounts`/`mounts`
+        // element must actually be a string, so `gate_mounts: 3` is refused right here at parse
+        // (`gateMountsShape`) rather than becoming the path "3" and failing downstream for not
+        // being absolute (#282 fix round 1). A container is not a path at all either, and dropping
+        // either would build a script gate with fewer inputs than was asked for.
+        #expect(ScheduleJobArguments.parse(["prompt": .string("p"), "intervalSeconds": .int(60),
+                                            "gate_mounts": .int(3)])
+                == .failure(ScheduleJobArguments.gateMountsShape))
         #expect(ScheduleJobArguments.parse(["prompt": .string("p"), "intervalSeconds": .int(60),
                                             "gate_mounts": .object(["path": .string("/tmp")])])
                 .failureText != nil)

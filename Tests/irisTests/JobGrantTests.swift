@@ -367,4 +367,28 @@ struct JobGrantToolTests {
                                      conversationId: other, sandboxAvailable: true)
         #expect(Set(try store.ledger.jobs().map(\.name)) == ["deploy", "deploy-2"])
     }
+
+    @Test("schedule_job never replaces a watch of the same name from the same conversation — it suffixes, and the watch is untouched")
+    func replaceNeverTakesAWatch() async throws {
+        let (store, _, engine, conversation) = try engineHarness()
+        let watch = Job(name: "notes", prompt: "summarise",
+                        trigger: .fsEvent(FSWatch(path: "/tmp/notes")),
+                        createdInConversationId: conversation)
+        try store.ledger.upsert(watch)
+
+        let result = await engine.scheduleJob(ScheduleJobArguments.parse(["prompt": .string("check notes"),
+                                                                          "name": .string("notes"), "intervalSeconds": .int(60)]),
+                                              conversationId: conversation, sandboxAvailable: true)
+        #expect(result.contains("Scheduled 'notes-2'"))
+        #expect(!result.contains(ScheduleJobArguments.replacedNote("notes")))
+
+        let jobs = try store.ledger.jobs()
+        #expect(Set(jobs.map(\.name)) == ["notes", "notes-2"])
+        let stillWatch = try #require(jobs.first(where: { $0.name == "notes" }))
+        #expect(stillWatch.id == watch.id)
+        guard case .fsEvent = stillWatch.trigger else {
+            Issue.record("the watch's trigger must not have been replaced")
+            return
+        }
+    }
 }

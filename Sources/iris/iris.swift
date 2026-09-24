@@ -1975,12 +1975,14 @@ actor IrisEngine {
         var taken = Set(((try? ledger.jobs()) ?? []).map(\.name))
         // §0.1: an explicit name that this conversation already used is a re-schedule, and a
         // re-schedule replaces — the schedule, the prompt, the profile and the grant alike. Another
-        // conversation's job of that name is not ours to replace and still gets a suffix.
+        // conversation's job of that name is not ours to replace and still gets a suffix. So does a
+        // watch of that name: `register_directory_watcher` keeps its own folder-slug identity, and
+        // `schedule_job` replacing it would silently turn a standing watch into a cadence.
         var replacing: Job?
         if let name = args.name, let conversationId {
             let slug = Job.slug(from: name)
             replacing = ((try? ledger.jobs()) ?? []).first {
-                $0.name == slug && $0.createdInConversationId == conversationId
+                $0.name == slug && $0.createdInConversationId == conversationId && $0.trigger.kind != Trigger.fsEventKind
             }
             if let replacing { taken.remove(replacing.name) }
         }
