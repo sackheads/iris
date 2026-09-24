@@ -744,6 +744,49 @@ struct ApproveAndRunTests {
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1)
     }
 
+    @Test("a call refused outside the grant is never offered the button, and the click is refused before the approval is spent (#282)")
+    func outsideGrantIsNotApprovable() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let granted = IrisPaths.canonicalPath(dir.appendingPathComponent("proj").path)
+        try FileManager.default.createDirectory(atPath: granted, withIntermediateDirectories: true)
+        let (store, state, engine) = try harness()
+        var job = self.job(name: "deploy")
+        job.policy.grants = JobGrant(mounts: [ContainerMount(source: granted)])
+        try store.ledger.upsert(job)
+        // The call the gate refused outside the grant (5b): `grantNearest` is set for exactly this case.
+        let target = dir.appendingPathComponent("outside.md").path
+        let call = BlockedCall(toolName: "write_file",
+                               args: ["path": .string(target), "content": .string("nope")],
+                               cwd: granted, grantNearest: granted)
+        let blocked = try blockedRun(call, job: job, ledger: store.ledger)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        config.enableVibecop = true
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
+                               sandboxAvailable: { true })
+        let spy = SpyVibecop(decision: "APPROVE")
+
+        // The offer, as the fire path takes it when the card is written: withheld, and Vibecop not asked.
+        let offer = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": spy]) {
+            await runner.approvalOffer(for: call, job: job)
+        }
+        #expect(offer.refusal == EventCard.outsideGrantNotApprovable)
+        #expect(offer.verdict == nil && spy.calls == 0, "nothing is asked about a call no click can authorise")
+        let card = EventCard(runId: blocked.id, jobId: job.id, jobName: job.name, status: .blockedOnApproval,
+                             blockedTool: "write_file", startedAt: blocked.startedAt, finishedAt: blocked.startedAt,
+                             blockedCall: EventCard.displayCopy(of: call), approvalBlockedReason: offer.refusal)
+        #expect(!card.offersApproval)
+        #expect(card.approvalRefusal == EventCard.outsideGrantNotApprovable)
+
+        // The click, if the button is reached some other way: refused before the claim, so the
+        // approval is left unspent and no second row is written.
+        #expect(await runner.runApproved(runId: blocked.id) == .refused(JobRunner.outsideGrantRefusal))
+        #expect(try store.ledger.run(id: blocked.id)?.approvedAt == nil, "the approval is left unspent")
+        #expect(!FileManager.default.fileExists(atPath: target))
+        #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1)
+    }
+
     @Test("the executor refuses a protected write even with the approval already granted (R10)")
     func executorRefusesAProtectedWrite() async throws {
         let (_, state, engine) = try harness()

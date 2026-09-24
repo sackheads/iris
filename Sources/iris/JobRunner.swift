@@ -1087,6 +1087,12 @@ actor JobRunner {
         if protectedTarget {
             return ApprovalOffer(refusal: EventCard.protectedNotApprovable, verdict: nil, reason: nil)
         }
+        // The third class no click can authorise (#282 §0.13): a file-tool call refused outside
+        // the grant. `grantNearest` is set for exactly that case (5b), and `executeApprovedCall`
+        // would decide a nil mount for it — the click could only fail after spending the one-shot.
+        if call.grantNearest != nil {
+            return ApprovalOffer(refusal: EventCard.outsideGrantNotApprovable, verdict: nil, reason: nil)
+        }
         // The verdict is taken about the path the tool actually takes (#282 §3). A `write_file`
         // (or `read_file`) runs on the host at the granted path whatever the profile — a mutating
         // job's host write is not sandboxed — so it is judged as a host call; only a `run_command`
@@ -1116,6 +1122,7 @@ actor JobRunner {
     static let missingJobRefusal = "that job has been deleted"
     /// R10: `~/.iris/config` and `~/.iris/plugins` are where permission is granted.
     static let protectedWriteRefusal = "it would write into a protected directory, which an approval cannot authorise"
+    static let outsideGrantRefusal = "it was refused outside the job's grant, which an approval cannot widen; re-schedule the job with a grant that covers it"
     static let alreadyApprovedRefusal = "it has already been approved once"
     static let runnerUnavailableRefusal = "jobs are not available right now"
     static func ledgerRefusal(_ error: any Error) -> String { "the ledger could not be read: \(error)" }
@@ -1170,6 +1177,9 @@ actor JobRunner {
         // still has a button that would try.
         let protectedTarget = await MainActor.run { state.permissions.isProtectedWrite(call) }
         if protectedTarget { return await refuse(Self.protectedWriteRefusal, for: job) }
+        // Outside the grant (#282 §0.13), the same shape as R10: the card does not offer it, and
+        // the claim below must not be spent on a call the executor can only refuse.
+        if call.grantNearest != nil { return await refuse(Self.outsideGrantRefusal, for: job) }
         // R20: the profile is re-asked HERE, at click time, not inherited from the fire. Between
         // the run that was blocked and this click the user can have uninstalled the runtime or
         // turned sandboxing off, and the answer to "may this job do this?" changes with it. The

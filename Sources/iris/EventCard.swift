@@ -239,6 +239,12 @@ struct EventCard: Codable, Equatable, Sendable {
     static let protectedNotApprovable =
         "This writes into a protected directory (`config/` or `plugins/`), which grants permission rather than editing a file. Make the change yourself if you want it."
 
+    /// Shown in place of the button for a file-tool call refused outside the job's grant (#282
+    /// §0.13): a granted run has no host path for `write_file` or `read_file` to take, so the
+    /// click could only fail after spending the one-shot. The remedy is a wider grant.
+    static let outsideGrantNotApprovable =
+        "This call is outside the job's grant, and a granted run's file tools have no path outside it that a click can open. Re-schedule the job with a grant that covers this directory if it should be able to."
+
     /// How much of one *content-like* argument a card shows. A `write_file` body is the argument
     /// that matters most and the one that can be a megabyte; 500 characters is enough to see what
     /// is being written without pasting the file into the transcript (spec §6). Execution-bearing

@@ -291,9 +291,10 @@ mounts. Whoever wants that read or write widens the grant. A call refused outsid
 on the row and the card — `needs approval: write_file outside the grant (nearest: /Users/me/proj)`
 — naming the nearest granted directory so you can widen once rather than click every time, and
 the transcript line is `Not run: \`write_file\` needs approval — outside the grant (nearest:
-/Users/me/proj) — and this is an unattended run.` **Approve and run** on such a call is refused as
-well: a granted run has no host path for those two tools to take, so the remedy is a re-schedule
-with a wider grant, not a click.
+/Users/me/proj) — and this is an unattended run.` **Approve and run** is not offered on such a call,
+and the click is refused if it is reached some other way, with the approval left unspent: a granted
+run has no host path for those two tools to take, so the remedy is a re-schedule with a wider grant,
+not a click.
 
 **How the path is judged.** On the real path, never a lexical one. The covering mount is chosen
 from the kernel's resolution of the deepest existing ancestor of the path (compared
@@ -755,8 +756,9 @@ is never run on the host instead. A click authorises the command; it does not au
 the isolation. An approved call of a granted job runs with the same grant — the same mounts,
 network and working directory — and is refused, with the approval left unspent, if a granted
 directory has since moved (`grant source unavailable: <path>`); a file-tool call that was refused
-*outside* the grant is refused again by the click, because a granted run has no host path for it
-to take, and the remedy is a wider grant (see "Grants").
+*outside* the grant is never offered the button and is refused by the click before the approval is
+spent, because a granted run has no host path for it to take, and the remedy is a wider grant (see
+"Grants").
 
 Precisely: *model-issued* commands. A hook is the other way a command leaves an unattended run, and
 it does not follow this rule — a `BeforeTool` or command hook runs under the hooks sandbox setting
@@ -767,14 +769,18 @@ model can reach for. The rule above is about what the model can issue.
 A refusal is said in the conversation the card is in — the job's destination, or Iris Activity —
 because a sentence in a conversation you do not have open is the same as silence.
 
-Two calls are never offered the button at all, and are refused again by the runner and by the
-ledger if one is reached another way:
+Three calls are never offered the button at all, and are refused again by the runner (and, for
+the first, by the ledger) if one is reached another way:
 
 - a call a **read-only** job's profile refused. It was not stopped for want of a human, so no human
   can grant it; the job would have to be created `mutating`.
 - a **write into a protected directory** (`~/.iris/config`, `~/.iris/plugins`). A write there grants
   further permission rather than editing a file, and a click says a person vouches for the call —
   it does not change what may be written. Make that change yourself if you want it.
+- a **file-tool call outside the job's grant** (`write_file` or `read_file` from a granted run,
+  refused with `nearest: …`). A granted run's file tools have no path outside the grant that a
+  click can open, so the click could only fail after spending the approval. Re-schedule the job with
+  a grant that covers the directory instead.
 
 **Dismiss** acknowledges the run: it leaves `/jobs`'s failure list and stops being exempt from
 retention. The card stays in the transcript, because it is a record of what happened. Approving
