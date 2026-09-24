@@ -189,24 +189,52 @@ struct IrisPaths: Sendable {
     /// the remaining components appended. A `..` among the missing tail pops lexically: a
     /// directory that does not exist cannot be a symlink. `canonicalPath` stays for the callers
     /// that store and display paths; this is for deciding.
+    ///
+    /// One exception to "what the kernel would act on": a DANGLING final symlink (or a loop) is
+    /// returned as its spelling under the resolved parent, while `open(O_CREAT)` would create the
+    /// link's *target*. Three things hold that shut: `realPathForAllow` refuses it (an entry that
+    /// `lstat` sees but `realpath(3)` cannot resolve is nil on the allow side), `ToolExecutor.writeFile`
+    /// writes atomically, so its rename replaces the link rather than following it, and Task 4c's
+    /// walk opens the final component `O_NOFOLLOW`. This lenient form is for the deny side.
     static func realPath(_ rawPath: String) -> String {
+        realPath(rawPath, strict: false) ?? "/"   // strict: false never returns nil; `/` is the last resort
+    }
+
+    /// `realPath` for an *allow*: nil when the path is not absolute after tilde expansion, any
+    /// component is `..` (§0.9) — a model never needs either inside a grant, and refusing them
+    /// costs nothing a person could not have phrased without them — or the deepest existing
+    /// entry will not resolve (a loop, a dangling link, EACCES, a component swapped between the
+    /// existence check and `realpath(3)`): an allow must not step past what it could not see.
+    static func realPathForAllow(_ rawPath: String) -> String? {
+        let expanded = IrisEngine.expandTilde(rawPath)   // #275: never `expandingTildeInPath` on a decider
+        guard expanded.hasPrefix("/") else { return nil }
+        guard !expanded.split(separator: "/").contains("..") else { return nil }
+        return realPath(expanded, strict: true)
+    }
+
+    /// The walk both forms share. Existence is `lstat`'s, not `stat`'s, so a symlink that does not
+    /// resolve is met as the deepest existing entry and `realpath(3)` is asked about *it*: strict
+    /// answers nil there; lenient steps back one more and appends the rest lexically, which is
+    /// the answer the deny side has always had. Only `/` itself is trusted without asking.
+    private static func realPath(_ rawPath: String, strict: Bool) -> String? {
         let expanded = IrisEngine.expandTilde(rawPath)   // #275: never `expandingTildeInPath` on a decider
         let absolute = expanded.hasPrefix("/") ? expanded : URL(fileURLWithPath: expanded).path
         let components = absolute.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
             .filter { $0 != "." }
-        let fm = FileManager.default
         var existing = components.count
-        var prefix = "/" + components.joined(separator: "/")
-        while existing > 0, !fm.fileExists(atPath: prefix) {
+        var resolved = "/"
+        while existing > 0 {
+            let prefix = "/" + components[0..<existing].joined(separator: "/")
+            var info = stat()
+            if lstat(prefix, &info) == 0 {
+                if let real = Darwin.realpath(prefix, nil) {
+                    resolved = String(cString: real)
+                    free(real)
+                    break
+                }
+                if strict { return nil }
+            }
             existing -= 1
-            prefix = "/" + components[0..<existing].joined(separator: "/")
-        }
-        var resolved: String
-        if let real = Darwin.realpath(prefix, nil) {
-            resolved = String(cString: real)
-            free(real)
-        } else {
-            resolved = prefix
         }
         for component in components[existing...] {
             if component == ".." {
@@ -216,16 +244,6 @@ struct IrisPaths: Sendable {
             }
         }
         return resolved
-    }
-
-    /// `realPath` for an *allow*: nil when the path is not absolute after tilde expansion or any
-    /// component is `..` (§0.9) — a model never needs either inside a grant, and refusing them
-    /// costs nothing a person could not have phrased without them.
-    static func realPathForAllow(_ rawPath: String) -> String? {
-        let expanded = IrisEngine.expandTilde(rawPath)   // #275: never `expandingTildeInPath` on a decider
-        guard expanded.hasPrefix("/") else { return nil }
-        guard !expanded.split(separator: "/").contains("..") else { return nil }
-        return realPath(expanded)
     }
 
     /// True if `rawPath` resolves to a location inside `root` (`~/.iris`).

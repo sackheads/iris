@@ -55,6 +55,11 @@ struct JobGrantAllowsTests {
     @Test("a differently-cased spelling of a granted directory is allowed (§3): the walk, not the string, proves identity")
     func differentlyCasedSpellingIsAllowed() throws {
         let t = try Self.tree(); defer { t.tearDown() }
+        // The claim is about APFS's default: a case-insensitive volume keeps the caller's spelling.
+        // On a case-sensitive volume `PROJ` is simply another directory and there is nothing to pin.
+        let caseSensitive = try t.base.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
+            .volumeSupportsCaseSensitiveNames ?? false
+        guard !caseSensitive else { return }
         let upper = t.base.appendingPathComponent("PROJ").appendingPathComponent("out.md").path
         let mount = try #require(t.grant.allowedMount(toolName: "write_file", details: upper, cwd: nil))
         #expect(mount.source == c(t.proj), "the covering entry is chosen case-insensitively")
@@ -124,5 +129,16 @@ struct JobGrantAllowsTests {
         #expect(t.grant.nearest(to: c(t.proj, "locked/deeper/x"), cwd: nil) == c(t.inner))
         #expect(t.grant.nearest(to: "/nowhere/x", cwd: nil) == c(t.proj), "nothing shared beyond / still names something")
         #expect(t.grant.nearest(to: c(t.proj) + "/../x", cwd: nil) == c(t.proj), "a refused .. path is still told where the grant is")
+    }
+
+    @Test("nearest for a relative path with no working directory names the first mount, not somewhere under the process cwd")
+    func nearestForARelativePathWithoutCwd() throws {
+        let t = try Self.tree(); defer { t.tearDown() }
+        // The second entry IS the process cwd: resolving a bare `out.md` against it would name it.
+        let launchDir = IrisPaths.canonicalPath(FileManager.default.currentDirectoryPath)
+        let g = JobGrant(mounts: [ContainerMount(source: c(t.ro), readOnly: true), ContainerMount(source: launchDir)])
+        #expect(g.nearest(to: "out.md", cwd: nil) == c(t.ro), "the card must not depend on where the daemon was launched")
+        #expect(g.nearest(to: "out.md", cwd: launchDir) == launchDir, "with a cwd it is placed as usual")
+        #expect(JobGrant(network: true).nearest(to: "out.md", cwd: nil) == nil)
     }
 }

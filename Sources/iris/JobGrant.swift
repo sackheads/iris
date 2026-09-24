@@ -242,7 +242,12 @@ extension JobGrant {
     func nearest(to details: String, cwd: String?) -> String? {
         let real = realMounts
         guard !real.isEmpty else { return nil }
-        let target = URL(fileURLWithPath: IrisPaths.realPath(ToolExecutor.resolvePath(details, cwd: cwd))).pathComponents
+        // A relative path with no working directory has nowhere to be placed from: `realPath` would
+        // place it under the *process* cwd, and the card's text must not depend on where the
+        // daemon was launched. The first mount is the honest answer — it is where the grant is.
+        let resolved = IrisEngine.expandTilde(ToolExecutor.resolvePath(details, cwd: cwd))
+        guard resolved.hasPrefix("/") else { return mounts.first?.source }
+        let target = URL(fileURLWithPath: IrisPaths.realPath(resolved)).pathComponents
         func shared(_ path: String) -> Int {
             zip(URL(fileURLWithPath: path).pathComponents, target).prefix { $0 == $1 }.count
         }

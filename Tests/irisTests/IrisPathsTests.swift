@@ -118,6 +118,23 @@ struct IrisPathsTests {
         #expect(IrisPaths.realPathForAllow(t.mount.path + "/proj/./f") == real(t.mount) + "/proj/f", "a . is not a ..")
     }
 
+    @Test("realPathForAllow is nil when the deepest existing entry will not resolve; realPath still answers the deny side")
+    func realPathForAllowFailsClosedOnAnUnresolvableEntry() throws {
+        let t = try linkTree(); defer { try? FileManager.default.removeItem(at: t.base) }
+        // A loop (ELOOP) and a dangling link (ENOENT): `stat` says neither is there, `lstat` says both
+        // are, and `realpath(3)` fails on each. The allow side must not paper over that by stepping
+        // back to the parent and appending the link's name as if it were a plain missing directory.
+        let loop = t.mount.appendingPathComponent("loop"), dangle = t.mount.appendingPathComponent("dangle")
+        try FileManager.default.createSymbolicLink(atPath: loop.path, withDestinationPath: "loop")
+        try FileManager.default.createSymbolicLink(atPath: dangle.path, withDestinationPath: "nowhere")
+        #expect(IrisPaths.realPathForAllow(loop.path + "/x") == nil)
+        #expect(IrisPaths.realPathForAllow(loop.path) == nil)
+        #expect(IrisPaths.realPathForAllow(dangle.path) == nil, "a dangling final link is the one case open(O_CREAT) would follow")
+        // The deny side keeps a lexical answer, resolved as far as the parent, so R10 can still say no.
+        #expect(IrisPaths.realPath(loop.path + "/x") == real(t.mount) + "/loop/x")
+        #expect(IrisPaths.realPath(dangle.path) == real(t.mount) + "/dangle")
+    }
+
     @Test("canonicalPath expands a tilde without PATH_MAX truncation (#275, third site)")
     func canonicalPathDoesNotTruncateATilde() {
         // The same pin `WatchMigrationTests` keeps for `WatchRoot.canonical`: `expandingTildeInPath`
