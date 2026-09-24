@@ -27,6 +27,11 @@ struct ToolExecutor {
     var irisPaths: IrisPaths?
     var homeDirectory: String?
 
+    /// Whether a `mutating` watch would get the VM its commands need (`SandboxPolicy.mutatingJobCanRun`).
+    /// nil, the case in the app, asks the real policy when the tool runs; a test sets `{ true }`.
+    var mutatingJobsAvailable: (@Sendable () -> Bool)?
+    static let watchProfileNeedsSandbox = "A mutating watch's commands always run in the apple/container VM, and that VM is not available: install the runtime and turn sandboxing on in Settings → Sandboxing, or leave the watch read-only."
+
     /// How the sandboxed branch of `run_command` reaches the container session. Injectable so a
     /// test can assert what that branch forwards — the command, the workspace, and the deadline —
     /// without a `container` binary, a daemon or a VM. nil, the case everywhere in the app, means
@@ -98,7 +103,10 @@ struct ToolExecutor {
                     "instructions": Schema(type: "STRING", description: "The instructions to execute when a file is modified"),
                     "quiet_window_seconds": Schema(type: "INTEGER", description: "1 to 300; outside is clamped"),
                     "ignore": Schema(type: "ARRAY", description: "glob patterns relative to the path, e.g. `*.log`, `build/`", items: Schema(type: "STRING")),
-                    "overlap": Schema(type: "STRING", description: "`queue` or `skip`")
+                    "overlap": Schema(type: "STRING", description: "`queue` or `skip`"),
+                    "profile": Schema(type: "STRING", description: "'readOnly' (default) or 'mutating'. A watch that writes must be mutating; its commands then run in the sandbox VM, which must be available."),
+                    "mounts": Schema(type: "ARRAY", description: "Directories the watch's runs may use, as '/host/dir', '/host/dir:ro' or '/host/dir:/path/in/container'. Read-write unless ':ro'; the first read-write one is the working directory. Mutating only. The watched folder is not included unless named here.", items: Schema(type: "STRING")),
+                    "network": Schema(type: "BOOLEAN", description: "true lets the runs' commands reach the network from inside the VM; default false. Mutating only.")
                 ],
                 required: ["path", "instructions"]
             )
@@ -267,15 +275,30 @@ struct ToolExecutor {
                 guard case .fsEvent(let watch) = job.trigger else { return false }
                 return watch.path.lowercased() == key
             }
+            let existing = watching.first(where: { $0.createdInConversationId == conversationId })
+            let asked = parsed.profile?.lowercased() == JobProfile.mutating.rawValue.lowercased() ? JobProfile.mutating
+                : (parsed.profile == nil ? nil : JobProfile.readOnly)
+            let profile = asked ?? existing?.profile ?? .readOnly
+            if profile == .mutating, !(mutatingJobsAvailable?() ?? SandboxPolicy.mutatingJobCanRun()) {
+                return Self.watchProfileNeedsSandbox
+            }
+            let grant: JobGrant?
+            switch JobGrant.resolve(mounts: parsed.mounts, network: parsed.network, profile: profile,
+                                    paths: irisPaths ?? .default, home: homeDirectory ?? NSHomeDirectory()) {
+            case .failure(let message):
+                return "Not watching \(path): \(ScheduleJobArguments.grantRefusal(message, mountsNamed: !(parsed.mounts ?? []).isEmpty).text)"
+            case .success(let resolved): grant = resolved
+            }
             var job: Job
             let opening: String
-            if var existing = watching.first(where: { $0.createdInConversationId == conversationId }),
-               case .fsEvent(var watch) = existing.trigger {
+            if var existing = existing, case .fsEvent(var watch) = existing.trigger {
                 existing.prompt = parsed.instructions
                 if let window { watch.quietWindowSeconds = window }
                 if let ignore = parsed.ignore { watch.ignore = ignore }
                 existing.trigger = .fsEvent(watch)
                 if let overlap = parsed.overlap { existing.policy.overlap = overlap }
+                existing.profile = profile
+                existing.policy.grants = grant
                 existing.enabled = true
                 existing.pausedReason = nil
                 job = existing
@@ -288,10 +311,11 @@ struct ToolExecutor {
                     prompt: parsed.instructions,
                     trigger: .fsEvent(FSWatch(path: path, quietWindowSeconds: window ?? FSWatch.defaultQuietWindowSeconds,
                                               ignore: parsed.ignore ?? [])),
+                    profile: profile,
                     createdInConversationId: conversationId,
                     // A watch never runs concurrently with itself; by default a save that lands
                     // mid-run is queued, not dropped.
-                    policy: JobPolicy(overlap: parsed.overlap ?? .queue))
+                    policy: { var p = JobPolicy(overlap: parsed.overlap ?? .queue); p.grants = grant; return p }())
                 let others = watching.map { "`\($0.name)`" }
                 let named = others.count <= 2 ? others.joined(separator: " and ")
                     : others.dropLast().joined(separator: ", ") + " and " + others[others.count - 1]
@@ -314,6 +338,7 @@ struct ToolExecutor {
             }
             sentences.append(runs + ".")
             if clamped, let window { sentences.append("The window was clamped to \(window) s.") }
+            if let grant = job.policy.grants { sentences.append(grant.sentence) }
             return sentences.joined(separator: " ")
         } catch {
             return "Could not save the watcher job."

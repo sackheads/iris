@@ -270,3 +270,101 @@ struct JobGrantResolveTests {
         #expect(result == .failure(ToolMessage(JobGrant.tooBroad(credsCanonical))))
     }
 }
+
+/// The two tools (#282 §4): parsing, the stored grant, the sentence, replace and remove.
+@MainActor
+@Suite("JobGrant through the tools (#282)")
+struct JobGrantToolTests {
+    private func canonical(_ url: URL) -> String { IrisPaths.canonicalPath(url.path) }
+
+    @Test("schedule_job parses mounts and network in the loose shapes a model writes, and refuses the rest")
+    func scheduleJobArguments() throws {
+        let a = try ScheduleJobArguments.parse(["prompt": .string("p"), "intervalSeconds": .int(60),
+                                                "mounts": .string("/p"), "network": .string("true")]).get()
+        #expect(a.mounts == ["/p"] && a.network == true)
+        let b = try ScheduleJobArguments.parse(["prompt": .string("p"), "intervalSeconds": .int(60),
+                                                "mounts": .array([.string("/p"), .string("/q:ro")]), "network": .bool(false)]).get()
+        #expect(b.mounts == ["/p", "/q:ro"] && b.network == false)
+        let none = try ScheduleJobArguments.parse(["prompt": .string("p"), "intervalSeconds": .int(60),
+                                                   "mounts": .array([]), "network": .null]).get()
+        #expect(none.mounts == nil && none.network == nil)
+        #expect(ScheduleJobArguments.parse(["prompt": .string("p"), "network": .string("maybe")]) == .failure(ScheduleJobArguments.networkShape))
+        #expect(ScheduleJobArguments.parse(["prompt": .string("p"), "mounts": .array([.int(3)])]) == .failure(ScheduleJobArguments.mountsShape))
+    }
+
+    @Test("makeJob stores the grant on a mutating job and refuses one on a read-only job, before the schedule is looked at")
+    func makeJobStoresGrant() throws {
+        let f = try JobGrantResolveTests.fixture(); defer { f.tearDown() }
+        let args = try ScheduleJobArguments.parse(["prompt": .string("p"), "intervalSeconds": .int(60),
+                                                   "profile": .string("mutating"), "mounts": .string(f.proj.path)]).get()
+        let job = try args.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: [],
+                                   sandboxAvailable: true, paths: f.paths, home: f.home).get()
+        #expect(job.policy.grants == JobGrant(mounts: [ContainerMount(source: canonical(f.proj))]))
+        #expect(ScheduleJobArguments.resultSentence(for: job).hasSuffix(" Grant: read-write \(canonical(f.proj)) (working directory) · network off."))
+
+        let readOnly = try ScheduleJobArguments.parse(["prompt": .string("p"), "mounts": .string(f.proj.path)]).get()
+        #expect(readOnly.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: [], sandboxAvailable: true,
+                                 paths: f.paths, home: f.home) == .failure(ToolMessage("mounts: " + JobGrant.grantNeedsMutating)),
+                "refused for the grant, not for the missing schedule")
+        // A network-only refusal is not about mounts and does not say so (L4).
+        let netOnly = try ScheduleJobArguments.parse(["prompt": .string("p"), "network": .bool(true)]).get()
+        #expect(netOnly.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: [], sandboxAvailable: true,
+                                paths: f.paths, home: f.home) == .failure(ToolMessage(JobGrant.grantNeedsMutating)))
+        // §0.11 through the tool: explicit network false, no mounts, mutating → a grant.
+        let off = try ScheduleJobArguments.parse(["prompt": .string("p"), "intervalSeconds": .int(60),
+                                                  "profile": .string("mutating"), "network": .bool(false)]).get()
+        let offJob = try off.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: [], sandboxAvailable: true,
+                                     paths: f.paths, home: f.home).get()
+        #expect(offJob.policy.grants == JobGrant(mounts: [], network: false))
+        #expect(ScheduleJobArguments.resultSentence(for: offJob).hasSuffix(" Grant: no mounts · network off."))
+    }
+
+    private func engineHarness() throws -> (ConversationStore, AppState, IrisEngine, UUID) {
+        let store = try ConversationStore.inMemory()
+        let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        state.conversations.removeAll()
+        let conversation = UUID()
+        state.createNewConversation(id: conversation)
+        state.selectedConversationId = conversation
+        let engine = IrisEngine(state: state, tier: .medium, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false, sessionPeerCount: 0)
+        return (store, state, engine, conversation)
+    }
+
+    @Test("re-scheduling the same explicit name from the same conversation replaces the job and its grant; omitting the grant removes it")
+    func rescheduleReplacesAndRemoves() async throws {
+        let f = try JobGrantResolveTests.fixture(); defer { f.tearDown() }
+        let (store, state, engine, conversation) = try engineHarness()
+        func schedule(_ extra: [String: JSONValue]) async -> String {
+            var args: [String: JSONValue] = ["prompt": .string("deploy it"), "name": .string("deploy"),
+                                             "intervalSeconds": .int(3600), "profile": .string("mutating")]
+            for (k, v) in extra { args[k] = v }
+            return await engine.scheduleJob(ScheduleJobArguments.parse(args), conversationId: conversation,
+                                            sandboxAvailable: true, paths: f.paths, home: f.home)
+        }
+        let first = await schedule(["mounts": .string(f.proj.path)])
+        #expect(first.contains("Scheduled 'deploy'") && first.contains("Grant: read-write"))
+        let original = try #require(try store.ledger.jobs().first)
+        #expect(original.policy.grants?.mounts.count == 1)
+
+        let second = await schedule(["mounts": .array([.string(f.proj.path), .string("\(f.creds.path):ro")]), "network": .bool(true)])
+        let jobs = try store.ledger.jobs()
+        #expect(jobs.count == 1, "replaced, not suffixed to deploy-2")
+        #expect(jobs[0].id == original.id && jobs[0].createdAt == original.createdAt)
+        #expect(jobs[0].policy.grants == JobGrant(mounts: [ContainerMount(source: canonical(f.proj)),
+                                                           ContainerMount(source: canonical(f.creds), readOnly: true)], network: true))
+        #expect(second.contains(ScheduleJobArguments.replacedNote("deploy")))
+
+        let third = await schedule([:])
+        #expect(try store.ledger.jobs().first?.policy.grants == nil, "omitting mounts and network removes the grant")
+        #expect(!third.contains("Grant:"))
+
+        // A different conversation asking for the same name still gets a suffix — the name is
+        // that conversation's, and a replacement must not reach across.
+        let other = state.createNewConversation()
+        _ = await engine.scheduleJob(ScheduleJobArguments.parse(["prompt": .string("x"), "name": .string("deploy"),
+                                                                 "intervalSeconds": .int(60)]),
+                                     conversationId: other, sandboxAvailable: true)
+        #expect(Set(try store.ledger.jobs().map(\.name)) == ["deploy", "deploy-2"])
+    }
+}

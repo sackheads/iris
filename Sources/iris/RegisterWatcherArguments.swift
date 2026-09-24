@@ -1,18 +1,23 @@
 import Foundation
 
-/// Everything `register_directory_watcher` accepts (#187 deliverable 4, spec §5), read once into
-/// the shape `ToolExecutor.registerWatcher` stores.
+/// Everything `register_directory_watcher` accepts (#187 deliverable 4, spec §5; grant fields
+/// #282 §4), read once into the shape `ToolExecutor.registerWatcher` stores.
 ///
-/// The three optional arguments are `nil` when not given, and `nil` means "say nothing": on a
-/// re-registration the stored value stands, and on a new watch the default applies. That is why
-/// the window is not clamped here — the tool clamps it and says so, and a clamp is only worth
-/// saying when a number was actually asked for.
+/// The three original optional arguments are `nil` when not given, and `nil` means "say nothing":
+/// on a re-registration the stored value stands, and on a new watch the default applies. That is
+/// why the window is not clamped here — the tool clamps it and says so, and a clamp is only worth
+/// saying when a number was actually asked for. The grant (`profile`, `mounts`, `network`) is the
+/// exception to that rule (§0.1): a re-registration stores exactly the grant the call names, and
+/// naming none removes the one that was stored.
 struct RegisterWatcherArguments: Equatable, Sendable {
     let path: String
     let instructions: String
     let quietWindowSeconds: Int?
     let ignore: [String]?
     let overlap: JobPolicy.Overlap?
+    let profile: String?
+    let mounts: [String]?
+    let network: Bool?
 
     static let missing: ToolMessage = "Error: Missing path or instructions"
     static let windowShape: ToolMessage = "Error: quiet_window_seconds must be a whole number of seconds (1 to 300)."
@@ -53,7 +58,18 @@ struct RegisterWatcherArguments: Equatable, Sendable {
             }
             overlap = value
         }
+        let mounts: [String]?
+        switch ScheduleJobArguments.stringList(args["mounts"], shape: ScheduleJobArguments.mountsShape) {
+        case .failure(let message): return .failure(ToolMessage("Error: " + message.text))
+        case .success(let values): mounts = values
+        }
+        let network: Bool?
+        switch ScheduleJobArguments.boolean(args["network"]) {
+        case .failure(let message): return .failure(ToolMessage("Error: " + message.text))
+        case .success(let value): network = value
+        }
         return .success(RegisterWatcherArguments(
-            path: path, instructions: instructions, quietWindowSeconds: window, ignore: ignore, overlap: overlap))
+            path: path, instructions: instructions, quietWindowSeconds: window, ignore: ignore, overlap: overlap,
+            profile: ScheduleJobArguments.text(args["profile"]), mounts: mounts, network: network))
     }
 }

@@ -1201,7 +1201,7 @@ actor IrisEngine {
         if !isUnattended {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -1223,7 +1223,9 @@ actor IrisEngine {
                     "gate_mounts": Schema(type: "ARRAY", description: "Directories the gate script can read, as '/host/dir' or '/host/dir:/path/in/container'. Always mounted read-only, and recorded as the directory the path resolves to. A single file cannot be mounted — give its directory. The whole filesystem and Iris's own configuration cannot be mounted at all, so name the narrowest directory the check needs.", items: Schema(type: "STRING")),
                     "gate_timeout_seconds": Schema(type: "INTEGER", description: "How long the gate script may take before it is killed and counted as a failure (default 60, clamped to 5-600)."),
                     "overlap": Schema(type: "STRING", description: "What a fire does when the previous run has not finished: 'skip' (default — the fire is dropped and recorded) or 'queue' (one fire is held and taken as soon as that run ends; never more than one)."),
-                    "catch_up": Schema(type: "STRING", description: "What a wake does with occurrences missed while the Mac slept: 'coalesce' (default — one fire now), 'skip' (none; jump to the next occurrence), or 'replay' to run the most recent missed ones one at a time, up to a cap (default 5, at most 100) — write a cap as 'replay:3'. A replayed fire is an ordinary one, so it asks the gate and counts against the breaker and the budgets, and the burst stops at the first fire that is refused or fails.")
+                    "catch_up": Schema(type: "STRING", description: "What a wake does with occurrences missed while the Mac slept: 'coalesce' (default — one fire now), 'skip' (none; jump to the next occurrence), or 'replay' to run the most recent missed ones one at a time, up to a cap (default 5, at most 100) — write a cap as 'replay:3'. A replayed fire is an ordinary one, so it asks the gate and counts against the breaker and the budgets, and the burst stops at the first fire that is refused or fails."),
+                    "mounts": Schema(type: "ARRAY", description: "Directories the job may use, as '/host/dir', '/host/dir:ro' or '/host/dir:/path/in/container'. Read-write unless ':ro'. The first read-write one is the job's working directory. Mutating jobs only. Recorded as the directory each path resolves to; the whole filesystem, the home directory, volume roots and Iris's own directory cannot be mounted.", items: Schema(type: "STRING")),
+                    "network": Schema(type: "BOOLEAN", description: "true lets the job's commands reach the network from inside the VM; default false, which attaches the VM to a host-only network. Mutating jobs only.")
                 ],
                 required: ["prompt"]
             )
@@ -1955,7 +1957,8 @@ actor IrisEngine {
     /// reason: whether this Mac has the VM today is not something a test can arrange.
     func scheduleJob(_ parsed: Result<ScheduleJobArguments, ToolMessage>, conversationId: UUID?,
                      review: GateScriptReview? = nil,
-                     sandboxAvailable: Bool = SandboxPolicy.mutatingJobCanRun()) async -> String {
+                     sandboxAvailable: Bool = SandboxPolicy.mutatingJobCanRun(),
+                     paths: IrisPaths = .default, home: String = NSHomeDirectory()) async -> String {
         let args: ScheduleJobArguments
         switch parsed {
         case .failure(let message): return message.text
@@ -1970,6 +1973,19 @@ actor IrisEngine {
         let scheduler = schedulerForJobWrites(ledger: ledger)
 
         var taken = Set(((try? ledger.jobs()) ?? []).map(\.name))
+        // §0.1: an explicit name that this conversation already used is a re-schedule, and a
+        // re-schedule replaces — the schedule, the prompt, the profile and the grant alike. Another
+        // conversation's job of that name is not ours to replace and still gets a suffix.
+        var replacing: Job?
+        if let name = args.name, let conversationId {
+            let slug = Job.slug(from: name)
+            replacing = ((try? ledger.jobs()) ?? []).first {
+                $0.name == slug && $0.createdInConversationId == conversationId
+            }
+            if let replacing { taken.remove(replacing.name) }
+        }
+        var notes = args.notes
+        if let replacing { notes.append(ScheduleJobArguments.replacedNote(replacing.name)) }
         // A gate script is reviewed once, and only once however many times the name loop below
         // goes round: a second dialog for the same script would read as a stuck button.
         var reviewedScript = false
@@ -1979,7 +1995,7 @@ actor IrisEngine {
         for _ in 0..<2 {
             switch args.makeJob(defaultTimeZone: TimeZone.current.identifier,
                                 createdIn: conversationId, existingNames: taken,
-                                sandboxAvailable: sandboxAvailable) {
+                                sandboxAvailable: sandboxAvailable, paths: paths, home: home) {
             case .failure(let message):
                 return message.text
             case .success(let job):
@@ -1998,12 +2014,19 @@ actor IrisEngine {
                     }
                     reviewedScript = true
                 }
+                var job = job
+                if let replacing {
+                    job = Job(id: replacing.id, name: job.name, prompt: job.prompt, trigger: job.trigger,
+                              profile: job.profile, destinationConversationId: replacing.destinationConversationId,
+                              createdInConversationId: replacing.createdInConversationId,
+                              createdAt: replacing.createdAt, policy: job.policy)
+                }
                 do {
                     // Stored through the scheduler, not the ledger, so the first fire is computed
                     // by the code the polling loop uses — and a cadence that matches nothing comes
                     // back paused rather than looking scheduled.
                     return ScheduleJobArguments.resultSentence(for: try await scheduler.schedule(job),
-                                                                notes: args.notes)
+                                                                notes: notes)
                 } catch {
                     taken.insert(job.name)
                 }
