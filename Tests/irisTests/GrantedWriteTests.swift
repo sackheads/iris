@@ -57,7 +57,7 @@ struct GrantedWriteTests {
         #expect(try String(contentsOf: target, encoding: .utf8) == "keep")
         #expect(t.names(t.root) == ["out.md", "sub"], "the link itself is left where it was")
         #expect(throws: GrantedFileError.symlink(component: "out.md")) { _ = try t.access.read(relative: ["out.md"]) }
-        // A directory where a file was named is refused with its own sentence (L2), staging removed.
+        // A directory where a file was named is refused with its own sentence (L2) before anything is staged.
         #expect(throws: GrantedFileError.isADirectory(component: "sub")) { try t.access.write(relative: ["sub"], content: "x") }
         #expect(t.names(t.root) == ["out.md", "sub"])
     }
@@ -169,6 +169,36 @@ struct GrantedWriteTests {
         #expect(throws: GrantedFileError.missing(component: "nodir")) { _ = try t.access.read(relative: ["nodir", "r.md"]) }
         #expect(throws: GrantedFileError.notADirectory(component: "r.md")) { _ = try t.access.read(relative: ["sub", "r.md", "deeper"]) }
         #expect(throws: GrantedFileError.emptyPath) { _ = try t.access.read(relative: []) }
+    }
+
+    @Test("read refuses a directory and a FIFO with their own sentences, and the FIFO answer comes back promptly")
+    func readRefusesNonRegularFiles() async throws {
+        let t = try tree(); defer { t.tearDown() }
+        #expect(throws: GrantedFileError.isADirectory(component: "sub")) { _ = try t.access.read(relative: ["sub"]) }
+        // Measured by review: a plain `open(O_RDONLY)` of a FIFO blocks until a writer appears, which
+        // would park a job's run on the watchdog. The walk opens `O_NONBLOCK`, asks `fstat`, and refuses.
+        let fifo = t.root.appendingPathComponent("sub/pipe")
+        #expect(mkfifo(fifo.path, 0o644) == 0)
+        enum Outcome: Equatable { case threw(GrantedFileError), readBack, timedOut }
+        let access = t.access
+        let (outcomes, sink) = AsyncStream<Outcome>.makeStream()
+        Task.detached {
+            do { _ = try access.read(relative: ["sub", "pipe"]); sink.yield(.readBack) }
+            catch let error as GrantedFileError { sink.yield(.threw(error)) }
+            catch { sink.yield(.readBack) }
+        }
+        Task.detached { try? await Task.sleep(for: .seconds(5)); sink.yield(.timedOut) }
+        var first: Outcome = .timedOut
+        for await outcome in outcomes { first = outcome; break }
+        #expect(first == .threw(.notARegularFile(component: "pipe")))
+    }
+
+    @Test("a root spelled with one trailing slash is walked as its canonical spelling, as relativeComponents reads it")
+    func trailingSlashRootIsWalked() throws {
+        let t = try tree(); defer { t.tearDown() }
+        try GrantedFileAccess(root: t.root.path + "/").write(relative: ["slash.md"], content: "ok")
+        #expect(try String(contentsOf: t.root.appendingPathComponent("slash.md"), encoding: .utf8) == "ok")
+        #expect(try GrantedFileAccess(root: t.root.path + "/").read(relative: ["slash.md"]) == "ok")
     }
 
     @Test("the executor's granted pair return the tool's sentences, and execute(grantedMount:) routes to them")

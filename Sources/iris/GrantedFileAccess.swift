@@ -9,6 +9,7 @@ enum GrantedFileError: Error, Equatable {
     case symlink(component: String)
     case notADirectory(component: String)
     case isADirectory(component: String)
+    case notARegularFile(component: String)
     case missing(component: String)
     case stagingExists(String)
     case io(call: String, errno: Int32)
@@ -21,6 +22,7 @@ enum GrantedFileError: Error, Equatable {
         case .symlink(let component): return "the path crosses a symlink at `\(component)`; a granted run may not read or write through symlinks — name the real directory instead"
         case .notADirectory(let component): return "`\(component)` is not a directory"
         case .isADirectory(let component): return "`\(component)` is a directory, not a file"
+        case .notARegularFile(let component): return "`\(component)` is not a regular file (a pipe, socket or device); a granted run reads regular files only"
         case .missing(let component): return "no such file or directory: `\(component)`"
         case .stagingExists(let name): return "a staging file `\(name)` already exists; try again"
         case .io(let call, let code): return "\(call) failed: \(String(cString: strerror(code)))"
@@ -32,13 +34,20 @@ enum GrantedFileError: Error, Equatable {
 /// this decides *where* in a way nothing on the host can move between the two: the mount's root is
 /// opened once as a directory descriptor, every remaining component is walked with `openat` and
 /// `O_NOFOLLOW`, and a write is staged and renamed inside the final directory's descriptor. A
-/// symlink anywhere in the remainder is `ELOOP`, reported as a refusal — never followed.
+/// symlink anywhere in the remainder is a refusal, never followed — met as ENOTDIR on a directory
+/// open (measured, remapped to `symlink` after an `fstatat`) or ELOOP on the final open.
+///
+/// `root` is the mount's *stored* spelling: `IrisPaths.canonicalPath` form, `/private` stripped, no
+/// trailing slash. Step 2 of the root open compares the kernel's resolution, canonicalised, with
+/// this string, so any other spelling is refused with a `symlink(component:)` sentence that names
+/// an innocent component. One trailing slash is tolerated and stripped, because
+/// `JobGrant.relativeComponents` tolerates the same one; the two must read the source alike.
 struct GrantedFileAccess: Sendable {
     let root: String
     let stagingName: @Sendable (String) -> String
 
     init(root: String, stagingName: @escaping @Sendable (String) -> String = GrantedFileAccess.defaultStagingName) {
-        self.root = root
+        self.root = root.count > 1 && root.hasSuffix("/") ? String(root.dropLast()) : root
         self.stagingName = stagingName
     }
 
@@ -55,9 +64,17 @@ struct GrantedFileAccess: Sendable {
         defer { close(rootFD) }
         let dirFD = try descend(relative.dropLast(), from: rootFD)
         defer { if dirFD != rootFD { close(dirFD) } }
-        let fd = openat(dirFD, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        // `O_NONBLOCK` so a FIFO cannot park the run before it is refused: a plain `open(O_RDONLY)`
+        // of a pipe blocks until a writer appears (measured by review). The descriptor is asked what
+        // it is, only a regular file is read, and the flag is cleared for the read itself.
+        let fd = openat(dirFD, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { throw Self.error(errno, at: name, call: "openat") }
         defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0 else { throw GrantedFileError.io(call: "fstat", errno: errno) }
+        if (st.st_mode & S_IFMT) == S_IFDIR { throw GrantedFileError.isADirectory(component: name) }
+        guard (st.st_mode & S_IFMT) == S_IFREG else { throw GrantedFileError.notARegularFile(component: name) }
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK)
         var data = Data()
         var buffer = [UInt8](repeating: 0, count: 65_536)
         while true {
