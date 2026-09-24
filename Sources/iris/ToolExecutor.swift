@@ -199,7 +199,7 @@ struct ToolExecutor {
                 // §0.13: under a grant there is no Foundation branch. A nil decision is a refusal,
                 // because it may have been made while a component was a link.
                 guard let grantedMount else { return Self.notDecidedInsideGrant("read_file") }
-                guard let relative = grant.relativeComponents(of: path, cwd: cwd, under: grantedMount) else {
+                guard let relative = Self.grantedComponents(of: path, cwd: cwd, grant: grant, decided: grantedMount) else {
                     return Self.notUnderGrantedDirectory(grantedMount.source)
                 }
                 return await readFile(grantRoot: grantedMount.source, relative: relative)
@@ -209,7 +209,7 @@ struct ToolExecutor {
             guard let path = args["path"]?.stringValue, let content = args["content"]?.stringValue else { return "Error: Missing path or content" }
             if let grant {
                 guard let grantedMount else { return Self.notDecidedInsideGrant("write_file") }
-                guard let relative = grant.relativeComponents(of: path, cwd: cwd, under: grantedMount) else {
+                guard let relative = Self.grantedComponents(of: path, cwd: cwd, grant: grant, decided: grantedMount) else {
                     return Self.notUnderGrantedDirectory(grantedMount.source)
                 }
                 return await writeFile(grantRoot: grantedMount.source, relative: relative, content: content)
@@ -580,6 +580,21 @@ struct ToolExecutor {
             } catch let error as GrantedFileError { return "Error writing file: \(error.message)" }
             catch { return "Error writing file: \(error.localizedDescription)" }
         }.value
+    }
+
+    /// The components the walk descends for a granted file-tool call, or nil. `path` is the
+    /// post-hook path, so nothing decided upstream is relied on: it must be spelled under the
+    /// DECIDED mount (`relativeComponents`), and its real path must still be covered by that same
+    /// entry — equality with the decision, never a fresh decision — so a `BeforeTool` rewrite into
+    /// a nested read-only entry beneath the decided mount (where a command would get EROFS) is
+    /// refused rather than walked from the outer root. A link out of the mount fails here too; a
+    /// link that stays inside is left to the walk, whose sentence names it.
+    private static func grantedComponents(of path: String, cwd: String?, grant: JobGrant,
+                                          decided: ContainerMount) -> [String]? {
+        guard let relative = grant.relativeComponents(of: path, cwd: cwd, under: decided),
+              let real = IrisPaths.realPathForAllow(resolvePath(path, cwd: cwd)),
+              grant.covering(real)?.source == decided.source else { return nil }
+        return relative
     }
 
     static func notUnderGrantedDirectory(_ source: String) -> String {

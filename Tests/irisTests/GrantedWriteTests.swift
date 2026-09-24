@@ -224,6 +224,32 @@ struct GrantedWriteTests {
         #expect(try GrantedFileAccess(root: t.root.path + "/").read(relative: ["slash.md"]) == "ok")
     }
 
+    @Test("a post-hook path that lands in a nested entry under the decided mount is refused: the decision is walked, never a substitute")
+    func nestedEntryUnderDecidedMountIsRefused() async throws {
+        let t = try tree(); defer { t.tearDown() }
+        // `mount/` read-write with `mount/sub` read-only nested inside it. The dispatcher decided
+        // `mount/x.md` → the outer entry; a BeforeTool hook then rewrote the path to `mount/sub/y.md`,
+        // which is spelled under the decided mount but covered by the inner, read-only one — where a
+        // command would get EROFS. Containment alone would let the host write land.
+        let outer = ContainerMount(source: t.root.path)
+        let inner = ContainerMount(source: t.root.appendingPathComponent("sub").path, readOnly: true)
+        let grant = JobGrant(mounts: [outer, inner])
+        let executor = ToolExecutor()
+        let rewritten = t.root.appendingPathComponent("sub/y.md").path
+        #expect(await executor.execute(name: "write_file", args: ["path": .string(rewritten), "content": .string("x")],
+                                       cwd: t.root.path, grant: grant, grantedMount: outer)
+                == ToolExecutor.notUnderGrantedDirectory(t.root.path))
+        #expect(!FileManager.default.fileExists(atPath: rewritten))
+        // The same path decided on its own entry reads; a path decided on the outer entry and still
+        // covered by it writes. The check is equality with the decision, not a fresh decision.
+        try "in".write(to: URL(fileURLWithPath: rewritten), atomically: true, encoding: .utf8)
+        #expect(await executor.execute(name: "read_file", args: ["path": .string(rewritten)], cwd: t.root.path,
+                                       grant: grant, grantedMount: inner) == "in")
+        let plain = t.root.appendingPathComponent("top.md").path
+        #expect(await executor.execute(name: "write_file", args: ["path": .string(plain), "content": .string("ok")],
+                                       cwd: t.root.path, grant: grant, grantedMount: outer) == "Successfully wrote to \(plain)")
+    }
+
     @Test("the executor's granted pair return the tool's sentences, and execute(grantedMount:) routes to them")
     func executorRoutesToTheWalk() async throws {
         let t = try tree(); defer { t.tearDown() }
@@ -260,11 +286,19 @@ struct GrantedWriteTests {
                 == ToolExecutor.notDecidedInsideGrant("read_file"))
         #expect(!FileManager.default.fileExists(atPath: inside))
 
-        // Through a link inside the mount: the walk's sentence, not a write.
+        // Through a link that leaves the mount: its real path is no longer covered by the decided
+        // entry, so the executor's own re-check refuses it before the walk (Minor 5).
         try FileManager.default.createSymbolicLink(at: t.root.appendingPathComponent("link"), withDestinationURL: t.outside)
-        let viaLink = await executor.execute(name: "write_file", args: ["path": .string("link/x.md"), "content": .string("x")],
+        #expect(await executor.execute(name: "write_file", args: ["path": .string("link/x.md"), "content": .string("x")],
+                                       cwd: t.root.path, grant: grant, grantedMount: mount)
+                == ToolExecutor.notUnderGrantedDirectory(t.root.path))
+        #expect(t.names(t.outside).isEmpty)
+        // Through a link that stays inside the mount: covered, so it reaches the walk, whose sentence names the link.
+        try FileManager.default.createSymbolicLink(at: t.root.appendingPathComponent("inlink"), withDestinationURL: t.root.appendingPathComponent("sub"))
+        let viaLink = await executor.execute(name: "write_file", args: ["path": .string("inlink/x.md"), "content": .string("x")],
                                              cwd: t.root.path, grant: grant, grantedMount: mount)
-        #expect(viaLink == "Error writing file: \(GrantedFileError.symlink(component: "link").message)")
+        #expect(viaLink == "Error writing file: \(GrantedFileError.symlink(component: "inlink").message)")
+        #expect(!FileManager.default.fileExists(atPath: t.root.appendingPathComponent("sub/x.md").path))
 
         // No decided mount: today's Foundation path, unchanged (an attended call, or an approved/allowlisted one).
         let plain = await executor.execute(name: "write_file", args: ["path": .string(elsewhere), "content": .string("plain")], cwd: nil)
