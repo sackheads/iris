@@ -79,6 +79,7 @@ Lands after `#163` and `#177`.
 2. **Ledger and delivery.** `job_runs` beside the conversation store; background conversations hidden from the sidebar; event cards; steer-inbox delivery; `get_job_run`; stop writing job output into `messages`. — landed: see `docs/specs/2026-09-21-agency-model-and-ledger.md`; PR pending
 3. **Runtime.** Gate execution, background profile, fail-closed approvals with proposal cards, budgets, breaker, overlap policy, retry and pause, sleep assertion and `catchUp`, `iris --run-job`. — landed: see `docs/specs/2026-09-21-agency-runtime.md` and `docs/jobs.md`; final PR pending
 4. **Watches.** Fold `WatcherManager` onto the trigger model; quiet window; self-write filter; poll trigger. — landed: see `docs/specs/2026-09-22-agency-watches.md` and `docs/jobs.md` (the poll trigger landed with deliverable 3)
+4½. **Job grants.** `mounts` and `network` on a mutating job; the file tools allowed inside the grant, through a descriptor walk; the isolated network (host still reachable); credential stores refused by name; `set_workspace` refused unattended; re-checked every fire. — landed: see `docs/specs/2026-09-23-agency-job-grants.md` and `docs/jobs.md` (Grants)
 5. **Main conversation.** Pin, briefing, tools, anchoring. After `#163` and `#177`.
 6. **Native surfaces.** Notifications, status item, URL scheme, run log view.
 
@@ -86,6 +87,6 @@ Each is an issue with its own spec and measured verification; this document is t
 
 ## Decided in review
 
-- **Sandbox always.** A `mutating` job runs in the `apple/container` VM, full stop. A waiver widens the tool allowlist inside the container; it never drops isolation. Unattended mutation on the bare host of a corp-managed Mac is a risk with no upside.
+- **Sandbox always.** A `mutating` job runs in the `apple/container` VM, full stop. A waiver widens the tool allowlist inside the container; it never drops isolation. The waiver is the job's grant (`2026-09-23-agency-job-grants.md`): directories and a network bit, never the host. Unattended mutation on the bare host of a corp-managed Mac is a risk with no upside.
 - **Briefing cap: five recent events, plus every unacknowledged failure and paused job pinned until dismissed or resolved.** A strict five-slot window would let five trivial successes roll a failure out of sight, which is "failing silently" coming back through the side door.
 - **No unattended job creation.** A run may propose a job with a card in the main conversation; committing it to the schedule takes a human click. Otherwise triggers create triggers.

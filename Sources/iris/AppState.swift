@@ -2225,8 +2225,9 @@ class AppState {
         // Fail closed for background (unattended) conversations, before every other path —
         // including `autoApproveTools` — since nobody is watching to see the approval dialog and a
         // gated tool must never run unattended (#187). The deterministic allowlist still applies
-        // (a call it already permits never needed a human, so it runs); everything else is denied
-        // and recorded for Task 6's ledger, without ever consulting Vibecop or a human.
+        // (a call it already permits never needed a human, so it runs) — except to a granted run's
+        // two file tools, which the grant alone decides (#282 §0.13, below); everything else is
+        // denied and recorded for Task 6's ledger, without ever consulting Vibecop or a human.
         if let id = conversationId, let conversation = conversations.first(where: { $0.id == id }), conversation.isBackground {
             // R10 first and on its own (#282 §3): a write into a protected directory is refused
             // before any grant is consulted, whatever a stored grant happens to say. The path is

@@ -127,7 +127,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// short-circuits to the host when the master switch is off, however the conversation is
     /// pinned. Injected so the refusal can be tested on a machine either way. A `mutating` job's
     /// *commands* always run in that VM (spec §0.2) — the rest of its tools run on the host behind
-    /// the user's allowlist, as in any run — so without the VM there is nowhere safe to run a
+    /// the user's allowlist or the job's grant (#282), as in any run — so without the VM there is nowhere safe to run a
     /// command and the tool says so rather than creating a job whose commands would quietly fall
     /// back to the host.
     /// `JobRunner` asks the same question again at every fire: this one can only speak for today —

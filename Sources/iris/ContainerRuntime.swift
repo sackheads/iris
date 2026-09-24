@@ -124,7 +124,9 @@ struct ContainerMount: Codable, Equatable, Hashable, Sendable {
 }
 
 /// Which network a container is attached to (#282 §0.7). The CLI has no "none": `run --network`
-/// takes a name, so "off" is an Iris-owned internal network with no route out and no DNS.
+/// takes a name, so "off" is an Iris-owned internal network with no route out and no DNS — no
+/// egress and no LAN; the host's own listeners are still reachable from it (measured, §0.7), and
+/// `/jobs` says so.
 enum NetworkMode: Equatable, Sendable {
     case `default`
     case isolated(name: String)
