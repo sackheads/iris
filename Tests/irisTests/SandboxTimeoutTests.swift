@@ -426,7 +426,7 @@ struct SandboxTimeoutTests {
             }
         }
 
-        func createDetached(name: String, image: String, mounts: [String], workdir: String) async throws {
+        func createDetached(name: String, image: String, mounts: [String], workdir: String, network: NetworkMode) async throws {
             let first = lock.withLock { () -> Bool in
                 if held { return false }
                 held = true
@@ -448,6 +448,7 @@ struct SandboxTimeoutTests {
             }
             lock.withLock { created.append(mounts) }
         }
+        func ensureIsolatedNetwork(named name: String) async throws {}
         func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws
             -> (stdout: String, stderr: String, exitCode: Int32) { ("ok", "", 0) }
         func remove(name: String) async { lock.withLock { removed.append(name) } }

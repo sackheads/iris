@@ -10,6 +10,9 @@ enum ContainerRuntimeError: Error, Equatable {
     case timedOut(elapsedSeconds: Double)
     /// A mount entry that cannot be handed to the CLI without changing what it means.
     case invalidMount(entry: String, reason: String)
+    /// The isolated network could not be vouched for: a failed listing, or a create that failed
+    /// for a reason other than the network already existing.
+    case networkFailed(String)
 }
 
 /// One host directory made visible inside the container. Was a caseless enum of helpers; the
@@ -120,10 +123,31 @@ struct ContainerMount: Codable, Equatable, Hashable, Sendable {
     }
 }
 
+/// Which network a container is attached to (#282 §0.7). The CLI has no "none": `run --network`
+/// takes a name, so "off" is an Iris-owned internal network with no route out and no DNS.
+enum NetworkMode: Equatable, Sendable {
+    case `default`
+    case isolated(name: String)
+
+    static let isolatedNetworkName = "iris-isolated"
+    static let isolated = NetworkMode.isolated(name: isolatedNetworkName)
+
+    /// A granted run without the network bit is isolated; a granted run with it, and every run
+    /// with no grant at all, keeps the default network — an ungranted job's container is exactly
+    /// what it was before grants existed.
+    static func forGrant(_ grant: JobGrant?) -> NetworkMode {
+        guard let grant, !grant.network else { return .default }
+        return .isolated
+    }
+}
+
 /// Seam over the `container` CLI so `SandboxSessionManager` is unit-testable without a real VM.
 protocol ContainerRuntime: Sendable {
-    /// `container run -d --name <name> [--mount <spec>]… -w <workdir> <image> sleep infinity`
-    func createDetached(name: String, image: String, mounts: [String], workdir: String) async throws
+    /// `container run -d --name <name> [--mount <spec>]… [--network <name> --no-dns] -w <workdir> <image> sleep infinity`
+    func createDetached(name: String, image: String, mounts: [String], workdir: String, network: NetworkMode) async throws
+    /// Makes sure the host-only network `name` exists: `container network ls`, then
+    /// `container network create --internal <name>` when it is missing. Throws `networkFailed`.
+    func ensureIsolatedNetwork(named name: String) async throws
     /// `container exec -w <workdir> <name> bash -c <command>`.
     ///
     /// `timeoutSeconds` is a wall-clock deadline for the whole command; past it the CLI process is
@@ -136,6 +160,11 @@ protocol ContainerRuntime: Sendable {
 }
 
 extension ContainerRuntime {
+    /// The pre-grant form: the default network. Every caller that is not a granted run.
+    func createDetached(name: String, image: String, mounts: [String], workdir: String) async throws {
+        try await createDetached(name: name, image: image, mounts: mounts, workdir: workdir, network: .default)
+    }
+
     /// `remove`, run where the caller's cancellation cannot reach it — for cleanup, and only for
     /// cleanup.
     ///
@@ -493,12 +522,17 @@ struct CLIContainerRuntime: ContainerRuntime {
         self.launch = launch
     }
 
-    func createDetached(name: String, image: String, mounts: [String], workdir: String) async throws {
+    func createDetached(name: String, image: String, mounts: [String], workdir: String, network: NetworkMode) async throws {
         var args = ["run", "-d", "--name", name]
         // Rendered before anything is spawned, so a mount the CLI could not read refuses the
         // container rather than producing one with a mount missing.
         for entry in mounts {
             args += ["--mount", try ContainerMount.argument(for: entry)]
+        }
+        if case .isolated(let networkName) = network {
+            // `--no-dns` too: an internal network has no resolver to offer, and the default DNS
+            // would be a route out that the network itself does not have.
+            args += ["--network", networkName, "--no-dns"]
         }
         args += ["-w", workdir, image, "sleep", "infinity"]
         // Generous, because a cold create pulls the image and that is legitimately minutes; finite,
@@ -510,6 +544,35 @@ struct CLIContainerRuntime: ContainerRuntime {
         if r.exitCode != 0 {
             throw ContainerRuntimeError.createFailed((r.stdout + r.stderr).trimmingCharacters(in: .whitespacesAndNewlines))
         }
+    }
+
+    /// Measured 2026-09-23 (CLI 1.1.0): `network ls --format json` is an array of objects with a
+    /// top-level `id` and a `configuration.name`; a duplicate `network create` exits non-zero
+    /// with `Error: network <name> already exists` on stderr. That stderr is success here — two
+    /// fires racing to create the same network must not fail each other — and a listing that fails
+    /// is a network nobody can vouch for, so it fails closed.
+    func ensureIsolatedNetwork(named name: String) async throws {
+        let listed = try await launch(["network", "ls", "--format", "json"], Self.housekeepingTimeoutSeconds)
+        guard listed.exitCode == 0 else {
+            throw ContainerRuntimeError.networkFailed((listed.stdout + listed.stderr).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        if Self.networkNames(in: listed.stdout).contains(name) { return }
+        let created = try await launch(["network", "create", "--internal", name], Self.housekeepingTimeoutSeconds)
+        guard created.exitCode == 0 || created.stderr.contains("already exists") else {
+            throw ContainerRuntimeError.networkFailed((created.stdout + created.stderr).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    /// Both spellings the CLI uses for a network's name.
+    private static func networkNames(in json: String) -> Set<String> {
+        guard let data = json.data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+        var names: Set<String> = []
+        for entry in arr {
+            if let id = entry["id"] as? String { names.insert(id) }
+            if let name = (entry["configuration"] as? [String: Any])?["name"] as? String { names.insert(name) }
+        }
+        return names
     }
 
     func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws -> (stdout: String, stderr: String, exitCode: Int32) {

@@ -21,13 +21,16 @@ final class GateRuntime: ContainerRuntime, @unchecked Sendable {
     /// by the time the cleanup runs.
     var execAwaitsCancellation = false
 
-    func createDetached(name: String, image: String, mounts: [String], workdir: String) async throws {
+    func createDetached(name: String, image: String, mounts: [String], workdir: String, network: NetworkMode) async throws {
         lock.withLock { creates.append((name, image, mounts, workdir)) }
         if let createDelaySeconds {
             try await Task.sleep(nanoseconds: UInt64(createDelaySeconds * 1_000_000_000))
         }
         if let createError { throw createError }
     }
+
+    /// A gate never asks for the isolated network.
+    func ensureIsolatedNetwork(named name: String) async throws {}
 
     func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws
         -> (stdout: String, stderr: String, exitCode: Int32) {

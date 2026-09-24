@@ -81,8 +81,8 @@ actor JobRunner {
     /// conversations were ended without touching `SandboxSessionManager.shared` (invariant 7).
     private let endSandboxSession: @Sendable (UUID) async -> Void
     /// Makes sure the host-only network a `network: false` grant runs on exists (§0.7), answering
-    /// the failure detail or nil. Injected so a test can answer without a runtime; the default is
-    /// a stand-in until the runtime grows the check.
+    /// the failure detail or nil. Injected so a test can answer without a runtime; the default
+    /// asks the real `CLIContainerRuntime`.
     private let ensureIsolatedNetwork: @Sendable () async -> String?
     /// The jobs with a run in flight right now. Every fire goes through `fire`, so one set here is
     /// the whole overlap story, whatever woke the job.
@@ -141,7 +141,11 @@ actor JobRunner {
             sandboxAvailable: resolvedSandboxAvailable, image: { config.sandboxImage })
         self.lastGateSignal = lastGateSignal ?? { [ledger] in try ledger.lastGateSignal(jobId: $0) }
         self.endSandboxSession = endSandboxSession ?? { await SandboxSessionManager.shared.endSession($0) }
-        self.ensureIsolatedNetwork = ensureIsolatedNetwork ?? { nil }   // Task 4b installs the real network check
+        self.ensureIsolatedNetwork = ensureIsolatedNetwork ?? {   // Task 4a: the real network check
+            do { try await CLIContainerRuntime().ensureIsolatedNetwork(named: NetworkMode.isolatedNetworkName); return nil }
+            catch ContainerRuntimeError.networkFailed(let detail) { return detail }
+            catch { return "\(error)" }
+        }
         self.watchdogSlice = watchdogSlice
     }
 
@@ -1513,11 +1517,14 @@ actor JobRunner {
     }
 
     private func closeSession(_ conversationId: UUID, status: String) async {
+        // The strip and the card flip first: a slow `container rm` must not hold up either one
+        // just because the two happen to be closing together.
+        if let state {
+            await MainActor.run { state.finishSession(id: conversationId, status: status) }
+        }
         // The run's container goes with the run (§2): before this, a job's container stood until
         // the idle reaper or the next launch's sweep, holding its mounts open the whole time.
         await endSandboxSession(conversationId)
-        guard let state else { return }
-        await MainActor.run { state.finishSession(id: conversationId, status: status) }
     }
 
     private func deliver(_ card: EventCard, for job: Job) async {

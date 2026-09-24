@@ -15,14 +15,23 @@ final class MockRuntime: ContainerRuntime, @unchecked Sendable {
     var failNextExec = false                     // throw once, then succeed
     var nextExecError: Error?                    // throw this once, then succeed
     var nextCreateError: Error?                  // throw this once, then succeed
+    private var networksPerCreate: [NetworkMode] = []
+    private(set) var networksEnsured: [String] = []
+    var nextNetworkError: Error?
 
-    func createDetached(name: String, image: String, mounts: [String], workdir: String) async throws {
+    func createDetached(name: String, image: String, mounts: [String], workdir: String, network: NetworkMode) async throws {
         await Task.yield()
         try? await Task.sleep(nanoseconds: 10_000_000) // 10ms: let all concurrent callers park here before any completes
         if let scripted = lock.withLock({ () -> Error? in let e = nextCreateError; nextCreateError = nil; return e }) {
             throw scripted
         }
-        lock.withLock { created.append(name); mountsPerCreate.append(mounts) }
+        lock.withLock { created.append(name); mountsPerCreate.append(mounts); networksPerCreate.append(network) }
+    }
+    func ensureIsolatedNetwork(named name: String) async throws {
+        if let scripted = lock.withLock({ () -> Error? in let e = nextNetworkError; nextNetworkError = nil; return e }) {
+            throw scripted
+        }
+        lock.withLock { networksEnsured.append(name) }
     }
     func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws -> (stdout: String, stderr: String, exitCode: Int32) {
         let (fail, scripted, r) = lock.withLock { () -> (Bool, Error?, (String, String, Int32)) in
@@ -49,6 +58,7 @@ final class MockRuntime: ContainerRuntime, @unchecked Sendable {
     var removedNames: [String] { lock.withLock { removed } }
     var createdMounts: [[String]] { lock.withLock { mountsPerCreate } }
     var lastExecTimeout: Int? { lock.withLock { execTimeouts.last ?? nil } }
+    var createdNetworks: [NetworkMode] { lock.withLock { networksPerCreate } }
 }
 
 @Suite("SandboxSessionManager")
