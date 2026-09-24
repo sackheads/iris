@@ -633,7 +633,7 @@ struct JobGateAdmissionTests {
         defer { teardown() }
         let job = polled()
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                protectionEnabled: false,
                                gateEvaluator: { _, _ in .unchanged(signal: "etag=aaa") })
 
@@ -658,7 +658,7 @@ struct JobGateAdmissionTests {
         defer { teardown() }
         let job = polled(gate: .script(command: "check.sh", mounts: [], timeoutSeconds: 30))
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                protectionEnabled: false,
                                gateEvaluator: { _, _ in .changed(signal: "script=CHANGED", payload: "3 new PRs") })
 
@@ -683,7 +683,7 @@ struct JobGateAdmissionTests {
         let job = polled()
         try store.ledger.upsert(job)
         let seen = Locked<[String?]>([])
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                protectionEnabled: false,
                                gateEvaluator: { _, previous in
                                    seen.mutate { $0.append(previous) }
@@ -703,7 +703,7 @@ struct JobGateAdmissionTests {
         defer { teardown() }
         let job = polled()
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                protectionEnabled: false,
                                gateEvaluator: { _, _ in .error("HEAD answered 500") })
 
@@ -736,7 +736,7 @@ struct JobGateAdmissionTests {
         let job = polled()
         try store.ledger.upsert(job)
         struct Unreadable: Error {}
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                protectionEnabled: false,
                                gateEvaluator: { _, _ in
                                    Issue.record("the gate is never asked when its signal cannot be read")
@@ -772,7 +772,7 @@ struct JobGateAdmissionTests {
         let answers = Locked<[GateResult]>([
             .error("one"), .error("two"), .changed(signal: "s", payload: nil), .error("three"),
         ])
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                protectionEnabled: false,
                                gateEvaluator: { _, _ in answers.mutate { $0.removeFirst() } })
 
@@ -811,7 +811,7 @@ struct JobGateAdmissionTests {
         let job = polled()
         try store.ledger.upsert(job)
         let asked = Locked(0)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                protectionEnabled: false,
                                gateEvaluator: { _, _ in
                                    asked.mutate { $0 += 1 }
@@ -837,7 +837,7 @@ struct JobGateAdmissionTests {
         let job = polled()
         try store.ledger.upsert(job)
         let asked = Locked(0)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                protectionEnabled: false,
                                gateEvaluator: { _, _ in
                                    asked.mutate { $0 += 1 }
@@ -867,7 +867,7 @@ struct JobGateAdmissionTests {
         let job = polled()
         try store.ledger.upsert(job)
         let asked = Locked(0)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                protectionEnabled: false,
                                gateEvaluator: { _, _ in
                                    asked.mutate { $0 += 1 }
@@ -890,7 +890,7 @@ struct JobGateAdmissionTests {
         let job = polled()
         try store.ledger.upsert(job)
         let asked = Locked(0)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                protectionEnabled: false,
                                gateEvaluator: { _, previous in
                                    asked.mutate { $0 += 1 }
@@ -917,7 +917,7 @@ struct JobGateAdmissionTests {
                       trigger: .schedule(.interval(seconds: 60)))
         try store.ledger.upsert(job)
         let asked = Locked(0)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                protectionEnabled: false,
                                gateEvaluator: { _, _ in asked.mutate { $0 += 1 }; return .unchanged(signal: "x") })
 

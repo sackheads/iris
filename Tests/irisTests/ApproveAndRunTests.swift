@@ -110,7 +110,7 @@ struct ApproveAndRunTests {
         try store.ledger.upsert(job)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { true })
 
         await runner.fire(job: job, origin: .schedule)
@@ -279,7 +279,7 @@ struct ApproveAndRunTests {
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         config.enableVibecop = true
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { true })
         let spy = SpyVibecop(decision: "DENY", reason: "this deletes things")
 
@@ -310,7 +310,7 @@ struct ApproveAndRunTests {
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         config.enableVibecop = true
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config)
         let spy = SpyVibecop(decision: "APPROVE")
 
         await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": spy]) {
@@ -331,7 +331,7 @@ struct ApproveAndRunTests {
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         config.enableVibecop = true
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { true })
         // The context line Vibecop is given when the call runs inside the VM.
         let inVM = "EXECUTION CONTEXT"
@@ -381,7 +381,7 @@ struct ApproveAndRunTests {
         let blocked = try blockedRun(call, job: job, ledger: store.ledger)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { true })
 
         let outcome = await runner.runApproved(runId: blocked.id)
@@ -434,7 +434,7 @@ struct ApproveAndRunTests {
                                      job: job, ledger: store.ledger)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { true })
 
         _ = await runner.runApproved(runId: blocked.id)
@@ -464,7 +464,7 @@ struct ApproveAndRunTests {
         #expect(try store.ledger.markApproved(runId: blocked.id, at: Date()))
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { true })
 
         #expect(await runner.runApproved(runId: blocked.id) == .refused(JobRunner.alreadyApprovedRefusal))
@@ -482,7 +482,7 @@ struct ApproveAndRunTests {
                                      job: job, ledger: store.ledger)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { true })
         // The run row cascades away with the job, so this is also the "row is gone" case.
         try store.ledger.delete(jobId: job.id)
@@ -512,7 +512,7 @@ struct ApproveAndRunTests {
                                      job: job, ledger: store.ledger)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config)
 
         #expect(await runner.runApproved(runId: blocked.id) == .refused(JobRunner.profileNotApprovableRefusal))
         #expect(!FileManager.default.fileExists(atPath: target))
@@ -542,7 +542,7 @@ struct ApproveAndRunTests {
         defer { teardown() }
 
         // No VM: the call is refused rather than run on the host (R12).
-        let noSandbox = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let noSandbox = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                   sandboxAvailable: { false })
         #expect(await noSandbox.runApproved(runId: blocked.id)
                 == .refused(JobRunner.sandboxUnavailableReason))
@@ -550,7 +550,7 @@ struct ApproveAndRunTests {
                 "a refused dispatch does not burn the one-shot claim")
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1)
 
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { true })
         guard case .dispatched(let approvedRunId) = await runner.runApproved(runId: blocked.id) else {
             Issue.record("the approval was refused")
@@ -583,7 +583,7 @@ struct ApproveAndRunTests {
         let blocked = try blockedRun(call, job: job, ledger: store.ledger)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { false })
 
         let outcome = await runner.runApproved(runId: blocked.id)
@@ -615,7 +615,7 @@ struct ApproveAndRunTests {
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         // The runner's own seam says the VM is there, so admission lets the call through.
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { true })
 
         guard case .dispatched(let approvedRunId) = await runner.runApproved(runId: blocked.id) else {
@@ -654,7 +654,7 @@ struct ApproveAndRunTests {
         #expect(try store.ledger.markApproved(runId: blocked.id, at: Date()))
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { true })
 
         #expect(await runner.runApproved(runId: blocked.id) == .refused(JobRunner.alreadyApprovedRefusal))
@@ -683,7 +683,7 @@ struct ApproveAndRunTests {
                                      job: job, ledger: store.ledger)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { true })
 
         // The claim is one conditional UPDATE, so the two can interleave at every await before it
@@ -720,7 +720,7 @@ struct ApproveAndRunTests {
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         config.enableVibecop = true
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { true })
         let spy = SpyVibecop(decision: "APPROVE")
 
@@ -818,7 +818,7 @@ struct ApproveAndRunTests {
         #expect(try store.ledger.unacknowledgedFailures().map(\.id) == [blocked.id])
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { true })
 
         guard case .dispatched = await runner.runApproved(runId: blocked.id) else {

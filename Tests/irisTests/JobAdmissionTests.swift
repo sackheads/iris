@@ -297,7 +297,7 @@ struct JobAdmissionTests {
         defer { teardown() }
         let job = self.job(name: "slow")
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, origin: .schedule) }
@@ -333,7 +333,7 @@ struct JobAdmissionTests {
                       trigger: .fsEvent(FSWatch(path: "/tmp/watched")),
                       policy: JobPolicy(overlap: .skip))
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/a"])) }
@@ -360,7 +360,7 @@ struct JobAdmissionTests {
                         trigger: .fsEvent(FSWatch(path: "/tmp/watched")))
         try store.ledger.upsert(stale)
         try store.ledger.setPaused(jobId: stale.id, reason: "breaker: 6 runs in the last hour")
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, protectionEnabled: false)
 
         for path in ["/tmp/a", "/tmp/b", "/tmp/c"] {
@@ -380,7 +380,7 @@ struct JobAdmissionTests {
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         let job = self.job(name: "gone")
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, protectionEnabled: false)
 
         await runner.fire(job: job, origin: .schedule)
@@ -399,7 +399,7 @@ struct JobAdmissionTests {
         var job = self.job(name: "queued-job", overlap: .queue)
         job.trigger = .fsEvent(FSWatch(path: "/tmp/queued"))
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, protectionEnabled: false)
         // Standing in for `WatchCoordinator.takeHeldPaths`: what the watch saw while the run was
         // going and the runner never heard about, because the coordinator stopped offering fires
@@ -457,7 +457,7 @@ struct JobAdmissionTests {
         var job = self.job(name: "no-coordinator", overlap: .queue)
         job.trigger = .fsEvent(FSWatch(path: "/tmp/lonely"))
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/lonely/a"])) }
@@ -499,7 +499,7 @@ struct JobAdmissionTests {
         // not a fire the gate gets a say in (R29).
         let evaluated = SeamCounter()
         let runner = JobRunner(
-            state: state, engine: engine, ledger: store.ledger, config: config,
+            state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
             protectionEnabled: false,
             gateEvaluator: { _, _ in
                 if await evaluated.bump() == 1 { await gate.arriveAndWait() }
@@ -538,7 +538,7 @@ struct JobAdmissionTests {
         defer { teardown() }
         let job = self.job(name: "hand-started", overlap: .queue)
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, protectionEnabled: false)
         let asked = SeamCounter()
         await runner.setHeldPathsSource { _ in
@@ -572,7 +572,7 @@ struct JobAdmissionTests {
         var job = self.job(name: "summarised")
         job.trigger = .fsEvent(FSWatch(path: "/tmp/summarised"))
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, protectionEnabled: false)
         // What the coordinator counted: `delivered` is left at zero, because only the prompt build
         // knows how many paths actually got past the cap and the guard.
@@ -608,7 +608,7 @@ struct JobAdmissionTests {
         try store.ledger.upsert(job)
         // The tier-2 classifier, pinned to "this is an injection", so the block of paths is
         // refused and the run gets the marker and nothing else.
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, protectionEnabled: true)
 
         await CoreMLEvaluator.$scopedModel.withValue(.init(MockCoreMLModel(probability: 0.99))) {
@@ -633,7 +633,7 @@ struct JobAdmissionTests {
         var job = self.job(name: "flipper", overlap: .queue)
         job.trigger = .fsEvent(FSWatch(path: "/tmp/flip"))
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/flip/a"])) }
@@ -667,7 +667,7 @@ struct JobAdmissionTests {
         defer { teardown() }
         let job = self.job(name: "paused", paused: "daily token budget reached (job): 1 / 1")
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, protectionEnabled: false)
 
         await runner.fire(job: job, origin: .schedule)
@@ -691,7 +691,7 @@ struct JobAdmissionTests {
                       trigger: .fsEvent(FSWatch(path: "/tmp/watched")))
         job.enabled = false
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, protectionEnabled: false)
 
         let admission = await runner.fire(job: job, origin: .watcher(paths: ["/tmp/watched/a"]))
@@ -713,7 +713,7 @@ struct JobAdmissionTests {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let job = self.job(name: "thrasher")
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                now: { now }, config: config, protectionEnabled: false)
 
         // One run inside the hour is still under the limit.
@@ -753,7 +753,7 @@ struct JobAdmissionTests {
         for offset in [-900.0, -600.0, -300.0] {
             try JobRunner.recordSkip(job: job, ledger: store.ledger, triggerKind: "schedule", now: now.addingTimeInterval(offset))
         }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                now: { now }, config: config, protectionEnabled: false)
 
         await runner.fire(job: job, origin: .schedule)
@@ -775,7 +775,7 @@ struct JobAdmissionTests {
         try JobRunner.recordStillborn(job: job, ledger: store.ledger, reason: reason,
                                       triggerKind: "schedule", now: now.addingTimeInterval(-300))
         try store.ledger.setPaused(jobId: job.id, reason: reason)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                now: { now }, config: config, protectionEnabled: false)
 
         // What `/jobs resume` does.
@@ -796,7 +796,7 @@ struct JobAdmissionTests {
         let job = self.job(name: "hourly")
         try store.ledger.upsert(job)
         try recordRun(store.ledger, job: job, at: now.addingTimeInterval(-3601), tokens: 10)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                now: { now }, config: config, protectionEnabled: false)
 
         await runner.fire(job: job, origin: .schedule)
@@ -816,7 +816,7 @@ struct JobAdmissionTests {
         let job = self.job(name: "spender", policy: JobPolicy(dailyTokenBudget: 500))
         try store.ledger.upsert(job)
         try recordRun(store.ledger, job: job, at: now.addingTimeInterval(-60), tokens: 500)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                now: { now }, config: config, protectionEnabled: false)
 
         await runner.fire(job: job, origin: .schedule)
@@ -844,7 +844,7 @@ struct JobAdmissionTests {
         try store.ledger.upsert(job)
         // Someone else spent the day's allowance.
         try recordRun(store.ledger, job: other, at: now.addingTimeInterval(-60), tokens: 1_000)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                now: { now }, config: config, protectionEnabled: false)
 
         await runner.fire(job: job, origin: .schedule)
@@ -865,7 +865,7 @@ struct JobAdmissionTests {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let job = self.job(name: "stamped")
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                now: { now }, config: config, protectionEnabled: false)
 
         await runner.fire(job: job, origin: .schedule)
@@ -874,7 +874,7 @@ struct JobAdmissionTests {
 
         // The next fire trips the breaker: refused, so the stamp must not move.
         let later = now.addingTimeInterval(60)
-        let refuser = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let refuser = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                 now: { later }, config: config, protectionEnabled: false)
         await refuser.fire(job: job, origin: .schedule)
         #expect(client.callCount == 1)
@@ -893,7 +893,7 @@ struct JobAdmissionTests {
         let job = self.job(name: "yesterday", policy: JobPolicy(dailyTokenBudget: 500))
         try store.ledger.upsert(job)
         try recordRun(store.ledger, job: job, at: now.addingTimeInterval(-12 * 3600), tokens: 5_000)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                now: { now }, calendar: calendar, config: config,
                                protectionEnabled: false)
 
@@ -921,7 +921,7 @@ struct JobAdmissionTests {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let job = self.job(name: "unreadable")
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { now },
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, now: { now },
                                config: config, protectionEnabled: false,
                                usageSource: UnreadableUsage())
 
@@ -956,7 +956,7 @@ struct JobAdmissionTests {
         defer { teardown() }
         let job = self.job(name: "still-going")
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, protectionEnabled: false)
 
         // The job woke still running the turn it started before the Mac slept.
@@ -982,7 +982,7 @@ struct JobAdmissionTests {
         defer { teardown() }
         let job = self.job(name: "queue-on-wake", overlap: .queue)
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, origin: .schedule) }
@@ -1012,7 +1012,7 @@ struct JobAdmissionTests {
         defer { teardown() }
         let job = self.job(name: "unreadable-on-wake")
         try store.ledger.upsert(job)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, protectionEnabled: false,
                                usageSource: UnreadableUsage())
 
@@ -1035,7 +1035,7 @@ struct JobAdmissionTests {
         job.trigger = .fsEvent(FSWatch(path: "/tmp/watched"))
         try store.ledger.upsert(job)
         try recordRun(store.ledger, job: job, at: now.addingTimeInterval(-60), tokens: 10)
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { now },
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, now: { now },
                                config: config, protectionEnabled: false)
 
         await runner.fire(job: job, origin: .manual)

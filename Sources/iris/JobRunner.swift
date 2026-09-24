@@ -77,6 +77,13 @@ actor JobRunner {
     /// same reason `usageSource` exists. A gate whose previous signal cannot be read is a gate
     /// error like any other, and there is no other way to make only that read fail.
     private let lastGateSignal: @Sendable (UUID) throws -> String?
+    /// Ends the run's container when the run closes (§2). Injected so a test can watch which
+    /// conversations were ended without touching `SandboxSessionManager.shared` (invariant 7).
+    private let endSandboxSession: @Sendable (UUID) async -> Void
+    /// Makes sure the host-only network a `network: false` grant runs on exists (§0.7), answering
+    /// the failure detail or nil. Injected so a test can answer without a runtime; the default is
+    /// a stand-in until the runtime grows the check.
+    private let ensureIsolatedNetwork: @Sendable () async -> String?
     /// The jobs with a run in flight right now. Every fire goes through `fire`, so one set here is
     /// the whole overlap story, whatever woke the job.
     private var inFlight: Set<UUID> = []
@@ -107,6 +114,8 @@ actor JobRunner {
     }
 
     init(state: AppState, engine: IrisEngine, ledger: JobLedger,
+         endSandboxSession: (@Sendable (UUID) async -> Void)? = nil,
+         ensureIsolatedNetwork: (@Sendable () async -> String?)? = nil,
          now: @escaping @Sendable () -> Date = Date.init,
          calendar: Calendar = .current,
          config: ConfigManager = .shared,
@@ -131,6 +140,8 @@ actor JobRunner {
         self.gateEvaluator = gateEvaluator ?? Self.liveGateEvaluator(
             sandboxAvailable: resolvedSandboxAvailable, image: { config.sandboxImage })
         self.lastGateSignal = lastGateSignal ?? { [ledger] in try ledger.lastGateSignal(jobId: $0) }
+        self.endSandboxSession = endSandboxSession ?? { await SandboxSessionManager.shared.endSession($0) }
+        self.ensureIsolatedNetwork = ensureIsolatedNetwork ?? { nil }   // Task 4b installs the real network check
         self.watchdogSlice = watchdogSlice
     }
 
@@ -802,10 +813,13 @@ actor JobRunner {
     /// Private: `fire` is the only way in, so nothing can start a run that skipped admission.
     private func run(job: Job, origin: FireOrigin, limits: JobLimits, gate: GateContext? = nil,
                      note: String? = nil, watch: WatchSummary? = nil) async {
+        // L1: a grant on a read-only row is inert — never stamped, never checked.
+        let grant = job.profile == .mutating ? job.policy.grants : nil
         let startedAt = now()
         let title = "\(job.name) · \(ISO8601DateFormatter().string(from: startedAt))"
         guard let conversationId = await openConversation(for: job, titled: title,
-                                                          sandboxed: job.profile == .mutating) else {
+                                                          sandboxed: job.profile == .mutating,
+                                                          grant: grant) else {
             print("[JobRunner] not running \(job.name): \(Self.releasedReason)")
             return
         }
@@ -861,6 +875,23 @@ actor JobRunner {
             await closeFailed(run: run, job: job, origin: origin, conversationId: conversationId,
                               reason: Self.sandboxUnavailableReason, at: now(), note: note)
             return
+        }
+        // §0.8: the grant is a claim about the disk made once, and the disk moves. Asked before
+        // the container exists; a miss is a failed row on the ordinary ladder.
+        if let grant {
+            if let drift = JobGrant.drift(grant) {
+                await closeFailed(run: run, job: job, origin: origin, conversationId: conversationId,
+                                  reason: drift, at: now(), note: note)
+                return
+            }
+            // §0.7: "network off" is a network that has to exist. This is the check that puts the
+            // reason on the row; the session manager asks again at create so a container rebuilt
+            // mid-turn is isolated too.
+            if !grant.network, let detail = await ensureIsolatedNetwork() {
+                await closeFailed(run: run, job: job, origin: origin, conversationId: conversationId,
+                                  reason: Self.isolatedNetworkUnavailableReason(detail), at: now(), note: note)
+                return
+            }
         }
 
         guard let engine else {
@@ -1162,6 +1193,14 @@ actor JobRunner {
                 return await refuse(Self.profileNotApprovableRefusal, for: job)
             }
         }
+        // §0.8 again, at click time: the grant is re-checked before the approval is spent.
+        let grant = job.profile == .mutating ? job.policy.grants : nil
+        if let grant {
+            if let drift = JobGrant.drift(grant) { return await refuse(drift, for: job) }
+            if !grant.network, let detail = await ensureIsolatedNetwork() {
+                return await refuse(Self.isolatedNetworkUnavailableReason(detail), for: job)
+            }
+        }
         // The claim, before anything runs. Every refusal above is a decision about the call rather
         // than a dispatch of it, so none of them burns it.
         do {
@@ -1178,7 +1217,8 @@ actor JobRunner {
         // to whatever the per-workspace default says, which is the host fallback R20 forbids.
         guard let conversationId = await openConversation(
             for: job, titled: "\(job.name) · approved \(call.toolName)",
-            sandboxed: job.profile == .mutating || call.toolName == "run_command")
+            sandboxed: job.profile == .mutating || call.toolName == "run_command",
+            grant: grant)
         else { return await refuse(Self.runnerUnavailableRefusal, for: job) }
 
         var approved = JobRun(jobId: job.id, jobName: job.name,
@@ -1366,7 +1406,7 @@ actor JobRunner {
     /// the app state has been released — there is nothing to run a turn against, and no row has been
     /// written yet, so the fire is simply dropped.
     private func openConversation(for job: Job, titled title: String,
-                                  sandboxed: Bool) async -> UUID? {
+                                  sandboxed: Bool, grant: JobGrant?) async -> UUID? {
         guard let state else { return nil }
         return await MainActor.run { () -> UUID in
             let id = state.createNewConversation(isBackground: true, title: title)
@@ -1375,6 +1415,13 @@ actor JobRunner {
             // for (§4). Stamped for both profiles — nil means "not a job run at all", which is
             // the unnarrowed surface.
             state.setJobProfile(for: id, job.profile)
+            // §0.6, §2: the first read-write mount is the run's working directory — it feeds `-w`,
+            // relative paths in `write_file`, the AGENTS.md loader and the per-workspace sandbox
+            // file — and the grant itself is what the approval gate and the executor read.
+            if let grant {
+                if let workingDirectory = grant.workingDirectory { state.setWorkspace(for: id, path: workingDirectory) }
+                state.setSandboxGrant(for: id, grant)
+            }
             // An ordinary `.mutating` fire asks for a container, and so does any approved call
             // that could run a command (R20). `.readOnly` otherwise leaves the field nil
             // deliberately: nil means "fall through to the per-workspace/global default", which is
@@ -1411,6 +1458,10 @@ actor JobRunner {
 
     /// The failure reason a `mutating` fire with nowhere to run writes. Read back by `/jobs`.
     static let sandboxUnavailableReason = "sandbox unavailable"
+    /// A granted fire whose source moved, or is no longer a directory (§0.8). Read back by `/jobs`.
+    static func grantSourceUnavailableReason(_ path: String) -> String { "grant source unavailable: \(path)" }
+    /// A `network: false` fire whose host-only network could not be created (§0.7).
+    static func isolatedNetworkUnavailableReason(_ detail: String) -> String { "isolated network unavailable: \(detail)" }
 
     /// Closes a run that never started its turn, as a failure: the row, the retry ladder and the
     /// card, exactly as the tail of `run` would have written them, minus everything that only a
@@ -1462,6 +1513,9 @@ actor JobRunner {
     }
 
     private func closeSession(_ conversationId: UUID, status: String) async {
+        // The run's container goes with the run (§2): before this, a job's container stood until
+        // the idle reaper or the next launch's sweep, holding its mounts open the whole time.
+        await endSandboxSession(conversationId)
         guard let state else { return }
         await MainActor.run { state.finishSession(id: conversationId, status: status) }
     }

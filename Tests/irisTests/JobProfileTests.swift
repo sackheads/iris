@@ -67,7 +67,7 @@ struct JobProfileTests {
         try store.ledger.upsert(job)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { sandboxAvailable })
         await runner.fire(job: job, origin: .schedule)
     }
@@ -267,7 +267,7 @@ struct JobProfileTests {
         try store.ledger.upsert(job)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: app, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: app, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { false })
 
         await runner.fire(job: job, origin: .schedule)

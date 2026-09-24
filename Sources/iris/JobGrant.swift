@@ -140,3 +140,22 @@ extension JobGrant {
 
     var sentence: String { "Grant: \(describe())." }
 }
+
+extension JobGrant {
+    /// Why this grant cannot be honoured *now*, or nil (spec §0.8): every source must still
+    /// canonicalise to itself and be a directory — `GateEvaluator.mountDrift`'s rule, with the
+    /// grant's sentence. The stored source is already canonical, so any difference is a change made
+    /// since the grant was given.
+    static func drift(_ grant: JobGrant, fileManager: FileManager = .default) -> String? {
+        for mount in grant.mounts {
+            guard IrisPaths.canonicalPath(mount.source) == mount.source else {
+                return JobRunner.grantSourceUnavailableReason(mount.source)
+            }
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: mount.source, isDirectory: &isDirectory), isDirectory.boolValue else {
+                return JobRunner.grantSourceUnavailableReason(mount.source)
+            }
+        }
+        return nil
+    }
+}
