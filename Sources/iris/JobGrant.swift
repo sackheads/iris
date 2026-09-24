@@ -177,3 +177,77 @@ extension JobGrant {
         return mounts.enumerated().filter { $0.offset != workspace }.map(\.element.entry)
     }
 }
+
+extension JobGrant {
+    private static func isUnder(_ path: String, _ source: String) -> Bool {
+        path == source || path.hasPrefix(source.hasSuffix("/") ? source : source + "/")
+    }
+
+    /// Each mount with its source taken to the real path, so a source stored as `/tmp/x` meets a
+    /// candidate that resolved to `/private/tmp/x`. A source that will not resolve covers nothing.
+    private var realMounts: [(mount: ContainerMount, real: String)] {
+        mounts.compactMap { mount in IrisPaths.realPathForAllow(mount.source).map { (mount, $0) } }
+    }
+
+    /// Case-insensitive (§3): APFS keeps the caller's spelling and the decision is only *whether*;
+    /// the descriptor walk (Task 4c) is what proves the file is really under the entry.
+    func covering(_ realPath: String) -> ContainerMount? {
+        let lowered = realPath.lowercased()
+        return realMounts.filter { Self.isUnder(lowered, $0.real.lowercased()) }
+            .max { $0.real.count < $1.real.count }?.mount
+    }
+
+    /// The lexical components of the call's path beneath `mount.source` — the spelling the walk
+    /// descends, `.` removed. nil when the path is not spelled under the source (case-insensitively —
+    /// a spelling that only *resolves* into the mount, the `/private` firmlink or a link from
+    /// outside, has no components to walk from the mount's root) or when any component is `..`
+    /// (the walk refuses it again on its own; this is the earlier, cheaper no).
+    func relativeComponents(of details: String, cwd: String?, under mount: ContainerMount) -> [String]? {
+        let spelled = IrisEngine.expandTilde(ToolExecutor.resolvePath(details, cwd: cwd))
+        let source = mount.source.hasSuffix("/") ? String(mount.source.dropLast()) : mount.source
+        guard spelled.lowercased() == source.lowercased() || spelled.lowercased().hasPrefix(source.lowercased() + "/") else { return nil }
+        let components = spelled.dropFirst(source.count).split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init).filter { $0 != "." }
+        guard !components.contains("..") else { return nil }
+        return components
+    }
+
+    /// The mount a file-tool call may use, or nil. Three conditions, all of them: the path is
+    /// spelled under the mount (`relativeComponents`), its real path is covered by the mount
+    /// (`covering` — a link from inside the spelling to outside resolves outside), and the mode fits.
+    func allowedMount(toolName: String, details: String, cwd: String?) -> ContainerMount? {
+        guard toolName == "write_file" || toolName == "read_file",
+              let real = IrisPaths.realPathForAllow(ToolExecutor.resolvePath(details, cwd: cwd)),
+              let mount = covering(real),
+              relativeComponents(of: details, cwd: cwd, under: mount) != nil else { return nil }
+        if toolName == "write_file", mount.readOnly { return nil }
+        return mount
+    }
+
+    /// Pure (spec §3). `run_command` answers the sandbox question the caller hands in (§0.4) — the
+    /// R20 check in the dispatcher is the other lock, and neither trusts the other — so a path that
+    /// reaches approval unsandboxed gets `false`. The two file tools answer through `allowedMount`.
+    /// Everything else is `false`.
+    func allows(toolName: String, details: String, cwd: String?, sandboxed: Bool) -> Bool {
+        switch toolName {
+        case "run_command": return sandboxed
+        case "write_file", "read_file": return allowedMount(toolName: toolName, details: details, cwd: cwd) != nil
+        default: return false
+        }
+    }
+
+    /// For the card: the granted directory closest to where the call wanted to go, so the person
+    /// can widen the grant once rather than click every time. A path refused for a `..` is still
+    /// placed, by its real path, so the card can say where the grant is.
+    func nearest(to details: String, cwd: String?) -> String? {
+        let real = realMounts
+        guard !real.isEmpty else { return nil }
+        let target = URL(fileURLWithPath: IrisPaths.realPath(ToolExecutor.resolvePath(details, cwd: cwd))).pathComponents
+        func shared(_ path: String) -> Int {
+            zip(URL(fileURLWithPath: path).pathComponents, target).prefix { $0 == $1 }.count
+        }
+        var best = real[0]
+        for candidate in real.dropFirst() where shared(candidate.real) > shared(best.real) { best = candidate }
+        return best.mount.source
+    }
+}

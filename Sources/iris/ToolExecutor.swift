@@ -508,9 +508,11 @@ struct ToolExecutor {
     /// keep their prior (process-cwd) behavior. This mirrors how `run_command` already uses `cwd`
     /// and closes the gap where relative `write_file` paths clobbered the iris source tree (#68).
     static func resolvePath(_ path: String, cwd: String?) -> String {
-        let expanded = (path as NSString).expandingTildeInPath
+        // #275: `expandingTildeInPath` truncates to PATH_MAX and hands back a plausible path; every
+        // allow-side expansion passes through here (#282 §0.9), so it keeps every byte.
+        let expanded = IrisEngine.expandTilde(path)
         guard !(expanded as NSString).isAbsolutePath, let cwd = cwd else { return expanded }
-        let base = (cwd as NSString).expandingTildeInPath
+        let base = IrisEngine.expandTilde(cwd)
         return URL(fileURLWithPath: base).appendingPathComponent(expanded).path
     }
 

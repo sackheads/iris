@@ -1004,7 +1004,8 @@ actor JobRunner {
         let blockedTool = blockedCall?.toolName
         let failureReason = overran ? TurnBudget.timeExceeded
             : Self.failureReason(status: status, messages: turn.messages, blockedTool: blockedTool,
-                                 blockedReason: blockedCall?.reason ?? .approval)
+                                 blockedReason: blockedCall?.reason ?? .approval,
+                                 blockedNearest: blockedCall?.grantNearest)
         do {
             // The conversation is fresh, so its accumulated `tokenUsage` IS this run's cost.
             try ledger.finish(runId: run.id, status: status, outcome: outcome,
@@ -1667,15 +1668,17 @@ actor JobRunner {
     /// reply to show, what the card prints in its place.
     static func failureReason(status: JobRun.Status, messages: [ChatMessage],
                               blockedTool: String?,
-                              blockedReason: BlockedCall.Reason = .approval) -> String? {
+                              blockedReason: BlockedCall.Reason = .approval,
+                              blockedNearest: String? = nil) -> String? {
         switch status {
         case .blockedOnApproval:
             let tool = blockedTool ?? "a gated tool"
             // The two reasons read differently on purpose: one is waiting for a person, the other
-            // is waiting for a job that was never created to be able to do this at all.
+            // is waiting for a job that was never created to be able to do this at all. A denial
+            // inside a granted run also says where the grant is (#282 §5).
             return blockedReason == .profile
                 ? "not available to a read-only job: \(tool)"
-                : "needs approval: \(tool)"
+                : "needs approval: \(tool)" + (blockedNearest.map { " outside the grant (nearest: \($0))" } ?? "")
         case .failed:
             return llmErrorHeadline(in: messages) ?? budgetStopReason(in: messages)
                 ?? softStopLine(in: messages) ?? noReplyReason

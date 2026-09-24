@@ -126,6 +126,15 @@ struct JobRunnerTests {
         #expect(JobRunner.failureReason(status: .completed, messages: [], blockedTool: nil) == nil)
     }
 
+    @Test("a call blocked outside a grant names the nearest granted directory")
+    func failureReasonNamesTheNearestGrantedDirectory() {
+        #expect(JobRunner.failureReason(status: .blockedOnApproval, messages: [], blockedTool: "write_file",
+                                        blockedNearest: "/Users/me/proj")
+                == "needs approval: write_file outside the grant (nearest: /Users/me/proj)")
+        #expect(JobRunner.failureReason(status: .blockedOnApproval, messages: [], blockedTool: "write_file")
+                == "needs approval: write_file")
+    }
+
     @Test("the soft-stop marker is the line softStopWithSummary posts")
     func softStopMarkerMatchesTheEngineLine() {
         let line = ChatMessage(role: .system,
