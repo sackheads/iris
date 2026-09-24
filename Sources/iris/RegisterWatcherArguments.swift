@@ -6,9 +6,10 @@ import Foundation
 /// The three original optional arguments are `nil` when not given, and `nil` means "say nothing":
 /// on a re-registration the stored value stands, and on a new watch the default applies. That is
 /// why the window is not clamped here — the tool clamps it and says so, and a clamp is only worth
-/// saying when a number was actually asked for. The grant (`profile`, `mounts`, `network`) is the
-/// exception to that rule (§0.1): a re-registration stores exactly the grant the call names, and
-/// naming none removes the one that was stored.
+/// saying when a number was actually asked for. The grant (`mounts`, `network`) is the exception
+/// to that rule (§0.1): a re-registration stores exactly the grant the call names, and naming none
+/// removes the one that was stored. `profile` follows the original rule — omitted, the stored one
+/// stands (`ToolExecutor.registerWatcher`: `asked ?? existing?.profile`).
 struct RegisterWatcherArguments: Equatable, Sendable {
     let path: String
     let instructions: String

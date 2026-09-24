@@ -220,8 +220,9 @@ else: no per-command allowlist inside the container, no secrets. It is stored in
 safe direction; that older build re-saving the job drops the grant, as it drops every policy key it
 does not know).
 
-**Making one.** `schedule_job` and `register_directory_watcher` take `mounts` and `network`; a watch
-also takes `profile`, since a watch that writes has to be `mutating`. `mounts` is an ordered list of
+**Making one.** `schedule_job` and `register_directory_watcher` take `mounts` and `network`, and
+both take `profile` (new to the watch tool, since a watch that writes has to be `mutating`).
+`mounts` is an ordered list of
 `source[:target][:ro]` entries — read-write unless `:ro`, and identity-mapped when no target is
 given, which is the form to prefer: a `write_file` names the host *source*, a command inside the
 container names the *target*, and with no target the two are the same path. `network` is a Bool and
@@ -241,9 +242,12 @@ container, exactly as before this deliverable.
 
 **What is refused**, at creation, in this order, each with its own sentence: a grant on a read-only
 job; a malformed entry (wrong number of parts, an empty part, a relative path, a comma); a source
-that does not exist or is not a directory; `/`, a volume root or any mount point, your home folder
-itself, or a path that is or contains `~/.iris` — read-only included, because the memory tools
-write there outside every filter; a **credential store**, read-only included (the list is below,
+that does not exist or is not a directory; a source too broad to grant — `/`, your home folder
+itself, `/System`, `/Library`, `/usr`, `/private`, `/var`, `/etc`, `/bin`, `/sbin`, `/Volumes`, and
+any volume root or mount point (a folder *inside* one of those is fine: `/private/tmp/proj`,
+`~/proj`); a path that is or contains `~/.iris` — read-only included, because even a read-only
+mount hands the container `config/permissions.json`, the plugin settings and the memory store; a
+**credential store**, read-only included (the list is below,
 beside the fact it belongs with); a read-only first entry when a read-write entry follows it; the
 same source twice. A source is judged and stored as the directory it *resolves to* — `~/x -> /` is
 a mount of the whole disk — never as it was spelled, and that resolved spelling is what every later
@@ -686,7 +690,8 @@ five-minute agent loop. Raw run output never enters the destination's messages.
 
 Nobody is watching a background run, so it never blocks on an approval dialog. A tool call from a
 background conversation is checked, after the protected-directory rule, against the job's grant —
-`run_command` always, `write_file` under a read-write granted directory, `read_file` under any (see
+`run_command` when the run is sandboxed (which the no-host-fallback rule has already required),
+`write_file` under a read-write granted directory, `read_file` under any (see
 "Grants") — then against the deterministic allowlist — a call that is already permitted needs no
 human, so it runs — and anything else is denied on the spot, without consulting Vibecop and without
 a dialog. The whole call is recorded, the run ends `blocked on approval`, and the card shows what

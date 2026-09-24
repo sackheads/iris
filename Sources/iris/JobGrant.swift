@@ -48,7 +48,7 @@ extension JobGrant {
         "the mount source \(source) is a file, and a file cannot be mounted — mount its directory instead."
     }
     static func tooBroad(_ source: String) -> String {
-        "the mount source \(source) is too broad to grant (the whole filesystem, a volume, or the home directory) — name the directory the job actually works in."
+        "the mount source \(source) is too broad to grant (the whole filesystem, a volume or mount point, the home directory, or a system root such as /System, /Library, /usr, /private, /var, /etc, /bin, /sbin or /Volumes) — name the directory the job actually works in."
     }
     static func protected(_ source: String) -> String {
         "the mount source \(source) is or contains Iris's own directory (~/.iris), which a job may not mount."
