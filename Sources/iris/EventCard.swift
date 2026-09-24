@@ -304,7 +304,7 @@ struct EventCard: Codable, Equatable, Sendable {
             args[key] = shown == value.stringValue ? value : .string(shown)
         }
         return BlockedCall(toolName: call.toolName, args: args,
-                           cwd: call.cwd, reason: call.reason, at: call.at)
+                           cwd: call.cwd, reason: call.reason, at: call.at, grantNearest: call.grantNearest)
     }
 
     /// One argument as a card shows it. Four passes: render it (compact JSON for a structure, so a

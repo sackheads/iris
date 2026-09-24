@@ -142,3 +142,212 @@ struct JobGrantAllowsTests {
         #expect(JobGrant(network: true).nearest(to: "out.md", cwd: nil) == nil)
     }
 }
+
+/// The gate in its place (#282 §3): `AppState.requestApproval`'s background branch. The permission
+/// layer is pointed at a temp `IrisPaths`, never `~/.iris`.
+@MainActor
+@Suite("JobGrant through requestApproval (#282)")
+struct JobGrantApprovalTests {
+    private typealias Tree = JobGrantAllowsTests.Tree
+    private func c(_ url: URL, _ tail: String = "") -> String { JobGrantAllowsTests.c(url, tail) }
+
+    private func background(_ t: Tree, grant: JobGrant?) -> (AppState, UUID) {
+        let app = AppState()
+        app.permissions = PermissionManager(paths: IrisPaths(root: t.home.appendingPathComponent(".iris")))
+        let cid = app.createNewConversation(isBackground: true, select: false)
+        app.setWorkspace(for: cid, path: c(t.proj))
+        app.setSandboxGrant(for: cid, grant)
+        return (app, cid)
+    }
+
+    @Test("a granted run_command is allowed only with the sandbox answer in hand (§0.4)")
+    func grantedCommandNeedsTheSandboxAnswer() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let (app, cid) = background(t, grant: t.grant)
+        #expect(await app.requestApproval(toolName: "run_command", details: "git status", args: ["command": .string("git status")],
+                                          workspace: c(t.proj), conversationId: cid, inSandbox: true))
+        #expect(app.takeBackgroundDenials(for: cid).isEmpty)
+        // The same call arriving with the dispatcher's answer "not sandboxed" (R20 would have refused
+        // it first; this is the second lock) falls to the allowlist and is recorded.
+        #expect(!(await app.requestApproval(toolName: "run_command", details: "git status", args: ["command": .string("git status")],
+                                            workspace: c(t.proj), conversationId: cid, inSandbox: false)))
+        #expect(app.takeBackgroundDenials(for: cid).first?.toolName == "run_command")
+    }
+
+    @Test("a granted background conversation runs a write inside the grant without a denial or a dialog")
+    func grantedWriteIsAllowed() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let (app, cid) = background(t, grant: t.grant)
+        let decided = t.grant.allowedMount(toolName: "write_file", details: "out.md", cwd: c(t.proj))
+        let ok = await app.requestApproval(toolName: "write_file", details: "out.md",
+                                           args: ["path": .string("out.md")], workspace: c(t.proj), conversationId: cid,
+                                           grantedMount: decided)
+        #expect(ok)
+        #expect(app.pendingApprovals.isEmpty && app.takeBackgroundDenials(for: cid).isEmpty)
+        #expect(app.conversations.first { $0.id == cid }?.messages.isEmpty == true)
+    }
+
+    @Test("R10 is asked first: a grant that somehow covers a protected directory still cannot write into it")
+    func protectedWriteBeatsTheGrant() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        // Never creatable through the tools (Task 2a refuses ~/.iris), so built by hand.
+        let rogue = JobGrant(mounts: [ContainerMount(source: c(t.home, ".iris"))])
+        let (app, cid) = background(t, grant: rogue)
+        let target = c(t.home, ".iris/config/permissions.json")
+        let ok = await app.requestApproval(toolName: "write_file", details: target,
+                                           args: ["path": .string(target)], workspace: c(t.proj), conversationId: cid)
+        #expect(!ok)
+        let denial = try #require(app.takeBackgroundDenials(for: cid).first)
+        #expect(denial.reason == .approval && denial.grantNearest == nil, "a protected write is refused as R10, not as 'outside the grant'")
+    }
+
+    @Test("the reproduced escape — link/../ into ~/.iris from inside a read-write mount — is recorded as R10, for both tools (§0.9)")
+    func linkDotDotIsRecordedAsProtected() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let link = t.proj.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: t.home.appendingPathComponent(".iris"))
+        let (app, cid) = background(t, grant: t.grant)
+        let escape = link.path + "/../.iris/config/permissions.json"
+        #expect(!(await app.requestApproval(toolName: "write_file", details: escape, args: ["path": .string(escape)],
+                                            workspace: c(t.proj), conversationId: cid)))
+        let denial = try #require(app.takeBackgroundDenials(for: cid).first)
+        #expect(denial.grantNearest == nil, "refused by R10, before the grant is read")
+        #expect(app.conversations.first { $0.id == cid }?.messages.last?.content
+                == String(format: AppState.unattendedDenialNotice, "write_file"))
+        // A read through the same link with no `..` is outside every mount by real path: refused,
+        // and named as outside the grant (reads are not R10's business).
+        let read = link.path + "/config/permissions.json"
+        #expect(!(await app.requestApproval(toolName: "read_file", details: read, args: ["path": .string(read)],
+                                            workspace: c(t.proj), conversationId: cid)))
+        #expect(app.takeBackgroundDenials(for: cid).first?.grantNearest == c(t.proj))
+    }
+
+    @Test("in a granted run the file tools are the grant's alone: an allowlisted write outside it is recorded with the nearest directory; other tools still fall to the allowlist")
+    func missFallsToAllowlistThenRecords() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let (app, cid) = background(t, grant: t.grant)
+        let outside = c(t.base, "elsewhere.md")
+        let rules = t.proj.appendingPathComponent(".iris")
+        try FileManager.default.createDirectory(at: rules, withIntermediateDirectories: true)
+        try JSONEncoder().encode([PermissionRule(toolName: "write_file", details: outside),
+                                  PermissionRule(toolName: "run_command", details: "make lint")])
+            .write(to: rules.appendingPathComponent("permissions.json"))
+        // H1's invariant: a granted run's write reaches Foundation on no branch, so the allowlist
+        // cannot widen the two file tools — the decision (nil here) is the whole answer.
+        #expect(!(await app.requestApproval(toolName: "write_file", details: outside, args: ["path": .string(outside)],
+                                            workspace: c(t.proj), conversationId: cid, grantedMount: nil)))
+        #expect(app.takeBackgroundDenials(for: cid).first?.grantNearest == c(t.proj))
+        // Every other tool keeps the allowlist step (here a command the sandbox answer refused).
+        #expect(await app.requestApproval(toolName: "run_command", details: "make lint", workspace: c(t.proj),
+                                          conversationId: cid, inSandbox: false))
+        // And an ungranted background run's allowlisted write is exactly as today.
+        let (plainApp, plainCid) = background(t, grant: nil)
+        #expect(await plainApp.requestApproval(toolName: "write_file", details: outside, workspace: c(t.proj), conversationId: plainCid))
+
+        let other = c(t.base, "other.md")
+        #expect(!(await app.requestApproval(toolName: "write_file", details: other, args: ["path": .string(other)],
+                                            workspace: c(t.proj), conversationId: cid)))
+        let denial = try #require(app.takeBackgroundDenials(for: cid).first)
+        #expect(denial.grantNearest == c(t.proj))
+        let notice = String(format: AppState.outsideGrantDenialNotice, "write_file", c(t.proj))
+        #expect(app.conversations.first { $0.id == cid }?.messages.last?.content == notice)
+    }
+
+    @Test("an ungranted background conversation is exactly as before: denied, recorded, the old notice")
+    func ungrantedUnchanged() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let (app, cid) = background(t, grant: nil)
+        let target = c(t.proj, "x.md")
+        #expect(!(await app.requestApproval(toolName: "write_file", details: target, workspace: c(t.proj), conversationId: cid)))
+        #expect(app.takeBackgroundDenials(for: cid).first?.grantNearest == nil)
+        #expect(app.conversations.first { $0.id == cid }?.messages.last?.content
+                == String(format: AppState.unattendedDenialNotice, "write_file"))
+    }
+
+    @Test("a read-only profile refuses a granted call before approval is ever asked (R13 untouched)")
+    func readOnlyProfileRefusesFirst() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let store = try ConversationStore.inMemory()
+        let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        state.conversations.removeAll()
+        state.permissions = PermissionManager(paths: IrisPaths(root: t.home.appendingPathComponent(".iris")))
+        let target = c(t.proj, "x.md")
+        let call = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [
+            Part(functionCall: FunctionCall(name: "write_file", args: ["path": .string(target), "content": .string("hi")]))]))],
+                                  usageMetadata: nil)
+        let engine = IrisEngine(state: state, tier: .medium, client: FakeLLMClient(responses: [call]),
+                                protectionEnabled: false, sessionPeerCount: 0, recentWrites: RecentWrites())
+        let cid = state.createNewConversation(isBackground: true, select: false)
+        state.setJobProfile(for: cid, .readOnly)
+        state.setSandboxGrant(for: cid, t.grant)          // a contradiction Task 2a refuses at creation; the profile still wins
+        await engine.processInput("go", source: "job:x", conversationId: cid)
+        let denial = try #require(state.takeBackgroundDenials(for: cid).first)
+        #expect(denial.reason == .profile)
+        #expect(!FileManager.default.fileExists(atPath: target))
+    }
+
+    @Test("through the engine, a granted write is routed to the walk: a link inside the mount is refused by the walk, a plain write lands")
+    func engineRoutesGrantedWritesToTheWalk() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        // The link points INSIDE the grant (proj/real), so the decision allows — the real path is
+        // covered — and only the walk refuses. A link to a sibling outside would be refused by the
+        // decision first and would not exercise the routing at all (M3).
+        let real = t.proj.appendingPathComponent("real")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: t.proj.appendingPathComponent("link"), withDestinationURL: real)
+        func turn(_ path: String) async throws -> (result: String, state: AppState) {
+            let store = try ConversationStore.inMemory()
+            let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+            state.conversations.removeAll()
+            state.permissions = PermissionManager(paths: IrisPaths(root: t.home.appendingPathComponent(".iris")))
+            let call = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [
+                Part(functionCall: FunctionCall(name: "write_file", args: ["path": .string(path), "content": .string("hi")]))]))], usageMetadata: nil)
+            let done = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "done")]))], usageMetadata: nil)
+            // The engine's own registry (AGENTS invariant 7): a successful unattended write records
+            // into it, and the default is the process-shared one.
+            let engine = IrisEngine(state: state, tier: .medium, client: FakeLLMClient(responses: [call, done]),
+                                    protectionEnabled: false, sessionPeerCount: 0, recentWrites: RecentWrites())
+            let cid = state.createNewConversation(isBackground: true, select: false)
+            state.setJobProfile(for: cid, .mutating)
+            state.setWorkspace(for: cid, path: c(t.proj))
+            state.setSandboxGrant(for: cid, t.grant)
+            await engine.processInput("go", source: "job:x", conversationId: cid)
+            let results = state.conversations.first { $0.id == cid }?.history.flatMap { $0.parts }
+                .compactMap { $0.functionResponse?.response["result"]?.stringValue } ?? []
+            return (results.joined(separator: "\n"), state)
+        }
+        let plain = try await turn("out.md")
+        #expect(plain.result.contains("Successfully wrote to \(c(t.proj))/out.md"))
+        #expect(FileManager.default.fileExists(atPath: c(t.proj, "out.md")))
+        let viaLink = try await turn("link/x.md")
+        #expect(viaLink.result.contains(GrantedFileError.symlink(component: "link").message), "Foundation would have followed the link into proj/real; the walk refused it")
+        #expect(!FileManager.default.fileExists(atPath: real.appendingPathComponent("x.md").path))
+    }
+
+    @Test("a component toggled link → directory → link across the three instants is refused: the gate consumes the decision, the executor has no fallback (H1)")
+    func toggleBetweenDecisionAndGateIsRefused() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let sub = t.proj.appendingPathComponent("sub")
+        let target = c(t.proj, "sub/authorized_keys")
+        // t1 — the dispatcher decides while `sub` is a link to somewhere outside: nil.
+        try FileManager.default.createSymbolicLink(at: sub, withDestinationURL: t.base.appendingPathComponent("project"))
+        let decided = t.grant.allowedMount(toolName: "write_file", details: target, cwd: c(t.proj))
+        #expect(decided == nil)
+        // t2/t3 — the attacker's `cmd &` swaps it back to a real directory before the gate runs.
+        try FileManager.default.removeItem(at: sub)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        #expect(t.grant.allowedMount(toolName: "write_file", details: target, cwd: c(t.proj)) != nil, "a gate that recomputed would now say yes")
+        let (app, cid) = background(t, grant: t.grant)
+        let ok = await app.requestApproval(toolName: "write_file", details: target, args: ["path": .string(target)],
+                                           workspace: c(t.proj), conversationId: cid, grantedMount: decided)
+        #expect(!ok, "the gate consumes the decision it was handed")
+        #expect(app.takeBackgroundDenials(for: cid).first?.grantNearest == c(t.proj))
+        // t4 — and had it somehow reached the executor with that nil decision, while `sub` is a link again:
+        try FileManager.default.removeItem(at: sub)
+        try FileManager.default.createSymbolicLink(at: sub, withDestinationURL: t.base.appendingPathComponent("project"))
+        let out = await ToolExecutor().execute(name: "write_file", args: ["path": .string(target), "content": .string("ssh-ed25519 …")],
+                                               cwd: c(t.proj), grant: t.grant, grantedMount: decided)
+        #expect(out == ToolExecutor.notDecidedInsideGrant("write_file"))
+        #expect(!FileManager.default.fileExists(atPath: c(t.project, "authorized_keys")))
+    }
+}

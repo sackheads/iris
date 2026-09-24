@@ -2212,7 +2212,8 @@ class AppState {
                          workspace: String? = nil,
                          conversationId: UUID? = nil, origin: String = "Main agent",
                          inSandbox: Bool = false, callerRole: VibecopCallerRole = .agent,
-                         allowedCommands: [String] = [], vibecopEnabled: Bool? = nil) async -> Bool {
+                         allowedCommands: [String] = [], vibecopEnabled: Bool? = nil,
+                         grantedMount: ContainerMount? = nil) async -> Bool {
         // No pre-granted-approval branch here, deliberately (#187 R21, 2026-09-21): a call a
         // person clicked "Approve and run" on is dispatched by `IrisEngine.executeApprovedCall`,
         // which runs the tool through the hook layer directly and never enters this function. The
@@ -2226,13 +2227,37 @@ class AppState {
         // gated tool must never run unattended (#187). The deterministic allowlist still applies
         // (a call it already permits never needed a human, so it runs); everything else is denied
         // and recorded for Task 6's ledger, without ever consulting Vibecop or a human.
-        if let id = conversationId, conversations.first(where: { $0.id == id })?.isBackground == true {
-            if permissions.isAllowed(toolName: toolName, details: details, workspace: workspace,
-                                     isBackground: true) {
+        if let id = conversationId, let conversation = conversations.first(where: { $0.id == id }), conversation.isBackground {
+            // R10 first and on its own (#282 §3): a write into a protected directory is refused
+            // before any grant is consulted, whatever a stored grant happens to say. The path is
+            // resolved against the run's directory; `isProtectedWrite` judges it by real path (§0.9).
+            let resolvedPath = ToolExecutor.resolvePath(details, cwd: workspace)
+            if permissions.isProtectedWrite(toolName: toolName, path: resolvedPath) {
+                recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval), in: id)
+                return false
+            }
+            // §0.4, §0.5: inside the grant, no human is needed. A `run_command` reaching here has
+            // already passed the R20 check in the dispatcher, so "yes" is a sandboxed yes.
+            if let grant = conversation.sandboxGrant {
+                // §0.13, one decision: the dispatcher decided the covering mount before this call,
+                // and the two file tools are judged by that decision alone — never re-derived here,
+                // and never widened by the allowlist, because the executor has no Foundation branch
+                // for a granted run. A nil decision falls straight to the record below.
+                if toolName == "write_file" || toolName == "read_file" {
+                    if grantedMount != nil { return true }
+                } else if grant.allows(toolName: toolName, details: details, cwd: workspace, sandboxed: inSandbox) {
+                    // `inSandbox` is `resolveUseSandbox`'s answer for this call (IrisEngine's
+                    // dispatcher): the conversation's resolution for a `run_command` — the
+                    // parameter §0.4 asks for.
+                    return true
+                }
+            }
+            if !(conversation.sandboxGrant != nil && (toolName == "write_file" || toolName == "read_file")),
+               permissions.isAllowed(toolName: toolName, details: details, workspace: workspace, isBackground: true) {
                 return true
             }
-            recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace,
-                                                     reason: .approval),
+            recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval,
+                                                     grantNearest: conversation.sandboxGrant?.nearest(to: details, cwd: workspace)),
                                    in: id)
             return false
         }
@@ -2376,6 +2401,10 @@ class AppState {
     /// fail-closed denial, formatted with the tool name.
     static let unattendedDenialNotice = "Not run: `%@` needs approval, and this is an unattended run."
 
+    /// The same line for a granted run's call that fell outside the grant (#282 §5): it names the
+    /// nearest granted directory so the person can widen once.
+    static let outsideGrantDenialNotice = "Not run: `%@` needs approval — outside the grant (nearest: %@) — and this is an unattended run."
+
     /// The same line for a call a `readOnly` job's profile forbids outright (#187 §0.2). Separate
     /// from the approval notice because the two are not the same news: nobody can approve this one
     /// into running as it stands — the job would have to be created `mutating`.
@@ -2386,8 +2415,11 @@ class AppState {
     /// run spawned, so it drains with the run; the transcript line goes where the call was made.
     func recordBackgroundDenial(call: BlockedCall, in conversationId: UUID) {
         backgroundDenials[backgroundRunRoot(of: conversationId), default: []].append(call)
-        let notice = call.reason == .profile ? Self.profileDenialNotice : Self.unattendedDenialNotice
-        appendMessage(role: .system, content: String(format: notice, call.toolName), to: conversationId)
+        let notice: String
+        if call.reason == .profile { notice = String(format: Self.profileDenialNotice, call.toolName) }
+        else if let nearest = call.grantNearest { notice = String(format: Self.outsideGrantDenialNotice, call.toolName, nearest) }
+        else { notice = String(format: Self.unattendedDenialNotice, call.toolName) }
+        appendMessage(role: .system, content: notice, to: conversationId)
     }
 
     /// The first fail-closed denial recorded for a background run, without draining it. The

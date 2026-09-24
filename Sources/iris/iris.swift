@@ -3081,9 +3081,11 @@ actor IrisEngine {
 
             let useSandbox = await resolveUseSandbox(toolName: functionCall.name, conversationId: conversationId, workspacePath: workspacePath)
             // #282 §0.13: the covering mount for a granted file-tool call is decided ONCE, here,
-            // before approval, and the executor walks that decision rather than recomputing it — a
-            // command the run left running in the container can swap a component between a check
-            // and an open. nil under a grant is a refusal in the executor, never a Foundation write.
+            // before approval, and both the gate and the executor consume this value — neither
+            // recomputes it: a command the run left running in the container can swap a component
+            // between a check and an open, and a component toggled between two computations is
+            // exactly the race the walk exists to close. nil under a grant is a refusal at the gate
+            // and again in the executor, never a Foundation write.
             let grantedMount = sandboxGrant?.allowedMount(toolName: functionCall.name, details: details, cwd: workspacePath)
             if needsApproval {
                 let approved = await localState?.requestApproval(
@@ -3091,7 +3093,7 @@ actor IrisEngine {
                     workspace: workspacePath,
                     conversationId: conversationId, origin: approvalOrigin, inSandbox: useSandbox,
                     callerRole: principal == .evaluator ? .evaluator : .agent,
-                    allowedCommands: evaluatorChecks) ?? false
+                    allowedCommands: evaluatorChecks, grantedMount: grantedMount) ?? false
                 if approved {
                     result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount)
                 } else {

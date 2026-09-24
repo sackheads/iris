@@ -326,7 +326,7 @@ struct ApproveAndRunTests {
     }
 
     @Test("the verdict is taken in the context the approved call will actually run in")
-    func verdictFollowsTheExecutorsSandboxRule() async throws {
+    func verdictFollowsTheToolsActualPath() async throws {
         let (store, state, engine) = try harness()
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
@@ -336,8 +336,8 @@ struct ApproveAndRunTests {
         // The context line Vibecop is given when the call runs inside the VM.
         let inVM = "EXECUTION CONTEXT"
 
-        // A mutating job's approved call opens a sandboxed conversation whatever the tool is, so
-        // that is the context the verdict has to be taken in.
+        // A mutating job's approved `write_file` runs on the host at the granted path (#282 §3),
+        // so that is the context the verdict has to be taken in.
         let mutatingJob = job(name: "writer", profile: .mutating)
         let write = BlockedCall(toolName: "write_file", args: ["path": .string("/tmp/x")])
         let writeSpy = SpyVibecop(decision: "APPROVE")
@@ -345,8 +345,8 @@ struct ApproveAndRunTests {
             _ = await runner.approvalOffer(for: write, job: mutatingJob)
         }
         #expect(writeSpy.calls == 1)
-        #expect(writeSpy.lastPrompt.contains(inVM),
-                "a mutating job's call is run in the VM, so the verdict is asked about the VM")
+        #expect(!writeSpy.lastPrompt.contains(inVM),
+                "a write_file runs on the host whatever the profile; the verdict is asked about the host")
 
         // A read-only job's `run_command` is the container's or nobody's, so it is sandboxed too.
         let readerJob = job(name: "reader", profile: .readOnly)

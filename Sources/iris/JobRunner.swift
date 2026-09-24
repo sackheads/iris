@@ -1086,13 +1086,11 @@ actor JobRunner {
         if protectedTarget {
             return ApprovalOffer(refusal: EventCard.protectedNotApprovable, verdict: nil, reason: nil)
         }
-        // The same expression `runApproved` opens the approved call's conversation with, so the
-        // verdict is taken about the isolation the call would actually have. Asking the *blocked
-        // run's* conversation instead — which is what this used to do — answered for a `write_file`
-        // with "not sandboxed" even when the job is `mutating` and the approved call would run in
-        // the VM, and answered for a `run_command` with whatever that conversation happened to
-        // resolve to rather than with R20's "the container or nobody".
-        let sandboxed = job.profile == .mutating || call.toolName == "run_command"
+        // The verdict is taken about the path the tool actually takes (#282 §3). A `write_file`
+        // (or `read_file`) runs on the host at the granted path whatever the profile — a mutating
+        // job's host write is not sandboxed — so it is judged as a host call; only a `run_command`
+        // is the container's or nobody's (R20), so only a command is judged as sandboxed.
+        let sandboxed = call.toolName == "run_command"
         let verdict = await state.vibecopVerdict(for: call, inSandbox: sandboxed,
                                                  vibecopEnabled: config.enableVibecop)
         return ApprovalOffer(refusal: nil, verdict: verdict?.decision, reason: verdict?.reason)
