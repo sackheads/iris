@@ -147,6 +147,25 @@ struct JobGrantResolveTests {
         #expect(try resolve(f, nil, network: true).get() == JobGrant(mounts: [], network: true))
     }
 
+    @Test("an unnamed target is identity to the STORED canonical source; a named target stays verbatim")
+    func unnamedTargetIsIdentityToTheStoredSource() throws {
+        let f = try Self.fixture(); defer { f.tearDown() }
+        // The firmlink spelling of the same directory: `/private/var/…` canonicalises to `/var/…`.
+        let spelled = "/private" + canonical(f.proj)
+        #expect(spelled != canonical(f.proj) && IrisPaths.canonicalPath(spelled) == canonical(f.proj))
+        let grant = try #require(try resolve(f, [spelled]).get())
+        #expect(grant.mounts == [ContainerMount(source: canonical(f.proj))],
+                "before the fix the target kept the raw spelling, so the stored form was `/var/…:/private/var/…`")
+        #expect(grant.mountEntries == [canonical(f.proj)], "no `:` — the entry is identity, as the docs say")
+        #expect(grant.describe() == "read-write \(canonical(f.proj)) (working directory) · network off")
+        // A trailing slash is a spelling too.
+        let slash = try #require(try resolve(f, [f.proj.path + "/"]).get())
+        #expect(slash.mountEntries == [canonical(f.proj)])
+        // A named target is the person's, verbatim.
+        let named = try #require(try resolve(f, [spelled + ":/work:ro"]).get())
+        #expect(named.mounts == [ContainerMount(source: canonical(f.proj), target: "/work", readOnly: true)])
+    }
+
     @Test("an explicit network: false with no mounts is a grant on a mutating job, and nothing on a read-only one (§0.11)")
     func explicitNetworkOffIsAGrant() throws {
         let f = try Self.fixture(); defer { f.tearDown() }

@@ -110,7 +110,12 @@ extension JobGrant {
             case nil: break
             }
             if isCredentialStore(source, home: home) { return .failure(ToolMessage(credentialStoreRefusal)) }
-            resolved.append(ContainerMount(source: source, target: parsed.target, readOnly: parsed.readOnly))
+            // An unnamed target is identity to the *stored* source — what "recorded as the directory
+            // each path resolves to" promises — not to the spelling: `/private/tmp/x` would otherwise
+            // store as `/tmp/x:/private/tmp/x`, and every command would see a path `write_file`
+            // cannot name. A named target is the person's, verbatim.
+            let target = parsed.target == parsed.source ? source : parsed.target
+            resolved.append(ContainerMount(source: source, target: target, readOnly: parsed.readOnly))
         }
         // §0.6: the working directory is never in doubt. Before the duplicate check, in §1's order.
         if let first = resolved.first, first.readOnly, resolved.contains(where: { !$0.readOnly }) {
