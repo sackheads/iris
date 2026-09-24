@@ -246,7 +246,7 @@ extension JobGrant {
         // place it under the *process* cwd, and the card's text must not depend on where the
         // daemon was launched. The first mount is the honest answer — it is where the grant is.
         let resolved = IrisEngine.expandTilde(ToolExecutor.resolvePath(details, cwd: cwd))
-        guard resolved.hasPrefix("/") else { return mounts.first?.source }
+        guard resolved.hasPrefix("/") else { return real.first?.mount.source ?? mounts.first?.source }
         let target = URL(fileURLWithPath: IrisPaths.realPath(resolved)).pathComponents
         func shared(_ path: String) -> Int {
             zip(URL(fileURLWithPath: path).pathComponents, target).prefix { $0 == $1 }.count

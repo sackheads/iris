@@ -3080,6 +3080,11 @@ actor IrisEngine {
             }
 
             let useSandbox = await resolveUseSandbox(toolName: functionCall.name, conversationId: conversationId, workspacePath: workspacePath)
+            // #282 §0.13: the covering mount for a granted file-tool call is decided ONCE, here,
+            // before approval, and the executor walks that decision rather than recomputing it — a
+            // command the run left running in the container can swap a component between a check
+            // and an open. nil under a grant is a refusal in the executor, never a Foundation write.
+            let grantedMount = sandboxGrant?.allowedMount(toolName: functionCall.name, details: details, cwd: workspacePath)
             if needsApproval {
                 let approved = await localState?.requestApproval(
                     toolName: functionCall.name, details: details, args: functionCall.args,
@@ -3088,12 +3093,12 @@ actor IrisEngine {
                     callerRole: principal == .evaluator ? .evaluator : .agent,
                     allowedCommands: evaluatorChecks) ?? false
                 if approved {
-                    result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant)
+                    result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount)
                 } else {
                     result = Self.deniedToolResult
                 }
             } else {
-                result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant)
+                result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount)
             }
         }
         
@@ -3143,13 +3148,16 @@ actor IrisEngine {
         // runs in the container the run was granted — its mounts, its network — not in one built
         // from `call.cwd`. The conversation is reopened with the grant before this is reached.
         let grant = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.sandboxGrant }
+        // #282 §0.13: the same single decision the model-turn dispatcher makes, on the call's own
+        // path and cwd; the executor walks it and refuses a nil under a grant.
+        let grantedMount = grant?.allowedMount(toolName: call.toolName, details: call.args["path"]?.stringValue ?? "", cwd: call.cwd)
         // `isUnattended` defaults to false here, and that is the ruling rather than an oversight
         // (#187 §4, R-D4-1): a person clicked "Approve and run" on this call a moment ago, so its
         // write is the human-driven kind a watch is meant to notice, like any other foreground
         // write. The filter is fed from the dispatcher's unattended branch only.
         return await executeToolWithHooks(name: call.toolName, args: call.args, cwd: call.cwd,
                                           conversationId: conversationId, useSandbox: useSandbox,
-                                          origin: .approvedCall, grant: grant)
+                                          origin: .approvedCall, grant: grant, grantedMount: grantedMount)
     }
 
     /// What an approved call that turns out to target a protected directory returns instead of
@@ -3242,7 +3250,7 @@ actor IrisEngine {
         }
     }
 
-    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil) async -> String {
+    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil) async -> String {
         var execArgs: [String: JSONValue] = args
 
         // Session strip activity (#217/#19): the detail is derived from the tool's own arguments
@@ -3287,7 +3295,7 @@ actor IrisEngine {
             }
         }
         
-        var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant)
+        var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant, grantedMount: grantedMount)
 
         if name == "write_file", result.hasPrefix("Successfully wrote to "),
            let cid = conversationId, let path = execArgs["path"]?.stringValue {

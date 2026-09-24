@@ -175,8 +175,13 @@ struct ToolExecutor {
         return tools
     }
     
+    /// `grantedMount` is the covering mount the dispatcher decided on for this call (#282 §0.13).
+    /// With a `grant` present the two file tools have exactly two outcomes: a non-nil decision is
+    /// walked from that mount's root; a nil decision is refused (`notDecidedInsideGrant`). They
+    /// reach Foundation on no branch. `grant == nil` (every attended call, every ungranted run) is
+    /// today's path.
     func execute(name: String, args: [String: JSONValue], cwd: String? = nil, conversationId: UUID? = nil,
-                 useSandbox: Bool = false, grant: JobGrant? = nil) async -> String {
+                 useSandbox: Bool = false, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil) async -> String {
         switch name {
         case "run_command":
             guard let command = args["command"]?.stringValue else { return "Error: Missing command" }
@@ -190,9 +195,25 @@ struct ToolExecutor {
                                     timeoutSeconds: timeoutSeconds, grant: grant)
         case "read_file":
             guard let path = args["path"]?.stringValue else { return "Error: Missing path" }
+            if let grant {
+                // §0.13: under a grant there is no Foundation branch. A nil decision is a refusal,
+                // because it may have been made while a component was a link.
+                guard let grantedMount else { return Self.notDecidedInsideGrant("read_file") }
+                guard let relative = grant.relativeComponents(of: path, cwd: cwd, under: grantedMount) else {
+                    return Self.notUnderGrantedDirectory(grantedMount.source)
+                }
+                return await readFile(grantRoot: grantedMount.source, relative: relative)
+            }
             return await readFile(path, cwd: cwd)
         case "write_file":
             guard let path = args["path"]?.stringValue, let content = args["content"]?.stringValue else { return "Error: Missing path or content" }
+            if let grant {
+                guard let grantedMount else { return Self.notDecidedInsideGrant("write_file") }
+                guard let relative = grant.relativeComponents(of: path, cwd: cwd, under: grantedMount) else {
+                    return Self.notUnderGrantedDirectory(grantedMount.source)
+                }
+                return await writeFile(grantRoot: grantedMount.source, relative: relative, content: content)
+            }
             return await writeFile(path, content: content, cwd: cwd)
         case "register_directory_watcher":
             switch RegisterWatcherArguments.parse(args) {
@@ -537,6 +558,36 @@ struct ToolExecutor {
                 return "Error writing file: \(error.localizedDescription)"
             }
         }.value
+    }
+
+    /// A granted run's read (#282 §0.13): the same walk the write takes, from the covering mount's root.
+    func readFile(grantRoot: String, relative: [String]) async -> String {
+        await Task.detached {
+            do { return try GrantedFileAccess(root: grantRoot).read(relative: relative) }
+            catch let error as GrantedFileError { return "Error reading file: \(error.message)" }
+            catch { return "Error reading file: \(error.localizedDescription)" }
+        }.value
+    }
+
+    /// A granted run's write (#282 §0.13). The success sentence is the one `IrisEngine.writtenPaths`
+    /// reads, so the self-write filter is fed exactly as for a Foundation write.
+    func writeFile(grantRoot: String, relative: [String], content: String) async -> String {
+        let path = ([grantRoot] + relative).joined(separator: "/")
+        return await Task.detached {
+            do {
+                try GrantedFileAccess(root: grantRoot).write(relative: relative, content: content)
+                return "Successfully wrote to \(path)"
+            } catch let error as GrantedFileError { return "Error writing file: \(error.message)" }
+            catch { return "Error writing file: \(error.localizedDescription)" }
+        }.value
+    }
+
+    static func notUnderGrantedDirectory(_ source: String) -> String {
+        "Error: the path is not under the granted directory \(source); nothing was done."
+    }
+
+    static func notDecidedInsideGrant(_ tool: String) -> String {
+        "Error: `\(tool)` was not inside this run's grant when it was decided; nothing was done — widen the grant (re-schedule) if it should be."
     }
     
     private func searchWeb(query: String) async -> String {
