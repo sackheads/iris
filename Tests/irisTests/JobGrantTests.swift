@@ -96,3 +96,162 @@ struct JobGrantTests {
         #expect(store.ledger.unreadableJobCount == 0)
     }
 }
+
+/// The creation half's pure core (#282 §1, §0.11): what `mounts`/`network` resolve to and every
+/// refusal by name, against temp directories only.
+@Suite("JobGrant.resolve (#282)")
+struct JobGrantResolveTests {
+    struct Fixture {
+        let base: URL          // <tmp>/iris-grant-<uuid>
+        let proj: URL          // base/proj
+        let creds: URL         // base/creds
+        let irisRoot: URL      // base/dot-iris  (contains config/)
+        let home: String       // base/home
+        var paths: IrisPaths { IrisPaths(root: irisRoot) }
+        func tearDown() { try? FileManager.default.removeItem(at: base) }
+    }
+
+    static func fixture() throws -> Fixture {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("iris-grant-\(UUID().uuidString)")
+        for name in ["proj", "creds", "dot-iris/config", "home"] {
+            try fm.createDirectory(at: base.appendingPathComponent(name), withIntermediateDirectories: true)
+        }
+        return Fixture(base: base, proj: base.appendingPathComponent("proj"),
+                       creds: base.appendingPathComponent("creds"),
+                       irisRoot: base.appendingPathComponent("dot-iris"),
+                       home: base.appendingPathComponent("home").path)
+    }
+
+    private func resolve(_ f: Fixture, _ mounts: [String]?, network: Bool? = nil,
+                         profile: JobProfile = .mutating) -> Result<JobGrant?, ToolMessage> {
+        JobGrant.resolve(mounts: mounts, network: network, profile: profile,
+                         paths: f.paths, home: f.home, isVolume: { _ in false })
+    }
+
+    private func canonical(_ url: URL) -> String { IrisPaths.canonicalPath(url.path) }
+
+    @Test("a grant resolves with canonical sources, verbatim targets, and the first read-write as working directory")
+    func resolvesCanonical() throws {
+        let f = try Self.fixture(); defer { f.tearDown() }
+        let grant = try #require(try resolve(f, [f.proj.path, "\(f.creds.path):/gh:ro"], network: true).get())
+        #expect(grant.mounts == [ContainerMount(source: canonical(f.proj)),
+                                 ContainerMount(source: canonical(f.creds), target: "/gh", readOnly: true)])
+        #expect(grant.network == true)
+        #expect(grant.workingDirectory == canonical(f.proj))
+        // Naming neither is nothing granted, on either profile.
+        #expect(try resolve(f, nil).get() == nil)
+        #expect(try resolve(f, []).get() == nil)
+        #expect(try resolve(f, nil, profile: .readOnly).get() == nil)
+        // A network bit alone is a grant: commands may reach the network from a mount-less container.
+        #expect(try resolve(f, nil, network: true).get() == JobGrant(mounts: [], network: true))
+    }
+
+    @Test("an explicit network: false with no mounts is a grant on a mutating job, and nothing on a read-only one (§0.11)")
+    func explicitNetworkOffIsAGrant() throws {
+        let f = try Self.fixture(); defer { f.tearDown() }
+        let off = try #require(try resolve(f, [], network: false).get())
+        #expect(off == JobGrant(mounts: [], network: false))
+        #expect(off.sentence == "Grant: no mounts · network off.")
+        #expect(try resolve(f, nil, network: false).get() == JobGrant(mounts: [], network: false))
+        #expect(try resolve(f, nil, network: false, profile: .readOnly).get() == nil,
+                "a read-only job asked for nothing it does not already have")
+    }
+
+    @Test("each refusal, by name, in the spec's order")
+    func refusalsByName() throws {
+        let f = try Self.fixture(); defer { f.tearDown() }
+        func refusal(_ mounts: [String]?, network: Bool? = nil, profile: JobProfile = .mutating) -> String? {
+            if case .failure(let m) = resolve(f, mounts, network: network, profile: profile) { return m.text }
+            return nil
+        }
+        // 1. a grant on a read-only profile — mounts or network alike
+        #expect(refusal([f.proj.path], profile: .readOnly) == JobGrant.grantNeedsMutating)
+        #expect(refusal(nil, network: true, profile: .readOnly) == JobGrant.grantNeedsMutating)
+        // 2. malformed, with ContainerMount's own reasons
+        #expect(refusal(["relative/dir"])?.contains("both paths must be absolute") == true)
+        #expect(refusal(["\(f.proj.path):/in,puts"])?.contains("comma") == true)
+        #expect(refusal(["/a:/b:/c"])?.contains("expected source[:target][:ro]") == true)
+        // 3. missing or a file
+        let gone = "/tmp/\(UUID().uuidString)"
+        #expect(refusal([gone]) == JobGrant.missing(gone))
+        let file = f.base.appendingPathComponent("f.txt"); try "x".write(to: file, atomically: true, encoding: .utf8)
+        #expect(refusal([file.path]) == JobGrant.notADirectory(canonical(file)))
+        // 4. too broad: /, a volume root, a mount point, the home directory
+        #expect(refusal(["/"]) == JobGrant.tooBroad("/"))
+        // Refused whether or not such a volume is mounted: absent it is `missing`, mounted it is
+        // the lexical `/Volumes/<x>` rule — either way nothing is granted.
+        #expect(refusal(["/Volumes/Data"]) != nil)
+        #expect(refusal([f.home]) == JobGrant.tooBroad(IrisPaths.canonicalPath(f.home)))
+        let volume = JobGrant.resolve(mounts: [f.creds.path], network: nil, profile: .mutating,
+                                      paths: f.paths, home: f.home, isVolume: { _ in true })
+        #expect(volume == .failure(ToolMessage(JobGrant.tooBroad(canonical(f.creds)))))
+        // 5. Iris's own directory, read-only included, in both directions
+        #expect(refusal([f.irisRoot.path + ":ro"]) == JobGrant.protected(canonical(f.irisRoot)))
+        #expect(refusal([f.irisRoot.appendingPathComponent("config").path]) == JobGrant.protected(canonical(f.irisRoot.appendingPathComponent("config"))))
+        #expect(refusal([f.base.path]) == JobGrant.protected(canonical(f.base)), "a root that contains ~/.iris sees every write into it")
+        // 6. a credential store, by name — see credentialStoresRefusedByName for the whole list
+        try FileManager.default.createDirectory(atPath: f.home + "/.ssh", withIntermediateDirectories: true)
+        #expect(refusal([f.home + "/.ssh:ro"]) == JobGrant.credentialStoreRefusal)
+        // 7. read-only first, read-write after — and it outranks a duplicate further down the list
+        #expect(refusal(["\(f.creds.path):ro", f.proj.path]) == JobGrant.readOnlyFirst)
+        #expect(refusal(["\(f.creds.path):ro", f.proj.path, f.proj.path]) == JobGrant.readOnlyFirst)
+        #expect(refusal(["\(f.creds.path):ro"]) == nil, "all read-only is fine: the working directory is /")
+        // 8. the same source twice, however spelled
+        #expect(refusal([f.proj.path, f.proj.path + "/"]) == JobGrant.duplicate(canonical(f.proj)))
+    }
+
+    @Test("every credential store is refused by name — itself, under it, and anything that contains it — read-only included; a sibling is not (§0.12)")
+    func credentialStoresRefusedByName() throws {
+        let f = try Self.fixture(); defer { f.tearDown() }
+        let fm = FileManager.default
+        for entry in JobGrant.credentialStores {
+            let store = f.home + String(entry.dropFirst())            // "~/.ssh" → "<home>/.ssh"
+            try fm.createDirectory(atPath: store + "/inner", withIntermediateDirectories: true)
+            for spelled in [store, store + ":ro", store + "/inner", store + "/inner:/keys:ro"] {
+                #expect(resolve(f, [spelled]) == .failure(ToolMessage(JobGrant.credentialStoreRefusal)), Comment(rawValue: spelled))
+            }
+        }
+        #expect(JobGrant.credentialStores.count == 9, "the list the spec names, no more and no fewer")
+        // Both directions, the `~/.iris` containment rule: a mount that holds a store hands it over
+        // with everything around it. (The home directory itself is refused earlier, as too broad.)
+        for parent in ["/.config", "/Library", "/Library/Application Support"] {
+            for spelled in [f.home + parent, f.home + parent + ":ro"] {
+                #expect(resolve(f, [spelled]) == .failure(ToolMessage(JobGrant.credentialStoreRefusal)), Comment(rawValue: spelled))
+            }
+        }
+        try FileManager.default.createDirectory(atPath: f.home + "/Library/Application Support/SomeApp", withIntermediateDirectories: true)
+        #expect(try resolve(f, [f.home + "/Library/Application Support/SomeApp"]).get() != nil,
+                "a sibling under a refused parent that contains no store is fine")
+        // A directory made for the job beside a store is what §0.2 asks for, and is fine.
+        let sibling = f.home + "/.ssh-deploy-key"
+        try fm.createDirectory(atPath: sibling, withIntermediateDirectories: true)
+        #expect(try resolve(f, [sibling + ":ro"]).get()?.mounts.first?.source == IrisPaths.canonicalPath(sibling))
+        // Matched on canonical paths: a symlink to a store is the store.
+        let link = f.base.appendingPathComponent("keys")
+        try fm.createSymbolicLink(at: link, withDestinationURL: URL(fileURLWithPath: f.home + "/.aws"))
+        #expect(resolve(f, [link.path]) == .failure(ToolMessage(JobGrant.credentialStoreRefusal)))
+    }
+
+    @Test("nested entries are allowed and the sentence says so")
+    func nestedEntries() throws {
+        let f = try Self.fixture(); defer { f.tearDown() }
+        let sub = f.proj.appendingPathComponent("secrets")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        let grant = try #require(try resolve(f, [f.proj.path, "\(sub.path):ro"]).get())
+        #expect(grant.describe() == "read-write \(canonical(f.proj)) (working directory) · read-only \(canonical(sub)) · network off · nested: \(canonical(sub)) under \(canonical(f.proj)), whose mode applies beneath it")
+        let plain = try #require(try resolve(f, [f.proj.path, "\(f.creds.path):/gh:ro"], network: true).get())
+        #expect(plain.describe() == "read-write \(canonical(f.proj)) (working directory) · read-only \(canonical(f.creds)) → /gh · network on")
+        #expect(plain.sentence == "Grant: \(plain.describe()).")
+        #expect(JobGrant(network: true).describe() == "no mounts · network on")
+    }
+
+    @Test("the host-reachable note is the listing's only (§0.7): the result sentence says network off")
+    func hostReachableOnlyOnTheListing() {
+        let off = JobGrant(mounts: [ContainerMount(source: "/p")])
+        #expect(off.describe() == "read-write /p (working directory) · network off")
+        #expect(off.describe(hostNote: true) == "read-write /p (working directory) · network off (host reachable)")
+        #expect(off.sentence == "Grant: read-write /p (working directory) · network off.")
+        #expect(JobGrant(network: true).describe(hostNote: true) == "no mounts · network on")
+    }
+}
