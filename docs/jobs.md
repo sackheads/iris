@@ -313,7 +313,8 @@ Foundation: the mount's root is opened once as a directory descriptor, each rema
 walked with `openat(O_DIRECTORY | O_NOFOLLOW)`, the final component is opened `O_NOFOLLOW`, a write
 is staged as `<name>.sb-…` beside its target (`O_CREAT | O_EXCL`, the shape Foundation's own atomic
 save uses, so the watches' ignore set and the self-write filter treat it as they always did) and
-renamed into place with `renameat` inside that directory's descriptor. A symlink anywhere in the
+renamed into place with `renameat` inside that directory's descriptor; a rewrite keeps the file's
+mode bits, as Foundation's atomic save does, so a script the job maintains stays executable. A symlink anywhere in the
 path is a refusal, not a resolution — `the path crosses a symlink at …; a granted run may not read
 or write through symlinks — name the real directory instead` — a directory named as a file is
 refused, and `read_file` reads regular files only: a FIFO is refused rather than parking the run

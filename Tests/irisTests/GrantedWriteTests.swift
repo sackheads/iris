@@ -34,6 +34,29 @@ struct GrantedWriteTests {
         #expect(try String(contentsOf: t.root.appendingPathComponent("top.md"), encoding: .utf8) == "")
     }
 
+    @Test("a rewrite keeps the existing file's mode bits, as Foundation's atomic write does; a new file gets the default")
+    func rewriteKeepsMode() throws {
+        let t = try tree(); defer { t.tearDown() }
+        func mode(_ url: URL) -> mode_t {
+            var st = stat()
+            #expect(lstat(url.path, &st) == 0)
+            return st.st_mode & 0o7777
+        }
+        // Measured: `write(atomically:)` — the attended path — leaves a 755 script at 755. A job that
+        // maintains `deploy.sh` and then runs it must not find it 644 in the container.
+        let script = t.root.appendingPathComponent("sub/deploy.sh")
+        try "#!/bin/sh\necho one\n".write(to: script, atomically: true, encoding: .utf8)
+        #expect(chmod(script.path, 0o755) == 0)
+        try t.access.write(relative: ["sub", "deploy.sh"], content: "#!/bin/sh\necho two\n")
+        #expect(mode(script) == 0o755, "the rewrite keeps +x and every other bit")
+        #expect(try String(contentsOf: script, encoding: .utf8) == "#!/bin/sh\necho two\n")
+        #expect(t.names(t.root.appendingPathComponent("sub")) == ["deploy.sh"])
+        // A file that did not exist gets the default: owner-readable, never executable.
+        try t.access.write(relative: ["sub", "fresh.md"], content: "x")
+        let fresh = mode(t.root.appendingPathComponent("sub/fresh.md"))
+        #expect(fresh & 0o111 == 0 && fresh & 0o600 == 0o600, "fresh file mode \(String(fresh, radix: 8))")
+    }
+
     @Test("a symlink as an intermediate component is refused, and nothing lands outside")
     func intermediateSymlinkRefused() throws {
         let t = try tree(); defer { t.tearDown() }

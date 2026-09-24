@@ -95,11 +95,16 @@ struct GrantedFileAccess: Sendable {
         let dirFD = try descend(relative.dropLast(), from: rootFD)
         defer { if dirFD != rootFD { close(dirFD) } }
         // `renameat` would replace a symlink rather than follow it, but a run may not write
-        // *through* one either way (§0.13): refuse before anything is staged.
+        // *through* one either way (§0.13): refuse before anything is staged. A regular file's
+        // mode bits are kept for the rewrite: Foundation's atomic write — the attended path —
+        // leaves a 755 script at 755 (measured), and a job that maintains `deploy.sh` and then
+        // runs it must find it executable.
         var st = stat()
+        var existingMode: mode_t?
         if fstatat(dirFD, name, &st, AT_SYMLINK_NOFOLLOW) == 0 {
             if (st.st_mode & S_IFMT) == S_IFLNK { throw GrantedFileError.symlink(component: name) }
             if (st.st_mode & S_IFMT) == S_IFDIR { throw GrantedFileError.isADirectory(component: name) }
+            if (st.st_mode & S_IFMT) == S_IFREG { existingMode = st.st_mode & 0o7777 }
         }
         let staging = stagingName(name)
         let fd = openat(dirFD, staging, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o644)
@@ -111,6 +116,7 @@ struct GrantedFileAccess: Sendable {
             close(fd)
             if !renamed { _ = unlinkat(dirFD, staging, 0) }
         }
+        if let existingMode, fchmod(fd, existingMode) != 0 { throw GrantedFileError.io(call: "fchmod", errno: errno) }
         let bytes = Array(content.utf8)
         var written = 0
         while written < bytes.count {
