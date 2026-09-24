@@ -2238,26 +2238,28 @@ class AppState {
             }
             // §0.4, §0.5: inside the grant, no human is needed. A `run_command` reaching here has
             // already passed the R20 check in the dispatcher, so "yes" is a sandboxed yes.
-            if let grant = conversation.sandboxGrant {
-                // §0.13, one decision: the dispatcher decided the covering mount before this call,
-                // and the two file tools are judged by that decision alone — never re-derived here,
-                // and never widened by the allowlist, because the executor has no Foundation branch
-                // for a granted run. A nil decision falls straight to the record below.
-                if toolName == "write_file" || toolName == "read_file" {
-                    if grantedMount != nil { return true }
-                } else if grant.allows(toolName: toolName, details: details, cwd: workspace, sandboxed: inSandbox) {
-                    // `inSandbox` is `resolveUseSandbox`'s answer for this call (IrisEngine's
-                    // dispatcher): the conversation's resolution for a `run_command` — the
-                    // parameter §0.4 asks for.
-                    return true
-                }
+            //
+            // §0.13, one decision: in a granted run the two file tools are the grant's alone. The
+            // dispatcher decided the covering mount before this call, and they are judged by that
+            // decision — never re-derived here, and never widened by the allowlist, because the
+            // executor has no Foundation branch for a granted run. A nil decision falls straight
+            // to the record below, which names the nearest granted directory for these two tools
+            // only: a command is not placed against directories, so its denial keeps the plain notice.
+            let grant = conversation.sandboxGrant
+            let isGrantedFileTool = grant != nil && (toolName == "write_file" || toolName == "read_file")
+            if isGrantedFileTool {
+                if grantedMount != nil { return true }
+            } else if let grant, grant.allows(toolName: toolName, details: details, cwd: workspace, sandboxed: inSandbox) {
+                // `inSandbox` is `resolveUseSandbox`'s answer for this call (IrisEngine's dispatcher):
+                // the conversation's resolution for a `run_command` — the parameter §0.4 asks for.
+                return true
             }
-            if !(conversation.sandboxGrant != nil && (toolName == "write_file" || toolName == "read_file")),
+            if !isGrantedFileTool,
                permissions.isAllowed(toolName: toolName, details: details, workspace: workspace, isBackground: true) {
                 return true
             }
             recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval,
-                                                     grantNearest: conversation.sandboxGrant?.nearest(to: details, cwd: workspace)),
+                                                     grantNearest: isGrantedFileTool ? grant?.nearest(to: details, cwd: workspace) : nil),
                                    in: id)
             return false
         }

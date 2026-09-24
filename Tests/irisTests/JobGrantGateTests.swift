@@ -171,7 +171,11 @@ struct JobGrantApprovalTests {
         // it first; this is the second lock) falls to the allowlist and is recorded.
         #expect(!(await app.requestApproval(toolName: "run_command", details: "git status", args: ["command": .string("git status")],
                                             workspace: c(t.proj), conversationId: cid, inSandbox: false)))
-        #expect(app.takeBackgroundDenials(for: cid).first?.toolName == "run_command")
+        let denial = try #require(app.takeBackgroundDenials(for: cid).first)
+        #expect(denial.toolName == "run_command")
+        #expect(denial.grantNearest == nil, "a command is not placed against the grant's directories; 'nearest' is the file tools' word")
+        #expect(app.conversations.first { $0.id == cid }?.messages.last?.content
+                == String(format: AppState.unattendedDenialNotice, "run_command"))
     }
 
     @Test("a granted background conversation runs a write inside the grant without a denial or a dialog")
@@ -194,8 +198,13 @@ struct JobGrantApprovalTests {
         let rogue = JobGrant(mounts: [ContainerMount(source: c(t.home, ".iris"))])
         let (app, cid) = background(t, grant: rogue)
         let target = c(t.home, ".iris/config/permissions.json")
+        // The dispatcher's decision under the rogue grant is a yes — the mount covers the path — so
+        // only R10, asked first, stands between this call and `true`.
+        let decided = rogue.allowedMount(toolName: "write_file", details: target, cwd: c(t.proj))
+        #expect(decided != nil, "the grant says yes; the refusal has to be R10's")
         let ok = await app.requestApproval(toolName: "write_file", details: target,
-                                           args: ["path": .string(target)], workspace: c(t.proj), conversationId: cid)
+                                           args: ["path": .string(target)], workspace: c(t.proj), conversationId: cid,
+                                           grantedMount: decided)
         #expect(!ok)
         let denial = try #require(app.takeBackgroundDenials(for: cid).first)
         #expect(denial.reason == .approval && denial.grantNearest == nil, "a protected write is refused as R10, not as 'outside the grant'")
@@ -214,11 +223,14 @@ struct JobGrantApprovalTests {
         #expect(denial.grantNearest == nil, "refused by R10, before the grant is read")
         #expect(app.conversations.first { $0.id == cid }?.messages.last?.content
                 == String(format: AppState.unattendedDenialNotice, "write_file"))
-        // A read through the same link with no `..` is outside every mount by real path: refused,
-        // and named as outside the grant (reads are not R10's business).
+        // A read through the same link with no `..` resolves outside every mount by real path, so
+        // the dispatcher's decision for it is nil; the gate refuses on that decision and names the
+        // call as outside the grant (reads are not R10's business).
         let read = link.path + "/config/permissions.json"
+        let readDecision = t.grant.allowedMount(toolName: "read_file", details: read, cwd: c(t.proj))
+        #expect(readDecision == nil, "the real path is ~/.iris/config, under no mount")
         #expect(!(await app.requestApproval(toolName: "read_file", details: read, args: ["path": .string(read)],
-                                            workspace: c(t.proj), conversationId: cid)))
+                                            workspace: c(t.proj), conversationId: cid, grantedMount: readDecision)))
         #expect(app.takeBackgroundDenials(for: cid).first?.grantNearest == c(t.proj))
     }
 

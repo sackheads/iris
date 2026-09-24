@@ -305,4 +305,15 @@ struct EventCardTests {
         #expect(ChatMessage(role: .command, content: "").exportRoleName == "Iris")
         #expect(ChatMessage(role: .agent, content: "body").exportText == "body")
     }
+
+    @Test("the display copy of a blocked call keeps the nearest granted directory while bounding its arguments (#282 §5)")
+    func displayCopyKeepsGrantNearest() {
+        let long = String(repeating: "x", count: EventCard.argumentPreviewLimit + 50)
+        let call = BlockedCall(toolName: "write_file", args: ["path": .string("/w/out.md"), "content": .string(long)],
+                               cwd: "/w", reason: .approval, grantNearest: "/w")
+        let shown = EventCard.displayCopy(of: call)
+        #expect(shown.grantNearest == "/w", "the card says where the grant is; the copy must not drop it")
+        #expect(shown.toolName == call.toolName && shown.cwd == call.cwd && shown.reason == call.reason && shown.at == call.at)
+        #expect((shown.args["content"]?.stringValue.count ?? 0) < long.count)
+    }
 }
