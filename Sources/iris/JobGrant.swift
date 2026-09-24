@@ -189,11 +189,15 @@ extension JobGrant {
         mounts.compactMap { mount in IrisPaths.realPathForAllow(mount.source).map { (mount, $0) } }
     }
 
-    /// Case-insensitive (§3): APFS keeps the caller's spelling and the decision is only *whether*;
-    /// the descriptor walk (Task 4c) is what proves the file is really under the entry.
+    /// Exact (§0.13 as amended): both sides are `realpath(3)` output, and realpath returns the
+    /// on-disk case for every existing component (measured), so the stored source and the
+    /// candidate already agree in case on a case-insensitive volume, and on a case-sensitive one
+    /// a real path differing in case only is a different, existing directory — a fold here would
+    /// send `/Vol/PROJ/x` into the granted `/Vol/proj/x`. Only `relativeComponents`, which reads
+    /// the *spelled* path, folds case. The descriptor walk (Task 4c) then proves the file is
+    /// really under the entry.
     func covering(_ realPath: String) -> ContainerMount? {
-        let lowered = realPath.lowercased()
-        return realMounts.filter { Self.isUnder(lowered, $0.real.lowercased()) }
+        realMounts.filter { Self.isUnder(realPath, $0.real) }
             .max { $0.real.count < $1.real.count }?.mount
     }
 

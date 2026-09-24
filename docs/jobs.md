@@ -297,9 +297,12 @@ run has no host path for those two tools to take, so the remedy is a re-schedule
 not a click.
 
 **How the path is judged.** On the real path, never a lexical one. The covering mount is chosen
-from the kernel's resolution of the deepest existing ancestor of the path (compared
-case-insensitively, since APFS keeps whatever spelling you typed — the walk below then proves the
-file is really under it), the innermost matching entry decides, and a path with `..` in any
+from the kernel's resolution of the deepest existing ancestor of the path, compared exactly: the
+kernel spells a real path as it is on disk, so the stored source and the real path already agree
+in case on the usual case-insensitive volume, and on a case-sensitive one a differently-cased
+sibling is a different directory and is refused. Only the check that the path is *spelled* under
+the granted directory folds case, since what you typed may differ from the stored spelling; the
+walk below then proves the file is really under it. The innermost matching entry decides, and a path with `..` in any
 component is refused outright: a job never needs one inside a grant, and `<mount>/link/../x` with
 `link` pointing outside is exactly the shape a lexical check gets wrong. The path must also be
 *spelled* under the granted directory — a grant on `/tmp/proj` does not cover

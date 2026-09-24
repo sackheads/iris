@@ -62,9 +62,34 @@ struct JobGrantAllowsTests {
         guard !caseSensitive else { return }
         let upper = t.base.appendingPathComponent("PROJ").appendingPathComponent("out.md").path
         let mount = try #require(t.grant.allowedMount(toolName: "write_file", details: upper, cwd: nil))
-        #expect(mount.source == c(t.proj), "the covering entry is chosen case-insensitively")
+        #expect(mount.source == c(t.proj), "realpath already spelled the real path as on disk, so the exact comparison finds the entry")
         #expect(t.grant.relativeComponents(of: upper, cwd: nil, under: mount) == ["out.md"], "and the walk starts at the granted root, so on any volume the write lands in the granted directory")
         #expect(!t.grant.allows(toolName: "write_file", details: t.base.appendingPathComponent("PROJECT/out.md").path, cwd: nil, sandboxed: false), "case-insensitive is not prefix-insensitive")
+    }
+
+    @Test("the real path is compared exactly: a differently-cased sibling that really exists is another directory, not the grant (§0.13 amendment)")
+    func differentlyCasedSiblingIsRefused() throws {
+        let t = try Self.tree(); defer { t.tearDown() }
+        // Pure, on any volume: `covering` takes real paths, and realpath(3) returns the on-disk case
+        // for every existing component (measured), so a real path differing from the stored source
+        // in case only is a different directory — on a case-sensitive volume, an existing one.
+        let realProj = IrisPaths.realPath(c(t.proj))
+        let upper = (realProj as NSString).deletingLastPathComponent + "/PROJ/x"
+        #expect(t.grant.covering(upper) == nil)
+        #expect(t.grant.covering(realProj + "/x")?.source == c(t.proj))
+        // End to end, where the sibling can exist: grant `proj`, a different directory `PROJ` beside
+        // it. Before the amendment the fold chose `proj`, the walk opened it, and `proj/x` was
+        // written for a call that named `PROJ/x`. On a case-insensitive volume `PROJ` is `proj`
+        // and `differentlyCasedSpellingIsAllowed` is the test.
+        let caseSensitive = try t.base.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
+            .volumeSupportsCaseSensitiveNames ?? false
+        guard caseSensitive else { return }
+        let sibling = t.base.appendingPathComponent("PROJ")
+        try FileManager.default.createDirectory(at: sibling, withIntermediateDirectories: true)
+        let target = sibling.appendingPathComponent("x").path
+        #expect(!t.grant.allows(toolName: "write_file", details: target, cwd: nil, sandboxed: false))
+        #expect(t.grant.allowedMount(toolName: "write_file", details: target, cwd: nil) == nil)
+        #expect(t.grant.nearest(to: target, cwd: nil) == c(t.proj), "refused with the nearest granted directory named")
     }
 
     @Test("a relative path resolves against the working directory before it is judged")
