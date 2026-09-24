@@ -36,7 +36,7 @@ struct ToolExecutor {
     /// test can assert what that branch forwards — the command, the workspace, the extra mounts,
     /// the network and the deadline — without a `container` binary, a daemon or a VM. nil, the
     /// case everywhere in the app, means the one `SandboxSessionManager` the process shares.
-    var sandboxSession: (@Sendable (_ command: String, _ conversationId: UUID, _ workspace: String?,
+    var sandboxSession: (@Sendable (_ command: String, _ conversationId: UUID, _ workspace: ContainerMount?,
                                     _ extraMounts: [String], _ network: NetworkMode, _ timeoutSeconds: Int) async -> String)?
 
     /// Merges the captured login-shell PATH (`loginPath`) ahead of `base`'s own `PATH`, so host
@@ -350,6 +350,13 @@ struct ToolExecutor {
 
     private func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false,
                             timeoutSeconds: Double = 600, grant: JobGrant? = nil) async -> String {
+        // A grant is a promise about a container (#282). Off the sandboxed branch — sandboxing
+        // resolved off, or no conversation to own a session — there is no container to keep it
+        // in, and the host with `cwd` is not a fallback. The dispatcher refuses this upstream
+        // (R20); this is the executor's own answer, so the seam cannot be handed a grant it drops.
+        if grant != nil, !(useSandbox && conversationId != nil) {
+            return IrisEngine.sandboxUnavailableRefusal(tool: "run_command")
+        }
         if useSandbox, let conversationId {
             // The same deadline the host branch enforces, in seconds — the container runtime kills
             // the command on it. It used to be dropped here, which left a sandboxed command with
@@ -357,10 +364,12 @@ struct ToolExecutor {
             let deadline = Int(timeoutSeconds)
             // §0.10: with a grant, the container's mounts are the grant's and nothing else — the
             // working directory from the grant, never from the conversation's workspace, which a
-            // run must not be able to move. Without one, the workspace as today. A grant with no
-            // read-write mount yields nil here, i.e. `/`, not the cwd.
-            let workspace: String? = if let grant { grant.workspaceMountEntry }
-                                     else { cwd.map { IrisEngine.expandTilde($0) } }   // #275: no PATH_MAX truncation on a mount
+            // run must not be able to move. Without one, the workspace as today: an identity mount
+            // of the expanded cwd, typed rather than spelled, so a `:` in the path reaches the
+            // runtime as the entry it always did and is refused there. A grant with no read-write
+            // mount yields nil here, i.e. `/`, not the cwd.
+            let workspace: ContainerMount? = if let grant { grant.workspaceMount }
+                                             else { cwd.map { ContainerMount(source: IrisEngine.expandTilde($0)) } }   // #275: no PATH_MAX truncation on a mount
             let extraMounts = grant?.extraMountEntries() ?? []
             let network = NetworkMode.forGrant(grant)
             if let sandboxSession {

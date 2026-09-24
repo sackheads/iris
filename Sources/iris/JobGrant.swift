@@ -18,13 +18,13 @@ struct JobGrant: Codable, Equatable, Sendable {
 
     /// The host side of the run's working directory — the hidden conversation's `workspacePath`
     /// and the path the host file tools resolve against; nil means `/`. The container's own `-w`
-    /// is the same mount's target (`workspaceMountEntry`), which differs only when one was named.
+    /// is the same mount's target (`workspaceMount`), which differs only when one was named.
     var workingDirectory: String? { mounts.first(where: { !$0.readOnly })?.source }
 
-    /// The working directory's mount as `SandboxSessionManager.run` takes its `workspace`:
-    /// `source[:target]`, a read-write entry, so it carries no `:ro`. nil means no read-write
-    /// mount, which the manager mounts as nothing and runs in `/` (§0.6).
-    var workspaceMountEntry: String? { mounts.first(where: { !$0.readOnly })?.entry }
+    /// The working directory's mount, as `SandboxSessionManager.run` takes its `workspace`: the
+    /// first read-write one. nil means no read-write mount, which the manager mounts as nothing
+    /// and runs in `/` (§0.6).
+    var workspaceMount: ContainerMount? { mounts.first(where: { !$0.readOnly }) }
 
     /// The mounts in the runtime's `source[:target][:ro]` grammar.
     var mountEntries: [String] { mounts.map(\.entry) }

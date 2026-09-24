@@ -560,9 +560,9 @@ struct SandboxTimeoutTests {
     /// What the sandboxed branch handed the session: the workspace, the extra mounts, the network.
     private final class CapturedSession: @unchecked Sendable {
         private let lock = NSLock()
-        private var workspace: String?; private var mounts: [String] = []; private var network: NetworkMode = .default
-        func set(_ w: String?, _ m: [String], _ n: NetworkMode) { lock.withLock { workspace = w; mounts = m; network = n } }
-        var value: (workspace: String?, mounts: [String], network: NetworkMode) { lock.withLock { (workspace, mounts, network) } }
+        private var workspace: ContainerMount?; private var mounts: [String] = []; private var network: NetworkMode = .default
+        func set(_ w: ContainerMount?, _ m: [String], _ n: NetworkMode) { lock.withLock { workspace = w; mounts = m; network = n } }
+        var value: (workspace: ContainerMount?, mounts: [String], network: NetworkMode) { lock.withLock { (workspace, mounts, network) } }
     }
 
     private func capturingExecutor() -> (ToolExecutor, CapturedSession) {
@@ -609,5 +609,23 @@ struct SandboxTimeoutTests {
                                    conversationId: UUID(), useSandbox: true, grant: grant)
         #expect(captured.value.workspace == "/Users/me/proj")
         #expect(captured.value.mounts.isEmpty)
+    }
+
+    /// A grant is a promise about a container. Outside the sandboxed branch — sandboxing resolved
+    /// off, or no conversation to own a session — there is no container to keep it in, and the
+    /// answer is the refusal a background command gets without its VM, not the host with `cwd`.
+    /// Unreachable from the dispatcher today (R20 refuses upstream); pinned so the seam stays honest.
+    @Test("a grant outside the sandboxed branch is refused, not run on the host")
+    func grantOutsideTheSandboxIsRefused() async {
+        let (executor, captured) = capturingExecutor()
+        let grant = JobGrant(mounts: [ContainerMount(source: "/p")])
+        let refusal = IrisEngine.sandboxUnavailableRefusal(tool: "run_command")
+        let offSandbox = await executor.execute(name: "run_command", args: ["command": .string("x")], cwd: "/p",
+                                                conversationId: UUID(), useSandbox: false, grant: grant)
+        #expect(offSandbox == refusal)
+        let noConversation = await executor.execute(name: "run_command", args: ["command": .string("x")], cwd: "/p",
+                                                    conversationId: nil, useSandbox: true, grant: grant)
+        #expect(noConversation == refusal)
+        #expect(captured.value.workspace == nil && captured.value.mounts.isEmpty, "the session was never reached")
     }
 }

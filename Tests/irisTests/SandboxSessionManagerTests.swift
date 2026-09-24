@@ -2,6 +2,13 @@ import Testing
 import Foundation
 @testable import iris
 
+/// `run(workspace:)` takes the working directory as a typed mount (fix round 1: a path with a `:`
+/// in it must never be re-parsed into a different directory). A bare string in a test is the
+/// identity read-write mount of that path, which is what every test here meant by it.
+extension ContainerMount: ExpressibleByStringLiteral {
+    public init(stringLiteral value: String) { self.init(source: value) }
+}
+
 /// Records calls and lets tests script exec results / failures.
 final class MockRuntime: ContainerRuntime, @unchecked Sendable {
     private let lock = NSLock()
@@ -277,6 +284,7 @@ struct SandboxSessionManagerTests {
         let out = await m.run(command: "a", conversationId: UUID(), workspace: "/ws", network: .isolated)
         #expect(out == SandboxSessionManager.isolatedNetworkError("permission denied"))
         #expect(rt.execCount == 0 && rt.createdCount == 0)
+        #expect(rt.removedNames == [], "nothing was created, so there is nothing to sweep up")
     }
 
     /// §0.7 through the manager: `NetworkMode.forGrant` decides, and the decision reaches the
@@ -319,12 +327,26 @@ struct SandboxSessionManagerTests {
         let m = mgr(rt)
         let grant = JobGrant(mounts: [ContainerMount(source: "/host/dir", target: "/work"),
                                       ContainerMount(source: "/ref", readOnly: true)])
-        _ = await m.run(command: "a", conversationId: UUID(), workspace: grant.workspaceMountEntry,
+        _ = await m.run(command: "a", conversationId: UUID(), workspace: grant.workspaceMount,
                         extraMounts: grant.extraMountEntries())
         #expect(rt.createdMounts == [["/host/dir:/work", "/ref:ro"]], "no identity mount of /host/dir beside it")
         #expect(try ContainerMount.argument(for: "/host/dir:/work") == "type=virtiofs,source=/host/dir,target=/work")
         #expect(rt.createdWorkdirs == ["/work"])
         #expect(rt.execedWorkdirs == ["/work"])
         #expect(grant.workingDirectory == "/host/dir", "the conversation's workspacePath is still the host side")
+    }
+
+    /// The seam is typed so that a `:` inside a host path can never be read as a target. macOS
+    /// allows one in a name (Finder writes one for every `/` typed), and an ungranted workspace
+    /// bound to such a directory was refused by `ContainerMount.argument(for:)` before this task:
+    /// the same entry, the same sentence, and no container.
+    @Test("an ungranted workspace path containing ':' is still refused, with the sentence it always got")
+    func colonInWorkspacePathStillRefused() async {
+        let launcher = RecordingLauncher()
+        let m = SandboxSessionManager(runtime: CLIContainerRuntime(launch: launcher.launch), image: { "img" })
+        let out = await m.run(command: "a", conversationId: UUID(),
+                              workspace: ContainerMount(source: "/Users/me/Documents/Backup:/x"))
+        #expect(out == "Error: the mount `/Users/me/Documents/Backup:/x:/Users/me/Documents/Backup:/x` cannot be used — expected source[:target][:ro].")
+        #expect(!launcher.argv.contains { $0.first == "run" }, "no container was created")
     }
 }
