@@ -98,6 +98,11 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// (§0.2, §4). `nil` on every conversation that is not a job run, which is the unnarrowed
     /// surface — never use it as a synonym for `readOnly`.
     var jobProfile: JobProfile?
+    /// #282 — the grant of the job whose run this background conversation holds: the directories
+    /// its host file tools may use unattended and its container mounts, and its network bit.
+    /// Stamped by `JobRunner.openConversation`, inherited by the subagents a run delegates into,
+    /// `nil` everywhere else — and `nil` is "no grant", which is the narrow answer.
+    var sandboxGrant: JobGrant?
     var goalContract: GoalContract? = nil
     var lastGoalCompletionReport: JSONValue? = nil
     var lastGoalEvaluation: GoalEvaluation? = nil
@@ -131,7 +136,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -153,6 +158,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         // Same invariant 1, and absent is the meaningful value: not a job run.
         jobProfile = try container.decodeIfPresent(JobProfile.self, forKey: .jobProfile)
+        sandboxGrant = try container.decodeIfPresent(JobGrant.self, forKey: .sandboxGrant)
         goalContract = try container.decodeIfPresent(GoalContract.self, forKey: .goalContract)
         lastGoalCompletionReport = try container.decodeIfPresent(JSONValue.self, forKey: .lastGoalCompletionReport)
         lastGoalEvaluation = try container.decodeIfPresent(GoalEvaluation.self, forKey: .lastGoalEvaluation)
@@ -1006,6 +1012,15 @@ class AppState {
     func setJobProfile(for conversationId: UUID, _ profile: JobProfile?) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].jobProfile = profile
+            markChanged(conversationId, .metadata)
+        }
+    }
+
+    /// Stamps a run's grant on its conversation (#282). Persisted, so a transcript reopened after
+    /// a relaunch still says what the run was allowed to touch.
+    func setSandboxGrant(for conversationId: UUID, _ grant: JobGrant?) {
+        if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
+            conversations[idx].sandboxGrant = grant
             markChanged(conversationId, .metadata)
         }
     }
