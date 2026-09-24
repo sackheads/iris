@@ -43,6 +43,12 @@ struct JobPolicy: Codable, Equatable, Sendable {
     /// Whether a failed run is retried on the backoff ladder before the job is paused.
     var retry: Bool = true
 
+    /// The directories and network a `mutating` job was granted at creation (#282). `nil` for
+    /// every job without one, which is every job written before deliverable 4½. Inside the policy
+    /// rather than a column of its own so an older build ignores it (and, re-saving, drops it —
+    /// the fate of every unknown policy key, and documented).
+    var grants: JobGrant?
+
     /// The cap a `replay` written without one takes (spec §0.1).
     static let defaultReplayCap = 5
 
@@ -66,7 +72,7 @@ struct JobPolicy: Codable, Equatable, Sendable {
 
     init(overlap: Overlap = .skip, catchUp: CatchUp = .coalesce, runTimeoutSeconds: Int = 600,
          perRunTokenBudget: Int? = nil, dailyTokenBudget: Int? = nil, maxRunsPerHour: Int? = nil,
-         retry: Bool = true) {
+         retry: Bool = true, grants: JobGrant? = nil) {
         self.overlap = overlap
         self.catchUp = catchUp
         self.runTimeoutSeconds = runTimeoutSeconds
@@ -74,11 +80,12 @@ struct JobPolicy: Codable, Equatable, Sendable {
         self.dailyTokenBudget = dailyTokenBudget
         self.maxRunsPerHour = maxRunsPerHour
         self.retry = retry
+        self.grants = grants
     }
 
     private enum CodingKeys: String, CodingKey {
         case overlap, catchUp, runTimeoutSeconds, perRunTokenBudget, dailyTokenBudget
-        case maxRunsPerHour, retry
+        case maxRunsPerHour, retry, grants
     }
 
     /// Invariant 1, and one step further: every key is optional *and* an unrecognized `overlap`
@@ -95,6 +102,8 @@ struct JobPolicy: Codable, Equatable, Sendable {
         dailyTokenBudget = Self.notNegative(try c.decodeIfPresent(Int.self, forKey: .dailyTokenBudget))
         maxRunsPerHour = Self.notNegative(try c.decodeIfPresent(Int.self, forKey: .maxRunsPerHour))
         retry = try c.decodeIfPresent(Bool.self, forKey: .retry) ?? true
+        // `try?`, not `try`: a grant this build cannot read is no grant, and the job still loads.
+        grants = try? c.decodeIfPresent(JobGrant.self, forKey: .grants)
     }
 
     /// A stored figure, or `nil` — absent, which is "take the default" — when it is below zero.

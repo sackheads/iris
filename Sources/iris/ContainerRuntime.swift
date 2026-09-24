@@ -12,12 +12,14 @@ enum ContainerRuntimeError: Error, Equatable {
     case invalidMount(entry: String, reason: String)
 }
 
-/// One host directory made visible inside the container.
+/// One host directory made visible inside the container. Was a caseless enum of helpers; the
+/// helpers keep their names so every existing caller compiles unchanged.
 ///
-/// Entries stay `String`s rather than a struct because they travel in a job's stored gate and in
-/// tool arguments, where a second schema is one more thing for a model to get wrong. The grammar
-/// is `source[:target][:ro]`: a bare path mounts at itself, and `ro` makes the mount read-only.
-enum ContainerMount {
+/// Codable through a single string value — the on-disk form, the tool argument grammar, and what
+/// every surface prints are all `source[:target][:ro]`: a bare path mounts at itself, and `ro`
+/// makes the mount read-only. A second schema here would be one more thing for a model, or a hand
+/// edited policy column, to get wrong.
+struct ContainerMount: Codable, Equatable, Hashable, Sendable {
     /// The value of one `--mount` flag: `type=virtiofs,source=<src>,target=<dst>[,readonly]`,
     /// which is the format `container run --mount` documents.
     ///
@@ -36,6 +38,48 @@ enum ContainerMount {
     /// What is not checked here, because only the daemon can answer it: the source must exist and
     /// be a directory. A single file cannot be mounted this way — mount its parent. That surfaces
     /// as a `createFailed` from the CLI.
+    let source: String
+    let target: String
+    let readOnly: Bool
+
+    init(source: String, target: String? = nil, readOnly: Bool = false) {
+        self.source = source
+        self.target = target ?? source
+        self.readOnly = readOnly
+    }
+
+    /// Strict, through `argument(for:)`: an entry this refuses is one no container could be
+    /// created with, and refusing here means a grant can never store one.
+    init(parsing entry: String) throws {
+        _ = try Self.argument(for: entry)
+        var parts = entry.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        let readOnly = Self.hasReadOnlyFlag(entry)
+        if readOnly { parts.removeLast() }
+        self.init(source: parts[0], target: parts.count == 2 ? parts[1] : nil, readOnly: readOnly)
+    }
+
+    /// The one spelling: `source[:target][:ro]`, target omitted when identity-mapped. This is the
+    /// tool's input grammar, the stored form and what every surface prints.
+    var entry: String {
+        var text = source
+        if target != source { text += ":\(target)" }
+        if readOnly { text += ":ro" }
+        return text
+    }
+
+    var argument: String {
+        get throws { try Self.argument(for: entry) }
+    }
+
+    init(from decoder: Decoder) throws {
+        try self.init(parsing: try decoder.singleValueContainer().decode(String.self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(entry)
+    }
+
     /// Whether `entry` already ends in the read-only flag. Spelled once, because a caller that
     /// *adds* `:ro` to an entry (a gate's inputs, `GateEvaluator.readOnly`) has to decide the same
     /// question this parser does — two spellings would eventually disagree about an entry whose
