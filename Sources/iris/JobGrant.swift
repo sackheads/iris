@@ -96,11 +96,11 @@ extension JobGrant {
                 return .failure(ToolMessage(missing(source)))
             }
             guard isDirectory.boolValue else { return .failure(ToolMessage(notADirectory(source))) }
-            if let broad = broadRefusal(source, home: home, isVolume: isVolume) { return .failure(ToolMessage(broad)) }
-            let iris = IrisPaths.canonicalPath(paths.root.path).lowercased()
-            let lowered = source.lowercased()
-            if lowered == iris || lowered.hasPrefix(iris + "/") || iris.hasPrefix(lowered + "/") {
-                return .failure(ToolMessage(protected(source)))
+            // The breadth rule is `WatchRoot`'s — shared, not copied, so the two can never drift.
+            switch WatchRoot.breadthProblem(for: source, paths: paths, home: home, isVolume: isVolume) {
+            case .tooBroad: return .failure(ToolMessage(tooBroad(source)))
+            case .protectedIris: return .failure(ToolMessage(protected(source)))
+            case nil: break
             }
             if isCredentialStore(source, home: home) { return .failure(ToolMessage(credentialStoreRefusal)) }
             resolved.append(ContainerMount(source: source, target: parsed.target, readOnly: parsed.readOnly))
@@ -114,19 +114,6 @@ extension JobGrant {
             return .failure(ToolMessage(duplicate(mount.source)))
         }
         return .success(JobGrant(mounts: resolved, network: network ?? false))
-    }
-
-    /// `WatchRoot.refusal`'s breadth rule, without its sentence: `/`, the listed system roots, any
-    /// `/Volumes/<x>`, any mount point, and the home directory. A mount point that will not
-    /// answer is refused too (fail closed, as there).
-    private static func broadRefusal(_ source: String, home: String, isVolume: (String) throws -> Bool) -> String? {
-        let lowered = source.lowercased()
-        let broad = (WatchRoot.tooBroad + [home]).map { IrisPaths.canonicalPath($0).lowercased() }
-        if broad.contains(lowered) { return tooBroad(source) }
-        let components = URL(fileURLWithPath: lowered).pathComponents
-        if components.count == 3, components[1] == "volumes" { return tooBroad(source) }
-        if (try? isVolume(source)) ?? true { return tooBroad(source) }
-        return nil
     }
 
     /// One line, the same on the result, `/jobs` and the card: each mount's mode, its source (and

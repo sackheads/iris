@@ -254,4 +254,19 @@ struct JobGrantResolveTests {
         #expect(off.sentence == "Grant: read-write /p (working directory) · network off.")
         #expect(JobGrant(network: true).describe(hostNote: true) == "no mounts · network on")
     }
+
+    @Test("a root WatchRoot.refusal calls too broad is refused by resolve too, through the same rule")
+    func sharesWatchRootsBreadthRule() throws {
+        let f = try Self.fixture(); defer { f.tearDown() }
+        // The same `isVolume` closure drives both callers to the shared `WatchRoot.breadthProblem`
+        // — one canonical mount point, refused by name on either side, pins that the rule (not
+        // just its wording) is one piece of code.
+        let credsCanonical = canonical(f.creds)
+        let isVolume: (String) throws -> Bool = { $0 == credsCanonical }
+        #expect(WatchRoot.refusal(for: f.creds.path, paths: f.paths, home: f.home, isVolume: isVolume)
+                == WatchRoot.tooBroadRefusal)
+        let result = JobGrant.resolve(mounts: [f.creds.path], network: nil, profile: .mutating,
+                                      paths: f.paths, home: f.home, isVolume: isVolume)
+        #expect(result == .failure(ToolMessage(JobGrant.tooBroad(credsCanonical))))
+    }
 }
