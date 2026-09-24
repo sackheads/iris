@@ -231,7 +231,11 @@ struct JobGrantResolveTests {
                 #expect(resolve(f, [spelled]) == .failure(ToolMessage(JobGrant.credentialStoreRefusal)), Comment(rawValue: spelled))
             }
         }
-        #expect(JobGrant.credentialStores.count == 9, "the list the spec names, no more and no fewer")
+        #expect(JobGrant.credentialStores.count == 18, "the list the spec names, no more and no fewer")
+        for widened in ["~/.azure", "~/.cargo", "~/.m2", "~/.terraform.d", "~/.oci", "~/.gem", "~/.password-store",
+                        "~/Library/Group Containers", "~/Library/Containers"] {
+            #expect(JobGrant.credentialStores.contains(widened), Comment(rawValue: widened))
+        }
         // Both directions, the `~/.iris` containment rule: a mount that holds a store hands it over
         // with everything around it. (The home directory itself is refused earlier, as too broad.)
         for parent in ["/.config", "/Library", "/Library/Application Support"] {
@@ -250,6 +254,21 @@ struct JobGrantResolveTests {
         let link = f.base.appendingPathComponent("keys")
         try fm.createSymbolicLink(at: link, withDestinationURL: URL(fileURLWithPath: f.home + "/.aws"))
         #expect(resolve(f, [link.path]) == .failure(ToolMessage(JobGrant.credentialStoreRefusal)))
+    }
+
+    @Test("a leading ~ is expanded before the entry is parsed, so ~/dir is judged as its absolute form; every other relative source is still refused")
+    func tildeExpands() throws {
+        let f = try Self.fixture(); defer { f.tearDown() }
+        // Nothing is created under the real home (invariant 7): the missing-source refusal, naming the
+        // expanded absolute path, is the proof that `~` was read as the home directory rather than
+        // as the name of a volume.
+        let name = "iris-no-such-dir-\(UUID().uuidString)"
+        let expanded = IrisPaths.canonicalPath(NSHomeDirectory() + "/" + name)
+        #expect(resolve(f, ["~/\(name)"]) == .failure(ToolMessage(JobGrant.missing(expanded))))
+        #expect(resolve(f, ["~/\(name):ro"]) == .failure(ToolMessage(JobGrant.missing(expanded))))
+        if case .failure(let m) = resolve(f, ["relative/dir"]) {
+            #expect(m.text.contains("both paths must be absolute"), "unchanged for everything else")
+        } else { Issue.record("a relative source resolved") }
     }
 
     @Test("nested entries are allowed and the sentence says so")

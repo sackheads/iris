@@ -222,10 +222,10 @@ does not know).
 
 **Making one.** `schedule_job` and `register_directory_watcher` take `mounts` and `network`, and
 both take `profile` (new to the watch tool, since a watch that writes has to be `mutating`).
-`mounts` is an ordered list of
-`source[:target][:ro]` entries — read-write unless `:ro`, and identity-mapped when no target is
-given, which is the form to prefer: a `write_file` names the host *source*, a command inside the
-container names the *target*, and with no target the two are the same path. `network` is a Bool and
+`mounts` is an ordered list of `source[:target][:ro]` entries (a leading `~` is expanded) —
+read-write unless `:ro`, and identity-mapped when no target is given, which is the form to prefer:
+a `write_file` names the host *source*, a command inside the container names the *target*, and
+with no target the two are the same path. `network` is a Bool and
 defaults to `false`. Only a `mutating` job may carry a grant; a read-only job created with `mounts`,
 or with `network: true`, is refused with a sentence saying why — a read-only run has no mounts and
 no network by definition. The grant is made once, in the attended conversation that created the
@@ -350,9 +350,10 @@ Mac's `en0` address answered. `network off` therefore means no egress and no LAN
 and `/jobs` says so: `network off (host reachable)`. A local listener that forwards, a proxying dev
 server, an MCP server with a fetch tool — each is still a way out for anything a mount exposes.
 Which is why the credential stores are refused as mounts by name, in both directions: a source that
-is, is under, **or contains** any of `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.docker`,
-`~/.kube`, `~/Library/Keychains`, `~/Library/Cookies`, `~/Library/Application
-Support/com.apple.container` is refused, read-only included, with `that directory holds
+is, is under, **or contains** any of `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.docker`, `~/.kube`, `~/.azure`, `~/.cargo`,
+`~/.m2`, `~/.terraform.d`, `~/.oci`, `~/.gem`, `~/.password-store`, `~/Library/Keychains`,
+`~/Library/Cookies`, `~/Library/Application Support/com.apple.container`, `~/Library/Group
+Containers`, `~/Library/Containers` is refused, read-only included, with `that directory holds
 credentials; copy the one key the job needs into a directory made for it` — so `~/.config`,
 `~/Library` and `~/Library/Application Support` are refused too, the same containment rule that
 keeps `~/.iris` out. A grant is a standing capability written by a model from text it read, and

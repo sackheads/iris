@@ -62,7 +62,9 @@ extension JobGrant {
     /// and in both directions, as `~/.iris` is — a mount that *contains* a store (`~/.config`,
     /// `~/Library`) hands over the store with everything around it.
     static let credentialStores = ["~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gh", "~/.docker", "~/.kube",
-                                   "~/Library/Keychains", "~/Library/Cookies", "~/Library/Application Support/com.apple.container"]
+                                   "~/.azure", "~/.cargo", "~/.m2", "~/.terraform.d", "~/.oci", "~/.gem", "~/.password-store",
+                                   "~/Library/Keychains", "~/Library/Cookies", "~/Library/Application Support/com.apple.container",
+                                   "~/Library/Group Containers", "~/Library/Containers"]
     static let credentialStoreRefusal = "that directory holds credentials; copy the one key the job needs into a directory made for it."
 
     static func isCredentialStore(_ canonicalSource: String, home: String) -> Bool {
@@ -94,7 +96,10 @@ extension JobGrant {
         var resolved: [ContainerMount] = []
         for entry in entries {
             let parsed: ContainerMount
-            do { parsed = try ContainerMount(parsing: entry) }
+            // `~/proj` is the spelling a model reaches for, and the entry grammar has no other use
+            // for a leading `~`; expanded here so it is judged as its absolute form. Every other
+            // relative source is still the volume-name refusal.
+            do { parsed = try ContainerMount(parsing: IrisEngine.expandTilde(entry)) }
             catch ContainerRuntimeError.invalidMount(_, let reason) { return .failure(ToolMessage(malformed(entry, reason))) }
             catch { return .failure(ToolMessage(malformed(entry, "\(error)"))) }   // backstop; parsing only throws invalidMount
             let source = IrisPaths.canonicalPath(parsed.source)
