@@ -33,10 +33,11 @@ struct ToolExecutor {
     static let watchProfileNeedsSandbox = "A mutating watch's commands always run in the apple/container VM, and that VM is not available: install the runtime and turn sandboxing on in Settings → Sandboxing, or leave the watch read-only."
 
     /// How the sandboxed branch of `run_command` reaches the container session. Injectable so a
-    /// test can assert what that branch forwards — the command, the workspace, and the deadline —
-    /// without a `container` binary, a daemon or a VM. nil, the case everywhere in the app, means
-    /// the one `SandboxSessionManager` the process shares.
-    var sandboxSession: (@Sendable (_ command: String, _ conversationId: UUID, _ workspace: String?, _ timeoutSeconds: Int) async -> String)?
+    /// test can assert what that branch forwards — the command, the workspace, the extra mounts,
+    /// the network and the deadline — without a `container` binary, a daemon or a VM. nil, the
+    /// case everywhere in the app, means the one `SandboxSessionManager` the process shares.
+    var sandboxSession: (@Sendable (_ command: String, _ conversationId: UUID, _ workspace: String?,
+                                    _ extraMounts: [String], _ network: NetworkMode, _ timeoutSeconds: Int) async -> String)?
 
     /// Merges the captured login-shell PATH (`loginPath`) ahead of `base`'s own `PATH`, so host
     /// `run_command` invocations see pyenv/nvm/Homebrew shims that only `.zprofile`/`.zshrc` set up
@@ -174,7 +175,8 @@ struct ToolExecutor {
         return tools
     }
     
-    func execute(name: String, args: [String: JSONValue], cwd: String? = nil, conversationId: UUID? = nil, useSandbox: Bool = false) async -> String {
+    func execute(name: String, args: [String: JSONValue], cwd: String? = nil, conversationId: UUID? = nil,
+                 useSandbox: Bool = false, grant: JobGrant? = nil) async -> String {
         switch name {
         case "run_command":
             guard let command = args["command"]?.stringValue else { return "Error: Missing command" }
@@ -184,7 +186,8 @@ struct ToolExecutor {
             default: 600
             }
             let timeoutSeconds = min(max(rawTimeout, 10), 3600)
-            return await runCommand(command, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, timeoutSeconds: timeoutSeconds)
+            return await runCommand(command, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox,
+                                    timeoutSeconds: timeoutSeconds, grant: grant)
         case "read_file":
             guard let path = args["path"]?.stringValue else { return "Error: Missing path" }
             return await readFile(path, cwd: cwd)
@@ -345,21 +348,30 @@ struct ToolExecutor {
         }
     }
 
-    private func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false, timeoutSeconds: Double = 600) async -> String {
+    private func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false,
+                            timeoutSeconds: Double = 600, grant: JobGrant? = nil) async -> String {
         if useSandbox, let conversationId {
-            let expandedCwd = cwd.map { ($0 as NSString).expandingTildeInPath }
             // The same deadline the host branch enforces, in seconds — the container runtime kills
             // the command on it. It used to be dropped here, which left a sandboxed command with
             // no bound at all while the model believed it had set one.
             let deadline = Int(timeoutSeconds)
+            // §0.10: with a grant, the container's mounts are the grant's and nothing else — the
+            // working directory from the grant, never from the conversation's workspace, which a
+            // run must not be able to move. Without one, the workspace as today. A grant with no
+            // read-write mount yields nil here, i.e. `/`, not the cwd.
+            let workspace: String? = if let grant { grant.workspaceMountEntry }
+                                     else { cwd.map { IrisEngine.expandTilde($0) } }   // #275: no PATH_MAX truncation on a mount
+            let extraMounts = grant?.extraMountEntries() ?? []
+            let network = NetworkMode.forGrant(grant)
             if let sandboxSession {
-                return await sandboxSession(command, conversationId, expandedCwd, deadline)
+                return await sandboxSession(command, conversationId, workspace, extraMounts, network, deadline)
             }
             guard SandboxingManager.shared.isContainerInstalled else {
                 return "Error: sandboxing is on but the container runtime isn't installed. Open Iris Settings → Sandboxing to install it, or turn sandboxing off."
             }
             return await SandboxSessionManager.shared.run(command: command, conversationId: conversationId,
-                                                          workspace: expandedCwd, timeoutSeconds: deadline)
+                                                          workspace: workspace, extraMounts: extraMounts,
+                                                          network: network, timeoutSeconds: deadline)
         }
         // Hoist process/pipes so the cancellation handler can capture them.
         let process = Process()

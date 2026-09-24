@@ -1166,18 +1166,21 @@ actor IrisEngine {
         // not write itself a cadence or a watch, so the two tools that do are not declared to it
         // at all — undeclared costs it nothing, and `executeFunctionCall` refuses the call anyway.
         if isUnattended { toolsList.removeAll { Self.jobCreationTools.contains($0.name) } }
-        // Add set_workspace tool dynamically
-        toolsList.append(FunctionDeclaration(
-            name: "set_workspace",
-            description: "Bind this conversation to a project directory when the user explicitly asks to work in, open, switch to, or bind one. A path mentioned in passing while asking about something else is not a request.",
-            parameters: Schema(
-                type: "OBJECT",
-                properties: [
-                    "path": Schema(type: "STRING", description: "Absolute or tilde-expanded path to the workspace directory. A relative path is refused, since it would depend on where Iris was launched from.")
-                ],
-                required: ["path"]
-            )
-        ))
+        // Add set_workspace tool dynamically — not to a background turn (#282 §0.10, invariant 6):
+        // its grant is its boundary, and `executeFunctionCall` refuses the call anyway.
+        if !isUnattended {
+            toolsList.append(FunctionDeclaration(
+                name: "set_workspace",
+                description: "Bind this conversation to a project directory when the user explicitly asks to work in, open, switch to, or bind one. A path mentioned in passing while asking about something else is not a request.",
+                parameters: Schema(
+                    type: "OBJECT",
+                    properties: [
+                        "path": Schema(type: "STRING", description: "Absolute or tilde-expanded path to the workspace directory. A relative path is refused, since it would depend on where Iris was launched from.")
+                    ],
+                    required: ["path"]
+                )
+            ))
+        }
         
         // Offered only on the rename-trigger turn (`/rename` and the automatic third-message
         // trigger both send this prefix). On plain turns the model renamed unprompted on first
@@ -2202,6 +2205,9 @@ actor IrisEngine {
     static let unattendedJobCreationRefusal =
         "A background run cannot create jobs or watches; describe what you want and the user can create it."
 
+    /// §0.10: the grant is the boundary, and nothing a run does may move it.
+    static let unattendedWorkspaceRefusal = "Not run: a background run cannot change its workspace; widen the job's grant instead."
+
     /// The failure reason written onto runs that were still `running` when the app came up: the
     /// last process died in the middle of them and nothing will ever finish them.
     static let interruptedByQuitReason = "app was not running"
@@ -2429,11 +2435,12 @@ actor IrisEngine {
         let localState = state
         var result = ""
 
-        // One hop for both gates below (they ask the same conversation two questions), rather than
-        // one per tool call per gate: an ordinary chat pays this on every call and is neither.
-        let (isUnattended, jobProfile) = await MainActor.run { () -> (Bool, JobProfile?) in
+        // One hop for the gates below and the grant the executor mounts (they ask the same
+        // conversation three questions), rather than one per tool call per gate: an ordinary chat
+        // pays this on every call and is none of them.
+        let (isUnattended, jobProfile, sandboxGrant) = await MainActor.run { () -> (Bool, JobProfile?, JobGrant?) in
             let conversation = localState?.conversations.first(where: { $0.id == conversationId })
-            return (conversation?.isBackground == true, conversation?.jobProfile)
+            return (conversation?.isBackground == true, conversation?.jobProfile, conversation?.sandboxGrant)
         }
 
         // The epic's standing ruling: no unattended job creation. Neither tool is declared to a
@@ -2441,6 +2448,11 @@ actor IrisEngine {
         // model — the refusal has to live at the point that would actually write the row.
         if Self.jobCreationTools.contains(functionCall.name), isUnattended {
             return Self.unattendedJobCreationRefusal
+        }
+        // #282 §0.10, the same shape: a background run's grant is its boundary, and `set_workspace`
+        // is the tool that would move it. Undeclared to it (see `buildRequest`), refused here.
+        if functionCall.name == "set_workspace", isUnattended {
+            return Self.unattendedWorkspaceRefusal
         }
 
         // #187 §0.2, §4: a readOnly job run fails closed on a tool its profile denies, before any
@@ -3076,12 +3088,12 @@ actor IrisEngine {
                     callerRole: principal == .evaluator ? .evaluator : .agent,
                     allowedCommands: evaluatorChecks) ?? false
                 if approved {
-                    result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended)
+                    result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant)
                 } else {
                     result = Self.deniedToolResult
                 }
             } else {
-                result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended)
+                result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant)
             }
         }
         
@@ -3127,13 +3139,17 @@ actor IrisEngine {
         guard call.toolName != "run_command" || useSandbox else {
             return Self.sandboxUnavailableRefusal(tool: call.toolName)
         }
+        // The grant, though, is the run's whatever the origin (#282 §0.10): the approved command
+        // runs in the container the run was granted — its mounts, its network — not in one built
+        // from `call.cwd`. The conversation is reopened with the grant before this is reached.
+        let grant = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.sandboxGrant }
         // `isUnattended` defaults to false here, and that is the ruling rather than an oversight
         // (#187 §4, R-D4-1): a person clicked "Approve and run" on this call a moment ago, so its
         // write is the human-driven kind a watch is meant to notice, like any other foreground
         // write. The filter is fed from the dispatcher's unattended branch only.
         return await executeToolWithHooks(name: call.toolName, args: call.args, cwd: call.cwd,
                                           conversationId: conversationId, useSandbox: useSandbox,
-                                          origin: .approvedCall)
+                                          origin: .approvedCall, grant: grant)
     }
 
     /// What an approved call that turns out to target a protected directory returns instead of
@@ -3226,7 +3242,7 @@ actor IrisEngine {
         }
     }
 
-    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn) async -> String {
+    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil) async -> String {
         var execArgs: [String: JSONValue] = args
 
         // Session strip activity (#217/#19): the detail is derived from the tool's own arguments
@@ -3271,7 +3287,7 @@ actor IrisEngine {
             }
         }
         
-        var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox)
+        var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant)
 
         if name == "write_file", result.hasPrefix("Successfully wrote to "),
            let cid = conversationId, let path = execArgs["path"]?.stringValue {

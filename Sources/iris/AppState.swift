@@ -1041,12 +1041,16 @@ class AppState {
     /// Bind a contracted goal's workspace at lock (#68), creating it when it does not exist.
     ///
     /// Returns the bound path, or nil when nothing could be bound — creation failing is not fatal:
-    /// the goal proceeds unbound, which is exactly today's behaviour and therefore not worse.
+    /// the goal proceeds unbound, which is exactly today's behaviour and therefore not worse. A
+    /// background conversation is nil too, by rule rather than by failure (#282 §0.10).
     /// `paths` is injected so tests run against a temp root rather than the real ~/.iris.
     @discardableResult
     func bindGoalWorkspace(for conversationId: UUID, contract: GoalContract,
                            paths: IrisPaths = .default) -> String? {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return nil }
+        // §0.10: a background run cannot change its workspace by any path — the tool is refused,
+        // and a goal locked in such a conversation binds nothing. The grant is the boundary.
+        guard !conversations[idx].isBackground else { return nil }
         let fm = FileManager.default
         let workspacesRoot = paths.workspacesDir.path
 

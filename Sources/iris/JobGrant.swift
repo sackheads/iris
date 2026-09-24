@@ -16,8 +16,15 @@ struct JobGrant: Codable, Equatable, Sendable {
         self.network = network
     }
 
-    /// The run's working directory and the hidden conversation's `workspacePath`; nil means `/`.
+    /// The host side of the run's working directory — the hidden conversation's `workspacePath`
+    /// and the path the host file tools resolve against; nil means `/`. The container's own `-w`
+    /// is the same mount's target (`workspaceMountEntry`), which differs only when one was named.
     var workingDirectory: String? { mounts.first(where: { !$0.readOnly })?.source }
+
+    /// The working directory's mount as `SandboxSessionManager.run` takes its `workspace`:
+    /// `source[:target]`, a read-write entry, so it carries no `:ro`. nil means no read-write
+    /// mount, which the manager mounts as nothing and runs in `/` (§0.6).
+    var workspaceMountEntry: String? { mounts.first(where: { !$0.readOnly })?.entry }
 
     /// The mounts in the runtime's `source[:target][:ro]` grammar.
     var mountEntries: [String] { mounts.map(\.entry) }
@@ -157,5 +164,16 @@ extension JobGrant {
             }
         }
         return nil
+    }
+}
+
+extension JobGrant {
+    /// The entries to hand `SandboxSessionManager.run` as `extraMounts`: every mount except the
+    /// working directory's — the first read-write one, which `run` receives as its `workspace` and
+    /// `mountList` mounts itself, at its target; listing it here as well would be two `--mount`
+    /// flags for one directory.
+    func extraMountEntries() -> [String] {
+        guard let workspace = mounts.firstIndex(where: { !$0.readOnly }) else { return mountEntries }
+        return mounts.enumerated().filter { $0.offset != workspace }.map(\.element.entry)
     }
 }

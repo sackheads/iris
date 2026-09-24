@@ -9,7 +9,9 @@ final class MockRuntime: ContainerRuntime, @unchecked Sendable {
     private(set) var removed: [String] = []
     private(set) var execCount = 0
     private var mountsPerCreate: [[String]] = []
+    private var workdirsPerCreate: [String] = []
     private var execTimeouts: [Int?] = []
+    private var execWorkdirs: [String] = []
     var existing: [String] = []                 // returned by list()
     var execResult: (String, String, Int32) = ("ok", "", 0)
     var failNextExec = false                     // throw once, then succeed
@@ -25,7 +27,10 @@ final class MockRuntime: ContainerRuntime, @unchecked Sendable {
         if let scripted = lock.withLock({ () -> Error? in let e = nextCreateError; nextCreateError = nil; return e }) {
             throw scripted
         }
-        lock.withLock { created.append(name); mountsPerCreate.append(mounts); networksPerCreate.append(network) }
+        lock.withLock {
+            created.append(name); mountsPerCreate.append(mounts); workdirsPerCreate.append(workdir)
+            networksPerCreate.append(network)
+        }
     }
     func ensureIsolatedNetwork(named name: String) async throws {
         if let scripted = lock.withLock({ () -> Error? in let e = nextNetworkError; nextNetworkError = nil; return e }) {
@@ -37,6 +42,7 @@ final class MockRuntime: ContainerRuntime, @unchecked Sendable {
         let (fail, scripted, r) = lock.withLock { () -> (Bool, Error?, (String, String, Int32)) in
             execCount += 1
             execTimeouts.append(timeoutSeconds)
+            execWorkdirs.append(workdir)
             let f = failNextExec; failNextExec = false
             let e = nextExecError; nextExecError = nil
             return (f, e, execResult)
@@ -59,6 +65,8 @@ final class MockRuntime: ContainerRuntime, @unchecked Sendable {
     var createdMounts: [[String]] { lock.withLock { mountsPerCreate } }
     var lastExecTimeout: Int? { lock.withLock { execTimeouts.last ?? nil } }
     var createdNetworks: [NetworkMode] { lock.withLock { networksPerCreate } }
+    var createdWorkdirs: [String] { lock.withLock { workdirsPerCreate } }
+    var execedWorkdirs: [String] { lock.withLock { execWorkdirs } }
 }
 
 @Suite("SandboxSessionManager")
@@ -242,5 +250,81 @@ struct SandboxSessionManagerTests {
         let out = await m.run(command: "a", conversationId: id, workspace: "/ws")
         #expect(rt.createdCount == 2)   // initial + recreate
         #expect(out.hasPrefix("[sandbox]"))
+    }
+
+    // MARK: - #282: the network and the working directory's mount
+
+    @Test("an isolated session ensures the network before its create, and a changed network recreates")
+    func isolatedNetworkIsEnsuredAndPinned() async {
+        let rt = MockRuntime()
+        let m = mgr(rt)
+        let id = UUID()
+        _ = await m.run(command: "a", conversationId: id, workspace: "/ws", network: .isolated)
+        #expect(rt.networksEnsured == ["iris-isolated"])
+        #expect(rt.createdNetworks == [.isolated])
+        _ = await m.run(command: "b", conversationId: id, workspace: "/ws", network: .isolated)
+        #expect(rt.createdCount == 1 && rt.networksEnsured.count == 1, "the network is ensured per create, not per command")
+        _ = await m.run(command: "c", conversationId: id, workspace: "/ws", network: .default)
+        #expect(rt.createdCount == 2 && rt.removedNames.count == 1, "a different network is a different container")
+        #expect(rt.createdNetworks == [.isolated, .default])
+    }
+
+    @Test("a network that cannot be created runs nothing and says why")
+    func networkFailureRunsNothing() async {
+        let rt = MockRuntime()
+        rt.nextNetworkError = ContainerRuntimeError.networkFailed("permission denied")
+        let m = mgr(rt)
+        let out = await m.run(command: "a", conversationId: UUID(), workspace: "/ws", network: .isolated)
+        #expect(out == SandboxSessionManager.isolatedNetworkError("permission denied"))
+        #expect(rt.execCount == 0 && rt.createdCount == 0)
+    }
+
+    /// §0.7 through the manager: `NetworkMode.forGrant` decides, and the decision reaches the
+    /// create — on the mock as the recorded mode, and on the real runtime as the argv.
+    @Test("NetworkMode.forGrant: no grant and network on keep the default; network off is isolated, ensured, and on the argv")
+    func networkFollowsTheGrant() async {
+        let rt = MockRuntime()
+        let m = mgr(rt)
+        let proj = ContainerMount(source: "/ws")
+        _ = await m.run(command: "a", conversationId: UUID(), workspace: "/ws", network: NetworkMode.forGrant(nil))
+        _ = await m.run(command: "a", conversationId: UUID(), workspace: "/ws",
+                        network: NetworkMode.forGrant(JobGrant(mounts: [proj], network: true)))
+        #expect(rt.createdNetworks == [.default, .default] && rt.networksEnsured.isEmpty,
+                "neither an ungranted run nor a network-on grant touches the isolated network")
+        _ = await m.run(command: "a", conversationId: UUID(), workspace: "/ws",
+                        network: NetworkMode.forGrant(JobGrant(mounts: [proj], network: false)))
+        #expect(rt.createdNetworks == [.default, .default, .isolated])
+        #expect(rt.networksEnsured == [NetworkMode.isolatedNetworkName])
+
+        let launcher = RecordingLauncher(result: ("[]", "", 0))   // `network ls`: nothing there yet
+        let cli = SandboxSessionManager(runtime: CLIContainerRuntime(launch: launcher.launch), image: { "img" })
+        let id = UUID()
+        _ = await cli.run(command: "a", conversationId: id, workspace: "/ws",
+                          network: NetworkMode.forGrant(JobGrant(mounts: [proj], network: false)))
+        #expect(launcher.argv.prefix(3).map { Array($0) } == [
+            ["network", "ls", "--format", "json"],
+            ["network", "create", "--internal", "iris-isolated"],
+            ["run", "-d", "--name", "\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())",
+             "--mount", "type=virtiofs,source=/ws,target=/ws",
+             "--network", "iris-isolated", "--no-dns",
+             "-w", "/ws", "img", "sleep", "infinity"],
+        ])
+    }
+
+    /// The working directory is the first read-write mount; the container's `-w` is that mount's
+    /// TARGET, and the mount is made once, at the target — never a second time at its source.
+    @Test("a working directory with a named target: -w is the target, mounted once at the target")
+    func namedTargetIsTheWorkdirAndMountedOnce() async throws {
+        let rt = MockRuntime()
+        let m = mgr(rt)
+        let grant = JobGrant(mounts: [ContainerMount(source: "/host/dir", target: "/work"),
+                                      ContainerMount(source: "/ref", readOnly: true)])
+        _ = await m.run(command: "a", conversationId: UUID(), workspace: grant.workspaceMountEntry,
+                        extraMounts: grant.extraMountEntries())
+        #expect(rt.createdMounts == [["/host/dir:/work", "/ref:ro"]], "no identity mount of /host/dir beside it")
+        #expect(try ContainerMount.argument(for: "/host/dir:/work") == "type=virtiofs,source=/host/dir,target=/work")
+        #expect(rt.createdWorkdirs == ["/work"])
+        #expect(rt.execedWorkdirs == ["/work"])
+        #expect(grant.workingDirectory == "/host/dir", "the conversation's workspacePath is still the host side")
     }
 }
