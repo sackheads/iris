@@ -158,6 +158,22 @@ struct GrantedWriteTests {
         #expect(t.names(t.outside.appendingPathComponent("leaf")).isEmpty)
     }
 
+    @Test("a root whose case was changed since the grant is refused as renamed, not as a symlink crossing")
+    func caseRenamedRootIsRefusedAsRenamed() throws {
+        let t = try tree(); defer { t.tearDown() }
+        // On a case-insensitive volume `mount` still resolves after the rename, but realpath returns
+        // the new on-disk case, so step 2 of the root open mismatches; the sentence should say what
+        // happened rather than accuse an innocent component of being a symlink. On a case-sensitive
+        // volume the rename makes a different directory and the root is simply gone.
+        let caseSensitive = try t.base.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
+            .volumeSupportsCaseSensitiveNames ?? false
+        guard !caseSensitive else { return }
+        try FileManager.default.moveItem(at: t.root, to: t.base.appendingPathComponent("MOUNT"))
+        #expect(throws: GrantedFileError.renamed(component: "mount")) { try t.access.write(relative: ["x.md"], content: "x") }
+        #expect(throws: GrantedFileError.renamed(component: "mount")) { _ = try t.access.read(relative: ["x.md"]) }
+        #expect(t.names(t.base.appendingPathComponent("MOUNT")) == ["sub"], "nothing was written")
+    }
+
     @Test("a root under the system symlinks — /var/folders, /tmp — opens and writes, staging inside (N-H1)")
     func rootUnderTmpIsWalkable() throws {
         // Every root in this suite lives under NSTemporaryDirectory() (`/var/folders/…`, and `/var` is a
@@ -205,14 +221,17 @@ struct GrantedWriteTests {
         enum Outcome: Equatable { case threw(GrantedFileError), readBack, timedOut }
         let access = t.access
         let (outcomes, sink) = AsyncStream<Outcome>.makeStream()
-        Task.detached {
+        let reader = Task.detached {
             do { _ = try access.read(relative: ["sub", "pipe"]); sink.yield(.readBack) }
             catch let error as GrantedFileError { sink.yield(.threw(error)) }
             catch { sink.yield(.readBack) }
         }
-        Task.detached { try? await Task.sleep(for: .seconds(5)); sink.yield(.timedOut) }
+        let timer = Task.detached { try? await Task.sleep(for: .seconds(5)); sink.yield(.timedOut) }
         var first: Outcome = .timedOut
         for await outcome in outcomes { first = outcome; break }
+        // The loser is cancelled once the winner has arrived, so a passing run does not leave a
+        // five-second sleeper behind it (and a failing one does not leave a parked reader).
+        reader.cancel(); timer.cancel()
         #expect(first == .threw(.notARegularFile(component: "pipe")))
     }
 

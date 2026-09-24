@@ -7,6 +7,7 @@ enum GrantedFileError: Error, Equatable {
     case badComponent(String)
     case rootUnavailable(String)        // the granted source no longer resolves (realpath failed)
     case symlink(component: String)
+    case renamed(component: String)       // the root's case changed since the grant (step 2 of the root open)
     case notADirectory(component: String)
     case isADirectory(component: String)
     case notARegularFile(component: String)
@@ -20,6 +21,7 @@ enum GrantedFileError: Error, Equatable {
         case .badComponent(let component): return "the path component `\(component)` is not allowed under a grant; name the file with plain components under the granted directory"
         case .rootUnavailable(let root): return "the granted directory \(root) no longer exists"
         case .symlink(let component): return "the path crosses a symlink at `\(component)`; a granted run may not read or write through symlinks — name the real directory instead"
+        case .renamed(let component): return "the granted directory has been renamed at `\(component)` since the grant was given (only its case differs); a granted run does not follow a rename — the next fire re-checks the grant"
         case .notADirectory(let component): return "`\(component)` is not a directory"
         case .isADirectory(let component): return "`\(component)` is a directory, not a file"
         case .notARegularFile(let component): return "`\(component)` is not a regular file (a pipe, socket or device); a granted run reads regular files only"
@@ -40,7 +42,7 @@ enum GrantedFileError: Error, Equatable {
 /// `root` is the mount's *stored* spelling: `IrisPaths.canonicalPath` form, `/private` stripped, no
 /// trailing slash. Step 2 of the root open compares the kernel's resolution, canonicalised, with
 /// this string, so any other spelling is refused with a `symlink(component:)` sentence that names
-/// an innocent component. One trailing slash is tolerated and stripped, because
+/// an innocent component (`renamed(component:)` when only the case differs). One trailing slash is tolerated and stripped, because
 /// `JobGrant.relativeComponents` tolerates the same one; the two must read the source alike.
 struct GrantedFileAccess: Sendable {
     let root: String
@@ -157,9 +159,7 @@ struct GrantedFileAccess: Sendable {
         guard let resolved = Darwin.realpath(root, nil) else { throw GrantedFileError.rootUnavailable(root) }
         let real = String(cString: resolved)
         free(resolved)
-        guard IrisPaths.canonicalPath(real) == root else {
-            throw GrantedFileError.symlink(component: firstSwappedComponent())
-        }
+        guard IrisPaths.canonicalPath(real) == root else { throw firstSwappedComponent() }
         let components = real.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         try Self.validate(components)
         let slash = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
@@ -170,17 +170,23 @@ struct GrantedFileAccess: Sendable {
     /// For the sentence only, on the failure path of step 2: the first prefix of the stored root
     /// whose kernel resolution no longer canonicalises to its own spelling — `…/mount/inner` for a
     /// swapped `inner`, the root itself for a root that became a link. System symlinks pass
-    /// (`/var` → `/private/var` → canonical `/var`).
-    private func firstSwappedComponent() -> String {
+    /// (`/var` → `/private/var` → canonical `/var`). When the resolution differs from the spelling
+    /// in case alone, nothing was crossed: the directory was renamed on a case-insensitive volume
+    /// (realpath returns the on-disk case), and the sentence says so rather than accusing an
+    /// innocent component of being a symlink. Either way the refusal stands.
+    private func firstSwappedComponent() -> GrantedFileError {
         var prefix = ""
         for component in root.split(separator: "/", omittingEmptySubsequences: true).map(String.init) {
             prefix += "/" + component
-            guard let resolved = Darwin.realpath(prefix, nil) else { return component }
+            guard let resolved = Darwin.realpath(prefix, nil) else { return .symlink(component: component) }
             let real = String(cString: resolved)
             free(resolved)
-            if IrisPaths.canonicalPath(real) != prefix { return component }
+            let canonical = IrisPaths.canonicalPath(real)
+            if canonical != prefix {
+                return canonical.lowercased() == prefix.lowercased() ? .renamed(component: component) : .symlink(component: component)
+            }
         }
-        return (root as NSString).lastPathComponent
+        return .symlink(component: (root as NSString).lastPathComponent)
     }
 
     /// Opens each directory component in turn, each relative to the one before, none through a
