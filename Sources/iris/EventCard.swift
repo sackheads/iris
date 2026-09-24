@@ -58,6 +58,9 @@ struct EventCard: Codable, Equatable, Sendable {
     /// from the row because a card is persisted verbatim and never goes back to the ledger; `nil`
     /// for every run no burst started, and for every card written before the figures existed.
     let watchSummary: WatchSummary?
+    /// Whether the run's commands could reach the network (#282 §5) — a granted job's
+    /// `network: true`; false for every card written before grants and for every ungranted run.
+    let network: Bool
 
     init(kind: String = "job_run",
          runId: UUID,
@@ -75,6 +78,7 @@ struct EventCard: Codable, Equatable, Sendable {
          vibecopReason: String? = nil,
          approvalBlockedReason: String? = nil,
          catchUpNote: String? = nil,
+         network: Bool = false,
          watchSummary: WatchSummary? = nil) {
         self.kind = kind
         self.runId = runId
@@ -92,6 +96,7 @@ struct EventCard: Codable, Equatable, Sendable {
         self.vibecopReason = vibecopReason
         self.approvalBlockedReason = approvalBlockedReason
         self.catchUpNote = catchUpNote
+        self.network = network
         self.watchSummary = watchSummary
     }
 
@@ -136,6 +141,9 @@ struct EventCard: Codable, Equatable, Sendable {
         vibecopReason = try container.decodeIfPresent(String.self, forKey: .vibecopReason)
         approvalBlockedReason = try container.decodeIfPresent(String.self, forKey: .approvalBlockedReason)
         catchUpNote = try container.decodeIfPresent(String.self, forKey: .catchUpNote)
+        // Invariant 1: an older card has no key at all and reads false, the safe direction — a
+        // card predating grants never claimed network reach in the first place.
+        network = try container.decodeIfPresent(Bool.self, forKey: .network) ?? false
         // The `blockedCall` idiom (invariant 1): a summary this build cannot read costs the
         // figures, not the card — the run's outcome is the card's reason to exist.
         watchSummary = try? container.decodeIfPresent(WatchSummary.self, forKey: .watchSummary)
@@ -370,9 +378,10 @@ struct EventCard: Codable, Equatable, Sendable {
     /// The card's right-hand line — `1m 15s · 4.2k tokens`, then the watch figures when the burst
     /// had any. Pure so the view can render it without owning the wording.
     var metadataLine: String {
-        let base = "\(elapsedText) · \(SessionActivity.formatTokenCount(totalTokens)) tokens"
-        guard let watchMetadataText else { return base }
-        return "\(base) · \(watchMetadataText)"
+        var line = "\(elapsedText) · \(SessionActivity.formatTokenCount(totalTokens)) tokens"
+        if network { line += " · network" }
+        if let watchMetadataText { line += " · \(watchMetadataText)" }
+        return line
     }
 
     /// `[job pr-sweep · completed · 4.2k tokens] swept 3 PRs` — what Copy Transcript and the
@@ -387,6 +396,7 @@ struct EventCard: Codable, Equatable, Sendable {
         // The watch figures too, for the same reason: what a burst absorbed is part of what the
         // run was.
         if let watchMetadataText { line += " (\(watchMetadataText))" }
+        if network { line += " (network)" }
         return line
     }
 

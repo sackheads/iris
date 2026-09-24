@@ -3486,7 +3486,7 @@ extension IrisEngine {
         return [
             FunctionDeclaration(
                 name: "list_jobs",
-                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, why one is paused, and how the last run ended, plus what each has spent today and how hard it has been running — `tokensToday` against `dailyBudget`, `runsLastHour` against `maxRunsPerHour` (the breaker), `retryAttempt` out of three, and `policy`, `gateKind` and `profile` — with `tokensTodayAllJobs` against `globalDailyBudget` for every background run together, and `unreadableJobs` — how many stored jobs could not be read at all. A figure that is null could not be read, which is not the same as zero. Use it to answer what is scheduled, what a job is costing, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
+                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, why one is paused, and how the last run ended, plus what each has spent today and how hard it has been running — `tokensToday` against `dailyBudget`, `runsLastHour` against `maxRunsPerHour` (the breaker), `retryAttempt` out of three, and `policy`, `gateKind` and `profile`, and `grants` — the directories and network a mutating job was created with, null when it has none — with `tokensTodayAllJobs` against `globalDailyBudget` for every background run together, and `unreadableJobs` — how many stored jobs could not be read at all. A figure that is null could not be read, which is not the same as zero. Use it to answer what is scheduled, what a job is costing, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
                 parameters: Schema(type: "OBJECT", properties: [:], required: [])),
             FunctionDeclaration(
                 name: "get_job_run",
@@ -3535,6 +3535,9 @@ extension IrisEngine {
                 "policy": JobsCommand.policySummary(for: job),
                 "gateKind": job.trigger.gate?.summary ?? NSNull(),
                 "retryAttempt": job.retryAttempt,
+                // As stored: `mounts` in the runtime's grammar (`ContainerMount.entry`), `network`
+                // as given. Null for every job with no grant, never an empty object.
+                "grants": job.policy.grants.map(jsonObject) ?? NSNull(),
                 // Null, never zero, when the ledger would not answer: "spent nothing today" is a
                 // claim, and an unread figure is not one.
                 "tokensToday": figures?.tokensToday ?? NSNull(),

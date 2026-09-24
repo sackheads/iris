@@ -79,6 +79,20 @@ struct JobRunnerGrantTests {
         #expect(background.mainAgentSandbox == .sandboxed)
         #expect(background.jobProfile == .mutating)
         #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.status == .completed)
+
+        // The card names whether the run could reach the network (#282 §5): off for this grant,
+        // on for one made with `network: true`.
+        let activityId = state.activityConversationId()
+        let card = try #require(state.conversations.first { $0.id == activityId }?
+            .messages.compactMap { EventCard.decode($0.content) }.first)
+        #expect(card.network == false)
+
+        let openJob = grantedJob(dir, network: true, name: "open")
+        try store.ledger.upsert(openJob)
+        await runner(state, engine, store, config: config).fire(job: openJob, origin: .schedule)
+        let openCard = try #require(state.conversations.first { $0.id == activityId }?
+            .messages.compactMap { EventCard.decode($0.content) }.last)
+        #expect(openCard.network == true)
     }
 
     @Test("an ungranted mutating job still gets no workspace and no grant, and never asks for the isolated network")

@@ -169,6 +169,21 @@ struct JobToolsTests {
         #expect(body["globalDailyBudget"] as? Int == 3_000_000)
     }
 
+    @Test("list_jobs returns grants as stored, null when absent, and the policy string says grant")
+    func listJobsCarriesGrants() throws {
+        var g = job("deploy")
+        g.profile = .mutating
+        g.policy.grants = JobGrant(mounts: [ContainerMount(source: "/p"), ContainerMount(source: "/q", target: "/gh", readOnly: true)], network: true)
+        let json = IrisEngine.jobsListJSON([g, job("plain")], lastStatuses: [:], usage: .empty, unreadableJobs: 0)
+        let body = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let rows = try #require(body["jobs"] as? [[String: Any]])
+        let grants = try #require(rows[0]["grants"] as? [String: Any])
+        #expect(grants["mounts"] as? [String] == ["/p", "/q:/gh:ro"])
+        #expect(grants["network"] as? Bool == true)
+        #expect((rows[0]["policy"] as? String)?.contains("grant") == true)
+        #expect(rows[1]["grants"] is NSNull)
+    }
+
     @Test("a job whose figures could not be read still lists, with nulls rather than zeros")
     func listJobsFiguresLenient() throws {
         let j = job()
