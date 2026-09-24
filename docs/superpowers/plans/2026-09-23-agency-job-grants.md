@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
-> **Status:** READY — spec proposed 2026-09-23 (`a983a4b`), amended twice the same day after an adversarial pre-review (`8f2c044`, `10ba75a`): §0.9 real-path matching and no `..`, §0.10 mounts fixed by the grant and `set_workspace` refused unattended, §0.11 explicit `network: false` is a grant. Plan revised 2026-09-23 against `10ba75a`. Closes #282.
+> **Status:** READY — spec proposed 2026-09-23 (`a983a4b`), amended three times the same day after adversarial and home reviews (`8f2c044`, `10ba75a`, `6129afa`): §0.9 real-path matching and no `..`, §0.10 mounts fixed by the grant and `set_workspace` refused unattended, §0.11 explicit `network: false` is a grant, §0.4 `sandboxed` as a parameter of the allow, §0.12 credential stores refused by name, §0.13 one-operation writes through a descriptor walk. Plan revised 2026-09-23 against `6129afa`. Closes #282.
 
 **Goal:** A `mutating` job created with `mounts` and `network` runs its commands in the VM with exactly those directories and that network, may `write_file`/`read_file` unattended inside them, is re-checked against the disk at every fire and click, ends its container when the run ends, and says on `/jobs`, the card and the result sentence what it was granted.
 
@@ -10,7 +10,7 @@
 
 **Tech Stack:** Swift 6 strict concurrency, GRDB, `apple/container` CLI 1.1.0 (`run --network`, `--no-dns`, `network create --internal`), Swift Testing.
 
-**Spec:** `docs/specs/2026-09-23-agency-job-grants.md` (binding, at `10ba75a`). Every `file:line` below was verified against the worktree (main `b302b55`) on 2026-09-23; lines may drift by a few as earlier tasks land. Prior slices: #252 (D1), #253 (D2), #257/#260/#262/#264 (D3), #279/#280 (D4).
+**Spec:** `docs/specs/2026-09-23-agency-job-grants.md` (binding, at `6129afa`). Every `file:line` below was verified against the worktree (main `b302b55`) on 2026-09-23; lines may drift by a few as earlier tasks land. Prior slices: #252 (D1), #253 (D2), #257/#260/#262/#264 (D3), #279/#280 (D4).
 
 ## Global Constraints
 
@@ -19,15 +19,18 @@ The spec's §0 decisions, binding on every task:
 - **§0.1** A grant is made once, at creation, through `schedule_job` / `register_directory_watcher` (`mounts`, `network`); the result echoes it; re-scheduling by the same explicit name from the same conversation, or re-registering the same path from the same conversation, replaces it, and omitting `mounts`/`network` on that call removes it. No confirmation card. Job creation from an unattended run stays refused (`IrisEngine.jobCreationTools`).
 - **§0.2** A grant is an ordered list of `source[:target][:ro]` entries (read-write unless `:ro`) plus `network: Bool` (default `false`). Nothing else — no per-command allowlists, no secrets.
 - **§0.3** Only a `mutating` job may carry a grant; a read-only job asked for one is refused with a sentence.
-- **§0.4** For a granted run `run_command` is allowed unattended when — and only when — the conversation resolves as sandboxed. R20/R22 are untouched: no runtime or sandboxing off is refused, never host.
+- **§0.4** For a granted run `run_command` is allowed unattended when — and only when — the conversation resolves as sandboxed, and the grant's own `allows` asks that as a parameter (`sandboxed: Bool`, `run_command → sandboxed`) rather than trusting that R20 ran first: two independent refusals. R20/R22 are untouched: no runtime or sandboxing off is refused, never host.
 - **§0.5** `write_file`/`read_file` stay on the host and are allowed only inside the grant: `write_file` under a read-write source, `read_file` under any source, by path-component prefix, innermost entry deciding, path resolved against the run's cwd and canonicalised with `IrisPaths.canonicalPath`.
 - **§0.6** The first read-write mount is the working directory and the hidden conversation's `workspacePath`; if any entry is read-write the first must be; no read-write mount means `/` as today.
 - **§0.7** `network: false` attaches the container to the Iris-owned internal network `iris-isolated` (created on demand with `container network create --internal iris-isolated`) with `--no-dns`; `network: true` uses the default network; a network that cannot be created fails the fire closed with `isolated network unavailable: <detail>` on the row.
 - **§0.8** Grants are re-checked at every fire and every approved call: each source must canonicalise to itself and be a directory (`GateEvaluator.mountDrift`'s rule); a miss fails with `grant source unavailable: <path>` and walks the existing retry ladder (three retries; the fourth consecutive failure pauses). `SandboxPolicy.mutatingJobCanRun` is asked as today.
-- **§0.9** The grant is matched on the **real path**, never a lexical one: `realpath(3)` of the deepest existing ancestor of the *unstandardised* components, remaining components appended; any `..` component after tilde expansion is refused outright on the allow side. The same helper hardens `isUnderProtectedWriteDir` (R10) for every caller. `IrisPaths.canonicalPath` stays for its deny-side callers.
+- **§0.9** The grant is matched on the **real path**, never a lexical one: `realpath(3)` of the deepest existing ancestor of the *unstandardised* components, remaining components appended; any `..` component after tilde expansion is refused outright on the allow side. The same helper hardens `isUnderProtectedWriteDir` (R10) for every caller. `IrisPaths.canonicalPath` stays for its deny-side callers and swaps `expandingTildeInPath` for `IrisEngine.expandTilde` (#275, third site). The `..` test uses a path whose final component does not yet exist (measured: `standardizedFileURL` resolves the link when the path exists, so only the new-file case diverges).
 - **§0.10** A granted run's container mounts are a pure function of its grant: the workspace mount is `grant.workingDirectory`, never the conversation's current `workspacePath`. `set_workspace` is refused for every unattended conversation with `Not run: a background run cannot change its workspace; widen the job's grant instead.`, and `AppState.bindGoalWorkspace` — the one other path that moves a `workspacePath` — leaves a background conversation's alone, so the sentence is true of every path.
 - **§0.11** An explicit `network: false` on a mutating job is a grant, mounts or not: `JobGrant(mounts: [], network: false)`, sentence `Grant: no mounts · network off.`; only a call naming neither `mounts` nor `network` leaves the job ungranted. On a read-only job an explicit `false` is nothing to record.
-- The names below are the only names: `JobGrant`, `JobGrant.resolve`, `JobGrant.allows(toolName:details:cwd:)`, `JobGrant.nearest(to:cwd:)`, `JobGrant.drift(_:fileManager:)`, `JobGrant.describe()`, `JobGrant.sentence`, `JobPolicy.grants`, `Conversation.sandboxGrant`, `AppState.setSandboxGrant(for:_:)`, `NetworkMode`, `NetworkMode.isolatedNetworkName`, `ContainerRuntime.ensureIsolatedNetwork(named:)`, `JobRunner.grantSourceUnavailableReason(_:)`, `JobRunner.isolatedNetworkUnavailableReason(_:)`, `BlockedCall.grantNearest`, `AppState.outsideGrantDenialNotice`, `EventCard.network`, `JobsCommand.grantLine(job:)`, `IrisPaths.realPath(_:)`, `IrisPaths.realPathForAllow(_:)`, `IrisEngine.unattendedWorkspaceRefusal`.
+- **§0.12** Credential stores are refused as mounts by name, read-only included: a source that is or is under any of `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.docker`, `~/.kube`, `~/Library/Keychains`, `~/Library/Cookies`, `~/Library/Application Support/com.apple.container` — one static list, `JobGrant.credentialStores`, matched on canonical paths — with `that directory holds credentials; copy the one key the job needs into a directory made for it`. §0.2's example is a directory made for the job (`/Users/me/deploy-key`).
+- **§0.13** For a granted run the allow and the write are one operation: `write_file`/`read_file` do not take a path to Foundation. The covering mount is chosen from the real path (case-insensitively), its root opened once as a directory descriptor, every remaining component walked with `openat(O_DIRECTORY | O_NOFOLLOW)`, the final component opened `O_NOFOLLOW` (`O_CREAT | O_EXCL` for a staging file named `<name>.sb-<hex>-<rand>`, so the watches' sibling rule keeps matching) and the write finished with `renameat` in that directory descriptor. A symlink anywhere in the remainder is a refusal; the walk refuses `..`, `.`, empty and slash-bearing components itself, before any syscall; the root is reached by `realpath(3)` of the stored source, checked to canonicalise back to that source, and walked from `/` as a real path. **One decision, one consumer, no fallback:** the dispatcher decides the covering mount once, the gate and the executor consume that decision, and a granted run's `write_file`/`read_file` reach Foundation on no branch — a nil decision at the executor is a refusal. Attended runs keep today's path.
+- **§0.7 addendum** `network: false` means no egress and no LAN, not no host (measured: the Mac's own listeners answer from an `--internal` network); `/jobs` and docs say `network off (host reachable)`; the result sentence stays `network off`.
+- The names below are the only names: `JobGrant`, `JobGrant.resolve`, `JobGrant.nearest(to:cwd:)`, `JobGrant.relativeComponents(of:cwd:under:)`, `JobGrant.drift(_:fileManager:)`, `JobGrant.describe()`, `JobGrant.sentence`, `JobPolicy.grants`, `Conversation.sandboxGrant`, `AppState.setSandboxGrant(for:_:)`, `NetworkMode`, `NetworkMode.isolatedNetworkName`, `ContainerRuntime.ensureIsolatedNetwork(named:)`, `JobRunner.grantSourceUnavailableReason(_:)`, `JobRunner.isolatedNetworkUnavailableReason(_:)`, `BlockedCall.grantNearest`, `AppState.outsideGrantDenialNotice`, `EventCard.network`, `JobsCommand.grantLine(job:)`, `IrisPaths.realPath(_:)`, `IrisPaths.realPathForAllow(_:)`, `IrisEngine.unattendedWorkspaceRefusal`, `JobGrant.credentialStores`, `JobGrant.credentialStoreRefusal`, `JobGrant.allowedMount(toolName:details:cwd:)`, `JobGrant.allows(toolName:details:cwd:sandboxed:)`, `GrantedFileAccess`, `GrantedFileError`, `ToolExecutor.writeFile(grantRoot:relative:content:)`, `ToolExecutor.readFile(grantRoot:relative:)`, `JobGrant.isCredentialStore(_:home:)`, `ToolExecutor.notUnderGrantedDirectory(_:)`, `ToolExecutor.notDecidedInsideGrant(_:)`, `GrantedFileAccess.defaultStagingName(_:)`.
 
 AGENTS.md invariants, verbatim:
 
@@ -42,7 +45,7 @@ House rules: Swift Testing only (`@Suite`, `@Test`, `#expect`, `#require`), neve
 
 ## Task 1: `JobGrant`, `ContainerMount` as a struct, `JobPolicy.grants` **[§1 model]**
 
-Task map (11 tasks, each green on its own): 1 model · 2a grant resolution and sentences · 2b the two tools · 3a the conversation field, migration v12, subagent inheritance · 3b the runner · 4a the container runtime · 4b the session manager, the executor and `set_workspace` · 5a the pure gate and the real-path helper · 5b the approval branch · 6 visibility · 7 docs.
+Task map (12 tasks, each green on its own): 1 model · 2a grant resolution and sentences · 2b the two tools · 3a the conversation field, migration v12, subagent inheritance · 3b the runner · 4a the container runtime · 4b the session manager, the executor and `set_workspace` · 4c the descriptor walk for a granted run's file tools · 5a the pure gate and the real-path helper · 5b the approval branch · 6 visibility · 7 docs.
 
 **Files:**
 - Create: `Sources/iris/JobGrant.swift`
@@ -112,9 +115,9 @@ struct JobGrantTests {
         #expect(rw.entry == "/Users/me/proj")
         #expect(!rw.readOnly && rw.target == "/Users/me/proj")
 
-        let ro = try ContainerMount(parsing: "/Users/me/.config/gh:/gh:ro")
-        #expect(ro == ContainerMount(source: "/Users/me/.config/gh", target: "/gh", readOnly: true))
-        #expect(ro.entry == "/Users/me/.config/gh:/gh:ro")
+        let ro = try ContainerMount(parsing: "/Users/me/deploy-key:/gh:ro")
+        #expect(ro == ContainerMount(source: "/Users/me/deploy-key", target: "/gh", readOnly: true))
+        #expect(ro.entry == "/Users/me/deploy-key:/gh:ro")
         #expect(try ContainerMount(parsing: "/a:ro").entry == "/a:ro")
 
         // Codable IS the string: the policy JSON, the result and `/jobs` all show one spelling.
@@ -327,7 +330,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-## Task 2a: `JobGrant.resolve`, the refusal sentences, `describe()` **[§1 refusals, §0.3, §0.6, §0.11]**
+## Task 2a: `JobGrant.resolve`, the refusal sentences, `describe()` **[§1 refusals, §0.3, §0.6, §0.11, §0.12]**
 
 **Files:**
 - Modify: `Sources/iris/JobGrant.swift` (add `resolve`, the sentences, `describe()`, `sentence`)
@@ -353,15 +356,21 @@ extension JobGrant {
     static func notADirectory(_ source: String) -> String                  // "the mount source S is a file, and a file cannot be mounted — mount its directory instead"
     static func tooBroad(_ source: String) -> String                       // "the mount source S is too broad to grant (the whole filesystem, a volume, or the home directory) — name the directory the job actually works in"
     static func protected(_ source: String) -> String                      // "the mount source S is or contains Iris's own directory (~/.iris), which a job may not mount"
+    /// §0.12, spelled once, matched on canonical paths under the injected `home`.
+    static let credentialStores = ["~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gh", "~/.docker", "~/.kube",
+                                   "~/Library/Keychains", "~/Library/Cookies", "~/Library/Application Support/com.apple.container"]
+    static let credentialStoreRefusal = "that directory holds credentials; copy the one key the job needs into a directory made for it"
+    static func isCredentialStore(_ canonicalSource: String, home: String) -> Bool
     static let readOnlyFirst: String                                       // checked before `duplicate`
     static func duplicate(_ source: String) -> String                      // "the mount source S is listed twice"
-    /// "read-write /p (working directory) · read-only /q → /gh · network off" (+ " · nested: /p/sub under /p, whose mode applies beneath it"); "no mounts · network off" for a mount-less grant
-    func describe() -> String
+    /// "read-write /p (working directory) · read-only /q → /gh · network off" (+ " · nested: /p/sub under /p, whose mode applies beneath it"); "no mounts · network off" for a mount-less grant.
+    /// `hostNote: true` (the `/jobs` line only, §0.7) renders the off case as "network off (host reachable)".
+    func describe(hostNote: Bool = false) -> String
     var sentence: String                                                   // "Grant: " + describe() + "."
 }
 ```
 
-Rules locked here: sources are stored canonical (`IrisPaths.canonicalPath`), targets verbatim, as `GateEvaluator.canonicalMount` does for gates; refusal sentences are grant-worded but the *rules* are the existing ones — grammar through `ContainerMount.argument(for:)`, breadth through `WatchRoot.tooBroad` + `/Volumes/<x>` + `isMountPoint` + `home`, protection through `paths.root` in both directions (the whole of `~/.iris`, per §1); the order is exactly §1's: profile, malformed, missing/file, too broad, protected, read-only-first, duplicate (L4 — duplicate is checked after the loop so it comes after read-only-first).
+Rules locked here: sources are stored canonical (`IrisPaths.canonicalPath`), targets verbatim, as `GateEvaluator.canonicalMount` does for gates; refusal sentences are grant-worded but the *rules* are the existing ones — grammar through `ContainerMount.argument(for:)`, breadth through `WatchRoot.tooBroad` + `/Volumes/<x>` + `isMountPoint` + `home`, protection through `paths.root` in both directions (the whole of `~/.iris`, per §1); the order is exactly §1's plus §0.12: profile, malformed, missing/file, too broad, protected, credential store, read-only-first, duplicate (L4 — duplicate is checked after the loop so it comes after read-only-first).
 
 - [ ] **Step 1: Write the failing tests** — append to `Tests/irisTests/JobGrantTests.swift`
 
@@ -459,12 +468,37 @@ struct JobGrantResolveTests {
         #expect(refusal([f.irisRoot.path + ":ro"]) == JobGrant.protected(canonical(f.irisRoot)))
         #expect(refusal([f.irisRoot.appendingPathComponent("config").path]) == JobGrant.protected(canonical(f.irisRoot.appendingPathComponent("config"))))
         #expect(refusal([f.base.path]) == JobGrant.protected(canonical(f.base)), "a root that contains ~/.iris sees every write into it")
-        // 6. read-only first, read-write after — and it outranks a duplicate further down the list
+        // 6. a credential store, by name — see credentialStoresRefusedByName for the whole list
+        try FileManager.default.createDirectory(atPath: f.home + "/.ssh", withIntermediateDirectories: true)
+        #expect(refusal([f.home + "/.ssh:ro"]) == JobGrant.credentialStoreRefusal)
+        // 7. read-only first, read-write after — and it outranks a duplicate further down the list
         #expect(refusal(["\(f.creds.path):ro", f.proj.path]) == JobGrant.readOnlyFirst)
         #expect(refusal(["\(f.creds.path):ro", f.proj.path, f.proj.path]) == JobGrant.readOnlyFirst)
         #expect(refusal(["\(f.creds.path):ro"]) == nil, "all read-only is fine: the working directory is /")
-        // 7. the same source twice, however spelled
+        // 8. the same source twice, however spelled
         #expect(refusal([f.proj.path, f.proj.path + "/"]) == JobGrant.duplicate(canonical(f.proj)))
+    }
+
+    @Test("every credential store is refused by name, read-only included, and a sibling is not (§0.12)")
+    func credentialStoresRefusedByName() throws {
+        let f = try Self.fixture(); defer { f.tearDown() }
+        let fm = FileManager.default
+        for entry in JobGrant.credentialStores {
+            let store = f.home + String(entry.dropFirst())            // "~/.ssh" → "<home>/.ssh"
+            try fm.createDirectory(atPath: store + "/inner", withIntermediateDirectories: true)
+            for spelled in [store, store + ":ro", store + "/inner", store + "/inner:/keys:ro"] {
+                #expect(resolve(f, [spelled]) == .failure(ToolMessage(JobGrant.credentialStoreRefusal)), Comment(rawValue: spelled))
+            }
+        }
+        #expect(JobGrant.credentialStores.count == 9, "the list the spec names, no more and no fewer")
+        // A directory made for the job beside a store is what §0.2 asks for, and is fine.
+        let sibling = f.home + "/.ssh-deploy-key"
+        try fm.createDirectory(atPath: sibling, withIntermediateDirectories: true)
+        #expect(try resolve(f, [sibling + ":ro"]).get()?.mounts.first?.source == IrisPaths.canonicalPath(sibling))
+        // Matched on canonical paths: a symlink to a store is the store.
+        let link = f.base.appendingPathComponent("keys")
+        try fm.createSymbolicLink(at: link, withDestinationURL: URL(fileURLWithPath: f.home + "/.aws"))
+        #expect(resolve(f, [link.path]) == .failure(ToolMessage(JobGrant.credentialStoreRefusal)))
     }
 
     @Test("nested entries are allowed and the sentence says so")
@@ -479,10 +513,19 @@ struct JobGrantResolveTests {
         #expect(plain.sentence == "Grant: \(plain.describe()).")
         #expect(JobGrant(network: true).describe() == "no mounts · network on")
     }
+
+    @Test("the host-reachable note is the listing's only (§0.7): the result sentence says network off")
+    func hostReachableOnlyOnTheListing() {
+        let off = JobGrant(mounts: [ContainerMount(source: "/p")])
+        #expect(off.describe() == "read-write /p (working directory) · network off")
+        #expect(off.describe(hostNote: true) == "read-write /p (working directory) · network off (host reachable)")
+        #expect(off.sentence == "Grant: read-write /p (working directory) · network off.")
+        #expect(JobGrant(network: true).describe(hostNote: true) == "no mounts · network on")
+    }
 }
 ```
 
-What turns each red once green: `resolvesCanonical` — storing the spelling instead of `canonicalPath`; `explicitNetworkOffIsAGrant` — the old `guard !entries.isEmpty || wantsNetwork` (H1); `refusalsByName` — dropping any one guard, checking the profile after the mounts, or checking duplicates inside the loop (the both-defects case); `nestedEntries` — losing the nested clause.
+What turns each red once green: `resolvesCanonical` — storing the spelling instead of `canonicalPath`; `explicitNetworkOffIsAGrant` — the old `guard !entries.isEmpty || wantsNetwork` (H1); `refusalsByName` — dropping any one guard, checking the profile after the mounts, or checking duplicates inside the loop (the both-defects case); `credentialStoresRefusedByName` — a missing list entry, matching the spelling rather than the canonical path, or exempting `:ro`; `nestedEntries` — losing the nested clause; `hostReachableOnlyOnTheListing` — printing the host note in the result sentence.
 
 - [ ] **Step 2: Run to verify they fail** — `scripts/test-filter.sh JobGrantResolveTests`; Expected: compile error `type 'JobGrant' has no member 'resolve'`.
 
@@ -504,6 +547,21 @@ extension JobGrant {
     }
     static let readOnlyFirst = "the first mount must be read-write when any later one is, because it is the job's working directory — put the read-write directory first"
     static func duplicate(_ source: String) -> String { "the mount source \(source) is listed twice" }
+
+    /// §0.12: the stores a grant may not mount, whatever the mode. A grant is a standing capability
+    /// written by a model from text it read, and `~/.ssh:ro` beside `network: true` is otherwise a
+    /// permitted grant. Spelled once; matched on canonical paths, so a link to a store is the store.
+    static let credentialStores = ["~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gh", "~/.docker", "~/.kube",
+                                   "~/Library/Keychains", "~/Library/Cookies", "~/Library/Application Support/com.apple.container"]
+    static let credentialStoreRefusal = "that directory holds credentials; copy the one key the job needs into a directory made for it"
+
+    static func isCredentialStore(_ canonicalSource: String, home: String) -> Bool {
+        let lowered = canonicalSource.lowercased()
+        return credentialStores.contains { entry in
+            let store = IrisPaths.canonicalPath(home + entry.dropFirst()).lowercased()
+            return lowered == store || lowered.hasPrefix(store + "/")
+        }
+    }
 
     /// The grant `mounts`/`network` describe, or the sentence refusing it (spec §1, in its order).
     /// Every question is asked of the *resolved* source, never the spelling — `~/x -> /` is a
@@ -541,6 +599,7 @@ extension JobGrant {
             if lowered == iris || lowered.hasPrefix(iris + "/") || iris.hasPrefix(lowered + "/") {
                 return .failure(ToolMessage(protected(source)))
             }
+            if isCredentialStore(source, home: home) { return .failure(ToolMessage(credentialStoreRefusal)) }
             resolved.append(ContainerMount(source: source, target: parsed.target, readOnly: parsed.readOnly))
         }
         // §0.6: the working directory is never in doubt. Before the duplicate check, in §1's order.
@@ -570,7 +629,7 @@ extension JobGrant {
     /// One line, the same on the result, `/jobs` and the card: each mount's mode, its source (and
     /// target when different), which one is the working directory, the network bit, and the
     /// nesting note when a source lies under another.
-    func describe() -> String {
+    func describe(hostNote: Bool = false) -> String {
         var parts: [String] = mounts.map { mount in
             var text = (mount.readOnly ? "read-only " : "read-write ") + mount.source
             if mount.target != mount.source { text += " \u{2192} \(mount.target)" }
@@ -578,7 +637,9 @@ extension JobGrant {
             return text
         }
         if parts.isEmpty { parts.append("no mounts") }
-        parts.append(network ? "network on" : "network off")
+        // `hostNote` is the listing's: an `--internal` network still reaches the Mac's own
+        // listeners (measured, §0.7), and `/jobs` is where a person reads what a job can reach.
+        parts.append(network ? "network on" : (hostNote ? "network off (host reachable)" : "network off"))
         for inner in mounts {
             if let outer = mounts.first(where: { $0.source != inner.source && inner.source.hasPrefix($0.source + "/") }) {
                 parts.append("nested: \(inner.source) under \(outer.source), whose mode applies beneath it")
@@ -591,13 +652,13 @@ extension JobGrant {
 }
 ```
 
-- [ ] **Step 4: Run to verify they pass** — `scripts/test-filter.sh JobGrantResolveTests` (4 tests) and `scripts/test-filter.sh JobGrantTests` (still 7).
+- [ ] **Step 4: Run to verify they pass** — `scripts/test-filter.sh JobGrantResolveTests` (6 tests) and `scripts/test-filter.sh JobGrantTests` (still 7).
 
 - [ ] **Step 5: Full suite and commit**
 ```bash
 swift test; echo exit=$?
 git add Sources/iris/JobGrant.swift Tests/irisTests/JobGrantTests.swift
-git commit -m "feat(jobs): JobGrant.resolve — the grant's refusals in the spec's order, explicit network:false as a grant, and the one-line description (#282)
+git commit -m "feat(jobs): JobGrant.resolve — the grant's refusals in the spec's order, credential stores refused by name, explicit network:false as a grant, and the one-line description (#282)
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
@@ -1565,12 +1626,12 @@ Create argv for a granted run reads exactly: `run -d --name iris-<id> --mount ty
         let launcher = RecordingLauncher()
         try await CLIContainerRuntime(launch: launcher.launch).createDetached(
             name: "iris-g", image: "img",
-            mounts: ["/Users/me/proj", "/Users/me/.config/gh:ro"], workdir: "/Users/me/proj",
+            mounts: ["/Users/me/proj", "/Users/me/deploy-key:ro"], workdir: "/Users/me/proj",
             network: .isolated)
         #expect(launcher.lastArgv == [
             "run", "-d", "--name", "iris-g",
             "--mount", "type=virtiofs,source=/Users/me/proj,target=/Users/me/proj",
-            "--mount", "type=virtiofs,source=/Users/me/.config/gh,target=/Users/me/.config/gh,readonly",
+            "--mount", "type=virtiofs,source=/Users/me/deploy-key,target=/Users/me/deploy-key,readonly",
             "--network", "iris-isolated", "--no-dns",
             "-w", "/Users/me/proj", "img", "sleep", "infinity",
         ])
@@ -1790,7 +1851,7 @@ func extraMountEntries() -> [String]
 var sandboxSession: (@Sendable (_ command: String, _ conversationId: UUID, _ workspace: String?,
                                 _ extraMounts: [String], _ network: NetworkMode, _ timeoutSeconds: Int) async -> String)?
 func execute(name: String, args: [String: JSONValue], cwd: String? = nil, conversationId: UUID? = nil,
-             useSandbox: Bool = false, grant: JobGrant? = nil) async -> String
+             useSandbox: Bool = false, grant: JobGrant? = nil) async -> String        // Task 4c adds `grantedMount:`
 // IrisEngine
 static let unattendedWorkspaceRefusal = "Not run: a background run cannot change its workspace; widen the job's grant instead."
 private func executeToolWithHooks(name:args:cwd:conversationId:useSandbox:isUnattended:origin:, grant: JobGrant? = nil) async -> String
@@ -1989,7 +2050,7 @@ extension JobGrant {
             // §0.10: with a grant, the container's mounts are the grant's and nothing else — the
             // working directory from the grant, never from the conversation's workspace, which a
             // run must not be able to move. Without one, the workspace as today.
-            let workspace = grant.map(\.workingDirectory) ?? cwd.map { ($0 as NSString).expandingTildeInPath }
+            let workspace = grant.map(\.workingDirectory) ?? cwd.map { IrisEngine.expandTilde($0) }   // #275: no PATH_MAX truncation on a mount
             let extraMounts = grant?.extraMountEntries() ?? []
             let network = NetworkMode.forGrant(grant)
             if let sandboxSession {
@@ -2000,7 +2061,7 @@ extension JobGrant {
                                                           workspace: workspace, extraMounts: extraMounts,
                                                           network: network, timeoutSeconds: deadline)
 ```
-(`grant.map(\.workingDirectory)` is `String??` flattened by `??` — write it as `let workspace: String? = grant != nil ? grant!.workingDirectory : cwd.map { … }` if the optional chaining reads badly; the point is that a grant with no read-write mount yields `nil`, i.e. `/`, not the cwd.)
+(`IrisEngine.expandTilde`, not `expandingTildeInPath`, on the three new deciders and this workspace: a `~/…` past PATH_MAX would otherwise truncate to a *prefix* and be reported as success — L1. `grant.map(\.workingDirectory)` is `String??` flattened by `??` — write it as `let workspace: String? = grant != nil ? grant!.workingDirectory : cwd.map { … }` if the optional chaining reads badly; the point is that a grant with no read-write mount yields `nil`, i.e. `/`, not the cwd.)
 
 - [ ] **Step 6: `IrisEngine`** — beside `unattendedJobCreationRefusal` (:2177):
 ```swift
@@ -2040,10 +2101,592 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-## Task 5a: The real-path helper, the pure gate, `grantNearest` on the call **[§0.9, §3 pure `allows`, §5 nearest]**
+## Task 4c: The descriptor walk — a granted run's `write_file`/`read_file` as one operation **[§0.13]**
 
 **Files:**
-- Modify: `Sources/iris/IrisPaths.swift:151-182` (`realPath`, `realPathForAllow`; `isUnderProtectedWriteDir` hardened; `canonicalPath` untouched)
+- Create: `Sources/iris/GrantedFileAccess.swift` (`GrantedFileAccess`, `GrantedFileError`)
+- Modify: `Sources/iris/ToolExecutor.swift:160-185` (`execute` gains `grantedMount:` and routes the two file tools), `:471-492` (`readFile(grantRoot:relative:)`, `writeFile(grantRoot:relative:content:)` beside the Foundation pair, which stays for attended runs)
+- Test: `Tests/irisTests/GrantedWriteTests.swift` (new)
+
+**Interfaces:**
+- Consumes: `ContainerMount.source` (Task 1); `RecentWrites.isAtomicTempSibling(_:of:)` (RecentWrites.swift:120-128 — the staging name must satisfy it); `IrisEngine.writtenPaths` (iris.swift:3183-3186 — reads `"Successfully wrote to "`); Darwin `open`/`openat`/`fstatat`/`renameat`/`unlinkat`/`fsync`.
+- Produces:
+
+```swift
+/// A granted run's file access (§0.13): the mount's root opened once as a directory descriptor,
+/// one `openat(O_DIRECTORY | O_NOFOLLOW)` per intermediate component, the final component opened
+/// `O_NOFOLLOW` (reads) or staged `O_CREAT | O_EXCL | O_NOFOLLOW` and `renameat`-ed into place
+/// (writes). A symlink anywhere in the remainder is a refusal. The root must be a real directory.
+struct GrantedFileAccess: Sendable {
+    let root: String
+    let stagingName: @Sendable (String) -> String            // injectable; default is Foundation's shape
+    init(root: String, stagingName: @escaping @Sendable (String) -> String = GrantedFileAccess.defaultStagingName)
+    /// `<name>.sb-<hex>-<rand>`: Foundation's atomic-write staging shape, so the watches' sibling rule
+    /// (`RecentWrites.isAtomicTempSibling`) and the built-in ignore set keep matching.
+    static func defaultStagingName(_ name: String) -> String
+    func read(relative: [String]) throws -> String            // relative: components beneath root, no "." or ".."
+    func write(relative: [String], content: String) throws
+}
+enum GrantedFileError: Error, Equatable {
+    case emptyPath
+    case badComponent(String)           // "", ".", "..", or anything containing "/" — refused before any syscall
+    case rootUnavailable(String)        // the granted source no longer resolves (realpath failed)
+    case symlink(component: String)
+    case notADirectory(component: String)
+    case isADirectory(component: String)
+    case missing(component: String)
+    case stagingExists(String)
+    case io(call: String, errno: Int32)
+    var message: String
+}
+// JobGrant (lands here; Task 5a defines `allowedMount` against it)
+/// The lexical components of the call's path beneath `mount.source`, `.` removed — what the walk descends.
+/// nil when the path is not spelled under the source (case-insensitively) or any component is `..`.
+func relativeComponents(of details: String, cwd: String?, under mount: ContainerMount) -> [String]?
+// ToolExecutor
+/// `grantedMount` is the covering mount the dispatcher decided on for this call (Task 5b). With a
+/// `grant` present the two file tools have exactly two outcomes: a non-nil decision is walked from
+/// that mount's root; a nil decision is refused (`notDecidedInsideGrant`). They reach Foundation on
+/// no branch. `grant == nil` (every attended call, every ungranted run) is today's path.
+func execute(name: String, args: [String: JSONValue], cwd: String? = nil, conversationId: UUID? = nil,
+             useSandbox: Bool = false, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil) async -> String
+func readFile(grantRoot: String, relative: [String]) async -> String
+func writeFile(grantRoot: String, relative: [String], content: String) async -> String   // "Successfully wrote to <root>/<relative>" on success
+static func notUnderGrantedDirectory(_ source: String) -> String   // "Error: the path is not under the granted directory <source>; nothing was done."
+static func notDecidedInsideGrant(_ tool: String) -> String        // "Error: `<tool>` was not inside this run's grant when it was decided; nothing was done — widen the grant (re-schedule) if it should be."
+```
+
+Why the routing takes a *decided* mount and does not recompute: the check and the open are two steps, and a command the same run left running in the container (`cmd &` survives across tool calls) can swap a component for a symlink between them. The dispatcher computes `grant.allowedMount(...)` once (Task 5b), before approval; the gate consumes that same value; the executor walks the **spelled** components (`relativeComponents`, lexical) from the mount's root and refuses any symlink it meets — so a swap after the decision is met by the walk, never followed. With a grant present the executor has no Foundation branch at all: a nil decision is a refusal, because "nil" could be a decision made while a component was a link. Two more things the walk does not trust anyone else for: it refuses `..`, `.`, empty and slash-bearing components itself, before any syscall (the executor hands it the post-hook path, and `openat(dirFD, "..")` is a real directory entry the kernel happily opens — measured: without the guard `write(relative: ["..","..","outside","esc.md"])` lands outside); and it reaches the root in three steps rather than by an `open(root)` (a nested entry's own ancestors lie inside a read-write mount an attacker can rename — measured: with `outer/inner/leaf` as the root and `inner` swapped for a link, an `open(root)` even with `O_NOFOLLOW` followed it) and rather than by a lexical `O_NOFOLLOW` walk of the stored spelling (measured: `/tmp`, `/var` and `/etc` are symlinks into `/private`, and `IrisPaths.canonicalPath` — the stored, printed form — strips `/private`, so that walk refused every grant under them at its first component). The three steps: (1) `realpath(3)` of the stored source — the kernel's own resolution, `/tmp/x` → `/private/tmp/x`; (2) `IrisPaths.canonicalPath(real)` must equal the stored source — `/private/tmp/x` canonicalises to `/tmp/x`, equal, while a nested root whose `inner` was swapped for a link to `/etc` resolves to `/etc/…`, not equal, and is refused naming the swapped component; (3) the real path is walked from `/` with `openat(O_DIRECTORY | O_NOFOLLOW)` — a real path has no symlinks by definition, so a symlink met during the walk is a swap made since step 1 and is a refusal. The residual is the window between step 1 and step 3, and it closes shut (a refusal), never open. Measured errno (macOS 26 / Darwin 25.6): `openat(dir, link, O_DIRECTORY | O_NOFOLLOW)` fails with **ENOTDIR**, not ELOOP; only a non-directory open of a link gives ELOOP. So after a failed directory open the walk asks `fstatat(AT_SYMLINK_NOFOLLOW)` and reports `symlink` when it is one — the model gets the right repair hint.
+
+- [ ] **Step 1: Write the failing tests** — `Tests/irisTests/GrantedWriteTests.swift`
+
+```swift
+import Testing
+import Foundation
+@testable import iris
+
+/// #282 §0.13 — the descriptor walk. Temp directories only; every "outside" is a sibling temp dir
+/// the test checks stayed empty.
+@Suite("Granted writes go through a descriptor walk (#282)")
+struct GrantedWriteTests {
+    struct Tree {
+        let base: URL; let root: URL; let outside: URL
+        func tearDown() { try? FileManager.default.removeItem(at: base) }
+        var access: GrantedFileAccess { GrantedFileAccess(root: root.path) }
+        func names(_ dir: URL) -> [String] { (try? FileManager.default.contentsOfDirectory(atPath: dir.path))?.sorted() ?? [] }
+    }
+
+    private func tree() throws -> Tree {
+        let fm = FileManager.default
+        let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("iris-gwalk-\(UUID().uuidString)")
+        let root = base.appendingPathComponent("mount"), outside = base.appendingPathComponent("outside")
+        try fm.createDirectory(at: root.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        return Tree(base: base, root: root, outside: outside)
+    }
+
+    @Test("a write through the walk lands, atomically, with no staging file left behind; a second write replaces")
+    func writeLands() throws {
+        let t = try tree(); defer { t.tearDown() }
+        try t.access.write(relative: ["sub", "x.md"], content: "one")
+        #expect(try String(contentsOf: t.root.appendingPathComponent("sub/x.md"), encoding: .utf8) == "one")
+        #expect(t.names(t.root.appendingPathComponent("sub")) == ["x.md"], "the staging file was renamed away, not left")
+        try t.access.write(relative: ["sub", "x.md"], content: "two")
+        #expect(try String(contentsOf: t.root.appendingPathComponent("sub/x.md"), encoding: .utf8) == "two")
+        try t.access.write(relative: ["top.md"], content: "")
+        #expect(try String(contentsOf: t.root.appendingPathComponent("top.md"), encoding: .utf8) == "")
+    }
+
+    @Test("a symlink as an intermediate component is refused, and nothing lands outside")
+    func intermediateSymlinkRefused() throws {
+        let t = try tree(); defer { t.tearDown() }
+        try FileManager.default.createSymbolicLink(at: t.root.appendingPathComponent("link"), withDestinationURL: t.outside)
+        #expect(throws: GrantedFileError.symlink(component: "link")) {
+            try t.access.write(relative: ["link", "x.md"], content: "leak")
+        }
+        #expect(t.names(t.outside).isEmpty)
+        #expect(throws: GrantedFileError.symlink(component: "link")) { _ = try t.access.read(relative: ["link", "x.md"]) }
+    }
+
+    @Test("a symlink as the final component is refused rather than followed or replaced")
+    func finalSymlinkRefused() throws {
+        let t = try tree(); defer { t.tearDown() }
+        let target = t.outside.appendingPathComponent("target.md")
+        try "keep".write(to: target, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: t.root.appendingPathComponent("out.md"), withDestinationURL: target)
+        #expect(throws: GrantedFileError.symlink(component: "out.md")) {
+            try t.access.write(relative: ["out.md"], content: "leak")
+        }
+        #expect(try String(contentsOf: target, encoding: .utf8) == "keep")
+        #expect(t.names(t.root) == ["out.md", "sub"], "the link itself is left where it was")
+        #expect(throws: GrantedFileError.symlink(component: "out.md")) { _ = try t.access.read(relative: ["out.md"]) }
+        // A directory where a file was named is refused with its own sentence (L2), staging removed.
+        #expect(throws: GrantedFileError.isADirectory(component: "sub")) { try t.access.write(relative: ["sub"], content: "x") }
+        #expect(t.names(t.root) == ["out.md", "sub"])
+    }
+
+    @Test("a component swapped for a symlink after the allow and before the write is refused (the §0.13 race)")
+    func swapAfterAllowRefused() throws {
+        let t = try tree(); defer { t.tearDown() }
+        // The allow, as the dispatcher makes it: the path is judged, `sub` is a real directory.
+        let sub = t.root.appendingPathComponent("sub")
+        var isDir: ObjCBool = false
+        #expect(FileManager.default.fileExists(atPath: sub.path, isDirectory: &isDir) && isDir.boolValue)
+        // The swap, as a background `cmd &` in the container would make it on the identity-mapped mount.
+        try FileManager.default.removeItem(at: sub)
+        try FileManager.default.createSymbolicLink(at: sub, withDestinationURL: t.outside)
+        // The write, with the components decided before the swap.
+        #expect(throws: GrantedFileError.symlink(component: "sub")) {
+            try t.access.write(relative: ["sub", "x.md"], content: "leak")
+        }
+        #expect(t.names(t.outside).isEmpty)
+    }
+
+    @Test("the staging file is created inside the final directory's descriptor, exclusively, and matches the watches' sibling rule")
+    func stagingStaysInside() throws {
+        let t = try tree(); defer { t.tearDown() }
+        let staging = GrantedFileAccess.defaultStagingName("x.md")
+        #expect(staging.hasPrefix("x.md.sb-"))
+        #expect(RecentWrites.isAtomicTempSibling(staging, of: "x.md"), "a watch absorbs the staging file as the run's own write")
+        // A fixed staging name that already exists: O_EXCL refuses, and the existing file is untouched.
+        let fixed = GrantedFileAccess(root: t.root.path, stagingName: { _ in "x.md.sb-fixed" })
+        try "occupied".write(to: t.root.appendingPathComponent("sub/x.md.sb-fixed"), atomically: true, encoding: .utf8)
+        #expect(throws: GrantedFileError.stagingExists("x.md.sb-fixed")) {
+            try fixed.write(relative: ["sub", "x.md"], content: "new")
+        }
+        #expect(try String(contentsOf: t.root.appendingPathComponent("sub/x.md.sb-fixed"), encoding: .utf8) == "occupied")
+        #expect(!FileManager.default.fileExists(atPath: t.root.appendingPathComponent("sub/x.md").path))
+        // A root that is itself a symlink is refused by step 2 of the root open (its real path does
+        // not canonicalise back to the stored spelling), naming the swapped component.
+        let linkRoot = t.base.appendingPathComponent("rootlink")
+        try FileManager.default.createSymbolicLink(at: linkRoot, withDestinationURL: t.root)
+        #expect(throws: GrantedFileError.symlink(component: "rootlink")) {
+            try GrantedFileAccess(root: linkRoot.path).write(relative: ["y.md"], content: "x")
+        }
+    }
+
+    @Test("the walk refuses .., ., empty and slash-bearing components itself, before any syscall (H2)")
+    func dotDotRefusedByTheWalk() throws {
+        let t = try tree(); defer { t.tearDown() }
+        // Measured without the guard: `..` is a real directory entry, `openat(O_DIRECTORY|O_NOFOLLOW)` opens it,
+        // and esc.md lands outside the root. The guard is the walk's own; it does not rely on the allow having run.
+        #expect(throws: GrantedFileError.badComponent("..")) { try t.access.write(relative: ["..", "outside", "esc.md"], content: "leak") }
+        #expect(throws: GrantedFileError.badComponent("..")) { try t.access.write(relative: ["sub", "..", "x.md"], content: "leak") }
+        #expect(throws: GrantedFileError.badComponent("..")) { _ = try t.access.read(relative: ["..", "outside", "esc.md"]) }
+        #expect(throws: GrantedFileError.badComponent(".")) { try t.access.write(relative: [".", "x.md"], content: "x") }
+        #expect(throws: GrantedFileError.badComponent("")) { try t.access.write(relative: ["", "x.md"], content: "x") }
+        #expect(throws: GrantedFileError.badComponent("a/b")) { try t.access.write(relative: ["a/b"], content: "x") }
+        #expect(t.names(t.outside).isEmpty)
+        #expect(t.names(t.root) == ["sub"], "nothing was created at all")
+    }
+
+    @Test("a nested mount root is reached by the same walk: an intermediate of the root swapped for a link is refused (M2)")
+    func nestedRootIntermediateSwapRefused() throws {
+        let t = try tree(); defer { t.tearDown() }
+        // The grant's inner entry is `mount/inner/leaf`; `mount/` is read-write, so a command can rename `inner`.
+        let leaf = t.root.appendingPathComponent("inner/leaf")
+        try FileManager.default.createDirectory(at: leaf, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: t.outside.appendingPathComponent("leaf"), withIntermediateDirectories: true)
+        let access = GrantedFileAccess(root: leaf.path)
+        try access.write(relative: ["ok.md"], content: "in")            // before the swap: lands
+        try FileManager.default.removeItem(at: t.root.appendingPathComponent("inner"))
+        try FileManager.default.createSymbolicLink(at: t.root.appendingPathComponent("inner"), withDestinationURL: t.outside)
+        // Measured: `open(root, O_DIRECTORY|O_NOFOLLOW)` followed `inner` and z.md landed in outside/leaf.
+        // Now: realpath(root) = …/outside/leaf, whose canonical form is not the stored root → refused at `inner`.
+        #expect(throws: GrantedFileError.symlink(component: "inner")) { try access.write(relative: ["z.md"], content: "leak") }
+        #expect(throws: GrantedFileError.symlink(component: "inner")) { _ = try access.read(relative: ["ok.md"]) }
+        #expect(t.names(t.outside.appendingPathComponent("leaf")).isEmpty)
+    }
+
+    @Test("a root under the system symlinks — /var/folders, /tmp — opens and writes, staging inside (N-H1)")
+    func rootUnderTmpIsWalkable() throws {
+        // Every root in this suite lives under NSTemporaryDirectory() (`/var/folders/…`, and `/var` is a
+        // symlink to `/private/var`), so the suite itself proves the firmlink case; this test says so
+        // out loud and adds the `/tmp` spelling the Verification demo uses.
+        let t = try tree(); defer { t.tearDown() }
+        #expect(t.root.path.hasPrefix("/var/") || t.root.path.hasPrefix("/private/var/"))
+        #expect(IrisPaths.canonicalPath(t.root.path) == t.root.path, "the stored (canonical) spelling is what the walk is handed")
+        try t.access.write(relative: ["sub", "tmp.md"], content: "ok")
+        #expect(try t.access.read(relative: ["sub", "tmp.md"]) == "ok")
+        #expect(t.names(t.root.appendingPathComponent("sub")) == ["tmp.md"])
+
+        let tmp = URL(fileURLWithPath: "/tmp").appendingPathComponent("iris-gwalk-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let stored = IrisPaths.canonicalPath(tmp.path)
+        #expect(stored.hasPrefix("/tmp/"), "canonicalPath strips /private (measured)")
+        try GrantedFileAccess(root: stored).write(relative: ["hello.md"], content: "demo")
+        #expect(try String(contentsOf: tmp.appendingPathComponent("hello.md"), encoding: .utf8) == "demo")
+
+        // A root that no longer resolves is its own refusal, not a symlink sentence.
+        try FileManager.default.removeItem(at: tmp)
+        #expect(throws: GrantedFileError.rootUnavailable(stored)) { try GrantedFileAccess(root: stored).write(relative: ["x"], content: "x") }
+    }
+
+    @Test("read_file walks the same way: content back, a missing file named, no descent through a link")
+    func readThroughTheWalk() throws {
+        let t = try tree(); defer { t.tearDown() }
+        try "hello".write(to: t.root.appendingPathComponent("sub/r.md"), atomically: true, encoding: .utf8)
+        #expect(try t.access.read(relative: ["sub", "r.md"]) == "hello")
+        #expect(throws: GrantedFileError.missing(component: "gone.md")) { _ = try t.access.read(relative: ["sub", "gone.md"]) }
+        #expect(throws: GrantedFileError.missing(component: "nodir")) { _ = try t.access.read(relative: ["nodir", "r.md"]) }
+        #expect(throws: GrantedFileError.notADirectory(component: "r.md")) { _ = try t.access.read(relative: ["sub", "r.md", "deeper"]) }
+        #expect(throws: GrantedFileError.emptyPath) { _ = try t.access.read(relative: []) }
+    }
+
+    @Test("the executor's granted pair return the tool's sentences, and execute(grantedMount:) routes to them")
+    func executorRoutesToTheWalk() async throws {
+        let t = try tree(); defer { t.tearDown() }
+        let executor = ToolExecutor()
+        let mount = ContainerMount(source: t.root.path)
+        let grant = JobGrant(mounts: [mount])
+        let target = t.root.appendingPathComponent("sub/e.md").path
+        let wrote = await executor.execute(name: "write_file", args: ["path": .string(target), "content": .string("via walk")],
+                                           cwd: t.root.path, grant: grant, grantedMount: mount)
+        #expect(wrote == "Successfully wrote to \(target)", "the sentence writtenPaths reads, so the self-write filter is fed as before")
+        #expect(try String(contentsOf: URL(fileURLWithPath: target), encoding: .utf8) == "via walk")
+        #expect(await executor.execute(name: "read_file", args: ["path": .string("sub/e.md")], cwd: t.root.path,
+                                       grant: grant, grantedMount: mount) == "via walk")
+
+        // A path a hook rewrote out from under the decided mount is refused, never re-routed to Foundation.
+        // (`execute` receives the hook layer's `execArgs` — iris.swift:3249 — so this IS the post-hook path;
+        // `HookManager.shared` is process-global and is not driven from a test, invariant 7.)
+        let elsewhere = t.outside.appendingPathComponent("h.md").path
+        #expect(await executor.execute(name: "write_file", args: ["path": .string(elsewhere), "content": .string("x")],
+                                       cwd: t.root.path, grant: grant, grantedMount: mount)
+                == ToolExecutor.notUnderGrantedDirectory(t.root.path))
+        // …including one that is spelled under the mount and climbs out with `..` (H2).
+        #expect(await executor.execute(name: "write_file", args: ["path": .string(t.root.path + "/../outside/h.md"), "content": .string("x")],
+                                       cwd: t.root.path, grant: grant, grantedMount: mount)
+                == ToolExecutor.notUnderGrantedDirectory(t.root.path))
+        #expect(t.names(t.outside).isEmpty)
+
+        // A granted conversation whose decision was nil: refused, never Foundation (H1 — the invariant).
+        let inside = t.root.appendingPathComponent("sub/undecided.md").path
+        #expect(await executor.execute(name: "write_file", args: ["path": .string(inside), "content": .string("x")],
+                                       cwd: t.root.path, grant: grant, grantedMount: nil)
+                == ToolExecutor.notDecidedInsideGrant("write_file"))
+        #expect(await executor.execute(name: "read_file", args: ["path": .string(inside)], cwd: t.root.path, grant: grant, grantedMount: nil)
+                == ToolExecutor.notDecidedInsideGrant("read_file"))
+        #expect(!FileManager.default.fileExists(atPath: inside))
+
+        // Through a link inside the mount: the walk's sentence, not a write.
+        try FileManager.default.createSymbolicLink(at: t.root.appendingPathComponent("link"), withDestinationURL: t.outside)
+        let viaLink = await executor.execute(name: "write_file", args: ["path": .string("link/x.md"), "content": .string("x")],
+                                             cwd: t.root.path, grant: grant, grantedMount: mount)
+        #expect(viaLink == "Error writing file: \(GrantedFileError.symlink(component: "link").message)")
+
+        // No decided mount: today's Foundation path, unchanged (an attended call, or an approved/allowlisted one).
+        let plain = await executor.execute(name: "write_file", args: ["path": .string(elsewhere), "content": .string("plain")], cwd: nil)
+        #expect(plain == "Successfully wrote to \(elsewhere)")
+    }
+}
+```
+
+What turns each red once green: `writeLands` — writing straight to `name` instead of stage + `renameat` (the staging assertion), or leaking the staging file on success; `intermediateSymlinkRefused` — dropping `O_NOFOLLOW` from the intermediate `openat`; `finalSymlinkRefused` — dropping the `fstatat(AT_SYMLINK_NOFOLLOW)` check before the rename, or the read's `O_NOFOLLOW`; `swapAfterAllowRefused` — resolving the path once up front (Foundation) instead of walking; `stagingStaysInside` — dropping `O_EXCL`, a staging name that does not match the sibling rule, or opening the root without `O_NOFOLLOW`; `readThroughTheWalk` — mapping `ENOENT`/`ENOTDIR` to a generic error; `dotDotRefusedByTheWalk` — dropping the component guard (the kernel opens `..`); `nestedRootIntermediateSwapRefused` — opening the root by path, or comparing `canonicalPath(real)` against `canonicalPath(root)` instead of the stored spelling (the swapped link would canonicalise both sides to the attacker's target); `rootUnderTmpIsWalkable` — walking the stored spelling from `/` with `O_NOFOLLOW` (refuses at `var`/`tmp`), and — with `writeLands`, whose root is under `/var/folders` too — every test in this suite; the `isADirectory` line — dropping the `S_IFDIR` arm of the `fstatat` guard; `executorRoutesToTheWalk` — any Foundation branch under a grant (a nil decision falling through, or recomputing the mount), or a different success sentence. The four `.symlink(component:)` expectations on intermediate components turn red if the `fstatat` re-mapping after `ENOTDIR` is dropped (they would read `.notADirectory`, measured).
+
+- [ ] **Step 2: Run to verify they fail** — `scripts/test-filter.sh GrantedWriteTests`; Expected: compile error `cannot find 'GrantedFileAccess' in scope`.
+
+- [ ] **Step 3: `Sources/iris/GrantedFileAccess.swift`**
+
+```swift
+import Foundation
+import Darwin
+
+/// Why a granted read or write did not happen, in the words the tool returns.
+enum GrantedFileError: Error, Equatable {
+    case emptyPath
+    case badComponent(String)
+    case rootUnavailable(String)        // the granted source no longer resolves (realpath failed)
+    case symlink(component: String)
+    case notADirectory(component: String)
+    case isADirectory(component: String)
+    case missing(component: String)
+    case stagingExists(String)
+    case io(call: String, errno: Int32)
+
+    var message: String {
+        switch self {
+        case .emptyPath: return "a granted read or write needs a file name under the granted directory"
+        case .badComponent(let component): return "the path component `\(component)` is not allowed under a grant; name the file with plain components under the granted directory"
+        case .rootUnavailable(let root): return "the granted directory \(root) no longer exists"
+        case .symlink(let component): return "the path crosses a symlink at `\(component)`; a granted run may not read or write through symlinks — name the real directory instead"
+        case .notADirectory(let component): return "`\(component)` is not a directory"
+        case .isADirectory(let component): return "`\(component)` is a directory, not a file"
+        case .missing(let component): return "no such file or directory: `\(component)`"
+        case .stagingExists(let name): return "a staging file `\(name)` already exists; try again"
+        case .io(let call, let code): return "\(call) failed: \(String(cString: strerror(code)))"
+        }
+    }
+}
+
+/// A granted run's file access (#282 §0.13). The allow (`JobGrant.allowedMount`) decides *whether*;
+/// this decides *where* in a way nothing on the host can move between the two: the mount's root is
+/// opened once as a directory descriptor, every remaining component is walked with `openat` and
+/// `O_NOFOLLOW`, and a write is staged and renamed inside the final directory's descriptor. A
+/// symlink anywhere in the remainder is `ELOOP`, reported as a refusal — never followed.
+struct GrantedFileAccess: Sendable {
+    let root: String
+    let stagingName: @Sendable (String) -> String
+
+    init(root: String, stagingName: @escaping @Sendable (String) -> String = GrantedFileAccess.defaultStagingName) {
+        self.root = root
+        self.stagingName = stagingName
+    }
+
+    /// Foundation's own staging shape (measured on Darwin 25.6: `<name>.sb-<hex>-<rand>`), so the
+    /// watches' sibling rule and the built-in ignore set treat it as the run's own write.
+    static func defaultStagingName(_ name: String) -> String {
+        "\(name).sb-\(String(UInt32.random(in: .min ... .max), radix: 16))-\(String(UInt32.random(in: .min ... .max), radix: 36))"
+    }
+
+    func read(relative: [String]) throws -> String {
+        guard let name = relative.last else { throw GrantedFileError.emptyPath }
+        try Self.validate(relative)
+        let rootFD = try openRoot()
+        defer { close(rootFD) }
+        let dirFD = try descend(relative.dropLast(), from: rootFD)
+        defer { if dirFD != rootFD { close(dirFD) } }
+        let fd = openat(dirFD, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw Self.error(errno, at: name, call: "openat") }
+        defer { close(fd) }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 65_536)
+        while true {
+            let n = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+            if n < 0 { throw GrantedFileError.io(call: "read", errno: errno) }
+            if n == 0 { break }
+            data.append(contentsOf: buffer[0..<n])
+        }
+        guard let text = String(data: data, encoding: .utf8) else { throw GrantedFileError.io(call: "decode", errno: EILSEQ) }
+        return text
+    }
+
+    func write(relative: [String], content: String) throws {
+        guard let name = relative.last else { throw GrantedFileError.emptyPath }
+        try Self.validate(relative)
+        let rootFD = try openRoot()
+        defer { close(rootFD) }
+        let dirFD = try descend(relative.dropLast(), from: rootFD)
+        defer { if dirFD != rootFD { close(dirFD) } }
+        // `renameat` would replace a symlink rather than follow it, but a run may not write
+        // *through* one either way (§0.13): refuse before anything is staged.
+        var st = stat()
+        if fstatat(dirFD, name, &st, AT_SYMLINK_NOFOLLOW) == 0 {
+            if (st.st_mode & S_IFMT) == S_IFLNK { throw GrantedFileError.symlink(component: name) }
+            if (st.st_mode & S_IFMT) == S_IFDIR { throw GrantedFileError.isADirectory(component: name) }
+        }
+        let staging = stagingName(name)
+        let fd = openat(dirFD, staging, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o644)
+        guard fd >= 0 else {
+            throw errno == EEXIST ? GrantedFileError.stagingExists(staging) : Self.error(errno, at: staging, call: "openat")
+        }
+        var renamed = false
+        defer {
+            close(fd)
+            if !renamed { _ = unlinkat(dirFD, staging, 0) }
+        }
+        let bytes = Array(content.utf8)
+        var written = 0
+        while written < bytes.count {
+            let n = bytes.withUnsafeBufferPointer { Darwin.write(fd, $0.baseAddress! + written, $0.count - written) }
+            guard n > 0 else { throw GrantedFileError.io(call: "write", errno: errno) }
+            written += n
+        }
+        guard fsync(fd) == 0 else { throw GrantedFileError.io(call: "fsync", errno: errno) }
+        guard renameat(dirFD, staging, dirFD, name) == 0 else { throw GrantedFileError.io(call: "renameat", errno: errno) }
+        renamed = true
+    }
+
+    // MARK: - The walk
+
+    /// The walk's own gate, before any syscall: `..` is a real directory entry the kernel opens
+    /// without complaint (measured), `.` and "" are no-ops that would hide a mistake, and a `/`
+    /// inside a component is a path pretending to be a name. The executor hands this the
+    /// post-hook path, so nothing upstream is relied on.
+    private static func validate(_ relative: [String]) throws {
+        for component in relative where component.isEmpty || component == "." || component == ".." || component.contains("/") {
+            throw GrantedFileError.badComponent(component)
+        }
+    }
+
+    /// The root, in three steps (§0.13). Not `open(root)`: a nested entry's ancestors lie inside a
+    /// read-write mount a command can rename, and `open` follows them (measured). Not an
+    /// `O_NOFOLLOW` walk of the stored spelling either: `/tmp`, `/var`, `/etc` are symlinks into
+    /// `/private`, and the stored form (`IrisPaths.canonicalPath`) strips `/private`, so that walk
+    /// refused every grant under them at `tmp`/`var` (measured).
+    ///
+    /// (1) `realpath(3)` of the stored source — the kernel's resolution; (2) its canonical form
+    /// must be the stored source again (`/private/tmp/x` → `/tmp/x`), which a root with a swapped
+    /// component cannot satisfy (`…/mount/inner/leaf` with `inner → /etc` resolves to `/etc/…`);
+    /// (3) the real path is walked from `/` with `O_NOFOLLOW` — it has no symlinks by definition,
+    /// so one met here is a swap since step 1 and is refused. The window between (1) and (3)
+    /// closes shut, never open.
+    private func openRoot() throws -> Int32 {
+        guard let resolved = Darwin.realpath(root, nil) else { throw GrantedFileError.rootUnavailable(root) }
+        let real = String(cString: resolved)
+        free(resolved)
+        guard IrisPaths.canonicalPath(real) == root else {
+            throw GrantedFileError.symlink(component: firstSwappedComponent())
+        }
+        let components = real.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        try Self.validate(components)
+        let slash = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard slash >= 0 else { throw GrantedFileError.io(call: "open", errno: errno) }
+        return try descend(components[...], from: slash, closingRoot: true)
+    }
+
+    /// For the sentence only, on the failure path of step 2: the first prefix of the stored root
+    /// whose kernel resolution no longer canonicalises to its own spelling — `…/mount/inner` for a
+    /// swapped `inner`, the root itself for a root that became a link. System symlinks pass
+    /// (`/var` → `/private/var` → canonical `/var`).
+    private func firstSwappedComponent() -> String {
+        var prefix = ""
+        for component in root.split(separator: "/", omittingEmptySubsequences: true).map(String.init) {
+            prefix += "/" + component
+            guard let resolved = Darwin.realpath(prefix, nil) else { return component }
+            let real = String(cString: resolved)
+            free(resolved)
+            if IrisPaths.canonicalPath(real) != prefix { return component }
+        }
+        return (root as NSString).lastPathComponent
+    }
+
+    /// Opens each directory component in turn, each relative to the one before, none through a
+    /// symlink. Returns the final directory's descriptor (the starting one when there is none).
+    /// `closingRoot` closes the starting descriptor once it has been advanced past (the root walk);
+    /// the caller-owned root descriptor of a read/write is never closed here.
+    private func descend(_ directories: ArraySlice<String>, from start: Int32, closingRoot: Bool = false) throws -> Int32 {
+        var dirFD = start
+        for component in directories {
+            let next = openat(dirFD, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            let code = errno
+            let failure: GrantedFileError? = next >= 0 ? nil : Self.directoryError(code, in: dirFD, at: component)
+            if dirFD != start || closingRoot { close(dirFD) }
+            if let failure { throw failure }
+            dirFD = next
+        }
+        return dirFD
+    }
+
+    /// Measured (macOS 26): a directory open of a symlink with `O_NOFOLLOW` fails with ENOTDIR, not
+    /// ELOOP, so the entry is asked what it is before the sentence is chosen.
+    private static func directoryError(_ code: Int32, in dirFD: Int32, at component: String) -> GrantedFileError {
+        if code == ENOTDIR || code == ELOOP {
+            var st = stat()
+            if fstatat(dirFD, component, &st, AT_SYMLINK_NOFOLLOW) == 0, (st.st_mode & S_IFMT) == S_IFLNK {
+                return .symlink(component: component)
+            }
+            return .notADirectory(component: component)
+        }
+        return error(code, at: component, call: "openat")
+    }
+
+    private static func error(_ code: Int32, at component: String, call: String) -> GrantedFileError {
+        switch code {
+        case ELOOP: return .symlink(component: component)
+        case ENOTDIR: return .notADirectory(component: component)
+        case ENOENT: return .missing(component: component)
+        default: return .io(call: call, errno: code)
+        }
+    }
+}
+```
+
+- [ ] **Step 4: `ToolExecutor`** — `execute` (:170) gains `grantedMount: ContainerMount? = nil`; the two cases become
+```swift
+        case "read_file":
+            guard let path = args["path"]?.stringValue else { return "Error: Missing path" }
+            if let grant {
+                // §0.13: under a grant there is no Foundation branch. A nil decision is a refusal,
+                // because it may have been made while a component was a link.
+                guard let grantedMount else { return Self.notDecidedInsideGrant("read_file") }
+                guard let relative = grant.relativeComponents(of: path, cwd: cwd, under: grantedMount) else {
+                    return Self.notUnderGrantedDirectory(grantedMount.source)
+                }
+                return await readFile(grantRoot: grantedMount.source, relative: relative)
+            }
+            return await readFile(path, cwd: cwd)
+        case "write_file":
+            guard let path = args["path"]?.stringValue, let content = args["content"]?.stringValue else { return "Error: Missing path or content" }
+            if let grant {
+                guard let grantedMount else { return Self.notDecidedInsideGrant("write_file") }
+                guard let relative = grant.relativeComponents(of: path, cwd: cwd, under: grantedMount) else {
+                    return Self.notUnderGrantedDirectory(grantedMount.source)
+                }
+                return await writeFile(grantRoot: grantedMount.source, relative: relative, content: content)
+            }
+            return await writeFile(path, content: content, cwd: cwd)
+```
+beside `readFile`/`writeFile` (:471-492):
+```swift
+    /// A granted run's read (#282 §0.13): the same walk the write takes, from the covering mount's root.
+    func readFile(grantRoot: String, relative: [String]) async -> String {
+        await Task.detached {
+            do { return try GrantedFileAccess(root: grantRoot).read(relative: relative) }
+            catch let error as GrantedFileError { return "Error reading file: \(error.message)" }
+            catch { return "Error reading file: \(error.localizedDescription)" }
+        }.value
+    }
+
+    /// A granted run's write (#282 §0.13). The success sentence is the one `IrisEngine.writtenPaths`
+    /// reads, so the self-write filter is fed exactly as for a Foundation write.
+    func writeFile(grantRoot: String, relative: [String], content: String) async -> String {
+        let path = ([grantRoot] + relative).joined(separator: "/")
+        return await Task.detached {
+            do {
+                try GrantedFileAccess(root: grantRoot).write(relative: relative, content: content)
+                return "Successfully wrote to \(path)"
+            } catch let error as GrantedFileError { return "Error writing file: \(error.message)" }
+            catch { return "Error writing file: \(error.localizedDescription)" }
+        }.value
+    }
+
+    static func notUnderGrantedDirectory(_ source: String) -> String {
+        "Error: the path is not under the granted directory \(source); nothing was done."
+    }
+
+    static func notDecidedInsideGrant(_ tool: String) -> String {
+        "Error: `\(tool)` was not inside this run's grant when it was decided; nothing was done — widen the grant (re-schedule) if it should be."
+    }
+```
+and, in `Sources/iris/JobGrant.swift` (Task 5a defines `allowedMount` against this and does not redefine it):
+```swift
+extension JobGrant {
+    /// The lexical components of the call's path beneath `mount.source` — the spelling the walk
+    /// descends, `.` removed. nil when the path is not spelled under the source (case-insensitively —
+    /// a spelling that only *resolves* into the mount, the `/private` firmlink or a link from
+    /// outside, has no components to walk from the mount's root) or when any component is `..`
+    /// (the walk refuses it again on its own; this is the earlier, cheaper no).
+    func relativeComponents(of details: String, cwd: String?, under mount: ContainerMount) -> [String]? {
+        let spelled = IrisEngine.expandTilde(ToolExecutor.resolvePath(details, cwd: cwd))
+        let source = mount.source.hasSuffix("/") ? String(mount.source.dropLast()) : mount.source
+        guard spelled.lowercased() == source.lowercased() || spelled.lowercased().hasPrefix(source.lowercased() + "/") else { return nil }
+        let components = spelled.dropFirst(source.count).split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init).filter { $0 != "." }
+        guard !components.contains("..") else { return nil }
+        return components
+    }
+}
+```
+
+- [ ] **Step 5: Run to verify they pass** — `scripts/test-filter.sh GrantedWriteTests` (10), `scripts/test-filter.sh SandboxTimeoutTests`, `scripts/test-filter.sh SelfWriteHookTests` (`writtenPaths` still sees the sentence), `scripts/test-filter.sh ToolExecutorWorkspaceTests`. Expected: PASS with counts.
+
+- [ ] **Step 6: Full suite and commit**
+```bash
+swift test; echo exit=$?
+git add Sources/iris/GrantedFileAccess.swift Sources/iris/ToolExecutor.swift Sources/iris/JobGrant.swift Tests/irisTests/GrantedWriteTests.swift
+git commit -m "feat(jobs): a granted run's write_file and read_file walk descriptors from the mount root with O_NOFOLLOW and stage-and-renameat; no path reaches Foundation (#282)
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+---
+
+## Task 5a: The real-path helper, the pure gate, `grantNearest` on the call **[§0.9, §0.4, §3 pure `allows`, §5 nearest]**
+
+**Files:**
+- Modify: `Sources/iris/IrisPaths.swift:151-182` (`realPath`, `realPathForAllow`; `isUnderProtectedWriteDir` hardened; `canonicalPath` :170-171 swaps `expandingTildeInPath` for `IrisEngine.expandTilde` — #275's third site — and is otherwise untouched)
 - Modify: `Sources/iris/JobGrant.swift` (`covering`, `allows`, `nearest`)
 - Modify: `Sources/iris/JobRun.swift:102-137` (`BlockedCall.grantNearest`, lenient)
 - Modify: `Sources/iris/JobRunner.swift:968-972` (pass the nearest), `:1607-1620` (`failureReason(... blockedNearest:)`)
@@ -2065,11 +2708,21 @@ static func realPath(_ rawPath: String) -> String
 static func realPathForAllow(_ rawPath: String) -> String?
 func isUnderProtectedWriteDir(_ rawPath: String) -> Bool     // now both sides through realPath, still case-insensitive
 // JobGrant
-/// The innermost mount whose real source is `realPath` or a component ancestor of it. `/proj` does not cover `/project`.
+/// The innermost mount whose real source is `realPath` or a component ancestor of it, compared
+/// case-insensitively (§3: APFS keeps the caller's spelling; the descriptor walk of Task 4c proves identity).
+/// `/proj` does not cover `/project`.
 func covering(_ realPath: String) -> ContainerMount?
-/// §3, pure: run_command → true; write_file → under a read-write source; read_file → under any source;
-/// everything else → false. `details` resolved against `cwd`, then `realPathForAllow` (nil → false).
-func allows(toolName: String, details: String, cwd: String?) -> Bool
+/// The mount a file-tool call may use, or nil: the path resolved against `cwd`, spelled under the
+/// mount's source (case-insensitively — that spelling is what the walk descends), taken to its real
+/// path (`realPathForAllow`, nil → nil) and covered by the mount by real path; `write_file` needs a
+/// read-write mount, `read_file` any. This is what `allows` decides on for the two file tools and
+/// what the executor walks (Task 4c). Every other tool → nil.
+func allowedMount(toolName: String, details: String, cwd: String?) -> ContainerMount?
+/// The lexical components of the call's path beneath `mount.source`, `.` removed — what the walk descends.
+func relativeComponents(of details: String, cwd: String?, under mount: ContainerMount) -> [String]?
+/// §3, pure: run_command → `sandboxed` (§0.4: the caller passes the conversation's resolution);
+/// write_file / read_file → `allowedMount(...) != nil`; everything else → false.
+func allows(toolName: String, details: String, cwd: String?, sandboxed: Bool) -> Bool
 /// The granted source sharing the longest component prefix with the resolved path; ties → the earlier entry;
 /// nil only when the grant has no mounts; a `..` path is still placed by its real path, so the card can say where the grant is.
 func nearest(to details: String, cwd: String?) -> String?
@@ -2080,7 +2733,7 @@ static func failureReason(status:messages:blockedTool:blockedReason:, blockedNea
 // "needs approval: write_file outside the grant (nearest: /Users/me/proj)" when blockedNearest is set
 ```
 
-Why both sides go through the helper: `realpath(3)` returns `/private/tmp/x` where Foundation's `resolvingSymlinksInPath` (and so `canonicalPath`, which stores sources) returns `/tmp/x` (L2). `covering` and `nearest` therefore resolve each stored source with `realPathForAllow` too and compare real to real; `isUnderProtectedWriteDir` resolves `protectedWriteDirs` the same way. Both sides being real paths also settles case: `realpath(3)` canonicalises case on APFS (measured: `/tmp/SYMTEST/MOUNT/proj` → `/private/tmp/symtest/mount/proj`), so a differently-cased spelling of a granted directory is allowed because it *is* that directory, and `allows` needs no case-fold of its own; `isUnderProtectedWriteDir` keeps its explicit case-fold as before (a deny, and the carve-out tests already assume a case-insensitive volume). Also load-bearing: `ToolExecutor.writeFile` writes `atomically: true` (ToolExecutor.swift:486), so a dangling symlink as the final component is *replaced* by a regular file inside the mount rather than followed, and a dangling intermediate link fails with ENOENT — neither escapes; a link swapped between the check and the write remains the accepted residual. The reproduced case (pre-review C1): `link → <iris root>` inside a mount; `<mount>/link/../x` is refused by the `..` rule on the allow side and, on the deny side, resolved to `<parent of iris root>/x` by `realPath`; `<mount>/link/config/permissions.json` resolves to the real `<iris root>/config/permissions.json` → protected, and outside every mount.
+Why both sides go through the helper: `realpath(3)` returns `/private/tmp/x` where Foundation's `resolvingSymlinksInPath` (and so `canonicalPath`, which stores sources) returns `/tmp/x` (L2). `covering` and `nearest` therefore resolve each stored source with `realPathForAllow` too and compare real to real; `isUnderProtectedWriteDir` resolves `protectedWriteDirs` the same way. Case (spec §3): the covering entry is chosen **case-insensitively** — APFS keeps the caller's spelling (R-D4-7), and the decision is only *whether*; the descriptor walk of Task 4c then proves each component is really under the mount, so a differently-cased spelling is neither refused nor over-granted. `isUnderProtectedWriteDir` keeps its explicit case-fold (a deny). Two consequences the tests pin: a path must be *spelled under the granted directory* — `/private/tmp/proj/x` for a grant on `/tmp/proj` reaches the mount only through the firmlink, so `allowedMount` is nil and it falls to the allowlist (the card names the nearest directory) — and the residual that used to be accepted here (a link swapped between the check and the write) is closed by Task 4c, not argued away. The reproduced case (pre-review C1): `link → <iris root>` inside a mount; `<mount>/link/../x` is refused by the `..` rule on the allow side and, on the deny side, resolved to `<parent of iris root>/x` by `realPath`; `<mount>/link/config/permissions.json` resolves to the real `<iris root>/config/permissions.json` → protected, and outside every mount.
 
 - [ ] **Step 1: Write the failing tests** — `IrisPathsTests`, appended:
 
@@ -2105,6 +2758,10 @@ Why both sides go through the helper: `realpath(3)` returns `/private/tmp/x` whe
     func realPathIsComponentWise() throws {
         let t = try linkTree(); defer { try? FileManager.default.removeItem(at: t.base) }
         // canonicalPath collapses lexically and lands inside the mount; realPath lands where the write would.
+        // `x` must NOT exist (§0.9, measured): when the final component exists, `standardizedFileURL`
+        // resolves the link first and agrees with the kernel, so an existing-file case would pass
+        // against the unfixed code. The new-file case is exactly `write_file`'s.
+        #expect(!FileManager.default.fileExists(atPath: t.link.path + "/../x"))
         #expect(IrisPaths.canonicalPath(t.link.path + "/../x") == IrisPaths.canonicalPath(t.mount.path) + "/x")
         #expect(IrisPaths.realPath(t.link.path + "/../x") == real(t.base) + "/x")
         #expect(IrisPaths.realPath(t.link.path + "/config/permissions.json") == real(t.iris) + "/config/permissions.json")
@@ -2124,6 +2781,15 @@ Why both sides go through the helper: `realpath(3)` returns `/private/tmp/x` whe
         #expect(IrisPaths.realPathForAllow("~/../x") == nil)
         #expect(IrisPaths.realPathForAllow(t.link.path + "/config/x") == IrisPaths.realPath(t.link.path + "/config/x"))
         #expect(IrisPaths.realPathForAllow(t.mount.path + "/proj/./f") == real(t.mount) + "/proj/f", "a . is not a ..")
+    }
+
+    @Test("canonicalPath expands a tilde without PATH_MAX truncation (#275, third site)")
+    func canonicalPathDoesNotTruncateATilde() {
+        // The same pin `WatchMigrationTests` keeps for `WatchRoot.canonical`: `expandingTildeInPath`
+        // hands back a plausible, truncated path past PATH_MAX; `IrisEngine.expandTilde` keeps every byte.
+        let overLong = "~/" + String(repeating: "a", count: 2_000)
+        #expect(IrisPaths.canonicalPath(overLong).utf8.count > 2_000, "the tilde expansion must not truncate")
+        #expect(IrisPaths.canonicalPath("~/x") == IrisPaths.canonicalPath(NSHomeDirectory() + "/x"), "and an ordinary tilde still expands")
     }
 
     @Test("isUnderProtectedWriteDir sees through link/.. and through the link itself (R10 hardened)")
@@ -2180,23 +2846,37 @@ struct JobGrantAllowsTests {
     func writeInsideBoundaryOutside() throws {
         let t = try Self.tree(); defer { t.tearDown() }
         let g = t.grant
-        #expect(g.allows(toolName: "write_file", details: c(t.proj, "out.md"), cwd: nil))
-        #expect(g.allows(toolName: "write_file", details: c(t.proj, "new/dir/out.md"), cwd: nil), "a file under a directory that does not exist yet still resolves to the mount")
-        #expect(!g.allows(toolName: "write_file", details: c(t.project, "out.md"), cwd: nil), "/proj does not cover /project")
-        #expect(!g.allows(toolName: "write_file", details: c(t.base, "out.md"), cwd: nil), "one directory above the mount")
-        #expect(!g.allows(toolName: "write_file", details: c(t.proj) + "/../out.md", cwd: nil), ".. is refused outright")
-        #expect(!g.allows(toolName: "write_file", details: c(t.proj) + "/../proj/out.md", cwd: nil), "even a .. that would land inside")
-        #expect(g.allows(toolName: "write_file", details: c(t.proj), cwd: nil), "the mount itself")
-        #expect(g.allows(toolName: "write_file", details: "/private" + c(t.proj, "out.md"), cwd: nil), "the real spelling of the same directory")
+        #expect(g.allows(toolName: "write_file", details: c(t.proj, "out.md"), cwd: nil, sandboxed: false))
+        #expect(g.allows(toolName: "write_file", details: c(t.proj, "new/dir/out.md"), cwd: nil, sandboxed: false), "a file under a directory that does not exist yet still resolves to the mount")
+        #expect(!g.allows(toolName: "write_file", details: c(t.project, "out.md"), cwd: nil, sandboxed: false), "/proj does not cover /project")
+        #expect(!g.allows(toolName: "write_file", details: c(t.base, "out.md"), cwd: nil, sandboxed: false), "one directory above the mount")
+        #expect(!g.allows(toolName: "write_file", details: c(t.proj) + "/../out.md", cwd: nil, sandboxed: false), ".. is refused outright")
+        #expect(!g.allows(toolName: "write_file", details: c(t.proj) + "/../proj/out.md", cwd: nil, sandboxed: false), "even a .. that would land inside")
+        #expect(g.allows(toolName: "write_file", details: c(t.proj), cwd: nil, sandboxed: false), "the mount itself")
+        // Spelled under the granted directory, not merely resolving there: the firmlink spelling reaches
+        // the mount through `/private`, which the walk cannot descend from the mount's root.
+        #expect(!g.allows(toolName: "write_file", details: "/private" + c(t.proj, "out.md"), cwd: nil, sandboxed: false), "a spelling that is not under the granted directory falls to the allowlist")
+        #expect(g.allowedMount(toolName: "write_file", details: c(t.proj, "new/dir/out.md"), cwd: nil)?.source == c(t.proj))
+        #expect(g.relativeComponents(of: c(t.proj, "new/./dir/out.md"), cwd: nil, under: g.mounts[0]) == ["new", "dir", "out.md"])
+    }
+
+    @Test("a differently-cased spelling of a granted directory is allowed (§3): the walk, not the string, proves identity")
+    func differentlyCasedSpellingIsAllowed() throws {
+        let t = try Self.tree(); defer { t.tearDown() }
+        let upper = t.base.appendingPathComponent("PROJ").appendingPathComponent("out.md").path
+        let mount = try #require(t.grant.allowedMount(toolName: "write_file", details: upper, cwd: nil))
+        #expect(mount.source == c(t.proj), "the covering entry is chosen case-insensitively")
+        #expect(t.grant.relativeComponents(of: upper, cwd: nil, under: mount) == ["out.md"], "and the walk starts at the granted root, so on any volume the write lands in the granted directory")
+        #expect(!t.grant.allows(toolName: "write_file", details: t.base.appendingPathComponent("PROJECT/out.md").path, cwd: nil, sandboxed: false), "case-insensitive is not prefix-insensitive")
     }
 
     @Test("a relative path resolves against the working directory before it is judged")
     func relativeAgainstCwd() throws {
         let t = try Self.tree(); defer { t.tearDown() }
-        #expect(t.grant.allows(toolName: "write_file", details: "out.md", cwd: c(t.proj)))
-        #expect(!t.grant.allows(toolName: "write_file", details: "../out.md", cwd: c(t.proj)))
-        #expect(!t.grant.allows(toolName: "write_file", details: "out.md", cwd: c(t.base)))
-        #expect(!t.grant.allows(toolName: "write_file", details: "out.md", cwd: nil), "no cwd: nothing to resolve against, refused")
+        #expect(t.grant.allows(toolName: "write_file", details: "out.md", cwd: c(t.proj), sandboxed: false))
+        #expect(!t.grant.allows(toolName: "write_file", details: "../out.md", cwd: c(t.proj), sandboxed: false))
+        #expect(!t.grant.allows(toolName: "write_file", details: "out.md", cwd: c(t.base), sandboxed: false))
+        #expect(!t.grant.allows(toolName: "write_file", details: "out.md", cwd: nil, sandboxed: false), "no cwd: nothing to resolve against, refused")
     }
 
     @Test("a symlink from inside a mount to a protected directory resolves outside and is refused, with or without a .. (§0.9)")
@@ -2204,9 +2884,12 @@ struct JobGrantAllowsTests {
         let t = try Self.tree(); defer { t.tearDown() }
         let link = t.proj.appendingPathComponent("link")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: t.home.appendingPathComponent(".iris"))
+        // `permissions.json` does not exist in the tree (§0.9, measured): only the new-file case
+        // diverges from the kernel under the old lexical resolution, and it is `write_file`'s case.
+        #expect(!FileManager.default.fileExists(atPath: link.path + "/config/permissions.json"))
         for tool in ["write_file", "read_file"] {
-            #expect(!t.grant.allows(toolName: tool, details: link.path + "/config/permissions.json", cwd: nil), Comment(rawValue: tool))
-            #expect(!t.grant.allows(toolName: tool, details: link.path + "/../.iris/config/permissions.json", cwd: nil), Comment(rawValue: tool))
+            #expect(!t.grant.allows(toolName: tool, details: link.path + "/config/permissions.json", cwd: nil, sandboxed: false), Comment(rawValue: tool))
+            #expect(!t.grant.allows(toolName: tool, details: link.path + "/../.iris/config/permissions.json", cwd: nil, sandboxed: false), Comment(rawValue: tool))
         }
         // The lexical form of that last path is inside the mount — which is exactly the trap.
         #expect(IrisPaths.canonicalPath(link.path + "/../.iris/config/permissions.json").hasPrefix(c(t.proj)))
@@ -2216,25 +2899,28 @@ struct JobGrantAllowsTests {
     func readOnlyAndInnermost() throws {
         let t = try Self.tree(); defer { t.tearDown() }
         let g = t.grant
-        #expect(g.allows(toolName: "read_file", details: c(t.ro, "key"), cwd: nil))
-        #expect(!g.allows(toolName: "write_file", details: c(t.ro, "key"), cwd: nil))
-        #expect(!g.allows(toolName: "write_file", details: c(t.inner, "x"), cwd: nil))
-        #expect(g.allows(toolName: "read_file", details: c(t.inner, "x"), cwd: nil))
-        #expect(g.allows(toolName: "write_file", details: c(t.proj, "lockedfile"), cwd: nil), "a sibling name that merely starts with 'locked' is still under proj")
+        #expect(g.allows(toolName: "read_file", details: c(t.ro, "key"), cwd: nil, sandboxed: false))
+        #expect(!g.allows(toolName: "write_file", details: c(t.ro, "key"), cwd: nil, sandboxed: false))
+        #expect(!g.allows(toolName: "write_file", details: c(t.inner, "x"), cwd: nil, sandboxed: false))
+        #expect(g.allows(toolName: "read_file", details: c(t.inner, "x"), cwd: nil, sandboxed: false))
+        #expect(g.allows(toolName: "write_file", details: c(t.proj, "lockedfile"), cwd: nil, sandboxed: false), "a sibling name that merely starts with 'locked' is still under proj")
         #expect(g.covering(IrisPaths.realPath(c(t.inner, "x")))?.source == c(t.inner))
         #expect(g.covering(IrisPaths.realPath(c(t.project, "x"))) == nil)
     }
 
-    @Test("run_command is true; every other tool is false; a mountless grant allows only run_command")
+    @Test("run_command is the sandbox answer; every other tool is false; a mountless grant allows only run_command")
     func runCommandAndTheRest() throws {
         let t = try Self.tree(); defer { t.tearDown() }
-        #expect(t.grant.allows(toolName: "run_command", details: "rm -rf /", cwd: nil))
+        #expect(t.grant.allows(toolName: "run_command", details: "rm -rf /", cwd: nil, sandboxed: true))
+        #expect(!t.grant.allows(toolName: "run_command", details: "rm -rf /", cwd: nil, sandboxed: false),
+                "§0.4: the grant asks the sandbox question itself — a path that reaches approval unsandboxed gets false, not true")
         for tool in ["create_skill", "update_memory", "save_fact", "gmail_send_email", "register_directory_watcher", "set_workspace"] {
-            #expect(!t.grant.allows(toolName: tool, details: c(t.proj, "x"), cwd: nil), Comment(rawValue: tool))
+            #expect(!t.grant.allows(toolName: tool, details: c(t.proj, "x"), cwd: nil, sandboxed: false), Comment(rawValue: tool))
         }
         let netOnly = JobGrant(network: true)
-        #expect(netOnly.allows(toolName: "run_command", details: "curl x", cwd: nil))
-        #expect(!netOnly.allows(toolName: "write_file", details: c(t.proj, "x"), cwd: nil))
+        #expect(netOnly.allows(toolName: "run_command", details: "curl x", cwd: nil, sandboxed: true))
+        #expect(!netOnly.allows(toolName: "run_command", details: "curl x", cwd: nil, sandboxed: false))
+        #expect(!netOnly.allows(toolName: "write_file", details: c(t.proj, "x"), cwd: nil, sandboxed: false))
         #expect(netOnly.nearest(to: c(t.proj, "x"), cwd: nil) == nil)
     }
 
@@ -2261,7 +2947,7 @@ struct JobGrantAllowsTests {
     }
 ```
 
-What turns each red once green: `realPathIsComponentWise` — standardising before resolving (the old `canonicalPath` shape); `realPathForAllowRefuses` — dropping the `..`/absolute guard; `protectedWriteDirSeesThroughLinks` — `isUnderProtectedWriteDir` left on `canonicalPath`; `writeInsideBoundaryOutside` — a `hasPrefix` without the `/`, resolving only one side to a real path (the `/private` case), or accepting `..`; `relativeAgainstCwd` — resolving without `cwd`, or accepting a relative path with none; `symlinkToProtected` — comparing lexical paths; `readOnlyAndInnermost` — taking the first match instead of the longest; `runCommandAndTheRest` — a `default: true`; `nearestDirectory` — choosing the last tie, or returning nil for a `..` path; the runner case — `failureReason` ignoring `blockedNearest`.
+What turns each red once green: `realPathIsComponentWise` — standardising before resolving (the old `canonicalPath` shape); `realPathForAllowRefuses` — dropping the `..`/absolute guard; `protectedWriteDirSeesThroughLinks` — `isUnderProtectedWriteDir` left on `canonicalPath`; `canonicalPathDoesNotTruncateATilde` — `canonicalPath` left on `expandingTildeInPath`; `writeInsideBoundaryOutside` — a `hasPrefix` without the `/`, dropping the spelled-under-source requirement (the `/private` case), or accepting `..`; `differentlyCasedSpellingIsAllowed` — a case-sensitive `covering`, or relative components taken from the real path instead of the spelling; `relativeAgainstCwd` — resolving without `cwd`, or accepting a relative path with none; `symlinkToProtected` — comparing lexical paths; `readOnlyAndInnermost` — taking the first match instead of the longest; `runCommandAndTheRest` — a `default: true`, or `run_command → true` regardless of `sandboxed` (§0.4); `nearestDirectory` — choosing the last tie, or returning nil for a `..` path; the runner case — `failureReason` ignoring `blockedNearest`.
 
 - [ ] **Step 2: Run to verify they fail** — `scripts/test-filter.sh IrisPathsTests` and `scripts/test-filter.sh JobGrantAllowsTests`; Expected: compile errors (`realPath`, `allows`).
 
@@ -2274,7 +2960,7 @@ What turns each red once green: `realPathIsComponentWise` — standardising befo
     /// directory that does not exist cannot be a symlink. `canonicalPath` stays for the callers
     /// that store and display paths; this is for deciding.
     static func realPath(_ rawPath: String) -> String {
-        let expanded = (rawPath as NSString).expandingTildeInPath
+        let expanded = IrisEngine.expandTilde(rawPath)   // #275: never `expandingTildeInPath` on a decider
         let absolute = expanded.hasPrefix("/") ? expanded : URL(fileURLWithPath: expanded).path
         let components = absolute.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
             .filter { $0 != "." }
@@ -2306,13 +2992,13 @@ What turns each red once green: `realPathIsComponentWise` — standardising befo
     /// component is `..` (§0.9) — a model never needs either inside a grant, and refusing them
     /// costs nothing a person could not have phrased without them.
     static func realPathForAllow(_ rawPath: String) -> String? {
-        let expanded = (rawPath as NSString).expandingTildeInPath
+        let expanded = IrisEngine.expandTilde(rawPath)   // #275: never `expandingTildeInPath` on a decider
         guard expanded.hasPrefix("/") else { return nil }
         guard !expanded.split(separator: "/").contains("..") else { return nil }
         return realPath(expanded)
     }
 ```
-`isUnderProtectedWriteDir` (:159-165): replace both `Self.canonicalPath(…)` with `Self.realPath(…)`; the comment gains "Real paths, not `canonicalPath`: that one collapses `..` before following a symlink, and `link/../config` with `link → ~/.iris` is inside `config` on disk and outside it lexically (#282 §0.9)."
+`canonicalPath` (:170-171): `let expanded = IrisEngine.expandTilde(rawPath)` in place of `(rawPath as NSString).expandingTildeInPath` — #275's truncation, the third site; nothing else in it moves. `isUnderProtectedWriteDir` (:159-165): replace both `Self.canonicalPath(…)` with `Self.realPath(…)`; the comment gains "Real paths, not `canonicalPath`: that one collapses `..` before following a symlink, and `link/../config` with `link → ~/.iris` is inside `config` on disk and outside it lexically (#282 §0.9)."
 
 - [ ] **Step 4: `JobGrant.allows`/`covering`/`nearest`** — append to `JobGrant.swift`
 ```swift
@@ -2327,31 +3013,38 @@ extension JobGrant {
         mounts.compactMap { mount in IrisPaths.realPathForAllow(mount.source).map { (mount, $0) } }
     }
 
+    /// Case-insensitive (§3): APFS keeps the caller's spelling and the decision is only *whether*;
+    /// the descriptor walk (Task 4c) is what proves the file is really under the entry.
     func covering(_ realPath: String) -> ContainerMount? {
-        realMounts.filter { Self.isUnder(realPath, $0.real) }.max { $0.real.count < $1.real.count }?.mount
+        let lowered = realPath.lowercased()
+        return realMounts.filter { Self.isUnder(lowered, $0.real.lowercased()) }
+            .max { $0.real.count < $1.real.count }?.mount
     }
 
-    /// The path a file-tool call would actually touch, or nil when it cannot be judged for an allow
-    /// (relative with no cwd, or any `..`).
-    private static func allowPath(_ details: String, cwd: String?) -> String? {
-        IrisPaths.realPathForAllow(ToolExecutor.resolvePath(details, cwd: cwd))
+    // `relativeComponents(of:cwd:under:)` is already in place from Task 4c (shown there in full);
+    // `allowedMount` below is defined against it and nothing here redefines it.
+
+    /// The mount a file-tool call may use, or nil. Three conditions, all of them: the path is
+    /// spelled under the mount (`relativeComponents`), its real path is covered by the mount
+    /// (`covering` — a link from inside the spelling to outside resolves outside), and the mode fits.
+    func allowedMount(toolName: String, details: String, cwd: String?) -> ContainerMount? {
+        guard toolName == "write_file" || toolName == "read_file",
+              let real = IrisPaths.realPathForAllow(ToolExecutor.resolvePath(details, cwd: cwd)),
+              let mount = covering(real),
+              relativeComponents(of: details, cwd: cwd, under: mount) != nil else { return nil }
+        if toolName == "write_file", mount.readOnly { return nil }
+        return mount
     }
 
-    /// Pure (spec §3). `run_command` is the container's question — asked by the R20 check ahead
-    /// of the approval gate and by `executeApprovedCall` — so the grant answers yes and nothing
-    /// here ever puts a command on the host. Everything that is not the three named tools is `false`.
-    func allows(toolName: String, details: String, cwd: String?) -> Bool {
+    /// Pure (spec §3). `run_command` answers the sandbox question the caller hands in (§0.4) — the
+    /// R20 check in the dispatcher is the other lock, and neither trusts the other — so a path that
+    /// reaches approval unsandboxed gets `false`. The two file tools answer through `allowedMount`.
+    /// Everything else is `false`.
+    func allows(toolName: String, details: String, cwd: String?, sandboxed: Bool) -> Bool {
         switch toolName {
-        case "run_command":
-            return true
-        case "write_file":
-            guard let path = Self.allowPath(details, cwd: cwd), let mount = covering(path) else { return false }
-            return !mount.readOnly
-        case "read_file":
-            guard let path = Self.allowPath(details, cwd: cwd) else { return false }
-            return covering(path) != nil
-        default:
-            return false
+        case "run_command": return sandboxed
+        case "write_file", "read_file": return allowedMount(toolName: toolName, details: details, cwd: cwd) != nil
+        default: return false
         }
     }
 
@@ -2374,13 +3067,13 @@ extension JobGrant {
 
 - [ ] **Step 5: `BlockedCall.grantNearest` and `failureReason`** — JobRun.swift: `let grantNearest: String?` after `at`; init gains `grantNearest: String? = nil`; `CodingKeys` gains it; `init(from:)`: `grantNearest = try c.decodeIfPresent(String.self, forKey: .grantNearest)`. JobRunner.swift: `failureReason` (:1607) gains `blockedNearest: String? = nil`; the `.approval` arm returns `"needs approval: \(tool)" + (blockedNearest.map { " outside the grant (nearest: \($0))" } ?? "")`; the call at :970-972 passes `blockedNearest: blockedCall?.grantNearest`.
 
-- [ ] **Step 6: Run to verify they pass** — `scripts/test-filter.sh IrisPathsTests`, `scripts/test-filter.sh JobGrantAllowsTests` (6), `scripts/test-filter.sh JobRunnerTests`, `scripts/test-filter.sh PermissionCarveOutTests`, `scripts/test-filter.sh PermissionManagerTests`, `scripts/test-filter.sh GateEvaluatorTests` (`mountRefusal` calls `isUnderProtectedWriteDir`), `scripts/test-filter.sh WatchRootTests`. Expected: PASS with counts.
+- [ ] **Step 6: Run to verify they pass** — `scripts/test-filter.sh IrisPathsTests`, `scripts/test-filter.sh JobGrantAllowsTests` (7), `scripts/test-filter.sh JobRunnerTests`, `scripts/test-filter.sh PermissionCarveOutTests`, `scripts/test-filter.sh PermissionManagerTests`, `scripts/test-filter.sh GateEvaluatorTests` (`mountRefusal` calls `isUnderProtectedWriteDir`), `scripts/test-filter.sh WatchRootTests`. Expected: PASS with counts.
 
 - [ ] **Step 7: Full suite and commit**
 ```bash
 swift test; echo exit=$?
 git add Sources/iris/IrisPaths.swift Sources/iris/JobGrant.swift Sources/iris/JobRun.swift Sources/iris/JobRunner.swift Tests/irisTests/IrisPathsTests.swift Tests/irisTests/JobGrantGateTests.swift Tests/irisTests/JobRunnerTests.swift
-git commit -m "feat(jobs): the grant is matched on the component-wise real path with no '..'; R10 sees through link/..; the blocked call carries the nearest granted directory (#282)
+git commit -m "feat(jobs): the grant is matched on the component-wise real path with no '..', the covering entry chosen case-insensitively, run_command answers the sandbox question it is handed; R10 sees through link/..; canonicalPath stops truncating a tilde; the blocked call carries the nearest granted directory (#282)
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
@@ -2393,10 +3086,11 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `Sources/iris/AppState.swift:2192-2219` (the background branch), `:2356-2372` (`outsideGrantDenialNotice`, `recordBackgroundDenial`)
 - Modify: `Sources/iris/JobRunner.swift:1044-1063` (`approvalOffer`)
 - Modify: `Sources/iris/EventCard.swift:300-308` (`displayCopy` passes `grantNearest` through — nit)
+- Modify: `Sources/iris/iris.swift:3007-3015` (the dispatcher decides the granted mount once, before approval), `:3054,:3059` and `:3204,:3249` (`grantedMount:` threaded to `execute`), `:3079-3112` (`executeApprovedCall` decides it the same way)
 - Test: `Tests/irisTests/JobGrantGateTests.swift` (second suite, through `requestApproval`), `Tests/irisTests/ApproveAndRunTests.swift:~330-370` (`verdictFollowsTheExecutorsSandboxRule` restated), `Tests/irisTests/BackgroundApprovalTests.swift` (unchanged; restated by name below)
 
 **Interfaces:**
-- Consumes: `JobGrant.allows`, `nearest`, `BlockedCall.grantNearest`, `IrisPaths.realPath` (Task 5a); `Conversation.sandboxGrant` (Task 3a); `PermissionManager.isAllowed(... isBackground:)` (:32-64), `isProtectedWrite(toolName:path:)` (:73-75); `AppState.recordBackgroundDenial` (:2368), `unattendedDenialNotice` (:2358), `profileDenialNotice` (:2363); `JobGrantAllowsTests.tree()` / `c(_:_:)` (Task 5a, reused).
+- Consumes: `JobGrant.allows(toolName:details:cwd:sandboxed:)`, `nearest`, `BlockedCall.grantNearest`, `IrisPaths.realPath` (Task 5a); `requestApproval`'s existing `inSandbox:` parameter (AppState.swift:2195), which the dispatcher fills with `resolveUseSandbox`'s answer (iris.swift:3045-3050: `true` only for a `run_command` the conversation resolves to the container, `false` for every other tool) — so the sandbox answer §0.4 wants is already in the branch's hands, warning-free, with no second resolution; `Conversation.sandboxGrant` (Task 3a); `PermissionManager.isAllowed(... isBackground:)` (:32-64), `isProtectedWrite(toolName:path:)` (:73-75); `AppState.recordBackgroundDenial` (:2368), `unattendedDenialNotice` (:2358), `profileDenialNotice` (:2363); `JobGrantAllowsTests.tree()` / `c(_:_:)` (Task 5a, reused).
 - Produces:
 
 ```swift
@@ -2405,16 +3099,27 @@ static let outsideGrantDenialNotice = "Not run: `%@` needs approval — outside 
 // the background branch of requestApproval, in this order: R10 (explicit, first) → grant → allowlist → record
 // JobRunner.approvalOffer: inSandbox: call.toolName == "run_command"
 // EventCard.displayCopy(of:) keeps grantNearest
+// AppState.requestApproval gains `grantedMount: ContainerMount? = nil` — the dispatcher's decision, consumed, never recomputed
+// IrisEngine (the routing half of §0.13): ONE decision, ONE consumer chain, NO fallback —
+//   let grantedMount = sandboxGrant?.allowedMount(toolName: functionCall.name, details: details, cwd: workspacePath)   // decided once, before approval
+//   requestApproval(…, inSandbox: useSandbox, grantedMount: grantedMount)                                             // the gate consumes it
+//   executeToolWithHooks(…, grant: sandboxGrant, grantedMount: grantedMount) → executor.execute(…, grantedMount:)     // the executor consumes it
+// INVARIANT (stated here, pinned by `toggleBetweenDecisionAndGateIsRefused` and `executorRoutesToTheWalk`):
+//   a granted run's `write_file`/`read_file` reach Foundation on no branch — not through the gate's allowlist step
+//   (skipped for the two file tools when a grant is present), not through a nil decision at the executor (a refusal),
+//   not through an approved call outside the grant (refused with the same sentence; the remedy is a re-schedule, §0.10).
 ```
 
 The branch after this task (spec §3, verbatim shape):
 ```
 if conversation.isBackground:
     if permissions.isProtectedWrite(toolName, resolvedPath) → record(.approval) → false     (R10, absolute, first; resolvedPath via resolvePath(cwd:), judged by realPath inside)
-    if let grant = conversation.sandboxGrant, grant.allows(toolName, details, workspace) → true
-    if permissions.isAllowed(..., isBackground: true) → true
+    if conversation.sandboxGrant != nil, toolName is write_file/read_file → grantedMount != nil    (the dispatcher's decision, consumed as given; the allowlist is NOT consulted for these two — H1)
+    if let grant = conversation.sandboxGrant, grant.allows(toolName, details, workspace, sandboxed: inSandbox) → true   (run_command; inSandbox IS the dispatcher's `resolveUseSandbox` answer)
+    if permissions.isAllowed(..., isBackground: true) → true                                          (every other tool, and every ungranted run)
     record BlockedCall(.approval, grantNearest: grant?.nearest(...)) → false
 ```
+Departure from §3's literal order, forced by §0.13's invariant: in a granted run the two file tools are the grant's alone. If the allowlist could still allow one outside the grant, the executor would have to reach Foundation for it — the branch that does not exist — or refuse what the gate allowed. So a `permissions.json` rule cannot put a granted run's `write_file` on the host path; an ungranted run's allowlisted write is exactly as today (`BackgroundApprovalTests.backgroundAllowlistedCallRuns`, restated by name). Task 7's Grants row says so.
 R10 used to be reached *through* `isAllowed` (PermissionManager.swift:39-40); it is now asked explicitly first so a grant can never be consulted about a protected write, whatever a hand-edited policy row holds — and, since Task 5a, `isProtectedWrite` sees through `link/..`. `isAllowed`'s own copy stays (deny-side, harmless twice).
 
 - [ ] **Step 1: Write the failing tests** — append to `Tests/irisTests/JobGrantGateTests.swift`:
@@ -2437,12 +3142,28 @@ struct JobGrantApprovalTests {
         return (app, cid)
     }
 
+    @Test("a granted run_command is allowed only with the sandbox answer in hand (§0.4)")
+    func grantedCommandNeedsTheSandboxAnswer() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let (app, cid) = background(t, grant: t.grant)
+        #expect(await app.requestApproval(toolName: "run_command", details: "git status", args: ["command": .string("git status")],
+                                          workspace: c(t.proj), conversationId: cid, inSandbox: true))
+        #expect(app.takeBackgroundDenials(for: cid).isEmpty)
+        // The same call arriving with the dispatcher's answer "not sandboxed" (R20 would have refused
+        // it first; this is the second lock) falls to the allowlist and is recorded.
+        #expect(!(await app.requestApproval(toolName: "run_command", details: "git status", args: ["command": .string("git status")],
+                                            workspace: c(t.proj), conversationId: cid, inSandbox: false)))
+        #expect(app.takeBackgroundDenials(for: cid).first?.toolName == "run_command")
+    }
+
     @Test("a granted background conversation runs a write inside the grant without a denial or a dialog")
     func grantedWriteIsAllowed() async throws {
         let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
         let (app, cid) = background(t, grant: t.grant)
+        let decided = t.grant.allowedMount(toolName: "write_file", details: "out.md", cwd: c(t.proj))
         let ok = await app.requestApproval(toolName: "write_file", details: "out.md",
-                                           args: ["path": .string("out.md")], workspace: c(t.proj), conversationId: cid)
+                                           args: ["path": .string("out.md")], workspace: c(t.proj), conversationId: cid,
+                                           grantedMount: decided)
         #expect(ok)
         #expect(app.pendingApprovals.isEmpty && app.takeBackgroundDenials(for: cid).isEmpty)
         #expect(app.conversations.first { $0.id == cid }?.messages.isEmpty == true)
@@ -2483,16 +3204,27 @@ struct JobGrantApprovalTests {
         #expect(app.takeBackgroundDenials(for: cid).first?.grantNearest == c(t.proj))
     }
 
-    @Test("a miss falls to the allowlist, and a miss the allowlist does not cover is recorded with the nearest directory")
+    @Test("in a granted run the file tools are the grant's alone: an allowlisted write outside it is recorded with the nearest directory; other tools still fall to the allowlist")
     func missFallsToAllowlistThenRecords() async throws {
         let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
         let (app, cid) = background(t, grant: t.grant)
         let outside = c(t.base, "elsewhere.md")
         let rules = t.proj.appendingPathComponent(".iris")
         try FileManager.default.createDirectory(at: rules, withIntermediateDirectories: true)
-        try JSONEncoder().encode([PermissionRule(toolName: "write_file", details: outside)])
+        try JSONEncoder().encode([PermissionRule(toolName: "write_file", details: outside),
+                                  PermissionRule(toolName: "run_command", details: "make lint")])
             .write(to: rules.appendingPathComponent("permissions.json"))
-        #expect(await app.requestApproval(toolName: "write_file", details: outside, workspace: c(t.proj), conversationId: cid))
+        // H1's invariant: a granted run's write reaches Foundation on no branch, so the allowlist
+        // cannot widen the two file tools — the decision (nil here) is the whole answer.
+        #expect(!(await app.requestApproval(toolName: "write_file", details: outside, args: ["path": .string(outside)],
+                                            workspace: c(t.proj), conversationId: cid, grantedMount: nil)))
+        #expect(app.takeBackgroundDenials(for: cid).first?.grantNearest == c(t.proj))
+        // Every other tool keeps the allowlist step (here a command the sandbox answer refused).
+        #expect(await app.requestApproval(toolName: "run_command", details: "make lint", workspace: c(t.proj),
+                                          conversationId: cid, inSandbox: false))
+        // And an ungranted background run's allowlisted write is exactly as today.
+        let (plainApp, plainCid) = background(t, grant: nil)
+        #expect(await plainApp.requestApproval(toolName: "write_file", details: outside, workspace: c(t.proj), conversationId: plainCid))
 
         let other = c(t.base, "other.md")
         #expect(!(await app.requestApproval(toolName: "write_file", details: other, args: ["path": .string(other)],
@@ -2538,7 +3270,7 @@ struct JobGrantApprovalTests {
 }
 ```
 
-What turns each red once green: `grantedWriteIsAllowed` — the grant step after the record; `protectedWriteBeatsTheGrant` — the grant step before R10; `linkDotDotIsRecordedAsProtected` — R10 still on `canonicalPath`, or the explicit R10 check missing (the grant would then judge `link/..` and refuse it as "outside", with a nearest); `missFallsToAllowlistThenRecords` — omitting `grantNearest` from the recorded call or the allowlist step; `ungrantedUnchanged` — using the new notice for every denial; `readOnlyProfileRefusesFirst` — moving `profileRefusal` after the approval gate.
+What turns each red once green: `grantedCommandNeedsTheSandboxAnswer` — passing `sandboxed: true` (or the old `run_command → true`) instead of `inSandbox`; `grantedWriteIsAllowed` — the grant step after the record, or ignoring `grantedMount`; `missFallsToAllowlistThenRecords` — letting the allowlist widen a granted run's file tools; `toggleBetweenDecisionAndGateIsRefused` — recomputing `allowedMount` in the gate, or a Foundation branch under a grant in the executor; `protectedWriteBeatsTheGrant` — the grant step before R10; `linkDotDotIsRecordedAsProtected` — R10 still on `canonicalPath`, or the explicit R10 check missing (the grant would then judge `link/..` and refuse it as "outside", with a nearest); `missFallsToAllowlistThenRecords` — omitting `grantNearest` from the recorded call or the allowlist step; `ungrantedUnchanged` — using the new notice for every denial; `readOnlyProfileRefusesFirst` — moving `profileRefusal` after the approval gate.
 
 `ApproveAndRunTests.verdictFollowsTheExecutorsSandboxRule` (:~330-370) → renamed `verdictFollowsTheToolsActualPath`: the first block expects the **host** context — `#expect(!writeSpy.lastPrompt.contains(inVM), "a write_file runs on the host whatever the profile; the verdict is asked about the host")`; the `run_command` and `send_mail` blocks are unchanged. Red if `approvalOffer` keeps `job.profile == .mutating ||`.
 
@@ -2546,7 +3278,7 @@ Kept green and restated by name (run them, quote the counts): `BackgroundApprova
 
 - [ ] **Step 2: Run to verify they fail** — `scripts/test-filter.sh JobGrantApprovalTests`; Expected: `grantedWriteIsAllowed` fails (`ok == false`), `missFallsToAllowlistThenRecords` fails on `grantNearest`, the rest compile and pass or fail on the notice.
 
-- [ ] **Step 3: `AppState.requestApproval`** (:2210-2219) becomes
+- [ ] **Step 3: `AppState.requestApproval`** — the signature (:2192-2196) gains `grantedMount: ContainerMount? = nil` after `vibecopEnabled:`; the branch (:2210-2219) becomes
 ```swift
         if let id = conversationId, let conversation = conversations.first(where: { $0.id == id }), conversation.isBackground {
             // R10 first and on its own (#282 §3): a write into a protected directory is refused
@@ -2559,10 +3291,21 @@ Kept green and restated by name (run them, quote the counts): `BackgroundApprova
             }
             // §0.4, §0.5: inside the grant, no human is needed. A `run_command` reaching here has
             // already passed the R20 check in the dispatcher, so "yes" is a sandboxed yes.
-            if let grant = conversation.sandboxGrant, grant.allows(toolName: toolName, details: details, cwd: workspace) {
-                return true
+            if let grant = conversation.sandboxGrant {
+                // §0.13, one decision: the dispatcher decided the covering mount before this call,
+                // and the two file tools are judged by that decision alone — never re-derived here,
+                // and never widened by the allowlist, because the executor has no Foundation branch
+                // for a granted run. A nil decision falls straight to the record below.
+                if toolName == "write_file" || toolName == "read_file" {
+                    if grantedMount != nil { return true }
+                } else if grant.allows(toolName: toolName, details: details, cwd: workspace, sandboxed: inSandbox) {
+                    // `inSandbox` is `resolveUseSandbox`'s answer for this call (iris.swift:3045-3050):
+                    // the conversation's resolution for a `run_command` — the parameter §0.4 asks for.
+                    return true
+                }
             }
-            if permissions.isAllowed(toolName: toolName, details: details, workspace: workspace, isBackground: true) {
+            if !(conversation.sandboxGrant != nil && (toolName == "write_file" || toolName == "read_file")),
+               permissions.isAllowed(toolName: toolName, details: details, workspace: workspace, isBackground: true) {
                 return true
             }
             recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval,
@@ -2586,15 +3329,93 @@ Beside `unattendedDenialNotice` (:2358):
         appendMessage(role: .system, content: notice, to: conversationId)
 ```
 
+`executeApprovedCall` (iris.swift:3079-3112) never enters `requestApproval` and calls no `allows`: the person's click is the approval and R10/R13/R20 stay its backstops. What it does pass on is the grant (Task 4b), its own `useSandbox`, and `grantedMount: grant?.allowedMount(toolName: call.toolName, details: call.details, cwd: call.cwd)` — so an approved `write_file`/`read_file` *inside* the grant goes through the same descriptor walk (Task 4c) as a fire's; one that is *not* inside it at click time (approved outside the grant, or an entry that has since drifted to a link) is refused with `notDecidedInsideGrant` rather than run through Foundation — a granted run's file tools reach Foundation on no branch, and a click cannot widen a grant (§0.10); an approved `run_command` runs with the grant's mounts or is refused by R20 as today.
+
+- [ ] **Step 3b: the dispatcher decides the granted mount once** — iris.swift, in the generic branch right after `needsApproval`/`details` are set (:3007-3015):
+```swift
+            // §0.13: the mount a granted file-tool call may use is decided here, once, from the
+            // same grant the approval gate reads — and both the gate and the executor consume this
+            // value. Neither recomputes it: a component toggled between two computations is
+            // exactly the race the walk exists to close.
+            let grantedMount = needsApproval && functionCall.name != "run_command"
+                ? sandboxGrant?.allowedMount(toolName: functionCall.name, details: details, cwd: workspacePath) : nil
+```
+`requestApproval(...)` (:3047-3052) gains `grantedMount: grantedMount`; both `executeToolWithHooks` calls (:3054, :3059) pass `grant: sandboxGrant, grantedMount: grantedMount`; `executeToolWithHooks` (:3204) gains `grantedMount: ContainerMount? = nil` and passes it to `executor.execute` (:3249). `executeApprovedCall` (:3109) passes `grantedMount: grant?.allowedMount(toolName: call.toolName, details: call.details, cwd: call.cwd)` — and, by the executor's rule, an approved `write_file`/`read_file` of a **granted** job that is *not* inside the grant at click time (a write the person approved outside it, or an entry that has since drifted) is refused with `notDecidedInsideGrant`, not run through Foundation: the click cannot widen a grant (§0.10); the remedy is a re-schedule. State this on the card's refusal: `runApproved` reports the executor's sentence as the approved run's outcome as it does today for any refusal. Add to `JobGrantApprovalTests`:
+```swift
+    @Test("through the engine, a granted write is routed to the walk: a link inside the mount is refused by the walk, a plain write lands")
+    func engineRoutesGrantedWritesToTheWalk() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        // The link points INSIDE the grant (proj/real), so the decision allows — the real path is
+        // covered — and only the walk refuses. A link to a sibling outside would be refused by the
+        // decision first and would not exercise the routing at all (M3).
+        let real = t.proj.appendingPathComponent("real")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: t.proj.appendingPathComponent("link"), withDestinationURL: real)
+        func turn(_ path: String) async throws -> (result: String, state: AppState) {
+            let store = try ConversationStore.inMemory()
+            let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+            state.conversations.removeAll()
+            state.permissions = PermissionManager(paths: IrisPaths(root: t.home.appendingPathComponent(".iris")))
+            let call = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [
+                Part(functionCall: FunctionCall(name: "write_file", args: ["path": .string(path), "content": .string("hi")]))]))], usageMetadata: nil)
+            let done = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "done")]))], usageMetadata: nil)
+            let engine = IrisEngine(state: state, tier: .medium, client: FakeLLMClient(responses: [call, done]),
+                                    protectionEnabled: false, sessionPeerCount: 0)
+            let cid = state.createNewConversation(isBackground: true, select: false)
+            state.setJobProfile(for: cid, .mutating)
+            state.setWorkspace(for: cid, path: c(t.proj))
+            state.setSandboxGrant(for: cid, t.grant)
+            await engine.processInput("go", source: "job:x", conversationId: cid)
+            let results = state.conversations.first { $0.id == cid }?.history.flatMap { $0.parts }
+                .compactMap { $0.functionResponse?.response["result"]?.stringValue } ?? []
+            return (results.joined(separator: "\n"), state)
+        }
+        let plain = try await turn("out.md")
+        #expect(plain.result.contains("Successfully wrote to \(c(t.proj))/out.md"))
+        #expect(FileManager.default.fileExists(atPath: c(t.proj, "out.md")))
+        let viaLink = try await turn("link/x.md")
+        #expect(viaLink.result.contains(GrantedFileError.symlink(component: "link").message), "Foundation would have followed the link into proj/real; the walk refused it")
+        #expect(!FileManager.default.fileExists(atPath: real.appendingPathComponent("x.md").path))
+    }
+
+    @Test("a component toggled link → directory → link across the three instants is refused: the gate consumes the decision, the executor has no fallback (H1)")
+    func toggleBetweenDecisionAndGateIsRefused() async throws {
+        let t = try JobGrantAllowsTests.tree(); defer { t.tearDown() }
+        let sub = t.proj.appendingPathComponent("sub")
+        let target = c(t.proj, "sub/authorized_keys")
+        // t1 — the dispatcher decides while `sub` is a link to somewhere outside: nil.
+        try FileManager.default.createSymbolicLink(at: sub, withDestinationURL: t.base.appendingPathComponent("project"))
+        let decided = t.grant.allowedMount(toolName: "write_file", details: target, cwd: c(t.proj))
+        #expect(decided == nil)
+        // t2/t3 — the attacker's `cmd &` swaps it back to a real directory before the gate runs.
+        try FileManager.default.removeItem(at: sub)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        #expect(t.grant.allowedMount(toolName: "write_file", details: target, cwd: c(t.proj)) != nil, "a gate that recomputed would now say yes")
+        let (app, cid) = background(t, grant: t.grant)
+        let ok = await app.requestApproval(toolName: "write_file", details: target, args: ["path": .string(target)],
+                                           workspace: c(t.proj), conversationId: cid, grantedMount: decided)
+        #expect(!ok, "the gate consumes the decision it was handed")
+        #expect(app.takeBackgroundDenials(for: cid).first?.grantNearest == c(t.proj))
+        // t4 — and had it somehow reached the executor with that nil decision, while `sub` is a link again:
+        try FileManager.default.removeItem(at: sub)
+        try FileManager.default.createSymbolicLink(at: sub, withDestinationURL: t.base.appendingPathComponent("project"))
+        let out = await ToolExecutor().execute(name: "write_file", args: ["path": .string(target), "content": .string("ssh-ed25519 …")],
+                                               cwd: c(t.proj), grant: t.grant, grantedMount: decided)
+        #expect(out == ToolExecutor.notDecidedInsideGrant("write_file"))
+        #expect(!FileManager.default.fileExists(atPath: c(t.project, "authorized_keys")))
+    }
+```
+Red if the dispatcher passes no `grantedMount` (the write would take Foundation and follow the link into `proj/real/x.md`), if `requestApproval` recomputes `allowedMount` instead of consuming `grantedMount` (the toggle test's gate would say yes), or if the executor keeps a Foundation branch under a grant (`authorized_keys` appears in `project/`).
+
 - [ ] **Step 4: `approvalOffer` and `displayCopy`** — JobRunner.swift:1059: `let sandboxed = call.toolName == "run_command"`, comment rewritten: a `write_file` runs on the host at the granted path whatever the profile (§3), so the verdict is asked about the host; only a command is the container's. EventCard.swift:306-307: `BlockedCall(toolName: call.toolName, args: args, cwd: call.cwd, reason: call.reason, at: call.at, grantNearest: call.grantNearest)` — the card's display copy keeps what the row knows.
 
-- [ ] **Step 5: Run to verify they pass** — `scripts/test-filter.sh JobGrantApprovalTests` (6), `scripts/test-filter.sh ApproveAndRunTests`, `scripts/test-filter.sh BackgroundApprovalTests`, `scripts/test-filter.sh PermissionCarveOutTests`, `scripts/test-filter.sh JobProfileTests`, `scripts/test-filter.sh SelfWriteHookTests`, `scripts/test-filter.sh EventCardTests`. Expected: PASS with counts.
+- [ ] **Step 5: Run to verify they pass** — `scripts/test-filter.sh JobGrantApprovalTests` (9), `scripts/test-filter.sh GrantedWriteTests`, `scripts/test-filter.sh ApproveAndRunTests`, `scripts/test-filter.sh BackgroundApprovalTests`, `scripts/test-filter.sh PermissionCarveOutTests`, `scripts/test-filter.sh JobProfileTests`, `scripts/test-filter.sh SelfWriteHookTests`, `scripts/test-filter.sh EventCardTests`. Expected: PASS with counts.
 
 - [ ] **Step 6: Full suite and commit**
 ```bash
 swift test; echo exit=$?
-git add Sources/iris/AppState.swift Sources/iris/JobRunner.swift Sources/iris/EventCard.swift Tests/irisTests/JobGrantGateTests.swift Tests/irisTests/ApproveAndRunTests.swift
-git commit -m "feat(jobs): the approval gate allows a granted run's file tools inside the grant after R10 and before the allowlist; the outside-the-grant notice; Vibecop is asked about the path a tool actually takes (#282)
+git add Sources/iris/AppState.swift Sources/iris/JobRunner.swift Sources/iris/EventCard.swift Sources/iris/iris.swift Tests/irisTests/JobGrantGateTests.swift Tests/irisTests/ApproveAndRunTests.swift
+git commit -m "feat(jobs): the approval gate allows a granted run's file tools inside the grant after R10 and before the allowlist, judging a command by the sandbox answer it is handed; the dispatcher routes granted file tools to the descriptor walk; the outside-the-grant notice; Vibecop is asked about the path a tool actually takes (#282)
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
@@ -2617,7 +3438,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```swift
 // JobsCommand
 static func policySummary(for job: Job) -> String        // gains "grant" after "mutating": "mutating · grant · overlap queue"
-static func grantLine(job: Job) -> String?               // "`deploy` — read-write /Users/me/proj (working directory) · read-only /Users/me/.config/gh · network on"; nil when ungranted
+static func grantLine(job: Job) -> String?               // "`deploy` — read-write /Users/me/proj (working directory) · read-only /Users/me/deploy-key · network on"; "… · network off (host reachable)" for the isolated case (§0.7); nil when ungranted
 // jobsListJSON: per-job "grants": {"mounts":[...strings...],"network":Bool} or null
 // EventCard
 let network: Bool                                        // default false; decodeIfPresent ?? false; passed at the three runner card sites as `grant?.network == true` where `grant` is the profile-guarded grant of Task 3b
@@ -2632,7 +3453,7 @@ var transcriptLine: String                               // + " (network)" when 
         var j = job(name)
         j.profile = .mutating
         j.policy.grants = JobGrant(mounts: [ContainerMount(source: "/Users/me/proj"),
-                                            ContainerMount(source: "/Users/me/.config/gh", readOnly: true)], network: network)
+                                            ContainerMount(source: "/Users/me/deploy-key", readOnly: true)], network: network)
         return j
     }
 
@@ -2640,7 +3461,7 @@ var transcriptLine: String                               // + " (network)" when 
     func grantLineAndColumn() throws {
         let j = granted()
         #expect(JobsCommand.policySummary(for: j) == "mutating · grant")
-        let expected = "`deploy` — read-write /Users/me/proj (working directory) · read-only /Users/me/.config/gh · network on"
+        let expected = "`deploy` — read-write /Users/me/proj (working directory) · read-only /Users/me/deploy-key · network on"
         #expect(JobsCommand.grantLine(job: j) == expected)
         #expect(JobsCommand.grantLine(job: job()) == nil)
 
@@ -2649,7 +3470,8 @@ var transcriptLine: String                               // + " (network)" when 
                                      unacknowledged: [], unreadableJobs: 0, now: Date())
         let table = try #require(out.range(of: "| deploy |"))
         let line = try #require(out.range(of: expected))
-        let second = try #require(out.range(of: "`second` — read-write /Users/me/proj (working directory) · read-only /Users/me/.config/gh · network off"))
+        let second = try #require(out.range(of: "`second` — read-write /Users/me/proj (working directory) · read-only /Users/me/deploy-key · network off (host reachable)"),
+                                  "the listing says what an isolated container can still reach (§0.7)")
         let footer = try #require(out.range(of: "Tokens today, all jobs:"))
         #expect(table.lowerBound < line.lowerBound && line.lowerBound < second.lowerBound && second.lowerBound < footer.lowerBound)
         #expect(out.contains("\n\n" + expected + "\n\n"), "its own paragraph, not a run-on line")
@@ -2701,7 +3523,7 @@ var transcriptLine: String                               // + " (network)" when 
 (`encodedContent` sorts keys, so `"network":false,` is the exact substring; if `network` sorts last the trailing comma differs — adjust the replaced substring to `,"network":false` after one look at the JSON.)
 `JobRunnerGrantTests.fireStampsWorkspaceGrantAndPin` — add: the Activity card for the run has `network == false`; add a second fire of `grantedJob(dir, network: true, name: "open")` and assert its card has `network == true`.
 
-Red once green if: `policySummary` forgets `grant`; `grantLine` is emitted inside the table; `jobsListJSON` encodes `grants` as the policy string; `EventCard.init(from:)` uses `decode`; a card site omits `network:`.
+Red once green if: `policySummary` forgets `grant`; `grantLine` is emitted inside the table or prints `describe()` without the host note; `jobsListJSON` encodes `grants` as the policy string; `EventCard.init(from:)` uses `decode`; a card site omits `network:`.
 
 - [ ] **Step 2: Run to verify they fail** — `scripts/test-filter.sh JobsCommandTests`; Expected: compile error `grantLine`.
 
@@ -2711,7 +3533,7 @@ Red once green if: `policySummary` forgets `grant`; `grantLine` is emitted insid
     /// the result sentence used when it was created, so the two never disagree.
     static func grantLine(job: Job) -> String? {
         guard let grant = job.policy.grants else { return nil }
-        return "`\(job.name)` — \(grant.describe())"
+        return "`\(job.name)` — \(grant.describe(hostNote: true))"
     }
 ```
 `render` (:160-170): the `watchLines` array becomes `let extraLines = jobs.compactMap { job -> String? in if case .fsEvent = job.trigger { return watchLine(...) }; return nil } + jobs.compactMap(grantLine(job:))` — watch lines first, then grant lines, each its own paragraph, all before the daily footer.
@@ -2765,7 +3587,7 @@ grep -rn -i "behind the user's allowlist\|behind the allowlist\|no workspace and
 | `docs/jobs.md:288-300` (Watches, self-write filter) | "files written by `run_command`, on the host or in the container" — true, but silent about granted jobs | a granted job that writes into a watched folder via a command would loop | Append: "A granted job that writes into a watched folder should therefore use `write_file`, which the filter sees; a command's writes in the container it cannot." |
 | `docs/jobs.md:494-497` | "A tool call from a background conversation is checked against the deterministic allowlist … and anything else is denied on the spot" | the grant is consulted between R10 and the allowlist | "…is checked, after the protected-directory rule, against the job's grant — `run_command` always, `write_file` under a read-write granted directory, `read_file` under any — then against the deterministic allowlist; anything else is denied on the spot. A call refused outside a grant says so on the card: `needs approval: write_file outside the grant (nearest: /Users/me/proj)`." |
 | `docs/jobs.md:523-575` (Approve and run) | describes the approved call's conversation without the grant | the approved call reopens with the grant and is refused on drift | Add one sentence: "An approved call of a granted job runs with the same grant — the same mounts, network and working directory — and is refused, with the approval left unspent, if a granted directory has since moved (`grant source unavailable: <path>`)." |
-| `docs/jobs.md` new section **Grants** after Profiles | — | §1–§5 need a home | Write: what a grant is (`mounts`, `network`), the refusals in order, the working-directory rule, the mutating-only rule, what the grant allows unattended (§3's list and what it does not change: memory/skill tools, save_fact, MCP, self-write filter), re-check at every fire and click with the two reasons, `network off` = `iris-isolated` internal network with `--no-dns` and the fail-closed create, replace/remove on re-schedule and re-register, the watched folder is not implicit, the `/jobs` column and paragraph, `list_jobs.grants`, the card's `network`, the container ends with the run, and that an older build reads a granted job as ungranted and re-saving under it drops the grant. |
+| `docs/jobs.md` new section **Grants** after Profiles | — | §1–§5 need a home | Write: what a grant is (`mounts`, `network`), the refusals in order including the credential-store list (§0.12) verbatim and its sentence, the working-directory rule, the mutating-only rule, what the grant allows unattended (§3's list and what it does not change: memory/skill tools, save_fact, MCP, self-write filter), that a granted run's `write_file`/`read_file` go through a descriptor walk and refuse any symlink under the mount (§0.13 — name the target instead) and that in a granted run those two tools are the grant's alone — a `permissions.json` rule cannot put them on the host path, and Approve-and-run of one outside the grant is refused (the remedy is a re-schedule), re-check at every fire and click with the two reasons, `network off` = `iris-isolated` internal network with `--no-dns` and the fail-closed create **and that it still reaches the Mac's own listeners — no egress, no LAN, not no host (measured; `/jobs` prints `network off (host reachable)`)**, nested mounts compose inside the container too (measured: with `/a` read-write and `/a/b` read-only a command's write under `/a/b` fails with `EROFS`; the file-tool gate applies the same innermost-wins rule), replace/remove on re-schedule and re-register, the watched folder is not implicit, the `/jobs` column and paragraph, `list_jobs.grants`, the card's `network`, the container ends with the run, and that an older build reads a granted job as ungranted and re-saving under it drops the grant. |
 | `README.md:20` | "the other tools run on the host behind the allowlist, as they always do" | a grant also lets them through | "…on the host behind the allowlist **or the job's grant**, as they always do). A `mutating` job can be created with a grant — `mounts` (read-write unless `:ro`; the first read-write one is its working directory) and `network` (off by default: the VM sits on a host-only network) — under which its commands run with those directories mounted and its `write_file`/`read_file` are allowed unattended inside them, re-checked against the disk at every fire; `/jobs` shows the grant and the card says `network` when a run had it." |
 | `Sources/iris/iris.swift:1204` | "so a job whose work needs approval stops and says so." | a covered call runs | Done in Task 2b (`unless the job was created with a grant that covers it`); verify with the grep. |
 | `Sources/iris/Job.swift:3-11` | "tools execute on the host behind the user's allowlist, as they do in any run" | grant | "…behind the user's allowlist or the job's grant (#282)…" |
@@ -2796,22 +3618,22 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 Launch the branch with `scripts/run-dev.sh` (a bare `swift run` hangs on a Keychain prompt). Fresh conversations; clean up the jobs and the temp folder afterwards. Record the create argv from the runner's log and both curl results in the PR body. Paths below are as Iris stores and prints them: `canonicalPath` strips `/private`, so the grant, the argv, the card and `/jobs` all say `/tmp/grant-demo` (L2); only the R10/grant *decision* uses the `/private` real path, and nothing prints that.
 
-1. `mkdir -p /tmp/grant-demo`; in a chat: "Schedule a mutating job named grant-demo every 10 minutes with mounts /tmp/grant-demo and network off that writes hello.md into its working directory and then runs `git init && git status`." Then `/jobs run grant-demo`. Expect: one **completed** run, no approval card, `/tmp/grant-demo/hello.md` on the host, `.git` under it, and the runner's log line with `run -d --name iris-… --mount type=virtiofs,source=/tmp/grant-demo,target=/tmp/grant-demo --network iris-isolated --no-dns -w /tmp/grant-demo …`.
-2. Re-schedule the same name with a prompt that runs `curl -sS -m 10 https://example.com | head -c 80` and `network: false`; `/jobs run` → the run's transcript shows curl failing (no route / could not resolve). Re-schedule with `network: true`; `/jobs run` → curl succeeds, and the card's metadata line ends `· network`.
+1. `mkdir -p /tmp/grant-demo`; in a chat: "Schedule a mutating job named grant-demo every 10 minutes with mounts /tmp/grant-demo and network off that writes hello.md into its working directory and then runs `git init && git status`." Then `/jobs run grant-demo`. Expect: one **completed** run, no approval card, `/tmp/grant-demo/hello.md` on the host (if the model spells the path `/private/tmp/grant-demo/hello.md`, that spelling is not under the granted directory and falls to the allowlist — the card then names the nearest directory; re-run with the prompt saying "the file hello.md in your working directory"), `.git` under it, and the runner's log line with `run -d --name iris-… --mount type=virtiofs,source=/tmp/grant-demo,target=/tmp/grant-demo --network iris-isolated --no-dns -w /tmp/grant-demo …`.
+2. Start `python3 -m http.server 8000` in a terminal and note the Mac's `en0` address (`ipconfig getifaddr en0`). Re-schedule the same name with a prompt that runs `curl -sS -m 10 https://example.com | head -c 80; curl -sS -m 5 http://<en0>:8000/ | head -c 80` and `network: false`; `/jobs run` → the transcript shows the external curl failing (no route / could not resolve) **and the host probe answering** (§0.7: no egress, no LAN, not no host). Re-schedule with `network: true`; `/jobs run` → both succeed, and the card's metadata line ends `· network`. `/jobs` for the isolated version reads `· network off (host reachable)`.
 3. Re-schedule with a prompt that writes `/tmp/outside.md` (one directory above the mount) → the run ends **blocked on approval**; `get_job_run` (or the `/jobs` failure line, when the run left no reply) shows the row's `failureReason` as `needs approval: write_file outside the grant (nearest: /tmp/grant-demo)`, and the transcript line is the outside-the-grant notice (L3: the card's one line is the model's last words when it said any, so assert on the row).
 4. Register a watch on `/tmp/grant-demo` from another conversation, then `/jobs run grant-demo` with the hello.md prompt → the watch's `/jobs` line counts one own write and no watch run fires.
 5. `rm -rf /tmp/grant-demo`; `/jobs run grant-demo` four times → each row `failed · grant source unavailable: /tmp/grant-demo`, the fourth leaves the job `paused: failed 3 times; paused` (the ladder as it exists).
 6. `/jobs` → the policy column shows `mutating · grant` and the paragraph `` `grant-demo` — read-write /tmp/grant-demo (working directory) · network on `` beneath the table; `container list -a` shows no `iris-<conversation>` container left behind after each run.
 7. (§0.10) In the granted job's prompt ask it to "set the workspace to /Users/me first" → the transcript shows `Not run: a background run cannot change its workspace; widen the job's grant instead.` and the run's `-w` in the log is still `/tmp/grant-demo`.
 
-One PR, or two if the diff says so (behaviour: Tasks 1–5b; surface and docs: Tasks 6–7), per spec §7.
+One PR, or two if the diff says so (behaviour: Tasks 1–5b, the walk of 4c included; surface and docs: Tasks 6–7), per spec §7.
 
 ---
 
 ## Self-review
 
-- **Spec coverage:** §0.1 grant at creation, echo, replace/remove, no card, unattended creation still refused → T2a (`resolve`), T2b (`replacedNote`, `scheduleJob` replacement, `registerWatcher` replacement; `jobCreationTools` untouched). §0.2 mounts + network only → T1/T2a. §0.3 mutating only → T2a (`grantNeedsMutating`, first refusal), T2b (both tools). §0.4 `run_command` allowed only when sandboxed → T5a (`allows` true), T5b (`readOnlyProfileRefusesFirst`; R20 in the dispatcher and `executeApprovedCall` untouched). §0.5 host file tools inside the grant → T5a/T5b. §0.6 working directory → T2a (`readOnlyFirst`), T3b (`setWorkspace`), T4b (`workspace: grant.workingDirectory`, `extraMountEntries`). §0.7 isolated network, ungranted unchanged, network-only grant → T4a (`NetworkMode`, argv, `ensureIsolatedNetwork`), T4b (`SandboxSessionManager`), T3b (fail closed on the row), T2a (`network: true` alone). §0.8 re-check at fire and click, the ladder as it exists → T3b (`drift`, `runApproved`, the four-fire test). **§0.9** real path, no `..`, R10 hardened → T5a (`IrisPaths.realPath`/`realPathForAllow`, `isUnderProtectedWriteDir`, `covering`/`allows`/`nearest`, `IrisPathsTests` on the reproduced case, `symlinkToProtected` for both tools), T5b (`linkDotDotIsRecordedAsProtected` through `requestApproval`). **§0.10** mounts a pure function of the grant, `set_workspace` refused unattended with the exact sentence, no other path moves a background `workspacePath` → T4b (`runCommand`, `movedWorkspaceDoesNotMoveTheMount`, `unattendedWorkspaceRefusal`, declaration gate, the `bindGoalWorkspace` guard, `UnattendedWorkspaceTests` ×3), T7 (docs/jobs.md:161-166 deleted, the replacement names both paths). **§0.11** explicit `network: false` is a grant on mutating, nothing on read-only → T2a (`resolve` guard, `explicitNetworkOffIsAGrant`), T2b (`makeJobStoresGrant`'s `offJob`). §1 model, lenient decode, `ContainerMount` struct, refusal order → T1, T2a. §2 container (`extraMounts`, `network`, argv, the measured `network ls` shape and `already exists`), lifecycle (`endSession`, approve-and-run with the grant, subagent inheritance), drift → T3a, T3b, T4a, T4b. §3 gate order (R10 explicit first), pure `allows`, case-sensitive allow, `set_workspace` refusal, `approvalOffer` correction → T5a, T5b, T4b. §4 tool surface, declarations, description sentence, result sentence, replacement rules, mutating watch needs the VM, `list_jobs.grants` → T2b, T6. §5 `/jobs`, card `network`, outside-the-grant notice on the `BlockedCall`, fire-time reasons → T5a, T5b, T6. §6 tests: `JobGrantTests` (T1), `JobGrantResolveTests`/`JobGrantToolTests` (T2a/T2b), `JobGrantAllowsTests`/`JobGrantApprovalTests` (T5a/T5b) including `<mount>/link/../x` both ways and `set_workspace`/moved-workspace (T4b), `JobRunnerGrantTests` (T3b), `ContainerRuntimeTests` (T4a: `id`/`configuration.name`, once, `already exists`, failed listing), rendering (T6), restated by name (T5b). §7 delivery → Verification (now seven steps); docs → T7 with the M3 rows. §8 out of scope: nothing here adds secrets, container-side file tools, grants on read-only jobs, per-command allowlists or a grant editor.
-- **Pre-review findings, where each landed:** C1 → §0.9 → T5a/T5b; C2 → §0.10 → T4b (+ T7 rows, Verification 7); H1 → §0.11 → T2a/T2b; M1 → T4a (measured keys, `already exists`, failed listing); M2 → T3b Step 5 and the parameter placement after `ledger:`; M3 → T7 (three rows); L1 → T3b (`grant` profile-guarded at both sites, `readOnlyRowWithAGrantIsNotStamped`); L2 → Verification; L3 → Verification step 3; L4 → T2a (order) and T2b (`grantRefusal`); L5 → T3b (both checks kept, argued); nits → T5b (`displayCopy`), T2a (the backstop `catch` is labelled as one).
-- **Departures forced by the code, each stated in its task:** `ContainerMount` was a caseless enum — T1; `schedule_job` never replaced by name — T2b; grant-worded refusals over gate/watch-worded ones — T2a; the grant is the one watcher argument replaced rather than kept when omitted — T2b; `realpath(3)` spells `/private/tmp` where `canonicalPath` spells `/tmp` and canonicalises case, so both sides of every allow comparison go through the helper, display stays `/tmp`, and `allows` has no case rule of its own — T5a; `bindGoalWorkspace` is the second writer of `workspacePath`, guarded on `isBackground` so §0.10's sentence is true of every path — T4b; the runner's `ensureIsolatedNetwork` default is `{ nil }` in T3b and real in T4b so each task builds green; the two new `JobRunner` parameters sit after `ledger:` so all 84 existing constructions (one of them multi-line) take one mechanical insertion — T3b; `EventCard`'s `CodingKeys` is synthesized — T6; the outside-the-grant text travels as `BlockedCall.grantNearest` — T5a.
-- **Placeholder scan:** no TBD/TODO/"similar to"; every code step shows its code; every referenced symbol is defined in a task or exists at the cited line (`store.writer` is internal, checked by the pre-review; the `RecordingLauncher(results:)` initialiser and the `ConversationStoreTests` `write(_:_:)` helper are named where they are added or used).
-- **Type consistency:** `JobGrant.resolve(mounts:network:profile:fileManager:paths:home:isVolume:)` (T2a) is what `makeJob` and `registerWatcher` call (T2b) with `ScheduleJobArguments.grantRefusal(_:mountsNamed:)` wrapping the refusal; `JobGrant.drift(_:fileManager:)` (T3b) returns `JobRunner.grantSourceUnavailableReason` (T3b); `JobRunner.init(state:engine:ledger:endSandboxSession:ensureIsolatedNetwork:…)` (T3b) is the order every test and the perl insertion use; `NetworkMode.forGrant(_:)` (T4a) and `extraMountEntries()` (T4b) are what `runCommand` passes into the six-parameter `sandboxSession` seam and `SandboxSessionManager.run(... network:)` (T4b); `IrisPaths.realPathForAllow(_:)` / `realPath(_:)` (T5a) are what `allows`/`covering`/`nearest` and `isUnderProtectedWriteDir` use; `BlockedCall(... grantNearest:)` (T5a) is what `requestApproval` records (T5b), `failureReason(... blockedNearest:)` reads (T5a) and `displayCopy` keeps (T5b); `JobGrant.describe()` (T2a) feeds `sentence`, `grantLine(job:)` (T6) and nothing else; `EventCard(network:)` (T6) is passed at the three runner sites from the profile-guarded `grant` (T3b); `openConversation(for:titled:sandboxed:grant:)` (T3b) at both call sites; `IrisEngine.unattendedWorkspaceRefusal` (T4b) is what `UnattendedWorkspaceTests` asserts and the T7 row quotes; `RecordingLauncher(results:)` (T4a Step 1) is the form `ensureIsolatedNetworkRaceAndFailure` uses; `AppState.flushSave()` (existing, :2642) is the seam `setAndClear` (T3a) calls; `bindGoalWorkspace(for:contract:paths:)` keeps its signature and returns nil for a background conversation (T4b), which `goalBindingLeavesABackgroundWorkspaceAlone` asserts.
+- **Spec coverage:** §0.1 grant at creation, echo, replace/remove, no card, unattended creation still refused → T2a (`resolve`), T2b (`replacedNote`, `scheduleJob` replacement, `registerWatcher` replacement; `jobCreationTools` untouched). §0.2 mounts + network only, the example a directory made for the job → T1/T2a; every example path in this plan is `/Users/me/deploy-key`. §0.3 mutating only → T2a (`grantNeedsMutating`, first refusal), T2b (both tools). **§0.4** `run_command → sandboxed` as a parameter of the allow, two independent locks → T5a (`allows(toolName:details:cwd:sandboxed:)`, `runCommandAndTheRest` with `sandboxed: false → false`), T5b (`requestApproval` hands in its existing `inSandbox`, which is `resolveUseSandbox`'s answer; `grantedCommandNeedsTheSandboxAnswer`; `executeApprovedCall` keeps R20 and calls no `allows`). §0.5 host file tools inside the grant → T5a/T5b, executed through §0.13's walk (T4c). §0.6 working directory → T2a (`readOnlyFirst`), T3b (`setWorkspace`), T4b (`workspace: grant.workingDirectory`, `extraMountEntries`). §0.7 isolated network, ungranted unchanged, network-only grant, **host reachable on the listing** → T4a (`NetworkMode`, argv, `ensureIsolatedNetwork`), T4b (`SandboxSessionManager`), T3b (fail closed on the row), T2a (`network: true` alone; `describe(hostNote:)` and `hostReachableOnlyOnTheListing`), T6 (`grantLine` prints `network off (host reachable)`), Verification 2 (the host probe). §0.8 re-check at fire and click, the ladder as it exists → T3b (`drift`, `runApproved`, the four-fire test). **§0.9** real path, no `..`, R10 hardened, `canonicalPath` on `IrisEngine.expandTilde`, the `..` test on a new file → T5a (`IrisPaths.realPath`/`realPathForAllow`, `isUnderProtectedWriteDir`, `canonicalPathDoesNotTruncateATilde`, the `fileExists == false` preconditions in `realPathIsComponentWise` and `symlinkToProtected`), T5b (`linkDotDotIsRecordedAsProtected` through `requestApproval`). **§0.10** mounts a pure function of the grant, `set_workspace` refused unattended with the exact sentence, no other path moves a background `workspacePath` → T4b (`runCommand`, `movedWorkspaceDoesNotMoveTheMount`, `unattendedWorkspaceRefusal`, declaration gate, the `bindGoalWorkspace` guard, `UnattendedWorkspaceTests` ×3), T7 (docs/jobs.md:161-166 deleted, the replacement names both paths). **§0.11** explicit `network: false` is a grant on mutating, nothing on read-only → T2a (`resolve` guard, `explicitNetworkOffIsAGrant`), T2b (`makeJobStoresGrant`'s `offJob`). **§0.12** credential stores refused by name, read-only included, the static list, the exact sentence → T2a (`credentialStores`, `credentialStoreRefusal`, `isCredentialStore` on canonical paths, `credentialStoresRefusedByName` walking every entry, a child, `:ro`, a symlink to a store, and a sibling), T7 (the list verbatim in the Grants section). **§0.13** one-operation writes → T4c (`GrantedFileAccess`: the root reached by `realpath` → canonical-equals-stored → real-path walk from `/` (so `/tmp`/`/var` grants open and a swapped root component is refused), `openat(O_DIRECTORY | O_NOFOLLOW)` per component with the measured ENOTDIR→`fstatat` re-mapping, the walk's own `badComponent` guard for `..`/`.`/empty/slash, `O_NOFOLLOW` final open, `isADirectory`, `O_CREAT | O_EXCL` staging named like Foundation's, `renameat` in the directory descriptor; `GrantedWriteTests` — lands, intermediate link, final link, directory target, swap after the allow, staging inside/exclusive/sibling-shaped, root link, `..`, nested-root intermediate swap, roots under `/var/folders` and `/tmp` and a vanished root, read through the walk — plus the executor pair with the nil-decision refusal), T5b (one decision: the dispatcher decides `grantedMount` once before approval, `requestApproval(grantedMount:)` consumes it and skips the allowlist for the two file tools under a grant, the executor consumes it with no Foundation branch, `executeApprovedCall` likewise; `engineRoutesGrantedWritesToTheWalk` with the link inside the grant, `toggleBetweenDecisionAndGateIsRefused`). §1 model, lenient decode, `ContainerMount` struct, refusal order (now with the credential store between protected and read-only-first), nested mounts compose inside the container (measured) → T1, T2a, T7. §2 container (`extraMounts`, `network`, argv, the measured `network ls` shape and `already exists`), lifecycle (`endSession`, approve-and-run with the grant, subagent inheritance), drift → T3a, T3b, T4a, T4b. §3 gate order (R10 explicit first), pure `allows` with `sandboxed:`, the covering entry chosen **case-insensitively** with the walk proving identity, spelled-under-the-source as a third condition, `set_workspace` refusal, `approvalOffer` correction → T5a (`covering`, `allowedMount`, `relativeComponents`, `differentlyCasedSpellingIsAllowed`), T5b, T4b. §4 tool surface, declarations, description sentence, result sentence (`network off`, no host note), replacement rules, mutating watch needs the VM, `list_jobs.grants` → T2b, T6. §5 `/jobs` (`network off (host reachable)`), card `network`, outside-the-grant notice on the `BlockedCall`, fire-time reasons → T5a, T5b, T6. §6 tests: `JobGrantTests` (T1), `JobGrantResolveTests` (T2a, 6) / `JobGrantToolTests` (T2b), `JobGrantAllowsTests` (T5a, 7) / `JobGrantApprovalTests` (T5b, 9) including `<mount>/link/../x` both ways, `sandboxed: false`, the cased spelling, `set_workspace`/moved-workspace (T4b), `JobRunnerGrantTests` (T3b, 8), `ContainerRuntimeTests` (T4a), `GrantedWriteTests` (T4c, 10), rendering (T6), restated by name (T5b). §7 delivery → Verification (seven steps, the host probe in 2); docs → T7 with the M3 rows and the §0.12/§0.13/nested/host-reachable sentences in the Grants row. §8 out of scope: nothing here adds secrets, container-side file tools, grants on read-only jobs, per-command allowlists or a grant editor.
+- **Pre-review findings, where each landed:** C1 → §0.9 → T5a/T5b; C2 → §0.10 → T4b (+ T7 rows, Verification 7); H1 → §0.11 → T2a/T2b; M1 → T4a; M2 → T3b Step 5 and the parameter placement after `ledger:`; M3 → T7; L1 → T3b; L2 → Verification; L3 → Verification 3; L4 → T2a (order) and T2b (`grantRefusal`); L5 → T3b (both checks kept, argued); nits → T5b (`displayCopy`), T2a (the backstop `catch`), T5a (`nearest` doc line), T4b (the deleted clause). Home review → §0.4 sandboxed (T5a/T5b), §0.12 (T2a), §0.13 (T4c/T5b), `canonicalPath` tilde (T5a), case-insensitive covering (T5a), host reachable (T2a/T6/T7/Verification), nested measured (T7).
+- **Departures forced by the code, each stated in its task:** `ContainerMount` was a caseless enum — T1; `schedule_job` never replaced by name — T2b; grant-worded refusals over gate/watch-worded ones — T2a; the grant is the one watcher argument replaced rather than kept when omitted — T2b; `realpath(3)` spells `/private/tmp` where `canonicalPath` spells `/tmp`, so both sides of every cover comparison go through the helper, display stays `/tmp`, and a path must additionally be *spelled* under the granted directory because the walk descends the spelling from the mount's root (`/private/tmp/proj/x` for a grant on `/tmp/proj` falls to the allowlist) — T5a; one decision, one consumer chain, no fallback: the dispatcher decides the mount, `requestApproval` consumes it rather than recomputing, and the executor refuses a nil decision under a grant instead of falling to Foundation — which forces one departure from §3's literal order, the allowlist not widening a granted run's two file tools (an allowlisted write it allowed would need the Foundation branch that does not exist) — T5b/T4c; the walk validates its own components, and reaches the root by `realpath` → canonical-equals-stored → real-path walk, because the executor hands it the post-hook path, a nested root's ancestors lie in a read-write mount, and the stored spelling of any grant under `/tmp`/`/var` passes through a system symlink that `canonicalPath` hides (all measured against the kernel; so is ENOTDIR for a directory open of a link) — T4c; the three new deciders and the sandboxed workspace use `IrisEngine.expandTilde` (#275) — T4c/T5a/T4b; `requestApproval` already receives the sandbox answer as `inSandbox`, so §0.4 needs no second resolution — T5b; `relativeComponents` lands in T4c (the executor needs it) and T5a defines `allowedMount` against it — T4c/T5a; `bindGoalWorkspace` is the second writer of `workspacePath`, guarded on `isBackground` — T4b; the runner's `ensureIsolatedNetwork` default is `{ nil }` in T3b and real in T4b; the two new `JobRunner` parameters sit after `ledger:` so all 84 existing constructions take one mechanical insertion — T3b; `EventCard`'s `CodingKeys` is synthesized — T6; the outside-the-grant text travels as `BlockedCall.grantNearest` — T5a.
+- **Placeholder scan:** no TBD/TODO/"similar to"; every code step shows its code; every referenced symbol is defined in a task or exists at the cited line (`store.writer` is internal; `RecordingLauncher(results:)` is shown in T4a Step 1; `AppState.flushSave()` exists at :2642; `GrantedFileAccess`, `relativeComponents` and both executor methods are shown in full in T4c; the names list in Global Constraints carries every name the tasks define).
+- **Type consistency:** `JobGrant.resolve(mounts:network:profile:fileManager:paths:home:isVolume:)` (T2a) is what `makeJob` and `registerWatcher` call (T2b) with `ScheduleJobArguments.grantRefusal(_:mountsNamed:)` wrapping the refusal; `JobGrant.isCredentialStore(_:home:)` (T2a) reads the `home` `resolve` already takes; `describe(hostNote:)` (T2a) is called bare by `sentence` and with `hostNote: true` by `grantLine` (T6) and nowhere else; `JobGrant.drift(_:fileManager:)` (T3b) returns `JobRunner.grantSourceUnavailableReason` (T3b); `JobRunner.init(state:engine:ledger:endSandboxSession:ensureIsolatedNetwork:…)` (T3b) is the order every test and the perl insertion use; `NetworkMode.forGrant(_:)` (T4a) and `extraMountEntries()` (T4b) are what `runCommand` passes into the six-parameter `sandboxSession` seam and `SandboxSessionManager.run(... network:)` (T4b); `GrantedFileAccess(root:stagingName:)`, `read(relative:)`, `write(relative:content:)`, `GrantedFileError` with `badComponent`/`isADirectory` (T4c) are what `ToolExecutor.readFile(grantRoot:relative:)` / `writeFile(grantRoot:relative:content:)` call and `GrantedWriteTests` assert; `execute(… grant:grantedMount:)` and `notDecidedInsideGrant(_:)` (T4c) are what `executeToolWithHooks(… grant:grantedMount:)`, `executeApprovedCall` and `toggleBetweenDecisionAndGateIsRefused` use (T5b); `requestApproval(… grantedMount:)` (T5b) is what the dispatcher passes and every file-tool case in `JobGrantApprovalTests` supplies; `JobGrant.relativeComponents(of:cwd:under:)` (T4c, shown there in full; nil on `..`) is what `execute` walks and `allowedMount` (T5a) requires; `IrisPaths.realPathForAllow(_:)` / `realPath(_:)` (T5a) are what `allowedMount`/`covering`/`nearest` and `isUnderProtectedWriteDir` use; `allows(toolName:details:cwd:sandboxed:)` (T5a) is what `requestApproval` calls with `sandboxed: inSandbox` (T5b) and every `JobGrantAllowsTests` case passes explicitly; `BlockedCall(... grantNearest:)` (T5a) is what `requestApproval` records (T5b), `failureReason(... blockedNearest:)` reads (T5a) and `displayCopy` keeps (T5b); `EventCard(network:)` (T6) is passed at the three runner sites from the profile-guarded `grant` (T3b); `openConversation(for:titled:sandboxed:grant:)` (T3b) at both call sites; `IrisEngine.unattendedWorkspaceRefusal` (T4b) is what `UnattendedWorkspaceTests` asserts and the T7 row quotes; `bindGoalWorkspace(for:contract:paths:)` keeps its signature and returns nil for a background conversation (T4b).
