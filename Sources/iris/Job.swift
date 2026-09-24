@@ -372,6 +372,11 @@ enum Trigger: Codable, Equatable, Sendable {
 /// A scheduled or event-driven agent task, stored in the conversation database. Replaces the old
 /// `UserDefaults`-backed scheduled jobs and watcher rules.
 struct Job: Identifiable, Codable, Equatable, Sendable {
+    /// The grant this job runs under (#282, L1): a grant on a read-only row is inert — never
+    /// stamped, never checked, never shown — so a hand-edited row cannot claim a capability its
+    /// run does not have. The one rule the runner's four card sites and both listings read.
+    var effectiveGrant: JobGrant? { profile == .mutating ? policy.grants : nil }
+
     let id: UUID
     var name: String
     var prompt: String

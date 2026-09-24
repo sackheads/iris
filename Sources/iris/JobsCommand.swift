@@ -246,7 +246,7 @@ enum JobsCommand: Equatable {
     static func policySummary(for job: Job) -> String {
         var parts: [String] = []
         if job.profile == .mutating { parts.append("mutating") }
-        if job.policy.grants != nil { parts.append("grant") }
+        if job.effectiveGrant != nil { parts.append("grant") }
         if job.policy.overlap == .queue { parts.append("overlap queue") }
         switch job.policy.catchUp {
         case .coalesce: break
@@ -290,9 +290,10 @@ enum JobsCommand: Equatable {
     }
 
     /// The grant paragraph beneath the table (spec §5): what a granted job may touch, in the words
-    /// the result sentence used when it was created, so the two never disagree.
+    /// the result sentence used when it was created, so the two never disagree. A read-only row's
+    /// grant is inert (L1) and gets no line.
     static func grantLine(job: Job) -> String? {
-        guard let grant = job.policy.grants else { return nil }
+        guard let grant = job.effectiveGrant else { return nil }
         return "`\(job.name)` — \(grant.describe(hostNote: true))"
     }
 

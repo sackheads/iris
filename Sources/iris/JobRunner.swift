@@ -785,9 +785,12 @@ actor JobRunner {
         do {
             let run = try Self.recordStillborn(job: job, ledger: ledger, reason: reason,
                                                triggerKind: origin.triggerKind, now: at)
+            // `network` as the three run sites say it (L1): the card line reads the same
+            // whichever site wrote it.
             await deliver(EventCard(runId: run.id, jobId: job.id, jobName: job.name,
                                     status: .interrupted, outcome: reason, startedAt: at,
-                                    finishedAt: at, catchUpNote: note), for: job)
+                                    finishedAt: at, catchUpNote: note,
+                                    network: job.effectiveGrant?.network == true), for: job)
         } catch {
             print("[JobRunner] could not record the pause for \(job.name): \(error)")
         }
@@ -818,7 +821,7 @@ actor JobRunner {
     private func run(job: Job, origin: FireOrigin, limits: JobLimits, gate: GateContext? = nil,
                      note: String? = nil, watch: WatchSummary? = nil) async {
         // L1: a grant on a read-only row is inert — never stamped, never checked.
-        let grant = job.profile == .mutating ? job.policy.grants : nil
+        let grant = job.effectiveGrant
         let startedAt = now()
         let title = "\(job.name) · \(ISO8601DateFormatter().string(from: startedAt))"
         guard let conversationId = await openConversation(for: job, titled: title,
@@ -1208,7 +1211,7 @@ actor JobRunner {
             }
         }
         // §0.8 again, at click time: the grant is re-checked before the approval is spent.
-        let grant = job.profile == .mutating ? job.policy.grants : nil
+        let grant = job.effectiveGrant
         if let grant {
             if let drift = JobGrant.drift(grant) { return await refuse(drift, for: job) }
             if !grant.network, let detail = await ensureIsolatedNetwork() {
@@ -1499,7 +1502,7 @@ actor JobRunner {
                                        now: finishedAt)
         await apply(retry, job: job, status: .failed)
         // L1, same rule as `run` and `runApproved`: a grant on a read-only row is inert.
-        let grant = job.profile == .mutating ? job.policy.grants : nil
+        let grant = job.effectiveGrant
         let card = EventCard(runId: run.id, jobId: job.id, jobName: job.name, status: .failed,
                              outcome: Self.cardOutcome(reason, retry: retry, now: finishedAt),
                              blockedTool: nil,

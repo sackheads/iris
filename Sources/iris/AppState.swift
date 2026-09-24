@@ -158,7 +158,9 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         // Same invariant 1, and absent is the meaningful value: not a job run.
         jobProfile = try container.decodeIfPresent(JobProfile.self, forKey: .jobProfile)
-        sandboxGrant = try container.decodeIfPresent(JobGrant.self, forKey: .sandboxGrant)
+        // The store's soft loss, for symmetry: a grant this build cannot read is no grant, and
+        // the conversation around it is kept.
+        sandboxGrant = (try? container.decodeIfPresent(JobGrant.self, forKey: .sandboxGrant)) ?? nil
         goalContract = try container.decodeIfPresent(GoalContract.self, forKey: .goalContract)
         lastGoalCompletionReport = try container.decodeIfPresent(JSONValue.self, forKey: .lastGoalCompletionReport)
         lastGoalEvaluation = try container.decodeIfPresent(GoalEvaluation.self, forKey: .lastGoalEvaluation)

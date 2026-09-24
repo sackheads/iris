@@ -149,6 +149,25 @@ struct JobRunnerGrantTests {
         #expect(state.conversations.filter { $0.isBackground }.count == JobRunner.backoff.count + 1)
     }
 
+    @Test("the pause card carries network like the run cards: the four card sites read the same L1 rule")
+    func pauseCardCarriesNetwork() async throws {
+        let dir = try tempDirectory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let (store, state, engine) = try harness([textResponse("tick"), textResponse("tick")])
+        let (config, teardown) = isolatedConfig(); defer { teardown() }
+        config.jobMaxRunsPerHour = 1
+        let job = grantedJob(dir, network: true)
+        try store.ledger.upsert(job)
+        let clock = Date(timeIntervalSince1970: 1_700_000_000)
+        let r = runner(state, engine, store, config: config, now: { clock })
+        await r.fire(job: job, origin: .schedule)                                                  // the one run the hour allows
+        await r.fire(job: try #require(try store.ledger.job(id: job.id)), origin: .schedule)     // over the line: the breaker pauses
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == JobRunner.breakerReason(count: 1))
+        let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
+        let cards = activity.messages.compactMap { EventCard.decode($0.content) }
+        #expect(cards.count == 2 && cards.last?.status == .interrupted)
+        #expect(cards.allSatisfy { $0.network }, "the pause card says what the job was granted, as the run card does")
+    }
+
     @Test("a symlink swapped under a source is drift too, and a source that became a file is drift")
     func driftRules() throws {
         let real = try tempDirectory(); defer { try? FileManager.default.removeItem(at: real) }

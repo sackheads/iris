@@ -182,6 +182,13 @@ struct JobToolsTests {
         #expect(grants["network"] as? Bool == true)
         #expect((rows[0]["policy"] as? String)?.contains("grant") == true)
         #expect(rows[1]["grants"] is NSNull)
+        // A hand-edited read-only row with a grant: inert for the runner (L1), so null here too, or
+        // the surface would claim a capability the run does not have.
+        var edited = g
+        edited.profile = .readOnly
+        let rows2 = try #require((JSONSerialization.jsonObject(with: Data(IrisEngine.jobsListJSON([edited], lastStatuses: [:], usage: .empty, unreadableJobs: 0).utf8)) as? [String: Any])?["jobs"] as? [[String: Any]])
+        #expect(rows2[0]["grants"] is NSNull)
+        #expect((rows2[0]["policy"] as? String)?.contains("grant") == false)
     }
 
     @Test("a job whose figures could not be read still lists, with nulls rather than zeros")

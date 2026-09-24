@@ -3536,8 +3536,9 @@ extension IrisEngine {
                 "gateKind": job.trigger.gate?.summary ?? NSNull(),
                 "retryAttempt": job.retryAttempt,
                 // As stored: `mounts` in the runtime's grammar (`ContainerMount.entry`), `network`
-                // as given. Null for every job with no grant, never an empty object.
-                "grants": job.policy.grants.map(jsonObject) ?? NSNull(),
+                // as given. Null for every job with no grant, never an empty object — and null for
+                // a read-only row's grant, which the runner treats as inert (L1).
+                "grants": job.effectiveGrant.map(jsonObject) ?? NSNull(),
                 // Null, never zero, when the ledger would not answer: "spent nothing today" is a
                 // claim, and an unread figure is not one.
                 "tokensToday": figures?.tokensToday ?? NSNull(),

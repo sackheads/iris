@@ -247,10 +247,15 @@ struct ConversationStoreTests {
         #expect(loaded.conversations.count == 1, "and the conversation is kept")
     }
 
-    @Test("Conversation JSON without sandboxGrant decodes (invariant 1)")
+    @Test("Conversation JSON without sandboxGrant decodes, and one with an unreadable grant decodes ungranted (invariant 1)")
     func conversationDecodesWithoutSandboxGrant() throws {
         let data = Data(#"{"id":"\#(UUID().uuidString)","title":"t"}"#.utf8)
         #expect(try JSONDecoder().decode(Conversation.self, from: data).sandboxGrant == nil)
+        // The same soft loss the store applies: a grant this build cannot read is no grant, and the
+        // conversation around it is kept rather than the whole decode failing.
+        let junk = Data(#"{"id":"\#(UUID().uuidString)","title":"t","sandboxGrant":{"mounts":["relative"]}}"#.utf8)
+        let decoded = try JSONDecoder().decode(Conversation.self, from: junk)
+        #expect(decoded.sandboxGrant == nil && decoded.title == "t")
     }
 
     @Test("appending writes only the new rows")

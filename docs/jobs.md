@@ -387,7 +387,9 @@ container it cannot see, and the loop that makes ends in the breaker.
 **What you will see.** `/jobs`'s policy column says `grant`, and beneath the table there is one
 paragraph per granted job, in the words the result sentence used: `` `deploy` — read-write
 /Users/me/proj (working directory) · read-only /Users/me/deploy-key · network on ``, or
-`network off (host reachable)`. `list_jobs` carries `grants` as stored (`null` when absent). The
+`network off (host reachable)`. `list_jobs` carries `grants` as stored (`null` when absent, and
+`null` for a read-only row that carries one — the runner treats that grant as inert, so neither
+listing shows it). The
 run card's metadata line says `network` when the run had it. A call blocked outside the grant names
 the nearest granted directory on the card, the row and the transcript notice alike.
 
@@ -969,7 +971,7 @@ is threading the run's own state to those call sites.
 
 Two read-only tools let the model answer questions about jobs: `list_jobs` (every job, its trigger,
 its next fire, why it is paused, how its last run ended, its policy, profile, gate kind and grant
-(`grants`, as stored; `null` when it has none), what
+(`grants`, as stored; `null` when it has none or is read-only), what
 it has spent today against its budgets and the breaker, and — for a watch — its quiet window, its
 ignore globs, its last burst's figures and what it has absorbed since launch, `null` for anything
 else) and `get_job_run` (one run, by id or by the eight characters a card shows, including the

@@ -324,6 +324,14 @@ struct JobsCommandTests {
         #expect(out.contains("\n\n" + expected + "\n\n"), "its own paragraph, not a run-on line")
     }
 
+    @Test("a hand-edited read-only row carrying a grant shows none: the runner treats it as inert (L1), so the listing does too")
+    func readOnlyRowShowsNoGrant() {
+        var j = granted("edited")
+        j.profile = .readOnly
+        #expect(JobsCommand.policySummary(for: j) == "default")
+        #expect(JobsCommand.grantLine(job: j) == nil)
+    }
+
     @Test("the two fire-time refusals reach the failure line as written")
     func grantReasonsOnTheFailureLine() {
         let j = granted()
