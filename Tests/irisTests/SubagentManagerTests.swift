@@ -313,8 +313,33 @@ final class SubagentManagerTests: XCTestCase {
 
     func testSubagentWriteIsRecordedInResult() async throws {
         let state = AppState(tier3Provisioning: .provisioned)
-        // Fast-path approve write_file for the exact path the mock uses (spec §5 / requestApproval).
-        PermissionManager.shared.allowGlobally(toolName: "write_file", details: "ledger_probe.txt")
+        // #290, invariant 7: this used to fast-path the approval through `PermissionManager.shared`,
+        // which appends to the developer's real `~/.iris/config/permissions.json` — every full test
+        // run left a standing `write_file` allow rule behind, and `.shared`'s init also runs
+        // `ensureDirectories()` against the real `~/.iris`. A manager over a temp root is injected
+        // instead, and the probe is written under a directory of its own rather than into the
+        // process working directory, which no test may depend on (#242, #160).
+        //
+        // What the rule below actually buys, since review measured it: *not* the approval. With
+        // Vibecop disabled — which it is in the volatile under-test defaults — `consultVibecop`
+        // short-circuits to APPROVE and the write is allowed whether or not any rule exists (the
+        // test passes with this line removed). The rule keeps the outcome independent of that
+        // setting, so a future test that flips `ENABLE_VIBECOP` cannot send this one into a real
+        // consult and a modal nobody answers. The isolation is what the injection is for.
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-290-\(UUID().uuidString)", isDirectory: true)
+        // The workspace sits *beside* the iris root, never under it: a workspace nested inside
+        // `paths.root` would be covered by the `~/.iris` carve-out the moment anything resolves the
+        // path before asking, and the fixture would start proving the carve-out instead (review).
+        let paths = IrisPaths(root: base.appendingPathComponent("iris", isDirectory: true))
+        let probeDir = base.appendingPathComponent("workspace", isDirectory: true)
+        try paths.ensureDirectories()
+        try FileManager.default.createDirectory(at: probeDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let permissions = PermissionManager(paths: paths)
+        permissions.allowGlobally(toolName: "write_file", details: "ledger_probe.txt")
+        state.permissions = permissions
 
         let lock = NSLock(); var count = 0
         MockURLProtocol.handler = { request in
@@ -338,15 +363,20 @@ final class SubagentManagerTests: XCTestCase {
         }
 
         let parentId = UUID()
-        await MainActor.run { state.createNewConversation(id: parentId) }
+        state.createNewConversation(id: parentId)
+        // The relative `ledger_probe.txt` resolves against the workspace, so binding one sends the
+        // write under the fixture's own directory instead of wherever the test process happens to be.
+        state.setWorkspace(for: parentId, path: probeDir.path)
         let summary = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "write a file", effort: "easy", parentConversationId: parentId, client: IsolatedAnthropicClient(config: config), appState: state).rendered
 
         XCTAssertTrue(summary.contains("Files written (1)"))
         XCTAssertTrue(summary.contains("ledger_probe.txt"))
 
-        // Clean up the file written during this test.
-        let probePath = FileManager.default.currentDirectoryPath + "/ledger_probe.txt"
-        try? FileManager.default.removeItem(atPath: probePath)
+        // Positive evidence, not the absence of a file in the working directory: reading the cwd is
+        // the thing this fix exists to stop depending on, and "it is not there" also passes when the
+        // write went nowhere at all. This says where it went (review).
+        XCTAssertTrue(FileManager.default.fileExists(atPath: probeDir.appendingPathComponent("ledger_probe.txt").path),
+                      "the probe belongs under the fixture's workspace (#290)")
     }
 }
