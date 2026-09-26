@@ -10,7 +10,7 @@
 
 **Tech Stack:** Swift 6 strict concurrency, GRDB, `apple/container` CLI 1.1.0 (`run --network`, `--no-dns`, `network create --internal`), Swift Testing.
 
-**Spec:** `docs/specs/2026-09-23-agency-job-grants.md` (binding, at `6129afa`). Every `file:line` below was verified against the worktree (main `b302b55`) on 2026-09-23; lines may drift by a few as earlier tasks land. Prior slices: #252 (D1), #253 (D2), #257/#260/#262/#264 (D3), #279/#280 (D4).
+**Spec:** `docs/specs/2026-09-23-agency-job-grants.md` (binding, as merged on main at `3b6fcc2`). Not the earlier `6129afa`: §0.12 gained its both-directions containment rule after that commit, so at `6129afa` a credential store was refused only for a source that is or is under one — leaving `~/.config` and `~/Library` mountable. The Global Constraints below carry the merged rule; where the two disagree, the merged spec wins. Every `file:line` below was verified against the worktree (main `b302b55`) on 2026-09-23; lines may drift by a few as earlier tasks land. Prior slices: #252 (D1), #253 (D2), #257/#260/#262/#264 (D3), #279/#280 (D4).
 
 ## Global Constraints
 
