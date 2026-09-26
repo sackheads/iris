@@ -129,7 +129,7 @@ struct ToolExecutor {
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
-                    "name": Schema(type: "STRING", description: "Short kebab-case skill identifier (e.g. gke-deployment-debug)"),
+                    "name": Schema(type: "STRING", description: "Short kebab-case skill identifier (e.g. gke-deployment-debug). One folder name, not a path: empty, '.', '..' or anything containing '/' is refused."),
                     "description": Schema(type: "STRING", description: "High-signal summary of what this skill does and when to trigger it"),
                     "body": Schema(type: "STRING", description: "Full Markdown body containing numbered steps, exact commands, pitfalls, and verification steps")
                 ],
@@ -142,7 +142,7 @@ struct ToolExecutor {
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
-                    "name": Schema(type: "STRING", description: "Skill identifier to update"),
+                    "name": Schema(type: "STRING", description: "Skill identifier to update. One folder name, not a path: empty, '.', '..' or anything containing '/' is refused."),
                     "description": Schema(type: "STRING", description: "Updated description (optional if unchanged)"),
                     "body": Schema(type: "STRING", description: "Updated Markdown body or additional procedures (optional if description updated)")
                 ],
@@ -155,7 +155,7 @@ struct ToolExecutor {
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
-                    "name": Schema(type: "STRING", description: "The skill identifier to delete")
+                    "name": Schema(type: "STRING", description: "The skill identifier to delete. One folder name, not a path: empty, '.', '..' or anything containing '/' is refused.")
                 ],
                 required: ["name"]
             )
@@ -690,16 +690,38 @@ except Exception as e:
     /// The name is slugged the same way for all three — lowercased, trimmed, spaces and
     /// underscores to dashes. `deleteSkill` used to lowercase and trim but not replace, so
     /// `delete_skill` with the name `my skill` looked for a folder `create_skill` had never made.
-    static func skillFolder(named name: String, paths: IrisPaths = .default) -> URL {
+    /// nil when the name cannot address a folder *inside* `skillsDir` (#284). The slug leaves `..`
+    /// and `/` alone, and `appendingPathComponent` treats a `/` as a path separator rather than a
+    /// literal, so before this guard `delete_skill` could remove a tree outside the skills
+    /// directory — measured: `"../../x"` reached `~/x`, `".."` reached `~/.iris` itself, and an
+    /// empty name reached `~/.iris/skills`, so a blank argument deleted every skill.
+    ///
+    /// Three refusals rather than one, because the resolved-path check alone would accept
+    /// `nested/skill` (inside, but not a name) and would accept nothing at all for an empty slug:
+    /// a name is one path component, non-empty, that stays under the directory once resolved.
+    static func skillFolder(named name: String, paths: IrisPaths = .default) -> URL? {
         let cleanName = name.lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: " ", with: "-")
             .replacingOccurrences(of: "_", with: "-")
-        return paths.skillsDir.appendingPathComponent(cleanName)
+        guard !cleanName.isEmpty, !cleanName.contains("/"), cleanName != ".." else { return nil }
+        let folder = paths.skillsDir.appendingPathComponent(cleanName)
+        // `IrisPaths.canonicalPath`, not `standardizedFileURL`: the latter is `NSString`'s, which
+        // strips a leading `/private` only when the resulting path EXISTS. The root does, the new
+        // folder does not, so under a root spelled `/private/tmp/...` the two sides disagreed and
+        // every `create_skill` was refused — found in review, reachable with `TMPDIR=/private/tmp`
+        // or the perf lane's volatile copy. `canonicalPath` resolves the deepest existing ancestor
+        // and re-appends what is missing, so both sides are the same spelling.
+        let root = IrisPaths.canonicalPath(paths.skillsDir.path)
+        guard IrisPaths.canonicalPath(folder.path).hasPrefix(root + "/") else { return nil }
+        return folder
     }
 
+    /// One sentence for all three tools, so a refusal reads the same wherever it comes from.
+    static let invalidSkillName = "Error: that is not a valid skill name — a skill name is a single folder name, not a path."
+
     func createSkill(name: String, description: String, body: String, paths: IrisPaths = .default) async -> String {
-        let skillFolder = Self.skillFolder(named: name, paths: paths)
+        guard let skillFolder = Self.skillFolder(named: name, paths: paths) else { return Self.invalidSkillName }
         let cleanName = skillFolder.lastPathComponent
         let skillFile = skillFolder.appendingPathComponent("SKILL.md")
         
@@ -729,7 +751,7 @@ except Exception as e:
     }
 
     func updateSkill(name: String, description: String?, body: String?, paths: IrisPaths = .default) async -> String {
-        let skillFolder = Self.skillFolder(named: name, paths: paths)
+        guard let skillFolder = Self.skillFolder(named: name, paths: paths) else { return Self.invalidSkillName }
         let cleanName = skillFolder.lastPathComponent
         let skillFile = skillFolder.appendingPathComponent("SKILL.md")
         let fileManager = FileManager.default
@@ -791,7 +813,7 @@ except Exception as e:
     }
 
     func deleteSkill(name: String, paths: IrisPaths = .default) async -> String {
-        let skillFolder = Self.skillFolder(named: name, paths: paths)
+        guard let skillFolder = Self.skillFolder(named: name, paths: paths) else { return Self.invalidSkillName }
         let cleanName = skillFolder.lastPathComponent
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: skillFolder.path) else {
