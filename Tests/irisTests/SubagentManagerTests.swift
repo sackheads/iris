@@ -313,8 +313,21 @@ final class SubagentManagerTests: XCTestCase {
 
     func testSubagentWriteIsRecordedInResult() async throws {
         let state = AppState(tier3Provisioning: .provisioned)
-        // Fast-path approve write_file for the exact path the mock uses (spec §5 / requestApproval).
-        PermissionManager.shared.allowGlobally(toolName: "write_file", details: "ledger_probe.txt")
+        // #290, invariant 7: this used to fast-path the approval through `PermissionManager.shared`,
+        // which appends to the developer's real `~/.iris/config/permissions.json` — every full test
+        // run left a standing `write_file` allow rule behind. The rule is written to a manager over
+        // a temp root and injected instead, and the probe is written under that root rather than
+        // into the process working directory, which no test may depend on (#242, #160).
+        let paths = IrisPaths(root: FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-290-\(UUID().uuidString)", isDirectory: true))
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        let probeDir = paths.root.appendingPathComponent("workspace", isDirectory: true)
+        try FileManager.default.createDirectory(at: probeDir, withIntermediateDirectories: true)
+
+        let permissions = PermissionManager(paths: paths)
+        permissions.allowGlobally(toolName: "write_file", details: "ledger_probe.txt")
+        await MainActor.run { state.permissions = permissions }
 
         let lock = NSLock(); var count = 0
         MockURLProtocol.handler = { request in
@@ -338,15 +351,22 @@ final class SubagentManagerTests: XCTestCase {
         }
 
         let parentId = UUID()
-        await MainActor.run { state.createNewConversation(id: parentId) }
+        await MainActor.run {
+            state.createNewConversation(id: parentId)
+            // The relative `ledger_probe.txt` resolves against the workspace, so binding one sends
+            // the write under the temp root instead of wherever the test process happens to be.
+            state.setWorkspace(for: parentId, path: probeDir.path)
+        }
         let summary = await SubagentManager.shared.runSubagent(
             role: "engineer", task: "write a file", effort: "easy", parentConversationId: parentId, client: IsolatedAnthropicClient(config: config), appState: state).rendered
 
         XCTAssertTrue(summary.contains("Files written (1)"))
         XCTAssertTrue(summary.contains("ledger_probe.txt"))
 
-        // Clean up the file written during this test.
-        let probePath = FileManager.default.currentDirectoryPath + "/ledger_probe.txt"
-        try? FileManager.default.removeItem(atPath: probePath)
+        // The probe landed under the temp root, which the `defer` above removes — nothing to clean
+        // out of the working directory, and nothing left behind if this test fails early.
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: FileManager.default.currentDirectoryPath + "/ledger_probe.txt"),
+                       "the probe must not be written into the process working directory (#290)")
     }
 }
