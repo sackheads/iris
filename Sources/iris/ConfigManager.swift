@@ -233,6 +233,15 @@ class ConfigManager: @unchecked Sendable {
         static let dailyTokenBudget = 1_000_000
         static let globalDailyTokenBudget = 3_000_000
         static let maxRunsPerHour = 6
+
+        /// The breaker floor for a watch (#283). Six an hour was sized for a schedule, where six
+        /// fires is a lot; a watch fires once per save-burst, so ordinary editing paused it inside
+        /// twenty minutes. Thirty is one run every two minutes sustained, which covers an editing
+        /// session with headroom while still bounding a self-write loop the filter cannot see —
+        /// finite is the property #282 leans on, not any particular figure. Deliberately below the
+        /// 120 a watch firing at its 30-second ceiling for a whole hour could reach: the breaker is
+        /// a backstop, not a rate limit that never fires.
+        static let maxRunsPerHourForWatch = 30
         static let runTimeoutSeconds = 600
     }
 

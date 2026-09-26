@@ -286,6 +286,38 @@ struct JobAdmissionTests {
                              perRunTokens: 200_000, runTimeoutSeconds: 600))
     }
 
+    // MARK: the breaker is sized for the trigger (#283)
+
+    /// #283 gives a *watch* its own breaker at registration, stored on the job. A scheduled job's
+    /// resolution is untouched, and so is a global the person set deliberately — including a lower
+    /// one, which an invisible floor at resolution time would have overridden (it did, in a first
+    /// attempt at this fix: `aRefusedManualFireSaysManual` sets the global to 1 on purpose).
+    @Test("a scheduled job's breaker is still the scheduled default")
+    func scheduledBreakerUnchanged() {
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        #expect(JobLimits.resolve(job: job(), config: config).maxRunsPerHour
+                == ConfigManager.JobDefaults.maxRunsPerHour)
+        #expect(ConfigManager.JobDefaults.maxRunsPerHourForWatch > ConfigManager.JobDefaults.maxRunsPerHour,
+                "a watch figure below the scheduled default would be no help at all")
+    }
+
+    /// A watch carrying the registration default resolves to it, and a person's deliberate global
+    /// still wins where the job named nothing — the ordinary policy-over-global rule, unchanged.
+    @Test("a watch's stored breaker is what resolves, and a global still moves a watch that named none")
+    func watchStoredBreakerResolves() {
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        var watch = Job(name: "w", prompt: "p", trigger: .fsEvent(FSWatch(path: "/tmp/w")),
+                        policy: JobPolicy(maxRunsPerHour: ConfigManager.JobDefaults.maxRunsPerHourForWatch))
+        #expect(JobLimits.resolve(job: watch, config: config).maxRunsPerHour
+                == ConfigManager.JobDefaults.maxRunsPerHourForWatch)
+        watch.policy.maxRunsPerHour = nil
+        #expect(JobLimits.resolve(job: watch, config: config).maxRunsPerHour
+                == ConfigManager.JobDefaults.maxRunsPerHour,
+                "a watch stored before #283 keeps the old figure until it is re-registered")
+    }
+
     // MARK: fire — overlap
 
     @Test("a scheduled fire that overlaps a run writes one interrupted row and starts nothing")

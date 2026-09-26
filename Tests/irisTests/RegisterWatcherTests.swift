@@ -171,6 +171,51 @@ struct RegisterWatcherTests {
         #expect(result.contains("this folder now has 2 watches, each of which runs on every change"))
     }
 
+    /// #283. Six runs an hour is the scheduled-job breaker; a watch fires once per save-burst and
+    /// paused itself about twenty minutes into #279's on-screen check, on nothing but a runbook's
+    /// saves. A new watch carries the watch figure in its own policy, which is why `/jobs` can show
+    /// it and a person can lower it.
+    @Test("a new watch carries the watch-sized breaker, and max_runs_per_hour overrides it")
+    func watchBreakerDefault() async throws {
+        let f = try fixture(); defer { f.tearDown() }
+
+        _ = await f.register()
+        #expect(try f.watch().job.policy.maxRunsPerHour == ConfigManager.JobDefaults.maxRunsPerHourForWatch)
+
+        let g = try fixture(); defer { g.tearDown() }
+        _ = await g.register(["max_runs_per_hour": .int(3)])
+        #expect(try g.watch().job.policy.maxRunsPerHour == 3, "a person's figure wins, lower included")
+
+        let h = try fixture(); defer { h.tearDown() }
+        _ = await h.register(["max_runs_per_hour": .int(0)])
+        #expect(try h.watch().job.policy.maxRunsPerHour == 0, "0 means no breaker, not 'unset'")
+    }
+
+    /// The re-registration rule the other optional arguments follow: omitted leaves the stored
+    /// figure alone. That is what keeps a watch created before #283 from silently changing, and it
+    /// is also why such a watch needs one re-registration naming a number to pick the new default up.
+    @Test("re-registering without max_runs_per_hour leaves the stored breaker alone")
+    func watchBreakerKeptOnUpdate() async throws {
+        let f = try fixture(); defer { f.tearDown() }
+        // The same conversation, or the second call is another conversation's watch rather than an
+        // update — which is the rule #280 established, and the mistake this test made first.
+        let cid = UUID()
+        _ = await f.register(["max_runs_per_hour": .int(7)], conversationId: cid)
+        _ = await f.register(["instructions": .string("changed")], conversationId: cid)
+        #expect(try f.watch().job.policy.maxRunsPerHour == 7)
+        #expect(try f.watch().job.prompt == "changed", "the rest of the call still applied")
+    }
+
+    @Test("a malformed max_runs_per_hour is refused by name rather than dropped")
+    func watchBreakerShape() async throws {
+        let f = try fixture(); defer { f.tearDown() }
+        let result = await f.register(["max_runs_per_hour": .string("lots")])
+        #expect(result.contains("max_runs_per_hour"), "got: \(result)")
+        #expect(try f.store.ledger.jobs().isEmpty, "a refused call stored no watch")
+        let negative = await f.register(["max_runs_per_hour": .int(-1)])
+        #expect(negative.contains("max_runs_per_hour"), "got: \(negative)")
+    }
+
     @Test("overlap defaults to queue on a new watch and skip is honoured when asked for")
     func overlapDefaultsToQueueAndSkipIsHonoured() async throws {
         let f = try fixture(); defer { f.tearDown() }

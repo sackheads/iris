@@ -107,7 +107,8 @@ struct ToolExecutor {
                     "overlap": Schema(type: "STRING", description: "`queue` or `skip`"),
                     "profile": Schema(type: "STRING", description: "'readOnly' (default) or 'mutating'. A watch that writes must be mutating; its commands then run in the sandbox VM, which must be available."),
                     "mounts": Schema(type: "ARRAY", description: "Directories the watch's runs may use, as '/host/dir', '/host/dir:ro' or '/host/dir:/path/in/container'. Read-write unless ':ro'; the first read-write one is the working directory. Mutating only. The watched folder is not included unless named here.", items: Schema(type: "STRING")),
-                    "network": Schema(type: "BOOLEAN", description: "true lets the runs' commands reach the network from inside the VM; default false. Mutating only.")
+                    "network": Schema(type: "BOOLEAN", description: "true lets the runs' commands reach the network from inside the VM; default false. Mutating only."),
+                    "max_runs_per_hour": Schema(type: "INTEGER", description: "How many runs an hour before the watch pauses itself. Defaults to \(ConfigManager.JobDefaults.maxRunsPerHourForWatch), which covers ordinary editing; 0 removes the breaker. Say a lower number for a folder that should rarely change.")
                 ],
                 required: ["path", "instructions"]
             )
@@ -321,6 +322,9 @@ struct ToolExecutor {
                 if let ignore = parsed.ignore { watch.ignore = ignore }
                 existing.trigger = .fsEvent(watch)
                 if let overlap = parsed.overlap { existing.policy.overlap = overlap }
+                // Omitted leaves the stored figure alone (§the original rule), so a watch created
+                // before #283 keeps its old breaker until someone names one.
+                if let runs = parsed.maxRunsPerHour { existing.policy.maxRunsPerHour = runs }
                 existing.profile = profile
                 existing.policy.grants = grant
                 existing.enabled = true
@@ -339,7 +343,16 @@ struct ToolExecutor {
                     createdInConversationId: conversationId,
                     // A watch never runs concurrently with itself; by default a save that lands
                     // mid-run is queued, not dropped.
-                    policy: { var p = JobPolicy(overlap: parsed.overlap ?? .queue); p.grants = grant; return p }())
+                    // #283: a watch carries the watch-sized breaker, stored so `/jobs` shows it and
+                    // the person can lower it. Six an hour was sized for a schedule; a watch fires
+                    // once per save-burst and paused itself inside twenty minutes of ordinary
+                    // editing. Stored rather than applied at resolution, so a global the person
+                    // lowered on purpose still binds a watch that named no figure of its own.
+                    policy: { var p = JobPolicy(overlap: parsed.overlap ?? .queue)
+                              p.grants = grant
+                              p.maxRunsPerHour = parsed.maxRunsPerHour
+                                  ?? ConfigManager.JobDefaults.maxRunsPerHourForWatch
+                              return p }())
                 let others = watching.map { "`\($0.name)`" }
                 let named = others.count <= 2 ? others.joined(separator: " and ")
                     : others.dropLast().joined(separator: ", ") + " and " + others[others.count - 1]

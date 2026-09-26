@@ -19,10 +19,15 @@ struct RegisterWatcherArguments: Equatable, Sendable {
     let profile: String?
     let mounts: [String]?
     let network: Bool?
+    /// #283. Follows the original rule, not the grant's: omitted on a re-registration leaves the
+    /// stored figure alone, and omitted on a new watch takes the watch default rather than the
+    /// scheduled-job one.
+    let maxRunsPerHour: Int?
 
     static let missing: ToolMessage = "Error: Missing path or instructions"
     static let windowShape: ToolMessage = "Error: quiet_window_seconds must be a whole number of seconds (1 to 300)."
     static let ignoreShape: ToolMessage = "Error: ignore must be a list of glob patterns, e.g. [\"*.log\", \"build/\"]."
+    static let runsShape: ToolMessage = "Error: max_runs_per_hour must be a whole number of runs (0 means no breaker)."
 
     /// Reads the tool call's arguments. A malformed optional argument is a refusal, not a drop
     /// (invariant 1's leniency is about *shape*, not about guessing): an `ignore` that was sent as
@@ -69,8 +74,16 @@ struct RegisterWatcherArguments: Equatable, Sendable {
         case .failure(let message): return .failure(ToolMessage("Error: " + message.text))
         case .success(let value): network = value
         }
+        var runsPerHour: Int?
+        if ScheduleJobArguments.given(args["max_runs_per_hour"]) != nil {
+            guard let value = ScheduleJobArguments.integer(args["max_runs_per_hour"]), value >= 0 else {
+                return .failure(runsShape)
+            }
+            runsPerHour = value
+        }
         return .success(RegisterWatcherArguments(
             path: path, instructions: instructions, quietWindowSeconds: window, ignore: ignore, overlap: overlap,
-            profile: ScheduleJobArguments.text(args["profile"]), mounts: mounts, network: network))
+            profile: ScheduleJobArguments.text(args["profile"]), mounts: mounts, network: network,
+            maxRunsPerHour: runsPerHour))
     }
 }

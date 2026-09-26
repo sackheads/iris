@@ -57,9 +57,11 @@ Two of the job's policies can be set at creation, and both default to the quiete
 
 A value neither field recognizes is refused with a sentence naming the ones that work, rather than
 quietly creating a job that behaves differently from the one that was asked for. The rest of a job's
-policy is not settable from the tool: the budgets, the breaker and the run timeout are global
-settings with a per-job override in the stored `policy` column, and `retry` is per job and on (see
-"Limits"). A `mutating` job can also be created with a **grant** — `mounts` and `network` — which
+policy is not settable from the tool, with one exception: the budgets and the run timeout are
+global settings with a per-job override in the stored `policy` column, `retry` is per job and on
+(see "Limits"), and the breaker is global for a scheduled job but takes `max_runs_per_hour` on
+`register_directory_watcher`, because a watch's sensible figure is not a schedule's (see
+"Watches"). A `mutating` job can also be created with a **grant** — `mounts` and `network` — which
 is what lets it write and run commands unattended; see "Grants".
 
 ## The cron subset
@@ -503,7 +505,14 @@ tool writes; anything a plugin hook writes; the memory tools (`update_memory`, `
 and anything containing it, is refused as a watch root; and the writes of an `iris --run-job`
 process, which is another process altogether (no watch is live while it holds the store). A loop
 built from any of those is not silent and not unbounded: it ends in the job's **breaker** pause
-(six runs an hour by default) with a card naming the figure, the same backstop every job has. A
+with a card naming the figure, the same backstop every job has — thirty runs an hour for a watch,
+six for a scheduled job. A watch gets the larger figure because it fires once per save-burst, so an
+ordinary editing session reaches six within the first hour and the watch pauses itself on nothing
+but the person's own saves (#283); thirty is one run every two minutes sustained. Say
+`max_runs_per_hour` on `register_directory_watcher` for a folder that should rarely change, or `0`
+to remove the breaker — which also removes the only bound on a loop the self-write filter cannot
+see. A watch created before #283 keeps the figure it was stored with until a re-registration names
+one. A
 granted job that writes into a watched folder should therefore use `write_file`, which the filter
 sees; a command's writes in the container it cannot.
 
