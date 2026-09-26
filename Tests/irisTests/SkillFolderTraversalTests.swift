@@ -72,18 +72,41 @@ struct SkillFolderTraversalTests {
         #expect(FileManager.default.fileExists(atPath: realSkill.path), "an unrelated skill survived")
     }
 
+    /// Review finding: `standardizedFileURL` strips a leading `/private` only when the path exists,
+    /// so a root spelled that way made the guard compare `/tmp/...` against `/private/tmp/...` and
+    /// refuse every *new* name while letting updates through. `/private/tmp` is a real root —
+    /// `TMPDIR=/private/tmp`, the perf lane's volatile copy — so this is not a hypothetical spelling.
+    @Test("an ordinary new name resolves under a root spelled through /private")
+    func privateSpelledRootAccepts() throws {
+        let root = URL(fileURLWithPath: "/private/tmp")
+            .appendingPathComponent("iris-284-\(UUID().uuidString)", isDirectory: true)
+        let paths = IrisPaths(root: root)
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        #expect(paths.skillsDir.path.hasPrefix("/private/"), "the fixture must keep the spelling under test")
+        #expect(ToolExecutor.skillFolder(named: "brand-new", paths: paths) != nil,
+                "a new skill under a /private-spelled root must resolve")
+        #expect(ToolExecutor.skillFolder(named: "..", paths: paths) == nil, "and the refusals still hold")
+        #expect(ToolExecutor.skillFolder(named: ".", paths: paths) == nil)
+    }
+
     @Test("create_skill and update_skill refuse a traversing name and write nothing outside")
     func writesRefused() async throws {
         let paths = try tempPaths()
         defer { try? FileManager.default.removeItem(at: paths.root) }
         let executor = ToolExecutor()
 
-        let created = await executor.createSkill(name: "../escaped", description: "d", body: "b", paths: paths)
-        #expect(created.lowercased().contains("not a valid skill name"), "got: \(created)")
+        // `.` and `""` are in here as well as in the delete test: their damage on a write is a
+        // `SKILL.md` dropped into the skills directory itself rather than into a skill's folder.
+        for name in ["../escaped", ".", ""] {
+            let created = await executor.createSkill(name: name, description: "d", body: "b", paths: paths)
+            #expect(created.lowercased().contains("not a valid skill name"), "create \(name.debugDescription): \(created)")
+            let updated = await executor.updateSkill(name: name, description: "d", body: "b", paths: paths)
+            #expect(updated.lowercased().contains("not a valid skill name"), "update \(name.debugDescription): \(updated)")
+        }
         #expect(!FileManager.default.fileExists(atPath: paths.root.appendingPathComponent("escaped").path))
-
-        let updated = await executor.updateSkill(name: "../escaped", description: "d", body: "b", paths: paths)
-        #expect(updated.lowercased().contains("not a valid skill name"), "got: \(updated)")
-        #expect(!FileManager.default.fileExists(atPath: paths.root.appendingPathComponent("escaped").path))
+        #expect(!FileManager.default.fileExists(atPath: paths.skillsDir.appendingPathComponent("SKILL.md").path),
+                "nothing may land in the skills directory itself")
     }
 }

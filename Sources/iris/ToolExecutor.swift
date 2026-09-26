@@ -129,7 +129,7 @@ struct ToolExecutor {
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
-                    "name": Schema(type: "STRING", description: "Short kebab-case skill identifier (e.g. gke-deployment-debug). One folder name, not a path: a name containing '/' or '..' is refused."),
+                    "name": Schema(type: "STRING", description: "Short kebab-case skill identifier (e.g. gke-deployment-debug). One folder name, not a path: empty, '.', '..' or anything containing '/' is refused."),
                     "description": Schema(type: "STRING", description: "High-signal summary of what this skill does and when to trigger it"),
                     "body": Schema(type: "STRING", description: "Full Markdown body containing numbered steps, exact commands, pitfalls, and verification steps")
                 ],
@@ -142,7 +142,7 @@ struct ToolExecutor {
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
-                    "name": Schema(type: "STRING", description: "Skill identifier to update. One folder name, not a path: a name containing '/' or '..' is refused."),
+                    "name": Schema(type: "STRING", description: "Skill identifier to update. One folder name, not a path: empty, '.', '..' or anything containing '/' is refused."),
                     "description": Schema(type: "STRING", description: "Updated description (optional if unchanged)"),
                     "body": Schema(type: "STRING", description: "Updated Markdown body or additional procedures (optional if description updated)")
                 ],
@@ -155,7 +155,7 @@ struct ToolExecutor {
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
-                    "name": Schema(type: "STRING", description: "The skill identifier to delete. One folder name, not a path: a name containing '/' or '..' is refused.")
+                    "name": Schema(type: "STRING", description: "The skill identifier to delete. One folder name, not a path: empty, '.', '..' or anything containing '/' is refused.")
                 ],
                 required: ["name"]
             )
@@ -706,14 +706,19 @@ except Exception as e:
             .replacingOccurrences(of: "_", with: "-")
         guard !cleanName.isEmpty, !cleanName.contains("/"), cleanName != ".." else { return nil }
         let folder = paths.skillsDir.appendingPathComponent(cleanName)
-        let root = paths.skillsDir.standardizedFileURL.path
-        guard folder.standardizedFileURL.path.hasPrefix(root + "/") else { return nil }
+        // `IrisPaths.canonicalPath`, not `standardizedFileURL`: the latter is `NSString`'s, which
+        // strips a leading `/private` only when the resulting path EXISTS. The root does, the new
+        // folder does not, so under a root spelled `/private/tmp/...` the two sides disagreed and
+        // every `create_skill` was refused — found in review, reachable with `TMPDIR=/private/tmp`
+        // or the perf lane's volatile copy. `canonicalPath` resolves the deepest existing ancestor
+        // and re-appends what is missing, so both sides are the same spelling.
+        let root = IrisPaths.canonicalPath(paths.skillsDir.path)
+        guard IrisPaths.canonicalPath(folder.path).hasPrefix(root + "/") else { return nil }
         return folder
     }
 
     /// One sentence for all three tools, so a refusal reads the same wherever it comes from.
     static let invalidSkillName = "Error: that is not a valid skill name — a skill name is a single folder name, not a path."
-
 
     func createSkill(name: String, description: String, body: String, paths: IrisPaths = .default) async -> String {
         guard let skillFolder = Self.skillFolder(named: name, paths: paths) else { return Self.invalidSkillName }
