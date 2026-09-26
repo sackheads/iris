@@ -19,6 +19,7 @@ struct EventCardTests {
                       runId: UUID = UUID(),
                       transcript: UUID? = nil,
                       catchUpNote: String? = nil,
+                      network: Bool = false,
                       watchSummary: WatchSummary? = nil) -> EventCard {
         EventCard(runId: runId,
                   jobId: UUID(),
@@ -31,6 +32,7 @@ struct EventCardTests {
                   totalTokens: totalTokens,
                   transcriptConversationId: transcript,
                   catchUpNote: catchUpNote,
+                  network: network,
                   watchSummary: watchSummary)
     }
 
@@ -137,6 +139,21 @@ struct EventCardTests {
         let changesOnly = card(watchSummary: WatchSummary(changed: 4))
         #expect(changesOnly.watchMetadataText == "4 changes")
         #expect(changesOnly.metadataLine == "\(base) · 4 changes")
+    }
+
+    @Test("a card without network decodes false, and network rides the metadata and transcript lines")
+    func networkOnTheCard() throws {
+        let plain = card()
+        #expect(!plain.network)
+        let old = try #require(EventCard.decode(plain.encodedContent().replacingOccurrences(of: "\"network\":false,", with: "")))
+        #expect(!old.network, "an older card has no key and reads false")
+
+        let net = card(network: true)
+        let base = "\(net.elapsedText) · \(SessionActivity.formatTokenCount(4_200)) tokens"
+        #expect(net.metadataLine == "\(base) · network")
+        #expect(card(network: true, watchSummary: WatchSummary(changed: 4)).metadataLine == "\(base) · network · 4 changes")
+        #expect(net.transcriptLine.hasSuffix(" swept 3 PRs (network)"))
+        #expect(try #require(EventCard.decode(net.encodedContent())).network)
     }
 
     /// Fix round 1: an unrecognised status is NOT the same as an absent one. A value this build
@@ -304,5 +321,16 @@ struct EventCardTests {
         #expect(ChatMessage(role: .agent, content: "").exportRoleName == "Iris")
         #expect(ChatMessage(role: .command, content: "").exportRoleName == "Iris")
         #expect(ChatMessage(role: .agent, content: "body").exportText == "body")
+    }
+
+    @Test("the display copy of a blocked call keeps the nearest granted directory while bounding its arguments (#282 §5)")
+    func displayCopyKeepsGrantNearest() {
+        let long = String(repeating: "x", count: EventCard.argumentPreviewLimit + 50)
+        let call = BlockedCall(toolName: "write_file", args: ["path": .string("/w/out.md"), "content": .string(long)],
+                               cwd: "/w", reason: .approval, grantNearest: "/w")
+        let shown = EventCard.displayCopy(of: call)
+        #expect(shown.grantNearest == "/w", "the card says where the grant is; the copy must not drop it")
+        #expect(shown.toolName == call.toolName && shown.cwd == call.cwd && shown.reason == call.reason && shown.at == call.at)
+        #expect((shown.args["content"]?.stringValue.count ?? 0) < long.count)
     }
 }

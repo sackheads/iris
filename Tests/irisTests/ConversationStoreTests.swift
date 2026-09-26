@@ -213,6 +213,51 @@ struct ConversationStoreTests {
         #expect(try store.loadAll().conversations.first?.checkpointHistory.first?.resolution == .humanApproved)
     }
 
+    @Test("v12 adds sandboxGrant; a row without it, and one whose blob will not parse, both load with nil")
+    func v12SandboxGrantIsLenient() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("iris-convstore-v11-\(UUID().uuidString)")
+        let url = root.appendingPathComponent("conversations.sqlite")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = UUID()
+        do {
+            let queue = try DatabaseQueue(path: url.path)
+            try ConversationStore.migrator.migrate(queue, upTo: "v11_watches")
+            try queue.write { db in
+                try db.execute(sql: """
+                    INSERT INTO conversations (id, position, title, createdAt, updatedAt, tokenUsage)
+                    VALUES (?, 1, 'old chat', datetime('now'), datetime('now'), ?)
+                    """, arguments: [id.uuidString, String(decoding: try JSONEncoder().encode(TokenUsage()), as: UTF8.self)])
+            }
+            try queue.close()
+        }
+        let store = try ConversationStore.onDisk(at: url)
+        var back = try #require(try store.loadAll().conversations.first)
+        #expect(back.sandboxGrant == nil)
+
+        back.sandboxGrant = JobGrant(mounts: [ContainerMount(source: "/p"), ContainerMount(source: "/q", readOnly: true)], network: true)
+        try store.apply([write(back, .metadata)])
+        #expect(try store.loadAll().conversations.first?.sandboxGrant == back.sandboxGrant)
+
+        try store.writer.write { db in
+            try db.execute(sql: "UPDATE conversations SET sandboxGrant = 'junk' WHERE id = ?", arguments: [id.uuidString])
+        }
+        let loaded = try store.loadAll()
+        #expect(loaded.conversations.first?.sandboxGrant == nil, "an unreadable grant is no grant")
+        #expect(loaded.conversations.count == 1, "and the conversation is kept")
+    }
+
+    @Test("Conversation JSON without sandboxGrant decodes, and one with an unreadable grant decodes ungranted (invariant 1)")
+    func conversationDecodesWithoutSandboxGrant() throws {
+        let data = Data(#"{"id":"\#(UUID().uuidString)","title":"t"}"#.utf8)
+        #expect(try JSONDecoder().decode(Conversation.self, from: data).sandboxGrant == nil)
+        // The same soft loss the store applies: a grant this build cannot read is no grant, and the
+        // conversation around it is kept rather than the whole decode failing.
+        let junk = Data(#"{"id":"\#(UUID().uuidString)","title":"t","sandboxGrant":{"mounts":["relative"]}}"#.utf8)
+        let decoded = try JSONDecoder().decode(Conversation.self, from: junk)
+        #expect(decoded.sandboxGrant == nil && decoded.title == "t")
+    }
+
     @Test("appending writes only the new rows")
     func appendIsIncremental() throws {
         let store = try ConversationStore.inMemory()

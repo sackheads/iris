@@ -98,6 +98,11 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// (§0.2, §4). `nil` on every conversation that is not a job run, which is the unnarrowed
     /// surface — never use it as a synonym for `readOnly`.
     var jobProfile: JobProfile?
+    /// #282 — the grant of the job whose run this background conversation holds: the directories
+    /// its host file tools may use unattended and its container mounts, and its network bit.
+    /// Stamped by `JobRunner.openConversation`, inherited by the subagents a run delegates into,
+    /// `nil` everywhere else — and `nil` is "no grant", which is the narrow answer.
+    var sandboxGrant: JobGrant?
     var goalContract: GoalContract? = nil
     var lastGoalCompletionReport: JSONValue? = nil
     var lastGoalEvaluation: GoalEvaluation? = nil
@@ -131,7 +136,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -153,6 +158,9 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         // Same invariant 1, and absent is the meaningful value: not a job run.
         jobProfile = try container.decodeIfPresent(JobProfile.self, forKey: .jobProfile)
+        // The store's soft loss, for symmetry: a grant this build cannot read is no grant, and
+        // the conversation around it is kept.
+        sandboxGrant = (try? container.decodeIfPresent(JobGrant.self, forKey: .sandboxGrant)) ?? nil
         goalContract = try container.decodeIfPresent(GoalContract.self, forKey: .goalContract)
         lastGoalCompletionReport = try container.decodeIfPresent(JSONValue.self, forKey: .lastGoalCompletionReport)
         lastGoalEvaluation = try container.decodeIfPresent(GoalEvaluation.self, forKey: .lastGoalEvaluation)
@@ -1010,6 +1018,15 @@ class AppState {
         }
     }
 
+    /// Stamps a run's grant on its conversation (#282). Persisted, so a transcript reopened after
+    /// a relaunch still says what the run was allowed to touch.
+    func setSandboxGrant(for conversationId: UUID, _ grant: JobGrant?) {
+        if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
+            conversations[idx].sandboxGrant = grant
+            markChanged(conversationId, .metadata)
+        }
+    }
+
     /// #185 §6.3 — a session's self-description to its peers, written by `set_session_card`.
     /// Advertised, not authoritative: `SessionDirectory.peers` never reads this for `isBusy`.
     ///
@@ -1026,12 +1043,16 @@ class AppState {
     /// Bind a contracted goal's workspace at lock (#68), creating it when it does not exist.
     ///
     /// Returns the bound path, or nil when nothing could be bound — creation failing is not fatal:
-    /// the goal proceeds unbound, which is exactly today's behaviour and therefore not worse.
+    /// the goal proceeds unbound, which is exactly today's behaviour and therefore not worse. A
+    /// background conversation is nil too, by rule rather than by failure (#282 §0.10).
     /// `paths` is injected so tests run against a temp root rather than the real ~/.iris.
     @discardableResult
     func bindGoalWorkspace(for conversationId: UUID, contract: GoalContract,
                            paths: IrisPaths = .default) -> String? {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return nil }
+        // §0.10: a background run cannot change its workspace by any path — the tool is refused,
+        // and a goal locked in such a conversation binds nothing. The grant is the boundary.
+        guard !conversations[idx].isBackground else { return nil }
         let fm = FileManager.default
         let workspacesRoot = paths.workspacesDir.path
 
@@ -2193,7 +2214,8 @@ class AppState {
                          workspace: String? = nil,
                          conversationId: UUID? = nil, origin: String = "Main agent",
                          inSandbox: Bool = false, callerRole: VibecopCallerRole = .agent,
-                         allowedCommands: [String] = [], vibecopEnabled: Bool? = nil) async -> Bool {
+                         allowedCommands: [String] = [], vibecopEnabled: Bool? = nil,
+                         grantedMount: ContainerMount? = nil) async -> Bool {
         // No pre-granted-approval branch here, deliberately (#187 R21, 2026-09-21): a call a
         // person clicked "Approve and run" on is dispatched by `IrisEngine.executeApprovedCall`,
         // which runs the tool through the hook layer directly and never enters this function. The
@@ -2205,15 +2227,42 @@ class AppState {
         // Fail closed for background (unattended) conversations, before every other path —
         // including `autoApproveTools` — since nobody is watching to see the approval dialog and a
         // gated tool must never run unattended (#187). The deterministic allowlist still applies
-        // (a call it already permits never needed a human, so it runs); everything else is denied
-        // and recorded for Task 6's ledger, without ever consulting Vibecop or a human.
-        if let id = conversationId, conversations.first(where: { $0.id == id })?.isBackground == true {
-            if permissions.isAllowed(toolName: toolName, details: details, workspace: workspace,
-                                     isBackground: true) {
+        // (a call it already permits never needed a human, so it runs) — except to a granted run's
+        // two file tools, which the grant alone decides (#282 §0.13, below); everything else is
+        // denied and recorded for Task 6's ledger, without ever consulting Vibecop or a human.
+        if let id = conversationId, let conversation = conversations.first(where: { $0.id == id }), conversation.isBackground {
+            // R10 first and on its own (#282 §3): a write into a protected directory is refused
+            // before any grant is consulted, whatever a stored grant happens to say. The path is
+            // resolved against the run's directory; `isProtectedWrite` judges it by real path (§0.9).
+            let resolvedPath = ToolExecutor.resolvePath(details, cwd: workspace)
+            if permissions.isProtectedWrite(toolName: toolName, path: resolvedPath) {
+                recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval), in: id)
+                return false
+            }
+            // §0.4, §0.5: inside the grant, no human is needed. A `run_command` reaching here has
+            // already passed the R20 check in the dispatcher, so "yes" is a sandboxed yes.
+            //
+            // §0.13, one decision: in a granted run the two file tools are the grant's alone. The
+            // dispatcher decided the covering mount before this call, and they are judged by that
+            // decision — never re-derived here, and never widened by the allowlist, because the
+            // executor has no Foundation branch for a granted run. A nil decision falls straight
+            // to the record below, which names the nearest granted directory for these two tools
+            // only: a command is not placed against directories, so its denial keeps the plain notice.
+            let grant = conversation.sandboxGrant
+            let isGrantedFileTool = grant != nil && (toolName == "write_file" || toolName == "read_file")
+            if isGrantedFileTool {
+                if grantedMount != nil { return true }
+            } else if let grant, grant.allows(toolName: toolName, details: details, cwd: workspace, sandboxed: inSandbox) {
+                // `inSandbox` is `resolveUseSandbox`'s answer for this call (IrisEngine's dispatcher):
+                // the conversation's resolution for a `run_command` — the parameter §0.4 asks for.
                 return true
             }
-            recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace,
-                                                     reason: .approval),
+            if !isGrantedFileTool,
+               permissions.isAllowed(toolName: toolName, details: details, workspace: workspace, isBackground: true) {
+                return true
+            }
+            recordBackgroundDenial(call: BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval,
+                                                     grantNearest: isGrantedFileTool ? grant?.nearest(to: details, cwd: workspace) : nil),
                                    in: id)
             return false
         }
@@ -2357,6 +2406,10 @@ class AppState {
     /// fail-closed denial, formatted with the tool name.
     static let unattendedDenialNotice = "Not run: `%@` needs approval, and this is an unattended run."
 
+    /// The same line for a granted run's call that fell outside the grant (#282 §5): it names the
+    /// nearest granted directory so the person can widen once.
+    static let outsideGrantDenialNotice = "Not run: `%@` needs approval — outside the grant (nearest: %@) — and this is an unattended run."
+
     /// The same line for a call a `readOnly` job's profile forbids outright (#187 §0.2). Separate
     /// from the approval notice because the two are not the same news: nobody can approve this one
     /// into running as it stands — the job would have to be created `mutating`.
@@ -2367,8 +2420,11 @@ class AppState {
     /// run spawned, so it drains with the run; the transcript line goes where the call was made.
     func recordBackgroundDenial(call: BlockedCall, in conversationId: UUID) {
         backgroundDenials[backgroundRunRoot(of: conversationId), default: []].append(call)
-        let notice = call.reason == .profile ? Self.profileDenialNotice : Self.unattendedDenialNotice
-        appendMessage(role: .system, content: String(format: notice, call.toolName), to: conversationId)
+        let notice: String
+        if call.reason == .profile { notice = String(format: Self.profileDenialNotice, call.toolName) }
+        else if let nearest = call.grantNearest { notice = String(format: Self.outsideGrantDenialNotice, call.toolName, nearest) }
+        else { notice = String(format: Self.unattendedDenialNotice, call.toolName) }
+        appendMessage(role: .system, content: notice, to: conversationId)
     }
 
     /// The first fail-closed denial recorded for a background run, without draining it. The

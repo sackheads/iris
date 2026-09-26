@@ -28,6 +28,7 @@ struct JobPolicyTests {
         #expect(policy.dailyTokenBudget == nil)
         #expect(policy.maxRunsPerHour == nil)
         #expect(policy.retry == true)
+        #expect(policy.grants == nil)
     }
 
     @Test("a fully populated policy round-trips")
@@ -36,6 +37,9 @@ struct JobPolicyTests {
                                perRunTokenBudget: 1_000, dailyTokenBudget: 2_000,
                                maxRunsPerHour: 4, retry: false)
         #expect(try decoder.decode(JobPolicy.self, from: Data(encodedJSON(policy).utf8)) == policy)
+
+        let granted = JobPolicy(overlap: .queue, grants: JobGrant(mounts: [ContainerMount(source: "/p")]))
+        #expect(try decoder.decode(JobPolicy.self, from: Data(encodedJSON(granted).utf8)) == granted)
     }
 
     @Test("a negative limit decodes as unset, not as unlimited")

@@ -153,13 +153,15 @@ struct IrisPaths: Sendable {
     /// Canonical, not merely standardized: APFS is case-insensitive by default, so `~/.iris/CONFIG`
     /// is the same directory as `~/.iris/config`, and a symlink planted in a writable directory
     /// (`memory/cfg -> config`) is a legal path to a protected target. Both sides go through
-    /// `canonicalPath` and are compared case-insensitively. This is a DENY check only — never
+    /// `realPath` and are compared case-insensitively. This is a DENY check only — never
     /// reuse it to widen an allow, where resolving a symlink the other way would let a link
-    /// smuggle an outside path into the carve-out.
+    /// smuggle an outside path into the carve-out. Real paths, not `canonicalPath`: that one
+    /// collapses `..` before following a symlink, and `link/../config` with `link → ~/.iris` is
+    /// inside `config` on disk and outside it lexically (#282 §0.9).
     func isUnderProtectedWriteDir(_ rawPath: String) -> Bool {
-        let candidate = Self.canonicalPath(rawPath).lowercased()
+        let candidate = Self.realPath(rawPath).lowercased()
         return protectedWriteDirs.contains { dir in
-            let base = Self.canonicalPath(dir.path).lowercased()
+            let base = Self.realPath(dir.path).lowercased()
             return candidate == base || candidate.hasPrefix(base + "/")
         }
     }
@@ -168,7 +170,7 @@ struct IrisPaths: Sendable {
     /// actually exists — the file being written usually does not yet, and `resolvingSymlinksInPath`
     /// leaves a path alone when it cannot stat it.
     static func canonicalPath(_ rawPath: String) -> String {
-        let expanded = (rawPath as NSString).expandingTildeInPath
+        let expanded = IrisEngine.expandTilde(rawPath)   // #275: never `expandingTildeInPath` on a decider
         var url = URL(fileURLWithPath: expanded).standardizedFileURL
         let fm = FileManager.default
         var missing: [String] = []
@@ -179,6 +181,69 @@ struct IrisPaths: Sendable {
         var resolved = url.resolvingSymlinksInPath()
         for component in missing.reversed() { resolved.appendPathComponent(component) }
         return resolved.standardizedFileURL.path
+    }
+
+    /// The path the kernel would act on (#282 §0.9): tilde expanded, then `realpath(3)` of the
+    /// deepest existing ancestor of the *unstandardised* components — so a symlink is followed
+    /// before a `..` that follows it, which is the one thing `canonicalPath` gets wrong — with
+    /// the remaining components appended. A `..` among the missing tail pops lexically: a
+    /// directory that does not exist cannot be a symlink. `canonicalPath` stays for the callers
+    /// that store and display paths; this is for deciding.
+    ///
+    /// One exception to "what the kernel would act on": a DANGLING final symlink (or a loop) is
+    /// returned as its spelling under the resolved parent, while `open(O_CREAT)` would create the
+    /// link's *target*. Three things hold that shut: `realPathForAllow` refuses it (an entry that
+    /// `lstat` sees but `realpath(3)` cannot resolve is nil on the allow side), `ToolExecutor.writeFile`
+    /// writes atomically, so its rename replaces the link rather than following it, and Task 4c's
+    /// walk opens the final component `O_NOFOLLOW`. This lenient form is for the deny side.
+    static func realPath(_ rawPath: String) -> String {
+        realPath(rawPath, strict: false) ?? "/"   // strict: false never returns nil; `/` is the last resort
+    }
+
+    /// `realPath` for an *allow*: nil when the path is not absolute after tilde expansion, any
+    /// component is `..` (§0.9) — a model never needs either inside a grant, and refusing them
+    /// costs nothing a person could not have phrased without them — or the deepest existing
+    /// entry will not resolve (a loop, a dangling link, EACCES, a component swapped between the
+    /// existence check and `realpath(3)`): an allow must not step past what it could not see.
+    static func realPathForAllow(_ rawPath: String) -> String? {
+        let expanded = IrisEngine.expandTilde(rawPath)   // #275: never `expandingTildeInPath` on a decider
+        guard expanded.hasPrefix("/") else { return nil }
+        guard !expanded.split(separator: "/").contains("..") else { return nil }
+        return realPath(expanded, strict: true)
+    }
+
+    /// The walk both forms share. Existence is `lstat`'s, not `stat`'s, so a symlink that does not
+    /// resolve is met as the deepest existing entry and `realpath(3)` is asked about *it*: strict
+    /// answers nil there; lenient steps back one more and appends the rest lexically, which is
+    /// the answer the deny side has always had. Only `/` itself is trusted without asking.
+    private static func realPath(_ rawPath: String, strict: Bool) -> String? {
+        let expanded = IrisEngine.expandTilde(rawPath)   // #275: never `expandingTildeInPath` on a decider
+        let absolute = expanded.hasPrefix("/") ? expanded : URL(fileURLWithPath: expanded).path
+        let components = absolute.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+            .filter { $0 != "." }
+        var existing = components.count
+        var resolved = "/"
+        while existing > 0 {
+            let prefix = "/" + components[0..<existing].joined(separator: "/")
+            var info = stat()
+            if lstat(prefix, &info) == 0 {
+                if let real = Darwin.realpath(prefix, nil) {
+                    resolved = String(cString: real)
+                    free(real)
+                    break
+                }
+                if strict { return nil }
+            }
+            existing -= 1
+        }
+        for component in components[existing...] {
+            if component == ".." {
+                resolved = (resolved as NSString).deletingLastPathComponent
+            } else {
+                resolved = (resolved as NSString).appendingPathComponent(component)
+            }
+        }
+        return resolved
     }
 
     /// True if `rawPath` resolves to a location inside `root` (`~/.iris`).

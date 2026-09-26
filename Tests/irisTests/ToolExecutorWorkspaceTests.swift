@@ -23,6 +23,15 @@ struct ToolExecutorWorkspaceTests {
         #expect(ToolExecutor.resolvePath("~/f.txt", cwd: "/ws") == home)              // tilde expands to absolute
     }
 
+    @Test("resolvePath expands a tilde without PATH_MAX truncation (#275; #282 §0.9: every allow-side expansion passes here)")
+    func resolvePathDoesNotTruncateATilde() {
+        // The same pin `WatchMigrationTests` keeps for `WatchRoot.canonical`: `expandingTildeInPath`
+        // hands back a plausible, truncated path past PATH_MAX; `IrisEngine.expandTilde` keeps every byte.
+        let overLong = "~/" + String(repeating: "a", count: 2_000)
+        #expect(ToolExecutor.resolvePath(overLong, cwd: nil).utf8.count > 2_000, "the path's tilde must not truncate")
+        #expect(ToolExecutor.resolvePath("f.txt", cwd: overLong).utf8.count > 2_000, "nor the workspace's")
+    }
+
     @Test("write_file + read_file with a relative path use the bound workspace, not the process cwd")
     func relativeWriteLandsInWorkspace() async throws {
         let tmp = FileManager.default.temporaryDirectory

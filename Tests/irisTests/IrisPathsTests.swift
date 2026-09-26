@@ -72,4 +72,87 @@ struct IrisPathsTests {
             #expect(isDir.boolValue)
         }
     }
+
+    /// A temp tree: mount/ with mount/link → iris/ (a fake ~/.iris holding config/), and mount/proj/.
+    private func linkTree() throws -> (base: URL, mount: URL, iris: URL, link: URL) {
+        let fm = FileManager.default
+        let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("iris-realpath-\(UUID().uuidString)")
+        let mount = base.appendingPathComponent("mount"), iris = base.appendingPathComponent("iris")
+        try fm.createDirectory(at: mount.appendingPathComponent("proj"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: iris.appendingPathComponent("config"), withIntermediateDirectories: true)
+        let link = mount.appendingPathComponent("link")
+        try fm.createSymbolicLink(at: link, withDestinationURL: iris)
+        return (base, mount, iris, link)
+    }
+
+    private func real(_ url: URL) -> String {
+        let p = realpath(url.path, nil)!; defer { free(p) }; return String(cString: p)
+    }
+
+    @Test("realPath follows a symlink before the .. that follows it, as the kernel does (§0.9)")
+    func realPathIsComponentWise() throws {
+        let t = try linkTree(); defer { try? FileManager.default.removeItem(at: t.base) }
+        // canonicalPath collapses lexically and lands inside the mount; realPath lands where the write would.
+        // `x` must NOT exist (§0.9, measured): when the final component exists, `standardizedFileURL`
+        // resolves the link first and agrees with the kernel, so an existing-file case would pass
+        // against the unfixed code. The new-file case is exactly `write_file`'s.
+        #expect(!FileManager.default.fileExists(atPath: t.link.path + "/../x"))
+        #expect(IrisPaths.canonicalPath(t.link.path + "/../x") == IrisPaths.canonicalPath(t.mount.path) + "/x")
+        #expect(IrisPaths.realPath(t.link.path + "/../x") == real(t.base) + "/x")
+        #expect(IrisPaths.realPath(t.link.path + "/config/permissions.json") == real(t.iris) + "/config/permissions.json")
+        // A missing tail is appended; a `..` inside the missing tail pops lexically.
+        #expect(IrisPaths.realPath(t.mount.path + "/proj/new/dir/f") == real(t.mount) + "/proj/new/dir/f")
+        #expect(IrisPaths.realPath(t.mount.path + "/proj/new/../f") == real(t.mount) + "/proj/f")
+        // /private is the real spelling of /tmp; both sides of every comparison go through here.
+        #expect(IrisPaths.realPath("/tmp/x").hasPrefix("/private/tmp/"))
+    }
+
+    @Test("realPathForAllow refuses .. and relative paths, and otherwise equals realPath")
+    func realPathForAllowRefuses() throws {
+        let t = try linkTree(); defer { try? FileManager.default.removeItem(at: t.base) }
+        #expect(IrisPaths.realPathForAllow(t.link.path + "/../x") == nil)
+        #expect(IrisPaths.realPathForAllow(t.mount.path + "/proj/../proj/f") == nil, "any .., not only one after a link")
+        #expect(IrisPaths.realPathForAllow("relative/f") == nil)
+        #expect(IrisPaths.realPathForAllow("~/../x") == nil)
+        #expect(IrisPaths.realPathForAllow(t.link.path + "/config/x") == IrisPaths.realPath(t.link.path + "/config/x"))
+        #expect(IrisPaths.realPathForAllow(t.mount.path + "/proj/./f") == real(t.mount) + "/proj/f", "a . is not a ..")
+    }
+
+    @Test("realPathForAllow is nil when the deepest existing entry will not resolve; realPath still answers the deny side")
+    func realPathForAllowFailsClosedOnAnUnresolvableEntry() throws {
+        let t = try linkTree(); defer { try? FileManager.default.removeItem(at: t.base) }
+        // A loop (ELOOP) and a dangling link (ENOENT): `stat` says neither is there, `lstat` says both
+        // are, and `realpath(3)` fails on each. The allow side must not paper over that by stepping
+        // back to the parent and appending the link's name as if it were a plain missing directory.
+        let loop = t.mount.appendingPathComponent("loop"), dangle = t.mount.appendingPathComponent("dangle")
+        try FileManager.default.createSymbolicLink(atPath: loop.path, withDestinationPath: "loop")
+        try FileManager.default.createSymbolicLink(atPath: dangle.path, withDestinationPath: "nowhere")
+        #expect(IrisPaths.realPathForAllow(loop.path + "/x") == nil)
+        #expect(IrisPaths.realPathForAllow(loop.path) == nil)
+        #expect(IrisPaths.realPathForAllow(dangle.path) == nil, "a dangling final link is the one case open(O_CREAT) would follow")
+        // The deny side keeps a lexical answer, resolved as far as the parent, so R10 can still say no.
+        #expect(IrisPaths.realPath(loop.path + "/x") == real(t.mount) + "/loop/x")
+        #expect(IrisPaths.realPath(dangle.path) == real(t.mount) + "/dangle")
+    }
+
+    @Test("canonicalPath expands a tilde without PATH_MAX truncation (#275, third site)")
+    func canonicalPathDoesNotTruncateATilde() {
+        // The same pin `WatchMigrationTests` keeps for `WatchRoot.canonical`: `expandingTildeInPath`
+        // hands back a plausible, truncated path past PATH_MAX; `IrisEngine.expandTilde` keeps every byte.
+        let overLong = "~/" + String(repeating: "a", count: 2_000)
+        #expect(IrisPaths.canonicalPath(overLong).utf8.count > 2_000, "the tilde expansion must not truncate")
+        #expect(IrisPaths.canonicalPath("~/x") == IrisPaths.canonicalPath(NSHomeDirectory() + "/x"), "and an ordinary tilde still expands")
+    }
+
+    @Test("isUnderProtectedWriteDir sees through link/.. and through the link itself (R10 hardened)")
+    func protectedWriteDirSeesThroughLinks() throws {
+        let t = try linkTree(); defer { try? FileManager.default.removeItem(at: t.base) }
+        let paths = IrisPaths(root: t.iris)
+        #expect(paths.isUnderProtectedWriteDir(t.link.path + "/config/permissions.json"))
+        #expect(paths.isUnderProtectedWriteDir(t.link.path + "/../iris/config/permissions.json"),
+                "the reproduced escape: lexically inside the mount, really inside config")
+        #expect(!paths.isUnderProtectedWriteDir(t.mount.path + "/proj/permissions.json"))
+        #expect(paths.isUnderProtectedWriteDir(t.iris.path.uppercased() + "/config/x") == paths.isUnderProtectedWriteDir(t.iris.path + "/config/x"),
+                "still case-insensitive on the deny side")
+    }
 }

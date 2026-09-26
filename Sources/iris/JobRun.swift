@@ -110,17 +110,21 @@ struct BlockedCall: Codable, Equatable, Sendable {
     let cwd: String?
     let reason: Reason
     let at: Date
+    /// The granted directory nearest the call's path (#282 §5), so the card can say where the grant
+    /// is; set only for a denial inside a granted run, nil for an ungranted one.
+    let grantNearest: String?
 
     init(toolName: String, args: [String: JSONValue] = [:], cwd: String? = nil,
-         reason: Reason = .approval, at: Date = Date()) {
+         reason: Reason = .approval, at: Date = Date(), grantNearest: String? = nil) {
         self.toolName = toolName
         self.args = args
         self.cwd = cwd
         self.reason = reason
         self.at = at
+        self.grantNearest = grantNearest
     }
 
-    private enum CodingKeys: String, CodingKey { case toolName, args, cwd, reason, at }
+    private enum CodingKeys: String, CodingKey { case toolName, args, cwd, reason, at, grantNearest }
 
     /// Invariant 1 throughout, and an unrecognized `reason` reads as `.profile` — the fail-closed
     /// direction, because `reason` is what three layers ask "can a click run this?" and `.profile`
@@ -134,6 +138,7 @@ struct BlockedCall: Codable, Equatable, Sendable {
         cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
         reason = Reason(rawValue: try c.decodeIfPresent(String.self, forKey: .reason) ?? "") ?? .profile
         at = try c.decodeIfPresent(Date.self, forKey: .at) ?? Date(timeIntervalSince1970: 0)
+        grantNearest = try c.decodeIfPresent(String.self, forKey: .grantNearest)
     }
 
     /// The one string that says what a call would actually do — the command, the path — and `nil`

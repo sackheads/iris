@@ -9,11 +9,15 @@ actor SandboxSessionManager {
 
     struct Session {
         let name: String
-        var mountedWorkspace: String?
+        var mountedWorkspace: ContainerMount?
         /// Every mount the container was created with, workspace included. A container's mounts
         /// are fixed at create time, so a call asking for a different set gets a different
         /// container — the same rule as a changed workspace, which is now one case of it.
         var mounts: [String]
+        /// The network the container was attached to. Fixed at create time like the mounts, and
+        /// compared like them: a granted run with the network off must never inherit a container
+        /// somebody built on the default network (#282 §0.7).
+        var network: NetworkMode
         var lastUsed: Date
     }
 
@@ -49,20 +53,24 @@ actor SandboxSessionManager {
 
     /// Runs one command in this conversation's container.
     ///
-    /// `extraMounts` are mounted alongside the workspace, in `source[:target][:ro]` form; a call
-    /// that asks for a different set than the live container has gets a fresh container, because
-    /// mounts are fixed when a container is created. Nothing in the app passes any yet — a gate
-    /// builds its own container rather than borrowing a conversation's session, and `run_command`
-    /// mounts only the workspace — so the mount-agreement machinery below is here for the caller
-    /// the spec asked for, not one that exists. `timeoutSeconds` bounds the command itself — past
-    /// it the command is killed and the result reads exactly like a host timeout.
-    func run(command: String, conversationId id: UUID, workspace: String?,
-             extraMounts: [String] = [], timeoutSeconds: Int? = nil) async -> String {
+    /// `workspace` is the working directory's mount: it is mounted read-write and the container's
+    /// `-w` is its target (`/` when there is none). Typed, not a `source[:target]` string, so a
+    /// `:` inside a host path is never read as a target — such a path reaches the runtime as the
+    /// four-part entry it always was, and is refused there. `extraMounts` are mounted
+    /// alongside it, in `source[:target][:ro]` form, and `network` is the network the container is
+    /// attached to; a call that asks for a different set of any of the three than the live
+    /// container has gets a fresh container, because all three are fixed when a container is
+    /// created. A granted job's `run_command` passes its grant's mounts here and its network mode
+    /// (#282); a gate still builds a container of its own rather than borrowing a conversation's
+    /// session. `timeoutSeconds` bounds the command itself — past it the command is killed and the
+    /// result reads exactly like a host timeout.
+    func run(command: String, conversationId id: UUID, workspace: ContainerMount?, extraMounts: [String] = [],
+             network: NetworkMode = .default, timeoutSeconds: Int? = nil) async -> String {
         let wasLost = lostSessions.contains(id)
         let mounts = Self.mountList(workspace: workspace, extra: extraMounts)
 
-        // Recreate if the workspace or the mount list changed (agent-initiated — not a "loss").
-        if let s = sessions[id], s.mountedWorkspace != workspace || s.mounts != mounts {
+        // Recreate if the workspace, the mount list or the network changed (agent-initiated — not a "loss").
+        if let s = sessions[id], s.mountedWorkspace != workspace || s.mounts != mounts || s.network != network {
             await runtime.remove(name: s.name)
             sessions[id] = nil
         }
@@ -83,9 +91,10 @@ actor SandboxSessionManager {
             // cannot be given the mounts it asked for does not run in the ones it was handed.
             var attempts = 0
             while true {
-                do { try await ensureSession(id, workspace: workspace, mounts: mounts) }
+                do { try await ensureSession(id, workspace: workspace, mounts: mounts, network: network) }
                 catch { return creationError(error) }
-                guard let s = sessions[id], s.mounts != mounts || s.mountedWorkspace != workspace else { break }
+                guard let s = sessions[id],
+                      s.mounts != mounts || s.mountedWorkspace != workspace || s.network != network else { break }
                 attempts += 1
                 if attempts >= mountAgreementAttempts {
                     // Left standing on the way out. It is the *winner's* container — tearing it
@@ -99,7 +108,7 @@ actor SandboxSessionManager {
             }
         }
 
-        let workdir = workspace ?? "/"
+        let workdir = Self.workdir(for: workspace)
         do {
             let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command,
                                            timeoutSeconds: timeoutSeconds)
@@ -127,7 +136,7 @@ actor SandboxSessionManager {
             await runtime.remove(name: name(for: id))
             sessions[id] = nil
             do {
-                try await ensureSession(id, workspace: workspace, mounts: mounts)
+                try await ensureSession(id, workspace: workspace, mounts: mounts, network: network)
                 let r = try await runtime.exec(name: name(for: id), workdir: workdir, command: command,
                                                timeoutSeconds: timeoutSeconds)
                 sessions[id]?.lastUsed = Date()
@@ -164,8 +173,16 @@ actor SandboxSessionManager {
     /// The workspace mount (read-write — the agent edits the files it is working on) followed by
     /// whatever the caller declared. Workspace first so the order a container is created with is
     /// stable, which is what makes comparing two mount lists a reliable "same container" test.
-    static func mountList(workspace: String?, extra: [String]) -> [String] {
-        (workspace.map { ["\($0):\($0)"] } ?? []) + extra
+    /// Always spelled `source:target` — an identity mount of `/ws` is `/ws:/ws`, exactly the entry
+    /// an ungranted workspace has always produced, so the runtime reads (and refuses) it as before.
+    static func mountList(workspace: ContainerMount?, extra: [String]) -> [String] {
+        (workspace.map { ["\($0.source):\($0.target)"] } ?? []) + extra
+    }
+
+    /// The container's working directory: the workspace mount's TARGET — which is the source
+    /// itself unless the grant named one (#282 §0.6) — and `/` when there is no workspace at all.
+    static func workdir(for workspace: ContainerMount?) -> String {
+        workspace?.target ?? "/"
     }
 
     func endSession(_ id: UUID) async {
@@ -210,7 +227,7 @@ actor SandboxSessionManager {
 
     /// Ensures a container exists for `id`, coalescing concurrent first-commands onto a single
     /// create so actor re-entrancy across the suspending `createDetached` can't spawn duplicates.
-    private func ensureSession(_ id: UUID, workspace: String?, mounts: [String]) async throws {
+    private func ensureSession(_ id: UUID, workspace: ContainerMount?, mounts: [String], network: NetworkMode) async throws {
         if sessions[id] != nil { return }
         if let inflight = creating[id] {
             try await inflight.value
@@ -220,7 +237,7 @@ actor SandboxSessionManager {
             // barrier, and fall through to creating our own if the answer is still nothing.
             if sessions[id] != nil { return }
         }
-        let task = Task<Void, Error> { [self] in try await create(id, workspace: workspace, mounts: mounts) }
+        let task = Task<Void, Error> { [self] in try await create(id, workspace: workspace, mounts: mounts, network: network) }
         creating[id] = task
         defer { creating[id] = nil }
         try await task.value
@@ -234,9 +251,16 @@ actor SandboxSessionManager {
     /// conversation id, so every later command in it would then fail with "already exists" until
     /// `reapOrphans()` at the next launch. Best effort, and its own failure is ignored: the create
     /// has already failed, and this is tidying, not the answer anybody is waiting for.
-    private func create(_ id: UUID, workspace: String?, mounts: [String]) async throws {
+    private func create(_ id: UUID, workspace: ContainerMount?, mounts: [String], network: NetworkMode) async throws {
+        // §0.7: the isolated network is made sure of before the container that needs it, and a
+        // network that cannot be had fails the command closed — `networkFailed` propagates out of
+        // here untouched, and `creationError` says so. Before the `do`, on purpose: nothing has
+        // been created yet, so there is nothing for the sweep below to stop or delete.
+        if case .isolated(let networkName) = network {
+            try await runtime.ensureIsolatedNetwork(named: networkName)
+        }
         do {
-            try await attemptCreate(id, workspace: workspace, mounts: mounts)
+            try await attemptCreate(id, workspace: workspace, mounts: mounts, network: network)
         } catch {
             // Ignoring cancellation on purpose: a cancelled create is one of the two ways this is
             // reached, and the ordinary `remove` would launch nothing at all from a cancelled task
@@ -246,26 +270,27 @@ actor SandboxSessionManager {
         }
     }
 
-    private func attemptCreate(_ id: UUID, workspace: String?, mounts: [String]) async throws {
+    private func attemptCreate(_ id: UUID, workspace: ContainerMount?, mounts: [String], network: NetworkMode) async throws {
+        let workdir = Self.workdir(for: workspace)
         do {
             try await runtime.createDetached(name: name(for: id), image: image(),
-                                             mounts: mounts, workdir: workspace ?? "/")
+                                             mounts: mounts, workdir: workdir, network: network)
         } catch {
             if case ContainerRuntimeError.createFailed(let msg) = error,
                ToolExecutor.sandboxSetupHint(for: msg) != nil {
                 let startResult = await SandboxingManager.shared.startContainerSystem()
                 if startResult.success {
                     try await runtime.createDetached(name: name(for: id), image: image(),
-                                                     mounts: mounts, workdir: workspace ?? "/")
+                                                     mounts: mounts, workdir: workdir, network: network)
                     sessions[id] = Session(name: name(for: id), mountedWorkspace: workspace,
-                                           mounts: mounts, lastUsed: Date())
+                                           mounts: mounts, network: network, lastUsed: Date())
                     return
                 }
             }
             throw error
         }
         sessions[id] = Session(name: name(for: id), mountedWorkspace: workspace,
-                               mounts: mounts, lastUsed: Date())
+                               mounts: mounts, network: network, lastUsed: Date())
     }
 
     private func format(_ r: (stdout: String, stderr: String, exitCode: Int32)) -> String {
@@ -295,6 +320,13 @@ actor SandboxSessionManager {
         if case ContainerRuntimeError.invalidMount(let entry, let reason) = error {
             return "Error: the mount `\(entry)` cannot be used — \(reason)."
         }
+        if case ContainerRuntimeError.networkFailed(let detail) = error { return Self.isolatedNetworkError(detail) }
         return "Error: could not start the sandbox container: \(error)"
+    }
+
+    /// What a granted run gets when the isolated network it needs could not be listed or created.
+    /// Nothing ran: a command that was granted no network does not run on the default one.
+    static func isolatedNetworkError(_ detail: String) -> String {
+        "Error: isolated network unavailable: \(detail). Nothing was run."
     }
 }

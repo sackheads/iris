@@ -34,7 +34,7 @@ struct RegisterWatcherTests {
 
     struct TestError: Error { let text: String; init(_ text: String) { self.text = text } }
 
-    private func fixture() throws -> Fixture {
+    private func fixture(mutatingJobsAvailable: Bool = true) throws -> Fixture {
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent("iris-regwatch-\(UUID().uuidString)")
         let notes = base.appendingPathComponent("notes")
@@ -46,6 +46,7 @@ struct RegisterWatcherTests {
         executor.jobToolsProvider = { JobTools(ledger: store.ledger) }
         executor.irisPaths = IrisPaths(root: irisRoot)
         executor.homeDirectory = base.appendingPathComponent("home").path
+        executor.mutatingJobsAvailable = { mutatingJobsAvailable }
         return Fixture(store: store, executor: executor, base: base, notes: notes)
     }
 
@@ -184,5 +185,38 @@ struct RegisterWatcherTests {
         // Omitted again: the choice made last time stands.
         _ = await f.register(conversationId: conversation)
         #expect(try f.watch().job.policy.overlap == .skip)
+    }
+
+    @Test("a watch takes profile, mounts and network; a grant on a read-only watch is refused; the watched folder is not implicitly granted")
+    func watchGrant() async throws {
+        let f = try fixture(); defer { f.tearDown() }
+        let out = f.base.appendingPathComponent("out")
+        try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        let refused = await f.register(["mounts": .string(out.path)])
+        #expect(refused == "Not watching \(IrisPaths.canonicalPath(f.notes.path)): mounts: \(JobGrant.grantNeedsMutating)")
+        #expect(try f.store.ledger.jobs().isEmpty)
+
+        let conversation = UUID()
+        let result = await f.register(["profile": .string("mutating"), "mounts": .string(out.path), "network": .bool(true)],
+                                      conversationId: conversation)
+        let (job, _) = try f.watch()
+        #expect(job.profile == .mutating)
+        #expect(job.policy.grants == JobGrant(mounts: [ContainerMount(source: IrisPaths.canonicalPath(out.path))], network: true))
+        #expect(job.policy.grants?.mounts.map(\.source).contains(IrisPaths.canonicalPath(f.notes.path)) == false,
+                "the watched folder is not in the grant unless named")
+        #expect(result.hasSuffix(" Grant: read-write \(IrisPaths.canonicalPath(out.path)) (working directory) · network on."))
+
+        // Re-registering from the same conversation without mounts removes the grant and keeps the profile.
+        _ = await f.register([:], conversationId: conversation)
+        let again = try f.watch().job
+        #expect(again.id == job.id && again.profile == .mutating && again.policy.grants == nil)
+    }
+
+    @Test("a mutating watch needs the VM, exactly as a mutating job does")
+    func mutatingWatchNeedsSandbox() async throws {
+        let f = try fixture(mutatingJobsAvailable: false); defer { f.tearDown() }
+        let result = await f.register(["profile": .string("mutating")])
+        #expect(result == ToolExecutor.watchProfileNeedsSandbox)
+        #expect(try f.store.ledger.jobs().isEmpty)
     }
 }

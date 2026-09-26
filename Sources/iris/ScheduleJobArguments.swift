@@ -39,6 +39,10 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// a later change to that default reaches every job that never had an opinion.
     let overlap: JobPolicy.Overlap?
     let catchUp: JobPolicy.CatchUp?
+    /// The grant (#282 §0.1): `nil` is "none asked for". Not the same rule as the policy fields
+    /// above — on a re-schedule an absent grant *removes* the stored one.
+    let mounts: [String]?
+    let network: Bool?
     /// What the parse had to change about what was asked for, in the words the answer uses. Not a
     /// refusal and not a silent fix: the job is created and the tool's sentence says what it got.
     var notes: [String] = []
@@ -74,7 +78,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
             }
         }
         let gateMounts: [String]?
-        switch stringList(args["gate_mounts"]) {
+        switch stringList(args["gate_mounts"], shape: Self.gateMountsShape) {
         case .failure(let message): return .failure(message)
         case .success(let values): gateMounts = values
         }
@@ -97,12 +101,22 @@ struct ScheduleJobArguments: Equatable, Sendable {
             catchUp = parsed.value
             if let note = parsed.note { notes.append(note) }
         }
+        let mounts: [String]?
+        switch stringList(args["mounts"], shape: Self.mountsShape) {
+        case .failure(let message): return .failure(message)
+        case .success(let values): mounts = values
+        }
+        let network: Bool?
+        switch boolean(args["network"]) {
+        case .failure(let message): return .failure(message)
+        case .success(let value): network = value
+        }
         return .success(ScheduleJobArguments(
             prompt: prompt, name: text(args["name"]), alias: alias, profile: text(args["profile"]),
             gateURL: text(args["gate_url"]), gatePath: text(args["gate_path"]),
             gateScript: text(args["gate_script"]), gateMounts: gateMounts,
             gateTimeoutSeconds: integer(args["gate_timeout_seconds"]),
-            overlap: overlap, catchUp: catchUp, notes: notes))
+            overlap: overlap, catchUp: catchUp, mounts: mounts, network: network, notes: notes))
     }
 
     /// Builds the job to store, or the sentence explaining why there is none. `existingNames` is
@@ -113,7 +127,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
     /// short-circuits to the host when the master switch is off, however the conversation is
     /// pinned. Injected so the refusal can be tested on a machine either way. A `mutating` job's
     /// *commands* always run in that VM (spec §0.2) — the rest of its tools run on the host behind
-    /// the user's allowlist, as in any run — so without the VM there is nowhere safe to run a
+    /// the user's allowlist or the job's grant (#282), as in any run — so without the VM there is nowhere safe to run a
     /// command and the tool says so rather than creating a job whose commands would quietly fall
     /// back to the host.
     /// `JobRunner` asks the same question again at every fire: this one can only speak for today —
@@ -124,12 +138,21 @@ struct ScheduleJobArguments: Equatable, Sendable {
     func makeJob(defaultTimeZone: String, createdIn: UUID?, existingNames: Set<String>,
                  sandboxAvailable: Bool = SandboxPolicy.mutatingJobCanRun(),
                  fileManager: FileManager = .default,
-                 directoryEntryLimit: Int = GateEvaluator.directoryEntryLimit) -> Result<Job, ToolMessage> {
+                 directoryEntryLimit: Int = GateEvaluator.directoryEntryLimit,
+                 paths: IrisPaths = .default, home: String = NSHomeDirectory()) -> Result<Job, ToolMessage> {
         // Anything that is not the word `mutating` reads as read-only, including a value this
         // build does not recognize: the narrow surface is the safe guess, and a refusal over a
         // spelling would cost a retry to arrive at the same job.
         let wantsMutating = profile?.lowercased() == JobProfile.mutating.rawValue.lowercased()
         if wantsMutating, !sandboxAvailable { return .failure(ToolMessage(Self.noRuntimeForMutating)) }
+        let grant: JobGrant?
+        switch JobGrant.resolve(mounts: mounts, network: network,
+                                profile: wantsMutating ? .mutating : .readOnly,
+                                fileManager: fileManager, paths: paths, home: home) {
+        case .failure(let message):
+            return .failure(Self.grantRefusal(message, mountsNamed: !(mounts ?? []).isEmpty))
+        case .success(let resolved): grant = resolved
+        }
         let gate: Gate?
         switch resolvedGate(sandboxAvailable: sandboxAvailable, fileManager: fileManager,
                             directoryEntryLimit: directoryEntryLimit) {
@@ -147,6 +170,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
             var policy = JobPolicy()
             if let overlap { policy.overlap = overlap }
             if let catchUp { policy.catchUp = catchUp }
+            policy.grants = grant
             return .success(Job(
                 name: Self.uniqueName(Job.slug(from: name ?? prompt), existing: existingNames),
                 prompt: prompt,
@@ -354,7 +378,12 @@ struct ScheduleJobArguments: Equatable, Sendable {
         } else {
             sentence = "Saved '\(stored.name)' but it will never fire: \(stored.pausedReason ?? JobScheduler.unmatchableReason)."
         }
-        return ([sentence] + notes).joined(separator: " ")
+        return ([sentence] + notes + [stored.policy.grants?.sentence].compactMap { $0 }).joined(separator: " ")
+    }
+
+    /// Said when a same-conversation `schedule_job` re-used an explicit name (§0.1).
+    static func replacedNote(_ name: String) -> String {
+        "This replaced '\(name)' from this conversation; its run history is kept."
     }
 
     /// A job's next fire, written for the model: minute precision in the zone the job's own cadence
@@ -415,6 +444,32 @@ struct ScheduleJobArguments: Equatable, Sendable {
         }
     }
 
+    static let networkShape: ToolMessage = "network must be true or false."
+    static let mountsShape: ToolMessage = "mounts must be a directory path, or a list of them, each as '/host/dir', '/host/dir:ro' or '/host/dir:/path/in/container'."
+
+    /// A Bool in the shapes a model sends one: a real Bool, or the words. Absent, null and the
+    /// empty string read as "not asked"; anything else is a refusal, because a dropped `network`
+    /// would silently attach a job to the wrong network for as long as it exists.
+    static func boolean(_ value: JSONValue?) -> Result<Bool?, ToolMessage> {
+        guard let value = given(value) else { return .success(nil) }
+        switch value {
+        case .bool(let flag): return .success(flag)
+        case .string(let word):
+            switch word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "true", "yes", "on": return .success(true)
+            case "false", "no", "off": return .success(false)
+            default: return .failure(networkShape)
+            }
+        default: return .failure(networkShape)
+        }
+    }
+
+    /// "mounts: …" when the call named mounts; a refusal earned by `network` alone is not about
+    /// mounts and says nothing of them.
+    static func grantRefusal(_ message: ToolMessage, mountsNamed: Bool) -> ToolMessage {
+        mountsNamed ? ToolMessage("mounts: \(message.text)") : message
+    }
+
     /// The value a model actually gave, or `nil` — absent, `null`, or an **empty string**, which
     /// is one of the ways a model spells "none". Same reading `stringList` gives an empty array,
     /// and for the same reason: refusing it would fail a call that asked for nothing, and the
@@ -436,21 +491,24 @@ struct ScheduleJobArguments: Equatable, Sendable {
         return true
     }
 
-    /// A list of non-empty strings — `gate_mounts`. A model that sends one mount as a bare string
-    /// rather than a one-element array means the same thing, so both are read.
+    /// A list of non-empty strings — `gate_mounts`, `mounts` (this tool and the watcher's). A model
+    /// that sends one mount as a bare string rather than a one-element array means the same thing,
+    /// so both are read.
     ///
     /// An empty array is *absent*, not a refusal: it is a common way for a model to say "none",
-    /// and "gate_mounts must be a directory path, or a list of them" is no help to a caller that
-    /// sent a list. An element that is not a string **is** a refusal, for the same reason the
-    /// `gate_*` keys above are: dropping it stores a gate with fewer inputs than was asked for,
-    /// and nothing in the answer would say so.
-    private static func stringList(_ value: JSONValue?) -> Result<[String]?, ToolMessage> {
+    /// and the caller's `shape` sentence is no help to a caller that sent a list. An element that
+    /// is not a string **is** a refusal, for the same reason the `gate_*` keys above are: dropping
+    /// it stores fewer inputs than were asked for, and nothing in the answer would say so.
+    static func stringList(_ value: JSONValue?, shape: ToolMessage) -> Result<[String]?, ToolMessage> {
         guard present(value) else { return .success(nil) }
-        if let single = text(value) { return .success([single]) }
-        guard case .array(let items) = value else { return .failure(Self.gateMountsShape) }
+        // Each element must actually be a string: a path is never a number, so the loose
+        // number-reads-as-its-text rule `text` gives everywhere else would silently turn a
+        // model's mistaken `3` into the path "3" rather than the refusal that names the mistake.
+        if case .string = value, let single = text(value) { return .success([single]) }
+        guard case .array(let items) = value else { return .failure(shape) }
         var values: [String] = []
         for item in items {
-            guard let path = text(item) else { return .failure(Self.gateMountsShape) }
+            guard case .string = item, let path = text(item) else { return .failure(shape) }
             values.append(path)
         }
         return .success(values.isEmpty ? nil : values)

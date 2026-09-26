@@ -120,6 +120,8 @@ struct ToolSurfaceTrimTests {
         #expect(job.contains("asks to be reminded"))
         #expect(job.contains("Never use shell cron"))
         #expect(job.contains("intervalSeconds"), "the parameter rules stay")
+        #expect(job.contains("unless the job was created with a grant that covers it"))
+        #expect(!job.contains("stops and says so."), "the old absolute sentence is gone")
 
         let mem = decls["search_memory"] ?? ""
         #expect(mem.contains("not present in the current context"))

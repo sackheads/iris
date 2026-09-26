@@ -426,7 +426,7 @@ struct SandboxTimeoutTests {
             }
         }
 
-        func createDetached(name: String, image: String, mounts: [String], workdir: String) async throws {
+        func createDetached(name: String, image: String, mounts: [String], workdir: String, network: NetworkMode) async throws {
             let first = lock.withLock { () -> Bool in
                 if held { return false }
                 held = true
@@ -448,6 +448,7 @@ struct SandboxTimeoutTests {
             }
             lock.withLock { created.append(mounts) }
         }
+        func ensureIsolatedNetwork(named name: String) async throws {}
         func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws
             -> (stdout: String, stderr: String, exitCode: Int32) { ("ok", "", 0) }
         func remove(name: String) async { lock.withLock { removed.append(name) } }
@@ -528,7 +529,7 @@ struct SandboxTimeoutTests {
     private func forwarded(args: [String: JSONValue]) async -> Int? {
         let captured = ForwardedTimeout()
         var executor = ToolExecutor()
-        executor.sandboxSession = { _, _, _, timeoutSeconds in
+        executor.sandboxSession = { _, _, _, _, _, timeoutSeconds in
             captured.set(timeoutSeconds)
             return "Success"
         }
@@ -552,5 +553,79 @@ struct SandboxTimeoutTests {
     @Test("with no timeout_seconds the sandboxed branch forwards the default")
     func sandboxedBranchForwardsDefault() async {
         #expect(await forwarded(args: ["command": .string("x")]) == 600)
+    }
+
+    // MARK: - run_command's sandboxed branch mounts the grant (#282 §0.10)
+
+    /// What the sandboxed branch handed the session: the workspace, the extra mounts, the network.
+    private final class CapturedSession: @unchecked Sendable {
+        private let lock = NSLock()
+        private var workspace: ContainerMount?; private var mounts: [String] = []; private var network: NetworkMode = .default
+        func set(_ w: ContainerMount?, _ m: [String], _ n: NetworkMode) { lock.withLock { workspace = w; mounts = m; network = n } }
+        var value: (workspace: ContainerMount?, mounts: [String], network: NetworkMode) { lock.withLock { (workspace, mounts, network) } }
+    }
+
+    private func capturingExecutor() -> (ToolExecutor, CapturedSession) {
+        let captured = CapturedSession()
+        var executor = ToolExecutor()
+        executor.sandboxSession = { _, _, workspace, extraMounts, network, _ in
+            captured.set(workspace, extraMounts, network); return "Success"
+        }
+        return (executor, captured)
+    }
+
+    @Test("the sandboxed branch mounts exactly the grant: its working directory, the rest as extras, its network")
+    func sandboxedBranchMountsTheGrant() async {
+        let (executor, captured) = capturingExecutor()
+        let grant = JobGrant(mounts: [ContainerMount(source: "/p"), ContainerMount(source: "/q", target: "/gh", readOnly: true)])
+        _ = await executor.execute(name: "run_command", args: ["command": .string("x")], cwd: "/p",
+                                   conversationId: UUID(), useSandbox: true, grant: grant)
+        #expect(captured.value.workspace == "/p")
+        #expect(captured.value.mounts == ["/q:/gh:ro"], "the working directory is mounted by mountList; only the rest ride as extras")
+        #expect(captured.value.network == .isolated)
+
+        _ = await executor.execute(name: "run_command", args: ["command": .string("x")], cwd: "/p",
+                                   conversationId: UUID(), useSandbox: true, grant: JobGrant(mounts: grant.mounts, network: true))
+        #expect(captured.value.network == .default)
+
+        // No read-write mount: the working directory is `/` (§0.6), whatever cwd says.
+        let ro = JobGrant(mounts: [ContainerMount(source: "/q", readOnly: true)])
+        _ = await executor.execute(name: "run_command", args: ["command": .string("x")], cwd: "/somewhere",
+                                   conversationId: UUID(), useSandbox: true, grant: ro)
+        #expect(captured.value.workspace == nil && captured.value.mounts == ["/q:ro"])
+
+        _ = await executor.execute(name: "run_command", args: ["command": .string("x")], cwd: "/ws",
+                                   conversationId: UUID(), useSandbox: true)
+        #expect(captured.value.workspace == "/ws" && captured.value.mounts.isEmpty && captured.value.network == .default, "no grant, no change")
+    }
+
+    @Test("a granted conversation whose workspacePath was moved still mounts only the grant (§0.10)")
+    func movedWorkspaceDoesNotMoveTheMount() async {
+        let (executor, captured) = capturingExecutor()
+        let grant = JobGrant(mounts: [ContainerMount(source: "/Users/me/proj")])
+        // `cwd` is what the dispatcher hands over from `conversation.workspacePath`; here it has
+        // been pointed at home. The container must not see it.
+        _ = await executor.execute(name: "run_command", args: ["command": .string("cat ~/.ssh/id_rsa")], cwd: "/Users/me",
+                                   conversationId: UUID(), useSandbox: true, grant: grant)
+        #expect(captured.value.workspace == "/Users/me/proj")
+        #expect(captured.value.mounts.isEmpty)
+    }
+
+    /// A grant is a promise about a container. Outside the sandboxed branch — sandboxing resolved
+    /// off, or no conversation to own a session — there is no container to keep it in, and the
+    /// answer is the refusal a background command gets without its VM, not the host with `cwd`.
+    /// Unreachable from the dispatcher today (R20 refuses upstream); pinned so the seam stays honest.
+    @Test("a grant outside the sandboxed branch is refused, not run on the host")
+    func grantOutsideTheSandboxIsRefused() async {
+        let (executor, captured) = capturingExecutor()
+        let grant = JobGrant(mounts: [ContainerMount(source: "/p")])
+        let refusal = IrisEngine.sandboxUnavailableRefusal(tool: "run_command")
+        let offSandbox = await executor.execute(name: "run_command", args: ["command": .string("x")], cwd: "/p",
+                                                conversationId: UUID(), useSandbox: false, grant: grant)
+        #expect(offSandbox == refusal)
+        let noConversation = await executor.execute(name: "run_command", args: ["command": .string("x")], cwd: "/p",
+                                                    conversationId: nil, useSandbox: true, grant: grant)
+        #expect(noConversation == refusal)
+        #expect(captured.value.workspace == nil && captured.value.mounts.isEmpty, "the session was never reached")
     }
 }

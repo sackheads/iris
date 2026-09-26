@@ -1166,18 +1166,21 @@ actor IrisEngine {
         // not write itself a cadence or a watch, so the two tools that do are not declared to it
         // at all — undeclared costs it nothing, and `executeFunctionCall` refuses the call anyway.
         if isUnattended { toolsList.removeAll { Self.jobCreationTools.contains($0.name) } }
-        // Add set_workspace tool dynamically
-        toolsList.append(FunctionDeclaration(
-            name: "set_workspace",
-            description: "Bind this conversation to a project directory when the user explicitly asks to work in, open, switch to, or bind one. A path mentioned in passing while asking about something else is not a request.",
-            parameters: Schema(
-                type: "OBJECT",
-                properties: [
-                    "path": Schema(type: "STRING", description: "Absolute or tilde-expanded path to the workspace directory. A relative path is refused, since it would depend on where Iris was launched from.")
-                ],
-                required: ["path"]
-            )
-        ))
+        // Add set_workspace tool dynamically — not to a background turn (#282 §0.10, invariant 6):
+        // its grant is its boundary, and `executeFunctionCall` refuses the call anyway.
+        if !isUnattended {
+            toolsList.append(FunctionDeclaration(
+                name: "set_workspace",
+                description: "Bind this conversation to a project directory when the user explicitly asks to work in, open, switch to, or bind one. A path mentioned in passing while asking about something else is not a request.",
+                parameters: Schema(
+                    type: "OBJECT",
+                    properties: [
+                        "path": Schema(type: "STRING", description: "Absolute or tilde-expanded path to the workspace directory. A relative path is refused, since it would depend on where Iris was launched from.")
+                    ],
+                    required: ["path"]
+                )
+            ))
+        }
         
         // Offered only on the rename-trigger turn (`/rename` and the automatic third-message
         // trigger both send this prefix). On plain turns the model renamed unprompted on first
@@ -1201,7 +1204,7 @@ actor IrisEngine {
         if !isUnattended {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -1223,7 +1226,9 @@ actor IrisEngine {
                     "gate_mounts": Schema(type: "ARRAY", description: "Directories the gate script can read, as '/host/dir' or '/host/dir:/path/in/container'. Always mounted read-only, and recorded as the directory the path resolves to. A single file cannot be mounted — give its directory. The whole filesystem and Iris's own configuration cannot be mounted at all, so name the narrowest directory the check needs.", items: Schema(type: "STRING")),
                     "gate_timeout_seconds": Schema(type: "INTEGER", description: "How long the gate script may take before it is killed and counted as a failure (default 60, clamped to 5-600)."),
                     "overlap": Schema(type: "STRING", description: "What a fire does when the previous run has not finished: 'skip' (default — the fire is dropped and recorded) or 'queue' (one fire is held and taken as soon as that run ends; never more than one)."),
-                    "catch_up": Schema(type: "STRING", description: "What a wake does with occurrences missed while the Mac slept: 'coalesce' (default — one fire now), 'skip' (none; jump to the next occurrence), or 'replay' to run the most recent missed ones one at a time, up to a cap (default 5, at most 100) — write a cap as 'replay:3'. A replayed fire is an ordinary one, so it asks the gate and counts against the breaker and the budgets, and the burst stops at the first fire that is refused or fails.")
+                    "catch_up": Schema(type: "STRING", description: "What a wake does with occurrences missed while the Mac slept: 'coalesce' (default — one fire now), 'skip' (none; jump to the next occurrence), or 'replay' to run the most recent missed ones one at a time, up to a cap (default 5, at most 100) — write a cap as 'replay:3'. A replayed fire is an ordinary one, so it asks the gate and counts against the breaker and the budgets, and the burst stops at the first fire that is refused or fails."),
+                    "mounts": Schema(type: "ARRAY", description: "Directories the job may use, as '/host/dir', '/host/dir:ro' or '/host/dir:/path/in/container'. Read-write unless ':ro'. The first read-write one is the job's working directory. Mutating jobs only. Recorded as the directory each path resolves to; the whole filesystem, the home directory, volume roots and Iris's own directory cannot be mounted.", items: Schema(type: "STRING")),
+                    "network": Schema(type: "BOOLEAN", description: "true lets the job's commands reach the network from inside the VM; default false, which attaches the VM to a host-only network. Mutating jobs only.")
                 ],
                 required: ["prompt"]
             )
@@ -1955,7 +1960,8 @@ actor IrisEngine {
     /// reason: whether this Mac has the VM today is not something a test can arrange.
     func scheduleJob(_ parsed: Result<ScheduleJobArguments, ToolMessage>, conversationId: UUID?,
                      review: GateScriptReview? = nil,
-                     sandboxAvailable: Bool = SandboxPolicy.mutatingJobCanRun()) async -> String {
+                     sandboxAvailable: Bool = SandboxPolicy.mutatingJobCanRun(),
+                     paths: IrisPaths = .default, home: String = NSHomeDirectory()) async -> String {
         let args: ScheduleJobArguments
         switch parsed {
         case .failure(let message): return message.text
@@ -1970,6 +1976,21 @@ actor IrisEngine {
         let scheduler = schedulerForJobWrites(ledger: ledger)
 
         var taken = Set(((try? ledger.jobs()) ?? []).map(\.name))
+        // §0.1: an explicit name that this conversation already used is a re-schedule, and a
+        // re-schedule replaces — the schedule, the prompt, the profile and the grant alike. Another
+        // conversation's job of that name is not ours to replace and still gets a suffix. So does a
+        // watch of that name: `register_directory_watcher` keeps its own folder-slug identity, and
+        // `schedule_job` replacing it would silently turn a standing watch into a cadence.
+        var replacing: Job?
+        if let name = args.name, let conversationId {
+            let slug = Job.slug(from: name)
+            replacing = ((try? ledger.jobs()) ?? []).first {
+                $0.name == slug && $0.createdInConversationId == conversationId && $0.trigger.kind != Trigger.fsEventKind
+            }
+            if let replacing { taken.remove(replacing.name) }
+        }
+        var notes = args.notes
+        if let replacing { notes.append(ScheduleJobArguments.replacedNote(replacing.name)) }
         // A gate script is reviewed once, and only once however many times the name loop below
         // goes round: a second dialog for the same script would read as a stuck button.
         var reviewedScript = false
@@ -1979,7 +2000,7 @@ actor IrisEngine {
         for _ in 0..<2 {
             switch args.makeJob(defaultTimeZone: TimeZone.current.identifier,
                                 createdIn: conversationId, existingNames: taken,
-                                sandboxAvailable: sandboxAvailable) {
+                                sandboxAvailable: sandboxAvailable, paths: paths, home: home) {
             case .failure(let message):
                 return message.text
             case .success(let job):
@@ -1998,12 +2019,19 @@ actor IrisEngine {
                     }
                     reviewedScript = true
                 }
+                var job = job
+                if let replacing {
+                    job = Job(id: replacing.id, name: job.name, prompt: job.prompt, trigger: job.trigger,
+                              profile: job.profile, destinationConversationId: replacing.destinationConversationId,
+                              createdInConversationId: replacing.createdInConversationId,
+                              createdAt: replacing.createdAt, policy: job.policy)
+                }
                 do {
                     // Stored through the scheduler, not the ledger, so the first fire is computed
                     // by the code the polling loop uses — and a cadence that matches nothing comes
                     // back paused rather than looking scheduled.
                     return ScheduleJobArguments.resultSentence(for: try await scheduler.schedule(job),
-                                                                notes: args.notes)
+                                                                notes: notes)
                 } catch {
                     taken.insert(job.name)
                 }
@@ -2176,6 +2204,9 @@ actor IrisEngine {
     /// What the dispatcher tells a background run that reached for one anyway.
     static let unattendedJobCreationRefusal =
         "A background run cannot create jobs or watches; describe what you want and the user can create it."
+
+    /// §0.10: the grant is the boundary, and nothing a run does may move it.
+    static let unattendedWorkspaceRefusal = "Not run: a background run cannot change its workspace; widen the job's grant instead."
 
     /// The failure reason written onto runs that were still `running` when the app came up: the
     /// last process died in the middle of them and nothing will ever finish them.
@@ -2404,11 +2435,12 @@ actor IrisEngine {
         let localState = state
         var result = ""
 
-        // One hop for both gates below (they ask the same conversation two questions), rather than
-        // one per tool call per gate: an ordinary chat pays this on every call and is neither.
-        let (isUnattended, jobProfile) = await MainActor.run { () -> (Bool, JobProfile?) in
+        // One hop for the gates below and the grant the executor mounts (they ask the same
+        // conversation three questions), rather than one per tool call per gate: an ordinary chat
+        // pays this on every call and is none of them.
+        let (isUnattended, jobProfile, sandboxGrant) = await MainActor.run { () -> (Bool, JobProfile?, JobGrant?) in
             let conversation = localState?.conversations.first(where: { $0.id == conversationId })
-            return (conversation?.isBackground == true, conversation?.jobProfile)
+            return (conversation?.isBackground == true, conversation?.jobProfile, conversation?.sandboxGrant)
         }
 
         // The epic's standing ruling: no unattended job creation. Neither tool is declared to a
@@ -2416,6 +2448,11 @@ actor IrisEngine {
         // model — the refusal has to live at the point that would actually write the row.
         if Self.jobCreationTools.contains(functionCall.name), isUnattended {
             return Self.unattendedJobCreationRefusal
+        }
+        // #282 §0.10, the same shape: a background run's grant is its boundary, and `set_workspace`
+        // is the tool that would move it. Undeclared to it (see `buildRequest`), refused here.
+        if functionCall.name == "set_workspace", isUnattended {
+            return Self.unattendedWorkspaceRefusal
         }
 
         // #187 §0.2, §4: a readOnly job run fails closed on a tool its profile denies, before any
@@ -3043,20 +3080,27 @@ actor IrisEngine {
             }
 
             let useSandbox = await resolveUseSandbox(toolName: functionCall.name, conversationId: conversationId, workspacePath: workspacePath)
+            // #282 §0.13: the covering mount for a granted file-tool call is decided ONCE, here,
+            // before approval, and both the gate and the executor consume this value — neither
+            // recomputes it: a command the run left running in the container can swap a component
+            // between a check and an open, and a component toggled between two computations is
+            // exactly the race the walk exists to close. nil under a grant is a refusal at the gate
+            // and again in the executor, never a Foundation write.
+            let grantedMount = sandboxGrant?.allowedMount(toolName: functionCall.name, details: details, cwd: workspacePath)
             if needsApproval {
                 let approved = await localState?.requestApproval(
                     toolName: functionCall.name, details: details, args: functionCall.args,
                     workspace: workspacePath,
                     conversationId: conversationId, origin: approvalOrigin, inSandbox: useSandbox,
                     callerRole: principal == .evaluator ? .evaluator : .agent,
-                    allowedCommands: evaluatorChecks) ?? false
+                    allowedCommands: evaluatorChecks, grantedMount: grantedMount) ?? false
                 if approved {
-                    result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended)
+                    result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount)
                 } else {
                     result = Self.deniedToolResult
                 }
             } else {
-                result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended)
+                result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount)
             }
         }
         
@@ -3102,13 +3146,20 @@ actor IrisEngine {
         guard call.toolName != "run_command" || useSandbox else {
             return Self.sandboxUnavailableRefusal(tool: call.toolName)
         }
+        // The grant, though, is the run's whatever the origin (#282 §0.10): the approved command
+        // runs in the container the run was granted — its mounts, its network — not in one built
+        // from `call.cwd`. The conversation is reopened with the grant before this is reached.
+        let grant = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.sandboxGrant }
+        // #282 §0.13: the same single decision the model-turn dispatcher makes, on the call's own
+        // path and cwd; the executor walks it and refuses a nil under a grant.
+        let grantedMount = grant?.allowedMount(toolName: call.toolName, details: call.args["path"]?.stringValue ?? "", cwd: call.cwd)
         // `isUnattended` defaults to false here, and that is the ruling rather than an oversight
         // (#187 §4, R-D4-1): a person clicked "Approve and run" on this call a moment ago, so its
         // write is the human-driven kind a watch is meant to notice, like any other foreground
         // write. The filter is fed from the dispatcher's unattended branch only.
         return await executeToolWithHooks(name: call.toolName, args: call.args, cwd: call.cwd,
                                           conversationId: conversationId, useSandbox: useSandbox,
-                                          origin: .approvedCall)
+                                          origin: .approvedCall, grant: grant, grantedMount: grantedMount)
     }
 
     /// What an approved call that turns out to target a protected directory returns instead of
@@ -3201,7 +3252,7 @@ actor IrisEngine {
         }
     }
 
-    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn) async -> String {
+    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil) async -> String {
         var execArgs: [String: JSONValue] = args
 
         // Session strip activity (#217/#19): the detail is derived from the tool's own arguments
@@ -3246,7 +3297,7 @@ actor IrisEngine {
             }
         }
         
-        var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox)
+        var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant, grantedMount: grantedMount)
 
         if name == "write_file", result.hasPrefix("Successfully wrote to "),
            let cid = conversationId, let path = execArgs["path"]?.stringValue {
@@ -3435,7 +3486,7 @@ extension IrisEngine {
         return [
             FunctionDeclaration(
                 name: "list_jobs",
-                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, why one is paused, and how the last run ended, plus what each has spent today and how hard it has been running — `tokensToday` against `dailyBudget`, `runsLastHour` against `maxRunsPerHour` (the breaker), `retryAttempt` out of three, and `policy`, `gateKind` and `profile` — with `tokensTodayAllJobs` against `globalDailyBudget` for every background run together, and `unreadableJobs` — how many stored jobs could not be read at all. A figure that is null could not be read, which is not the same as zero. Use it to answer what is scheduled, what a job is costing, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
+                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, why one is paused, and how the last run ended, plus what each has spent today and how hard it has been running — `tokensToday` against `dailyBudget`, `runsLastHour` against `maxRunsPerHour` (the breaker), `retryAttempt` out of three, and `policy`, `gateKind` and `profile`, and `grants` — the directories and network a mutating job was created with, null when it has none — with `tokensTodayAllJobs` against `globalDailyBudget` for every background run together, and `unreadableJobs` — how many stored jobs could not be read at all. A figure that is null could not be read, which is not the same as zero. Use it to answer what is scheduled, what a job is costing, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
                 parameters: Schema(type: "OBJECT", properties: [:], required: [])),
             FunctionDeclaration(
                 name: "get_job_run",
@@ -3484,6 +3535,10 @@ extension IrisEngine {
                 "policy": JobsCommand.policySummary(for: job),
                 "gateKind": job.trigger.gate?.summary ?? NSNull(),
                 "retryAttempt": job.retryAttempt,
+                // As stored: `mounts` in the runtime's grammar (`ContainerMount.entry`), `network`
+                // as given. Null for every job with no grant, never an empty object — and null for
+                // a read-only row's grant, which the runner treats as inert (L1).
+                "grants": job.effectiveGrant.map(jsonObject) ?? NSNull(),
                 // Null, never zero, when the ledger would not answer: "spent nothing today" is a
                 // claim, and an unread figure is not one.
                 "tokensToday": figures?.tokensToday ?? NSNull(),

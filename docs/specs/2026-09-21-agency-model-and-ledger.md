@@ -268,7 +268,9 @@ issue covers pricing.
 `AppState.requestApproval` gains one branch before the auto-approve check: if the conversation is
 `isBackground`, it records `(toolName, details)` in a new transient
 `backgroundDenials: [UUID: [BlockedToolCall]]`, appends a `.system` message "Not run: `<tool>`
-needs approval, and this is an unattended run" to the run transcript, and returns `false`. Nothing
+needs approval, and this is an unattended run" to the run transcript (for a file-tool call outside
+a granted run's grant the line names the nearest granted directory — 4½,
+`2026-09-23-agency-job-grants.md`), and returns `false`. Nothing
 is enqueued in `pendingApprovals`, so no dialog appears and the run is never blocked. The tool
 result the model sees is the existing denied-approval result. At the end of the run, if any denial
 was recorded the row's status is `blockedOnApproval` and `blockedTool` names the first one; the

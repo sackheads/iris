@@ -141,7 +141,7 @@ struct BackgroundDescendantTests {
             defaults.removePersistentDomain(forName: suite)
             IrisDefaults.removeSuiteFile(named: suite, in: IrisDefaults.preferencesDirectory)
         }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: ConfigManager(store: defaults),
                                sandboxAvailable: { true })
 

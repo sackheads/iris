@@ -6,7 +6,8 @@ import Foundation
 /// declarations by it and the dispatcher fails closed on anything it still gets asked for (#187
 /// deliverable 3, spec §0.2 and §4). A `mutating` job's *commands* always run in the
 /// `apple/container` VM — `run_command` is what the VM routes; `write_file` and the other native
-/// tools execute on the host behind the user's allowlist, as they do in any run — so it is refused
+/// tools execute on the host behind the user's allowlist or the job's grant (#282), as they do in
+/// any run — so it is refused
 /// both at creation and at every fire when that VM is unavailable; see
 /// `SandboxPolicy.mutatingJobCanRun`.
 enum JobProfile: String, Codable, Sendable {
@@ -36,7 +37,8 @@ extension JobProfile {
     /// container) and MCP tools (allowed only where the server annotated them read-only). Notably
     /// absent: `set_workspace`, because a workspace is what gives a sandboxed `run_command` a
     /// read-write bind mount — a read-only run that could set one could write to the host through
-    /// the sandbox it is confined to.
+    /// the sandbox it is confined to. Since #282 §0.10 no unattended run of either profile may
+    /// call it: the dispatcher refuses it (`IrisEngine.unattendedWorkspaceRefusal`).
     static let readOnlyAllowed: Set<String> = [
         "read_file", "search_web", "search_memory", "reflect",
         "list_jobs", "get_job_run",
@@ -370,6 +372,11 @@ enum Trigger: Codable, Equatable, Sendable {
 /// A scheduled or event-driven agent task, stored in the conversation database. Replaces the old
 /// `UserDefaults`-backed scheduled jobs and watcher rules.
 struct Job: Identifiable, Codable, Equatable, Sendable {
+    /// The grant this job runs under (#282, L1): a grant on a read-only row is inert — never
+    /// stamped, never checked, never shown — so a hand-edited row cannot claim a capability its
+    /// run does not have. The one rule the runner's four card sites and both listings read.
+    var effectiveGrant: JobGrant? { profile == .mutating ? policy.grants : nil }
+
     let id: UUID
     var name: String
     var prompt: String

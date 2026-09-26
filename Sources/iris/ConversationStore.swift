@@ -460,6 +460,14 @@ final class ConversationStore: Sendable {
                                arguments: [rewritten, id])
             }
         }
+        // #282: the grant of the job whose run a background conversation holds. One JSON column,
+        // NULL for every conversation that is not a granted run; an unreadable blob reads as nil,
+        // which is "no grant" — the narrow direction — and never costs the row.
+        m.registerMigration("v12_sandbox_grant") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "sandboxGrant", .text)
+            }
+        }
         return m
     }
 
@@ -669,30 +677,31 @@ final class ConversationStore: Sendable {
         let report = try c.lastGoalCompletionReport.map { try json($0, encoder) }
         // NULL when absent, like `goalContract` a few lines above (#185).
         let card = try c.sessionCard.map { try json($0, encoder) }
+        let grant = try c.sandboxGrant.map { try json($0, encoder) }
         if exists {
             try db.execute(sql: """
                 UPDATE conversations SET title = ?, updatedAt = ?, workspacePath = ?, activeGoal = ?,
                     messageCountSinceReflection = ?, goalIterationCount = ?, mainAgentSandbox = ?,
                     tokenUsage = ?, goalContract = ?, subagentResult = ?, checkpointHistory = ?,
                     lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?,
-                    isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?
+                    isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  history, evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
-                                 c.jobProfile?.rawValue, c.id.uuidString])
+                                 c.jobProfile?.rawValue, grant, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
                 INSERT INTO conversations (id, position, title, createdAt, updatedAt, workspacePath, activeGoal,
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
-                    isBackground, isPinned, sessionCard, jobProfile)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    isBackground, isPinned, sessionCard, jobProfile, sandboxGrant)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
-                                 c.isBackground, c.isPinned, card, c.jobProfile?.rawValue])
+                                 c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant])
         }
     }
 
@@ -868,6 +877,7 @@ final class ConversationStore: Sendable {
                     }
                 }
                 let subagentResult = supplementary("subagentResult")
+                let sandboxGrant = supplementary("sandboxGrant")
                 let checkpointHistory = supplementary("checkpointHistory")
                 let lastGoalEvaluation = supplementary("lastGoalEvaluation")
                 let lastGoalCompletionReport = supplementary("lastGoalCompletionReport")
@@ -926,6 +936,13 @@ final class ConversationStore: Sendable {
                 if let s = subagentResult {
                     do { c.subagentResult = try decoder.decode(SubagentResult.self, from: Data(s.utf8)) }
                     catch { localSoftLosses.append(("subagentResult", "\(error)")) }
+                }
+
+                // #282 — supplementary like `subagentResult`: a grant this build cannot read is no
+                // grant, which is the narrow answer, and the conversation is kept.
+                if let s = sandboxGrant {
+                    do { c.sandboxGrant = try decoder.decode(JobGrant.self, from: Data(s.utf8)) }
+                    catch { localSoftLosses.append(("sandboxGrant", "\(error)")) }
                 }
 
                 if let s = checkpointHistory {

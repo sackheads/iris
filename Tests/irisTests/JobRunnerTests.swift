@@ -126,6 +126,15 @@ struct JobRunnerTests {
         #expect(JobRunner.failureReason(status: .completed, messages: [], blockedTool: nil) == nil)
     }
 
+    @Test("a call blocked outside a grant names the nearest granted directory")
+    func failureReasonNamesTheNearestGrantedDirectory() {
+        #expect(JobRunner.failureReason(status: .blockedOnApproval, messages: [], blockedTool: "write_file",
+                                        blockedNearest: "/Users/me/proj")
+                == "needs approval: write_file outside the grant (nearest: /Users/me/proj)")
+        #expect(JobRunner.failureReason(status: .blockedOnApproval, messages: [], blockedTool: "write_file")
+                == "needs approval: write_file")
+    }
+
     @Test("the soft-stop marker is the line softStopWithSummary posts")
     func softStopMarkerMatchesTheEngineLine() {
         let line = ChatMessage(role: .system,
@@ -162,7 +171,7 @@ struct JobRunnerTests {
         let firedAt = Date(timeIntervalSince1970: 1_700_000_000)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { firedAt },
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, now: { firedAt },
                                config: config)
 
         await runner.fire(job: job, origin: .schedule)
@@ -173,6 +182,7 @@ struct JobRunnerTests {
         #expect(!SidebarOrdering.visible(state.conversations).contains { $0.id == background.id })
         #expect(state.selectedConversationId == userConversation, "and it never steals the selection")
         #expect(background.mainAgentSandbox == nil, "a readOnly job does not force a sandbox")
+        #expect(background.sandboxGrant == nil && background.workspacePath == nil, "a readOnly job has no grant and no workspace")
 
         // The ledger row.
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 10).first)
@@ -231,7 +241,7 @@ struct JobRunnerTests {
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         // A mutating fire needs a VM to run in (§0.2, R12), and a test process has sandboxing off.
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { true })
 
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/a.swift", "/tmp/b.swift"]))
@@ -327,7 +337,7 @@ struct JobRunnerTests {
         try store.ledger.upsert(job)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                sandboxAvailable: { true })
 
         await runner.fire(job: job, origin: .schedule)
@@ -357,7 +367,7 @@ struct JobRunnerTests {
         try store.ledger.upsert(job)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config)
 
         await runner.fire(job: job, origin: .schedule)
 
@@ -385,7 +395,7 @@ struct JobRunnerTests {
                                              protectionEnabled: false, sessionPeerCount: 0)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine!, ledger: store.ledger, config: config)
+        let runner = JobRunner(state: state, engine: engine!, ledger: store.ledger, endSandboxSession: { _ in }, config: config)
         engine = nil
 
         await runner.fire(job: job, origin: .schedule)
@@ -409,7 +419,7 @@ struct JobRunnerTests {
         try store.ledger.upsert(job)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config)
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config)
 
         await runner.fire(job: job, origin: .schedule)
 
@@ -429,7 +439,7 @@ struct JobRunnerTests {
         let at = Date(timeIntervalSince1970: 1_700_000_900)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { at },
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, now: { at },
                                config: config)
         let reason = "watch path unavailable: /gone"
 
@@ -458,7 +468,7 @@ struct JobRunnerTests {
         let at = Date(timeIntervalSince1970: 1_700_000_900)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { at },
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, now: { at },
                                config: config)
         let reason = "watch path unavailable: /gone"
 
@@ -490,7 +500,7 @@ struct JobRunnerTests {
         let at = Date(timeIntervalSince1970: 1_700_000_900)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { at },
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, now: { at },
                                config: config)
         let streams = WatcherManagerSyncTests.FakeStreams()
         let manager = WatcherManager(ledger: store.ledger, streams: streams.factory,

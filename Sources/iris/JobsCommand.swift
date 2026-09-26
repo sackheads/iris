@@ -156,15 +156,17 @@ enum JobsCommand: Equatable {
                             + "\(figures.map(runsCell) ?? missingFigure) |")
             }
             // One line per watch, directly beneath the table and in its order: a markdown table
-            // row cannot carry a second line, and the figures are too long for a column.
+            // row cannot carry a second line, and the figures are too long for a column. The grant
+            // paragraphs (spec §5) follow, one per granted job, in the jobs' own order.
             let watchLines = jobs.compactMap { job -> String? in
                 guard case .fsEvent = job.trigger else { return nil }
                 return watchLine(job: job, lastBurst: lastBursts[job.id],
                                  absorbed: absorbed?[job.id], hasCoordinator: absorbed != nil)
             }
-            // One paragraph per watch: the block is markdown, where a single newline is a space,
+            let extraLines = watchLines + jobs.compactMap(grantLine(job:))
+            // One paragraph per line: the block is markdown, where a single newline is a space,
             // so two lines joined by one would read as a single sentence.
-            for line in watchLines {
+            for line in extraLines {
                 rows.append("")
                 rows.append(line)
             }
@@ -244,6 +246,7 @@ enum JobsCommand: Equatable {
     static func policySummary(for job: Job) -> String {
         var parts: [String] = []
         if job.profile == .mutating { parts.append("mutating") }
+        if job.effectiveGrant != nil { parts.append("grant") }
         if job.policy.overlap == .queue { parts.append("overlap queue") }
         switch job.policy.catchUp {
         case .coalesce: break
@@ -284,6 +287,14 @@ enum JobsCommand: Equatable {
             since = missingFigure
         }
         return "`\(job.name)` — last burst: \(burst) · absorbed since launch: \(since)"
+    }
+
+    /// The grant paragraph beneath the table (spec §5): what a granted job may touch, in the words
+    /// the result sentence used when it was created, so the two never disagree. A read-only row's
+    /// grant is inert (L1) and gets no line.
+    static func grantLine(job: Job) -> String? {
+        guard let grant = job.effectiveGrant else { return nil }
+        return "`\(job.name)` — \(grant.describe(hostNote: true))"
     }
 
     /// What a column says when the figure behind it could not be read.

@@ -115,7 +115,7 @@ struct JobRetryTests {
         let firedAt = Date(timeIntervalSince1970: 1_700_000_000)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { firedAt },
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, now: { firedAt },
                                config: config, activity: RecordingActivity())
 
         await runner.fire(job: j, origin: .schedule)
@@ -138,7 +138,7 @@ struct JobRetryTests {
         let firedAt = Date(timeIntervalSince1970: 1_700_000_000)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, now: { firedAt },
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, now: { firedAt },
                                config: config, activity: RecordingActivity())
 
         await runner.fire(job: j, origin: .schedule)
@@ -158,7 +158,7 @@ struct JobRetryTests {
         try store.ledger.upsert(j)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                activity: RecordingActivity())
 
         await runner.fire(job: j, origin: .watcher(paths: ["/tmp/in/a.txt"]))
@@ -177,7 +177,7 @@ struct JobRetryTests {
         try store.ledger.upsert(j)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                activity: RecordingActivity())
 
         await runner.fire(job: j, origin: .schedule)
@@ -194,7 +194,7 @@ struct JobRetryTests {
         try store.ledger.upsert(j)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                now: { Date(timeIntervalSince1970: 1_700_000_000) },
                                config: config, activity: RecordingActivity())
 
@@ -414,7 +414,7 @@ struct JobRetryTests {
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         let activity = RecordingActivity()
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                activity: activity)
 
         let fire = Task { await runner.fire(job: j, origin: .schedule) }
@@ -438,7 +438,7 @@ struct JobRetryTests {
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         let activity = RecordingActivity()
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                activity: activity)
 
         await runner.fire(job: j, origin: .schedule)
@@ -466,7 +466,7 @@ struct JobRetryTests {
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         let activity = RecordingActivity()
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                activity: activity)
         defer { client.releaseAll() }
 
@@ -509,7 +509,7 @@ struct JobRetryTests {
         try store.ledger.upsert(j)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                activity: RecordingActivity())
 
         // Held across the run: a second turn's claim, which nothing in this run may give back.
@@ -534,7 +534,7 @@ struct JobRetryTests {
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         let activity = RecordingActivity()
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                activity: activity, watchdogSlice: 0.1)
         defer { client.releaseAll() }
 
@@ -580,7 +580,7 @@ struct JobRetryTests {
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         let activity = RecordingActivity()
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                activity: activity)
 
         let fire = Task { await runner.fire(job: j, origin: .schedule) }
@@ -607,7 +607,7 @@ struct JobRetryTests {
         try store.ledger.upsert(j)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                activity: RecordingActivity())
 
         await runner.fire(job: j, origin: .manual)
@@ -630,7 +630,7 @@ struct JobRetryTests {
         try store.ledger.upsert(j)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                activity: RecordingActivity())
 
         let first = Task { await runner.fire(job: j, origin: .watcher(paths: ["/tmp/in/a.txt"])) }

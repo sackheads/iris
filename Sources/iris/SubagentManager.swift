@@ -62,6 +62,11 @@ final class SubagentManager: @unchecked Sendable {
             if let parentWorkspace = appState.conversations.first(where: { $0.id == parentConversationId })?.workspacePath {
                 appState.setWorkspace(for: subagentId, path: parentWorkspace)
             }
+            // A granted run's delegate works under the same grant, never wider (#282 §2): the same
+            // mounts, the same network, the same host-write boundary.
+            if let parentGrant = appState.conversations.first(where: { $0.id == parentConversationId })?.sandboxGrant {
+                appState.setSandboxGrant(for: subagentId, parentGrant)
+            }
         }
 
         let tier: ModelTier

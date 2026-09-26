@@ -258,7 +258,7 @@ struct TurnBudgetTests {
         try store.ledger.upsert(job)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engineWithClient, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engineWithClient, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, activity: RecordingActivity(),
                                sandboxAvailable: { true })
 
@@ -294,7 +294,7 @@ struct TurnBudgetTests {
         try store.ledger.upsert(job)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                activity: RecordingActivity(), sandboxAvailable: { true })
 
         await runner.fire(job: job, origin: .schedule)

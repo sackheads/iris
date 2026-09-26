@@ -8,16 +8,24 @@ final class RecordingLauncher: @unchecked Sendable {
     private let lock = NSLock()
     private var calls: [(args: [String], timeout: Int?)] = []
     private var scripted: (stdout: String, stderr: String, exitCode: Int32) = ("", "", 0)
+    private var queue: [(stdout: String, stderr: String, exitCode: Int32)] = []
 
     init(result: (stdout: String, stderr: String, exitCode: Int32) = ("", "", 0)) {
         self.scripted = result
+    }
+
+    /// One result per call, in order; the last repeats once the queue is spent.
+    init(results: [(stdout: String, stderr: String, exitCode: Int32)]) {
+        self.queue = results
+        self.scripted = results.last ?? ("", "", 0)
     }
 
     var launch: CLIContainerRuntime.Launch {
         { [self] args, timeout in
             lock.withLock {
                 calls.append((args, timeout))
-                return scripted
+                if queue.count > 1 { return queue.removeFirst() }
+                return queue.first ?? scripted
             }
         }
     }
@@ -76,6 +84,78 @@ struct ContainerRuntimeTests {
                             mounts: ["/Users/me/My Notes:/work/My Notes"], workdir: "/work/My Notes")
         #expect(mountValues(launcher.lastArgv) == ["type=virtiofs,source=/Users/me/My Notes,target=/work/My Notes"])
         #expect(launcher.lastArgv.contains("/work/My Notes"))
+    }
+
+    @Test("a granted job's create argv: mounts in order, then --network iris-isolated --no-dns, then -w")
+    func grantedCreateArgv() async throws {
+        let launcher = RecordingLauncher()
+        try await CLIContainerRuntime(launch: launcher.launch).createDetached(
+            name: "iris-g", image: "img",
+            mounts: ["/Users/me/proj", "/Users/me/deploy-key:ro"], workdir: "/Users/me/proj",
+            network: .isolated)
+        #expect(launcher.lastArgv == [
+            "run", "-d", "--name", "iris-g",
+            "--mount", "type=virtiofs,source=/Users/me/proj,target=/Users/me/proj",
+            "--mount", "type=virtiofs,source=/Users/me/deploy-key,target=/Users/me/deploy-key,readonly",
+            "--network", "iris-isolated", "--no-dns",
+            "-w", "/Users/me/proj", "img", "sleep", "infinity",
+        ])
+    }
+
+    @Test("network on is the default network: no --network, no --no-dns; the four-argument form is the same")
+    func defaultNetworkArgv() async throws {
+        let launcher = RecordingLauncher()
+        let rt = CLIContainerRuntime(launch: launcher.launch)
+        try await rt.createDetached(name: "iris-n", image: "img", mounts: ["/p"], workdir: "/p", network: .default)
+        #expect(!launcher.lastArgv.contains("--network") && !launcher.lastArgv.contains("--no-dns"))
+        try await rt.createDetached(name: "iris-n", image: "img", mounts: ["/p"], workdir: "/p")
+        #expect(launcher.argv[0] == launcher.argv[1])
+    }
+
+    /// The shape `container network ls --format json` prints (measured 2026-09-23, CLI 1.1.0).
+    private static let listWithDefaultOnly = #"[{"id":"default","configuration":{"name":"default","mode":"nat"}}]"#
+    private static let listWithIsolated = #"[{"id":"default","configuration":{"name":"default"}},{"id":"iris-isolated","configuration":{"name":"iris-isolated"}}]"#
+
+    @Test("ensureIsolatedNetwork lists, creates once when absent, and never creates when present under either key")
+    func ensureIsolatedNetworkCreatesOnce() async throws {
+        let absent = RecordingLauncher(result: (Self.listWithDefaultOnly, "", 0))
+        try await CLIContainerRuntime(launch: absent.launch).ensureIsolatedNetwork(named: "iris-isolated")
+        #expect(absent.argv == [["network", "ls", "--format", "json"],
+                                ["network", "create", "--internal", "iris-isolated"]])
+        #expect(absent.timeouts.allSatisfy { $0 == CLIContainerRuntime.housekeepingTimeoutSeconds })
+
+        let present = RecordingLauncher(result: (Self.listWithIsolated, "", 0))
+        try await CLIContainerRuntime(launch: present.launch).ensureIsolatedNetwork(named: "iris-isolated")
+        #expect(present.argv == [["network", "ls", "--format", "json"]])
+
+        // Only `configuration.name` carries it (a CLI that drops the top-level id): still found.
+        let byName = RecordingLauncher(result: (#"[{"configuration":{"name":"iris-isolated"}}]"#, "", 0))
+        try await CLIContainerRuntime(launch: byName.launch).ensureIsolatedNetwork(named: "iris-isolated")
+        #expect(byName.argv.count == 1)
+    }
+
+    @Test("a create that loses a race is success; any other failed create, or a failed listing, is networkFailed")
+    func ensureIsolatedNetworkRaceAndFailure() async {
+        // Per-call scripting: the listing says the network is absent, then the create loses the
+        // race — exit 1 with the CLI's "already exists" on stderr — which is success.
+        let raced = RecordingLauncher(results: [(Self.listWithDefaultOnly, "", 0),
+                                                ("", "Error: network iris-isolated already exists", 1)])
+        await #expect(throws: Never.self) {
+            try await CLIContainerRuntime(launch: raced.launch).ensureIsolatedNetwork(named: "iris-isolated")
+        }
+        #expect(raced.argv.count == 2)
+
+        let denied = RecordingLauncher(results: [(Self.listWithDefaultOnly, "", 0), ("", "Error: permission denied", 1)])
+        await #expect(throws: ContainerRuntimeError.networkFailed("Error: permission denied")) {
+            try await CLIContainerRuntime(launch: denied.launch).ensureIsolatedNetwork(named: "iris-isolated")
+        }
+
+        // A listing that fails is a network nobody can vouch for: no create is attempted.
+        let unlisted = RecordingLauncher(results: [("", "boom", 1)])
+        await #expect(throws: ContainerRuntimeError.networkFailed("boom")) {
+            try await CLIContainerRuntime(launch: unlisted.launch).ensureIsolatedNetwork(named: "iris-isolated")
+        }
+        #expect(unlisted.argv == [["network", "ls", "--format", "json"]])
     }
 
     /// A path with a comma is refused, because `container --mount` takes a comma-separated

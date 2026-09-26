@@ -520,7 +520,7 @@ struct CatchUpTests {
                                 protectionEnabled: false, sessionPeerCount: 0)
         let (config, teardown) = Self.isolatedConfig()
         defer { teardown() }
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, config: config,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                protectionEnabled: false,
                                gateEvaluator: { _, _ in .unchanged(signal: "etag=aaa") })
         let job = Self.job(.replay(cap: 2),
@@ -550,7 +550,7 @@ struct CatchUpTests {
         // *current* local day, so a runner on the real clock stops counting this suite's 2026-09-21
         // row the moment the machine's own midnight passes — and the budget this test spends is
         // then unspent, deterministically, for every wall-clock day but one.
-        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                now: { Self.now }, calendar: Self.utc, config: config,
                                protectionEnabled: false)
         // A daily budget of one token, already spent by a finished run, so the next fire pauses.

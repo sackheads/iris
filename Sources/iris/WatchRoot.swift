@@ -78,6 +78,60 @@ enum WatchRoot {
     /// a volume that is not mounted right now, which cannot be stat'ed and should still not be
     /// registered as a watch waiting for the day it is.
     ///
+    /// The two ways a root can be too much to hand over: `tooBroad` (a system root, a volume,
+    /// the home directory) or `protectedIris` (`~/.iris`, in either direction). One kind, shared
+    /// by every caller that has its own sentences for the same rule — a watch refuses in its
+    /// words (`refusal`), a job grant in its own (`JobGrant.resolve`) — so the rule itself is
+    /// never copied.
+    enum BreadthProblem { case tooBroad, protectedIris }
+
+    /// The breadth problem `canonical` has, if any. Checked in the order a reader would want the
+    /// answer: a root that is too broad is reported so even when it also contains Iris's
+    /// directory (the home directory does), because "name a specific folder" is the fix for both.
+    ///
+    /// Both sides go through `IrisPaths.canonicalPath` and are compared case-insensitively — the
+    /// same rule as `IrisPaths.isUnderProtectedWriteDir`, and for the same reason: the default
+    /// volume is case-insensitive and `/var` is a symlink. Unlike that check, this one flags in
+    /// both directions — a root that *contains* Iris's directory sees every write into it — which
+    /// is why it is not written as a call to it.
+    ///
+    /// A volume root is too broad whichever way it is spelled. Two rules, because neither alone is
+    /// enough: a mount point is what the file system says it is (`isVolume`), which is the only
+    /// rule that catches `/System/Volumes/Data` — the data volume on every supported macOS, left
+    /// unchanged by symlink resolution and the real container of `~/.iris` (R-D4-13) — and any
+    /// SMB share or DMG mounted somewhere unexpected; the lexical `/Volumes/<name>` rule stays for
+    /// a volume that is not mounted right now, which cannot be stat'ed and should still not be
+    /// registered as a watch waiting for the day it is.
+    ///
+    /// - Parameters:
+    ///   - paths: where Iris's own directory is; injected so a test can refuse a temp root.
+    ///   - home: the user's home directory, injected for the same reason.
+    ///   - isVolume: whether a canonical path is a mount point; injected so a test can make a temp
+    ///     directory one without mounting anything. The default asks the file system. A throw is a
+    ///     root we cannot ask about, and a root we cannot ask about is not one we watch: it is
+    ///     reported as too broad rather than let through.
+    static func breadthProblem(for canonical: String, paths: IrisPaths, home: String,
+                               isVolume: (String) throws -> Bool = { try isMountPoint($0) }) -> BreadthProblem? {
+        // The string comparisons are case-insensitive; the file system is asked with the spelling
+        // the path actually has, because on a case-sensitive volume the lower-cased spelling is a
+        // path that does not exist and the question would fail for the wrong reason.
+        let canonicalRoot = IrisPaths.canonicalPath(canonical)
+        let root = canonicalRoot.lowercased()
+        let broad = (tooBroad + [home]).map { IrisPaths.canonicalPath($0).lowercased() }
+        if broad.contains(root) { return .tooBroad }
+        let components = URL(fileURLWithPath: root).pathComponents
+        if components.count == 3, components[1] == "volumes" { return .tooBroad }
+        if (try? isVolume(canonicalRoot)) ?? true { return .tooBroad }
+        let iris = IrisPaths.canonicalPath(paths.root.path).lowercased()
+        if root == iris || root.hasPrefix(iris + "/") || iris.hasPrefix(root + "/") {
+            return .protectedIris
+        }
+        return nil
+    }
+
+    /// Why `canonical` may not be watched, or nil when it may. `breadthProblem`'s rule, worded for
+    /// a watch.
+    ///
     /// - Parameters:
     ///   - paths: where Iris's own directory is; injected so a test can refuse a temp root.
     ///   - home: the user's home directory, injected for the same reason.
@@ -87,21 +141,11 @@ enum WatchRoot {
     ///     refused as too broad rather than let through.
     static func refusal(for canonical: String, paths: IrisPaths, home: String,
                         isVolume: (String) throws -> Bool = { try isMountPoint($0) }) -> String? {
-        // The string comparisons are case-insensitive; the file system is asked with the spelling
-        // the path actually has, because on a case-sensitive volume the lower-cased spelling is a
-        // path that does not exist and the question would fail for the wrong reason.
-        let canonicalRoot = IrisPaths.canonicalPath(canonical)
-        let root = canonicalRoot.lowercased()
-        let broad = (tooBroad + [home]).map { IrisPaths.canonicalPath($0).lowercased() }
-        if broad.contains(root) { return tooBroadRefusal }
-        let components = URL(fileURLWithPath: root).pathComponents
-        if components.count == 3, components[1] == "volumes" { return tooBroadRefusal }
-        if (try? isVolume(canonicalRoot)) ?? true { return tooBroadRefusal }
-        let iris = IrisPaths.canonicalPath(paths.root.path).lowercased()
-        if root == iris || root.hasPrefix(iris + "/") || iris.hasPrefix(root + "/") {
-            return protectedRefusal
+        switch breadthProblem(for: canonical, paths: paths, home: home, isVolume: isVolume) {
+        case .tooBroad: return tooBroadRefusal
+        case .protectedIris: return protectedRefusal
+        case nil: return nil
         }
-        return nil
     }
 
     /// What the file system says: `true` for `/`, `/System/Volumes/Data`, anything under `/Volumes`

@@ -27,11 +27,17 @@ struct ToolExecutor {
     var irisPaths: IrisPaths?
     var homeDirectory: String?
 
+    /// Whether a `mutating` watch would get the VM its commands need (`SandboxPolicy.mutatingJobCanRun`).
+    /// nil, the case in the app, asks the real policy when the tool runs; a test sets `{ true }`.
+    var mutatingJobsAvailable: (@Sendable () -> Bool)?
+    static let watchProfileNeedsSandbox = "A mutating watch's commands always run in the apple/container VM, and that VM is not available: install the runtime and turn sandboxing on in Settings → Sandboxing, or leave the watch read-only."
+
     /// How the sandboxed branch of `run_command` reaches the container session. Injectable so a
-    /// test can assert what that branch forwards — the command, the workspace, and the deadline —
-    /// without a `container` binary, a daemon or a VM. nil, the case everywhere in the app, means
-    /// the one `SandboxSessionManager` the process shares.
-    var sandboxSession: (@Sendable (_ command: String, _ conversationId: UUID, _ workspace: String?, _ timeoutSeconds: Int) async -> String)?
+    /// test can assert what that branch forwards — the command, the workspace, the extra mounts,
+    /// the network and the deadline — without a `container` binary, a daemon or a VM. nil, the
+    /// case everywhere in the app, means the one `SandboxSessionManager` the process shares.
+    var sandboxSession: (@Sendable (_ command: String, _ conversationId: UUID, _ workspace: ContainerMount?,
+                                    _ extraMounts: [String], _ network: NetworkMode, _ timeoutSeconds: Int) async -> String)?
 
     /// Merges the captured login-shell PATH (`loginPath`) ahead of `base`'s own `PATH`, so host
     /// `run_command` invocations see pyenv/nvm/Homebrew shims that only `.zprofile`/`.zshrc` set up
@@ -98,7 +104,10 @@ struct ToolExecutor {
                     "instructions": Schema(type: "STRING", description: "The instructions to execute when a file is modified"),
                     "quiet_window_seconds": Schema(type: "INTEGER", description: "1 to 300; outside is clamped"),
                     "ignore": Schema(type: "ARRAY", description: "glob patterns relative to the path, e.g. `*.log`, `build/`", items: Schema(type: "STRING")),
-                    "overlap": Schema(type: "STRING", description: "`queue` or `skip`")
+                    "overlap": Schema(type: "STRING", description: "`queue` or `skip`"),
+                    "profile": Schema(type: "STRING", description: "'readOnly' (default) or 'mutating'. A watch that writes must be mutating; its commands then run in the sandbox VM, which must be available."),
+                    "mounts": Schema(type: "ARRAY", description: "Directories the watch's runs may use, as '/host/dir', '/host/dir:ro' or '/host/dir:/path/in/container'. Read-write unless ':ro'; the first read-write one is the working directory. Mutating only. The watched folder is not included unless named here.", items: Schema(type: "STRING")),
+                    "network": Schema(type: "BOOLEAN", description: "true lets the runs' commands reach the network from inside the VM; default false. Mutating only.")
                 ],
                 required: ["path", "instructions"]
             )
@@ -166,7 +175,13 @@ struct ToolExecutor {
         return tools
     }
     
-    func execute(name: String, args: [String: JSONValue], cwd: String? = nil, conversationId: UUID? = nil, useSandbox: Bool = false) async -> String {
+    /// `grantedMount` is the covering mount the dispatcher decided on for this call (#282 §0.13).
+    /// With a `grant` present the two file tools have exactly two outcomes: a non-nil decision is
+    /// walked from that mount's root; a nil decision is refused (`notDecidedInsideGrant`). They
+    /// reach Foundation on no branch. `grant == nil` (every attended call, every ungranted run) is
+    /// today's path.
+    func execute(name: String, args: [String: JSONValue], cwd: String? = nil, conversationId: UUID? = nil,
+                 useSandbox: Bool = false, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil) async -> String {
         switch name {
         case "run_command":
             guard let command = args["command"]?.stringValue else { return "Error: Missing command" }
@@ -176,12 +191,29 @@ struct ToolExecutor {
             default: 600
             }
             let timeoutSeconds = min(max(rawTimeout, 10), 3600)
-            return await runCommand(command, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, timeoutSeconds: timeoutSeconds)
+            return await runCommand(command, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox,
+                                    timeoutSeconds: timeoutSeconds, grant: grant)
         case "read_file":
             guard let path = args["path"]?.stringValue else { return "Error: Missing path" }
+            if let grant {
+                // §0.13: under a grant there is no Foundation branch. A nil decision is a refusal,
+                // because it may have been made while a component was a link.
+                guard let grantedMount else { return Self.notDecidedInsideGrant("read_file") }
+                guard let relative = Self.grantedComponents(of: path, cwd: cwd, grant: grant, decided: grantedMount) else {
+                    return Self.notUnderGrantedDirectory(grantedMount.source)
+                }
+                return await readFile(grantRoot: grantedMount.source, relative: relative)
+            }
             return await readFile(path, cwd: cwd)
         case "write_file":
             guard let path = args["path"]?.stringValue, let content = args["content"]?.stringValue else { return "Error: Missing path or content" }
+            if let grant {
+                guard let grantedMount else { return Self.notDecidedInsideGrant("write_file") }
+                guard let relative = Self.grantedComponents(of: path, cwd: cwd, grant: grant, decided: grantedMount) else {
+                    return Self.notUnderGrantedDirectory(grantedMount.source)
+                }
+                return await writeFile(grantRoot: grantedMount.source, relative: relative, content: content)
+            }
             return await writeFile(path, content: content, cwd: cwd)
         case "register_directory_watcher":
             switch RegisterWatcherArguments.parse(args) {
@@ -267,15 +299,30 @@ struct ToolExecutor {
                 guard case .fsEvent(let watch) = job.trigger else { return false }
                 return watch.path.lowercased() == key
             }
+            let existing = watching.first(where: { $0.createdInConversationId == conversationId })
+            let asked = parsed.profile?.lowercased() == JobProfile.mutating.rawValue.lowercased() ? JobProfile.mutating
+                : (parsed.profile == nil ? nil : JobProfile.readOnly)
+            let profile = asked ?? existing?.profile ?? .readOnly
+            if profile == .mutating, !(mutatingJobsAvailable?() ?? SandboxPolicy.mutatingJobCanRun()) {
+                return Self.watchProfileNeedsSandbox
+            }
+            let grant: JobGrant?
+            switch JobGrant.resolve(mounts: parsed.mounts, network: parsed.network, profile: profile,
+                                    paths: irisPaths ?? .default, home: homeDirectory ?? NSHomeDirectory()) {
+            case .failure(let message):
+                return "Not watching \(path): \(ScheduleJobArguments.grantRefusal(message, mountsNamed: !(parsed.mounts ?? []).isEmpty).text)"
+            case .success(let resolved): grant = resolved
+            }
             var job: Job
             let opening: String
-            if var existing = watching.first(where: { $0.createdInConversationId == conversationId }),
-               case .fsEvent(var watch) = existing.trigger {
+            if var existing = existing, case .fsEvent(var watch) = existing.trigger {
                 existing.prompt = parsed.instructions
                 if let window { watch.quietWindowSeconds = window }
                 if let ignore = parsed.ignore { watch.ignore = ignore }
                 existing.trigger = .fsEvent(watch)
                 if let overlap = parsed.overlap { existing.policy.overlap = overlap }
+                existing.profile = profile
+                existing.policy.grants = grant
                 existing.enabled = true
                 existing.pausedReason = nil
                 job = existing
@@ -288,10 +335,11 @@ struct ToolExecutor {
                     prompt: parsed.instructions,
                     trigger: .fsEvent(FSWatch(path: path, quietWindowSeconds: window ?? FSWatch.defaultQuietWindowSeconds,
                                               ignore: parsed.ignore ?? [])),
+                    profile: profile,
                     createdInConversationId: conversationId,
                     // A watch never runs concurrently with itself; by default a save that lands
                     // mid-run is queued, not dropped.
-                    policy: JobPolicy(overlap: parsed.overlap ?? .queue))
+                    policy: { var p = JobPolicy(overlap: parsed.overlap ?? .queue); p.grants = grant; return p }())
                 let others = watching.map { "`\($0.name)`" }
                 let named = others.count <= 2 ? others.joined(separator: " and ")
                     : others.dropLast().joined(separator: ", ") + " and " + others[others.count - 1]
@@ -314,27 +362,46 @@ struct ToolExecutor {
             }
             sentences.append(runs + ".")
             if clamped, let window { sentences.append("The window was clamped to \(window) s.") }
+            if let grant = job.policy.grants { sentences.append(grant.sentence) }
             return sentences.joined(separator: " ")
         } catch {
             return "Could not save the watcher job."
         }
     }
 
-    private func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false, timeoutSeconds: Double = 600) async -> String {
+    private func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false,
+                            timeoutSeconds: Double = 600, grant: JobGrant? = nil) async -> String {
+        // A grant is a promise about a container (#282). Off the sandboxed branch — sandboxing
+        // resolved off, or no conversation to own a session — there is no container to keep it
+        // in, and the host with `cwd` is not a fallback. The dispatcher refuses this upstream
+        // (R20); this is the executor's own answer, so the seam cannot be handed a grant it drops.
+        if grant != nil, !(useSandbox && conversationId != nil) {
+            return IrisEngine.sandboxUnavailableRefusal(tool: "run_command")
+        }
         if useSandbox, let conversationId {
-            let expandedCwd = cwd.map { ($0 as NSString).expandingTildeInPath }
             // The same deadline the host branch enforces, in seconds — the container runtime kills
             // the command on it. It used to be dropped here, which left a sandboxed command with
             // no bound at all while the model believed it had set one.
             let deadline = Int(timeoutSeconds)
+            // §0.10: with a grant, the container's mounts are the grant's and nothing else — the
+            // working directory from the grant, never from the conversation's workspace, which a
+            // run must not be able to move. Without one, the workspace as today: an identity mount
+            // of the expanded cwd, typed rather than spelled, so a `:` in the path reaches the
+            // runtime as the entry it always did and is refused there. A grant with no read-write
+            // mount yields nil here, i.e. `/`, not the cwd.
+            let workspace: ContainerMount? = if let grant { grant.workspaceMount }
+                                             else { cwd.map { ContainerMount(source: IrisEngine.expandTilde($0)) } }   // #275: no PATH_MAX truncation on a mount
+            let extraMounts = grant?.extraMountEntries() ?? []
+            let network = NetworkMode.forGrant(grant)
             if let sandboxSession {
-                return await sandboxSession(command, conversationId, expandedCwd, deadline)
+                return await sandboxSession(command, conversationId, workspace, extraMounts, network, deadline)
             }
             guard SandboxingManager.shared.isContainerInstalled else {
                 return "Error: sandboxing is on but the container runtime isn't installed. Open Iris Settings → Sandboxing to install it, or turn sandboxing off."
             }
             return await SandboxSessionManager.shared.run(command: command, conversationId: conversationId,
-                                                          workspace: expandedCwd, timeoutSeconds: deadline)
+                                                          workspace: workspace, extraMounts: extraMounts,
+                                                          network: network, timeoutSeconds: deadline)
         }
         // Hoist process/pipes so the cancellation handler can capture them.
         let process = Process()
@@ -462,9 +529,11 @@ struct ToolExecutor {
     /// keep their prior (process-cwd) behavior. This mirrors how `run_command` already uses `cwd`
     /// and closes the gap where relative `write_file` paths clobbered the iris source tree (#68).
     static func resolvePath(_ path: String, cwd: String?) -> String {
-        let expanded = (path as NSString).expandingTildeInPath
+        // #275: `expandingTildeInPath` truncates to PATH_MAX and hands back a plausible path; every
+        // allow-side expansion passes through here (#282 §0.9), so it keeps every byte.
+        let expanded = IrisEngine.expandTilde(path)
         guard !(expanded as NSString).isAbsolutePath, let cwd = cwd else { return expanded }
-        let base = (cwd as NSString).expandingTildeInPath
+        let base = IrisEngine.expandTilde(cwd)
         return URL(fileURLWithPath: base).appendingPathComponent(expanded).path
     }
 
@@ -489,6 +558,51 @@ struct ToolExecutor {
                 return "Error writing file: \(error.localizedDescription)"
             }
         }.value
+    }
+
+    /// A granted run's read (#282 §0.13): the same walk the write takes, from the covering mount's root.
+    func readFile(grantRoot: String, relative: [String]) async -> String {
+        await Task.detached {
+            do { return try GrantedFileAccess(root: grantRoot).read(relative: relative) }
+            catch let error as GrantedFileError { return "Error reading file: \(error.message)" }
+            catch { return "Error reading file: \(error.localizedDescription)" }
+        }.value
+    }
+
+    /// A granted run's write (#282 §0.13). The success sentence is the one `IrisEngine.writtenPaths`
+    /// reads, so the self-write filter is fed exactly as for a Foundation write.
+    func writeFile(grantRoot: String, relative: [String], content: String) async -> String {
+        let path = ([grantRoot] + relative).joined(separator: "/")
+        return await Task.detached {
+            do {
+                try GrantedFileAccess(root: grantRoot).write(relative: relative, content: content)
+                return "Successfully wrote to \(path)"
+            } catch let error as GrantedFileError { return "Error writing file: \(error.message)" }
+            catch { return "Error writing file: \(error.localizedDescription)" }
+        }.value
+    }
+
+    /// The components the walk descends for a granted file-tool call, or nil. `path` is the
+    /// post-hook path, so nothing decided upstream is relied on: it must be spelled under the
+    /// DECIDED mount (`relativeComponents`), and its real path must still be covered by that same
+    /// entry — equality with the decision, never a fresh decision — so a `BeforeTool` rewrite into
+    /// a nested read-only entry beneath the decided mount (where a command would get EROFS) is
+    /// refused rather than walked from the outer root. A link out of the mount fails here too; a
+    /// link that stays inside is left to the walk, whose sentence names it.
+    private static func grantedComponents(of path: String, cwd: String?, grant: JobGrant,
+                                          decided: ContainerMount) -> [String]? {
+        guard let relative = grant.relativeComponents(of: path, cwd: cwd, under: decided),
+              let real = IrisPaths.realPathForAllow(resolvePath(path, cwd: cwd)),
+              grant.covering(real)?.source == decided.source else { return nil }
+        return relative
+    }
+
+    static func notUnderGrantedDirectory(_ source: String) -> String {
+        "Error: the path is not under the granted directory \(source); nothing was done."
+    }
+
+    static func notDecidedInsideGrant(_ tool: String) -> String {
+        "Error: `\(tool)` was not inside this run's grant when it was decided; nothing was done — widen the grant (re-schedule) if it should be."
     }
     
     private func searchWeb(query: String) async -> String {

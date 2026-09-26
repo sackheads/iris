@@ -294,6 +294,53 @@ struct JobsCommandTests {
                 == "`notes` — last burst: nothing fired yet · absorbed since launch: —")
     }
 
+    // MARK: The grant line and column (#282 §5)
+
+    private func granted(_ name: String = "deploy", network: Bool = true) -> Job {
+        var j = job(name)
+        j.profile = .mutating
+        j.policy.grants = JobGrant(mounts: [ContainerMount(source: "/Users/me/proj"),
+                                            ContainerMount(source: "/Users/me/deploy-key", readOnly: true)], network: network)
+        return j
+    }
+
+    @Test("a granted job shows `grant` in the policy column and one paragraph beneath the table")
+    func grantLineAndColumn() throws {
+        let j = granted()
+        #expect(JobsCommand.policySummary(for: j) == "mutating · grant")
+        let expected = "`deploy` — read-write /Users/me/proj (working directory) · read-only /Users/me/deploy-key · network on"
+        #expect(JobsCommand.grantLine(job: j) == expected)
+        #expect(JobsCommand.grantLine(job: job()) == nil)
+
+        let usage = JobsCommand.UsageSnapshot(perJob: [:], global: JobsCommand.GlobalUsage(tokensToday: 10, dailyBudget: 100))
+        let out = JobsCommand.render(jobs: [j, granted("second", network: false)], lastRuns: [:], usage: usage,
+                                     unacknowledged: [], unreadableJobs: 0, now: Date())
+        let table = try #require(out.range(of: "| deploy |"))
+        let line = try #require(out.range(of: expected))
+        let second = try #require(out.range(of: "`second` — read-write /Users/me/proj (working directory) · read-only /Users/me/deploy-key · network off (host reachable)"),
+                                  "the listing says what an isolated container can still reach (§0.7)")
+        let footer = try #require(out.range(of: "Tokens today, all jobs:"))
+        #expect(table.lowerBound < line.lowerBound && line.lowerBound < second.lowerBound && second.lowerBound < footer.lowerBound)
+        #expect(out.contains("\n\n" + expected + "\n\n"), "its own paragraph, not a run-on line")
+    }
+
+    @Test("a hand-edited read-only row carrying a grant shows none: the runner treats it as inert (L1), so the listing does too")
+    func readOnlyRowShowsNoGrant() {
+        var j = granted("edited")
+        j.profile = .readOnly
+        #expect(JobsCommand.policySummary(for: j) == "default")
+        #expect(JobsCommand.grantLine(job: j) == nil)
+    }
+
+    @Test("the two fire-time refusals reach the failure line as written")
+    func grantReasonsOnTheFailureLine() {
+        let j = granted()
+        let drift = run(j, status: .failed, failureReason: JobRunner.grantSourceUnavailableReason("/Users/me/proj"))
+        let net = run(j, status: .failed, failureReason: JobRunner.isolatedNetworkUnavailableReason("permission denied"))
+        #expect(JobsCommand.failureLine(drift).hasSuffix(" · grant source unavailable: /Users/me/proj"))
+        #expect(JobsCommand.failureLine(net).hasSuffix(" · isolated network unavailable: permission denied"))
+    }
+
     @Test("two watch lines are separate paragraphs, not one run-on line")
     func twoWatchLinesStayApart() throws {
         // Seen on screen: the block is markdown, and a single newline between two watch lines

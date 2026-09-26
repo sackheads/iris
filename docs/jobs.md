@@ -12,13 +12,14 @@ and if there were any the app posts a one-time notice into the open conversation
 dropped and to recreate it with `schedule_job` or `register_directory_watcher` — a console line is
 not something anyone running a Mac app reads.
 
-This document covers deliverables 1 to 4 of `#187` (see `docs/agency/agency.md`,
-`docs/specs/2026-09-21-agency-model-and-ledger.md`, `docs/specs/2026-09-21-agency-runtime.md` and
-`docs/specs/2026-09-22-agency-watches.md`): the job model, the cron subset, the schedule aliases,
-what happens on sleep, what a fire actually does — a run in a hidden conversation of its own, a row
-in the run ledger, and one event card — the gates, limits and retries around it, what a directory
-watch does with a burst of saves, and `iris --run-job`, which fires one job from a terminal and
-prints the row it wrote.
+This document covers deliverables 1 to 4½ of `#187` (see `docs/agency/agency.md`,
+`docs/specs/2026-09-21-agency-model-and-ledger.md`, `docs/specs/2026-09-21-agency-runtime.md`,
+`docs/specs/2026-09-22-agency-watches.md` and `docs/specs/2026-09-23-agency-job-grants.md`): the
+job model, the cron subset, the schedule aliases, what happens on sleep, what a fire actually does
+— a run in a hidden conversation of its own, a row in the run ledger, and one event card — the
+gates, limits and retries around it, what a directory watch does with a burst of saves, what a
+`mutating` job may be granted so that it can do its work unattended, and `iris --run-job`, which
+fires one job from a terminal and prints the row it wrote.
 
 ## Creating a job
 
@@ -28,7 +29,9 @@ prints the row it wrote.
   and then gone quiet for a few seconds (see "Watches"). Watch jobs are named after the directory's
   last path component. A watch belongs to the conversation that registered it: watching the same
   directory again *from that conversation* updates its watch in place — only the arguments you
-  give are changed, and the watch is switched back on if it was paused — while watching it from
+  give are changed, except the grant, which is stored exactly as the new call names it (naming
+  neither `mounts` nor `network` removes the one it had; see "Grants") — and the watch is
+  switched back on if it was paused — while watching it from
   another conversation creates a second watch with a suffixed name, and the tool says how many
   watches the folder now has. Two standing orders on one folder are two orders; each runs on every
   change.
@@ -37,7 +40,13 @@ prints the row it wrote.
   the job actually runs. See "Gates" below.
 
 Every job needs a unique name. If the requested name (or a slug of the prompt) is already taken,
-`-2`, `-3`, … is appended until it isn't.
+`-2`, `-3`, … is appended until it isn't — unless you gave the name explicitly and the job with
+that name is a scheduled or polled job created in *this* conversation, in which case `schedule_job`
+**replaces** it: schedule, prompt, profile, policy and grant are taken from the new call, and its
+id, destination and run history are kept (the result says so). A watch is never replaced this way
+— it keeps its folder-slug name, and a scheduled job asked for that name is suffixed like any
+other collision — and neither is a job another conversation created. Omitting `mounts` and
+`network` on a replacing call removes the grant (see "Grants").
 
 Two of the job's policies can be set at creation, and both default to the quieter answer:
 
@@ -50,7 +59,8 @@ A value neither field recognizes is refused with a sentence naming the ones that
 quietly creating a job that behaves differently from the one that was asked for. The rest of a job's
 policy is not settable from the tool: the budgets, the breaker and the run timeout are global
 settings with a per-job override in the stored `policy` column, and `retry` is per job and on (see
-"Limits").
+"Limits"). A `mutating` job can also be created with a **grant** — `mounts` and `network` — which
+is what lets it write and run commands unattended; see "Grants".
 
 ## The cron subset
 
@@ -155,14 +165,19 @@ annotated it `readOnlyHint` — that is the server's own claim, not something Ir
 is the only signal the protocol offers, and a tool that says nothing about itself is denied rather
 than assumed harmless. `set_workspace` is deliberately *not* on the list: a workspace is what gives
 a sandboxed `run_command` a read-write bind mount of that directory, so a read-only run that could
-set one could write to the host through the very sandbox that is meant to contain it. Which is also
-the honest statement of the `run_command` guarantee *for this profile*: a read-only run's sandboxed
-command cannot write to the host *because its conversation has no workspace and therefore no
-mount*, not because the mount is read-only. Anyone who gives read-only runs a workspace has to come
-back to this paragraph. It does not carry over to `mutating`, which has `set_workspace` and can
-therefore give itself a workspace mid-turn, after which a command gets that directory bind-mounted
-read-write — no wider than the allowlist or the approval that let the command run at all (in an
-attended chat that same command runs on the host), and the card's `in <cwd>` line says where.
+set one could write to the host through the very sandbox that is meant to contain it — and since
+deliverable 4½ no unattended run of either profile may call it. Which is also the honest statement
+of the `run_command` guarantee *for this profile*: a read-only run's sandboxed command cannot write
+to the host *because its conversation has no workspace and therefore no mount*, not because the
+mount is read-only. Anyone who gives read-only runs a workspace has to come back to this paragraph.
+A grant is refused on a read-only job for exactly this reason (see "Grants"), and a granted
+`mutating` run's mounts are fixed by its grant — its working directory is the grant's first
+read-write entry, and nothing the run does can move it.
+
+A background run cannot change its workspace at all: `set_workspace` is not offered to it and is
+refused if called (`Not run: a background run cannot change its workspace; widen the job's grant
+instead.`), and a goal locked in a background conversation binds no workspace either. An ungranted
+`mutating` run therefore has no mount; a granted one has exactly the grant's.
 
 Declaration is only the cheap half. A call that reaches the dispatcher anyway — a stale
 declaration, a forged name — is refused there too, recorded as the whole call (name, arguments,
@@ -176,7 +191,8 @@ arriving at the same answer. The sentence is the record; the ending is the enfor
 A `mutating` job keeps the whole tool surface, and its *commands* always run in the
 `apple/container` VM — that is what pays for the wider surface. Commands, precisely: `run_command`
 is what the VM routes, and `write_file`, `read_file` and the rest of the native tools execute on
-the host as they do in any run, behind the user's allowlist and the same fail-closed approval.
+the host as they do in any run, behind the user's allowlist **or the job's grant** (see "Grants")
+and the same fail-closed approval.
 "Always" is enforced twice: `schedule_job` refuses to create one
 unless the VM is available (the runtime installed *and* sandboxing switched on — with the master
 switch off, the sandbox resolution returns the host however the conversation is pinned), and the
@@ -187,10 +203,199 @@ ladder. It is never run on the host instead. Nor is it run on the host when the 
 next `run_command` is refused where it stands, with the command recorded on the run's card, so the
 "Always allow" rule you once clicked on that command in an ordinary chat cannot quietly stand in
 for the container. That rule holds for any unattended run, not just a job's own: a subagent the run
-delegates into is unattended too. Everything outside the user's allowlist still fails
-closed inside the VM: unattended means unattended whatever the profile. A `readOnly` run leaves the
-sandbox choice alone, so it follows the per-workspace default rather than being pinned to the
-host.
+delegates into is unattended too. Everything outside the user's allowlist **and the job's grant**
+still fails closed inside the VM: unattended means unattended whatever the profile. A `readOnly`
+run leaves the sandbox choice alone, so it follows the per-workspace default rather than being
+pinned to the host.
+
+## Grants
+
+Until it is given a **grant**, a job can do nothing unattended that the allowlist does not already
+permit: a `mutating` job's commands run in the VM, but a container with no mounts changes nothing on
+the disk, and a `write_file` outside the allowlist stops the run on a card. A grant is what a
+`mutating` job was allowed at creation — the host directories its commands see mounted and its file
+tools may use, and whether its commands may reach the network. It is those two knobs and nothing
+else: no per-command allowlist inside the container, no secrets. It is stored inside the job's
+`policy` as `grants`, so a build older than this one reads a granted job as an ungranted one (the
+safe direction; that older build re-saving the job drops the grant, as it drops every policy key it
+does not know).
+
+**Making one.** `schedule_job` and `register_directory_watcher` take `mounts` and `network`, and
+both take `profile` (new to the watch tool, since a watch that writes has to be `mutating`).
+`mounts` is an ordered list of `source[:target][:ro]` entries (a leading `~` is expanded) —
+read-write unless `:ro`, and identity-mapped when no target is given, which is the form to prefer:
+a `write_file` names the host *source*, a command inside the container names the *target*, and
+with no target the two are the same path. `network` is a Bool and
+defaults to `false`. Only a `mutating` job may carry a grant; a read-only job created with `mounts`,
+or with `network: true`, is refused with a sentence saying why — a read-only run has no mounts and
+no network by definition. The grant is made once, in the attended conversation that created the
+job, from what you asked for, and there is no confirmation card: the result sentence echoes it back
+— `Grant: read-write /Users/me/proj (working directory) · read-only /Users/me/deploy-key · network
+off.` — and `/jobs` repeats it, which is where you would catch a grant the model phrased wider than
+you did; the fix is a re-schedule. No run can make one: a background run is never offered the two
+job-creating tools, so no job writes a grant for itself.
+
+An explicit `network: false` on a `mutating` job is itself a grant, mounts or not — the job reads
+`Grant: no mounts · network off.` and its container is isolated, because you said off. Only a call
+that names neither `mounts` nor `network` leaves a job ungranted, on today's default-network
+container, exactly as before this deliverable.
+
+**What is refused**, at creation, in this order, each with its own sentence: a grant on a read-only
+job; a malformed entry (wrong number of parts, an empty part, a relative path, a comma); a source
+that does not exist or is not a directory; a source too broad to grant — `/`, your home folder
+itself, `/System`, `/Library`, `/usr`, `/private`, `/var`, `/etc`, `/bin`, `/sbin`, `/Volumes`, and
+any volume root or mount point (a folder *inside* one of those is fine: `/private/tmp/proj`,
+`~/proj`); a path that is or contains `~/.iris` — read-only included, because even a read-only
+mount hands the container `config/permissions.json`, the plugin settings and the memory store; a
+**credential store**, read-only included (the list is below,
+beside the fact it belongs with); a read-only first entry when a read-write entry follows it; the
+same source twice. A source is judged and stored as the directory it *resolves to* — `~/x -> /` is
+a mount of the whole disk — never as it was spelled, and that resolved spelling is what every later
+check compares against.
+
+**The working directory.** The first read-write mount is the run's working directory: the
+container's `-w`, the directory a relative `write_file` resolves against, where the run's
+`AGENTS.md` is read from, and the hidden conversation's `workspacePath`. That is why a read-only
+entry may not come first when a read-write one follows: the working directory is never in doubt. A
+grant with no read-write mount runs in `/`, as an ungranted job does. Nested entries are allowed,
+and the inner entry's mode wins beneath it on both sides — measured: with `/a` read-write and `/a/b`
+read-only, a command's write under `/a/b` fails with `EROFS` while a write under `/a/w` lands, and
+the file-tool gate applies the same innermost-wins rule. The result sentence names the nesting.
+
+**What a grant allows unattended.** Two things, precisely:
+
+- `run_command` runs in the container with the grant's mounts, and that *is* the approval — no
+  allowlist entry, no card. The container is the containment: a granted job can run any command the
+  container can, against the mounted directories, on the network if allowed. That is the feature.
+  The command is allowed only when the conversation resolves as sandboxed, and the grant asks that
+  question itself rather than trusting that the VM check ran first — two independent locks, so a
+  call that reaches the gate with sandboxing off is refused, never run on the host.
+- `write_file` is allowed when its resolved path is under a read-write mount's source; `read_file`
+  under any mount's source. Both still execute **on the host**: a mount is identity-mapped, so a
+  host write at `/Users/me/proj/out.md` is the same bytes on the same disk the container would
+  write through the mount, and keeping the host implementation keeps the self-write filter and the
+  protected-directory rule exactly as they are.
+
+Everything else is left as it was. The memory and skill tools stay refused unattended; `save_fact`,
+the Google mutators and MCP tools are neither widened nor narrowed; every other tool still meets
+the allowlist and fails closed outside it.
+
+**The gate, in order.** For a call from a granted run: a write into a protected directory
+(`~/.iris/config`, `~/.iris/plugins`) is refused first, before the grant is read, whatever the
+grant says. Then the grant. Then, for every tool *except* the two file tools, the allowlist. In a
+granted run `write_file` and `read_file` are the grant's alone — the allowlist is not consulted for
+them, so a `permissions.json` rule for a path outside the grant cannot put them on the host path,
+and the one thing this narrows is that the `~/.iris` read carve-out a background run's `read_file`
+normally has (see "Approvals fail closed") does not reach a granted run's `read_file` outside its
+mounts. Whoever wants that read or write widens the grant. A call refused outside the grant says so
+on the row and the card — `needs approval: write_file outside the grant (nearest: /Users/me/proj)`
+— naming the nearest granted directory so you can widen once rather than click every time, and
+the transcript line is `Not run: \`write_file\` needs approval — outside the grant (nearest:
+/Users/me/proj) — and this is an unattended run.` **Approve and run** is not offered on such a call,
+and the click is refused if it is reached some other way, with the approval left unspent: a granted
+run has no host path for those two tools to take, so the remedy is a re-schedule with a wider grant,
+not a click.
+
+**How the path is judged.** On the real path, never a lexical one. The covering mount is chosen
+from the kernel's resolution of the deepest existing ancestor of the path, compared exactly: the
+kernel spells a real path as it is on disk, so the stored source and the real path already agree
+in case on the usual case-insensitive volume, and on a case-sensitive one a differently-cased
+sibling is a different directory and is refused. Only the check that the path is *spelled* under
+the granted directory folds case, since what you typed may differ from the stored spelling; the
+walk below then proves the file is really under it. The innermost matching entry decides, and a path with `..` in any
+component is refused outright: a job never needs one inside a grant, and `<mount>/link/../x` with
+`link` pointing outside is exactly the shape a lexical check gets wrong. The path must also be
+*spelled* under the granted directory — a grant on `/tmp/proj` does not cover
+`/private/tmp/proj/x`, which falls to the allowlist and, being outside the grant, names the
+nearest directory.
+
+**The write itself.** For a granted run the allow and the write are one operation. Even with the
+real path, a check and an `open` are two steps, and a command the same run left running in the
+background (`cmd &` survives across tool calls in the session container) could swap a directory
+for a symlink between them. So a granted run's `write_file` and `read_file` never hand a path to
+Foundation: the mount's root is opened once as a directory descriptor, each remaining component is
+walked with `openat(O_DIRECTORY | O_NOFOLLOW)`, the final component is opened `O_NOFOLLOW`, a write
+is staged as `<name>.sb-…` beside its target (`O_CREAT | O_EXCL`, the shape Foundation's own atomic
+save uses, so the watches' ignore set and the self-write filter treat it as they always did) and
+renamed into place with `renameat` inside that directory's descriptor; a rewrite keeps the file's
+mode bits, as Foundation's atomic save does, so a script the job maintains stays executable. A symlink anywhere in the
+path is a refusal, not a resolution — `the path crosses a symlink at …; a granted run may not read
+or write through symlinks — name the real directory instead` — a directory named as a file is
+refused, and `read_file` reads regular files only: a FIFO is refused rather than parking the run
+until its deadline. A hook that rewrites the path is met by the same walk, because the walk starts
+from the path the hook returned — and the rewritten path must still be covered by the very entry
+the gate decided, so a rewrite into a nested read-only entry beneath it is refused rather than
+written from the outer root. Attended runs keep the ordinary path; nothing about a chat's
+`write_file` changed.
+
+**`set_workspace`.** A granted run's container mounts are a pure function of its grant, and nothing
+a run does can move them. `set_workspace` is not offered to any unattended conversation — a run, or
+the subagents it delegates into — and is refused if called anyway: `Not run: a background run
+cannot change its workspace; widen the job's grant instead.` A goal locked in a background
+conversation binds no workspace either. The only way to widen a grant is a re-schedule from a
+conversation with a person in it. A subagent a granted run delegates into inherits the grant with
+`isBackground` and the workspace, so a delegated command runs under the same mounts and network,
+never wider.
+
+**Network off, and what it still reaches.** `container` has no "no network": `run --network` takes
+a name. So `network: false` attaches the container to an Iris-owned internal network,
+`iris-isolated`, created on demand with `container network create --internal` (a create that
+reports `already exists` is a success; two racing fires cannot fail each other), and starts it with
+`--no-dns`; `network: true` uses the default network, as every ungranted job's container does. If
+the isolated network cannot be listed or created, the fire fails closed with `isolated network
+unavailable: <detail>` on the row rather than running with a network it was not granted. Measured
+from a container on that network (`container` 1.1.0): the internet and the default network's
+gateway are unreachable — **but the Mac's own listeners are**; a `python3 -m http.server` on the
+Mac's `en0` address answered. `network off` therefore means no egress and no LAN, *not* no host,
+and `/jobs` says so: `network off (host reachable)`. A local listener that forwards, a proxying dev
+server, an MCP server with a fetch tool — each is still a way out for anything a mount exposes.
+Which is why the credential stores are refused as mounts by name, in both directions: a source that
+is, is under, **or contains** any of `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.docker`, `~/.kube`, `~/.azure`, `~/.cargo`,
+`~/.m2`, `~/.terraform.d`, `~/.oci`, `~/.gem`, `~/.password-store`, `~/Library/Keychains`,
+`~/Library/Cookies`, `~/Library/Application Support/com.apple.container`, `~/Library/Group
+Containers`, `~/Library/Containers` is refused, read-only included, with `that directory holds
+credentials; copy the one key the job needs into a directory made for it` — so `~/.config`,
+`~/Library` and `~/Library/Application Support` are refused too, the same containment rule that
+keeps `~/.iris` out. A grant is a standing capability written by a model from text it read, and
+`~/.ssh:ro` beside `network: true` would otherwise be a permitted grant. The one key a job needs is
+copied into a directory made for it, and that directory is what gets mounted. A store not on the
+list is mountable; the list is spelled once in the code and is the place to widen.
+
+**Re-checked every time.** A grant is a claim about the disk made once, and the disk moves. Before
+every fire and every approved click, each source must still resolve to itself and be a directory,
+and the VM must still be available: a miss is a `failed` row with `grant source unavailable:
+<path>` (or `sandbox unavailable`, as before), walking the ordinary retry ladder, so the fourth
+consecutive failure pauses the job with "failed 3 times; paused". An approved call of a granted
+job runs with the same grant — the same mounts, network and working directory — and is refused,
+with the approval left unspent, if a granted directory has since moved. The run's container ends
+with the run: closing a run's conversation now ends its sandbox session, where before it lingered
+until the idle reaper.
+
+**Changing one.** `schedule_job` with an explicit `name` that names a scheduled or polled job
+created in *this* conversation replaces it — schedule, prompt, profile, policy and grant from the
+new call; id, `createdAt`, destination and run history kept; the result says `This replaced
+'<name>' from this conversation; its run history is kept.` Omitting both `mounts` and `network` on
+that call removes the grant. A name another conversation used, or a watch's name, is suffixed `-2`
+as any collision is. Re-registering a watch from the conversation that owns it stores exactly the
+grant the call names — naming none removes the one stored — while its window and ignore list keep
+their stored values as before. The watched folder is **not** implicitly in a watch's grant: a
+watch that writes into its own folder names it in `mounts` and is `mutating`, and a `mutating`
+watch needs the VM, with the refusal `schedule_job` gives. A granted job that writes into a watched
+folder should use `write_file`, which the self-write filter sees; a command's writes in the
+container it cannot see, and the loop that makes ends in the breaker.
+
+**What you will see.** `/jobs`'s policy column says `grant`, and beneath the table there is one
+paragraph per granted job, in the words the result sentence used: `` `deploy` — read-write
+/Users/me/proj (working directory) · read-only /Users/me/deploy-key · network on ``, or
+`network off (host reachable)`. `list_jobs` carries `grants` as stored (`null` when absent, and
+`null` for a read-only row that carries one — the runner treats that grant as inert, so neither
+listing shows it). The
+run card's metadata line says `network` when the run had it. A call blocked outside the grant names
+the nearest granted directory on the card, the row and the transcript notice alike.
+
+Not in this deliverable: secrets from the Keychain as environment variables, unattended memory and
+skill writes, grants on read-only jobs, per-command allowlists inside the container, `write_file`
+and `read_file` inside the container, and a UI for editing a grant — a re-schedule is the edit.
 
 ## Gates
 
@@ -298,7 +503,9 @@ tool writes; anything a plugin hook writes; the memory tools (`update_memory`, `
 and anything containing it, is refused as a watch root; and the writes of an `iris --run-job`
 process, which is another process altogether (no watch is live while it holds the store). A loop
 built from any of those is not silent and not unbounded: it ends in the job's **breaker** pause
-(six runs an hour by default) with a card naming the figure, the same backstop every job has.
+(six runs an hour by default) with a card naming the figure, the same backstop every job has. A
+granted job that writes into a watched folder should therefore use `write_file`, which the filter
+sees; a command's writes in the container it cannot.
 
 **Roots.** The path must be an existing directory; it is stored in its resolved spelling
 (`/tmp/notes` becomes `/private/tmp/notes`), which is what the file system reports events under.
@@ -492,11 +699,15 @@ five-minute agent loop. Raw run output never enters the destination's messages.
 ## Approvals fail closed
 
 Nobody is watching a background run, so it never blocks on an approval dialog. A tool call from a
-background conversation is checked against the deterministic allowlist — a call that is already
-permitted needs no human, so it runs — and anything else is denied on the spot, without consulting
-Vibecop and without a dialog. The whole call is recorded, the run ends `blocked on approval`, and
-the card shows what was refused — with an "Approve and run" button, below — so you can decide in
-the morning.
+background conversation is checked, after the protected-directory rule, against the job's grant —
+`run_command` when the run is sandboxed (which the no-host-fallback rule has already required),
+`write_file` under a read-write granted directory, `read_file` under any (see
+"Grants") — then against the deterministic allowlist — a call that is already permitted needs no
+human, so it runs — and anything else is denied on the spot, without consulting Vibecop and without
+a dialog. The whole call is recorded, the run ends `blocked on approval`, and the card shows what
+was refused — with an "Approve and run" button, below — so you can decide in the morning. A call
+refused outside a grant says so on the card: `needs approval: write_file outside the grant
+(nearest: /Users/me/proj)`.
 
 This outranks everything, including the headless auto-approve used by scenario runs, and it is
 inherited: a subagent or an evaluator a run spawns is a background conversation too, so delegating
@@ -510,8 +721,12 @@ with an `mcp` component becomes a command spawned at the next launch. That check
 case-insensitive, with symlinks resolved — so `~/.iris/CONFIG/permissions.json` or a link planted
 under `memory/` is the same refusal. (`rules/` is not protected: it is prompt text, which the guard
 already treats as untrusted, not a way to make something run.) And a background run gets no write
-carve-out at all: it reads its own memory freely, but anything it writes needs a rule you approved,
-and no rule can hand it a protected directory.
+carve-out at all: it reads its own memory freely, but anything it writes needs a rule you approved
+or a grant that covers it, and neither a rule nor a grant can hand it a protected directory. In a
+*granted* run the two file tools are decided by the grant alone and the allowlist is not consulted
+for them — so a `permissions.json` rule cannot put a granted run's `write_file` on the host path
+outside its mounts, and the `~/.iris` read carve-out does not apply to a granted run's `read_file`
+outside its mounts either (see "Grants").
 
 A background run cannot message other sessions either. `list_sessions`, `send_to_session` and
 `set_session_card` are not offered to it, and all three are refused if called anyway: delivering a
@@ -546,7 +761,12 @@ and the answer to "may this job do this?" changes with that. In particular, a `r
 came out of a background run — read-only or mutating — runs in the container or not at all: with no
 VM to run it in the click is refused with `sandbox unavailable`, the claim is left unspent, and it
 is never run on the host instead. A click authorises the command; it does not authorise dropping
-the isolation.
+the isolation. An approved call of a granted job runs with the same grant — the same mounts,
+network and working directory — and is refused, with the approval left unspent, if a granted
+directory has since moved (`grant source unavailable: <path>`); a file-tool call that was refused
+*outside* the grant is never offered the button and is refused by the click before the approval is
+spent, because a granted run has no host path for it to take, and the remedy is a wider grant (see
+"Grants").
 
 Precisely: *model-issued* commands. A hook is the other way a command leaves an unattended run, and
 it does not follow this rule — a `BeforeTool` or command hook runs under the hooks sandbox setting
@@ -557,14 +777,18 @@ model can reach for. The rule above is about what the model can issue.
 A refusal is said in the conversation the card is in — the job's destination, or Iris Activity —
 because a sentence in a conversation you do not have open is the same as silence.
 
-Two calls are never offered the button at all, and are refused again by the runner and by the
-ledger if one is reached another way:
+Three calls are never offered the button at all, and are refused again by the runner (and, for
+the first, by the ledger) if one is reached another way:
 
 - a call a **read-only** job's profile refused. It was not stopped for want of a human, so no human
   can grant it; the job would have to be created `mutating`.
 - a **write into a protected directory** (`~/.iris/config`, `~/.iris/plugins`). A write there grants
   further permission rather than editing a file, and a click says a person vouches for the call —
   it does not change what may be written. Make that change yourself if you want it.
+- a **file-tool call outside the job's grant** (`write_file` or `read_file` from a granted run,
+  refused with `nearest: …`). A granted run's file tools have no path outside the grant that a
+  click can open, so the click could only fail after spending the approval. Re-schedule the job with
+  a grant that covers the directory instead.
 
 **Dismiss** acknowledges the run: it leaves `/jobs`'s failure list and stops being exempt from
 retention. The card stays in the transcript, because it is a record of what happened. Approving
@@ -651,7 +875,7 @@ budget (`620k / 1M (62%)`), how many runs it has started in the last hour agains
 naming whatever it does differently from the defaults; under the table is the whole unattended
 system's spend for the day against the global ceiling. `list_jobs` carries the same figures as
 fields — `tokensToday`, `dailyBudget`, `runsLastHour`, `maxRunsPerHour`, `retryAttempt`, `policy`,
-`gateKind`, `profile`, and `tokensTodayAllJobs` against `globalDailyBudget` — so the model answers
+`gateKind`, `profile`, `grants`, and `tokensTodayAllJobs` against `globalDailyBudget` — so the model answers
 "what is this job costing?" from the same arithmetic admission decides on. A figure that could not
 be read is a dash in the table and a `null` in the tool, never a zero: "nothing spent today" is a
 claim, and an unreadable ledger is not one. A pause still names the figure that caused it, in the
@@ -663,7 +887,7 @@ pause reason the table prints, on the `interrupted` row and on the card.
 
 | Form | What it does |
 | --- | --- |
-| `/jobs` | A table of every job — name, trigger (with its gate, if it has one), its policy where it departs from the defaults, when it next fires (or why it is paused), how its last run ended, its tokens today against its daily budget and its runs in the last hour against the breaker — then one line per watch with what its last burst saw and what it has absorbed since launch (see "Watches"), then the day's spend across every job, then one line per unacknowledged failure with the first eight characters of the run's id |
+| `/jobs` | A table of every job — name, trigger (with its gate, if it has one), its policy where it departs from the defaults, when it next fires (or why it is paused), how its last run ended, its tokens today against its daily budget and its runs in the last hour against the breaker — then one line per watch with what its last burst saw and what it has absorbed since launch (see "Watches"), one paragraph per granted job with its mounts and network (see "Grants"), then the day's spend across every job, then one line per unacknowledged failure with the first eight characters of the run's id |
 | `/jobs ack <run id>` | Marks a failed or blocked run as seen: it leaves the failure list, and it stops being exempt from retention. Takes a full id or the first eight or more characters of one, as a card prints it; an ambiguous prefix is refused rather than guessed |
 | `/jobs pause <name>` | Stops a job firing, with "paused by user" as the reason the table shows |
 | `/jobs resume <name>` | Clears the pause *and* the retry ladder, and recomputes the next fire from the job's own schedule |
@@ -746,7 +970,8 @@ is threading the run's own state to those call sites.
 ## The job tools
 
 Two read-only tools let the model answer questions about jobs: `list_jobs` (every job, its trigger,
-its next fire, why it is paused, how its last run ended, its policy, profile and gate kind, what
+its next fire, why it is paused, how its last run ended, its policy, profile, gate kind and grant
+(`grants`, as stored; `null` when it has none or is read-only), what
 it has spent today against its budgets and the breaker, and — for a watch — its quiet window, its
 ignore globs, its last burst's figures and what it has absorbed since launch, `null` for anything
 else) and `get_job_run` (one run, by id or by the eight characters a card shows, including the
