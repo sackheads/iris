@@ -3241,12 +3241,14 @@ actor IrisEngine {
             guard result.hasPrefix("Successfully saved skill '")
                     || result.hasPrefix("Successfully updated skill '"),
                   let name = args["name"]?.stringValue else { return [] }
-            let folder = ToolExecutor.skillFolder(named: name, paths: paths)
+            // A refused name wrote nothing, so there is nothing to record (#284).
+            guard let folder = ToolExecutor.skillFolder(named: name, paths: paths) else { return [] }
             return [folder.path, folder.appendingPathComponent("SKILL.md").path]
         case "delete_skill":
             guard result.hasPrefix("Successfully deleted skill '"),
                   let name = args["name"]?.stringValue else { return [] }
-            return [ToolExecutor.skillFolder(named: name, paths: paths).path]
+            guard let folder = ToolExecutor.skillFolder(named: name, paths: paths) else { return [] }
+            return [folder.path]
         default:
             return []
         }
