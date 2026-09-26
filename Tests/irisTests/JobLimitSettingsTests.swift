@@ -21,13 +21,15 @@ struct JobLimitSettingsTests {
         })
     }
 
-    @Test("the five steppers are the five keys the runner resolves its limits from")
+    /// Six since #283 split the breaker by trigger kind: a watch fires once per save-burst, so the
+    /// figure that suits a schedule paused a watch inside twenty minutes of ordinary editing.
+    @Test("the six steppers are the six keys the runner resolves its limits from")
     func coversEveryKey() {
         #expect(Set(JobLimitSetting.allCases.map(\.configKey)) == [
             "JOB_PER_RUN_TOKEN_BUDGET", "JOB_DAILY_TOKEN_BUDGET", "JOB_GLOBAL_DAILY_TOKEN_BUDGET",
-            "JOB_MAX_RUNS_PER_HOUR", "JOB_RUN_TIMEOUT_SECONDS",
+            "JOB_MAX_RUNS_PER_HOUR", "JOB_MAX_RUNS_PER_HOUR_WATCH", "JOB_RUN_TIMEOUT_SECONDS",
         ])
-        #expect(JobLimitSetting.allCases.count == 5)
+        #expect(JobLimitSetting.allCases.count == 6)
     }
 
     @Test("each stepper starts at its documented default and writes through to the config")

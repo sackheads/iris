@@ -30,6 +30,12 @@ struct ToolExecutor {
     /// Whether a `mutating` watch would get the VM its commands need (`SandboxPolicy.mutatingJobCanRun`).
     /// nil, the case in the app, asks the real policy when the tool runs; a test sets `{ true }`.
     var mutatingJobsAvailable: (@Sendable () -> Bool)?
+
+    /// The watch breaker figure the registration answer quotes (#283), injectable so a test asserts
+    /// against a number it chose rather than whatever this machine's Settings say. Reading
+    /// `ConfigManager.shared` is allowed — invariant 7 forbids *mutating* it — but a test that
+    /// depended on its value would pass or fail by the developer's settings.
+    var watchBreakerProvider: (@Sendable () -> Int)?
     static let watchProfileNeedsSandbox = "A mutating watch's commands always run in the apple/container VM, and that VM is not available: install the runtime and turn sandboxing on in Settings → Sandboxing, or leave the watch read-only."
 
     /// How the sandboxed branch of `run_command` reaches the container session. Injectable so a
@@ -108,7 +114,7 @@ struct ToolExecutor {
                     "profile": Schema(type: "STRING", description: "'readOnly' (default) or 'mutating'. A watch that writes must be mutating; its commands then run in the sandbox VM, which must be available."),
                     "mounts": Schema(type: "ARRAY", description: "Directories the watch's runs may use, as '/host/dir', '/host/dir:ro' or '/host/dir:/path/in/container'. Read-write unless ':ro'; the first read-write one is the working directory. Mutating only. The watched folder is not included unless named here.", items: Schema(type: "STRING")),
                     "network": Schema(type: "BOOLEAN", description: "true lets the runs' commands reach the network from inside the VM; default false. Mutating only."),
-                    "max_runs_per_hour": Schema(type: "INTEGER", description: "How many runs an hour before the watch pauses itself. Defaults to \(ConfigManager.JobDefaults.maxRunsPerHourForWatch), which covers ordinary editing; 0 removes the breaker. Say a lower number for a folder that should rarely change.")
+                    "max_runs_per_hour": Schema(type: "INTEGER", description: "How many runs an hour before the watch pauses itself. On a new watch, omitting this takes the shared setting for watches (\(ConfigManager.JobDefaults.maxRunsPerHourForWatch) by default, which covers ordinary editing); on a re-registration, omitting it leaves whatever the watch already has. 0 removes the breaker entirely. Say a lower number for a folder that should rarely change.")
                 ],
                 required: ["path", "instructions"]
             )
@@ -275,6 +281,13 @@ struct ToolExecutor {
     /// The match is by canonical path, case-insensitively (R-D4-8) — the same rule
     /// `WatcherManager` keys its streams by, and the reason the cost of being wrong (two genuinely
     /// distinct directories on a case-sensitive volume sharing one watch) is accepted there too.
+    /// The watch breaker the answer quotes. Reads the live setting rather than the shipped constant,
+    /// so a person who moved the Settings row is told the figure their watch will actually get.
+    private var watchBreakerDefault: Int {
+        let configured = watchBreakerProvider?() ?? ConfigManager.shared.jobMaxRunsPerHourForWatch
+        return configured > 0 ? configured : ConfigManager.JobDefaults.maxRunsPerHourForWatch
+    }
+
     private func registerWatcher(_ parsed: RegisterWatcherArguments, resolved: String, conversationId: UUID?) async -> String {
         guard let tools = await jobToolsProvider?() else { return "Jobs are not available yet." }
         // The canonical spelling is what is stored and what event paths are matched against
@@ -343,16 +356,11 @@ struct ToolExecutor {
                     createdInConversationId: conversationId,
                     // A watch never runs concurrently with itself; by default a save that lands
                     // mid-run is queued, not dropped.
-                    // #283: a watch carries the watch-sized breaker, stored so `/jobs` shows it and
-                    // the person can lower it. Six an hour was sized for a schedule; a watch fires
-                    // once per save-burst and paused itself inside twenty minutes of ordinary
-                    // editing. Stored rather than applied at resolution, so a global the person
-                    // lowered on purpose still binds a watch that named no figure of its own.
-                    policy: { var p = JobPolicy(overlap: parsed.overlap ?? .queue)
-                              p.grants = grant
-                              p.maxRunsPerHour = parsed.maxRunsPerHour
-                                  ?? ConfigManager.JobDefaults.maxRunsPerHourForWatch
-                              return p }())
+                    // Nothing stored unless the caller named a figure: nil means "the watch global"
+                    // (#283), so the Settings row moves this watch like every other, and naming one
+                    // here is a per-job override the way it is for a scheduled job.
+                    policy: JobPolicy(overlap: parsed.overlap ?? .queue,
+                                      maxRunsPerHour: parsed.maxRunsPerHour, grants: grant))
                 let others = watching.map { "`\($0.name)`" }
                 let named = others.count <= 2 ? others.joined(separator: " and ")
                     : others.dropLast().joined(separator: ", ") + " and " + others[others.count - 1]
@@ -375,6 +383,17 @@ struct ToolExecutor {
             }
             sentences.append(runs + ".")
             if clamped, let window { sentences.append("The window was clamped to \(window) s.") }
+            // #283 review: a create at the default, a create at 0 and an update that kept a stored
+            // figure all read identically without this. `0` especially has to be said out loud —
+            // it removes the only bound on a loop the self-write filter cannot see.
+            switch job.policy.maxRunsPerHour {
+            case .none:
+                sentences.append("It pauses itself past \(watchBreakerDefault) runs an hour, the shared setting for watches.")
+            case .some(0):
+                sentences.append("It has no breaker: nothing bounds how often it runs.")
+            case .some(let runs):
+                sentences.append("It pauses itself past \(runs) run\(runs == 1 ? "" : "s") an hour.")
+            }
             if let grant = job.policy.grants { sentences.append(grant.sentence) }
             return sentences.joined(separator: " ")
         } catch {

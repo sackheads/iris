@@ -302,20 +302,48 @@ struct JobAdmissionTests {
                 "a watch figure below the scheduled default would be no help at all")
     }
 
-    /// A watch carrying the registration default resolves to it, and a person's deliberate global
-    /// still wins where the job named nothing — the ordinary policy-over-global rule, unchanged.
-    @Test("a watch's stored breaker is what resolves, and a global still moves a watch that named none")
-    func watchStoredBreakerResolves() {
+    // MARK: the breaker is sized for the trigger (#283)
+
+    private func watchJob(policy: JobPolicy? = nil) -> Job {
+        Job(name: "watch", prompt: "summarise", trigger: .fsEvent(FSWatch(path: "/tmp/w")),
+            policy: policy ?? JobPolicy())
+    }
+
+    /// #283. Six runs an hour was sized in deliverable 3 for scheduled jobs. A watch fires once per
+    /// save-burst, so ordinary editing in a watched folder paused the watch inside twenty minutes —
+    /// measured on #279's on-screen check, `6/6` in `/jobs` on nothing but a runbook's saves.
+    /// A watch reads its own global, and — the property the stored-figure version did not have —
+    /// a person who lowers that setting moves every watch, including ones created before #283.
+    @Test("a watch reads the watch global; a scheduled job reads the scheduled one")
+    func watchReadsItsOwnGlobal() {
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        var watch = Job(name: "w", prompt: "p", trigger: .fsEvent(FSWatch(path: "/tmp/w")),
-                        policy: JobPolicy(maxRunsPerHour: ConfigManager.JobDefaults.maxRunsPerHourForWatch))
-        #expect(JobLimits.resolve(job: watch, config: config).maxRunsPerHour
+        #expect(JobLimits.resolve(job: watchJob(), config: config).maxRunsPerHour
                 == ConfigManager.JobDefaults.maxRunsPerHourForWatch)
-        watch.policy.maxRunsPerHour = nil
-        #expect(JobLimits.resolve(job: watch, config: config).maxRunsPerHour
+
+        config.jobMaxRunsPerHourForWatch = 2
+        #expect(JobLimits.resolve(job: watchJob(), config: config).maxRunsPerHour == 2,
+                "a lowered watch setting binds a watch that stored no figure of its own")
+        #expect(JobLimits.resolve(job: job(), config: config).maxRunsPerHour
                 == ConfigManager.JobDefaults.maxRunsPerHour,
-                "a watch stored before #283 keeps the old figure until it is re-registered")
+                "and does not touch a schedule")
+
+        config.jobMaxRunsPerHour = 3
+        #expect(JobLimits.resolve(job: job(), config: config).maxRunsPerHour == 3)
+        #expect(JobLimits.resolve(job: watchJob(), config: config).maxRunsPerHour == 2,
+                "the two settings are independent in both directions")
+    }
+
+    /// And the job's own figure still beats both globals, which is what `max_runs_per_hour` writes.
+    @Test("a watch that stored its own breaker keeps it over either global")
+    func storedBreakerBeatsGlobals() {
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        config.jobMaxRunsPerHourForWatch = 99
+        #expect(JobLimits.resolve(job: watchJob(policy: JobPolicy(maxRunsPerHour: 4)), config: config)
+                .maxRunsPerHour == 4)
+        #expect(JobLimits.resolve(job: watchJob(policy: JobPolicy(maxRunsPerHour: 0)), config: config)
+                .maxRunsPerHour == 0, "0 is a figure, not an absence")
     }
 
     // MARK: fire — overlap
@@ -1061,7 +1089,9 @@ struct JobAdmissionTests {
         let (store, state, engine, client) = try harness([textResponse("tick")])
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        config.jobMaxRunsPerHour = 1
+        // The job under test is a watch, and #283 gives a watch its own breaker global. This test is
+        // about the `triggerKind` on the refusal row, not about which key the breaker reads.
+        config.jobMaxRunsPerHourForWatch = 1
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         var job = self.job(name: "watched")
         job.trigger = .fsEvent(FSWatch(path: "/tmp/watched"))

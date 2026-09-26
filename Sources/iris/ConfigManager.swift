@@ -259,6 +259,13 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(jobGlobalDailyTokenBudget, forKey: "JOB_GLOBAL_DAILY_TOKEN_BUDGET") }
     }
     /// The breaker: this many runs of one job inside an hour pauses it.
+    /// A watch's breaker, separately settable (#283). Per kind rather than per job, so that the
+    /// figure a person chooses binds every watch — the ones created before the default changed
+    /// included — and so the scheduled stepper stays honest about what it governs.
+    var jobMaxRunsPerHourForWatch: Int {
+        didSet { store.set(jobMaxRunsPerHourForWatch, forKey: "JOB_MAX_RUNS_PER_HOUR_WATCH") }
+    }
+
     var jobMaxRunsPerHour: Int {
         didSet { store.set(jobMaxRunsPerHour, forKey: "JOB_MAX_RUNS_PER_HOUR") }
     }
@@ -460,6 +467,9 @@ class ConfigManager: @unchecked Sendable {
         self.jobGlobalDailyTokenBudget = savedGlobalDaily <= 0 ? JobDefaults.globalDailyTokenBudget : savedGlobalDaily
         let savedRunsPerHour = store.integer(forKey: "JOB_MAX_RUNS_PER_HOUR")
         self.jobMaxRunsPerHour = savedRunsPerHour <= 0 ? JobDefaults.maxRunsPerHour : savedRunsPerHour
+        let savedWatchRuns = store.integer(forKey: "JOB_MAX_RUNS_PER_HOUR_WATCH")
+        self.jobMaxRunsPerHourForWatch = savedWatchRuns <= 0
+            ? JobDefaults.maxRunsPerHourForWatch : savedWatchRuns
         let savedRunTimeout = store.integer(forKey: "JOB_RUN_TIMEOUT_SECONDS")
         self.jobRunTimeoutSeconds = savedRunTimeout <= 0 ? JobDefaults.runTimeoutSeconds : savedRunTimeout
 

@@ -59,9 +59,9 @@ A value neither field recognizes is refused with a sentence naming the ones that
 quietly creating a job that behaves differently from the one that was asked for. The rest of a job's
 policy is not settable from the tool, with one exception: the budgets and the run timeout are
 global settings with a per-job override in the stored `policy` column, `retry` is per job and on
-(see "Limits"), and the breaker is global for a scheduled job but takes `max_runs_per_hour` on
-`register_directory_watcher`, because a watch's sensible figure is not a schedule's (see
-"Watches"). A `mutating` job can also be created with a **grant** — `mounts` and `network` — which
+(see "Limits"), and the breaker has a setting per trigger kind — one for scheduled jobs, one for
+watches — plus `max_runs_per_hour` on `register_directory_watcher` for a watch that wants its own
+(see "Limits" and "Watches"). A `mutating` job can also be created with a **grant** — `mounts` and `network` — which
 is what lets it write and run commands unattended; see "Grants".
 
 ## The cron subset
@@ -505,14 +505,12 @@ tool writes; anything a plugin hook writes; the memory tools (`update_memory`, `
 and anything containing it, is refused as a watch root; and the writes of an `iris --run-job`
 process, which is another process altogether (no watch is live while it holds the store). A loop
 built from any of those is not silent and not unbounded: it ends in the job's **breaker** pause
-with a card naming the figure, the same backstop every job has — thirty runs an hour for a watch,
-six for a scheduled job. A watch gets the larger figure because it fires once per save-burst, so an
-ordinary editing session reaches six within the first hour and the watch pauses itself on nothing
-but the person's own saves (#283); thirty is one run every two minutes sustained. Say
-`max_runs_per_hour` on `register_directory_watcher` for a folder that should rarely change, or `0`
-to remove the breaker — which also removes the only bound on a loop the self-write filter cannot
-see. A watch created before #283 keeps the figure it was stored with until a re-registration names
-one. A
+with a card naming the figure, the same backstop every job has — thirty runs an hour for a watch by
+default, six for a scheduled job, each its own stepper (see "Limits"). Say `max_runs_per_hour` on
+`register_directory_watcher` for a folder that should rarely change, or `0` to remove the breaker —
+which also removes the only bound on a loop the filter cannot see. Because the figure is a setting
+rather than something stored on each watch, moving it moves every watch that did not name its own,
+including ones created before the default changed. A
 granted job that writes into a watched folder should therefore use `write_file`, which the filter
 sees; a command's writes in the container it cannot.
 
@@ -815,7 +813,12 @@ whole unattended system is not a ceiling.
 **Before a run**, admission decides in a fixed order: a paused job is dropped, then a disabled one,
 then an overlap (skipped or queued by `policy.overlap`), then the breaker, then the budgets.
 
-- **Breaker** — **6 runs per job per hour** by default. The run that would be the seventh does not
+- **Breaker** — **6 runs per hour** for a scheduled job, **30** for a directory watch, each its own
+  stepper. A watch fires once per save-burst, so a person editing in a watched folder reaches six
+  within the first hour and the watch pauses itself on nothing but their own saves (#283); thirty is
+  one run every two minutes sustained. A job that names `max_runs_per_hour` keeps its own figure over
+  either setting, and `0` removes the breaker — which for a watch also removes the only bound on a
+  loop the self-write filter cannot see. The run that would be the next one does not
   happen; the job is paused instead, with the count in the reason. Refusals do not count as runs, so
   a job cannot trip its own breaker by being skipped.
 - **Daily token budget** — **1,000,000 tokens per job** per local calendar day, and **3,000,000

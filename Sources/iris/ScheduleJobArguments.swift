@@ -444,6 +444,21 @@ struct ScheduleJobArguments: Equatable, Sendable {
         }
     }
 
+    /// Like `integer`, but a fractional value is *refused* rather than rounded. For an argument
+    /// where the rounded-down value means something else entirely: `max_runs_per_hour: 0.5` rounds
+    /// to 0, and 0 removes the breaker (#283) — silently, which is the one outcome a person asking
+    /// for "about half a run" cannot have meant.
+    static func exactInteger(_ value: JSONValue?) -> Int? {
+        switch value {
+        case .int(let int): return int
+        case .double(let double): return double.isFinite ? Int(exactly: double) : nil
+        case .string(let string):
+            let trimmed = string.trimmingCharacters(in: .whitespaces)
+            return Int(trimmed) ?? Double(trimmed).flatMap { $0.isFinite ? Int(exactly: $0) : nil }
+        default: return nil
+        }
+    }
+
     static let networkShape: ToolMessage = "network must be true or false."
     static let mountsShape: ToolMessage = "mounts must be a directory path, or a list of them, each as '/host/dir', '/host/dir:ro' or '/host/dir:/path/in/container'."
 
