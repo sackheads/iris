@@ -10,7 +10,7 @@ import KeyboardShortcuts
 /// rather than "no budget". A job's own `JobPolicy` is where zero means unlimited, and that is not
 /// settable from here — the one ceiling that matters most is the one nobody edits by accident.
 enum JobLimitSetting: String, CaseIterable, Sendable {
-    case perRunTokens, dailyTokens, globalDailyTokens, maxRunsPerHour, runTimeoutSeconds
+    case perRunTokens, dailyTokens, globalDailyTokens, maxRunsPerHour, maxRunsPerHourForWatch, runTimeoutSeconds
 
     var configKey: String {
         switch self {
@@ -18,6 +18,7 @@ enum JobLimitSetting: String, CaseIterable, Sendable {
         case .dailyTokens: return "JOB_DAILY_TOKEN_BUDGET"
         case .globalDailyTokens: return "JOB_GLOBAL_DAILY_TOKEN_BUDGET"
         case .maxRunsPerHour: return "JOB_MAX_RUNS_PER_HOUR"
+        case .maxRunsPerHourForWatch: return "JOB_MAX_RUNS_PER_HOUR_WATCH"
         case .runTimeoutSeconds: return "JOB_RUN_TIMEOUT_SECONDS"
         }
     }
@@ -27,7 +28,8 @@ enum JobLimitSetting: String, CaseIterable, Sendable {
         case .perRunTokens: return "Tokens one run may spend"
         case .dailyTokens: return "Tokens one job may spend a day"
         case .globalDailyTokens: return "Tokens all jobs may spend a day"
-        case .maxRunsPerHour: return "Runs per job per hour"
+        case .maxRunsPerHour: return "Runs per scheduled job per hour"
+        case .maxRunsPerHourForWatch: return "Runs per watch per hour"
         case .runTimeoutSeconds: return "Wall clock one run may take"
         }
     }
@@ -41,7 +43,9 @@ enum JobLimitSetting: String, CaseIterable, Sendable {
         case .globalDailyTokens:
             return "The ceiling on every background run together. A job cannot raise it for itself."
         case .maxRunsPerHour:
-            return "The breaker: a job that has already run this many times in the last hour pauses instead of firing again."
+            return "The breaker for a scheduled job: one that has already run this many times in the last hour pauses instead of firing again."
+        case .maxRunsPerHourForWatch:
+            return "The same breaker for a directory watch, which fires once per save-burst and so runs far more often than a schedule (#283). A watch that names its own figure keeps it."
         case .runTimeoutSeconds:
             return "A run still going at this deadline is closed as failed and the Mac is let go back to sleep."
         }
@@ -53,6 +57,7 @@ enum JobLimitSetting: String, CaseIterable, Sendable {
         case .dailyTokens: return ConfigManager.JobDefaults.dailyTokenBudget
         case .globalDailyTokens: return ConfigManager.JobDefaults.globalDailyTokenBudget
         case .maxRunsPerHour: return ConfigManager.JobDefaults.maxRunsPerHour
+        case .maxRunsPerHourForWatch: return ConfigManager.JobDefaults.maxRunsPerHourForWatch
         case .runTimeoutSeconds: return ConfigManager.JobDefaults.runTimeoutSeconds
         }
     }
@@ -63,7 +68,7 @@ enum JobLimitSetting: String, CaseIterable, Sendable {
         switch self {
         case .perRunTokens: return 50_000
         case .dailyTokens, .globalDailyTokens: return 100_000
-        case .maxRunsPerHour: return 1
+        case .maxRunsPerHour, .maxRunsPerHourForWatch: return 1
         case .runTimeoutSeconds: return 60
         }
     }
@@ -73,7 +78,7 @@ enum JobLimitSetting: String, CaseIterable, Sendable {
         case .perRunTokens: return 0...10_000_000
         case .dailyTokens: return 0...50_000_000
         case .globalDailyTokens: return 0...100_000_000
-        case .maxRunsPerHour: return 0...1_000
+        case .maxRunsPerHour, .maxRunsPerHourForWatch: return 0...1_000
         case .runTimeoutSeconds: return 0...86_400
         }
     }
@@ -84,6 +89,7 @@ enum JobLimitSetting: String, CaseIterable, Sendable {
         case .dailyTokens: return config.jobDailyTokenBudget
         case .globalDailyTokens: return config.jobGlobalDailyTokenBudget
         case .maxRunsPerHour: return config.jobMaxRunsPerHour
+        case .maxRunsPerHourForWatch: return config.jobMaxRunsPerHourForWatch
         case .runTimeoutSeconds: return config.jobRunTimeoutSeconds
         }
     }
@@ -115,6 +121,7 @@ enum JobLimitSetting: String, CaseIterable, Sendable {
         case .dailyTokens: config.jobDailyTokenBudget = clamped
         case .globalDailyTokens: config.jobGlobalDailyTokenBudget = clamped
         case .maxRunsPerHour: config.jobMaxRunsPerHour = clamped
+        case .maxRunsPerHourForWatch: config.jobMaxRunsPerHourForWatch = clamped
         case .runTimeoutSeconds: config.jobRunTimeoutSeconds = clamped
         }
     }

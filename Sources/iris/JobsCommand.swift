@@ -248,6 +248,12 @@ enum JobsCommand: Equatable {
         if job.profile == .mutating { parts.append("mutating") }
         if job.effectiveGrant != nil { parts.append("grant") }
         if job.policy.overlap == .queue { parts.append("overlap queue") }
+        // #283 review: the column shows what a job's policy does differently from the defaults, and
+        // a removed breaker is the most different thing in it — `0` is the one value that takes the
+        // bound off a self-write loop entirely, so it must not read as `default`.
+        if let runs = job.policy.maxRunsPerHour {
+            parts.append(runs == 0 ? "no breaker" : "breaker \(runs)/h")
+        }
         switch job.policy.catchUp {
         case .coalesce: break
         case .skip: parts.append("catch-up skip")

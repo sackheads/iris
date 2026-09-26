@@ -34,7 +34,7 @@ struct RegisterWatcherTests {
 
     struct TestError: Error { let text: String; init(_ text: String) { self.text = text } }
 
-    private func fixture(mutatingJobsAvailable: Bool = true) throws -> Fixture {
+    private func fixture(mutatingJobsAvailable: Bool = true, watchBreaker: Int = 30) throws -> Fixture {
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent("iris-regwatch-\(UUID().uuidString)")
         let notes = base.appendingPathComponent("notes")
@@ -47,6 +47,9 @@ struct RegisterWatcherTests {
         executor.irisPaths = IrisPaths(root: irisRoot)
         executor.homeDirectory = base.appendingPathComponent("home").path
         executor.mutatingJobsAvailable = { mutatingJobsAvailable }
+        // Injected rather than read from this machine's settings, so the answer's figure is one the
+        // test chose (#283).
+        executor.watchBreakerProvider = { watchBreaker }
         return Fixture(store: store, executor: executor, base: base, notes: notes)
     }
 
@@ -169,6 +172,76 @@ struct RegisterWatcherTests {
         #expect(result.contains("created `notes-2`"))
         #expect(result.contains("`notes` belongs to another conversation"))
         #expect(result.contains("this folder now has 2 watches, each of which runs on every change"))
+    }
+
+    /// #283. Six runs an hour is the scheduled-job breaker; a watch fires once per save-burst and
+    /// paused itself about twenty minutes into #279's on-screen check, on nothing but a runbook's
+    /// saves. A new watch carries the watch figure in its own policy, which is why `/jobs` can show
+    /// it and a person can lower it.
+    @Test("a new watch stores no breaker of its own, and max_runs_per_hour writes one")
+    func watchBreakerDefault() async throws {
+        let f = try fixture(); defer { f.tearDown() }
+
+        _ = await f.register()
+        #expect(try f.watch().job.policy.maxRunsPerHour == nil,
+                "nil means the watch global (#283), so the Settings row moves this watch too")
+
+        let g = try fixture(); defer { g.tearDown() }
+        _ = await g.register(["max_runs_per_hour": .int(3)])
+        #expect(try g.watch().job.policy.maxRunsPerHour == 3, "a person's figure wins, lower included")
+
+        let h = try fixture(); defer { h.tearDown() }
+        _ = await h.register(["max_runs_per_hour": .int(0)])
+        #expect(try h.watch().job.policy.maxRunsPerHour == 0, "0 means no breaker, not 'unset'")
+    }
+
+    /// The re-registration rule the other optional arguments follow: omitted leaves the stored
+    /// figure alone. That is what keeps a watch created before #283 from silently changing, and it
+    /// is also why such a watch needs one re-registration naming a number to pick the new default up.
+    @Test("re-registering without max_runs_per_hour leaves the stored breaker alone")
+    func watchBreakerKeptOnUpdate() async throws {
+        let f = try fixture(); defer { f.tearDown() }
+        // The same conversation, or the second call is another conversation's watch rather than an
+        // update — which is the rule #280 established, and the mistake this test made first.
+        let cid = UUID()
+        _ = await f.register(["max_runs_per_hour": .int(7)], conversationId: cid)
+        _ = await f.register(["instructions": .string("changed")], conversationId: cid)
+        #expect(try f.watch().job.policy.maxRunsPerHour == 7)
+        #expect(try f.watch().job.prompt == "changed", "the rest of the call still applied")
+    }
+
+    /// Review: a create at the shared figure, a create at 0 and an update that kept a stored figure
+    /// all read identically before this. `0` in particular has to be said, because it removes the
+    /// only bound on a self-write loop the filter cannot see.
+    @Test("the answer says what bounds the watch, and says when nothing does")
+    func answerNamesTheBreaker() async throws {
+        let f = try fixture(watchBreaker: 42); defer { f.tearDown() }
+        let shared = await f.register()
+        #expect(shared.contains("42 runs an hour"), "the live setting, not the shipped constant: \(shared)")
+
+        let g = try fixture(); defer { g.tearDown() }
+        let none = await g.register(["max_runs_per_hour": .int(0)])
+        #expect(none.lowercased().contains("no breaker"), "got: \(none)")
+        #expect(none.lowercased().contains("nothing bounds"), "and says what that means: \(none)")
+
+        let h = try fixture(); defer { h.tearDown() }
+        let own = await h.register(["max_runs_per_hour": .int(5)])
+        #expect(own.contains("past 5 runs an hour"), "got: \(own)")
+    }
+
+    @Test("a malformed max_runs_per_hour is refused by name rather than dropped")
+    func watchBreakerShape() async throws {
+        let f = try fixture(); defer { f.tearDown() }
+        let result = await f.register(["max_runs_per_hour": .string("lots")])
+        #expect(result.contains("max_runs_per_hour"), "got: \(result)")
+        #expect(try f.store.ledger.jobs().isEmpty, "a refused call stored no watch")
+        let negative = await f.register(["max_runs_per_hour": .int(-1)])
+        #expect(negative.contains("max_runs_per_hour"), "got: \(negative)")
+        // 0.5 rounds toward zero, and 0 means "no breaker" — so rounding would silently remove the
+        // only bound on a loop the self-write filter cannot see (review).
+        let fraction = await f.register(["max_runs_per_hour": .double(0.5)])
+        #expect(fraction.contains("max_runs_per_hour"), "got: \(fraction)")
+        #expect(try f.store.ledger.jobs().isEmpty)
     }
 
     @Test("overlap defaults to queue on a new watch and skip is honoured when asked for")
