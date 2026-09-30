@@ -728,25 +728,42 @@ except Exception as e:
     /// directory — measured: `"../../x"` reached `~/x`, `".."` reached `~/.iris` itself, and an
     /// empty name reached `~/.iris/skills`, so a blank argument deleted every skill.
     ///
-    /// Three refusals rather than one, because the resolved-path check alone would accept
-    /// `nested/skill` (inside, but not a name) and would accept nothing at all for an empty slug:
-    /// a name is one path component, non-empty, that stays under the directory once resolved.
+    /// A name is one path component, non-empty, not `.` or `..`, with no control characters, and
+    /// Foundation must keep it as given: it truncates a path at U+0000, so `"..\u{0}"` passed every
+    /// string rule and acted on `skills/..` (#307 review). Containment is checked lexically, so a
+    /// skill folder that is a symlink into a git checkout is supported (#305): writes land in its
+    /// target and a delete removes only the link. Two link targets are refused: `config/` and
+    /// `plugins/`, which the skill tools would otherwise write with no approval while `write_file`
+    /// is refused there (#282 §0.9), and the skills directory or anything above it, which would
+    /// put `SKILL.md` into the skills directory itself.
     static func skillFolder(named name: String, paths: IrisPaths = .default) -> URL? {
         let cleanName = name.lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: " ", with: "-")
             .replacingOccurrences(of: "_", with: "-")
-        guard !cleanName.isEmpty, !cleanName.contains("/"), cleanName != ".." else { return nil }
+        guard !cleanName.isEmpty, !cleanName.contains("/"), cleanName != ".", cleanName != "..",
+              !cleanName.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
+        else { return nil }
         let folder = paths.skillsDir.appendingPathComponent(cleanName)
-        // `IrisPaths.canonicalPath`, not `standardizedFileURL`: the latter is `NSString`'s, which
-        // strips a leading `/private` only when the resulting path EXISTS. The root does, the new
-        // folder does not, so under a root spelled `/private/tmp/...` the two sides disagreed and
-        // every `create_skill` was refused — found in review, reachable with `TMPDIR=/private/tmp`
-        // or the perf lane's volatile copy. `canonicalPath` resolves the deepest existing ancestor
-        // and re-appends what is missing, so both sides are the same spelling.
-        let root = IrisPaths.canonicalPath(paths.skillsDir.path)
-        guard IrisPaths.canonicalPath(folder.path).hasPrefix(root + "/") else { return nil }
+        guard folder.lastPathComponent == cleanName,
+              folder.deletingLastPathComponent().path == paths.skillsDir.path else { return nil }
+        guard !paths.isUnderProtectedWriteDir(folder.path) else { return nil }
+        let resolved = IrisPaths.realPath(folder.path).lowercased()
+        let skillsResolved = IrisPaths.realPath(paths.skillsDir.path).lowercased()
+        // `/` is everything's ancestor, but `"/" + "/"` prefixes nothing, so it is named outright.
+        guard resolved != "/", skillsResolved != resolved, !skillsResolved.hasPrefix(resolved + "/") else { return nil }
         return folder
+    }
+
+    /// A skill folder that is a symlink whose target is gone. `fileExists` follows links, so
+    /// without this a moved checkout read as "not found" and its name could never be reused.
+    static func isDanglingLink(_ url: URL) -> Bool {
+        (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) != nil
+            && !FileManager.default.fileExists(atPath: url.path)
+    }
+
+    static func brokenLinkMessage(_ name: String) -> String {
+        "Error: skill '\(name)' is a broken link — its folder is a symlink whose target no longer exists. Delete the skill to remove the link."
     }
 
     /// One sentence for all three tools, so a refusal reads the same wherever it comes from.
@@ -755,6 +772,7 @@ except Exception as e:
     func createSkill(name: String, description: String, body: String, paths: IrisPaths = .default) async -> String {
         guard let skillFolder = Self.skillFolder(named: name, paths: paths) else { return Self.invalidSkillName }
         let cleanName = skillFolder.lastPathComponent
+        if Self.isDanglingLink(skillFolder) { return Self.brokenLinkMessage(cleanName) }
         let skillFile = skillFolder.appendingPathComponent("SKILL.md")
         
         let isoFormatter = ISO8601DateFormatter()
@@ -785,6 +803,7 @@ except Exception as e:
     func updateSkill(name: String, description: String?, body: String?, paths: IrisPaths = .default) async -> String {
         guard let skillFolder = Self.skillFolder(named: name, paths: paths) else { return Self.invalidSkillName }
         let cleanName = skillFolder.lastPathComponent
+        if Self.isDanglingLink(skillFolder) { return Self.brokenLinkMessage(cleanName) }
         let skillFile = skillFolder.appendingPathComponent("SKILL.md")
         let fileManager = FileManager.default
         
@@ -848,7 +867,8 @@ except Exception as e:
         guard let skillFolder = Self.skillFolder(named: name, paths: paths) else { return Self.invalidSkillName }
         let cleanName = skillFolder.lastPathComponent
         let fileManager = FileManager.default
-        guard fileManager.fileExists(atPath: skillFolder.path) else {
+        // `attributesOfItem` does not follow a link, so a dangling one is still found and removed.
+        guard (try? fileManager.attributesOfItem(atPath: skillFolder.path)) != nil else {
             return "Skill '\(cleanName)' not found."
         }
         do {
