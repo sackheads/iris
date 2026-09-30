@@ -86,9 +86,11 @@ compare uncached tokens across it.
 `--dump-requests <dir>` on `iris --perf run` writes each round's exact wire body — the bytes the
 currently configured provider client would send, reusing `AnthropicClient`/`OpenAIClient`'s own
 `makeURLRequest` builders (Gemini's body is just the request's own JSON encoding) — to
-`<dir>/<scenario>/<rep>/<turn>-<round>.json`. Nothing is sent over the network; a placeholder API
-key is used so the dump works even without configured credentials. These are what a byte-prefix
-diff reads to find exactly where two rounds' requests first differ.
+`<dir>/<scenario>/rung-<N>/<rep>/<turn>-<round>.json`. The rung is part of the path so a suite that
+dumps more than one rung (e.g. 4 and 5) never has one rung's files overwrite another's. Nothing is
+sent over the network; a placeholder API key is used so the dump works even without configured
+credentials. These are what a byte-prefix diff reads to find exactly where two rounds' requests
+first differ.
 
 ## Reading a record
 

@@ -136,6 +136,19 @@ struct ScenarioRunnerOptionsTests {
         #expect(found.contains { $0.content.contains(marker) })
     }
 
+    /// The actual runtime refusal (outside a volatile copy AND outside `swift test`) cannot be
+    /// exercised end-to-end from inside `swift test` — the process IS the test process — so the
+    /// decision is pulled out as a pure function and tested directly (5a fix round 1, review
+    /// finding #1). This is the second of the two refusals: `PerfSuiteTests` covers the first,
+    /// suite-level one (`validateScenarios`).
+    @Test("seedFacts may be written under a volatile copy or under swift test, never otherwise")
+    func canSeedFactsGate() {
+        #expect(ScenarioRunner.canSeedFacts(isVolatileCopy: true, isTestProcess: false))
+        #expect(ScenarioRunner.canSeedFacts(isVolatileCopy: false, isTestProcess: true))
+        #expect(ScenarioRunner.canSeedFacts(isVolatileCopy: true, isTestProcess: true))
+        #expect(!ScenarioRunner.canSeedFacts(isVolatileCopy: false, isTestProcess: false))
+    }
+
     @Test("a seeding failure (e.g. empty content) is ignored, not thrown")
     func seedFactsIgnoresErrors() async {
         let scenario = Scenario(name: "seeded-empty", clientMode: .fake,

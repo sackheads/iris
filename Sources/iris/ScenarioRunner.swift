@@ -46,6 +46,19 @@ enum ScenarioRunner {
     /// The guards=off notice is printed once per process; PerfRunner asks for .off on every
     /// fake-lane repetition and the test process is never a volatile copy.
     private static var warnedGuardsIgnored = false
+    /// Same one-per-process shape as `warnedGuardsIgnored`, for the seedFacts refusal below.
+    private static var warnedSeedFactsIgnored = false
+
+    /// Whether it is safe to write `seedFacts` into `FactStoreManager.shared`: only under a
+    /// volatile `IrisPaths` copy (a real-lane perf run routes the whole `~/.iris` home there) or
+    /// under `swift test` (where `FactStoreManager.shared` is in-memory regardless — see its own
+    /// doc comment). Pulled out as a pure function so the refusal is testable without needing a
+    /// live non-test process (5a fix round 1, review finding #1): `PerfSuite.validateScenarios`
+    /// is the fail-fast, whole-suite gate; this is the second gate, so the guard does not depend
+    /// on only that one caller validating first.
+    static func canSeedFacts(isVolatileCopy: Bool, isTestProcess: Bool) -> Bool {
+        isVolatileCopy || isTestProcess
+    }
 
     static func run(_ scenario: Scenario,
                     guards: GuardMode = .asConfigured,
@@ -135,9 +148,19 @@ enum ScenarioRunner {
 
         // Seed the fact store before turn 1 so a scenario like `caching` gets a deterministic
         // fact-store block: turns after this can rely on exactly these facts being present.
-        // Best-effort — a seeding failure must not fail the whole scenario run (5a).
-        for fact in scenario.seedFacts ?? [] {
-            _ = try? FactStoreManager.shared.addFact(content: fact)
+        // Best-effort — a seeding failure must not fail the whole scenario run (5a). Outside a
+        // volatile `IrisPaths` copy and outside `swift test`, `.shared` is the developer's real,
+        // on-disk fact store: refuse rather than write into it (fix round 1, review finding #1).
+        let seedFacts = scenario.seedFacts ?? []
+        if !seedFacts.isEmpty {
+            if Self.canSeedFacts(isVolatileCopy: IrisPaths.isVolatileCopy, isTestProcess: NSClassFromString("XCTestCase") != nil) {
+                for fact in seedFacts {
+                    _ = try? FactStoreManager.shared.addFact(content: fact)
+                }
+            } else if !warnedSeedFactsIgnored {
+                warnedSeedFactsIgnored = true
+                print("[ScenarioRunner] seedFacts ignored: settings store is not a volatile copy")
+            }
         }
 
         // Collect this run's finished turn profiles via a task-local sink scoped to the turn loop.

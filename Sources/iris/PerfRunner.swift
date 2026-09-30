@@ -13,6 +13,9 @@ enum PerfRunner {
                     client: (any LLMClientProtocol)? = nil, headless: Bool,
                     workspacePath: String? = nil, dumpRequestsDir: URL? = nil) async throws -> PerfRunRecord {
         try suite.validate()
+        // Fails fast, before any scenario runs, on a fake-lane suite whose scenario declares
+        // seedFacts (5a fix round 1, review finding #1).
+        try suite.validateScenarios(relativeTo: repoRoot)
         let reps = repetitionsOverride ?? suite.repetitions
         let startedAt = Date()
         var results: [PerfScenarioResult] = []
@@ -45,7 +48,11 @@ enum PerfRunner {
                         if suite.lane == .fake { effective.clientMode = .fake }
                         // Real-lane tool prompts run unattended with auto-approve: keep them in the VM.
                         let toolExecution: ToolExecutionMode = suite.lane == .real ? .sandboxed : .asConfigured
-                        let dumpDir = dumpRequestsDir?.appendingPathComponent(scenario.name).appendingPathComponent("\(i)")
+                        // Rung is part of the path: a suite running rungs 4 and 5 would otherwise
+                        // have rung 5's dumps overwrite rung 4's at the same <scenario>/<rep> (fix
+                        // round 1, review finding #2).
+                        let dumpDir = dumpRequestsDir?.appendingPathComponent(scenario.name)
+                            .appendingPathComponent("rung-\(rung)").appendingPathComponent("\(i)")
                         let result = await ScenarioRunner.run(effective, guards: guards, toolExecution: toolExecution, clientOverride: client,
                                                               workspacePath: workspacePath, dumpRequestsTo: dumpDir)
                         if result.toolsSandboxed { anySandboxed = true }

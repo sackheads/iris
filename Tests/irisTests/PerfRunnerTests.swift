@@ -81,6 +81,21 @@ struct PerfRunnerTests {
         #expect(s.rungs.first?.medianMs == 0)
         #expect(s.summary.medianMs == 0)
     }
+
+    /// Review finding #2 (5a fix round 1): rung 5's dumps must not overwrite rung 4's at the same
+    /// <scenario>/<rep> path.
+    @Test("--dump-requests keeps each rung's files separate when a suite runs more than one (5a)")
+    func dumpRequestsSeparatesRungs() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-dump-rungs-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let suite = PerfSuite(name: "two-rungs", lane: .fake, repetitions: 1, rungs: [4, 5],
+                              scenarios: ["perf/prompts/fake/text-only.json"])
+        _ = try await PerfRunner.run(suite: suite, repoRoot: root, headless: true, dumpRequestsDir: dir)
+        let rung4 = dir.appendingPathComponent("fake-text-only/rung-4/0/1-0.json")
+        let rung5 = dir.appendingPathComponent("fake-text-only/rung-5/0/1-0.json")
+        #expect(FileManager.default.fileExists(atPath: rung4.path))
+        #expect(FileManager.default.fileExists(atPath: rung5.path))
+    }
 }
 
 @Suite("PerfSummarizer")

@@ -32,6 +32,33 @@ struct PerfSuiteTests {
         }
     }
 
+    /// Review finding #1 (5a fix round 1): a fake-lane scenario with `seedFacts` would write into
+    /// the real, on-disk `FactStoreManager.shared` — `IrisPaths.useVolatileCopy` is only ever
+    /// installed for a real-lane run. This is the fail-fast, whole-suite refusal; the second one
+    /// (`ScenarioRunner.canSeedFacts`) is covered in `ScenarioRunnerOptionsTests`.
+    @Test("a fake-lane scenario with seedFacts is refused at validation time, naming the scenario")
+    func fakeLaneSeedFactsRefused() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-suite-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let scenarioPath = dir.appendingPathComponent("seeded.json")
+        try #"{"name":"seeded-scenario","turns":[{"prompt":"p"}],"seedFacts":["a fact"]}"#
+            .write(to: scenarioPath, atomically: true, encoding: .utf8)
+        let suite = PerfSuite(name: "s", lane: .fake, scenarios: [scenarioPath.path])
+        #expect(throws: PerfSuiteError.seedFactsNeedsRealLane(scenario: "seeded-scenario")) {
+            try suite.validateScenarios(relativeTo: dir)
+        }
+        // A real-lane suite with the same scenario is fine: the guard is lane-specific.
+        let realSuite = PerfSuite(name: "s", lane: .real, scenarios: [scenarioPath.path])
+        #expect(throws: Never.self) { try realSuite.validateScenarios(relativeTo: dir) }
+        // An empty seedFacts array is treated the same as none.
+        let emptyPath = dir.appendingPathComponent("empty.json")
+        try #"{"name":"empty-scenario","turns":[{"prompt":"p"}],"seedFacts":[]}"#
+            .write(to: emptyPath, atomically: true, encoding: .utf8)
+        let emptySuite = PerfSuite(name: "s", lane: .fake, scenarios: [emptyPath.path])
+        #expect(throws: Never.self) { try emptySuite.validateScenarios(relativeTo: dir) }
+    }
+
     @Test("scenario paths resolve against the repo root")
     func resolvesPaths() throws {
         let suite = try PerfSuite.decode(from: Data(#"{"name":"s","scenarios":["scenarios/echo-latency.json"]}"#.utf8))

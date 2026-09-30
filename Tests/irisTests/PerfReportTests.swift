@@ -56,8 +56,9 @@ struct PerfReportTests {
         let rung = PerfRungResult(rung: 1, repetitions: [rep], medianMs: 100, p90Ms: 100)
         r.scenarios[0].rungs.append(rung)
         let text = PerfReport.render(r)
-        // No cache read/write reported: cache read is "-" and the whole prompt counts uncached.
-        #expect(text.contains("| 1 | 1 | 100.0 | 100.0 | - | 42 | - | 42 | - |"))
+        // No cache read/write reported: cache read is "—" (unknown, not zero) and the whole
+        // prompt counts uncached.
+        #expect(text.contains("| 1 | 1 | 100.0 | 100.0 | - | 42 | — | 42 | - |"))
     }
 
     @Test("the first-token column is the median over the rung's successful turns, or a dash")
@@ -99,5 +100,13 @@ struct PerfReportTests {
         #expect(!PerfReport.render(PerfRecordTests.sampleRecord()).contains("unexpected tool-call rate"))
         r.scenarios[0].summary.missedExpectedToolRate = 1.0
         #expect(PerfReport.render(r).contains("missed expected tool in 100% of turns"))
+    }
+
+    @Test("unknown cache read and uncached render as an em dash, never a hyphen or zero (spec §0.4)")
+    func unknownCacheColumnsUseEmDash() {
+        // sampleRecord()'s one call has no cache fields at all.
+        let text = PerfReport.render(PerfRecordTests.sampleRecord())
+        #expect(text.contains("| 5 | 1 | 860.0 | 860.0 | - | 3000 | — | 3000 | - |"))
+        #expect(!text.contains("| 5 | 1 | 860.0 | 860.0 | - | 3000 | - | 3000 | - |"), "a hyphen must not stand in for the cache columns")
     }
 }
