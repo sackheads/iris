@@ -1,0 +1,52 @@
+import Testing
+import Foundation
+@testable import iris
+
+@Suite("Usage cache counts (5a)")
+struct UsageCacheCountTests {
+    @Test("Anthropic non-stream: prompt is input + read + write, and the cache fields are set")
+    func anthropicNonStream() throws {
+        let json: [String: Any] = ["content": [["type": "text", "text": "hi"]],
+                                   "usage": ["input_tokens": 10, "cache_read_input_tokens": 900,
+                                             "cache_creation_input_tokens": 50, "output_tokens": 7]]
+        let r = try AnthropicClient.parseResponse(json)
+        #expect(r.usageMetadata?.promptTokenCount == 960)
+        #expect(r.usageMetadata?.cacheReadTokens == 900)
+        #expect(r.usageMetadata?.cacheWriteTokens == 50)
+        #expect(r.usageMetadata?.totalTokenCount == 967, "total filled from prompt + output: budgets read it")
+    }
+
+    @Test("a provider that reports no cache fields yields nil, not zero")
+    func absentIsNil() throws {
+        let json: [String: Any] = ["content": [["type": "text", "text": "hi"]],
+                                   "usage": ["input_tokens": 10, "output_tokens": 7]]
+        let r = try AnthropicClient.parseResponse(json)
+        #expect(r.usageMetadata?.cacheReadTokens == nil)
+        #expect(r.usageMetadata?.cacheWriteTokens == nil)
+    }
+
+    @Test("Gemini: cachedContentTokenCount decodes into cacheReadTokens; write stays nil")
+    func gemini() throws {
+        let data = #"{"promptTokenCount":1000,"cachedContentTokenCount":800,"candidatesTokenCount":5,"totalTokenCount":1005}"#.data(using: .utf8)!
+        let u = try JSONDecoder().decode(UsageMetadata.self, from: data)
+        #expect(u.cacheReadTokens == 800)
+        #expect(u.cacheWriteTokens == nil)
+    }
+
+    @Test("OpenAI: prompt_tokens_details.cached_tokens is the read count")
+    func openAI() throws {
+        let json: [String: Any] = ["choices": [["message": ["role": "assistant", "content": "hi"]]],
+                                   "usage": ["prompt_tokens": 1000, "completion_tokens": 5, "total_tokens": 1005,
+                                             "prompt_tokens_details": ["cached_tokens": 768]]]
+        let r = try OpenAIClient.parseResponse(json)
+        #expect(r.usageMetadata?.cacheReadTokens == 768)
+        #expect(r.usageMetadata?.promptTokenCount == 1000)
+    }
+
+    @Test("withTotal fills a missing total and leaves a reported one alone")
+    func withTotal() {
+        #expect(UsageMetadata(promptTokenCount: 3, candidatesTokenCount: 4, totalTokenCount: nil).withTotal().totalTokenCount == 7)
+        #expect(UsageMetadata(promptTokenCount: 3, candidatesTokenCount: 4, totalTokenCount: 9).withTotal().totalTokenCount == 9)
+        #expect(UsageMetadata(promptTokenCount: nil, candidatesTokenCount: 4, totalTokenCount: nil).withTotal().totalTokenCount == nil)
+    }
+}

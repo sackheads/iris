@@ -41,9 +41,11 @@ struct OpenAIStreamMapper: StreamMapper {
             if let reason = choice["finish_reason"] as? String { finishReason = reason }
         }
         if let usage = json["usage"] as? [String: Any] {
+            let cacheRead = (usage["prompt_tokens_details"] as? [String: Any])?["cached_tokens"] as? Int
             out.append(.usage(UsageMetadata(promptTokenCount: usage["prompt_tokens"] as? Int,
                                             candidatesTokenCount: usage["completion_tokens"] as? Int,
-                                            totalTokenCount: usage["total_tokens"] as? Int)))
+                                            totalTokenCount: usage["total_tokens"] as? Int,
+                                            cacheReadTokens: cacheRead, cacheWriteTokens: nil)))
         }
         return out
     }

@@ -20,7 +20,11 @@ struct AnthropicStreamMapper: StreamMapper {
         case "message_start":
             if let usage = (json["message"] as? [String: Any])?["usage"] as? [String: Any],
                let input = usage["input_tokens"] as? Int {
-                return [.usage(UsageMetadata(promptTokenCount: input, candidatesTokenCount: nil, totalTokenCount: nil))]
+                let cacheRead = usage["cache_read_input_tokens"] as? Int
+                let cacheWrite = usage["cache_creation_input_tokens"] as? Int
+                let prompt = input + (cacheRead ?? 0) + (cacheWrite ?? 0)
+                return [.usage(UsageMetadata(promptTokenCount: prompt, candidatesTokenCount: nil, totalTokenCount: nil,
+                                             cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite))]
             }
         case "content_block_start":
             if let index = json["index"] as? Int, let block = json["content_block"] as? [String: Any],

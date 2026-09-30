@@ -27,6 +27,19 @@ struct OpenAIStreamMapperTests {
                            .done(finishReason: "stop")])
     }
 
+    @Test("usage chunk with prompt_tokens_details.cached_tokens sets cacheReadTokens")
+    func cachedTokens() throws {
+        let events = try run([
+            #"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":5,"total_tokens":1005,"prompt_tokens_details":{"cached_tokens":768}}}"#,
+            "[DONE]"
+        ])
+        #expect(events == [
+            .usage(UsageMetadata(promptTokenCount: 1000, candidatesTokenCount: 5, totalTokenCount: 1005,
+                                  cacheReadTokens: 768, cacheWriteTokens: nil)),
+            .done(finishReason: nil)
+        ])
+    }
+
     @Test("two parallel tool calls whose argument fragments interleave by index are emitted in index order at the end")
     func parallelTools() throws {
         let events = try run([

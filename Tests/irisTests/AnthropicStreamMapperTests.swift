@@ -40,6 +40,18 @@ struct AnthropicStreamMapperTests {
         ])
     }
 
+    @Test("message_start carries cache read/write counts, and prompt is their sum with input")
+    func messageStartCacheCounts() throws {
+        let events = try run([
+            ("message_start", #"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":50}}}"#),
+        ])
+        #expect(events == [
+            .usage(UsageMetadata(promptTokenCount: 960, candidatesTokenCount: nil, totalTokenCount: nil,
+                                  cacheReadTokens: 900, cacheWriteTokens: 50)),
+            .done(finishReason: nil),
+        ])
+    }
+
     @Test("two tool blocks interleaved with text keep their own buffers; an empty input parses as {}")
     func twoTools() throws {
         let events = try run([

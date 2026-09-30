@@ -237,6 +237,25 @@ struct UsageMetadata: Codable, Sendable {
     var promptTokenCount: Int?
     var candidatesTokenCount: Int?
     var totalTokenCount: Int?
+    /// Tokens served from the provider's prompt cache. nil means the provider did not say, which
+    /// is not the same as a miss (5a §0.4).
+    var cacheReadTokens: Int? = nil
+    /// Tokens written to the cache this call (Anthropic only). nil when not reported.
+    var cacheWriteTokens: Int? = nil
+
+    // Gemini's own key for the read count, so its usage decodes directly.
+    enum CodingKeys: String, CodingKey {
+        case promptTokenCount, candidatesTokenCount, totalTokenCount
+        case cacheReadTokens = "cachedContentTokenCount"
+        case cacheWriteTokens
+    }
+
+    /// `totalTokenCount` as prompt + output when the provider left it out. The job budgets read
+    /// the total, and Anthropic never sends one, so its runs were charged nothing (5a).
+    func withTotal() -> UsageMetadata {
+        guard totalTokenCount == nil, let p = promptTokenCount, let c = candidatesTokenCount else { return self }
+        var u = self; u.totalTokenCount = p + c; return u
+    }
 }
 
 /// Synthesized in this file (same-file requirement for auto `==`); used by `LLMStreamEvent`

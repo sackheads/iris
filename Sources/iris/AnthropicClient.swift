@@ -196,12 +196,21 @@ struct AnthropicClient {
         }
         
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        return try parseResponse(json)
+    }
+
+    /// Anthropic's non-stream Messages response back to `GeminiResponse`. `usage.input_tokens`
+    /// alone undercounts the prompt: a cache hit or write moves tokens into
+    /// `cache_read_input_tokens` / `cache_creation_input_tokens`, so `promptTokenCount` is their
+    /// sum (5a §0.4). Anthropic never sends a total, so `.withTotal()` fills one from prompt +
+    /// output — otherwise the job budgets, which read the total, charge these runs nothing.
+    static func parseResponse(_ json: [String: Any]) throws -> GeminiResponse {
         var geminiResponse = GeminiResponse()
         geminiResponse.candidates = []
-        
+
         if let contentArray = json["content"] as? [[String: Any]] {
             var content = Content(role: "model", parts: [])
-            
+
             for part in contentArray {
                 if let type = part["type"] as? String {
                     if type == "text", let text = part["text"] as? String {
@@ -216,20 +225,26 @@ struct AnthropicClient {
                     }
                 }
             }
-            
+
             if !content.parts.isEmpty {
                 geminiResponse.candidates?.append(Candidate(content: content))
             }
         }
-        
+
         if let usage = json["usage"] as? [String: Any] {
+            let input = usage["input_tokens"] as? Int
+            let cacheRead = usage["cache_read_input_tokens"] as? Int
+            let cacheWrite = usage["cache_creation_input_tokens"] as? Int
+            let prompt = (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0)
             geminiResponse.usageMetadata = UsageMetadata(
-                promptTokenCount: usage["input_tokens"] as? Int,
+                promptTokenCount: prompt,
                 candidatesTokenCount: usage["output_tokens"] as? Int,
-                totalTokenCount: nil
-            )
+                totalTokenCount: nil,
+                cacheReadTokens: cacheRead,
+                cacheWriteTokens: cacheWrite
+            ).withTotal()
         }
-        
+
         return geminiResponse
     }
 }

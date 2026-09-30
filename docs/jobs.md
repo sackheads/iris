@@ -825,7 +825,8 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
   across every background run together**. The fire that finds the day's spend at or over the figure
   pauses the job rather than starting. A run still in flight counts too: its spend is written to its
   row after every model round, so a run the app quit in the middle of still costs the day what it
-  spent.
+  spent. Budgets count every token sent, including tokens a provider served from its prompt cache;
+  before 5a an Anthropic run was charged nothing because Anthropic reports no total.
 - A refused fire writes a zero-length `interrupted` row and one card naming the figure that tripped
   it, so a pause is never silent.
 
@@ -874,23 +875,25 @@ overrides any of them except the global daily budget.
 — is simply the default above. In a job's own `JobPolicy`, `0` is an answer rather than a gap, and
 it means two different things: for the token budgets and the breaker it means **unlimited**, and for
 `runTimeoutSeconds` it means **take the global default**. The reason for the split is what each
-number bounds: a budget bounds spend, which a person may reasonably want unbounded, while the
-timeout bounds a turn that has stopped responding, and a run nothing can end is the failure this
-whole section exists to prevent. A **negative** figure is not a third answer — nobody writes `-1` to
-mean unlimited — so it is read as the typo it is and takes the default, wherever it was written: a
-settings key, or a hand-edited `policy` column.
+number bounds: a budget bounds context volume — tokens sent, not billed weight, which is a later
+slice (5a) — which a person may reasonably want unbounded, while the timeout bounds a turn that has
+stopped responding, and a run nothing can end is the failure this whole section exists to prevent. A
+**negative** figure is not a third answer — nobody writes `-1` to mean unlimited — so it is read as
+the typo it is and takes the default, wherever it was written: a settings key, or a hand-edited
+`policy` column.
 
 **What you can see of all this.** Every one of these numbers is readable before it bites, not only
-in the pause that names it. `/jobs` prints, per job, what it has spent today against its own daily
-budget (`620k / 1M (62%)`), how many runs it has started in the last hour against the breaker
-(`2 / 6`), its place on the retry ladder (`retry 1/3`) beside its next fire, and a policy column
-naming whatever it does differently from the defaults; under the table is the whole unattended
-system's spend for the day against the global ceiling. `list_jobs` carries the same figures as
-fields — `tokensToday`, `dailyBudget`, `runsLastHour`, `maxRunsPerHour`, `retryAttempt`, `policy`,
-`gateKind`, `profile`, `grants`, and `tokensTodayAllJobs` against `globalDailyBudget` — so the model answers
-"what is this job costing?" from the same arithmetic admission decides on. A figure that could not
-be read is a dash in the table and a `null` in the tool, never a zero: "nothing spent today" is a
-claim, and an unreadable ledger is not one. A pause still names the figure that caused it, in the
+in the pause that names it. `/jobs` prints, per job, its tokens today against its own daily
+budget (`620k / 1M (62%)`) — tokens sent, not billed cost — how many runs it has started in the
+last hour against the breaker (`2 / 6`), its place on the retry ladder (`retry 1/3`) beside its next
+fire, and a policy column naming whatever it does differently from the defaults; under the table is
+the whole unattended system's tokens sent for the day against the global ceiling. `list_jobs`
+carries the same figures as fields — `tokensToday`, `dailyBudget`, `runsLastHour`, `maxRunsPerHour`,
+`retryAttempt`, `policy`, `gateKind`, `profile`, `grants`, and `tokensTodayAllJobs` against
+`globalDailyBudget` — so the model answers "how much context has this job sent today?" from the
+same arithmetic admission decides on. A figure that could not be read is a dash in the table and a
+`null` in the tool, never a zero: "nothing sent today" is a claim, and an unreadable ledger is not
+one. A pause still names the figure that caused it, in the
 pause reason the table prints, on the `interrupted` row and on the card.
 
 ## `/jobs`
