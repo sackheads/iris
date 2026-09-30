@@ -91,11 +91,11 @@ final class FactStoreManager: @unchecked Sendable {
         let stillActiveSuccessor: Fact?
     }
 
-    /// A unit run gets its own in-memory store. `IrisPaths.default` resolves to the developer's
-    /// real `~/.iris` under `swift test`, so touching `.shared` there would open, v2-migrate and
-    /// then write retrieval counts into the machine's own fact store — the same isolation rule
-    /// `IrisDefaults.processStore` enforces for user defaults (#121). Tests that want a real
-    /// on-disk store build one with `FactStoreManager(paths:)` against a temp directory.
+    /// A unit run gets its own in-memory store. Before #304 `IrisPaths.default` was the
+    /// developer's real `~/.iris` under `swift test`, so touching `.shared` would open, v2-migrate
+    /// and write retrieval counts into the machine's own fact store (#121). It is a per-process
+    /// temp home now, but in-memory stays: no file to create, nothing to leave behind. Tests that
+    /// want a real on-disk store build one with `FactStoreManager(paths:)` against a temp directory.
     static let shared: FactStoreManager = {
         if NSClassFromString("XCTestCase") != nil {
             return try! FactStoreManager(inMemory: true)

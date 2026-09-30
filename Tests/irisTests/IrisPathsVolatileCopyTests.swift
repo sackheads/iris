@@ -64,9 +64,32 @@ struct IrisPathsVolatileCopyTests {
         #expect(IrisPaths.fingerprint(of: src.memoryDir) != b)
     }
 
-    @Test("the test process never runs on a volatile copy and resolves the real home")
-    func notVolatileUnderTest() {
+    /// #304. This used to assert the opposite — that the test process resolves the real home —
+    /// which is what let `SubagentManagerTests` write an allow rule into the developer's real
+    /// `permissions.json` on every run (#290). `standard` is still the real home, because the
+    /// isolation tests compare file existence there.
+    @Test("under test the default home is a per-process temp root, and standard is still the real one")
+    func defaultIsNotTheRealHomeUnderTest() {
         #expect(!IrisPaths.isVolatileCopy)
-        #expect(IrisPaths.default.root.path == ("~/.iris" as NSString).expandingTildeInPath)
+        #expect(IrisPaths.standard.root.path == ("~/.iris" as NSString).expandingTildeInPath)
+        #expect(IrisPaths.default.root.path != IrisPaths.standard.root.path)
+        #expect(IrisPaths.default.root.lastPathComponent == "iris-tests-home-\(ProcessInfo.processInfo.processIdentifier)")
+        #expect(FileManager.default.fileExists(atPath: IrisPaths.default.configDir.path),
+                "the test home has the real layout, so a manager's first write does not fail on a missing directory")
+    }
+
+    /// The sweep takes homes whose process is gone and nothing else: not a live run's, not this
+    /// process's, and not an unrelated directory that shares the prefix.
+    @Test("stale test homes are the dead pids' only")
+    func staleTestHomes() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-304-sweep-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let me = ProcessInfo.processInfo.processIdentifier
+        for name in ["iris-tests-home-111", "iris-tests-home-222", "iris-tests-home-\(me)",
+                     "iris-tests-home-notapid", "iris-tests-other-333"] {
+            try FileManager.default.createDirectory(at: dir.appendingPathComponent(name), withIntermediateDirectories: true)
+        }
+        let stale = IrisPaths.staleTestHomes(in: dir, isAlive: { $0 == 222 }).map(\.lastPathComponent)
+        #expect(stale == ["iris-tests-home-111"])
     }
 }

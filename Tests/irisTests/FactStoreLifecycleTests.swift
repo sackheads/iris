@@ -270,7 +270,7 @@ struct FactStoreLifecycleTests {
     func sharedStoreIsIsolatedFromTheRealHome() {
         #expect(FactStoreManager.shared.dbQueue != nil, "the shared store must be in-memory under XCTest")
 
-        let realPath = IrisPaths.default.factStoreDB.path
+        let realPath = IrisPaths.standard.factStoreDB.path
         let existedBefore = FileManager.default.fileExists(atPath: realPath)
         let app = AppState()
         _ = IrisEngine(state: app, tier: .medium, principal: .main,
