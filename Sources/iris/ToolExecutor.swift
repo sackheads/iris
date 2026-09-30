@@ -750,7 +750,8 @@ except Exception as e:
         guard !paths.isUnderProtectedWriteDir(folder.path) else { return nil }
         let resolved = IrisPaths.realPath(folder.path).lowercased()
         let skillsResolved = IrisPaths.realPath(paths.skillsDir.path).lowercased()
-        guard skillsResolved != resolved, !skillsResolved.hasPrefix(resolved + "/") else { return nil }
+        // `/` is everything's ancestor, but `"/" + "/"` prefixes nothing, so it is named outright.
+        guard resolved != "/", skillsResolved != resolved, !skillsResolved.hasPrefix(resolved + "/") else { return nil }
         return folder
     }
 

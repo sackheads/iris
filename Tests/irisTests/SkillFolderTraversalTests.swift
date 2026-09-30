@@ -161,9 +161,10 @@ struct SkillFolderTraversalTests {
         try fm.createSymbolicLink(at: paths.skillsDir.appendingPathComponent("toconfig"), withDestinationURL: paths.configDir)
         try fm.createSymbolicLink(at: paths.skillsDir.appendingPathComponent("me"), withDestinationURL: paths.skillsDir)
         try fm.createSymbolicLink(at: paths.skillsDir.appendingPathComponent("up"), withDestinationURL: paths.root)
+        try fm.createSymbolicLink(at: paths.skillsDir.appendingPathComponent("slash"), withDestinationURL: URL(fileURLWithPath: "/"))
 
         let executor = ToolExecutor()
-        for name in ["toplugins", "toconfig", "me", "up"] {
+        for name in ["toplugins", "toconfig", "me", "up", "slash"] {
             #expect(ToolExecutor.skillFolder(named: name, paths: paths) == nil, "\(name) must not resolve")
             let created = await executor.createSkill(name: name, description: "d", body: "b", paths: paths)
             #expect(created.lowercased().contains("not a valid skill name"), "create \(name): \(created)")
