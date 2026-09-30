@@ -109,4 +109,35 @@ struct SkillFolderTraversalTests {
         #expect(!FileManager.default.fileExists(atPath: paths.skillsDir.appendingPathComponent("SKILL.md").path),
                 "nothing may land in the skills directory itself")
     }
+
+    /// #305. A skill folder that is itself a symlink — a skill kept in a git checkout and linked
+    /// in — is a supported setup. #299's guard resolved symlinks before its containment check, so
+    /// the link resolved to its target outside `skillsDir` and all three tools refused the name.
+    @Test("a skill folder symlinked out of the skills directory still works")
+    func symlinkedSkillFolderWorks() async throws {
+        let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        let checkout = paths.root.appendingPathComponent("git-skills/linked", isDirectory: true)
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        let link = paths.skillsDir.appendingPathComponent("linked")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: checkout)
+
+        #expect(ToolExecutor.skillFolder(named: "linked", paths: paths)?.path == link.path)
+
+        let executor = ToolExecutor()
+        let created = await executor.createSkill(name: "linked", description: "d", body: "b", paths: paths)
+        #expect(!created.lowercased().contains("not a valid skill name"), "got: \(created)")
+        #expect(FileManager.default.fileExists(atPath: checkout.appendingPathComponent("SKILL.md").path),
+                "the write lands in the checkout, through the link")
+
+        let updated = await executor.updateSkill(name: "linked", description: "d2", body: nil, paths: paths)
+        #expect(!updated.lowercased().contains("not a valid skill name"), "got: \(updated)")
+
+        // Deleting removes the link, never the checkout it points at.
+        let deleted = await executor.deleteSkill(name: "linked", paths: paths)
+        #expect(!deleted.lowercased().contains("not a valid skill name"), "got: \(deleted)")
+        #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: link.path)) == nil, "the link is gone")
+        #expect(FileManager.default.fileExists(atPath: checkout.appendingPathComponent("SKILL.md").path),
+                "the checkout survived")
+    }
 }

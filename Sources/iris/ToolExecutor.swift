@@ -728,25 +728,20 @@ except Exception as e:
     /// directory — measured: `"../../x"` reached `~/x`, `".."` reached `~/.iris` itself, and an
     /// empty name reached `~/.iris/skills`, so a blank argument deleted every skill.
     ///
-    /// Three refusals rather than one, because the resolved-path check alone would accept
-    /// `nested/skill` (inside, but not a name) and would accept nothing at all for an empty slug:
-    /// a name is one path component, non-empty, that stays under the directory once resolved.
+    /// A name is one path component, non-empty, and not `.` or `..`. The folder is not resolved:
+    /// a skill folder that is a symlink is followed, so writes land in its target and a delete
+    /// removes only the link (#305).
     static func skillFolder(named name: String, paths: IrisPaths = .default) -> URL? {
         let cleanName = name.lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: " ", with: "-")
             .replacingOccurrences(of: "_", with: "-")
-        guard !cleanName.isEmpty, !cleanName.contains("/"), cleanName != ".." else { return nil }
-        let folder = paths.skillsDir.appendingPathComponent(cleanName)
-        // `IrisPaths.canonicalPath`, not `standardizedFileURL`: the latter is `NSString`'s, which
-        // strips a leading `/private` only when the resulting path EXISTS. The root does, the new
-        // folder does not, so under a root spelled `/private/tmp/...` the two sides disagreed and
-        // every `create_skill` was refused — found in review, reachable with `TMPDIR=/private/tmp`
-        // or the perf lane's volatile copy. `canonicalPath` resolves the deepest existing ancestor
-        // and re-appends what is missing, so both sides are the same spelling.
-        let root = IrisPaths.canonicalPath(paths.skillsDir.path)
-        guard IrisPaths.canonicalPath(folder.path).hasPrefix(root + "/") else { return nil }
-        return folder
+        // The name rules are the whole guard: one component, not `.` or `..`, cannot name
+        // anything but a direct child of `skillsDir`. #299 also compared resolved paths, which
+        // follows a symlinked skill folder to its target outside the directory and refused it —
+        // but a skill linked in from a git checkout is a supported setup (#305).
+        guard !cleanName.isEmpty, !cleanName.contains("/"), cleanName != ".", cleanName != ".." else { return nil }
+        return paths.skillsDir.appendingPathComponent(cleanName)
     }
 
     /// One sentence for all three tools, so a refusal reads the same wherever it comes from.
