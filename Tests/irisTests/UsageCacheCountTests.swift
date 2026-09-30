@@ -50,11 +50,11 @@ struct UsageCacheCountTests {
         #expect(UsageMetadata(promptTokenCount: nil, candidatesTokenCount: 4, totalTokenCount: nil).withTotal().totalTokenCount == nil)
     }
 
-    @Test("a TokenUsage saved before 5a decodes, with zero cache counts")
+    @Test("a TokenUsage saved before 5a decodes, with nil cache counts (unknown is not zero)")
     func oldTokenUsageDecodes() throws {
         let old = #"{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7}"#.data(using: .utf8)!
         let u = try JSONDecoder().decode(TokenUsage.self, from: old)
-        #expect(u.cacheReadTokenCount == 0 && u.cacheWriteTokenCount == 0 && u.promptTokenCount == 5)
+        #expect(u.cacheReadTokenCount == nil && u.cacheWriteTokenCount == nil && u.promptTokenCount == 5)
     }
 
     @Test("a ModelCallRecord written before 5a decodes, with nil cache counts")
@@ -64,13 +64,19 @@ struct UsageCacheCountTests {
         #expect(r.cacheReadTokens == nil && r.cacheWriteTokens == nil)
     }
 
-    @MainActor @Test("updateTokenUsage sums cache counts")
+    @MainActor @Test("updateTokenUsage sums cache counts, and a nil incoming value leaves the field untouched")
     func accumulates() {
         let app = AppState()
         let id = UUID(); app.createNewConversation(id: id)
+        let fresh = app.conversations.first { $0.id == id }!.tokenUsage
+        #expect(fresh.cacheReadTokenCount == nil && fresh.cacheWriteTokenCount == nil, "unreported is nil, not zero")
+
         app.updateTokenUsage(for: id, usage: UsageMetadata(promptTokenCount: 100, candidatesTokenCount: 1, totalTokenCount: 101, cacheReadTokens: 80, cacheWriteTokens: 10))
+        let afterReport = app.conversations.first { $0.id == id }!.tokenUsage
+        #expect(afterReport.cacheReadTokenCount == 80 && afterReport.cacheWriteTokenCount == 10, "a reported value after nil yields that value")
+
         app.updateTokenUsage(for: id, usage: UsageMetadata(promptTokenCount: 100, candidatesTokenCount: 1, totalTokenCount: 101, cacheReadTokens: nil, cacheWriteTokens: nil))
-        let u = app.conversations.first { $0.id == id }!.tokenUsage
-        #expect(u.cacheReadTokenCount == 80 && u.cacheWriteTokenCount == 10)
+        let afterNil = app.conversations.first { $0.id == id }!.tokenUsage
+        #expect(afterNil.cacheReadTokenCount == 80 && afterNil.cacheWriteTokenCount == 10, "a nil incoming value leaves the field untouched")
     }
 }
