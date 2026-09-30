@@ -1868,9 +1868,24 @@ struct JobLimits: Equatable, Sendable {
             && policy.runTimeoutSeconds != JobPolicy().runTimeoutSeconds
         let timeout = overridden ? policy.runTimeoutSeconds
             : global(config.jobRunTimeoutSeconds, default: ConfigManager.JobDefaults.runTimeoutSeconds)
+        // #283: the breaker is per *kind*. A watch fires once per save-burst, so the scheduled
+        // figure of six paused a watch inside twenty minutes of ordinary editing; a watch reads its
+        // own global instead. Per kind rather than written into each new watch's policy, which was
+        // the first shape of this fix: a stored figure means a person who lowers the setting does
+        // not move the watches they already have, and it leaves every pre-#283 watch on six until
+        // it is re-registered. The job's own `maxRunsPerHour` still wins over both, which is what
+        // `max_runs_per_hour` on the tool writes when a caller names one.
+        //
+        // The `default:` argument is unreachable for these two (`ConfigManager` reads a non-positive
+        // stored value back as the default, so `global()` never falls through); it is passed for the
+        // shape and the trigger decides which global is asked.
+        let isWatch: Bool
+        if case .fsEvent = job.trigger { isWatch = true } else { isWatch = false }
         return JobLimits(
-            maxRunsPerHour: limit(policy.maxRunsPerHour, global: config.jobMaxRunsPerHour,
-                                  default: ConfigManager.JobDefaults.maxRunsPerHour),
+            maxRunsPerHour: limit(policy.maxRunsPerHour,
+                                  global: isWatch ? config.jobMaxRunsPerHourForWatch : config.jobMaxRunsPerHour,
+                                  default: isWatch ? ConfigManager.JobDefaults.maxRunsPerHourForWatch
+                                                   : ConfigManager.JobDefaults.maxRunsPerHour),
             dailyTokens: limit(policy.dailyTokenBudget, global: config.jobDailyTokenBudget,
                                default: ConfigManager.JobDefaults.dailyTokenBudget),
             globalDailyTokens: global(config.jobGlobalDailyTokenBudget,

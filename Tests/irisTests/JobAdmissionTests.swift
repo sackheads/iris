@@ -286,6 +286,66 @@ struct JobAdmissionTests {
                              perRunTokens: 200_000, runTimeoutSeconds: 600))
     }
 
+    // MARK: the breaker is sized for the trigger (#283)
+
+    /// #283 gives a *watch* its own breaker at registration, stored on the job. A scheduled job's
+    /// resolution is untouched, and so is a global the person set deliberately — including a lower
+    /// one, which an invisible floor at resolution time would have overridden (it did, in a first
+    /// attempt at this fix: `aRefusedManualFireSaysManual` sets the global to 1 on purpose).
+    @Test("a scheduled job's breaker is still the scheduled default")
+    func scheduledBreakerUnchanged() {
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        #expect(JobLimits.resolve(job: job(), config: config).maxRunsPerHour
+                == ConfigManager.JobDefaults.maxRunsPerHour)
+        #expect(ConfigManager.JobDefaults.maxRunsPerHourForWatch > ConfigManager.JobDefaults.maxRunsPerHour,
+                "a watch figure below the scheduled default would be no help at all")
+    }
+
+    // MARK: the breaker is sized for the trigger (#283)
+
+    private func watchJob(policy: JobPolicy? = nil) -> Job {
+        Job(name: "watch", prompt: "summarise", trigger: .fsEvent(FSWatch(path: "/tmp/w")),
+            policy: policy ?? JobPolicy())
+    }
+
+    /// #283. Six runs an hour was sized in deliverable 3 for scheduled jobs. A watch fires once per
+    /// save-burst, so ordinary editing in a watched folder paused the watch inside twenty minutes —
+    /// measured on #279's on-screen check, `6/6` in `/jobs` on nothing but a runbook's saves.
+    /// A watch reads its own global, and — the property the stored-figure version did not have —
+    /// a person who lowers that setting moves every watch, including ones created before #283.
+    @Test("a watch reads the watch global; a scheduled job reads the scheduled one")
+    func watchReadsItsOwnGlobal() {
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        #expect(JobLimits.resolve(job: watchJob(), config: config).maxRunsPerHour
+                == ConfigManager.JobDefaults.maxRunsPerHourForWatch)
+
+        config.jobMaxRunsPerHourForWatch = 2
+        #expect(JobLimits.resolve(job: watchJob(), config: config).maxRunsPerHour == 2,
+                "a lowered watch setting binds a watch that stored no figure of its own")
+        #expect(JobLimits.resolve(job: job(), config: config).maxRunsPerHour
+                == ConfigManager.JobDefaults.maxRunsPerHour,
+                "and does not touch a schedule")
+
+        config.jobMaxRunsPerHour = 3
+        #expect(JobLimits.resolve(job: job(), config: config).maxRunsPerHour == 3)
+        #expect(JobLimits.resolve(job: watchJob(), config: config).maxRunsPerHour == 2,
+                "the two settings are independent in both directions")
+    }
+
+    /// And the job's own figure still beats both globals, which is what `max_runs_per_hour` writes.
+    @Test("a watch that stored its own breaker keeps it over either global")
+    func storedBreakerBeatsGlobals() {
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        config.jobMaxRunsPerHourForWatch = 99
+        #expect(JobLimits.resolve(job: watchJob(policy: JobPolicy(maxRunsPerHour: 4)), config: config)
+                .maxRunsPerHour == 4)
+        #expect(JobLimits.resolve(job: watchJob(policy: JobPolicy(maxRunsPerHour: 0)), config: config)
+                .maxRunsPerHour == 0, "0 is a figure, not an absence")
+    }
+
     // MARK: fire — overlap
 
     @Test("a scheduled fire that overlaps a run writes one interrupted row and starts nothing")
@@ -1029,7 +1089,9 @@ struct JobAdmissionTests {
         let (store, state, engine, client) = try harness([textResponse("tick")])
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
-        config.jobMaxRunsPerHour = 1
+        // The job under test is a watch, and #283 gives a watch its own breaker global. This test is
+        // about the `triggerKind` on the refusal row, not about which key the breaker reads.
+        config.jobMaxRunsPerHourForWatch = 1
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         var job = self.job(name: "watched")
         job.trigger = .fsEvent(FSWatch(path: "/tmp/watched"))
