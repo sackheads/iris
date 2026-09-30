@@ -2791,7 +2791,12 @@ class AppState {
                     description: "Scaffolded skill '\(name)'",
                     body: templateBody
                 )
-                self.emitCommandOutput("✨ Scaffolded skill template for **\(name)**.\n\(res)", format: .markdown, to: convId)
+                // The headline used to be unconditional, because before #284 this path could not
+                // fail on the name. It can now, and a success line above an error reads as both.
+                let scaffolded = res.hasPrefix("Successfully saved skill '")
+                    || res.hasPrefix("Successfully updated skill '")
+                self.emitCommandOutput(scaffolded ? "✨ Scaffolded skill template for **\(name)**.\n\(res)" : res,
+                                       format: .markdown, to: convId)
             } else if args.hasPrefix("reload") {
                 let skillArg = args.dropFirst(6).trimmingCharacters(in: .whitespacesAndNewlines)
                 await self.engine.invalidateSystemPrompt()
