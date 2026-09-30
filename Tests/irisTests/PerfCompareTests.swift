@@ -169,4 +169,58 @@ struct PerfCompareTests {
         let comparison = PerfCompare.compare(baseline: baseline, current: current, threshold: 0.2)
         #expect(comparison.refusal == nil)
     }
+
+    private func rung(_ calls: [ModelCallRecord], rung: Int = 1) -> PerfRungResult {
+        let rep = PerfRepetition(index: 0, coldStart: true, wallClockMs: 100, turns: [], modelCalls: calls, error: nil)
+        return PerfRungResult(rung: rung, repetitions: [rep], medianMs: 100, p90Ms: 100)
+    }
+
+    /// Across 5a, Anthropic prompt tokens jump because they now include cache reads/writes, so a
+    /// baseline that already carries cache fields must be compared on uncached tokens, not raw
+    /// prompt tokens (5a review #9).
+    @Test("when both sides carry cache fields, uncached tokens (prompt - read - write) are compared, not raw prompt tokens")
+    func uncachedTokensComparedWhenBothSidesHaveCacheFields() {
+        let baseCall = ModelCallRecord(round: 0, model: "m", latencyMs: 100, promptTokens: 1000, outputTokens: 3,
+                                       returnedToolCalls: false, cacheReadTokens: 900, cacheWriteTokens: 0)
+        var base = record(medianMs: 100)
+        base.scenarios[0].rungs = [rung([baseCall])]
+
+        let currCall = ModelCallRecord(round: 0, model: "m", latencyMs: 100, promptTokens: 1200, outputTokens: 3,
+                                       returnedToolCalls: false, cacheReadTokens: 1050, cacheWriteTokens: 0)
+        var curr = record(medianMs: 100)
+        curr.scenarios[0].rungs = [rung([currCall])]
+
+        let c = PerfCompare.compare(baseline: base, current: curr, threshold: 0.2)
+        let row = c.rows.first { $0.metric == "uncached prompt tokens" }
+        #expect(row != nil)
+        #expect(row?.before == 100, "1000 prompt - 900 read - 0 write")
+        #expect(row?.after == 150, "1200 prompt - 1050 read - 0 write")
+        #expect(!c.rows.contains { $0.metric == "prompt tokens" })
+        #expect(c.notes.isEmpty)
+    }
+
+    /// When only one side reports cache fields (a baseline recorded before 5a landed, say),
+    /// comparing uncached tokens would be comparing a real figure against one Iris invented by
+    /// treating an unknown read as zero. Fall back to raw prompt tokens, like before 5a, and warn
+    /// that the two records straddle the cache-count change.
+    @Test("when only one side carries cache fields, prompt tokens are compared and a straddle note is printed")
+    func straddleNoteWhenOnlyOneSideHasCacheFields() {
+        let baseCall = ModelCallRecord(round: 0, model: "m", latencyMs: 100, promptTokens: 100, outputTokens: 3, returnedToolCalls: false)
+        var base = record(medianMs: 100)
+        base.scenarios[0].rungs = [rung([baseCall])]
+
+        let currCall = ModelCallRecord(round: 0, model: "m", latencyMs: 100, promptTokens: 130, outputTokens: 3,
+                                       returnedToolCalls: false, cacheReadTokens: 20, cacheWriteTokens: 0)
+        var curr = record(medianMs: 100)
+        curr.scenarios[0].rungs = [rung([currCall])]
+
+        let c = PerfCompare.compare(baseline: base, current: curr, threshold: 0.2)
+        let row = c.rows.first { $0.metric == "prompt tokens" }
+        #expect(row != nil)
+        #expect(row?.before == 100 && row?.after == 130)
+        #expect(!c.rows.contains { $0.metric == "uncached prompt tokens" })
+        #expect(!c.notes.isEmpty)
+        #expect(c.notes.contains { $0.contains("cache") })
+        #expect(PerfCompare.render(c, threshold: 0.2).contains("cache"), "the note reaches the rendered report")
+    }
 }

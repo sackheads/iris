@@ -12,6 +12,9 @@ struct PerfComparison {
     }
     var refusal: String?
     var rows: [Row]
+    /// Advisory lines that aren't per-row regressions: today, just the cache-count straddle
+    /// warning (5a review #9).
+    var notes: [String] = []
     var flagged: [Row] { rows.filter(\.flagged) }
 }
 
@@ -33,6 +36,7 @@ enum PerfCompare {
             return PerfComparison(refusal: "model names differ: \(baseline.environment.models) vs \(current.environment.models)", rows: [])
         }
         var rows: [PerfComparison.Row] = []
+        var straddled = false
         func row(_ scenario: String, _ rung: Int?, _ metric: String, _ a: Double, _ b: Double) {
             let change = PerfStats.percentChange(from: a, to: b)
             let pastFloor = metric != "median ms" || (b - a) >= minFlaggedDeltaMs
@@ -57,15 +61,30 @@ enum PerfCompare {
                     continue
                 }
                 row(cur.name, r.rung, "median ms", br.medianMs, r.medianMs)
-                if let bt = medianPromptTokens(br), let ct = medianPromptTokens(r) {
-                    row(cur.name, r.rung, "prompt tokens", bt, ct)
+                // Across 5a, Anthropic prompt tokens jump because they now include cache reads and
+                // writes, so a pre-5a baseline compared on raw prompt tokens would show a false
+                // regression. Compare uncached tokens instead once both sides carry cache fields;
+                // when only one side does, the two records straddle the change, so fall back to
+                // prompt tokens as before and say so once (5a review #9).
+                if hasCacheFields(br) && hasCacheFields(r) {
+                    if let bt = medianUncachedTokens(br), let ct = medianUncachedTokens(r) {
+                        row(cur.name, r.rung, "uncached prompt tokens", bt, ct)
+                    }
+                } else {
+                    if let bt = medianPromptTokens(br), let ct = medianPromptTokens(r) {
+                        row(cur.name, r.rung, "prompt tokens", bt, ct)
+                    }
+                    if hasCacheFields(br) != hasCacheFields(r) { straddled = true }
                 }
             }
             if let a = base.summary.overheadRatio, let b = cur.summary.overheadRatio {
                 row(cur.name, nil, "overhead ratio", a, b)
             }
         }
-        return PerfComparison(refusal: nil, rows: rows)
+        let notes = straddled
+            ? ["baseline and current straddle the 5a cache-count change: one side reports cache fields and the other doesn't, so prompt tokens are compared raw instead of uncached."]
+            : []
+        return PerfComparison(refusal: nil, rows: rows, notes: notes)
     }
 
     static func render(_ c: PerfComparison, threshold: Double) -> String {
@@ -76,6 +95,7 @@ enum PerfCompare {
             out.append("| \(r.scenario) | \(r.rung.map(String.init) ?? "-") | \(r.metric) | \(short(r.before)) | \(short(r.after)) | \(change)\(r.flagged ? " REGRESSION" : "") |")
         }
         out.append("")
+        for note in c.notes { out.append("note: \(note)") }
         out.append(c.flagged.isEmpty ? "no regressions past threshold \(Int(threshold * 100))%"
                                      : "\(c.flagged.count) regression(s) past threshold \(Int(threshold * 100))%")
         return out.joined(separator: "\n")
@@ -87,10 +107,24 @@ enum PerfCompare {
     }
 
     private static func medianPromptTokens(_ r: PerfRungResult) -> Double? {
-        let tokens = r.repetitions.filter { $0.error == nil }
-            .flatMap { rep in (rep.modelCalls + rep.turns.flatMap(\.modelCalls)).compactMap(\.promptTokens) }
-            .map(Double.init)
+        let tokens = calls(r).compactMap(\.promptTokens).map(Double.init)
         return PerfStats.median(tokens)
+    }
+
+    private static func medianUncachedTokens(_ r: PerfRungResult) -> Double? {
+        let tokens = calls(r).compactMap(PerfReport.uncachedTokens)
+        return PerfStats.median(tokens)
+    }
+
+    /// True when any call in this rung reports a cache read or write, i.e. this rung was recorded
+    /// after 5a's usage instrumentation landed.
+    private static func hasCacheFields(_ r: PerfRungResult) -> Bool {
+        calls(r).contains { $0.cacheReadTokens != nil || $0.cacheWriteTokens != nil }
+    }
+
+    private static func calls(_ r: PerfRungResult) -> [ModelCallRecord] {
+        r.repetitions.filter { $0.error == nil }
+            .flatMap { rep in rep.modelCalls + rep.turns.flatMap(\.modelCalls) }
     }
 
     private static func short(_ v: Double) -> String {
