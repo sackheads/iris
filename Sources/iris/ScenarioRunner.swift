@@ -49,13 +49,14 @@ enum ScenarioRunner {
     /// Same one-per-process shape as `warnedGuardsIgnored`, for the seedFacts refusal below.
     private static var warnedSeedFactsIgnored = false
 
-    /// Whether it is safe to write `seedFacts` into `FactStoreManager.shared`: only under a
-    /// volatile `IrisPaths` copy (a real-lane perf run routes the whole `~/.iris` home there) or
-    /// under `swift test` (where `FactStoreManager.shared` is in-memory regardless — see its own
-    /// doc comment). Pulled out as a pure function so the refusal is testable without needing a
-    /// live non-test process (5a fix round 1, review finding #1): `PerfSuite.validateScenarios`
-    /// is the fail-fast, whole-suite gate; this is the second gate, so the guard does not depend
-    /// on only that one caller validating first.
+    /// Whether it is safe to mint a fresh in-memory store and seed `seedFacts` into it at all:
+    /// only under a volatile `IrisPaths` copy (a real-lane perf run routes the whole `~/.iris` home
+    /// there) or under `swift test`. Outside both, seeding is refused rather than silently building
+    /// a fact-store block the scenario's caller has no way to reason about. Pulled out as a pure
+    /// function so the refusal is testable without needing a live non-test process (5a fix round
+    /// 1, review finding #1): `PerfSuite.validateScenarios` is the fail-fast, whole-suite gate;
+    /// this is the second gate, so the guard does not depend on only that one caller validating
+    /// first.
     static func canSeedFacts(isVolatileCopy: Bool, isTestProcess: Bool) -> Bool {
         isVolatileCopy || isTestProcess
     }
@@ -65,7 +66,8 @@ enum ScenarioRunner {
                     toolExecution: ToolExecutionMode = .asConfigured,
                     clientOverride: (any LLMClientProtocol)? = nil,
                     workspacePath: String? = nil,
-                    dumpRequestsTo: URL? = nil) async -> ScenarioResult {
+                    dumpRequestsTo: URL? = nil,
+                    factStore: FactStoreManager? = nil) async -> ScenarioResult {
         let state = AppState()
         state.autoApproveTools = true // non-interactive: never block on an approval prompt
         // Pay the Vibecop cost a real run_command pays, unless this run is measuring guards off.
@@ -140,28 +142,46 @@ enum ScenarioRunner {
         // so this detaches; endSession is idempotent).
         defer { Task { await SandboxSessionManager.shared.endSession(conversationId) } }
 
+        // Seed the fact store before turn 1 so a scenario like `caching` gets a deterministic
+        // fact-store block: turns after this can rely on exactly these facts being present.
+        // Best-effort — a seeding failure must not fail the whole scenario run (5a). Never
+        // `.shared`, the process-global (or, outside a test process, the developer's real
+        // on-disk) fact store: a caller-injected store is used as-is; otherwise, when this
+        // scenario has seeds, a fresh in-memory store is minted for this run alone, so a
+        // repetition never sees another repetition's seeds and a real-lane run never inherits the
+        // developer's own facts (5a fix round 2, review finding #1/#2). Outside a volatile
+        // `IrisPaths` copy and outside `swift test`, there is no safe home for a fresh store's
+        // facts to matter against (a real, non-test, non-perf invocation), so seeding is refused.
+        let seedFacts = scenario.seedFacts ?? []
+        let effectiveFactStore: FactStoreManager?
+        if let factStore {
+            effectiveFactStore = factStore
+            for fact in seedFacts {
+                _ = try? factStore.addFact(content: fact)
+            }
+        } else if !seedFacts.isEmpty {
+            if Self.canSeedFacts(isVolatileCopy: IrisPaths.isVolatileCopy, isTestProcess: NSClassFromString("XCTestCase") != nil) {
+                let fresh = try? FactStoreManager(inMemory: true)
+                for fact in seedFacts {
+                    _ = try? fresh?.addFact(content: fact)
+                }
+                effectiveFactStore = fresh
+            } else {
+                if !warnedSeedFactsIgnored {
+                    warnedSeedFactsIgnored = true
+                    print("[ScenarioRunner] seedFacts ignored: ~/.iris home (IrisPaths) is not a volatile copy")
+                }
+                effectiveFactStore = nil
+            }
+        } else {
+            effectiveFactStore = nil
+        }
+
         // `AppState.init` auto-creates a conversation and this run adds its own above, so the
         // real peer count here is always >= 1 — the #185 session tools would land on every
         // perf-scenario turn and shift the #129/#144 declaration-size baselines this runner
         // exists to measure. Pin it off, matching `ToolSurfaceTrimTests`.
-        let engine = IrisEngine(state: state, tier: scenario.tier, client: client, sessionPeerCount: 0)
-
-        // Seed the fact store before turn 1 so a scenario like `caching` gets a deterministic
-        // fact-store block: turns after this can rely on exactly these facts being present.
-        // Best-effort — a seeding failure must not fail the whole scenario run (5a). Outside a
-        // volatile `IrisPaths` copy and outside `swift test`, `.shared` is the developer's real,
-        // on-disk fact store: refuse rather than write into it (fix round 1, review finding #1).
-        let seedFacts = scenario.seedFacts ?? []
-        if !seedFacts.isEmpty {
-            if Self.canSeedFacts(isVolatileCopy: IrisPaths.isVolatileCopy, isTestProcess: NSClassFromString("XCTestCase") != nil) {
-                for fact in seedFacts {
-                    _ = try? FactStoreManager.shared.addFact(content: fact)
-                }
-            } else if !warnedSeedFactsIgnored {
-                warnedSeedFactsIgnored = true
-                print("[ScenarioRunner] seedFacts ignored: settings store is not a volatile copy")
-            }
-        }
+        let engine = IrisEngine(state: state, tier: scenario.tier, client: client, factStore: effectiveFactStore, sessionPeerCount: 0)
 
         // Collect this run's finished turn profiles via a task-local sink scoped to the turn loop.
         let collector = TurnCollector()

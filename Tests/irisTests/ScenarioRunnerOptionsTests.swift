@@ -124,16 +124,37 @@ struct ScenarioRunnerOptionsTests {
         #expect(unbound.requests.first?.systemInstruction?.parts.first?.text?.contains(header) == false)
     }
 
-    @Test("seedFacts are written to the fact store before turn 1 (5a)")
+    /// Never seeds `.shared`, the process-global store: under FTS5 any-token matching, a fact
+    /// seeded there would linger for and pollute every other scenario/test sharing this process
+    /// (invariant 7's "fails in company" shape; 5a fix round 2, review finding #1). The scenario's
+    /// own store is injected so this test can inspect exactly what was seeded, in isolation.
+    @Test("seedFacts are written to the injected fact store before turn 1, never .shared (5a)")
     func seedFactsSeedBeforeFirstTurn() async throws {
         let marker = "PERFSEED\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
         let scenario = Scenario(name: "seeded", clientMode: .fake,
                                 turns: [Scenario.Turn(prompt: "one")],
                                 scriptedResponses: [Scenario.ScriptedResponse(kind: .text, text: "ack", calls: nil)],
                                 seedFacts: ["The \(marker) codename ships on Thursdays."])
-        _ = await ScenarioRunner.run(scenario)
-        let found = try FactStoreManager.shared.search(query: marker, countsAsRetrieval: false)
+        let store = try FactStoreManager(inMemory: true)
+        _ = await ScenarioRunner.run(scenario, factStore: store)
+        let found = try store.search(query: marker, countsAsRetrieval: false)
         #expect(found.contains { $0.content.contains(marker) })
+        let leaked = try FactStoreManager.shared.search(query: marker, countsAsRetrieval: false)
+        #expect(leaked.isEmpty, "seeding must never reach the process-global store")
+    }
+
+    /// A scenario with `seedFacts` and no injected store must still not touch `.shared`: it mints
+    /// its own fresh in-memory store per run (5a fix round 2, review finding #2b/2a).
+    @Test("seedFacts with no injected store still avoid .shared")
+    func seedFactsWithoutInjectedStoreAvoidsShared() async throws {
+        let marker = "PERFSEED\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        let scenario = Scenario(name: "seeded-default", clientMode: .fake,
+                                turns: [Scenario.Turn(prompt: "one")],
+                                scriptedResponses: [Scenario.ScriptedResponse(kind: .text, text: "ack", calls: nil)],
+                                seedFacts: ["The \(marker) codename ships on Thursdays."])
+        _ = await ScenarioRunner.run(scenario)
+        let leaked = try FactStoreManager.shared.search(query: marker, countsAsRetrieval: false)
+        #expect(leaked.isEmpty, "seeding must never reach the process-global store, even with no injected store")
     }
 
     /// The actual runtime refusal (outside a volatile copy AND outside `swift test`) cannot be
