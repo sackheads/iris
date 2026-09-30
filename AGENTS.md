@@ -56,6 +56,24 @@ escape the run either way.
 
 No Makefile. No lint config beyond the Swift compiler's own checks. Keep it that way unless asked.
 
+### GUI testing: take the lease first
+
+Sessions from more than one project run GUI tests on the same machine, often on the unattended
+work laptop at the request of a remote session. Two runs at once steal focus from each other and
+both results are worthless. Before anything that launches the app or drives the screen
+(`scripts/run-dev.sh`, manual UI passes, computer use, screenshots of real windows), take the
+host-wide lease with the `gui-test-lease` skill:
+
+```sh
+L="python3 ~/.claude/skills/gui-test-lease/lease.py"
+$L acquire --purpose "iris: <what>" --minutes N [--on-behalf-of <peer>]  # exit 1 = held; output says by whom
+$L release                                                             # as soon as GUI work ends, pass or fail
+```
+
+Exit 1 means another session has the screen: message the holder named in the output, or wait with
+`--wait SECS`. Never start GUI work without the lease, and never edit or delete the lease file by
+hand. If the skill isn't installed, ask the user rather than skipping this.
+
 ## Project layout
 
 ```
