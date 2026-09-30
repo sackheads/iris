@@ -54,11 +54,16 @@ public struct ModelCallRecord: Codable, Sendable, Equatable {
     /// ms from request start to the first text delta or function call. Set only for native
     /// streams; nil for replayed calls, calls that produced nothing, and records older than #131.
     public var firstTokenMs: Double? = nil
+    /// Cache-hit and cache-write token counts from the provider's usage metadata (5a). Nil for
+    /// the fake client, providers that don't report caching, and records older than 5a.
+    public var cacheReadTokens: Int? = nil
+    public var cacheWriteTokens: Int? = nil
 
-    public init(round: Int, model: String, latencyMs: Double, promptTokens: Int?, outputTokens: Int?, returnedToolCalls: Bool, firstTokenMs: Double? = nil) {
+    public init(round: Int, model: String, latencyMs: Double, promptTokens: Int?, outputTokens: Int?, returnedToolCalls: Bool, firstTokenMs: Double? = nil, cacheReadTokens: Int? = nil, cacheWriteTokens: Int? = nil) {
         self.round = round; self.model = model; self.latencyMs = latencyMs
         self.promptTokens = promptTokens; self.outputTokens = outputTokens; self.returnedToolCalls = returnedToolCalls
         self.firstTokenMs = firstTokenMs
+        self.cacheReadTokens = cacheReadTokens; self.cacheWriteTokens = cacheWriteTokens
     }
 }
 

@@ -50,7 +50,9 @@ enum PerfLadder {
             let call = ModelCallRecord(round: 0, model: model, latencyMs: ms,
                                        promptTokens: response.usageMetadata?.promptTokenCount,
                                        outputTokens: response.usageMetadata?.candidatesTokenCount,
-                                       returnedToolCalls: response.candidates?.first?.content?.parts.contains { $0.functionCall != nil } ?? false)
+                                       returnedToolCalls: response.candidates?.first?.content?.parts.contains { $0.functionCall != nil } ?? false,
+                                       cacheReadTokens: response.usageMetadata?.cacheReadTokens,
+                                       cacheWriteTokens: response.usageMetadata?.cacheWriteTokens)
             return LadderSample(wallClockMs: ms, modelCall: call, error: nil)
         } catch {
             let ms = (MonotonicClock.nowMs() - start)

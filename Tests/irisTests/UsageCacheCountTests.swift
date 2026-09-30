@@ -49,4 +49,28 @@ struct UsageCacheCountTests {
         #expect(UsageMetadata(promptTokenCount: 3, candidatesTokenCount: 4, totalTokenCount: 9).withTotal().totalTokenCount == 9)
         #expect(UsageMetadata(promptTokenCount: nil, candidatesTokenCount: 4, totalTokenCount: nil).withTotal().totalTokenCount == nil)
     }
+
+    @Test("a TokenUsage saved before 5a decodes, with zero cache counts")
+    func oldTokenUsageDecodes() throws {
+        let old = #"{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7}"#.data(using: .utf8)!
+        let u = try JSONDecoder().decode(TokenUsage.self, from: old)
+        #expect(u.cacheReadTokenCount == 0 && u.cacheWriteTokenCount == 0 && u.promptTokenCount == 5)
+    }
+
+    @Test("a ModelCallRecord written before 5a decodes, with nil cache counts")
+    func oldModelCallRecordDecodes() throws {
+        let old = #"{"round":0,"model":"m","latencyMs":1,"promptTokens":5,"outputTokens":2,"returnedToolCalls":false}"#.data(using: .utf8)!
+        let r = try JSONDecoder().decode(ModelCallRecord.self, from: old)
+        #expect(r.cacheReadTokens == nil && r.cacheWriteTokens == nil)
+    }
+
+    @MainActor @Test("updateTokenUsage sums cache counts")
+    func accumulates() {
+        let app = AppState()
+        let id = UUID(); app.createNewConversation(id: id)
+        app.updateTokenUsage(for: id, usage: UsageMetadata(promptTokenCount: 100, candidatesTokenCount: 1, totalTokenCount: 101, cacheReadTokens: 80, cacheWriteTokens: 10))
+        app.updateTokenUsage(for: id, usage: UsageMetadata(promptTokenCount: 100, candidatesTokenCount: 1, totalTokenCount: 101, cacheReadTokens: nil, cacheWriteTokens: nil))
+        let u = app.conversations.first { $0.id == id }!.tokenUsage
+        #expect(u.cacheReadTokenCount == 80 && u.cacheWriteTokenCount == 10)
+    }
 }

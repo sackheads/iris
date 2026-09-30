@@ -42,11 +42,22 @@ struct TokenUsage: Codable, Equatable, Sendable {
     var promptTokenCount: Int = 0
     var candidatesTokenCount: Int = 0
     var totalTokenCount: Int = 0
+    /// Cumulative cache-hit tokens across the conversation (5a). A nil `UsageMetadata` read adds
+    /// 0, so an old conversation or a provider that never reports cache fields simply stays at 0.
+    var cacheReadTokenCount: Int = 0
+    var cacheWriteTokenCount: Int = 0
 
-    init(promptTokenCount: Int = 0, candidatesTokenCount: Int = 0, totalTokenCount: Int = 0) {
+    enum CodingKeys: String, CodingKey {
+        case promptTokenCount, candidatesTokenCount, totalTokenCount, cacheReadTokenCount, cacheWriteTokenCount
+    }
+
+    init(promptTokenCount: Int = 0, candidatesTokenCount: Int = 0, totalTokenCount: Int = 0,
+         cacheReadTokenCount: Int = 0, cacheWriteTokenCount: Int = 0) {
         self.promptTokenCount = promptTokenCount
         self.candidatesTokenCount = candidatesTokenCount
         self.totalTokenCount = totalTokenCount
+        self.cacheReadTokenCount = cacheReadTokenCount
+        self.cacheWriteTokenCount = cacheWriteTokenCount
     }
 
     /// Lenient decoder (invariant 1): the synthesized `Decodable` ignores these defaults for
@@ -58,6 +69,8 @@ struct TokenUsage: Codable, Equatable, Sendable {
         promptTokenCount = try c.decodeIfPresent(Int.self, forKey: .promptTokenCount) ?? 0
         candidatesTokenCount = try c.decodeIfPresent(Int.self, forKey: .candidatesTokenCount) ?? 0
         totalTokenCount = try c.decodeIfPresent(Int.self, forKey: .totalTokenCount) ?? 0
+        cacheReadTokenCount = try c.decodeIfPresent(Int.self, forKey: .cacheReadTokenCount) ?? 0
+        cacheWriteTokenCount = try c.decodeIfPresent(Int.self, forKey: .cacheWriteTokenCount) ?? 0
     }
 }
 
@@ -1718,6 +1731,8 @@ class AppState {
             conversations[idx].tokenUsage.promptTokenCount += usage.promptTokenCount ?? 0
             conversations[idx].tokenUsage.candidatesTokenCount += usage.candidatesTokenCount ?? 0
             conversations[idx].tokenUsage.totalTokenCount += usage.totalTokenCount ?? 0
+            conversations[idx].tokenUsage.cacheReadTokenCount += usage.cacheReadTokens ?? 0
+            conversations[idx].tokenUsage.cacheWriteTokenCount += usage.cacheWriteTokens ?? 0
             markChanged(conversationId, .metadata)
         }
     }
@@ -3222,6 +3237,8 @@ class AppState {
         - **Prompt Tokens:** \(usage.promptTokenCount)
         - **Candidate Tokens:** \(usage.candidatesTokenCount)
         - **Total Tokens Used:** \(usage.totalTokenCount)
+        - **Cache Read Tokens:** \(usage.cacheReadTokenCount)
+        - **Cache Write Tokens:** \(usage.cacheWriteTokenCount)
         """
         emitCommandOutput(body, format: .markdown, to: convId)
     }

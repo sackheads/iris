@@ -1645,7 +1645,9 @@ actor IrisEngine {
                         promptTokens: response.usageMetadata?.promptTokenCount,
                         outputTokens: response.usageMetadata?.candidatesTokenCount,
                         returnedToolCalls: response.candidates?.first?.content?.parts.contains { $0.functionCall != nil } ?? false,
-                        firstTokenMs: streamed ? outcome.firstTokenMs : nil))
+                        firstTokenMs: streamed ? outcome.firstTokenMs : nil,
+                        cacheReadTokens: response.usageMetadata?.cacheReadTokens,
+                        cacheWriteTokens: response.usageMetadata?.cacheWriteTokens))
                 modelRound += 1
                 // No coarse "Executing..." mark here any more: this fires on every model round
                 // whether or not it actually returned a tool call. The session strip's `.executing`
