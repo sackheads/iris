@@ -64,9 +64,46 @@ struct IrisPathsVolatileCopyTests {
         #expect(IrisPaths.fingerprint(of: src.memoryDir) != b)
     }
 
-    @Test("the test process never runs on a volatile copy and resolves the real home")
-    func notVolatileUnderTest() {
+    /// #304. This used to assert the opposite — that the test process resolves the real home —
+    /// which is what let `SubagentManagerTests` write an allow rule into the developer's real
+    /// `permissions.json` on every run (#290). `standard` is still the real home, because the
+    /// isolation tests compare file existence there.
+    @Test("under test the default home is a per-process temp root, and standard is still the real one")
+    func defaultIsNotTheRealHomeUnderTest() {
         #expect(!IrisPaths.isVolatileCopy)
-        #expect(IrisPaths.default.root.path == ("~/.iris" as NSString).expandingTildeInPath)
+        #expect(IrisPaths.standard.root.path == ("~/.iris" as NSString).expandingTildeInPath)
+        #expect(IrisPaths.default.root.path != IrisPaths.standard.root.path)
+        #expect(IrisPaths.default.root.lastPathComponent == String(ProcessInfo.processInfo.processIdentifier))
+        // Its parent is ours alone, never `$TMPDIR` itself: the sweep lists that parent, and
+        // listing a crowded `$TMPDIR` stalled every suite behind the initializer.
+        #expect(IrisPaths.default.root.deletingLastPathComponent().standardizedFileURL.path
+                == IrisPaths.testHomesDir.standardizedFileURL.path)
+        #expect(IrisPaths.testHomesDir.standardizedFileURL.path
+                != FileManager.default.temporaryDirectory.standardizedFileURL.path)
+        #expect(FileManager.default.fileExists(atPath: IrisPaths.default.configDir.path),
+                "the test home has the real layout, so a manager's first write does not fail on a missing directory")
+    }
+
+    /// The sweep takes homes whose process is gone and nothing else: not a live run's, not this
+    /// process's, and not an entry that is not a pid.
+    @Test("stale test homes are the dead pids' only")
+    func staleTestHomes() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-304-sweep-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let me = ProcessInfo.processInfo.processIdentifier
+        for name in ["111", "222", "\(me)", "notapid", "iris-tests-other-333"] {
+            try FileManager.default.createDirectory(at: dir.appendingPathComponent(name), withIntermediateDirectories: true)
+        }
+        let stale = IrisPaths.staleTestHomes(in: dir, isAlive: { $0 == 222 }).map(\.lastPathComponent)
+        #expect(stale == ["111"])
+    }
+
+    /// `kill(0, 0)` probes our own process group and a negative pid probes a group: neither is a
+    /// process that could own a test file, so neither may read as alive forever.
+    @Test("a pid of zero or below is never alive")
+    func nonPositivePidsAreNotAlive() {
+        #expect(!IrisDefaults.isProcessAlive(0))
+        #expect(!IrisDefaults.isProcessAlive(-1))
+        #expect(IrisDefaults.isProcessAlive(ProcessInfo.processInfo.processIdentifier))
     }
 }

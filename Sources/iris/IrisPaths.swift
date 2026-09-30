@@ -18,7 +18,46 @@ struct IrisPaths: Sendable {
 
     /// The home every consumer resolves through. A headless perf run installs a volatile copy
     /// (see `useVolatileCopy(at:)`) before any manager is touched; nothing else ever sets it.
-    static var `default`: IrisPaths { lock.withLock { override } ?? standard }
+    static var `default`: IrisPaths { lock.withLock { override } ?? processDefault }
+
+    /// `standard`, except under `swift test`, where it is an empty home per test process (#304).
+    /// Without it every `.shared` manager in the suite read and wrote the developer's real
+    /// `~/.iris`, and invariant 7 held for it only by habit: one `allowGlobally` in a test wrote a
+    /// real allow rule on every run (#290). Empty rather than a copy, so no assertion can depend
+    /// on what the developer happens to have there. Same XCTest signal as `IrisDefaults`.
+    /// Removed at exit, or — if a detached task was still writing, or the run was killed — by the
+    /// next run's sweep.
+    private static let processDefault: IrisPaths = {
+        guard NSClassFromString("XCTestCase") != nil else { return standard }
+        for stale in staleTestHomes(in: testHomesDir, isAlive: IrisDefaults.isProcessAlive) {
+            try? FileManager.default.removeItem(at: stale)
+        }
+        let home = IrisPaths(root: testHomesDir.appendingPathComponent(
+            String(ProcessInfo.processInfo.processIdentifier), isDirectory: true))
+        try? FileManager.default.removeItem(at: home.root)   // a recycled pid's leftovers
+        try? home.ensureDirectories()
+        atexit { try? FileManager.default.removeItem(at: IrisPaths.processDefault.root) }
+        return home
+    }()
+
+    /// One directory of our own for the test homes, each named by its pid. The sweep must never
+    /// list `$TMPDIR` itself: `processDefault` is a `static let`, so every thread touching
+    /// `default` parks until it returns, and a crowded temp directory (212k entries on one
+    /// machine, ~8s in `contentsOfDirectory(atPath:)`) stalled the whole parallel run past
+    /// unrelated suites' wall-clock bounds. This one holds an entry per test process at most.
+    static let testHomesDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("iris-tests-homes", isDirectory: true)
+
+    /// Test homes under `directory` whose process is gone — a run that crashed or was killed
+    /// before its atexit. This process and live runs are skipped.
+    static func staleTestHomes(in directory: URL, isAlive: (pid_t) -> Bool) -> [URL] {
+        let me = ProcessInfo.processInfo.processIdentifier
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        return names.sorted().compactMap { name in
+            guard let pid = pid_t(name), pid != me, !isAlive(pid) else { return nil }
+            return directory.appendingPathComponent(name, isDirectory: true)
+        }
+    }
 
     /// The real home, regardless of any headless override — isolation tests compare file
     /// existence at this exact path before and after a test run and must never create anything
@@ -29,7 +68,8 @@ struct IrisPaths: Sendable {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var override: IrisPaths?
 
-    /// True only inside a headless run that installed a copy; never under `swift test`.
+    /// True only inside a headless run that installed a copy. Under `swift test` this is false
+    /// even though `default` is not the real home: that is `processDefault`, not an override.
     static var isVolatileCopy: Bool { lock.withLock { override != nil } }
 
     /// Route every path at a fresh copy of the real home under `root` for the rest of the

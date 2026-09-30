@@ -16,6 +16,8 @@ struct ConversationStoreSelectionTests {
         #expect(a.store.isOnDisk == false)
         #expect(a.store.path == nil)
         #expect(FileManager.default.fileExists(atPath: IrisPaths.standard.conversationsDB.path) == before)
+        #expect(!FileManager.default.fileExists(atPath: IrisPaths.default.conversationsDB.path),
+                "#304: a regression now lands in the per-process test home, and nothing legitimate creates it there")
     }
 
     @Test("the isolation rule: a store goes on disk only in a plain app process")

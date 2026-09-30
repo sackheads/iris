@@ -559,8 +559,8 @@ class AppState {
 
     /// Test seams for the launch notice below: nil means compute the real answer from
     /// `IrisPaths.default.modelsDir` at launch, which is what production always does. Injectable
-    /// so tests can pin `.provisioned`/`.unprovisioned` without depending on whether this machine
-    /// happens to have the real guard models under `~/.iris/models`. `tier2Provisioning` mirrors
+    /// so tests can pin `.provisioned`/`.unprovisioned`: under test the models directory is the
+    /// empty per-process home's (#304), so only a seam can make a tier read as provisioned. `tier2Provisioning` mirrors
     /// `tier3Provisioning` (#202) for the tier-2 CoreML model (#210).
     ///
     /// `createIfEmpty` and `emitLaunchNotices` are both things a *window* needs and a headless

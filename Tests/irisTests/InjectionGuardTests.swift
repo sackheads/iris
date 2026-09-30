@@ -136,8 +136,8 @@ struct InjectionGuardTests {
     @Test("Tier 2: present per provisioning but the real load fails closed, never a silent 0.0 (#210)")
     func testTier2BrokenModelFailsClosed() async throws {
         // `tier2Provisioning` is checked against the seam directory below, but
-        // `CoreMLEvaluator.loadModelIfNeeded()` always resolves against the real
-        // `IrisPaths.default.modelsDir` — under `swift test`, `IrisDefaults` deliberately points
+        // `CoreMLEvaluator.loadModelIfNeeded()` always resolves against
+        // `IrisPaths.default.modelsDir` (the per-process test home's, #304) — under `swift test`, `IrisDefaults` deliberately points
         // `promptGuardCoreMLModel` at a name that cannot exist there (see its doc comment), so the
         // real load throws "directory does not exist" even though our seam reports `.provisioned`.
         // That is exactly the observable shape of a present-but-corrupted model, and lets this

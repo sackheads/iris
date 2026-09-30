@@ -270,12 +270,16 @@ struct FactStoreLifecycleTests {
     func sharedStoreIsIsolatedFromTheRealHome() {
         #expect(FactStoreManager.shared.dbQueue != nil, "the shared store must be in-memory under XCTest")
 
-        let realPath = IrisPaths.default.factStoreDB.path
+        let realPath = IrisPaths.standard.factStoreDB.path
         let existedBefore = FileManager.default.fileExists(atPath: realPath)
         let app = AppState()
         _ = IrisEngine(state: app, tier: .medium, principal: .main,
                        client: CapturingLLMClient(reply: "ok"), retryDelays: [])
         #expect(FileManager.default.fileExists(atPath: realPath) == existedBefore)
+        // Since #304 a regression would create the file under the per-process test home, not the
+        // real one. Nothing legitimate creates it there, so its absence is absolute rather than
+        // before/after, which an earlier test touching `.shared` would make pass by luck.
+        #expect(!FileManager.default.fileExists(atPath: IrisPaths.default.factStoreDB.path))
     }
 
     // MARK: /facts rendering

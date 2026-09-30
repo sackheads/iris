@@ -38,12 +38,12 @@ enum IrisDefaults {
         sweepStaleTestSuites()   // ...and takes out the plists earlier test processes left behind
 
         // Point the model-backed guard tiers at a path that cannot exist. `promptGuardCoreMLModel`
-        // falls back to a real DeBERTa ONNX URL when unset, so a test process otherwise resolves
-        // the ~704MB model in the DEVELOPER's ~/.iris/models and runs real inference: whichever
-        // happens first in a run — a test installing a mock, or any engine test calling
-        // `sanitize` — decided for the whole process whether the real model loaded. That made runs
-        // swing between 0.9s and 11s and the Tier 2/3 tests fail in both directions. A unit run
-        // must not touch the machine's model files.
+        // falls back to a real DeBERTa ONNX URL when unset. Before #304 that resolved the ~704MB
+        // model in the developer's real ~/.iris/models, and whichever happened first in a run — a
+        // test installing a mock, or any engine test calling `sanitize` — decided for the whole
+        // process whether the real model loaded, so runs swung between 0.9s and 11s and the Tier
+        // 2/3 tests failed in both directions. The test home has no models now, but the name stays
+        // pinned so the tier's state is decided here, not by what a models directory holds.
         suite.set("iris-tests-no-model", forKey: "PROMPT_GUARD_COREML_MODEL")
         return suite
     }()
@@ -153,6 +153,13 @@ enum IrisDefaults {
     /// `iris-volatile-*` suite it is using right now was written within the hour, so that is left
     /// alone too.
     private static func sweepStaleTestSuites() {
-        sweepStaleTestSuites(in: preferencesDirectory, isAlive: { pid in kill(pid, 0) == 0 || errno == EPERM })
+        sweepStaleTestSuites(in: preferencesDirectory, isAlive: isProcessAlive)
+    }
+
+    /// Whether a test process named by a file is still running. `pid > 0` first: `kill(0, 0)`
+    /// probes our own process group and a negative pid probes a group, so either would read as
+    /// alive forever. EPERM means the process exists but belongs to someone else.
+    static func isProcessAlive(_ pid: pid_t) -> Bool {
+        pid > 0 && (kill(pid, 0) == 0 || errno == EPERM)
     }
 }

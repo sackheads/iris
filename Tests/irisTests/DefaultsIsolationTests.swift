@@ -28,6 +28,8 @@ struct DefaultsIsolationTests {
         #expect(app.store.isOnDisk == false)
         #expect(UserDefaults.standard.data(forKey: key) == before)
         #expect(FileManager.default.fileExists(atPath: IrisPaths.standard.conversationsDB.path) == fileBefore)
+        #expect(!FileManager.default.fileExists(atPath: IrisPaths.default.conversationsDB.path),
+                "#304: a regression now lands in the per-process test home, and nothing legitimate creates it there")
     }
 
     @Test("a fresh AppState with its own store starts empty apart from the default conversation")
