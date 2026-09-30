@@ -123,4 +123,41 @@ struct ScenarioRunnerOptionsTests {
         _ = await ScenarioRunner.run(textOnly, clientOverride: unbound)
         #expect(unbound.requests.first?.systemInstruction?.parts.first?.text?.contains(header) == false)
     }
+
+    @Test("seedFacts are written to the fact store before turn 1 (5a)")
+    func seedFactsSeedBeforeFirstTurn() async throws {
+        let marker = "PERFSEED\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        let scenario = Scenario(name: "seeded", clientMode: .fake,
+                                turns: [Scenario.Turn(prompt: "one")],
+                                scriptedResponses: [Scenario.ScriptedResponse(kind: .text, text: "ack", calls: nil)],
+                                seedFacts: ["The \(marker) codename ships on Thursdays."])
+        _ = await ScenarioRunner.run(scenario)
+        let found = try FactStoreManager.shared.search(query: marker, countsAsRetrieval: false)
+        #expect(found.contains { $0.content.contains(marker) })
+    }
+
+    @Test("a seeding failure (e.g. empty content) is ignored, not thrown")
+    func seedFactsIgnoresErrors() async {
+        let scenario = Scenario(name: "seeded-empty", clientMode: .fake,
+                                turns: [Scenario.Turn(prompt: "one")],
+                                scriptedResponses: [Scenario.ScriptedResponse(kind: .text, text: "ack", calls: nil)],
+                                seedFacts: [""])
+        let result = await ScenarioRunner.run(scenario)
+        #expect(result.finalTexts == ["ack"])
+    }
+
+    @Test("--dump-requests writes one valid-JSON file per round, named <turn>-<round>.json (5a)")
+    func dumpRequestsWritesOneFilePerRound() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-dump-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let result = await ScenarioRunner.run(textOnly, dumpRequestsTo: dir)
+        #expect(result.finalTexts == ["ack one", "ack two"])
+        let files = try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted()
+        #expect(files == ["1-0.json", "2-0.json"])
+        for name in files {
+            let data = try Data(contentsOf: dir.appendingPathComponent(name))
+            let parsed = try JSONSerialization.jsonObject(with: data)
+            #expect(parsed is [String: Any], "\(name) is valid JSON")
+        }
+    }
 }

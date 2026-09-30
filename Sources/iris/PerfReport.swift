@@ -21,16 +21,28 @@ enum PerfReport {
         for s in r.scenarios {
             out.append("## \(s.name)  (\(s.category), \(s.lane))")
             out.append("")
-            out.append("| rung | n | median ms | p90 ms | first token ms | prompt tokens | failed |")
-            out.append("|---|---|---|---|---|---|---|")
+            out.append("| rung | n | median ms | p90 ms | first token ms | prompt tokens | cache read | uncached | failed |")
+            out.append("|---|---|---|---|---|---|---|---|---|")
             for rung in s.rungs {
                 let ok = rung.repetitions.filter { $0.error == nil }
                 let failed = rung.repetitions.count - ok.count
-                let tokens = PerfStats.median(ok.flatMap { rep in (rep.modelCalls + rep.turns.flatMap(\.modelCalls)).compactMap { $0.promptTokens }.map(Double.init) })
-                let firstToken = PerfStats.median(ok.flatMap { rep in (rep.modelCalls + rep.turns.flatMap(\.modelCalls)).compactMap(\.firstTokenMs) })
-                out.append("| \(rung.rung) | \(ok.count) | \(fmt(rung.medianMs)) | \(fmt(rung.p90Ms)) | \(firstToken.map { String(Int($0)) } ?? "-") | \(tokens.map { String(Int($0)) } ?? "-") | \(failed > 0 ? "\(failed) failed" : "-") |")
+                let calls = ok.flatMap { rep in rep.modelCalls + rep.turns.flatMap(\.modelCalls) }
+                let tokens = PerfStats.median(calls.compactMap { $0.promptTokens }.map(Double.init))
+                let firstToken = PerfStats.median(calls.compactMap(\.firstTokenMs))
+                let cacheRead = PerfStats.median(calls.compactMap { $0.cacheReadTokens }.map(Double.init))
+                let uncached = PerfStats.median(calls.compactMap(uncachedTokens))
+                out.append("| \(rung.rung) | \(ok.count) | \(fmt(rung.medianMs)) | \(fmt(rung.p90Ms)) | \(firstToken.map { String(Int($0)) } ?? "-") | \(tokens.map { String(Int($0)) } ?? "-") | \(cacheRead.map { String(Int($0)) } ?? "-") | \(uncached.map { String(Int($0)) } ?? "-") | \(failed > 0 ? "\(failed) failed" : "-") |")
             }
             out.append("")
+            let cache = cacheTable(s)
+            if !cache.isEmpty {
+                if let top = s.rungs.max(by: { $0.rung < $1.rung }) {
+                    out.append("- per-round cache (rung \(top.rung), repetition 1):")
+                }
+                out.append("")
+                out.append(contentsOf: cache)
+                out.append("")
+            }
             var ratios: [String] = []
             if let o = s.summary.overheadRatio { ratios.append("overhead \(String(format: "%.2f", o))x") }
             if let h = s.summary.harnessRatio { ratios.append("harness \(String(format: "%.2f", h))x") }
@@ -50,6 +62,39 @@ enum PerfReport {
             out.append("")
         }
         return out.joined(separator: "\n")
+    }
+
+    /// Uncached tokens for one round: prompt minus cache read minus cache write. An unknown read
+    /// (nil: the fake client, a provider that doesn't report caching, or a pre-5a record) counts
+    /// the whole prompt as uncached rather than being excluded, per the brief. Nil only when the
+    /// prompt token count itself is unknown.
+    private static func uncachedTokens(_ call: ModelCallRecord) -> Double? {
+        guard let prompt = call.promptTokens else { return nil }
+        guard let read = call.cacheReadTokens else { return Double(prompt) }
+        let write = call.cacheWriteTokens ?? 0
+        return Double(prompt - read - write)
+    }
+
+    /// A per-round cache breakdown for a multi-turn scenario, built from the top rung's first
+    /// repetition only — one table per repetition would be noise; the rung table above already
+    /// carries the medians. Empty when the top rung has no turns with model calls (rungs 1-3,
+    /// single-turn scenarios).
+    static func cacheTable(_ s: PerfScenarioResult) -> [String] {
+        guard let top = s.rungs.max(by: { $0.rung < $1.rung }),
+              let first = top.repetitions.first,
+              first.turns.contains(where: { !$0.modelCalls.isEmpty }) else { return [] }
+        var lines = ["| turn | round | prompt | cache read | cache write | uncached |",
+                     "|---|---|---|---|---|---|"]
+        for (turnIndex, turn) in first.turns.enumerated() {
+            for call in turn.modelCalls {
+                let prompt = call.promptTokens.map(String.init) ?? "—"
+                let read = call.cacheReadTokens.map(String.init) ?? "—"
+                let write = call.cacheWriteTokens.map(String.init) ?? "—"
+                let uncached = uncachedTokens(call).map { String(Int($0)) } ?? "—"
+                lines.append("| \(turnIndex + 1) | \(call.round) | \(prompt) | \(read) | \(write) | \(uncached) |")
+            }
+        }
+        return lines
     }
 
     private static func topSpans(_ s: PerfScenarioResult) -> [(String, Double)] {

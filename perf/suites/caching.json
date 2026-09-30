@@ -1,0 +1,2 @@
+{ "name": "caching", "lane": "real", "repetitions": 2, "pauseMs": 2000, "rungs": [4],
+  "scenarios": ["perf/prompts/caching/six-turns.json"] }

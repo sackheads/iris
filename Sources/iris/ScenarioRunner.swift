@@ -51,7 +51,8 @@ enum ScenarioRunner {
                     guards: GuardMode = .asConfigured,
                     toolExecution: ToolExecutionMode = .asConfigured,
                     clientOverride: (any LLMClientProtocol)? = nil,
-                    workspacePath: String? = nil) async -> ScenarioResult {
+                    workspacePath: String? = nil,
+                    dumpRequestsTo: URL? = nil) async -> ScenarioResult {
         let state = AppState()
         state.autoApproveTools = true // non-interactive: never block on an approval prompt
         // Pay the Vibecop cost a real run_command pays, unless this run is measuring guards off.
@@ -62,19 +63,28 @@ enum ScenarioRunner {
         // there rather than in the process cwd (#151). Only run_command is sandboxed.
         if let workspacePath { state.setWorkspace(for: conversationId, path: workspacePath) }
 
-        let client: any LLMClientProtocol
+        let baseClient: any LLMClientProtocol
         if let clientOverride {
-            client = clientOverride
+            baseClient = clientOverride
         } else {
             switch scenario.clientMode {
             case .fake:
                 let responses = scenario.scriptedResponses.map { $0.asGeminiResponse() }
-                client = FakeLLMClient(responses: responses,
+                baseClient = FakeLLMClient(responses: responses,
                                        latency: scenario.latencyMs ?? .init(minMs: 0, maxMs: 0))
             case .real:
-                client = LLMClient()
+                baseClient = LLMClient()
             }
         }
+
+        // `--dump-requests`: wrap the client so every round's exact `GeminiRequest` is captured
+        // before it's forwarded, without perturbing the turn's real (or scripted) response. The
+        // collector is drained and cleared after each turn below, so round numbers restart at 0
+        // per turn, matching `ModelCallRecord.round`.
+        let roundRequests = dumpRequestsTo != nil ? RoundRequestCollector() : nil
+        let client: any LLMClientProtocol = roundRequests.map { collector in
+            RequestRecordingLLMClient(inner: baseClient) { collector.append($0) }
+        } ?? baseClient
 
         // Guard toggling writes through ConfigManager, whose setters persist. Only a volatile
         // copy of the store may be written to, so outside one this is a logged no-op.
@@ -123,13 +133,20 @@ enum ScenarioRunner {
         // exists to measure. Pin it off, matching `ToolSurfaceTrimTests`.
         let engine = IrisEngine(state: state, tier: scenario.tier, client: client, sessionPeerCount: 0)
 
+        // Seed the fact store before turn 1 so a scenario like `caching` gets a deterministic
+        // fact-store block: turns after this can rely on exactly these facts being present.
+        // Best-effort — a seeding failure must not fail the whole scenario run (5a).
+        for fact in scenario.seedFacts ?? [] {
+            _ = try? FactStoreManager.shared.addFact(content: fact)
+        }
+
         // Collect this run's finished turn profiles via a task-local sink scoped to the turn loop.
         let collector = TurnCollector()
         var finalTexts: [String] = []
         var turnErrors: [String?] = []
         let start = MonotonicClock.nowMs()
         await PerformanceProfiler.$runSink.withValue({ collector.append($0) }) {
-            for turn in scenario.turns {
+            for (turnIndex, turn) in scenario.turns.enumerated() {
                 let before = state.conversations.first { $0.id == conversationId }?.messages.count ?? 0
                 await engine.processInput(turn.prompt, source: turn.source, conversationId: conversationId)
                 let messages = state.conversations.first { $0.id == conversationId }?.messages ?? []
@@ -144,6 +161,10 @@ enum ScenarioRunner {
                 // is the only way to see it.
                 let error = turnMessages.compactMap { LLMErrorMessage.parse($0.content)?.headline }.first
                 turnErrors.append(error)
+
+                if let dumpRequestsTo, let roundRequests {
+                    writeRequestDumps(roundRequests.drain(), turn: turnIndex + 1, to: dumpRequestsTo, tier: scenario.tier)
+                }
             }
         }
         let wallClockMs = (MonotonicClock.nowMs() - start)
@@ -157,6 +178,67 @@ enum ScenarioRunner {
         return ScenarioResult(turnProfiles: collector.all, wallClockMs: wallClockMs,
                               finalTexts: finalTexts, guardsWereOff: guardsOff, vibecopMeasured: state.vibecopUnderAutoApprove,
                               toolsSandboxed: sandboxed, conversationId: conversationId, turnErrors: turnErrors)
+    }
+
+    /// Writes one turn's recorded requests as `<dir>/<turn>-<round>.json`, using the currently
+    /// configured provider and model so the bytes match what a real call would send (5a). Best
+    /// effort: a write failure is logged, not thrown, so `--dump-requests` never fails the run it
+    /// is only meant to observe.
+    private static func writeRequestDumps(_ requests: [GeminiRequest], turn: Int, to dir: URL, tier: ModelTier) {
+        guard !requests.isEmpty else { return }
+        let provider = ConfigManager.shared.primaryProvider
+        let model = ConfigManager.shared.getModel(for: tier)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            print("[ScenarioRunner] --dump-requests: could not create \(dir.path): \(error)")
+            return
+        }
+        for (round, request) in requests.enumerated() {
+            do {
+                let data = try RequestDump.body(for: request, provider: provider, model: model)
+                try data.write(to: dir.appendingPathComponent("\(turn)-\(round).json"))
+            } catch {
+                print("[ScenarioRunner] --dump-requests: failed to write turn \(turn) round \(round): \(error)")
+            }
+        }
+    }
+}
+
+/// Thread-safe accumulator for one turn's recorded requests, used by `--dump-requests`. `drain`
+/// both returns and clears so round numbers restart at 0 for the next turn.
+private final class RoundRequestCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [GeminiRequest] = []
+    func append(_ r: GeminiRequest) { lock.lock(); items.append(r); lock.unlock() }
+    func drain() -> [GeminiRequest] {
+        lock.lock(); defer { lock.unlock() }
+        let out = items; items = []; return out
+    }
+}
+
+/// Forwards every call to `inner` after handing `onRequest` the exact `GeminiRequest` sent, so
+/// `--dump-requests` can capture the wire request a round would send without perturbing the
+/// turn's real (or scripted) response.
+private final class RequestRecordingLLMClient: LLMClientProtocol, @unchecked Sendable {
+    private let inner: any LLMClientProtocol
+    private let onRequest: @Sendable (GeminiRequest) -> Void
+
+    init(inner: any LLMClientProtocol, onRequest: @escaping @Sendable (GeminiRequest) -> Void) {
+        self.inner = inner
+        self.onRequest = onRequest
+    }
+
+    var supportsStreaming: Bool { inner.supportsStreaming }
+
+    func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+        onRequest(request)
+        return try await inner.generateContent(request: request, tier: tier)
+    }
+
+    func streamContent(request: GeminiRequest, tier: ModelTier) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+        onRequest(request)
+        return inner.streamContent(request: request, tier: tier)
     }
 }
 

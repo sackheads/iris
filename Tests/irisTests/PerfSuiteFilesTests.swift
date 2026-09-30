@@ -38,6 +38,24 @@ struct PerfSuiteFilesTests {
         #expect(categories == ["model-only", "tool-use"])
     }
 
+    /// Not part of `suitesLoad` above: that test asserts every scenario is single-turn, which is
+    /// deliberately false for `caching` (5a) — its six turns are the point.
+    @Test("the caching suite loads: real lane, rung 4 only, six seeded-fact turns (5a)")
+    func cachingSuiteLoads() throws {
+        let suite = try PerfSuite.load(at: root.appendingPathComponent("perf/suites/caching.json").path)
+        #expect(suite.name == "caching")
+        #expect(suite.lane == .real)
+        #expect(suite.rungs == [4])
+        #expect(suite.pauseMs >= 1000)
+        for url in suite.scenarioURLs(relativeTo: root) {
+            #expect(FileManager.default.fileExists(atPath: url.path), Comment(rawValue: url.path))
+            let scenario = try Scenario.load(at: url.path)
+            #expect(scenario.clientMode == .real, Comment(rawValue: url.path))
+            #expect(scenario.turns.count == 6)
+            #expect(scenario.seedFacts?.count == 2)
+        }
+    }
+
     @Test("the second eagerness suite pairs bait prompts with tool-use controls (#138)")
     func eagerness2Categories() throws {
         let suite = try PerfSuite.load(at: root.appendingPathComponent("perf/suites/tool-eagerness-2.json").path)

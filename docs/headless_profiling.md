@@ -96,6 +96,7 @@ other field defaults.
 | `latencyMs` | `{ "minMs", "maxMs" }` | none | Fake mode only. Simulates per-call model latency (random in range). Omit for instant (~0). |
 | `scriptedResponses` | array | `[]` | Fake mode only. The model's replies, consumed in order. |
 | `toggles` | `{ guards, hooks, sandbox }` | all `false` | **Advisory metadata only** today — see note below. |
+| `seedFacts` | array of string | none | Facts written to the fact store before turn 1, so a scenario that depends on the fact-store block appearing/disappearing is deterministic (5a; see `perf/suites/caching.json`). |
 
 ### Scripted responses (fake mode)
 

@@ -11,7 +11,7 @@ enum PerfRunner {
 
     static func run(suite: PerfSuite, repetitionsOverride: Int? = nil, repoRoot: URL,
                     client: (any LLMClientProtocol)? = nil, headless: Bool,
-                    workspacePath: String? = nil) async throws -> PerfRunRecord {
+                    workspacePath: String? = nil, dumpRequestsDir: URL? = nil) async throws -> PerfRunRecord {
         try suite.validate()
         let reps = repetitionsOverride ?? suite.repetitions
         let startedAt = Date()
@@ -45,8 +45,9 @@ enum PerfRunner {
                         if suite.lane == .fake { effective.clientMode = .fake }
                         // Real-lane tool prompts run unattended with auto-approve: keep them in the VM.
                         let toolExecution: ToolExecutionMode = suite.lane == .real ? .sandboxed : .asConfigured
+                        let dumpDir = dumpRequestsDir?.appendingPathComponent(scenario.name).appendingPathComponent("\(i)")
                         let result = await ScenarioRunner.run(effective, guards: guards, toolExecution: toolExecution, clientOverride: client,
-                                                              workspacePath: workspacePath)
+                                                              workspacePath: workspacePath, dumpRequestsTo: dumpDir)
                         if result.toolsSandboxed { anySandboxed = true }
                         let turns = zip(result.turnProfiles, result.finalTexts + Array(repeating: "", count: max(0, result.turnProfiles.count - result.finalTexts.count)))
                             .map { PerfTurn($0, finalText: $1) }

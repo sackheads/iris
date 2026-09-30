@@ -56,7 +56,8 @@ struct PerfReportTests {
         let rung = PerfRungResult(rung: 1, repetitions: [rep], medianMs: 100, p90Ms: 100)
         r.scenarios[0].rungs.append(rung)
         let text = PerfReport.render(r)
-        #expect(text.contains("| 1 | 1 | 100.0 | 100.0 | - | 42 | - |"))
+        // No cache read/write reported: cache read is "-" and the whole prompt counts uncached.
+        #expect(text.contains("| 1 | 1 | 100.0 | 100.0 | - | 42 | - | 42 | - |"))
     }
 
     @Test("the first-token column is the median over the rung's successful turns, or a dash")
