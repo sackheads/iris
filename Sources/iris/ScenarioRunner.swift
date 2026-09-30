@@ -224,13 +224,16 @@ enum ScenarioRunner {
     }
 
     /// Writes one turn's recorded requests as `<dir>/<turn>-<round>.json`, using the currently
-    /// configured provider and model so the bytes match what a real call would send (5a). Best
-    /// effort: a write failure is logged, not thrown, so `--dump-requests` never fails the run it
-    /// is only meant to observe.
+    /// configured provider, model and streaming flag so the body matches what a real call would
+    /// build (5a) — `RequestDump` used to hardcode non-streaming while production streams by
+    /// default, so a dump never matched an actual turn's body (5a review #11). Best effort: a
+    /// write failure is logged, not thrown, so `--dump-requests` never fails the run it is only
+    /// meant to observe.
     private static func writeRequestDumps(_ requests: [GeminiRequest], turn: Int, to dir: URL, tier: ModelTier) {
         guard !requests.isEmpty else { return }
         let provider = ConfigManager.shared.primaryProvider
         let model = ConfigManager.shared.getModel(for: tier)
+        let stream = ConfigManager.shared.streamResponses
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         } catch {
@@ -239,7 +242,7 @@ enum ScenarioRunner {
         }
         for (round, request) in requests.enumerated() {
             do {
-                let data = try RequestDump.body(for: request, provider: provider, model: model)
+                let data = try RequestDump.body(for: request, provider: provider, model: model, stream: stream)
                 try data.write(to: dir.appendingPathComponent("\(turn)-\(round).json"))
             } catch {
                 print("[ScenarioRunner] --dump-requests: failed to write turn \(turn) round \(round): \(error)")

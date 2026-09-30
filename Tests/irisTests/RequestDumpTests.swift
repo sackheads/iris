@@ -22,7 +22,7 @@ struct RequestDumpTests {
     @Test("Anthropic dump matches makeURLRequest's own body structurally")
     func anthropicMatchesProduction() throws {
         let expected = try AnthropicClient.makeURLRequest(request: request, model: "claude-x", apiKey: "real-key-never-used-here", stream: false).httpBody
-        let dumped = try RequestDump.body(for: request, provider: LLMProvider.anthropic.rawValue, model: "claude-x")
+        let dumped = try RequestDump.body(for: request, provider: LLMProvider.anthropic.rawValue, model: "claude-x", stream: false)
         let expectedObj = try JSONSerialization.jsonObject(with: try #require(expected)) as? NSDictionary
         let dumpedObj = try JSONSerialization.jsonObject(with: dumped) as? NSDictionary
         #expect(expectedObj == dumpedObj)
@@ -31,15 +31,38 @@ struct RequestDumpTests {
     @Test("OpenAI dump matches makeURLRequest's own body structurally")
     func openAIMatchesProduction() throws {
         let expected = try OpenAIClient.makeURLRequest(request: request, model: "gpt-x", apiKey: "real-key-never-used-here", stream: false).httpBody
-        let dumped = try RequestDump.body(for: request, provider: LLMProvider.openai.rawValue, model: "gpt-x")
+        let dumped = try RequestDump.body(for: request, provider: LLMProvider.openai.rawValue, model: "gpt-x", stream: false)
         let expectedObj = try JSONSerialization.jsonObject(with: try #require(expected)) as? NSDictionary
         let dumpedObj = try JSONSerialization.jsonObject(with: dumped) as? NSDictionary
         #expect(expectedObj == dumpedObj)
     }
 
+    /// Production streams by default (`ConfigManager.streamResponses` defaults to `true`); a dump
+    /// built with `stream: false` unconditionally would not match the body a real turn sends
+    /// (5a review #11).
+    @Test("Anthropic dump honors a true streaming flag, matching makeURLRequest(stream: true)")
+    func anthropicHonorsStreamingFlag() throws {
+        let expected = try AnthropicClient.makeURLRequest(request: request, model: "claude-x", apiKey: "real-key-never-used-here", stream: true).httpBody
+        let dumped = try RequestDump.body(for: request, provider: LLMProvider.anthropic.rawValue, model: "claude-x", stream: true)
+        let expectedObj = try JSONSerialization.jsonObject(with: try #require(expected)) as? NSDictionary
+        let dumpedObj = try JSONSerialization.jsonObject(with: dumped) as? NSDictionary
+        #expect(expectedObj == dumpedObj)
+        #expect((dumpedObj?["stream"] as? Bool) == true)
+    }
+
+    @Test("OpenAI dump honors a true streaming flag, matching makeURLRequest(stream: true)")
+    func openAIHonorsStreamingFlag() throws {
+        let expected = try OpenAIClient.makeURLRequest(request: request, model: "gpt-x", apiKey: "real-key-never-used-here", stream: true).httpBody
+        let dumped = try RequestDump.body(for: request, provider: LLMProvider.openai.rawValue, model: "gpt-x", stream: true)
+        let expectedObj = try JSONSerialization.jsonObject(with: try #require(expected)) as? NSDictionary
+        let dumpedObj = try JSONSerialization.jsonObject(with: dumped) as? NSDictionary
+        #expect(expectedObj == dumpedObj)
+        #expect((dumpedObj?["stream"] as? Bool) == true)
+    }
+
     @Test("Gemini dump is the request's own JSON encoding")
     func geminiIsPlainEncoding() throws {
-        let dumped = try RequestDump.body(for: request, provider: LLMProvider.gemini.rawValue, model: "gemini-x")
+        let dumped = try RequestDump.body(for: request, provider: LLMProvider.gemini.rawValue, model: "gemini-x", stream: false)
         let decoded = try JSONDecoder().decode(GeminiRequest.self, from: dumped)
         #expect(decoded.contents.first?.parts.first?.text == "hello")
         #expect(decoded.systemInstruction?.parts.first?.text == "be nice")
@@ -47,7 +70,7 @@ struct RequestDumpTests {
 
     @Test("an unrecognized provider name falls back to the Gemini encoding")
     func unknownProviderFallsBackToGemini() throws {
-        let dumped = try RequestDump.body(for: request, provider: "SomeFutureProvider", model: "m")
+        let dumped = try RequestDump.body(for: request, provider: "SomeFutureProvider", model: "m", stream: false)
         #expect((try? JSONDecoder().decode(GeminiRequest.self, from: dumped)) != nil)
     }
 }

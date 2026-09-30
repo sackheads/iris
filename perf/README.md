@@ -87,14 +87,16 @@ will replay a system prompt that no longer holds either, so they will measure th
 and will not be comparable with pre-5a baselines. Anthropic's prompt tokens already jump across this
 PR's boundary, since they now include cached tokens, so compare uncached tokens across it.
 
-`--dump-requests <dir>` on `iris --perf run` writes each round's exact wire body — the bytes the
-currently configured provider client would send, reusing `AnthropicClient`/`OpenAIClient`'s own
-`makeURLRequest` builders (Gemini's body is just the request's own JSON encoding) — to
-`<dir>/<scenario>/rung-<N>/<rep>/<turn>-<round>.json`. The rung is part of the path so a suite that
-dumps more than one rung (e.g. 4 and 5) never has one rung's files overwrite another's. Nothing is
-sent over the network; a placeholder API key is used so the dump works even without configured
-credentials. These are what a byte-prefix diff reads to find exactly where two rounds' requests
-first differ.
+`--dump-requests <dir>` on `iris --perf run` writes each round's request body — the same body the
+client builds, key order aside, until requests are encoded with sorted keys — reusing
+`AnthropicClient`/`OpenAIClient`'s own `makeURLRequest` builders with the currently configured
+streaming flag (Gemini's body is just the request's own JSON encoding, and streaming or not makes
+no difference to it) — to `<dir>/<scenario>/rung-<N>/<rep>/<turn>-<round>.json`. The rung is part of
+the path so a suite that dumps more than one rung (e.g. 4 and 5) never has one rung's files
+overwrite another's. Nothing is sent over the network; a placeholder API key is used so the dump
+works even without configured credentials. These are what a byte-prefix diff reads to find exactly
+where two rounds' requests first differ — treat a reordering of the same keys as noise, not a real
+divergence, until sorted-key encoding lands.
 
 ## Reading a record
 
