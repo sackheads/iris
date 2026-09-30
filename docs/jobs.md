@@ -187,7 +187,7 @@ working directory) on the run's ledger row, and the run finishes `blocked on app
 naming the tool. The tool result the refusal writes into the transcript says the job is
 read-only and that no other tool will do it either — but the turn ends on the first such refusal
 before another model round can read it, which is the order that matters: no approval is coming and
-nothing else would do the same thing, so a further round could only spend the run's budget
+nothing else would do the same thing, so a further round could only use up the run's token budget
 arriving at the same answer. The sentence is the record; the ending is the enforcement.
 
 A `mutating` job keeps the whole tool surface, and its *commands* always run in the
@@ -682,7 +682,7 @@ A run ends in one of five statuses:
 | `completed` | the turn finished and said something — or the job's gate found nothing to do, in which case the outcome says `gate: no change` and there was no turn |
 | `failed` | the model call errored, the loop was cut short, or the turn ended having said nothing at all |
 | `blocked on approval` | the run wanted a tool it is not allowed to use unattended, and stopped (see below) |
-| `interrupted` | nothing finished it: the app quit mid-run and the next launch closed the row out, a cadence came round while the previous run of the same job was still going so this trigger was dropped rather than started twice, a gate could not answer, or a limit refused the fire before it started (the breaker, a budget, or a ledger that could not say what the job has spent) |
+| `interrupted` | nothing finished it: the app quit mid-run and the next launch closed the row out, a cadence came round while the previous run of the same job was still going so this trigger was dropped rather than started twice, a gate could not answer, or a limit refused the fire before it started (the breaker, a budget, or a ledger that could not say what the job has sent) |
 
 A run that says nothing is a failure, not a success: "it worked and had nothing to report" and "it
 never got as far as a reply" must not look the same on a card.
@@ -822,11 +822,12 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
   happen; the job is paused instead, with the count in the reason. Refusals do not count as runs, so
   a job cannot trip its own breaker by being skipped.
 - **Daily token budget** — **1,000,000 tokens per job** per local calendar day, and **3,000,000
-  across every background run together**. The fire that finds the day's spend at or over the figure
-  pauses the job rather than starting. A run still in flight counts too: its spend is written to its
-  row after every model round, so a run the app quit in the middle of still costs the day what it
-  spent. Budgets count every token sent, including tokens a provider served from its prompt cache;
-  before 5a an Anthropic run was charged nothing because Anthropic reports no total.
+  across every background run together**. The fire that finds the day's tokens sent at or over the
+  figure pauses the job rather than starting. A run still in flight counts too: what it has sent is
+  written to its row after every model round, so a run the app quit in the middle of still counts
+  toward the day's figure for what it had sent. Budgets count every token sent, including tokens a
+  provider served from its prompt cache; before 5a an Anthropic run was charged nothing because
+  Anthropic reports no total.
 - A refused fire writes a zero-length `interrupted` row and one card naming the figure that tripped
   it, so a pause is never silent.
 
@@ -836,7 +837,7 @@ for the turn either. At the deadline the run is closed `failed`, the Mac is let 
 the job is free to fire again; the turn is asked to stop, and if it is parked somewhere that never
 checks — a blocking subprocess, a stream with no timeout — it is abandoned rather than waited on.
 Whichever bound bit, the row and the card say `budget: tokens exceeded` or `budget: time exceeded`.
-The budget stop does not summarize — there is nothing left to spend on a summary — and any message
+The budget stop does not summarize — there is no budget left for a summary — and any message
 you steered in mid-run is written to the transcript before the turn ends, without starting another
 turn.
 
@@ -902,7 +903,7 @@ pause reason the table prints, on the `interrupted` row and on the card.
 
 | Form | What it does |
 | --- | --- |
-| `/jobs` | A table of every job — name, trigger (with its gate, if it has one), its policy where it departs from the defaults, when it next fires (or why it is paused), how its last run ended, its tokens today against its daily budget and its runs in the last hour against the breaker — then one line per watch with what its last burst saw and what it has absorbed since launch (see "Watches"), one paragraph per granted job with its mounts and network (see "Grants"), then the day's spend across every job, then one line per unacknowledged failure with the first eight characters of the run's id |
+| `/jobs` | A table of every job — name, trigger (with its gate, if it has one), its policy where it departs from the defaults, when it next fires (or why it is paused), how its last run ended, its tokens today against its daily budget and its runs in the last hour against the breaker — then one line per watch with what its last burst saw and what it has absorbed since launch (see "Watches"), one paragraph per granted job with its mounts and network (see "Grants"), then the day's tokens sent across every job, then one line per unacknowledged failure with the first eight characters of the run's id |
 | `/jobs ack <run id>` | Marks a failed or blocked run as seen: it leaves the failure list, and it stops being exempt from retention. Takes a full id or the first eight or more characters of one, as a card prints it; an ambiguous prefix is refused rather than guessed |
 | `/jobs pause <name>` | Stops a job firing, with "paused by user" as the reason the table shows |
 | `/jobs resume <name>` | Clears the pause *and* the retry ladder, and recomputes the next fire from the job's own schedule |
@@ -987,7 +988,7 @@ is threading the run's own state to those call sites.
 Two read-only tools let the model answer questions about jobs: `list_jobs` (every job, its trigger,
 its next fire, why it is paused, how its last run ended, its policy, profile, gate kind and grant
 (`grants`, as stored; `null` when it has none or is read-only), what
-it has spent today against its budgets and the breaker, and — for a watch — its quiet window, its
+it has sent today against its budgets and the breaker, and — for a watch — its quiet window, its
 ignore globs, its last burst's figures and what it has absorbed since launch, `null` for anything
 else) and `get_job_run` (one run, by id or by the eight characters a card shows, including the
 last thing the run itself said and, for a watch run, the burst's `watchSummary` as the row stores
