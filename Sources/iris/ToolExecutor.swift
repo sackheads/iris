@@ -694,8 +694,9 @@ try:
 except Exception as e:
     print(json.dumps({"error": str(e)}))
 """
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let irisDir = home.appendingPathComponent(".iris")
+        // Through `IrisPaths`, not the home directory: this was the one writer that bypassed it,
+        // so a test calling `search_web` would have written the real `~/.iris` (#304).
+        let irisDir = IrisPaths.default.root
         try? FileManager.default.createDirectory(at: irisDir, withIntermediateDirectories: true)
         let scriptURL = irisDir.appendingPathComponent("search_web.py")
         do {

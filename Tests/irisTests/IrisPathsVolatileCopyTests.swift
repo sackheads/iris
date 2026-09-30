@@ -92,4 +92,13 @@ struct IrisPathsVolatileCopyTests {
         let stale = IrisPaths.staleTestHomes(in: dir, isAlive: { $0 == 222 }).map(\.lastPathComponent)
         #expect(stale == ["iris-tests-home-111"])
     }
+
+    /// `kill(0, 0)` probes our own process group and a negative pid probes a group: neither is a
+    /// process that could own a test file, so neither may read as alive forever.
+    @Test("a pid of zero or below is never alive")
+    func nonPositivePidsAreNotAlive() {
+        #expect(!IrisDefaults.isProcessAlive(0))
+        #expect(!IrisDefaults.isProcessAlive(-1))
+        #expect(IrisDefaults.isProcessAlive(ProcessInfo.processInfo.processIdentifier))
+    }
 }

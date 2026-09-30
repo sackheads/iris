@@ -25,10 +25,12 @@ struct IrisPaths: Sendable {
     /// `~/.iris`, and invariant 7 held for it only by habit: one `allowGlobally` in a test wrote a
     /// real allow rule on every run (#290). Empty rather than a copy, so no assertion can depend
     /// on what the developer happens to have there. Same XCTest signal as `IrisDefaults`.
+    /// Removed at exit, or — if a detached task was still writing, or the run was killed — by the
+    /// next run's sweep.
     private static let processDefault: IrisPaths = {
         guard NSClassFromString("XCTestCase") != nil else { return standard }
         let tmp = FileManager.default.temporaryDirectory
-        for stale in staleTestHomes(in: tmp, isAlive: { pid in kill(pid, 0) == 0 || errno == EPERM }) {
+        for stale in staleTestHomes(in: tmp, isAlive: IrisDefaults.isProcessAlive) {
             try? FileManager.default.removeItem(at: stale)
         }
         let home = IrisPaths(root: tmp.appendingPathComponent(
