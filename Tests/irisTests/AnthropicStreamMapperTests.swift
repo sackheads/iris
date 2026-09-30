@@ -117,6 +117,29 @@ struct AnthropicStreamMapperTests {
         } catch { Issue.record("wrong error type \(error)") }
     }
 
+    /// Anthropic splits usage across two events: `message_start` carries input + cache tokens,
+    /// `message_delta` carries only `output_tokens`. `StreamAssembler.usage` merges field-wise
+    /// (max wins per field, not overwrite), and `response()` fills a still-missing total as
+    /// prompt + output — so the assembled response's total must be exactly prompt (input + read +
+    /// write) + output, not just one event's contribution (5a review #12).
+    @Test("StreamAssembler fills the total from Anthropic's split streaming usage: prompt (input+read+write) + output")
+    func assemblerFillsTotalFromSplitAnthropicUsage() throws {
+        var mapper = AnthropicStreamMapper()
+        var assembler = StreamAssembler()
+        let events = try mapper.handle(SSEEvent(event: "message_start",
+            data: #"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":50}}}"#))
+            + mapper.handle(SSEEvent(event: "message_delta",
+            data: #"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":31}}"#))
+            + mapper.finish()
+        for event in events { assembler.apply(event, now: 1) }
+        let usage = try #require(assembler.response().usageMetadata)
+        #expect(usage.promptTokenCount == 960, "input 10 + read 900 + write 50")
+        #expect(usage.candidatesTokenCount == 31)
+        #expect(usage.totalTokenCount == 991, "prompt (input+read+write) + output")
+        #expect(usage.cacheReadTokens == 900)
+        #expect(usage.cacheWriteTokens == 50)
+    }
+
     @Test("a malformed chunk throws instead of being skipped")
     func malformedChunkThrows() {
         var m = AnthropicStreamMapper()
