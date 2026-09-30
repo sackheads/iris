@@ -32,7 +32,7 @@ Found while writing this plan and committed to the spec's own PR, so the spec an
 
 ## Review Focus
 
-1. **Job budgets start charging Anthropic runs.** A daily budget that "worked" only because it read 0 will now trip. Expected: the budget measures real usage. Test it in Task 1, document it in Task 1, and call it out in PR A's description.
+1. **Job budgets start charging Anthropic runs.** The defaults (200k per run, 1M per job per day, 3M global) were never exercised by Anthropic traffic, and after 5a a turn that re-reads a 40k prefix five times counts 200k. A job that used to complete may now stop on "budget: tokens exceeded". Expected: the budget measures tokens sent. Task 1 tests and documents it. PR A's description says it is the first user-visible change, and Task 10 re-checks the defaults against the suite's figures.
 2. **A PreCompress hook that rewrites history mid-turn.** The turn-context anchor must not attach the block to the wrong entry. Expected: the block rides the turn's own entry, or is left off, never put on another message. Test in Task 6.
 3. **A turn with a mid-task steer.** The block stays on the original entry and is byte-identical across rounds, even though `history` gained entries. Test in Task 6.
 4. **A conversation saved and reloaded after a turn.** The persisted history contains no `<turn_context>`. Test in Task 6.
@@ -166,7 +166,7 @@ Run: `scripts/test-filter.sh UsageCacheCountTests` → 5 tests pass; `scripts/te
 
 - [ ] **Step 5: Budget test and docs**
 
-Add to the existing job budget tests (`grep -rln "pauseBudget" Tests/irisTests`) one case: a run whose client returns Anthropic-shaped usage with no total is charged `prompt + output` to `tokensToday`. Then update `docs/jobs.md`'s budgets paragraph to say: "Budgets count every token sent, including tokens a provider served from its prompt cache; before 5a an Anthropic run was charged nothing because Anthropic reports no total."
+Add to the existing job budget tests (`grep -rln "pauseBudget" Tests/irisTests`) one case: a run whose client returns Anthropic-shaped usage with no total is charged `prompt + output` to `tokensToday`. Then update `docs/jobs.md`'s budgets paragraph to say: "Budgets count every token sent, including tokens a provider served from its prompt cache; before 5a an Anthropic run was charged nothing because Anthropic reports no total." Anywhere `docs/jobs.md` or `/jobs` says "tokens today", it now means tokens sent, not billed. Correct `JobLimits`' doc comment, which calls a budget a bound on spend: after 5a it bounds context volume, and billed weight is a later slice. Fix README's "620k / 1M" budget sentence to match, and add one line to README's token section: Anthropic conversations now show real prompt and total figures where they showed 0.
 
 - [ ] **Step 6: Commit**
 
@@ -255,6 +255,8 @@ func accumulates() {
   - For each scenario whose top rung has any `turns` with `modelCalls`, render the per-round table from the **first** repetition (a table per repetition would be noise; the medians stay in the existing table).
   - Add median `cache read` and `uncached` columns to the existing rung table.
   - `seedFacts`: in `ScenarioRunner`, before turn 1, call `FactStoreManager.shared.addFact(content:)` for each, and ignore errors.
+- [ ] **Step 3b: Request dumps.** Add an `--dump-requests <dir>` option to `--perf run`. When set, the runner writes each round's final request body (the bytes the client would send, from `makeURLRequest(...).httpBody`) to `<dir>/<scenario>/<rep>/<turn>-<round>.json`. Task 10 counts prefixes from these. Test it on the fake lane: a two-turn fake scenario with the option produces two files, each valid JSON.
+- [ ] **Step 3c:** Add to `perf/README.md`: from 5a on, rungs 2 and 3 replay a system prompt that no longer holds the fact block or the peer count, so they measure the stable prefix only and are not comparable with pre-5a baselines. Anthropic's prompt tokens also jump across the boundary, since they now include cached tokens, so compare uncached tokens across it.
 - [ ] **Step 4: Suite files.**
 
 `perf/suites/caching.json`:
@@ -310,7 +312,7 @@ func anthropicStable() throws {
 }
 ```
 
-Write the same test for `OpenAIClient.makeURLRequest`, and for Gemini through its request builder in `LLMClient.swift` (build the `URLRequest` without sending it; if the builder is private, make it `static` internal).
+Write the same test for `OpenAIClient.makeURLRequest`, and for Gemini through its request builder in `LLMClient.swift` (build the `URLRequest` without sending it; if the builder is private, make it `static` internal). Keep the tests going through `makeURLRequest`: `AnthropicClient` re-serialises each schema after mutating it, so the final body serialisation is the change that matters, and a test that only encodes a `GeminiRequest` would miss it.
 - [ ] **Step 2: Run:** `scripts/test-filter.sh RequestByteStabilityTests`. Expected: at least one failure. Record which clients failed; that is evidence for the spec.
 - [ ] **Step 3: Implement.** Every `JSONSerialization.data(withJSONObject:)` on the request path gains `options: [.sortedKeys]`, and every `JSONEncoder()` on the request path sets `outputFormatting = [.sortedKeys]`. The schema re-encode at `:114`/`:126` round-trips through JSONSerialization, so sorting the final body is sufficient, but sort both for clarity.
 - [ ] **Step 4: Run to verify pass**, 3 tests, then run the full `swift test`.
@@ -336,16 +338,18 @@ struct TurnContext: Equatable, Sendable {
     /// `<turn_context>\n# heading\nbody\n\n# heading\nbody\n</turn_context>`
     func rendered() -> String
     /// `contents` with the block inserted as the leading part of `contents[anchor]`, when the
-    /// anchor is in range, is a user entry, and its text still equals `anchorText`. Otherwise
-    /// `contents` unchanged: a block on the wrong message is worse than none.
-    func applied(to contents: [Content], anchor: Int, anchorText: String?) -> [Content]
+    /// anchor is in range and that entry still encodes to `anchorBytes` (sorted-key JSON of the
+    /// exact `Content` the turn appended). Otherwise `contents` unchanged: a block on the wrong
+    /// message is worse than none. `Content` has no identity and is not Equatable; the whole
+    /// encoded entry is compared, not its first text, so a repeated "yes" cannot match.
+    func applied(to contents: [Content], anchor: Int, anchorBytes: Data?) -> [Content]
 }
 ```
 
 - [ ] **Step 1: Failing tests (unit):**
   - `rendered()` output for two sections.
   - `applied` inserts at the anchor only.
-  - `applied` with an anchor out of range, on a model entry, or whose text changed returns the input unchanged (Review Focus 2).
+  - `applied` with an anchor out of range, or whose entry's bytes differ (including a different user entry with identical text), returns the input unchanged (Review Focus 2).
   - An empty context returns the input unchanged, byte-equal.
 - [ ] **Step 2: Failing tests (engine).** Use `CapturingLLMClient` with a fact store seeded so the input matches, plus a scripted tool call so the turn has two rounds (use the existing scripted-client helper; see `grep -rln "ScriptedLLMClient\|scriptedResponses" Tests/irisTests`):
   1. Every captured request's turn entry starts with a `<turn_context>` part containing `# Mid-Term Fact Store Memory (JIT Context)`, and the system instruction does **not** contain that heading.
@@ -356,8 +360,8 @@ struct TurnContext: Equatable, Sendable {
 - [ ] **Step 3: Run:** `scripts/test-filter.sh TurnContextTests`. Expected: fail.
 - [ ] **Step 4: Implement.**
   - In `processInputBody`, replace the fact and peer-count appends (`iris.swift` ~1136-1141 and ~1157-1162) with sections on a local `var turnContext = TurnContext(sections: [])`, e.g. `turnContext.sections.append(.init(heading: "Mid-Term Fact Store Memory (JIT Context)", body: factString))`, using the same heading strings and body text as today.
-  - After the PreCompress hook (~1536), compute `let turnAnchor = history.lastIndex { $0.role == "user" }` and `let turnAnchorText = turnAnchor.flatMap { history[$0].parts.first?.text }`.
-  - Define `func requestContents(_ h: [Content]) -> [Content] { turnAnchor.map { turnContext.applied(to: h, anchor: $0, anchorText: turnAnchorText) } ?? h }` and use it at `:1543`, `:1600` and `:1803` in place of the bare `history`.
+  - After the PreCompress hook (~1536), compute the anchor **once**: `let turnAnchor = history.lastIndex { $0.role == "user" }`, and `let turnAnchorBytes = turnAnchor.flatMap { try? Self.sortedEncoder.encode(history[$0]) }`. Never recompute it later in the turn: after round one the last user-role entry is a tool-result message. The stored index stays valid because everything that touches `history` mid-turn appends (steers and event lines in `drainPendingInput`, the model reply, tool results); comment that at the definition. If a hook or the UI removes or rewrites the entry, the byte check drops the block and the engine pushes one system line ("turn context omitted: the turn's entry changed"), rather than guessing.
+  - Define `func requestContents(_ h: [Content]) -> [Content] { turnAnchor.map { turnContext.applied(to: h, anchor: $0, anchorBytes: turnAnchorBytes) } ?? h }` and use it at `:1543`, `:1600` and `:1803` in place of the bare `history`.
   - Subagent and evaluator turns go through the same function, so they get the same behaviour.
 - [ ] **Step 5: Run to verify pass**, all 9 tests with the count quoted, then the full `swift test`.
 - [ ] **Step 6: Commit:** `feat(engine): per-turn content rides this turn's entry, not the system prompt (5a)`
@@ -372,14 +376,16 @@ struct TurnContext: Equatable, Sendable {
 - Produces: `IrisEngine` private state `profileStamp: (path: String, modified: Date?)?` and `agentsStamp: [String: Date?]` (keyed by workspace path), plus `func invalidateUserProfile()`, called by the `update_user_profile` handler.
 
 - [ ] **Step 1: Failing tests:**
-  1. Two consecutive turns with an unchanged `USER.md` call the guard's sanitize for `user_profile` once, not twice. Count through the existing `InjectionGuard` test seam; if there is none, count through a test-only counter on `IrisEngine`.
+  1. Two consecutive turns with an unchanged `USER.md` call the guard's sanitize for `user_profile` once, not twice. Count through the task-scoped seams, `CoreMLEvaluator.$scopedModel.withValue(.init(countingMock))` and `AuxiliaryModelManager.$scopedEngines` (invariant 7), not a counter on `IrisEngine`.
   2. After `update_user_profile`, the next turn's system prompt contains the new profile text.
-  3. Touching `AGENTS.md`'s modification date in the bound workspace causes a re-read on the next turn.
+  3. Touching `AGENTS.md`'s modification date in the bound workspace causes a re-read on the next turn, and so does editing the target of an `AGENTS.md` that is a symlink.
   4. Two turns with no changes send byte-identical `systemInstruction`.
 - [ ] **Step 2: Run:** `scripts/test-filter.sh TurnContextTests`. Expected: fail.
 - [ ] **Step 3: Implement.**
-  - Keep the guarded profile and `AGENTS.md` text in engine-level caches, keyed by file path and modification date (`FileManager.attributesOfItem(atPath:)[.modificationDate]`).
-  - Rebuild the section only when the key changes.
+  - Keep the guarded profile and `AGENTS.md` text in engine-level caches, keyed by file path, modification date, the protection setting, and the guard tiers' provisioning state. The cached text is guard *output*, so a profile guarded under one configuration must not be served under another.
+  - Read the date with `URL(fileURLWithPath:).resolvingSymlinksInPath().resourceValues(forKeys: [.contentModificationDateKey])`, never `attributesOfItem(atPath:)`, which is `lstat` and does not follow links (#307 relies on exactly that). An `AGENTS.md -> CLAUDE.md` link must refresh when its target is edited.
+  - Compare stamps with `!=`, not "newer than", so a file restored with an older mtime (`cp -p`, `rsync -t`) still refreshes. A missing file is its own stamp, so deleting the file refreshes to empty.
+  - Rebuild the section only when the key changes. `invalidateUserProfile()` reaches only the engine that ran the tool; the mtime check is what covers subagents and evaluators, and a comment says so.
   - The composed prompt (base + profile + agents) is cached per (workspace path, stamps).
   - `invalidateUserProfile()` clears the profile stamp.
 - [ ] **Step 4: Run to verify pass**, then the full `swift test`.
@@ -397,29 +403,32 @@ grep -rn -i "other session.*active\|sessions are active" Sources docs README.md
 grep -rn -i "system prompt" docs/markdown_memory_design.md docs/holographic_memory_design.md docs/headless_profiling.md README.md
 ```
 
-- [ ] **Step 2:** Correct every sentence that places the fact block or the peer count in the system prompt so that it says "this turn's context". Leave the heading text as it is (spec §2).
+- [ ] **Step 2:** Correct every sentence that places the fact block or the peer count in the system prompt so that it says "this turn's context". Leave the heading text as it is (spec §2). Dated plans and reviews (`docs/superpowers/plans/2026-09-17-performance-evaluation-suite.md`, `docs/reviews/2026-09-17-tool-eagerness-analysis.md`) are history and are not edited.
 - [ ] **Step 3:** `swift test` passes. Commit: `docs: fact memory and the peer count now arrive in the turn's context (5a)`
 
-### Task 9: The `tool_result` breakpoint, only if the rounds show it
+### Task 9: Cache through tool-result rounds
 
-- [ ] **Step 1:** Run the `caching` suite on Anthropic on this branch (Tasks 5–8 in).
-- [ ] **Step 2:** Read turn 3 in the per-round table. If round 1's cache read is **at least** round 0's prompt minus 5%, the skip costs nothing: record that in spec §3.1 and skip to Task 10.
-- [ ] **Step 3 (only if Step 2 fails):**
-  - Failing test in `StreamingClientTests` (or a new `AnthropicCacheBreakpointTests`): a request whose last message ends in a `tool_result` block carries `cache_control` on that block.
-  - In `markLastContentBlock` (`AnthropicClient.swift:82-91`), drop the `tool_result` exclusion.
-  - Rerun the suite and confirm Step 2 now passes.
-  - Commit: `fix(anthropic): cache through tool-result rounds (5a)`
+**Files:** Modify `Sources/iris/AnthropicClient.swift:82-91` (`markLastContentBlock`). Test in `Tests/irisTests/AnthropicCacheBreakpointTests.swift` (new).
+
+The API accepts `cache_control` on `tool_result` blocks; the skip is an artifact. With it, a round ending in tool results writes its entry at the assistant's `tool_use`, so the results are re-sent uncached on the next round and the next turn (spec §1).
+
+- [ ] **Step 1: Failing test.** Build a request whose history ends in a user message of two `tool_result` parts, run it through `AnthropicClient.makeURLRequest`, decode the body, and assert that the last content block of the last message carries `"cache_control": {"type": "ephemeral"}`. Also assert the total number of `cache_control` markers in the body is still ≤ 4.
+- [ ] **Step 2:** `scripts/test-filter.sh AnthropicCacheBreakpointTests`. Expected: fail.
+- [ ] **Step 3:** In `markLastContentBlock`, remove the `tool_result` exclusion so the last block is marked whatever its type.
+- [ ] **Step 4:** Test passes (count quoted); full `swift test`.
+- [ ] **Step 5: Commit:** `fix(anthropic): cache through tool-result rounds (5a)`
 
 ### Task 10: After-measurement and the tool-list experiment
 
 - [ ] **Step 1:** Run the `caching` suite on each configured provider and add the tables to spec §3.1 under "After 5a".
 - [ ] **Step 2: Check the pass criteria** (spec §3, Anthropic, turns 3–6).
-  - For each turn k, compute tools + system + history up to the end of turn k−2 from the captured request, or approximate it with round-0 prompt tokens minus turn k−1 and turn k's entry.
-  - Check cache read ≥ 95% of that prefix.
+  - Pass or fail comes from the usage-only checks: first-round read never falls turn over turn; within a turn each round's read ≥ the previous round's read + write; first-round uncached ≤ turn k−1's output plus the tool results it read plus a fixed allowance for two entries.
+  - The 95% figure: run with `--dump-requests`, then count the prefix through turn k−2 in the dumped turn-k body with Anthropic's `count_tokens` endpoint (free), and report read ÷ prefix.
   - Record pass or fail per turn. **Stop and report if any turn fails**; do not tune thresholds to fit.
 - [ ] **Step 3: Tool-list experiment.**
-  - Temporarily declare `manage_fact` on every turn (a local, uncommitted change at `iris.swift` ~1253).
-  - Run the suite on Anthropic.
-  - Compare the sum of uncached plus cache-write tokens over six turns against Step 1's number.
-  - Record both in §3.1, and revert the local change.
+  - Add `IRIS_PERF_DECLARE_STATE_TOOLS=1`, read only in headless mode, which declares every state-gated tool (`manage_fact` and the peer tools) on every turn (`iris.swift` ~1253 and ~1385). Commit the flag with a test that it has no effect unless headless, so the experiment is reproducible.
+  - Run the suite on Anthropic with and without it.
+  - Compare the sum of uncached plus cache-write tokens over six turns.
+  - Record both in §3.1.
+- [ ] **Step 3b: Budget defaults.** From the suite's per-turn totals, estimate what a typical job turn now counts against the 200k/1M/3M defaults, and record in §3.1 whether they should change. The change itself, if any, is 5b's.
 - [ ] **Step 4:** Commit the measurements: `docs(spec): 5a measurements, pass criteria and the tool-list experiment`. PR B's description quotes the before/after table and the experiment's result, and says whether invariant 6 should change in 5b.
