@@ -1860,8 +1860,8 @@ struct JobLimits: Equatable, Sendable {
         // stepper still move every job that never asked for a timeout of its own.
         //
         // Zero (or less) takes the global default too, and deliberately does NOT mean "no timeout"
-        // the way a zero token budget does: a budget bounds context volume — tokens sent, not
-        // billed weight, which is a later slice (5a) — and a person may reasonably want that
+        // the way a zero token budget does: since 5a a budget bounds tokens sent, not billed
+        // weight — billed weight is a later slice — and a person may reasonably want that
         // unbounded, while this bounds a turn that has stopped responding — and a run nothing
         // can end is the failure the whole deliverable is about. Nothing configurable writes one;
         // a hand-edited policy can.

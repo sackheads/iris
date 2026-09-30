@@ -973,7 +973,7 @@ struct SettingsView: View {
                                 in: limit.range, step: limit.step)
                             .help(limit.help)
                     }
-                    Text("A stepper at its default uses the figure Iris ships with, and steps up or down from it; wind one down to zero to go back to the default. `/jobs` shows what each job has spent today against these numbers.")
+                    Text("A stepper at its default uses the figure Iris ships with, and steps up or down from it; wind one down to zero to go back to the default. `/jobs` shows what each job has sent today against these numbers.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

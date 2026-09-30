@@ -876,8 +876,8 @@ overrides any of them except the global daily budget.
 — is simply the default above. In a job's own `JobPolicy`, `0` is an answer rather than a gap, and
 it means two different things: for the token budgets and the breaker it means **unlimited**, and for
 `runTimeoutSeconds` it means **take the global default**. The reason for the split is what each
-number bounds: a budget bounds context volume — tokens sent, not billed weight, which is a later
-slice (5a) — which a person may reasonably want unbounded, while the timeout bounds a turn that has
+number bounds: since 5a a budget bounds tokens sent, not billed weight — billed weight is a later
+slice — which a person may reasonably want unbounded, while the timeout bounds a turn that has
 stopped responding, and a run nothing can end is the failure this whole section exists to prevent. A
 **negative** figure is not a third answer — nobody writes `-1` to mean unlimited — so it is read as
 the typo it is and takes the default, wherever it was written: a settings key, or a hand-edited
