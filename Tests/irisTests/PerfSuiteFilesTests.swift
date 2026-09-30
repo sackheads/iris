@@ -56,6 +56,24 @@ struct PerfSuiteFilesTests {
         }
     }
 
+    /// The real fact-store match schedule for six-turns.json, built the way `ScenarioRunner` now
+    /// builds it for a real run: a fresh in-memory store holding only this scenario's seeds, then
+    /// the store's own `search` run against each turn's prompt exactly as `iris.swift` calls it
+    /// (5a fix round 2, review finding #2). Before the reword, common words in the seeds ("The",
+    /// "ships") made turns 3 and 6 match too under FTS5's any-token search; the seeds now carry
+    /// only tokens distinctive enough that no other turn's prompt shares one.
+    @Test("six-turns.json's seeds match only turn 2's prompt, never any other turn (5a)")
+    func cachingSuiteFactScheduleIsDeterministic() throws {
+        let scenario = try Scenario.load(at: root.appendingPathComponent("perf/prompts/caching/six-turns.json").path)
+        let seeds = try #require(scenario.seedFacts)
+        let store = try FactStoreManager(inMemory: true)
+        for seed in seeds { try store.addFact(content: seed) }
+        let schedule = try scenario.turns.map { turn in
+            !(try store.search(query: turn.prompt, countsAsRetrieval: false)).isEmpty
+        }
+        #expect(schedule == [false, true, false, false, false, false])
+    }
+
     @Test("the second eagerness suite pairs bait prompts with tool-use controls (#138)")
     func eagerness2Categories() throws {
         let suite = try PerfSuite.load(at: root.appendingPathComponent("perf/suites/tool-eagerness-2.json").path)

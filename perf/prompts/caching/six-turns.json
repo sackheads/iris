@@ -1,5 +1,5 @@
 { "name": "six-turns", "clientMode": "real", "tier": "medium",
-  "seedFacts": ["The perf-probe project codename is BLUEHERON.", "BLUEHERON ships on Thursdays."],
+  "seedFacts": ["BLUEHERON ships Thursdays.", "BLUEHERON codename ZIRCONFINCH launches quarterly."],
   "turns": [
     { "prompt": "Say hello in five words." },
     { "prompt": "What do you know about the BLUEHERON codename? One sentence." },

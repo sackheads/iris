@@ -70,18 +70,22 @@ read afterwards without committing a secret.
 ## The caching suite
 
 `perf/suites/caching.json` runs one real-lane, rung-4 scenario (`perf/prompts/caching/six-turns.json`):
-a scripted six-turn conversation whose `seedFacts` are written to the fact store before turn 1, so
-the fact-store block a turn's system prompt carries is deterministic — turn 2's prompt matches a
-seeded fact and turn 4's matches none, so the block appears, changes and disappears on a known
-schedule. Turn 3 calls a tool, so it has more than one model round. This is the suite that measures
-today's prompt-cache behavior before the 5a behaviour change lands (see
-`docs/specs/2026-09-30-agency-cacheable-prompts.md` §3); it needs a configured provider and is not
-part of `perf/run.sh`'s default sweep, so run it manually: `iris --perf run perf/suites/caching.json`.
+a scripted six-turn conversation whose `seedFacts` are written, before turn 1, into a fresh
+in-memory fact store scoped to that run alone — never the developer's real store and never shared
+across repetitions — so the fact-store block a turn's system prompt carries is deterministic. The
+seeds carry only tokens distinctive enough that no prompt but turn 2's shares one, so the match
+schedule across the six turns is exactly `[false, true, false, false, false, false]`: only turn 2
+matches, and the block appears once, then disappears for good. Turn 3 calls a tool, so it has more
+than one model round. This is the suite that measures today's prompt-cache behavior before the 5a
+behaviour change lands (see `docs/specs/2026-09-30-agency-cacheable-prompts.md` §3); it needs a
+configured provider and is not part of `perf/run.sh`'s default sweep, so run it manually:
+`iris --perf run perf/suites/caching.json`.
 
-From 5a on, rungs 2 and 3 replay a system prompt that no longer holds the fact block or the peer
-count, so they measure the stable prefix only and are not comparable with pre-5a baselines.
-Anthropic's prompt tokens also jump across the boundary, since they now include cached tokens, so
-compare uncached tokens across it.
+Once 5a's request change lands (moving the fact block and peer count out of the system prompt and
+into a per-turn block — a later PR; this instrumentation PR changes no request byte), rungs 2 and 3
+will replay a system prompt that no longer holds either, so they will measure the stable prefix only
+and will not be comparable with pre-5a baselines. Anthropic's prompt tokens already jump across this
+PR's boundary, since they now include cached tokens, so compare uncached tokens across it.
 
 `--dump-requests <dir>` on `iris --perf run` writes each round's exact wire body — the bytes the
 currently configured provider client would send, reusing `AnthropicClient`/`OpenAIClient`'s own
