@@ -99,9 +99,9 @@ first differ.
 ## Reading a record
 
 `iris --perf report <run.json>` renders the Markdown summary. Per scenario: a row per rung with
-median and p90 wall-clock, median prompt tokens, median cache read tokens and median uncached
-tokens (prompt minus cache read minus cache write; an unknown cache read counts the whole prompt as
-uncached), the two ratios, the top five named spans
+median and p90 wall-clock, median prompt tokens, median cache read tokens, median cache write
+tokens, and median uncached tokens (prompt minus cache read minus cache write; an unknown cache
+read counts the whole prompt as uncached), the two ratios, the top five named spans
 (`guard.tier3`, `vibecop`, `assembly.userProfile`, ...), and the tool-call rate with a histogram, and, for prompts that declare `expectedTools`, the
 **unexpected tool-call rate**: turns that called any tool outside that list (bait prompts declare
 `[]`, controls declare their one tool, so an extra `read_file` next to a `set_workspace` counts).

@@ -56,9 +56,9 @@ struct PerfReportTests {
         let rung = PerfRungResult(rung: 1, repetitions: [rep], medianMs: 100, p90Ms: 100)
         r.scenarios[0].rungs.append(rung)
         let text = PerfReport.render(r)
-        // No cache read/write reported: cache read is "—" (unknown, not zero) and the whole
+        // No cache read/write reported: both render as "—" (unknown, not zero) and the whole
         // prompt counts uncached.
-        #expect(text.contains("| 1 | 1 | 100.0 | 100.0 | - | 42 | — | 42 | - |"))
+        #expect(text.contains("| 1 | 1 | 100.0 | 100.0 | - | 42 | — | — | 42 | - |"))
     }
 
     @Test("the first-token column is the median over the rung's successful turns, or a dash")
@@ -102,11 +102,20 @@ struct PerfReportTests {
         #expect(PerfReport.render(r).contains("missed expected tool in 100% of turns"))
     }
 
-    @Test("unknown cache read and uncached render as an em dash, never a hyphen or zero (spec §0.4)")
+    @Test("unknown cache read, write and uncached render as an em dash, never a hyphen or zero (spec §0.4)")
     func unknownCacheColumnsUseEmDash() {
         // sampleRecord()'s one call has no cache fields at all.
         let text = PerfReport.render(PerfRecordTests.sampleRecord())
-        #expect(text.contains("| 5 | 1 | 860.0 | 860.0 | - | 3000 | — | 3000 | - |"))
-        #expect(!text.contains("| 5 | 1 | 860.0 | 860.0 | - | 3000 | - | 3000 | - |"), "a hyphen must not stand in for the cache columns")
+        #expect(text.contains("| 5 | 1 | 860.0 | 860.0 | - | 3000 | — | — | 3000 | - |"))
+        #expect(!text.contains("| 5 | 1 | 860.0 | 860.0 | - | 3000 | - | - | 3000 | - |"), "a hyphen must not stand in for the cache columns")
+    }
+
+    @Test("the rung table carries a median cache write column (spec §0.5)")
+    func medianCacheWriteColumn() {
+        let text = PerfReport.render(PerfReportCacheTests.cachingRecord())
+        #expect(text.contains("| rung | n | median ms | p90 ms | first token ms | prompt tokens | cache read | cache write | uncached | failed |"))
+        // prompt tokens: median([1000,1200,1400,1500]) = 1300. cache read: median([900,1150,1100]) = 1100.
+        // cache write: median([250,200,300]) = 250. uncached: median([1000,50,50,100]) = 75.
+        #expect(text.contains("| 4 | 1 | 400.0 | 400.0 | - | 1300 | 1100 | 250 | 75 | - |"))
     }
 }

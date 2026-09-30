@@ -21,8 +21,8 @@ enum PerfReport {
         for s in r.scenarios {
             out.append("## \(s.name)  (\(s.category), \(s.lane))")
             out.append("")
-            out.append("| rung | n | median ms | p90 ms | first token ms | prompt tokens | cache read | uncached | failed |")
-            out.append("|---|---|---|---|---|---|---|---|---|")
+            out.append("| rung | n | median ms | p90 ms | first token ms | prompt tokens | cache read | cache write | uncached | failed |")
+            out.append("|---|---|---|---|---|---|---|---|---|---|")
             for rung in s.rungs {
                 let ok = rung.repetitions.filter { $0.error == nil }
                 let failed = rung.repetitions.count - ok.count
@@ -30,10 +30,11 @@ enum PerfReport {
                 let tokens = PerfStats.median(calls.compactMap { $0.promptTokens }.map(Double.init))
                 let firstToken = PerfStats.median(calls.compactMap(\.firstTokenMs))
                 let cacheRead = PerfStats.median(calls.compactMap { $0.cacheReadTokens }.map(Double.init))
+                let cacheWrite = PerfStats.median(calls.compactMap { $0.cacheWriteTokens }.map(Double.init))
                 let uncached = PerfStats.median(calls.compactMap(uncachedTokens))
-                // "—" for the two new cache columns specifically (spec §0.4: unknown cache is not
+                // "—" for the three cache columns specifically (spec §0.4: unknown cache is not
                 // zero and is never conflated with "-", which the pre-existing columns keep).
-                out.append("| \(rung.rung) | \(ok.count) | \(fmt(rung.medianMs)) | \(fmt(rung.p90Ms)) | \(firstToken.map { String(Int($0)) } ?? "-") | \(tokens.map { String(Int($0)) } ?? "-") | \(cacheRead.map { String(Int($0)) } ?? "—") | \(uncached.map { String(Int($0)) } ?? "—") | \(failed > 0 ? "\(failed) failed" : "-") |")
+                out.append("| \(rung.rung) | \(ok.count) | \(fmt(rung.medianMs)) | \(fmt(rung.p90Ms)) | \(firstToken.map { String(Int($0)) } ?? "-") | \(tokens.map { String(Int($0)) } ?? "-") | \(cacheRead.map { String(Int($0)) } ?? "—") | \(cacheWrite.map { String(Int($0)) } ?? "—") | \(uncached.map { String(Int($0)) } ?? "—") | \(failed > 0 ? "\(failed) failed" : "-") |")
             }
             out.append("")
             let cache = cacheTable(s)
