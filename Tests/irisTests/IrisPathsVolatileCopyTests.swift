@@ -73,24 +73,29 @@ struct IrisPathsVolatileCopyTests {
         #expect(!IrisPaths.isVolatileCopy)
         #expect(IrisPaths.standard.root.path == ("~/.iris" as NSString).expandingTildeInPath)
         #expect(IrisPaths.default.root.path != IrisPaths.standard.root.path)
-        #expect(IrisPaths.default.root.lastPathComponent == "iris-tests-home-\(ProcessInfo.processInfo.processIdentifier)")
+        #expect(IrisPaths.default.root.lastPathComponent == String(ProcessInfo.processInfo.processIdentifier))
+        // Its parent is ours alone, never `$TMPDIR` itself: the sweep lists that parent, and
+        // listing a crowded `$TMPDIR` stalled every suite behind the initializer.
+        #expect(IrisPaths.default.root.deletingLastPathComponent().standardizedFileURL.path
+                == IrisPaths.testHomesDir.standardizedFileURL.path)
+        #expect(IrisPaths.testHomesDir.standardizedFileURL.path
+                != FileManager.default.temporaryDirectory.standardizedFileURL.path)
         #expect(FileManager.default.fileExists(atPath: IrisPaths.default.configDir.path),
                 "the test home has the real layout, so a manager's first write does not fail on a missing directory")
     }
 
     /// The sweep takes homes whose process is gone and nothing else: not a live run's, not this
-    /// process's, and not an unrelated directory that shares the prefix.
+    /// process's, and not an entry that is not a pid.
     @Test("stale test homes are the dead pids' only")
     func staleTestHomes() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-304-sweep-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
         let me = ProcessInfo.processInfo.processIdentifier
-        for name in ["iris-tests-home-111", "iris-tests-home-222", "iris-tests-home-\(me)",
-                     "iris-tests-home-notapid", "iris-tests-other-333"] {
+        for name in ["111", "222", "\(me)", "notapid", "iris-tests-other-333"] {
             try FileManager.default.createDirectory(at: dir.appendingPathComponent(name), withIntermediateDirectories: true)
         }
         let stale = IrisPaths.staleTestHomes(in: dir, isAlive: { $0 == 222 }).map(\.lastPathComponent)
-        #expect(stale == ["iris-tests-home-111"])
+        #expect(stale == ["111"])
     }
 
     /// `kill(0, 0)` probes our own process group and a negative pid probes a group: neither is a

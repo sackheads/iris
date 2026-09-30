@@ -29,19 +29,24 @@ struct IrisPaths: Sendable {
     /// next run's sweep.
     private static let processDefault: IrisPaths = {
         guard NSClassFromString("XCTestCase") != nil else { return standard }
-        let tmp = FileManager.default.temporaryDirectory
-        for stale in staleTestHomes(in: tmp, isAlive: IrisDefaults.isProcessAlive) {
+        for stale in staleTestHomes(in: testHomesDir, isAlive: IrisDefaults.isProcessAlive) {
             try? FileManager.default.removeItem(at: stale)
         }
-        let home = IrisPaths(root: tmp.appendingPathComponent(
-            "\(testHomePrefix)\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true))
+        let home = IrisPaths(root: testHomesDir.appendingPathComponent(
+            String(ProcessInfo.processInfo.processIdentifier), isDirectory: true))
         try? FileManager.default.removeItem(at: home.root)   // a recycled pid's leftovers
         try? home.ensureDirectories()
         atexit { try? FileManager.default.removeItem(at: IrisPaths.processDefault.root) }
         return home
     }()
 
-    static let testHomePrefix = "iris-tests-home-"
+    /// One directory of our own for the test homes, each named by its pid. The sweep must never
+    /// list `$TMPDIR` itself: `processDefault` is a `static let`, so every thread touching
+    /// `default` parks until it returns, and a crowded temp directory (212k entries on one
+    /// machine, ~8s in `contentsOfDirectory(atPath:)`) stalled the whole parallel run past
+    /// unrelated suites' wall-clock bounds. This one holds an entry per test process at most.
+    static let testHomesDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("iris-tests-homes", isDirectory: true)
 
     /// Test homes under `directory` whose process is gone — a run that crashed or was killed
     /// before its atexit. This process and live runs are skipped.
@@ -49,9 +54,7 @@ struct IrisPaths: Sendable {
         let me = ProcessInfo.processInfo.processIdentifier
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         return names.sorted().compactMap { name in
-            guard name.hasPrefix(testHomePrefix),
-                  let pid = pid_t(name.dropFirst(testHomePrefix.count)),
-                  pid != me, !isAlive(pid) else { return nil }
+            guard let pid = pid_t(name), pid != me, !isAlive(pid) else { return nil }
             return directory.appendingPathComponent(name, isDirectory: true)
         }
     }
