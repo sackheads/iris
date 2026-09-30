@@ -50,7 +50,7 @@ poll (script at a cadence) ─┘
 
 A conversation with `isPinned`, kept at the top of the list, never auto-renamed, never deleted by `/clear`. It is not a different engine. It differs from other conversations in three ways:
 
-- **Briefing.** Its system prompt gets a `<recent_activity>` block: the last five notable ledger events (failures first), one line each. Capped, so it cannot grow.
+- **Briefing.** Each turn's context gets a `<recent_activity>` block: the last five notable ledger events (failures first), one line each. Capped, so it cannot grow. It rides the turn-context block of deliverable 5a, not the system prompt, so a changing briefing does not cost a cache miss on the whole history.
 - **Tools.** `list_jobs`, `get_job_run(id)`, `search_conversations(query)`, `read_conversation(id, range)`, declared only in the pinned conversation (invariant 6: no dead-weight declarations on other turns). Subagent and evaluator scratch conversations are excluded from search and read. Text read this way passes the InjectionGuard tiers under the tool-output tag with tool-call markers stripped, exactly as a `run_command` result does.
 - **Anchoring.** Memory reflection and the daily digest job report here.
 
@@ -80,7 +80,9 @@ Lands after `#163` and `#177`.
 3. **Runtime.** Gate execution, background profile, fail-closed approvals with proposal cards, budgets, breaker, overlap policy, retry and pause, sleep assertion and `catchUp`, `iris --run-job`. — landed: see `docs/specs/2026-09-21-agency-runtime.md` and `docs/jobs.md`; final PR pending
 4. **Watches.** Fold `WatcherManager` onto the trigger model; quiet window; self-write filter; poll trigger. — landed: see `docs/specs/2026-09-22-agency-watches.md` and `docs/jobs.md` (the poll trigger landed with deliverable 3)
 4½. **Job grants.** `mounts` and `network` on a mutating job; the file tools allowed inside the grant, through a descriptor walk; the isolated network (host still reachable); credential stores refused by name; `set_workspace` refused unattended; re-checked every fire. — landed: see `docs/specs/2026-09-23-agency-job-grants.md` and `docs/jobs.md` (Grants)
-5. **Main conversation.** Pin, briefing, tools, anchoring. After `#163` and `#177`.
+5. **Main conversation**, in two parts. After `#163` and `#177`.
+   - **5a. Cacheable, measurable prompts.** Sorted-key encoding; per-turn content (the fact block, the peer count) moved from the system prompt to a turn-context block that is sent but never saved; cache read and write counts per provider; a multi-turn perf rung. First, because the briefing is volatile per-turn content and the survey found the cache already failing unmeasured: see `docs/specs/2026-09-30-agency-cacheable-prompts.md`.
+   - **5b. The pinned conversation.** Pin rules, briefing (in 5a's turn-context block), tools, `/new` (archive, summarize, fresh pin), anchoring.
 6. **Native surfaces.** Notifications, status item, URL scheme, run log view.
 
 Each is an issue with its own spec and measured verification; this document is the epic they hang from.
