@@ -37,6 +37,22 @@ enum BinaryResolver {
         return (loginShellPath + common).filter { seen.insert($0).inserted }
     }
 
+    /// Merges the login-shell PATH (`defaultSearchDirs()`) ahead of `base`'s own PATH, so every
+    /// host command spawner sees pyenv/nvm/Homebrew shims that only `.zprofile`/`.zshrc` set up
+    /// (#69) without spawning a login shell per command (which prints profile banners and can have
+    /// side effects). Order is preserved and duplicates are removed, keeping the first occurrence.
+    /// Other keys pass through unchanged.
+    static func commandEnvironment(base: [String: String]) -> [String: String] {
+        let loginPath = defaultSearchDirs()
+        guard !loginPath.isEmpty else { return base }
+        let basePath = base["PATH"]?.components(separatedBy: ":").filter { !$0.isEmpty } ?? []
+        var seen: Set<String> = []
+        let merged = (loginPath + basePath).filter { seen.insert($0).inserted }
+        var env = base
+        env["PATH"] = merged.joined(separator: ":")
+        return env
+    }
+
     /// Resolution order: absolute/relative path as given > search dirs.
     ///
     /// `relativeTo` is the directory a relative command resolves against. It defaults to the
