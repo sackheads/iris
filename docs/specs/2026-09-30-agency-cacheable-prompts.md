@@ -42,11 +42,11 @@ The turn-context part is its own text block on Anthropic (`AnthropicClient.swift
 
 The fact-store heading and anything else telling the model where its memory appears (`# Mid-Term Fact Store Memory (JIT Context)`, the `manage_fact` description, the SYSTEM.md or memory docs if they name the system prompt as its location) is searched and updated to say "this turn's context" (invariant 9). `docs/markdown_memory_design.md`, `docs/headless_profiling.md` and README's memory section are searched for the same claim. The heading text inside the block stays as it is, so the model's existing guidance still names it. Dated plans and reviews (`docs/superpowers/plans/2026-09-17-performance-evaluation-suite.md`, `docs/reviews/2026-09-17-tool-eagerness-analysis.md`) describe the system prompt as it was and are left as history.
 
-The perf ladder's rungs 2 and 3 replay the first request's captured system prompt (`PerfLadder.swift` ~22–38). From 5a on that prompt no longer holds the fact block or the peer count, so those rungs measure the stable prefix only and are not comparable with pre-5a baselines; `perf/README.md` says so. Anthropic's recorded prompt tokens also jump across the 5a boundary (they now include cached tokens), so `--perf compare` across it compares uncached tokens, and the report says why.
+The perf ladder's rungs 2 and 3 replay the first request's captured system prompt (`PerfLadder.swift` ~22–38). From 5a on that prompt no longer holds the fact block or the peer count, so those rungs measure the stable prefix only and are not comparable with pre-5a baselines; `perf/README.md` says so. Anthropic's recorded prompt tokens also jump across the 5a boundary (they now include cached tokens). `--perf compare` still gates on prompt tokens, the size metric a regression inside the cached prefix shows up in. A pair that straddles the boundary (one record carries cache counts, the other does not) keeps the prompt-token row but marks it informational and prints a note saying why. When both records carry cache counts, compare adds an uncached-prompt-token row, informational only, because it swings with cache warmth rather than with what was sent. A pair where only one side ran the tool-list experiment (§0.6) gets the same treatment: a note, and an informational prompt-token row.
 
 ## 3. Verification
 
-**The `caching` suite** (`perf/suites/caching.json`, run at rung 4, a full Iris turn with guards off): a scripted conversation of six user turns on the real lane, run once per configured provider. Scenarios gain `seedFacts` so the fact-store turns are deterministic. Turn 2 matches the fact store and turn 4 does not, so the block appears, changes and disappears. Turn 3 calls a tool, so it has more than one round. Each round records prompt, cache read, cache write and uncached tokens.
+**The `caching` suite** (`perf/suites/caching.json`, run at rung 4, a full Iris turn with guards off): scripted multi-turn conversations on the real lane, run once per configured provider. Scenarios gain `seedFacts` so the fact-store turns are deterministic, and `PerfSuiteFilesTests` pins each one's match schedule. `six-turns`: turn 2 matches the fact store and turn 4 does not, so the block appears, changes and disappears; turn 3 calls a tool, so it has more than one round. `every-turn-facts`: each of six turns matches its own seed, so the block changes every turn. `tool-heavy`: five turns, where turns 1 and 3 match different seeds and turn 2 runs a dozen commands one at a time, so turn 2 spans more than the API's 20-block lookback and turns 3 and 4 read only through the explicit end-of-turn-k−2 marker (§1). Each round records prompt, cache read, cache write and uncached tokens.
 
 **Baseline first.** The suite runs on main after 5a's instrumentation PR (which changes no request byte) and before any behaviour change lands, and the spec records the numbers in §3.1 below. That turns the "Why" section's inference into a measurement.
 
@@ -55,11 +55,11 @@ The perf ladder's rungs 2 and 3 replay the first request's captured system promp
 **Pass criteria, Anthropic, turns 3–6.** Pass or fail is decided by checks that need only usage fields:
 - at each turn's first round, cache read ≥ the previous turn's first-round cache read (the prefix never collapses);
 - within a turn, each round's read ≥ the previous round's read + write;
-- at each turn's first round, uncached tokens ≤ turn k−1's output tokens plus the tool results it read plus a fixed allowance for two entries, bounded generously.
+- at each turn's first round, cache write + uncached tokens ≤ turn k−1's output tokens plus the tool results it read plus a fixed allowance for two entries, bounded generously. Uncached alone is no test: with a marker on the last message, it is the few tokens after that marker by construction (2–4 in every run), and what turn k−1 left uncached shows up as this turn's write.
 
 The 95% figure is reported alongside them from exact sizes: the suite writes each round's request body, and the prefix through turn k−2 is counted with the provider's token-counting endpoint. Read ≥ 95% of that prefix is the target. The dumps are also what gets diffed to find a miss. Gemini and OpenAI: the same rung reports their automatic-cache counts; they are recorded, not graded, because Iris does not control those caches.
 
-**Tool-list experiment:** the suite runs twice more on Anthropic, once as shipped and once with `manage_fact` declared on every turn. The report compares total uncached plus cache-write tokens across the six turns. If always-declared is cheaper, the plan for 5b amends invariant 6 with the numbers; if not, invariant 6 stands with this measurement cited.
+**Tool-list experiment:** the suite runs twice more on Anthropic, once as shipped and once with the state-gated tools (`manage_fact` and the peer tools) declared on every turn (`IRIS_PERF_DECLARE_STATE_TOOLS=1`). Perf pins the peer count to 0, so the peer tools never flap in either run; under the switch they are declared on every turn, with no `# Active Sessions` block. The report compares total uncached plus cache-write tokens across each conversation. That is cost evidence only: if always-declared is cheaper, the plan for 5b weighs amending invariant 6 with the numbers; if not, invariant 6 stands with this measurement cited. Tool eagerness (#132), the other half of invariant 6, is not measured here.
 
 **Unit tests:**
 1. Two encodings of the same request (built separately, not the same value twice) are byte-identical, for each client.
@@ -112,34 +112,54 @@ Reading (Anthropic): every non-fact turn read 97–100% of its prompt. The fact 
 
 #### Scenario: every turn matches a different fact
 
-`perf/prompts/caching/every-turn-facts.json`: six turns, each matching exactly its own seeded fact (pinned by `PerfSuiteFilesTests`), so the fact block changes on every turn as it does with a real fact store. Anthropic, `claude-opus-5-5`, 2026-10-01. Read / write / uncached per round:
+`perf/prompts/caching/every-turn-facts.json`: six turns, each matching exactly its own seeded fact (pinned by `PerfSuiteFilesTests`), so the fact block changes on every turn as it does with a real fact store. Anthropic, `claude-opus-5-5`, 2026-10-01. Read / write / uncached per round. The baseline record is `gitDirty: true` at `61c83d6`: the scenario file did not exist at that commit, so the run carried it as an uncommitted file; nothing else in the tree differed.
 
 | | rep | t1 | t2 | t3.0 | t3.1+ | t4 | t5 | t6 |
 |---|---|---|---|---|---|---|---|---|
 | baseline `61c83d6` | 1 | 0/19691/4 | 9006/10771/4 | 9006/10889/4 | 19895/141/63 | 9006/11244/4 | 9006/11354/4 | 9006/11626/4 |
 | after `ad88d84` | 1 | 19456/216/4 | 19456/303/4 | 19610/275/4 | 19885/149/2, 20034/199/2 | 19724/707/4 | 20277/268/4 | 20391/321/4 |
+| after the marker fix `[[RERUN: commit]]` | 1 | [[RERUN]] | [[RERUN]] | [[RERUN]] | [[RERUN]] | [[RERUN]] | [[RERUN]] | [[RERUN]] |
 
-Input cost of the six-turn conversation at the pricing above: **baseline $0.392 / $0.358 (two repetitions), after 5a $0.044 / $0.044: about 88% less.** Before, every turn re-wrote ~11k tokens behind the changed system prompt; after, each turn writes only its tail.
+Input cost of the six-turn conversation at the pricing above: **baseline $0.392 / $0.358 (two repetitions), after 5a (`ad88d84`) $0.044 / $0.044: about 88% less.** After the marker fix: [[RERUN: cost, both repetitions]]. Before, every turn re-wrote ~11k tokens behind the changed system prompt; after, each turn writes only its tail.
+
+Behaviour, one repetition each, so weak evidence: in the baseline run, turn 6 was confused by the changing fact block in the system prompt ("My last correction needs a correction of its own…"), while the after run used each turn's fact correctly. That is consistent with §0.2's move of the block to the user role not hurting, and no more than that.
+
+#### Scenario: a tool-heavy turn between two fact turns
+
+`perf/prompts/caching/tool-heavy.json`: turn 1 and turn 3 match different seeds, turn 2 runs twelve commands one at a time, turns 4–5 are plain. It exists for §1's marker placement: under the old placement, turn 3's read point (the end of turn 1) sat more than 20 blocks before the penultimate marker, out of the lookback's reach, so turn 3 re-wrote the whole history. Anthropic, `claude-opus-5-5`, [[RERUN: commit, date]]. Read / write / uncached per first round:
+
+| rep | t1 | t2 (first / last round) | t3 | t4 | t5 |
+|---|---|---|---|---|---|
+| 1 | [[RERUN]] | [[RERUN]] | [[RERUN]] | [[RERUN]] | [[RERUN]] |
+| 2 | [[RERUN]] | [[RERUN]] | [[RERUN]] | [[RERUN]] | [[RERUN]] |
+
+Pass: turn 3's first-round read ≥ turn 2's first-round read, and turn 3's write is about one turn's tail (turn 2's rounds plus turn 3's entry), not the whole history. [[RERUN: result]]
 
 #### After 5a: pass criteria (§3), Anthropic, turns 3–6
 
-Run at `ad88d84`, both scenarios, 2 repetitions each.
+Run at `ad88d84`, `six-turns` and `every-turn-facts`, 2 repetitions each, before the marker fix (§1). [[RERUN: re-check every criterion at the marker-fix commit, all three scenarios]]
 
-- **Within a turn, each round's read ≥ the previous round's read + write:** holds on every multi-round turn (e.g. 19610+275 → 19885, 19885+149 → 20034). This is Task 9's `tool_result` breakpoint working.
-- **First-round uncached ≤ the allowance:** 2–4 tokens on every round.
-- **Read ≥ 95% of the prefix through turn k−2:** holds as a lower bound without counting the prefix. Every first round reads ≥ 96% of its whole prompt, and the prompt is larger than that prefix.
 - **First-round read never falls turn over turn:** holds in every-turn-facts. It **fails once in six-turns**, repetition 2, turn 3 (19602 → 19241). The cause is the tool list: `manage_fact` is declared on the fact turn (2) and dropped on turn 3, so turn 3 falls back to turn 1's cached tool set. The experiment below removes the failure.
+- **Within a turn, each round's read ≥ the previous round's read + write:** holds on every multi-round turn (e.g. 19610+275 → 19885, 19885+149 → 20034). The baseline already met this, so it is not evidence for the `tool_result` marker. That evidence is round 3.1's uncached tokens: 311 and 53 in the baseline's two repetitions, 2 after, because the tool results now sit inside the marked prefix instead of after it.
+- **First-round write + uncached ≤ the allowance:** [[RERUN: per-turn write + uncached against turn k−1's output plus tool results]]. Uncached alone was 2–4 tokens on every round, which this criterion no longer reads (§3).
+- **The read reaches turn k−2:** the evidence is the first-round read rising turn over turn as history grows, e.g. every-turn-facts 19456 (t2) → 19610 (t3) → 19724 (t4): each turn reads what the turn before it added. The earlier claim here, that every first round reads ≥ 96% of its whole prompt, was true but proved nothing: history is about 5% of a ~20k prompt, so the tools and system alone clear 95%. The prefix-through-k−2 counts from the token-counting endpoint are [[RERUN: counted, or state not counted]].
 
 #### Tool-list experiment (§0.6)
 
-`IRIS_PERF_DECLARE_STATE_TOOLS=1`, same commit and suite. Perf runs pin the peer count to 0, so this measures `manage_fact` only.
+`IRIS_PERF_DECLARE_STATE_TOOLS=1`, `ad88d84`, `six-turns`. At that commit the switch covered `manage_fact` only. From the marker-fix commit on it also declares the peer tools (§0.6); perf pins the peer count to 0, so the peer tools are never exercised as flapping, but they are declared on every turn under the switch and add to its prompt. [[RERUN: both arms at the marker-fix commit]]
 
 | six-turns, rep 1 | t1 | t2 (fact) | t3 | t4–t6 first-round reads |
 |---|---|---|---|---|
 | gated (as shipped) | 0/19241/4 | 9006/**10807**/4 | 19241/240/4 | 20151, 20423, 20498 |
-| declared every turn | 9006/10564/4 (new tool set, cold) | 19570/**226**/4 | 19590/234/4 | 20436, 20741, 20821 |
+| declared every turn | 9006/10564/4 | 19570/**226**/4 | 19590/234/4 | 20436, 20741, 20821 |
 
-With the declaration stable, first-round reads never fall and the fact turn writes 226 tokens instead of 10,807. A state-gated tool costs one ~10k-token cache write each time the tool list changes to a combination not already cached, about $0.05 at the pricing above. Declaring it every turn costs its schema on every request, mostly as cached reads at 0.05×. **On Anthropic, stable declarations are cheaper than gating.** That is the evidence for amending invariant 6 for Anthropic, which #314's append-only work needs anyway. Gemini and OpenAI were not measured after 5a (the primary provider was Anthropic for these runs).
+The declared arm's turn 1 read 9006, not 0: its tool set (the shipped list plus `manage_fact`) was already cached by the gated arm's fact turn, so the tools were warm. The system prompt missed because the perf harness puts a per-run temp-home path into the skills' `**Path:**` lines, so every run's system prompt differs from the last run's. Every run's turn 1 therefore re-writes the system prompt, whichever arm it is in.
+
+Six-turn totals, uncached + write: repetition 1, gated **31,479** vs declared **12,179**; repetition 2, gated **1,350** vs declared **1,256**. Most of repetition 1's gap is turn 1, which the gated arm ran cold because it ran first (19,241 written vs 10,564), so run order inflates that headline; the rest is the fact turn's re-write (10,807 vs 226). In repetition 2 the arms nearly tie, consistent with the gated arm's fact-turn tool set still being cached from repetition 1, within the TTL. Neither repetition isolates the flap cost from run order; the rerun should alternate or warm both arms first. After the marker fix: [[RERUN: totals per repetition, both arms]].
+
+With the declaration stable, first-round reads never fall and the fact turn writes 226 tokens instead of 10,807. A state-gated tool costs one ~10k-token cache write each time the tool list changes to a combination not already cached, about $0.05 at the pricing above. Declaring it every turn costs its schema on every request, mostly as cached reads at 0.05×. **On Anthropic, at these sizes, stable declarations cost less than gating.** That is cost evidence for 5b's decision on invariant 6, which #314's append-only work needs anyway; it says nothing about tool eagerness (#132), which this suite does not measure.
+
+Gemini after 5a: not run. The plan's Gemini after-measurement step was skipped because these runs used Anthropic as the primary provider; Gemini has only its baseline above, and OpenAI has none.
 
 #### Budget defaults (§0.4)
 
