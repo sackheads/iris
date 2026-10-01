@@ -162,3 +162,65 @@ struct AnthropicCacheBreakpointTests {
         #expect(m.total == 4)
     }
 }
+
+/// The whole request, end to end: consecutive engine turns with no fact match and no peers,
+/// rendered by the client that sends them. Everything through the end of the previous turn must be
+/// the same bytes, or the read point (§1's marker (b)/(c)) has nothing to match (5a final review).
+@MainActor
+@Suite("Anthropic whole-request prefix across turns (5a)")
+struct AnthropicWholeRequestPrefixTests {
+    private func body(_ request: GeminiRequest) throws -> [String: Any] {
+        let urlRequest = try AnthropicClient.makeURLRequest(request: request, model: "m", apiKey: "k", stream: false)
+        let data = try #require(urlRequest.httpBody)
+        return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    private func json(_ value: Any) throws -> Data {
+        try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed])
+    }
+
+    /// The markers move by design (each request marks its own turn boundaries), and a marker does
+    /// not change the cached content, so messages are compared with `cache_control` removed.
+    private func unmarked(_ messages: [[String: Any]]) -> [[String: Any]] {
+        messages.map { message in
+            var m = message
+            if let content = m["content"] as? [[String: Any]] {
+                m["content"] = content.map { block in
+                    var b = block
+                    b.removeValue(forKey: "cache_control")
+                    return b
+                }
+            }
+            return m
+        }
+    }
+
+    @Test("tools, system and every message through the previous turn are byte-identical turn to turn")
+    func consecutiveTurnsSharePrefix() async throws {
+        let app = AppState()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [],
+                                streamResponses: false, factStore: try FactStoreManager(inMemory: true),
+                                protectionEnabled: false, sessionPeerCount: 0)
+        for prompt in ["first question", "second question", "third question"] {
+            await engine.processInput(prompt, source: "UI", conversationId: id)
+        }
+        let requests = client.requests
+        try #require(requests.count == 3)
+        let bodies = try requests.map(body)
+        for k in 1..<bodies.count {
+            let before = bodies[k - 1], after = bodies[k]
+            #expect(after["tools"] != nil)
+            #expect(try json(before["tools"] as Any) == json(after["tools"] as Any), "tools, turn \(k + 1)")
+            #expect(try json(before["system"] as Any) == json(after["system"] as Any), "system, turn \(k + 1)")
+            let prev = try #require(before["messages"] as? [[String: Any]])
+            let cur = try #require(after["messages"] as? [[String: Any]])
+            // The previous request held turns 1..k; this one adds turn k's reply and the new entry.
+            #expect(cur.count == prev.count + 2)
+            let n = prev.count
+            #expect(try json(unmarked(prev)) == json(unmarked(Array(cur.prefix(n)))), "messages[0..<\(n)], turn \(k + 1)")
+        }
+    }
+}
