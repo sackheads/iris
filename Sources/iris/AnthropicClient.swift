@@ -75,11 +75,25 @@ struct AnthropicClient {
             }
         }
 
-        // Cache breakpoints for conversation history.
-        // Marking the penultimate message's last block caches all prior history as a stable prefix.
-        // Marking the current (last) message's last block seeds the cache for the next turn.
-        // A `tool_result` is marked too: skipping it wrote the entry at the assistant's `tool_use`
-        // instead, so the results were re-sent uncached the next round and the next turn (5a §1).
+        // Cache breakpoints. The API allows four `cache_control` markers, and a request reads
+        // the cache only at a marked block or within the 20 blocks before one. The four are:
+        //  (a) system: the prefix of tools + system. Tools render before system, so this one
+        //      marker covers both; no separate last-tool marker (the tool takes it only when
+        //      there is no system block).
+        //  (b) the last message before the previous turn's entry, i.e. the end of turn k-2. This
+        //      is the read point: turn k-1 sent its own entry with a turn-context block that is
+        //      gone now, so nothing from turn k-1 onward can match, and the end of turn k-2 is
+        //      the longest prefix that can. Turn k-1 wrote it with marker (c). It is explicit
+        //      because a tool-heavy turn k-1 puts it beyond the 20-block lookback from (c).
+        //  (c) the last message before this turn's entry, i.e. the end of turn k-1. It misses
+        //      now and is written, so that the next turn reads it as its (b).
+        //  (d) the last message: each round within a turn reads the previous round's (d) and
+        //      writes its own. A `tool_result` is marked like any block; skipping it put the
+        //      write at the `tool_use` and re-sent the results uncached (5a §1).
+        // A turn's entry is a `user` message with at least one non-`tool_result` block: typed
+        // input, a system event, a reprompt. A mid-turn steer that rides its own entry qualifies
+        // too, which moves (b)/(c) to the steer; that costs at most one turn of reuse, and only
+        // on the turn after a steer. With fewer than two entries the missing markers are skipped.
         let ephemeral: [String: Any] = ["cache_control": ["type": "ephemeral"]]
         func markLastContentBlock(_ messages: inout [[String: Any]], at index: Int) {
             var msg = messages[index]
@@ -89,11 +103,23 @@ struct AnthropicClient {
                 messages[index] = msg
             }
         }
-        if anthropicMessages.count >= 2 {
-            markLastContentBlock(&anthropicMessages, at: anthropicMessages.count - 2)
+        let turnEntries = anthropicMessages.indices.filter { i in
+            guard anthropicMessages[i]["role"] as? String == "user",
+                  let content = anthropicMessages[i]["content"] as? [[String: Any]] else { return false }
+            return content.contains { $0["type"] as? String != "tool_result" }
+        }
+        var marked = Set<Int>()
+        if turnEntries.count >= 2, turnEntries[turnEntries.count - 2] > 0 {
+            marked.insert(turnEntries[turnEntries.count - 2] - 1)   // (b)
+        }
+        if let current = turnEntries.last, current > 0 {
+            marked.insert(current - 1)                              // (c)
         }
         if !anthropicMessages.isEmpty {
-            markLastContentBlock(&anthropicMessages, at: anthropicMessages.count - 1)
+            marked.insert(anthropicMessages.count - 1)              // (d)
+        }
+        for index in marked.sorted() {
+            markLastContentBlock(&anthropicMessages, at: index)
         }
 
         var body: [String: Any] = [
@@ -145,7 +171,11 @@ struct AnthropicClient {
                 ])
             }
             if !anthropicTools.isEmpty {
-                anthropicTools[anthropicTools.count - 1]["cache_control"] = ["type": "ephemeral"]
+                // Marker (a) sits on system, which covers the tools; only without one do the
+                // tools need their own.
+                if systemPrompt.isEmpty {
+                    anthropicTools[anthropicTools.count - 1]["cache_control"] = ["type": "ephemeral"]
+                }
                 body["tools"] = anthropicTools
             }
         }
