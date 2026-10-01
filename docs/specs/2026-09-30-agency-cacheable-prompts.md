@@ -174,7 +174,17 @@ Six-turn totals, uncached + write: repetition 1, gated **31,505** vs declared **
 
 With the declaration stable, first-round reads never fall and the fact turn writes 226 tokens instead of 10,807. A state-gated tool costs one ~10k-token cache write each time the tool list changes to a combination not already cached, about $0.05 at the pricing above. Declaring it every turn costs its schema on every request, mostly as cached reads at 0.05×. **On Anthropic, at these sizes, stable declarations cost less than gating whenever the gated tool would flap; where it would not, this suite cannot tell the two apart.** That is cost evidence for 5b's decision on invariant 6, which #314's append-only work needs anyway; it says nothing about tool eagerness (#132), which this suite does not measure.
 
-Gemini after 5a: not run. The plan's Gemini after-measurement step was skipped because these runs used Anthropic as the primary provider; Gemini has only its baseline above, and OpenAI has none.
+#### Gemini, before and after (recorded, not graded)
+
+`gemini-3.8-flash`, 2026-10-01: baseline at `61c83d6` (every-turn-facts and tool-heavy; six-turns' baseline is above) and after at `5a59a4c`, two repetitions each. Share of prompt tokens served from Gemini's implicit cache over the whole conversation:
+
+| scenario | baseline rep 1 / rep 2 | after rep 1 / rep 2 |
+|---|---|---|
+| every-turn-facts | 0% / 0% | 51% / 3% |
+| tool-heavy | 14% / 9% | 56% / 5% |
+| six-turns | (baseline above: no turn-to-turn reuse) | 7% / 22% |
+
+Gemini's implicit cache reuses whole ~4k-token chunks (reads of 4,039 / 8,102 / 12,137 / 16,112) and is best-effort. 5a gives it a stable prefix to match, and when it does match the effect is large (every-turn-facts 0% → 51%), but it is erratic from one repetition to the next (51% then 3%). Guaranteed reuse on Gemini needs explicit `cachedContent` (§4). OpenAI was not measured.
 
 #### Budget defaults (§0.4)
 
