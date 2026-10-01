@@ -135,6 +135,157 @@ actor IrisEngine {
     var factStore: FactStoreManager { injectedFactStore ?? .shared }
 
     var systemPrompt: Content!
+
+    /// Everything that decides what the guard OUTPUTS for a given file's content, besides the
+    /// content itself (5a Task 7). The cached text below is guard output, not raw file content, so
+    /// a profile guarded under one configuration must never be served under another — flipping
+    /// `protectionEnabled`, or a guard tier model appearing/disappearing on disk mid-process, has
+    /// to miss the cache exactly like editing the file does. Mirrors the fields
+    /// `InjectionGuard.classify`'s own cache key uses, computed the same way (`ConfigManager.shared`
+    /// plus `IrisPaths.default.modelsDir`), so this cache can never disagree with what the guard
+    /// would actually do for the current config.
+    private struct GuardTextStamp: Equatable {
+        let modified: Date?
+        let protectionEnabled: Bool
+        let tier2: InjectionGuard.Tier2Provisioning
+        let tier3: InjectionGuard.Tier3Provisioning
+    }
+
+    private func currentGuardTextStamp(modified: Date?) -> GuardTextStamp {
+        let enabled = protectionEnabled ?? ConfigManager.shared.enableAdvancedPromptInjectionProtection
+        let modelsDir = IrisPaths.default.modelsDir
+        let tier2 = InjectionGuard.tier2Provisioning(modelName: ConfigManager.shared.promptGuardCoreMLModel, modelsDir: modelsDir)
+        let tier3 = InjectionGuard.tier3Provisioning(engine: ConfigManager.shared.promptGuardEngine,
+                                                      modelName: ConfigManager.shared.promptGuardModel,
+                                                      modelsDir: modelsDir)
+        return GuardTextStamp(modified: modified, protectionEnabled: enabled, tier2: tier2, tier3: tier3)
+    }
+
+    /// Modification date for a guarded file, following symlinks (5a Task 7) — an
+    /// `AGENTS.md -> CLAUDE.md` link must refresh when its TARGET is edited, not only when the link
+    /// itself is re-pointed. `FileManager.attributesOfItem(atPath:)` is `lstat` and stops at the
+    /// link, which is why this goes through `resolvingSymlinksInPath()` + `resourceValues` instead
+    /// (#307 relies on exactly that distinction elsewhere). `nil` for a missing or unreadable file
+    /// is itself a valid, stable stamp value, not an error to retry.
+    private static func fileModificationDate(atPath path: String) -> Date? {
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        return try? resolved.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+    }
+
+    /// `USER.md`'s guard-output cache (5a Task 7). `path` is tracked alongside the stamp, not just
+    /// the stamp alone, so a change to WHERE `MemoryManager` reads USER.md from — never happens
+    /// today — still misses the cache rather than serving another path's guarded text.
+    /// `invalidateUserProfile()` clears this for the engine that ran `update_user_profile`; the
+    /// mtime comparison in `guardedUserProfileText()` is what notices the file changed for every
+    /// OTHER engine reading the same USER.md — a subagent, an evaluator, or another conversation's
+    /// main engine — none of which saw that tool call and none of which this method can reach.
+    private var profileStamp: (path: String, stamp: GuardTextStamp)?
+    private var cachedProfileText: String?
+
+    /// `AGENTS.md`'s guard-output cache, per workspace path (5a Task 7). A workspace path absent
+    /// from `agentsStamp` means "not checked yet, or the file was missing last time" — both compare
+    /// unequal to any stamp with a real `modified` date, so a file that newly appears is read on the
+    /// very next check.
+    private var agentsStamp: [String: GuardTextStamp] = [:]
+    private var cachedAgentsText: [String: String] = [:]
+
+    /// The fully composed system prompt (base + USER.md + AGENTS.md), per workspace (5a Task 7).
+    /// Keyed on the three already-deduplicated inputs rather than re-deriving a stamp of its own:
+    /// concatenation is pure, so equal inputs guarantee an equal result, and this layer can never
+    /// drift from what `guardedUserProfileText`/`guardedAgentsMdText` already decided was unchanged.
+    private var composedPromptCache: [String: (base: String, profile: String, agents: String?, content: Content)] = [:]
+
+    /// Sentinel key for `composedPromptCache`/`agentsStamp` when a conversation has no bound
+    /// workspace — distinct from any real path, including the empty string.
+    private static let noWorkspaceCacheKey = "\u{0}iris-no-workspace\u{0}"
+
+    /// USER.md, sanitized and guarded, cached until the file's content changes, the protection
+    /// setting changes, or a guard tier's provisioning state changes (5a Task 7, invariant 6/#130).
+    private func guardedUserProfileText() async -> String {
+        let path = MemoryManager.shared.paths.userMd.path
+        let stamp = currentGuardTextStamp(modified: Self.fileModificationDate(atPath: path))
+        if let existing = profileStamp, existing.path == path, existing.stamp == stamp,
+           let cached = cachedProfileText {
+            return cached
+        }
+        let userProfile = MemoryManager.shared.getUserProfile()
+        let safeUserProfile = await measureSpan("assembly.userProfile") {
+            let structural = PromptInjectionGuard.sanitizeUntrustedInput(userProfile)
+            return await InjectionGuard.sanitize(structural, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+        }
+        profileStamp = (path, stamp)
+        cachedProfileText = safeUserProfile
+        return safeUserProfile
+    }
+
+    /// Clears the USER.md guard-output cache. Called by the `update_user_profile` handler so the
+    /// engine that just rewrote the file does not keep serving the text it guarded before the
+    /// write. Every other engine reading the same USER.md never calls this — the mtime check in
+    /// `guardedUserProfileText()` is what covers them, on their own next turn.
+    func invalidateUserProfile() {
+        profileStamp = nil
+        cachedProfileText = nil
+    }
+
+    /// The workspace's `AGENTS.md`, sanitized and guarded, cached per workspace path until its
+    /// content changes (including through a symlink target), the protection setting changes, or a
+    /// guard tier's provisioning state changes (5a Task 7). `nil` means no file at that path right
+    /// now — a conversation with no `AGENTS.md` costs nothing beyond the one stat per turn.
+    private func guardedAgentsMdText(workspacePath: String?) async -> String? {
+        guard let wp = workspacePath else { return nil }
+        let agentsMdPath = Self.expandTilde(wp)
+        let fullPath = (agentsMdPath as NSString).appendingPathComponent("AGENTS.md")
+        guard let modified = Self.fileModificationDate(atPath: fullPath) else {
+            // No file (or unreadable): nothing to cache, and this absence IS the stamp — drop
+            // whatever was recorded while a file existed here on an earlier turn.
+            agentsStamp.removeValue(forKey: wp)
+            cachedAgentsText.removeValue(forKey: wp)
+            return nil
+        }
+        let stamp = currentGuardTextStamp(modified: modified)
+        if agentsStamp[wp] == stamp, let cached = cachedAgentsText[wp] {
+            return cached
+        }
+        guard let agentsMdContent = try? String(contentsOfFile: fullPath, encoding: .utf8) else {
+            agentsStamp.removeValue(forKey: wp)
+            cachedAgentsText.removeValue(forKey: wp)
+            return nil
+        }
+        let safeAgentsMd = await measureSpan("assembly.agentsMd") {
+            let structural = PromptInjectionGuard.sanitizeUntrustedInput(agentsMdContent)
+            return await InjectionGuard.sanitize(structural, contextTag: "workspace_rules", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+        }
+        agentsStamp[wp] = stamp
+        cachedAgentsText[wp] = safeAgentsMd
+        return safeAgentsMd
+    }
+
+    /// The per-turn system prompt: the cached base from `ensureSystemPrompt()` plus USER.md and the
+    /// bound workspace's `AGENTS.md`, both re-read only when they actually change (5a Task 7). The
+    /// composed result is itself cached per workspace so two unchanged turns hand back the identical
+    /// `Content` value — what keeps the provider's prompt cache hitting (5a §0.2).
+    private func assembledSystemPrompt(workspacePath: String?) async -> Content {
+        let base = await ensureSystemPrompt()
+        guard let baseText = base.parts.first?.text else { return base }
+        let profileText = await guardedUserProfileText()
+        let agentsText = await guardedAgentsMdText(workspacePath: workspacePath)
+        let key = workspacePath ?? Self.noWorkspaceCacheKey
+
+        if let cached = composedPromptCache[key], cached.base == baseText,
+           cached.profile == profileText, cached.agents == agentsText {
+            return cached.content
+        }
+
+        var text = baseText + "\n\n# User Profile (USER.md)\n" + profileText
+        if let agentsText {
+            text += "\n\n# Project Workspace Rules (AGENTS.md)\n" + agentsText
+        }
+        var composed = base
+        composed.parts[0].text = text
+        composedPromptCache[key] = (baseText, profileText, agentsText, composed)
+        return composed
+    }
+
     var modelTier: ModelTier
     let principal: Principal
     let roleLabel: String?
@@ -1128,42 +1279,21 @@ actor IrisEngine {
         var history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
         let workspacePath = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.workspacePath }
         
-        var currentSystemPrompt = await ensureSystemPrompt()
-        
-        let userProfile = MemoryManager.shared.getUserProfile()
-        
+        // USER.md and AGENTS.md are re-read and re-guarded only when they actually change — by
+        // content (via modification date, following symlinks), by the protection setting, or by a
+        // guard tier's provisioning state (5a Task 7). An unchanged turn gets back the identical
+        // `Content` it got last time, keeping the system prompt byte-stable for the provider's
+        // prompt cache (5a §0.2).
+        let currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath)
+
         let facts = measureSpanSync("assembly.factSearch") {
             (try? factStore.search(query: input, limit: 5)) ?? []
         }
-        
+
         if !facts.isEmpty {
             try? factStore.reinforceFacts(ids: facts.map { $0.id })
         }
-        
-    if let textPart = currentSystemPrompt.parts.first?.text {
-        // Append USER.md first (mostly static)
-        let safeUserProfile = await measureSpan("assembly.userProfile") {
-            let structural = PromptInjectionGuard.sanitizeUntrustedInput(userProfile)
-            return await InjectionGuard.sanitize(structural, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
-        }
-        currentSystemPrompt.parts[0].text = textPart + "\n\n# User Profile (USER.md)\n" + safeUserProfile
-    }
-        
-        if let wp = workspacePath {
-            let agentsMdPath = (wp as NSString).expandingTildeInPath
-            let fullPath = (agentsMdPath as NSString).appendingPathComponent("AGENTS.md")
-            if let agentsMdContent = try? String(contentsOfFile: fullPath, encoding: .utf8) {
-                if let textPart = currentSystemPrompt.parts.first?.text {
-                    // Append AGENTS.md next (static per workspace)
-                    let safeAgentsMd = await measureSpan("assembly.agentsMd") {
-                        let structural = PromptInjectionGuard.sanitizeUntrustedInput(agentsMdContent)
-                        return await InjectionGuard.sanitize(structural, contextTag: "workspace_rules", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
-                    }
-                    currentSystemPrompt.parts[0].text = textPart + "\n\n# Project Workspace Rules (AGENTS.md)\n" + safeAgentsMd
-                }
-            }
-        }
-        
+
         // Per-turn content rides this turn's own entry in the request, not the system prompt, so the
         // cached prefix (tools, system, older history) stays byte-stable across turns (5a §0.2).
         var turnContext = TurnContext(sections: [])
@@ -2858,6 +2988,7 @@ actor IrisEngine {
                 contextTag: "tool_output_search_memory", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         } else if functionCall.name == "update_user_profile", let content = functionCall.args["content"]?.stringValue {
             MemoryManager.shared.updateUserProfile(content: content)
+            invalidateUserProfile()   // 5a Task 7: this engine must not keep serving the pre-write guarded text
             result = "User profile updated."
         } else if functionCall.name == "update_soul", let content = functionCall.args["content"]?.stringValue {
             MemoryManager.shared.updateSoul(content: content)

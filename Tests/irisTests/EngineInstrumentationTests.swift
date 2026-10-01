@@ -61,9 +61,13 @@ struct EngineInstrumentationTests {
                 let result = await ScenarioRunner.run(scenario)
                 #expect(result.turnProfiles.count == 2)
                 let second = try #require(result.turnProfiles.last)
-                // USER.md did not change between the turns, so the cached verdict is served (#130).
+                // USER.md did not change between the turns. Before 5a Task 7, `assembly.userProfile`
+                // ran every turn (#130's cache lived inside `InjectionGuard` and only skipped the
+                // model tiers, `guard.tier3`). Task 7 added an engine-level cache keyed on the
+                // file's modification date, so an unchanged turn now skips the guard pass entirely —
+                // neither span is recorded.
                 #expect(second.spans["guard.tier3"] == nil)
-                #expect(second.spans["assembly.userProfile"] != nil)
+                #expect(second.spans["assembly.userProfile"] == nil)
             }
         }
     }
