@@ -132,6 +132,10 @@ actor IrisEngine {
     /// against its own store. Resolved lazily: forcing `.shared` at construction would open the
     /// process-wide store for every engine ever built, including ones that never touch memory.
     private let injectedFactStore: FactStoreManager?
+    /// 5a's tool-list experiment (spec §0.6): declare state-gated tools on every turn instead of
+    /// only when their state holds, so a perf run can measure what the flapping costs in cache
+    /// misses. Only `iris --perf run` sets it, from `IRIS_PERF_DECLARE_STATE_TOOLS=1`.
+    private let declareStateGatedTools: Bool
     var factStore: FactStoreManager { injectedFactStore ?? .shared }
     /// 5a Task 7 fix round 1: same idiom as `injectedFactStore`/`factStore`. `MemoryManager` has no
     /// per-instance seam other than `init(paths:)`, so a test that needs an isolated USER.md/SOUL.md
@@ -379,7 +383,7 @@ actor IrisEngine {
     /// parameter, so a delegated call never appears in the dump (5a review F4).
     private let requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false) {
         self.state = state
         self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
@@ -395,6 +399,7 @@ actor IrisEngine {
         self.checkpointAutoAdvanceOverride = checkpointAutoAdvance
         self.sessionPeerCountOverride = sessionPeerCount
         self.requestDumpSink = requestDumpSink
+        self.declareStateGatedTools = declareStateGatedTools
         systemPrompt = nil
     }
 
@@ -1429,7 +1434,7 @@ actor IrisEngine {
         // Correcting a fact needs a fact id, and the only ids the model ever sees come from the
         // facts injected above or a `search_memory` result. On a turn that surfaced none, this
         // declaration is dead weight in the prompt (invariant 6).
-        if !facts.isEmpty {
+        if !facts.isEmpty || declareStateGatedTools {
         toolsList.append(FunctionDeclaration(
             name: "manage_fact",
             description: "Correct the fact store when the user says a remembered fact is wrong, outdated, or replaced, or when a retrieved fact proved right or wrong: retract, supersede (with by_fact_id), restore, or rate it helpful/unhelpful. Fact ids are the bracketed ids in your Mid-Term Fact Store Memory block and in the facts results of search_memory (its conversations scope returns conversation titles, not fact ids).",

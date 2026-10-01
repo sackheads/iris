@@ -11,7 +11,8 @@ enum PerfRunner {
 
     static func run(suite: PerfSuite, repetitionsOverride: Int? = nil, repoRoot: URL,
                     client: (any LLMClientProtocol)? = nil, headless: Bool,
-                    workspacePath: String? = nil, dumpRequestsDir: URL? = nil) async throws -> PerfRunRecord {
+                    workspacePath: String? = nil, dumpRequestsDir: URL? = nil,
+                    declareStateGatedTools: Bool = false) async throws -> PerfRunRecord {
         try suite.validate()
         let reps = repetitionsOverride ?? suite.repetitions
         let startedAt = Date()
@@ -51,7 +52,8 @@ enum PerfRunner {
                         let dumpDir = dumpRequestsDir?.appendingPathComponent(scenario.name)
                             .appendingPathComponent("rung-\(rung)").appendingPathComponent("\(i)")
                         let result = await ScenarioRunner.run(effective, guards: guards, toolExecution: toolExecution, clientOverride: client,
-                                                              workspacePath: workspacePath, dumpRequestsTo: dumpDir)
+                                                              workspacePath: workspacePath, dumpRequestsTo: dumpDir,
+                                                              declareStateGatedTools: declareStateGatedTools)
                         if result.toolsSandboxed { anySandboxed = true }
                         let turns = zip(result.turnProfiles, result.finalTexts + Array(repeating: "", count: max(0, result.turnProfiles.count - result.finalTexts.count)))
                             .map { PerfTurn($0, finalText: $1) }
@@ -83,10 +85,12 @@ enum PerfRunner {
                                               rungs: rungResults, summary: PerfSummarizer.summarize(rungResults, expectedTools: scenario.expectedTools)))
         }
 
+        var environment = PerfEnvironment.capture(headless: headless, toolDeclarationCount: toolCount, repoRoot: repoRoot,
+                                                  toolSandbox: anySandboxed ? "sandboxed" : "host")
+        if declareStateGatedTools { environment.stateGatedToolsAlwaysDeclared = true }
         return PerfRunRecord(schemaVersion: PerfRunRecord.currentSchemaVersion, suite: suite.name,
                              startedAt: startedAt, finishedAt: Date(),
-                             environment: PerfEnvironment.capture(headless: headless, toolDeclarationCount: toolCount, repoRoot: repoRoot,
-                                                                  toolSandbox: anySandboxed ? "sandboxed" : "host"),
+                             environment: environment,
                              scenarios: results, cacheCountsVersion: PerfRunRecord.currentCacheCountsVersion)
     }
 

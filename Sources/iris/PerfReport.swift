@@ -14,6 +14,7 @@ enum PerfReport {
         out.append("- guards: vibecop \(env.vibecopEnabled ? "on (\(env.vibecopEngine))" : "off"), injection guard \(env.injectionGuardEnabled ? "on (\(env.promptGuardEngine))" : "off"), sandbox \(env.sandboxEnabled ? "on" : "off"), headless \(env.headless)")
         if let n = env.toolDeclarationCount { out.append("- tool declarations sent per call: \(n)") }
         if let streaming = env.streaming { out.append("- streaming: \(streaming ? "on" : "off")") }
+        if env.stateGatedToolsAlwaysDeclared == true { out.append("- EXPERIMENT: state-gated tools declared on every turn (IRIS_PERF_DECLARE_STATE_TOOLS)") }
         if env.buildConfiguration == "debug" { out.append("- WARNING: debug build; timings are not comparable to release runs") }
         if env.gitDirty { out.append("- WARNING: dirty tree; the sha does not describe this code") }
         out.append("")

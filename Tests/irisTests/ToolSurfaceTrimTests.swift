@@ -16,6 +16,7 @@ struct ToolSurfaceTrimTests {
     /// Drive one turn through a real engine against a capturing client and return the declared tool names.
     private func toolNames(prompt: String, source: String = "UI",
                            factStore: FactStoreManager? = nil,
+                           declareStateGatedTools: Bool = false,
                            prepare: (AppState, UUID) -> Void = { _, _ in }) async -> [String] {
         let app = AppState()
         let id = UUID()
@@ -27,7 +28,8 @@ struct ToolSurfaceTrimTests {
         // the one just created — #185's session-tools gate would see a peer and this suite's
         // counts predate that feature entirely. Pin it off; this suite is not testing sessions.
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [],
-                                factStore: factStore, sessionPeerCount: 0)
+                                factStore: factStore, sessionPeerCount: 0,
+                                declareStateGatedTools: declareStateGatedTools)
         await engine.processInput(prompt, source: source, conversationId: id)
         return client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? []
     }
@@ -65,6 +67,16 @@ struct ToolSurfaceTrimTests {
         try store.addFact(content: "Brian lives in Seattle", entity: "Brian")
         let withFacts = await toolNames(prompt: "Where does Brian live?", factStore: store)
         #expect(withFacts.contains("manage_fact"))
+    }
+
+    /// 5a's tool-list experiment (spec §0.6): with the switch on, `manage_fact` is declared even on
+    /// a turn that surfaced no facts, so a perf run can compare flapping against a stable list.
+    /// The switch defaults off, so the turn above (no facts, no switch) proves normal use is unchanged.
+    @Test("the tool-list experiment declares manage_fact on a turn with no facts")
+    func experimentDeclaresStateGatedTools() async throws {
+        let names = await toolNames(prompt: "Where does Brian live?", factStore: try FactStoreManager(inMemory: true),
+                                    declareStateGatedTools: true)
+        #expect(names.contains("manage_fact"))
     }
 
     @Test("the goal-draft trigger turn offers propose_goal_contract")

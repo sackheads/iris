@@ -54,7 +54,8 @@ enum ScenarioRunner {
                     workspacePath: String? = nil,
                     dumpRequestsTo: URL? = nil,
                     factStore: FactStoreManager? = nil,
-                    retryDelays: [TimeInterval] = [2, 4, 8]) async -> ScenarioResult {
+                    retryDelays: [TimeInterval] = [2, 4, 8],
+                    declareStateGatedTools: Bool = false) async -> ScenarioResult {
         let state = AppState()
         state.autoApproveTools = true // non-interactive: never block on an approval prompt
         // Pay the Vibecop cost a real run_command pays, unless this run is measuring guards off.
@@ -170,7 +171,8 @@ enum ScenarioRunner {
         // perf-scenario turn and shift the #129/#144 declaration-size baselines this runner
         // exists to measure. Pin it off, matching `ToolSurfaceTrimTests`.
         let engine = IrisEngine(state: state, tier: scenario.tier, client: client, retryDelays: retryDelays,
-                               factStore: effectiveFactStore, sessionPeerCount: 0, requestDumpSink: requestDumpSink)
+                               factStore: effectiveFactStore, sessionPeerCount: 0, requestDumpSink: requestDumpSink,
+                               declareStateGatedTools: declareStateGatedTools)
 
         // Collect this run's finished turn profiles via a task-local sink scoped to the turn loop.
         let collector = TurnCollector()

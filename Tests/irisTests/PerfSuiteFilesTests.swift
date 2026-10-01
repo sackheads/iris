@@ -52,8 +52,12 @@ struct PerfSuiteFilesTests {
             let scenario = try Scenario.load(at: url.path)
             #expect(scenario.clientMode == .real, Comment(rawValue: url.path))
             #expect(scenario.turns.count == 6)
-            #expect(scenario.seedFacts?.count == 2)
+            // six-turns: one fact turn in six (the best case); every-turn-facts: one seed per turn.
+            let expectedSeeds = ["six-turns": 2, "every-turn-facts": 6][scenario.name]
+            #expect(expectedSeeds != nil, "unexpected caching scenario \(scenario.name)")
+            #expect(scenario.seedFacts?.count == expectedSeeds)
         }
+        #expect(suite.scenarios.count == 2)
     }
 
     /// The real fact-store match schedule for six-turns.json, built the way `ScenarioRunner` now
@@ -72,6 +76,22 @@ struct PerfSuiteFilesTests {
             !(try store.search(query: turn.prompt, countsAsRetrieval: false)).isEmpty
         }
         #expect(schedule == [false, true, false, false, false, false])
+    }
+
+    /// The realistic case (5a §3.1): with a real fact store most turns match some fact, and a
+    /// different one each time, so the fact block changes on every turn. Each turn here must match
+    /// exactly its own seed and no other, under the same any-token search production uses.
+    @Test("every-turn-facts.json: each turn matches exactly its own seed (5a)")
+    func everyTurnFactsScheduleIsOneToOne() throws {
+        let scenario = try Scenario.load(at: root.appendingPathComponent("perf/prompts/caching/every-turn-facts.json").path)
+        let seeds = try #require(scenario.seedFacts)
+        #expect(seeds.count == scenario.turns.count)
+        let store = try FactStoreManager(inMemory: true)
+        for seed in seeds { try store.addFact(content: seed) }
+        for (i, turn) in scenario.turns.enumerated() {
+            let matched = try store.search(query: turn.prompt, countsAsRetrieval: false).map(\.content)
+            #expect(matched == [seeds[i]], "turn \(i + 1) matched \(matched)")
+        }
     }
 
     @Test("the second eagerness suite pairs bait prompts with tool-use controls (#138)")
