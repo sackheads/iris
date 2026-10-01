@@ -112,7 +112,38 @@ Reading (Anthropic): every non-fact turn read 97–100% of its prompt. The fact 
 
 #### Scenario: every turn matches a different fact
 
-Added with the after-measurement: a second caching scenario whose seeded facts make every turn match a different fact, so the block changes on every turn as it does with a real fact store. Measured on the baseline commit and after 5a, with the same pricing note.
+`perf/prompts/caching/every-turn-facts.json`: six turns, each matching exactly its own seeded fact (pinned by `PerfSuiteFilesTests`), so the fact block changes on every turn as it does with a real fact store. Anthropic, `claude-opus-5-5`, 2026-10-01. Read / write / uncached per round:
+
+| | rep | t1 | t2 | t3.0 | t3.1+ | t4 | t5 | t6 |
+|---|---|---|---|---|---|---|---|---|
+| baseline `61c83d6` | 1 | 0/19691/4 | 9006/10771/4 | 9006/10889/4 | 19895/141/63 | 9006/11244/4 | 9006/11354/4 | 9006/11626/4 |
+| after `ad88d84` | 1 | 19456/216/4 | 19456/303/4 | 19610/275/4 | 19885/149/2, 20034/199/2 | 19724/707/4 | 20277/268/4 | 20391/321/4 |
+
+Input cost of the six-turn conversation at the pricing above: **baseline $0.392 / $0.358 (two repetitions), after 5a $0.044 / $0.044: about 88% less.** Before, every turn re-wrote ~11k tokens behind the changed system prompt; after, each turn writes only its tail.
+
+#### After 5a: pass criteria (§3), Anthropic, turns 3–6
+
+Run at `ad88d84`, both scenarios, 2 repetitions each.
+
+- **Within a turn, each round's read ≥ the previous round's read + write:** holds on every multi-round turn (e.g. 19610+275 → 19885, 19885+149 → 20034). This is Task 9's `tool_result` breakpoint working.
+- **First-round uncached ≤ the allowance:** 2–4 tokens on every round.
+- **Read ≥ 95% of the prefix through turn k−2:** holds as a lower bound without counting the prefix. Every first round reads ≥ 96% of its whole prompt, and the prompt is larger than that prefix.
+- **First-round read never falls turn over turn:** holds in every-turn-facts. It **fails once in six-turns**, repetition 2, turn 3 (19602 → 19241). The cause is the tool list: `manage_fact` is declared on the fact turn (2) and dropped on turn 3, so turn 3 falls back to turn 1's cached tool set. The experiment below removes the failure.
+
+#### Tool-list experiment (§0.6)
+
+`IRIS_PERF_DECLARE_STATE_TOOLS=1`, same commit and suite. Perf runs pin the peer count to 0, so this measures `manage_fact` only.
+
+| six-turns, rep 1 | t1 | t2 (fact) | t3 | t4–t6 first-round reads |
+|---|---|---|---|---|
+| gated (as shipped) | 0/19241/4 | 9006/**10807**/4 | 19241/240/4 | 20151, 20423, 20498 |
+| declared every turn | 9006/10564/4 (new tool set, cold) | 19570/**226**/4 | 19590/234/4 | 20436, 20741, 20821 |
+
+With the declaration stable, first-round reads never fall and the fact turn writes 226 tokens instead of 10,807. A state-gated tool costs one ~10k-token cache write each time the tool list changes to a combination not already cached, about $0.05 at the pricing above. Declaring it every turn costs its schema on every request, mostly as cached reads at 0.05×. **On Anthropic, stable declarations are cheaper than gating.** That is the evidence for amending invariant 6 for Anthropic, which #314's append-only work needs anyway. Gemini and OpenAI were not measured after 5a (the primary provider was Anthropic for these runs).
+
+#### Budget defaults (§0.4)
+
+A turn of this suite counts about 20k prompt tokens per round, cached or not. The run budget (200k) therefore allows roughly ten such rounds per job run, and the per-job daily budget (1M) roughly fifty. Those figures were never exercised by Anthropic traffic before 5a. Whether to raise them, or to count billed weight instead of tokens sent, is 5b's decision with these numbers in hand.
 
 ## 4. Not in this deliverable
 
