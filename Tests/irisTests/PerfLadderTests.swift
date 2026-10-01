@@ -58,4 +58,19 @@ struct PerfLadderTests {
         #expect(c.systemInstruction?.parts.first?.text?.isEmpty == false)
         #expect(c.toolCount > 10)
     }
+
+    /// The recorded `toolDeclarationCount` comes from this capture, so under the tool-list
+    /// experiment it must be the experiment's tool list, not the gated one (5a final review).
+    @MainActor
+    @Test("capture under the tool-list experiment declares the state-gated tools")
+    func captureUnderExperiment() async throws {
+        let scenario = Scenario(name: "cap", clientMode: .real, turns: [Scenario.Turn(prompt: "hello")])
+        let gated = await PerfLadder.capture(for: scenario)
+        let declared = await PerfLadder.capture(for: scenario, declareStateGatedTools: true)
+        let names = declared.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? []
+        #expect(names.contains("manage_fact"))
+        #expect(names.contains("list_sessions"))
+        #expect(declared.toolCount == names.count)
+        #expect(declared.toolCount > gated.toolCount)
+    }
 }

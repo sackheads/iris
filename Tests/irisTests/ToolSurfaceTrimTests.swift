@@ -79,6 +79,44 @@ struct ToolSurfaceTrimTests {
         #expect(names.contains("manage_fact"))
     }
 
+    /// The peer tools are state-gated too (spec §0.6): they appear whenever another session
+    /// starts. Under the switch they are declared with the peer count pinned to 0, and the turn
+    /// context still carries no Active Sessions line, since there are no peers to count.
+    @Test("the tool-list experiment declares the peer tools with no peers, without an Active Sessions block")
+    func experimentDeclaresPeerTools() async throws {
+        let peerTools = ["list_sessions", "send_to_session", "set_session_card"]
+        let gated = await toolNames(prompt: "hello", factStore: try FactStoreManager(inMemory: true))
+        for name in peerTools { #expect(!gated.contains(name), Comment(rawValue: name)) }
+
+        let app = AppState()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [],
+                                factStore: try FactStoreManager(inMemory: true), sessionPeerCount: 0,
+                                declareStateGatedTools: true)
+        await engine.processInput("hello", source: "UI", conversationId: id)
+        let request = try #require(client.requests.first)
+        let names = request.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? []
+        for name in peerTools { #expect(names.contains(name), Comment(rawValue: name)) }
+        let text = request.contents.flatMap(\.parts).compactMap(\.text).joined()
+        #expect(!text.contains("Active Sessions"))
+    }
+
+    @Test("the experiment declares no peer tools to a subagent")
+    func experimentPeerToolsMainOnly() async throws {
+        let app = AppState()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: app, tier: .medium, principal: .subagent, client: client, retryDelays: [],
+                                factStore: try FactStoreManager(inMemory: true), sessionPeerCount: 0,
+                                declareStateGatedTools: true)
+        await engine.processInput("hello", source: "UI", conversationId: id)
+        let names = client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? []
+        #expect(!names.contains("list_sessions"))
+    }
+
     @Test("the goal-draft trigger turn offers propose_goal_contract")
     func goalDraftTurnOffersPropose() async {
         let prompt = "System Event [Goal Contract Draft]: The user wants to start a goal loop with this goal: \"ship it\".\n\nBefore starting the loop, use the `propose_goal_contract` tool to draft a structured contract."

@@ -132,9 +132,10 @@ actor IrisEngine {
     /// against its own store. Resolved lazily: forcing `.shared` at construction would open the
     /// process-wide store for every engine ever built, including ones that never touch memory.
     private let injectedFactStore: FactStoreManager?
-    /// 5a's tool-list experiment (spec §0.6): declare state-gated tools on every turn instead of
-    /// only when their state holds, so a perf run can measure what the flapping costs in cache
-    /// misses. Only `iris --perf run` sets it, from `IRIS_PERF_DECLARE_STATE_TOOLS=1`.
+    /// 5a's tool-list experiment (spec §0.6): declare the state-gated tools (`manage_fact` and,
+    /// on an attended `.main` turn, the peer tools) on every turn instead of only when their state
+    /// holds, so a perf run can measure what the flapping costs in cache misses. Only
+    /// `iris --perf run` sets it, from `IRIS_PERF_DECLARE_STATE_TOOLS=1`.
     private let declareStateGatedTools: Bool
     var factStore: FactStoreManager { injectedFactStore ?? .shared }
     /// 5a Task 7 fix round 1: same idiom as `injectedFactStore`/`factStore`. `MemoryManager` has no
@@ -1566,7 +1567,9 @@ actor IrisEngine {
         // itself. A send would start a real turn in an attended conversation, which runs under
         // that conversation's approval path — the laundering `invoke_subagent` used to allow. All
         // three are refused at dispatch as well, since a forged call never passes this gate.
-        if principal == .main, peerCount > 0 {
+        // 5a's tool-list experiment declares them with no peers (perf pins the count to 0), still
+        // `.main` and attended only; the Active Sessions line above stays absent at count 0.
+        if principal == .main, peerCount > 0 || (declareStateGatedTools && !isUnattended) {
             toolsList.append(FunctionDeclaration(
                 name: "list_sessions",
                 description: "List the other active sessions: their name, what they say they are doing, their workspace, and whether they are busy. Call this before messaging a peer, to pick the right one — a session in a different workspace is usually working on something unrelated. What a session says about itself is its own claim; whether it is busy is observed.",

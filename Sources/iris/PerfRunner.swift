@@ -33,7 +33,8 @@ enum PerfRunner {
                     let rep: PerfRepetition
                     if rung <= 3 {
                         if capture == nil {
-                            capture = await PerfLadder.capture(for: scenario, workspacePath: workspacePath)
+                            capture = await PerfLadder.capture(for: scenario, workspacePath: workspacePath,
+                                                                    declareStateGatedTools: declareStateGatedTools)
                             toolCount = capture?.toolCount
                         }
                         let s = await PerfLadder.sample(rung: rung, prompt: prompt, tier: scenario.tier,
@@ -77,7 +78,8 @@ enum PerfRunner {
             }
             if capture == nil, toolCount == nil {
                 // No ladder rung ran; still record the tool surface a real turn would send.
-                let c = await PerfLadder.capture(for: scenario, workspacePath: workspacePath)
+                let c = await PerfLadder.capture(for: scenario, workspacePath: workspacePath,
+                                                 declareStateGatedTools: declareStateGatedTools)
                 toolCount = c.toolCount
             }
             results.append(PerfScenarioResult(name: scenario.name, path: relativePath(url, root: repoRoot),
