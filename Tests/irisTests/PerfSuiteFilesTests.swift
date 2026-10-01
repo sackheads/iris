@@ -53,7 +53,7 @@ struct PerfSuiteFilesTests {
             #expect(scenario.clientMode == .real, Comment(rawValue: url.path))
             // six-turns: one fact turn in six (the best case); every-turn-facts: one seed per turn;
             // tool-heavy: a long tool turn between two fact turns (the k-2 read point, §1).
-            let expected: [String: (turns: Int, seeds: Int)] = ["six-turns": (6, 2), "every-turn-facts": (6, 6), "tool-heavy": (5, 2)]
+            let expected: [String: (turns: Int, seeds: Int)] = ["six-turns": (6, 2), "every-turn-facts": (6, 6), "tool-heavy": (5, 3)]
             let shape = expected[scenario.name]
             #expect(shape != nil, "unexpected caching scenario \(scenario.name)")
             #expect(scenario.turns.count == shape?.turns)
@@ -96,19 +96,22 @@ struct PerfSuiteFilesTests {
         }
     }
 
-    /// 5a final review item 1: the read point at turn k is the end of turn k-2, and the old
-    /// placement reached it only through the 20-block lookback, which a tool-heavy turn k-1 broke.
-    /// Turn 2 here runs a dozen sequential commands between two fact turns, so turn 3 and turn 4
-    /// read only if the end of the turn before the tool turn is an explicit marker.
-    @Test("tool-heavy.json: turns 1 and 3 match their own seed, the tool turn and the rest match none (5a)")
+    /// 5a §1's read point. At turn k the request matches the cache only through the end of turn
+    /// k-2, because turn k-1's entry is sent without the turn-context block it carried. Turn 2
+    /// here runs a dozen sequential commands AND matches its own seed, so its entry changes at
+    /// turn 3: turn 3 can read past the system prompt only through the end of turn 1, more than
+    /// 20 blocks back, which the old placement reached by lookback and the new one marks
+    /// explicitly. (The first version gave turn 2 no seed, so turn 3 read through turn 2's own
+    /// last-round marker under either placement and the scenario proved nothing about it.)
+    @Test("tool-heavy.json: turns 1, 2 and 3 each match their own seed, turns 4 and 5 match none (5a)")
     func toolHeavyFactSchedule() throws {
         let scenario = try Scenario.load(at: root.appendingPathComponent("perf/prompts/caching/tool-heavy.json").path)
         let seeds = try #require(scenario.seedFacts)
-        try #require(seeds.count == 2)
+        try #require(seeds.count == 3)
         let store = try FactStoreManager(inMemory: true)
         for seed in seeds { try store.addFact(content: seed) }
         let matches = try scenario.turns.map { try store.search(query: $0.prompt, countsAsRetrieval: false).map(\.content) }
-        #expect(matches == [[seeds[0]], [], [seeds[1]], [], []])
+        #expect(matches == [[seeds[0]], [seeds[1]], [seeds[2]], [], []])
         // Turn 2 asks for many separate commands, so it runs many tool rounds.
         #expect(scenario.turns[1].prompt.components(separatedBy: "`").count - 1 >= 24)
     }
