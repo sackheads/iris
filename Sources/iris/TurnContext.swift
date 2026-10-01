@@ -19,6 +19,10 @@ struct TurnContext: Equatable, Sendable {
     /// fact holding `</turn_context>` must not be able to end the block early. No `<` means no tag
     /// in any case or spacing. A look-alike rather than `&lt;`: the model reads `a ＜ b` as `a < b`
     /// without decoding anything, and a fact that already contains `&lt;` (code, HTML) stays exact.
+    /// The cost is verbatim copy-out: a fact storing a shell command with `<` (redirection, `<<EOF`,
+    /// `<(...)`) can be echoed into `run_command` with the look-alike, where it is a literal character.
+    /// Accepted over a narrower escape, which a fuzzy reader defeats (`turn-context`, U+200B, homoglyphs).
+    /// Never teach the model that `＜` means `<`: that would make `＜/turn_context>` a closing tag again.
     static func neutralised(_ text: String) -> String {
         text.replacingOccurrences(of: "<", with: "\u{FF1C}")
     }
