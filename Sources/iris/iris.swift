@@ -1064,7 +1064,7 @@ actor IrisEngine {
                                  conversationId: UUID) async -> [Content] {
         let (contents, firstDrop) = turn.contents(for: history, from: list)
         if firstDrop {
-            await pushToUI(role: .system, text: "turn context omitted: the turn's entry changed", conversationId: conversationId)
+            await pushToUI(role: .system, text: "turn context omitted from this request: the turn's entry changed", conversationId: conversationId)
         }
         return contents
     }
