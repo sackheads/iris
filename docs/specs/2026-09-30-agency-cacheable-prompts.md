@@ -69,6 +69,31 @@ The 95% figure is reported alongside them from exact sizes: the suite writes eac
 
 Filled in by the implementation: baseline on main, the result after 5a, and the tool-list experiment, each with provider, model, commit and date.
 
+#### Baseline: Gemini, before the request change
+
+`gemini-3.8-flash` (medium tier), main at `61c83d6` (PR A merged, no request change), 2026-10-01, `perf/suites/caching.json`, 2 repetitions, request bodies dumped. Gemini's caching is implicit (automatic); recorded, not graded.
+
+| repetition | turn.round | prompt | cache read |
+|---|---|---|---|
+| 1 | 1.0 | 12967 | — |
+| 1 | 2.0 | 13709 | — |
+| 1 | 3.0 / 3.1 | 13641 / 14060 | — / — |
+| 1 | 4.0 | 14138 | — |
+| 1 | 5.0 | 14228 | — |
+| 1 | 6.0 | 14445 | — |
+| 2 | 1.0 | 12967 | 8102 (62%) |
+| 2 | 2.0 | 13750 | — |
+| 2 | 3.0 / 3.1 / 3.2 | 13714 / 14091 / 14266 | — / — / — |
+| 2 | 4.0 | 14366 | — |
+| 2 | 5.0 | 14436 | — |
+| 2 | 6.0 | 14696 | 12103 (82%) |
+
+Reading: no turn reused the previous turn's prefix. Every round from turn 2 to turn 5 re-sent its whole prompt uncached. The two hits match an earlier request rather than the same conversation's previous turn. Repetition 2's turn 1 matched repetition 1's turn 1 for only 8.1k of 13k tokens, although nothing in that prefix should differ between runs, which is consistent with the unsorted key order of "Why" item 1.
+
+#### Baseline: Anthropic, before the request change
+
+Pending: no Anthropic provider was configured on the measuring machine on 2026-10-01. It runs on the same commit once one is.
+
 ## 4. Not in this deliverable
 
 - The briefing, the pinned-conversation rules, the new tools, `/new` and anchoring: 5b.
