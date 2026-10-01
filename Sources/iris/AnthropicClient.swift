@@ -56,7 +56,7 @@ struct AnthropicClient {
                     } else {
                         id = "call_\(fr.name)_0"
                     }
-                    let respData = try? JSONSerialization.data(withJSONObject: fr.response.mapValues { $0.anyValue })
+                    let respData = try? JSONSerialization.data(withJSONObject: fr.response.mapValues { $0.anyValue }, options: [.sortedKeys])
                     let respString = String(data: respData ?? Data(), encoding: .utf8) ?? "{}"
                     
                     partsArray.append([
@@ -111,7 +111,9 @@ struct AnthropicClient {
             for fd in fds {
                 var inputSchema: [String: Any] = ["type": "object", "properties": [:] as [String: Any]]
                 if let schema = fd.parameters {
-                    let schemaData = try? JSONEncoder().encode(schema)
+                    let schemaEncoder = JSONEncoder()
+                    schemaEncoder.outputFormatting = [.sortedKeys]
+                    let schemaData = try? schemaEncoder.encode(schema)
                     if var dict = try? JSONSerialization.jsonObject(with: schemaData ?? Data()) as? [String: Any] {
                         // Gemini often uses uppercase types (e.g. "OBJECT", "STRING").
                         // JSON Schema (Anthropic) requires lowercase.
@@ -168,8 +170,8 @@ struct AnthropicClient {
         urlRequest.addValue(apiKey, forHTTPHeaderField: "x-api-key")
         urlRequest.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         urlRequest.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
-        
+        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+
         LLMRequestPolicy.apply(to: &urlRequest)
         return urlRequest
     }

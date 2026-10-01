@@ -50,7 +50,7 @@ struct OpenAIClient {
                     let id = fc.id ?? "call_\(fc.name)_\(callIdCounter)"
                     callIdCounter += 1
                     pendingIdsForName[fc.name, default: []].append(id)
-                    let argsData = try? JSONSerialization.data(withJSONObject: fc.args.mapValues { $0.anyValue })
+                    let argsData = try? JSONSerialization.data(withJSONObject: fc.args.mapValues { $0.anyValue }, options: [.sortedKeys])
                     let argsString = String(data: argsData ?? Data(), encoding: .utf8) ?? "{}"
                     
                     toolCalls.append([
@@ -71,7 +71,7 @@ struct OpenAIClient {
                     } else {
                         id = "call_\(fr.name)_0" // Fallback if no ID is provided
                     }
-                    let respData = try? JSONSerialization.data(withJSONObject: fr.response.mapValues { $0.anyValue })
+                    let respData = try? JSONSerialization.data(withJSONObject: fr.response.mapValues { $0.anyValue }, options: [.sortedKeys])
                     let respString = String(data: respData ?? Data(), encoding: .utf8) ?? "{}"
                     
                     toolResponses.append([
@@ -123,7 +123,9 @@ struct OpenAIClient {
             for fd in fds {
                 var parameters: [String: Any] = ["type": "object", "properties": [:] as [String: Any]]
                 if let schema = fd.parameters {
-                    let schemaData = try? JSONEncoder().encode(schema)
+                    let schemaEncoder = JSONEncoder()
+                    schemaEncoder.outputFormatting = [.sortedKeys]
+                    let schemaData = try? schemaEncoder.encode(schema)
                     if var dict = try? JSONSerialization.jsonObject(with: schemaData ?? Data()) as? [String: Any] {
                         func lowerCaseTypes(_ dictionary: inout [String: Any]) {
                             if let type = dictionary["type"] as? String {
@@ -182,8 +184,8 @@ struct OpenAIClient {
         urlRequest.httpMethod = "POST"
         urlRequest.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         urlRequest.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
-        
+        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+
         LLMRequestPolicy.apply(to: &urlRequest)
         return urlRequest
     }

@@ -11,14 +11,13 @@ struct RequestDumpTests {
         return GeminiRequest(contents: [user], systemInstruction: system, tools: nil)
     }
 
-    /// `JSONSerialization.data(withJSONObject:)` (used by both `AnthropicClient.makeURLRequest`
-    /// and `OpenAIClient.makeURLRequest`) does not guarantee a stable key order across calls, even
-    /// for structurally identical dictionaries in the same process — confirmed independently while
-    /// writing this test. Two independently-built bodies for the same logical request can
-    /// therefore differ byte for byte while meaning the same thing, so this test compares parsed
-    /// structure (`NSDictionary` equality is order-independent), not raw bytes. A consumer that
-    /// diffs dump files byte-for-byte to find a cache-prefix miss (Task 10) needs to account for
-    /// this: an apparent divergence may be key reordering, not a real content or prefix change.
+    /// Compares parsed structure (`NSDictionary` equality is order-independent), not raw bytes,
+    /// because this predates sorted-key encoding: `JSONSerialization.data(withJSONObject:)` (used
+    /// by both `AnthropicClient.makeURLRequest` and `OpenAIClient.makeURLRequest`) did not
+    /// guarantee a stable key order across calls, even for structurally identical dictionaries in
+    /// the same process — confirmed independently while writing this test, and now fixed (5a:
+    /// every request-path `JSONSerialization`/`JSONEncoder` sorts keys; see
+    /// `RequestByteStabilityTests` for the byte-identity check this test did not attempt).
     @Test("Anthropic dump matches makeURLRequest's own body structurally")
     func anthropicMatchesProduction() throws {
         let expected = try AnthropicClient.makeURLRequest(request: request, model: "claude-x", apiKey: "real-key-never-used-here", stream: false).httpBody
