@@ -115,11 +115,7 @@ actor MCPManager {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: (config.command as NSString).expandingTildeInPath)
         process.arguments = config.args
-        if let env = config.env {
-            var fullEnv = ProcessInfo.processInfo.environment
-            for (k, v) in env { fullEnv[k] = v }
-            process.environment = fullEnv
-        }
+        process.environment = Self.environment(for: config)
         
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
@@ -349,5 +345,17 @@ actor MCPManager {
         var merged = plugin
         for (k, v) in legacy { merged[k] = v }
         return merged
+    }
+
+    /// The environment an MCP server process is spawned with: the login-shell PATH applied over
+    /// the process environment (#228), then the server's own `env` overrides on top. Static and
+    /// separate from `startServer` so a test can assert the PATH without a real MCP handshake.
+    static func environment(for config: MCPServerConfig,
+                            base: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
+        var fullEnv = BinaryResolver.commandEnvironment(base: base)
+        if let env = config.env {
+            for (k, v) in env { fullEnv[k] = v }
+        }
+        return fullEnv
     }
 }

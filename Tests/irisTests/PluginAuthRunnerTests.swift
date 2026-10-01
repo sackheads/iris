@@ -99,6 +99,16 @@ struct PluginAuthRunnerTests {
         #expect(!status.signedIn)
         #expect(status.output.contains("check_command"))
     }
+
+    @Test("check command spawns with the login-shell PATH applied")
+    func checkCommandLoginPath() async {
+        // #228: the bare GUI environment lacks pyenv/nvm/Homebrew shims, so a check_command
+        // against one of those CLIs would exit 127. The spawned PATH must begin with the login dirs.
+        let status = await PluginAuthRunner.check(auth(check: "printf '%s' \"$PATH\""), config: [:], approve: allow)
+        #expect(status.signedIn)
+        let firstLogin = BinaryResolver.defaultSearchDirs().first!
+        #expect(status.output.split(separator: ":").first.map(String.init) == firstLogin)
+    }
 }
 
 /// Test-only helper: AuthDeclaration has no memberwise init exposed for `kind` alone.

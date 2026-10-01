@@ -45,21 +45,6 @@ struct ToolExecutor {
     var sandboxSession: (@Sendable (_ command: String, _ conversationId: UUID, _ workspace: ContainerMount?,
                                     _ extraMounts: [String], _ network: NetworkMode, _ timeoutSeconds: Int) async -> String)?
 
-    /// Merges the captured login-shell PATH (`loginPath`) ahead of `base`'s own `PATH`, so host
-    /// `run_command` invocations see pyenv/nvm/Homebrew shims that only `.zprofile`/`.zshrc` set up
-    /// (#69) without spawning a login shell per command (which prints profile banners and can have
-    /// side effects). Order is preserved and duplicates are removed, keeping the first occurrence.
-    /// If `loginPath` is empty, `base` is returned unchanged.
-    static func commandEnvironment(base: [String: String], loginPath: [String]) -> [String: String] {
-        guard !loginPath.isEmpty else { return base }
-        let basePath = base["PATH"]?.components(separatedBy: ":").filter { !$0.isEmpty } ?? []
-        var seen: Set<String> = []
-        let merged = (loginPath + basePath).filter { seen.insert($0).inserted }
-        var env = base
-        env["PATH"] = merged.joined(separator: ":")
-        return env
-    }
-
     /// `workspaceToolsEnabled` defaults to "a Google refresh token is configured". Without one every
     /// Google Tasks / Workspace call fails, so the ten declarations were pure prompt weight (#133).
     /// Injectable so tests never mutate `ConfigManager.shared`.
@@ -459,7 +444,7 @@ struct ToolExecutor {
             if let cwd = cwd {
                 process.currentDirectoryURL = URL(fileURLWithPath: (cwd as NSString).expandingTildeInPath)
             }
-            process.environment = Self.commandEnvironment(base: ProcessInfo.processInfo.environment, loginPath: BinaryResolver.defaultSearchDirs())
+            process.environment = BinaryResolver.commandEnvironment(base: ProcessInfo.processInfo.environment)
         }
         process.standardOutput = outputPipe
         process.standardError = errorPipe
@@ -701,9 +686,7 @@ except Exception as e:
         let scriptURL = irisDir.appendingPathComponent("search_web.py")
         do {
             try script.write(to: scriptURL, atomically: true, encoding: .utf8)
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["python3", scriptURL.path, query]
+            let process = Self.searchWebProcess(scriptPath: scriptURL.path, query: query)
             let pipe = Pipe()
             process.standardOutput = pipe
             process.standardError = pipe
@@ -714,6 +697,18 @@ except Exception as e:
         } catch {
             return "Error executing search script: \(error)"
         }
+    }
+
+    /// The `/usr/bin/env python3` process `searchWeb` runs, with the login-shell PATH applied
+    /// (#228). Static and separate from `searchWeb` so a test can assert the environment without
+    /// running the search, which would hit the network.
+    static func searchWebProcess(scriptPath: String, query: String,
+                                 environment: [String: String] = ProcessInfo.processInfo.environment) -> Process {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["python3", scriptPath, query]
+        process.environment = BinaryResolver.commandEnvironment(base: environment)
+        return process
     }
 
     /// Where a skill of this name lives: the one spelling of the folder, for the three tools that

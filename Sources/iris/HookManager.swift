@@ -172,6 +172,7 @@ struct HookManager {
                 env.removeValue(forKey: key)
             }
             env["GEMINI_CWD"] = FileManager.default.currentDirectoryPath
+            env = BinaryResolver.commandEnvironment(base: env)
             process.environment = env
             
             if let data = payload {

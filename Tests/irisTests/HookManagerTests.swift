@@ -377,3 +377,47 @@ import Foundation
     
     try? FileManager.default.removeItem(at: configURL)
 }
+
+@Test func testHookManagerLoginPathEnv() async throws {
+    let tempDir = FileManager.default.temporaryDirectory
+    let configURL = tempDir.appendingPathComponent("test_settings_path.json")
+    let markerURL = tempDir.appendingPathComponent("hook_path_\(UUID().uuidString).txt")
+
+    // #228: command hooks run with the bare GUI environment otherwise, so a hook that calls a
+    // pyenv/nvm/Homebrew CLI would exit 127. The hook's PATH must begin with the login dirs.
+    let hookConfig = """
+    {
+      "hooks": {
+        "BeforeTool": [
+          {
+            "matcher": "test_tool",
+            "hooks": [
+              { "type": "command", "command": "printf '%s' \\"$PATH\\" > '\(markerURL.path)'" }
+            ]
+          }
+        ]
+      }
+    }
+    """
+    try hookConfig.write(to: configURL, atomically: true, encoding: .utf8)
+
+    var hookManager = HookManager()
+    hookManager.configPathOverride = configURL.path
+
+    _ = await hookManager.fireBeforeTool(toolName: "test_tool", args: [:])
+
+    var path = ""
+    for _ in 0..<20 {
+        if let current = try? String(contentsOf: markerURL, encoding: .utf8), !current.isEmpty {
+            path = current
+            break
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+    }
+
+    let firstLogin = BinaryResolver.defaultSearchDirs().first!
+    #expect(path.split(separator: ":").first.map(String.init) == firstLogin)
+
+    try? FileManager.default.removeItem(at: configURL)
+    try? FileManager.default.removeItem(at: markerURL)
+}

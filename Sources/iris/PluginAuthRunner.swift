@@ -49,6 +49,7 @@ enum PluginAuthRunner {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/sh")
             process.arguments = ["-c", command]
+            process.environment = BinaryResolver.commandEnvironment(base: ProcessInfo.processInfo.environment)
             let pipe = Pipe()
             process.standardOutput = pipe
             process.standardError = pipe
