@@ -3,13 +3,14 @@ import Foundation
 class MemoryManager: @unchecked Sendable {
     static let shared = MemoryManager()
 
-    /// Settable so tests can point the manager at a temp root. Production uses `.default`.
-    var paths: IrisPaths = .default
+    /// Fixed at init: `.default` for `shared`, the caller's own root via `init(paths:)`.
+    let paths: IrisPaths
 
     private var memoryPath: String { paths.memoryMd.path }
     private var userProfilePath: String { paths.userMd.path }
 
     private init() {
+        paths = .default
         ensureDefaults()
     }
 
