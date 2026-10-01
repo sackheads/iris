@@ -214,9 +214,18 @@ actor MCPManager {
     }
 
     func getGeminiTools() -> [FunctionDeclaration] {
+        Self.declarations(for: servers.map { name, server in
+            (name, server.availableTools, server.sanitizedDescriptions)
+        })
+    }
+
+    /// The declarations for what the servers reported, so the order is testable without a live
+    /// server. Servers go in name order: `servers` is a dictionary whose order changes between
+    /// launches, and a reordered tool list misses the whole prompt cache (5a §0.6).
+    static func declarations(for servers: [(name: String, tools: [MCP.Tool], sanitizedDescriptions: [String: String])]) -> [FunctionDeclaration] {
         var declarations: [FunctionDeclaration] = []
-        for (serverName, server) in servers {
-            for tool in server.availableTools {
+        for (serverName, availableTools, sanitizedDescriptions) in servers.sorted(by: { $0.name < $1.name }) {
+            for tool in availableTools {
                 // Prepend server name to tool name to avoid collisions
                 let uniqueName = Self.qualifiedName(server: serverName, tool: tool.name)
 
@@ -256,7 +265,7 @@ actor MCPManager {
                     description: nil
                 )
                 
-                let safeDescription = server.sanitizedDescriptions[tool.name] ?? tool.description ?? "MCP Tool from \(serverName)"
+                let safeDescription = sanitizedDescriptions[tool.name] ?? tool.description ?? "MCP Tool from \(serverName)"
                 
                 declarations.append(FunctionDeclaration(
                     name: uniqueName,
