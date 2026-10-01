@@ -69,14 +69,18 @@ read afterwards without committing a secret.
 
 ## The caching suite
 
-`perf/suites/caching.json` runs one real-lane, rung-4 scenario (`perf/prompts/caching/six-turns.json`):
-a scripted six-turn conversation whose `seedFacts` are written, before turn 1, into a fresh
+`perf/suites/caching.json` runs three real-lane, rung-4 scenarios from `perf/prompts/caching/`.
+Each scenario's `seedFacts` are written, before turn 1, into a fresh
 in-memory fact store scoped to that run alone — never the developer's real store and never shared
-across repetitions — so the fact-store block a turn's request carries is deterministic. The
-seeds carry only tokens distinctive enough that no prompt but turn 2's shares one, so the match
-schedule across the six turns is exactly `[false, true, false, false, false, false]`: only turn 2
-matches, and the block appears once, then disappears for good. Turn 3 calls a tool, so it has more
-than one model round. This is the suite that measures prompt-cache behavior across the 5a request
+across repetitions — so the fact-store block a turn's request carries is deterministic, and
+`PerfSuiteFilesTests` pins each scenario's match schedule. `six-turns.json` is the best case: its
+seeds carry only tokens distinctive enough that no prompt but turn 2's shares one, so the schedule
+is exactly `[false, true, false, false, false, false]` and the block appears once, then disappears
+for good; turn 3 calls a tool, so it has more than one model round. `every-turn-facts.json` is the
+realistic case: each of its six turns matches its own seed, so the block changes on every turn.
+`tool-heavy.json` has five turns: turn 1 and turn 3 match different seeds, and turn 2 runs a dozen
+commands one at a time, so turn 2 spans far more than 20 content blocks and the turns after it can
+read their cache only through the explicit end-of-turn-k−2 marker (spec §1). This is the suite that measures prompt-cache behavior across the 5a request
 change (see `docs/specs/2026-09-30-agency-cacheable-prompts.md` §3 for the before/after baselines);
 it needs a configured provider and is not part of `perf/run.sh`'s default sweep, so run it manually:
 `iris --perf run perf/suites/caching.json`.

@@ -40,7 +40,7 @@ struct PerfSuiteFilesTests {
 
     /// Not part of `suitesLoad` above: that test asserts every scenario is single-turn, which is
     /// deliberately false for `caching` (5a) — its six turns are the point.
-    @Test("the caching suite loads: real lane, rung 4 only, six seeded-fact turns (5a)")
+    @Test("the caching suite loads: real lane, rung 4 only, seeded multi-turn scenarios (5a)")
     func cachingSuiteLoads() throws {
         let suite = try PerfSuite.load(at: root.appendingPathComponent("perf/suites/caching.json").path)
         #expect(suite.name == "caching")
@@ -51,13 +51,15 @@ struct PerfSuiteFilesTests {
             #expect(FileManager.default.fileExists(atPath: url.path), Comment(rawValue: url.path))
             let scenario = try Scenario.load(at: url.path)
             #expect(scenario.clientMode == .real, Comment(rawValue: url.path))
-            #expect(scenario.turns.count == 6)
-            // six-turns: one fact turn in six (the best case); every-turn-facts: one seed per turn.
-            let expectedSeeds = ["six-turns": 2, "every-turn-facts": 6][scenario.name]
-            #expect(expectedSeeds != nil, "unexpected caching scenario \(scenario.name)")
-            #expect(scenario.seedFacts?.count == expectedSeeds)
+            // six-turns: one fact turn in six (the best case); every-turn-facts: one seed per turn;
+            // tool-heavy: a long tool turn between two fact turns (the k-2 read point, §1).
+            let expected: [String: (turns: Int, seeds: Int)] = ["six-turns": (6, 2), "every-turn-facts": (6, 6), "tool-heavy": (5, 2)]
+            let shape = expected[scenario.name]
+            #expect(shape != nil, "unexpected caching scenario \(scenario.name)")
+            #expect(scenario.turns.count == shape?.turns)
+            #expect(scenario.seedFacts?.count == shape?.seeds)
         }
-        #expect(suite.scenarios.count == 2)
+        #expect(suite.scenarios.count == 3)
     }
 
     /// The real fact-store match schedule for six-turns.json, built the way `ScenarioRunner` now
@@ -92,6 +94,23 @@ struct PerfSuiteFilesTests {
             let matched = try store.search(query: turn.prompt, countsAsRetrieval: false).map(\.content)
             #expect(matched == [seeds[i]], "turn \(i + 1) matched \(matched)")
         }
+    }
+
+    /// 5a final review item 1: the read point at turn k is the end of turn k-2, and the old
+    /// placement reached it only through the 20-block lookback, which a tool-heavy turn k-1 broke.
+    /// Turn 2 here runs a dozen sequential commands between two fact turns, so turn 3 and turn 4
+    /// read only if the end of the turn before the tool turn is an explicit marker.
+    @Test("tool-heavy.json: turns 1 and 3 match their own seed, the tool turn and the rest match none (5a)")
+    func toolHeavyFactSchedule() throws {
+        let scenario = try Scenario.load(at: root.appendingPathComponent("perf/prompts/caching/tool-heavy.json").path)
+        let seeds = try #require(scenario.seedFacts)
+        try #require(seeds.count == 2)
+        let store = try FactStoreManager(inMemory: true)
+        for seed in seeds { try store.addFact(content: seed) }
+        let matches = try scenario.turns.map { try store.search(query: $0.prompt, countsAsRetrieval: false).map(\.content) }
+        #expect(matches == [[seeds[0]], [], [seeds[1]], [], []])
+        // Turn 2 asks for many separate commands, so it runs many tool rounds.
+        #expect(scenario.turns[1].prompt.components(separatedBy: "`").count - 1 >= 24)
     }
 
     @Test("the second eagerness suite pairs bait prompts with tool-use controls (#138)")

@@ -1,2 +1,3 @@
 { "name": "caching", "lane": "real", "repetitions": 2, "pauseMs": 2000, "rungs": [4],
-  "scenarios": ["perf/prompts/caching/six-turns.json", "perf/prompts/caching/every-turn-facts.json"] }
+  "scenarios": ["perf/prompts/caching/six-turns.json", "perf/prompts/caching/every-turn-facts.json",
+                "perf/prompts/caching/tool-heavy.json"] }
