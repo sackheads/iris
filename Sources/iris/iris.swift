@@ -1823,14 +1823,16 @@ actor IrisEngine {
                 // this same round.
                 let roundForDump = modelRound
                 let dumpSink = requestDumpSink
-                let retryAttempt = RetryAttemptCounter()
+                // Only allocated when a dump sink is set: the counter exists purely to name a
+                // retry for the dump, and normal use (no sink) should do no extra work per call.
+                let retryAttempt = dumpSink != nil ? RetryAttemptCounter() : nil
                 let outcome = try await LLMRetry.run(delays: retryDelays, onRetry: { error, attempt, delay in
-                    retryAttempt.set(attempt)
+                    retryAttempt?.set(attempt)
                     await self.pushToUI(role: .system,
                                         text: "[retry] \(error.message); retrying in \(Self.formatDelay(delay)) (attempt \(attempt) of \(self.retryDelays.count))",
                                         conversationId: conversationId)
                 }) {
-                    dumpSink?(requestToSend, roundForDump, retryAttempt.get())
+                    dumpSink?(requestToSend, roundForDump, retryAttempt?.get() ?? 0)
                     return try await measure(.primaryLLM) {
                         try await self.consumeModelStream(request: requestToSend, streamed: streamed, streamer: streamer)
                     }
@@ -3695,7 +3697,7 @@ extension IrisEngine {
                 parameters: Schema(type: "OBJECT", properties: [:], required: [])),
             FunctionDeclaration(
                 name: "get_job_run",
-                description: "Read back one background job run: how it ended, what it cost, and the last thing the run itself said. Use it when the user asks about a run an event card mentioned — the card names the run by the first eight characters of its id, which is enough.",
+                description: "Read back one background job run: how it ended, how many tokens it sent (tokens sent, not billed cost), and the last thing the run itself said. Use it when the user asks about a run an event card mentioned — the card names the run by the first eight characters of its id, which is enough.",
                 parameters: Schema(type: "OBJECT", properties: [
                     "run_id": Schema(type: "STRING", description: "The run's id, or the first eight or more characters of it as an event card shows.")
                 ], required: ["run_id"])),

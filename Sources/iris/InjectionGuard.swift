@@ -296,11 +296,15 @@ public struct InjectionGuard {
                                tier2ModelsDir: tier2ModelsDir, tier3ModelsDir: tier3ModelsDir).outcome
     }
 
-    /// `classify`, plus whether the result is one THIS CALL actually stored in `cache` (equivalently:
-    /// whether it came from a `.error` tier verdict rather than a `.malicious` one or a `.safe`/
-    /// `.skipped` pass) — factored out so `sanitizeCacheable` can report that bit without
-    /// `IrisEngine` duplicating tier/cache logic that could then drift from this. `classify` is
-    /// exactly this with the bit dropped; the body is unchanged from before this split.
+    /// `classify`, plus whether the verdict is safe for a caller to keep (equivalently: whether it
+    /// came from anything other than a `.error` tier verdict). This is true far more often than it
+    /// is false, and not only when this call stored something in `cache`: a tier-1-only result, a
+    /// headless-mode pass and a cache hit are all reported cacheable without this call writing
+    /// anything, and a `.malicious` block is cacheable too. It is false only for a transient tier
+    /// failure, which must never be cached lest a model outage get remembered as a verdict.
+    /// Factored out so `sanitizeCacheable` can report that bit without `IrisEngine` duplicating
+    /// tier/cache logic that could then drift from this. `classify` is exactly this with the bit
+    /// dropped; the body is unchanged from before this split.
     private static func classifyDetailed(_ rawInput: String, contextTag: String = "",
                          maxTier: SanitizationTier = .tier1_structural,
                          protectionEnabled: Bool? = nil,

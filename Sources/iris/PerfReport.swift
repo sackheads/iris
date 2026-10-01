@@ -67,12 +67,6 @@ enum PerfReport {
         return out.joined(separator: "\n")
     }
 
-    /// Uncached tokens for one round: prompt minus cache read minus cache write. An unknown read
-    /// (nil: the fake client, a provider that doesn't report caching, or a pre-5a record) counts
-    /// the whole prompt as uncached rather than being excluded, per the brief. Nil only when the
-    /// prompt token count itself is unknown. Shared with `PerfCompare`, which needs the same
-    /// per-call arithmetic to compare uncached tokens across a run pair that both carry cache
-    /// fields (5a review #9).
     /// Successful-repetition model calls for one rung, flattened across both ladder-shaped
     /// (`modelCalls`) and full-turn (`turns.modelCalls`) repetitions. Shared with `PerfCompare`,
     /// which needs the same per-call collection to compare tokens across a run pair (5a review:
@@ -82,6 +76,12 @@ enum PerfReport {
             .flatMap { rep in rep.modelCalls + rep.turns.flatMap(\.modelCalls) }
     }
 
+    /// Uncached tokens for one round: prompt minus cache read minus cache write. An unknown read
+    /// (nil: the fake client, a provider that doesn't report caching, or a pre-5a record) counts
+    /// the whole prompt as uncached rather than being excluded, per the brief. Nil only when the
+    /// prompt token count itself is unknown. Shared with `PerfCompare`, which needs the same
+    /// per-call arithmetic to compare uncached tokens across a run pair that both carry cache
+    /// fields (5a review #9).
     static func uncachedTokens(_ call: ModelCallRecord) -> Double? {
         guard let prompt = call.promptTokens else { return nil }
         guard let read = call.cacheReadTokens else { return Double(prompt) }

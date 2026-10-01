@@ -72,20 +72,25 @@ read afterwards without committing a secret.
 `perf/suites/caching.json` runs one real-lane, rung-4 scenario (`perf/prompts/caching/six-turns.json`):
 a scripted six-turn conversation whose `seedFacts` are written, before turn 1, into a fresh
 in-memory fact store scoped to that run alone — never the developer's real store and never shared
-across repetitions — so the fact-store block a turn's system prompt carries is deterministic. The
+across repetitions — so the fact-store block a turn's request carries is deterministic. The
 seeds carry only tokens distinctive enough that no prompt but turn 2's shares one, so the match
 schedule across the six turns is exactly `[false, true, false, false, false, false]`: only turn 2
 matches, and the block appears once, then disappears for good. Turn 3 calls a tool, so it has more
-than one model round. This is the suite that measures today's prompt-cache behavior before the 5a
-behaviour change lands (see `docs/specs/2026-09-30-agency-cacheable-prompts.md` §3); it needs a
-configured provider and is not part of `perf/run.sh`'s default sweep, so run it manually:
+than one model round. This is the suite that measures prompt-cache behavior across the 5a request
+change (see `docs/specs/2026-09-30-agency-cacheable-prompts.md` §3 for the before/after baselines);
+it needs a configured provider and is not part of `perf/run.sh`'s default sweep, so run it manually:
 `iris --perf run perf/suites/caching.json`.
 
-Once 5a's request change lands (moving the fact block and peer count out of the system prompt and
-into a per-turn block — a later PR; this instrumentation PR changes no request byte), rungs 2 and 3
-will replay a system prompt that no longer holds either, so they will measure the stable prefix only
-and will not be comparable with pre-5a baselines. Anthropic's prompt tokens already jump across this
-PR's boundary, since they now include cached tokens, so compare uncached tokens across it.
+Since 5a's request change landed (the fact block and peer count moved out of the system prompt and
+into a per-turn `<turn_context>` block on the turn's own user entry), rungs 2 and 3 replay a system
+prompt that no longer holds either, so they measure the stable prefix only and are not comparable
+with pre-5a baselines. Anthropic's prompt tokens also jump across the 5a boundary, since they now
+include cached tokens. `--perf compare` accounts for this itself rather than needing a manual
+workaround: "prompt tokens" is the metric the regression gate reads, so on a pair that straddles the
+boundary (one side carries cache counts, the other doesn't) that row is marked informational with an
+explanatory note instead of being flagged, and the separate "uncached prompt tokens" row — always
+informational, since it swings with cache warmth rather than what was sent — is emitted only when
+both sides of the comparison carry cache counts, i.e. never on a straddled pair.
 
 `--dump-requests <dir>` on `iris --perf run` writes each round's request body — exactly the body the
 client builds, keys sorted (5a) — reusing
