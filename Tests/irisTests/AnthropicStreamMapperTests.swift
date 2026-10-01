@@ -52,6 +52,31 @@ struct AnthropicStreamMapperTests {
         ])
     }
 
+    /// `message_start` used to require `input_tokens` to emit any usage event at all, which
+    /// dropped cache fields that WERE present whenever `input_tokens` itself was missing (5a
+    /// review F8). Emit whenever any of the three prompt-side fields is present.
+    @Test("message_start without input_tokens still emits usage when cache fields are present")
+    func messageStartCacheCountsWithoutInputTokens() throws {
+        let events = try run([
+            ("message_start", #"{"type":"message_start","message":{"id":"msg_1","usage":{"cache_read_input_tokens":900,"cache_creation_input_tokens":50}}}"#),
+        ])
+        #expect(events == [
+            .usage(UsageMetadata(promptTokenCount: 950, candidatesTokenCount: nil, totalTokenCount: nil,
+                                  cacheReadTokens: 900, cacheWriteTokens: 50)),
+            .done(finishReason: nil),
+        ])
+    }
+
+    /// All three absent (no input, no cache fields): genuinely nothing to report, so no usage
+    /// event — unlike the case above, there is no cache data this would otherwise drop.
+    @Test("message_start with no usage fields at all emits no usage event")
+    func messageStartNoUsageFieldsEmitsNothing() throws {
+        let events = try run([
+            ("message_start", #"{"type":"message_start","message":{"id":"msg_1","usage":{}}}"#),
+        ])
+        #expect(events == [.done(finishReason: nil)])
+    }
+
     @Test("two tool blocks interleaved with text keep their own buffers; an empty input parses as {}")
     func twoTools() throws {
         let events = try run([

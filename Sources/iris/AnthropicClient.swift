@@ -235,7 +235,9 @@ struct AnthropicClient {
             let input = usage["input_tokens"] as? Int
             let cacheRead = usage["cache_read_input_tokens"] as? Int
             let cacheWrite = usage["cache_creation_input_tokens"] as? Int
-            let prompt = (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0)
+            // nil, not 0, when all three are absent: an unreported input must not become a
+            // confident zero that `withTotal()` then bakes into a confident total (5a review F6).
+            let prompt = UsageMetadata.anthropicPromptTokenCount(input: input, cacheRead: cacheRead, cacheWrite: cacheWrite)
             geminiResponse.usageMetadata = UsageMetadata(
                 promptTokenCount: prompt,
                 candidatesTokenCount: usage["output_tokens"] as? Int,

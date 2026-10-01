@@ -25,6 +25,20 @@ struct UsageCacheCountTests {
         #expect(r.usageMetadata?.cacheWriteTokens == nil)
     }
 
+    /// `(input ?? 0)` used to turn a missing `input_tokens` into a confident prompt of 0, so
+    /// `withTotal()` filled a confident total of `0 + output` — the unknown-as-zero the PR's own
+    /// rule forbids. Prompt must be nil, and so must the total, when all three prompt-side fields
+    /// are absent (5a review F6).
+    @Test("Anthropic non-stream: a usage object with only output_tokens yields prompt nil and total nil")
+    func allPromptFieldsAbsentYieldsNilNotZero() throws {
+        let json: [String: Any] = ["content": [["type": "text", "text": "hi"]],
+                                   "usage": ["output_tokens": 7]]
+        let r = try AnthropicClient.parseResponse(json)
+        #expect(r.usageMetadata?.promptTokenCount == nil)
+        #expect(r.usageMetadata?.totalTokenCount == nil)
+        #expect(r.usageMetadata?.candidatesTokenCount == 7)
+    }
+
     @Test("Gemini: cachedContentTokenCount decodes into cacheReadTokens; write stays nil")
     func gemini() throws {
         let data = #"{"promptTokenCount":1000,"cachedContentTokenCount":800,"candidatesTokenCount":5,"totalTokenCount":1005}"#.data(using: .utf8)!

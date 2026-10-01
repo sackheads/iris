@@ -18,13 +18,18 @@ struct AnthropicStreamMapper: StreamMapper {
         let type = (json["type"] as? String) ?? sse.event ?? ""
         switch type {
         case "message_start":
-            if let usage = (json["message"] as? [String: Any])?["usage"] as? [String: Any],
-               let input = usage["input_tokens"] as? Int {
+            if let usage = (json["message"] as? [String: Any])?["usage"] as? [String: Any] {
+                let input = usage["input_tokens"] as? Int
                 let cacheRead = usage["cache_read_input_tokens"] as? Int
                 let cacheWrite = usage["cache_creation_input_tokens"] as? Int
-                let prompt = input + (cacheRead ?? 0) + (cacheWrite ?? 0)
-                return [.usage(UsageMetadata(promptTokenCount: prompt, candidatesTokenCount: nil, totalTokenCount: nil,
-                                             cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite))]
+                // Emit whenever any of the three is present, not only when `input_tokens` is —
+                // requiring `input_tokens` dropped cache fields that WERE present whenever it
+                // itself was missing (5a review F8). `anthropicPromptTokenCount` is nil exactly
+                // when all three are absent, so it doubles as the "anything to report" check.
+                if let prompt = UsageMetadata.anthropicPromptTokenCount(input: input, cacheRead: cacheRead, cacheWrite: cacheWrite) {
+                    return [.usage(UsageMetadata(promptTokenCount: prompt, candidatesTokenCount: nil, totalTokenCount: nil,
+                                                 cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite))]
+                }
             }
         case "content_block_start":
             if let index = json["index"] as? Int, let block = json["content_block"] as? [String: Any],
