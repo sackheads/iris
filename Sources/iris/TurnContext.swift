@@ -39,25 +39,33 @@ struct TurnContext: Equatable, Sendable {
     }
 }
 
-/// One turn's block and where it goes: the anchor index and bytes are taken once, after the
-/// PreCompress hook, and every request of the turn is built through `contents(for:)`.
+/// One turn's block and where it goes. A turn sends two lists: round one sends the history the
+/// PreCompress hook returned (`.initial`), and every later request re-reads AppState's own list
+/// (`.state`), which the hook never touched. Each gets its own anchor, both taken once at the start
+/// of the turn; the bytes come from AppState's entry, the one the turn appended.
 struct TurnRequest: Sendable {
+    enum HistoryList: Sendable { case initial, state }
+
     let context: TurnContext
-    let anchor: Int?
+    let stateAnchor: Int?
+    let initialAnchor: Int?
     let anchorBytes: Data?
     private(set) var dropReported = false
 
-    init(context: TurnContext, history: [Content]) {
+    init(context: TurnContext, stateHistory: [Content], initialHistory: [Content]) {
         self.context = context
-        anchor = history.lastIndex { $0.role == "user" }
-        anchorBytes = anchor.flatMap { TurnContext.anchorBytes(of: history[$0]) }
+        let stateAnchor = stateHistory.lastIndex { $0.role == "user" }
+        self.stateAnchor = stateAnchor
+        initialAnchor = initialHistory.lastIndex { $0.role == "user" }
+        anchorBytes = stateAnchor.flatMap { TurnContext.anchorBytes(of: stateHistory[$0]) }
     }
 
     /// The request copy of `history`, and whether this is the first call of the turn to find the
     /// anchor broken (so the caller reports it once, not every round).
-    mutating func contents(for history: [Content]) -> (contents: [Content], firstDrop: Bool) {
-        guard let anchor, !context.isEmpty else { return (history, false) }
-        if context.anchorHolds(in: history, anchor: anchor, anchorBytes: anchorBytes) {
+    mutating func contents(for history: [Content], from list: HistoryList) -> (contents: [Content], firstDrop: Bool) {
+        guard !context.isEmpty else { return (history, false) }
+        if let anchor = list == .initial ? initialAnchor : stateAnchor,
+           context.anchorHolds(in: history, anchor: anchor, anchorBytes: anchorBytes) {
             return (context.applied(to: history, anchor: anchor, anchorBytes: anchorBytes), false)
         }
         defer { dropReported = true }

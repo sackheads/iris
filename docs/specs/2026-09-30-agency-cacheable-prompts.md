@@ -30,6 +30,10 @@ Each decision names its default and why; the cost of being wrong is what a revie
 
 Subagent and evaluator engines take the same path: their per-turn additions move into the block the same way.
 
+The fact block keeps its heading (`# Mid-Term Fact Store Memory (JIT Context)`). The peer-session count, which had no heading in the system prompt, sits under `# Active Sessions` in the turn context.
+
+Round one sends `history` as the PreCompress hook returned it; every later request re-reads AppState's list, which the hook never touched. The engine therefore takes two anchors at the start of the turn, one per list, both validated against the bytes of the entry the turn appended, so an index from one list is never applied to the other.
+
 Anthropic breakpoints stay four: last tool, system, and the last block of the penultimate and last messages (`AnthropicClient.swift` ~78–146). `markLastContentBlock` skips a message whose last block is a `tool_result` (`AnthropicClient.swift` ~85). The API accepts `cache_control` on `tool_result` blocks, so the skip is an artifact, and its cost follows from how the breakpoints work: a round ending in tool results writes its cache entry at the assistant's `tool_use`, so the tool results are re-sent uncached on the next round and again on the next turn. The fix (drop the exclusion) is in scope unconditionally, with its own test; the suite confirms it.
 
 The turn-context part is its own text block on Anthropic (`AnthropicClient.swift` ~24–26), so the entry becomes `[text(block), text(user)]` and the message breakpoint lands on the user's text, keeping the block inside the cached range of the next round.

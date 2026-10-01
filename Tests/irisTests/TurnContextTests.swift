@@ -24,7 +24,7 @@ private func model(_ text: String) -> Content { Content(role: "model", parts: [P
 struct TurnContextTests {
     private let context = TurnContext(sections: [
         .init(heading: "Mid-Term Fact Store Memory (JIT Context)", body: "- [f1] Brian lives in Seattle"),
-        .init(heading: "Sessions", body: "2 other sessions are active.")
+        .init(heading: "Active Sessions", body: "2 other sessions are active.")
     ])
 
     @Test("rendered() wraps every section in one turn_context element")
@@ -34,7 +34,7 @@ struct TurnContextTests {
         # Mid-Term Fact Store Memory (JIT Context)
         - [f1] Brian lives in Seattle
 
-        # Sessions
+        # Active Sessions
         2 other sessions are active.
         </turn_context>
         """)
@@ -77,22 +77,57 @@ struct TurnContextTests {
     @Test("a turn's anchor is its last user entry, taken once; a broken anchor is reported on the first round only")
     func turnRequestReportsOnce() {
         let history = [user("earlier"), model("reply"), user("now")]
-        var turn = TurnRequest(context: context, history: history)
-        #expect(turn.anchor == 2)
+        var turn = TurnRequest(context: context, stateHistory: history, initialHistory: history)
+        #expect(turn.stateAnchor == 2)
 
         // Later rounds append a tool call and a role-`user` tool result; the anchor does not move.
         let later = history + [model("call"), user("tool result")]
-        let (attached, firstDrop) = turn.contents(for: later)
+        let (attached, firstDrop) = turn.contents(for: later, from: .state)
         #expect(!firstDrop)
         #expect(attached[2].parts.first?.text == context.rendered())
         #expect(encoded(attached[4]) == encoded(later[4]))
 
         // Something rewrote the turn's entry: nothing attached, reported once.
         let rewritten = [user("earlier"), model("reply"), user("now, edited")]
-        let first = turn.contents(for: rewritten)
+        let first = turn.contents(for: rewritten, from: .state)
         #expect(first.firstDrop)
         #expect(encoded(first.contents) == encoded(rewritten))
-        #expect(!turn.contents(for: rewritten).firstDrop)
+        #expect(!turn.contents(for: rewritten, from: .state).firstDrop)
+    }
+
+    /// Review fix 1: a PreCompress hook that shortens history must not shift the index applied to
+    /// AppState's list onto an earlier message that happens to encode the same.
+    @Test("after a hook-shortened round one, later rounds put the block on the turn entry, not an earlier twin")
+    func hookRewrittenHistory() {
+        let state = [user("yes"), model("noted"), user("yes")]   // index 2 is this turn's entry
+        let hooked = [user("yes")]                              // the hook compressed the past away
+        var turn = TurnRequest(context: context, stateHistory: state, initialHistory: hooked)
+
+        let round1 = turn.contents(for: hooked, from: .initial)
+        #expect(!round1.firstDrop)
+        #expect(round1.contents[0].parts.first?.text == context.rendered())
+
+        let round2History = state + [model("call"), user("tool result")]
+        let round2 = turn.contents(for: round2History, from: .state)
+        #expect(!round2.firstDrop)
+        let carrying = round2.contents.indices.filter { round2.contents[$0].parts.count == 2 }
+        #expect(carrying == [2], "only the turn's own entry, never the earlier byte-identical \"yes\"")
+        #expect(encoded(round2.contents[0]) == encoded(state[0]))
+    }
+
+    @Test("an earlier byte-identical entry never receives the block, even when the turn entry is gone")
+    func earlierTwinNeverChosen() {
+        let state = [user("yes"), model("noted"), user("yes")]
+        var turn = TurnRequest(context: context, stateHistory: state, initialHistory: state)
+        // The UI removed the turn's entry; index 2 now holds something else, index 0 still says "yes".
+        let edited = [user("yes"), model("noted"), model("later")]
+        let out = turn.contents(for: edited, from: .state)
+        #expect(out.firstDrop)
+        #expect(encoded(out.contents) == encoded(edited))
+        // And with the entry present, only index 2 carries it.
+        let intact = turn.contents(for: state + [model("r")], from: .state).contents
+        #expect(intact[0].parts.count == 1)
+        #expect(intact[2].parts.first?.text == context.rendered())
     }
 
     @Test("an empty context returns the input byte-equal")
@@ -188,7 +223,7 @@ struct TurnContextEngineTests {
             #expect(lead.hasPrefix("<turn_context>"), "round \(i)")
             #expect(lead.contains(factHeading), "round \(i)")
             #expect(lead.contains("Brian lives in Seattle"), "round \(i)")
-            #expect(lead.contains("2 other sessions are active."), "round \(i)")
+            #expect(lead.contains("# Active Sessions\n2 other sessions are active."), "round \(i)")
             #expect(request.contents.first?.parts.dropFirst().first?.text == "Tell me about Seattle", "round \(i)")
             #expect(!systemText(request).contains(factHeading), "round \(i)")
             #expect(!systemText(request).contains("other sessions are active"), "round \(i)")
