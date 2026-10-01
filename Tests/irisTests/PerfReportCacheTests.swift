@@ -76,6 +76,31 @@ struct PerfReportCacheTests {
         #expect(!text.contains("99999"))
     }
 
+    /// F7: `cacheTable` used to always render the first repetition, even when it errored, giving
+    /// a partial per-round table with no marker. It must skip to the first repetition that
+    /// succeeded, and the render's label must say which one.
+    @Test("a failed repetition 0 is skipped: cacheTable uses repetition 1's rows, and the label says so (5a review F7)")
+    func skipsErroredFirstRepetition() {
+        var record = Self.cachingRecord()
+        let ok = record.scenarios[0].rungs[0].repetitions[0] // the original, successful repetition
+
+        // A distinctly-valued, errored repetition 0: if cacheTable picked it instead of the
+        // successful one, this prompt count would show up in the table.
+        var failed = ok
+        failed.error = "Anthropic HTTP 529"
+        failed.turns[0].modelCalls[0] = ModelCallRecord(round: 0, model: "claude", latencyMs: 1,
+                                                        promptTokens: 77777, outputTokens: 1, returnedToolCalls: false)
+        record.scenarios[0].rungs[0].repetitions = [failed, ok]
+
+        let table = PerfReport.cacheTable(record.scenarios[0])
+        #expect(!table.contains { $0.contains("77777") }, "the errored repetition's rows must not appear")
+        #expect(table.contains("| 1 | 0 | 1000 | — | — | 1000 |"), "repetition 1's (index 1) rows, not the errored repetition 0's")
+
+        let text = PerfReport.render(record)
+        #expect(text.contains("repetition 2"), "the label names the repetition actually used (1-indexed)")
+        #expect(!text.contains("repetition 1):"), "repetition 0 (label '1') errored and must not be the one named")
+    }
+
     @Test("seedFacts decodes and defaults to nil")
     func seedFactsDecoding() throws {
         let withFacts = try Scenario.decode(from: Data(#"{"name":"n","turns":[{"prompt":"p"}],"seedFacts":["a","b"]}"#.utf8))

@@ -26,6 +26,7 @@ struct PerfRunnerTests {
         #expect(record.environment.headless == true)
         #expect(record.environment.toolSandbox == "host", "the fake lane never sandboxes")
         #expect(record.scenarios.first?.rungs.first?.repetitions.first?.turns.first?.finalText == "Canberra.")
+        #expect(record.cacheCountsVersion == PerfRunRecord.currentCacheCountsVersion, "this build marks every record it writes (5a review F2)")
     }
 
     @Test("a real-lane suite with an injected client runs the ladder rungs and computes ratios")

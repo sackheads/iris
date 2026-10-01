@@ -13,9 +13,6 @@ enum PerfRunner {
                     client: (any LLMClientProtocol)? = nil, headless: Bool,
                     workspacePath: String? = nil, dumpRequestsDir: URL? = nil) async throws -> PerfRunRecord {
         try suite.validate()
-        // Fails fast, before any scenario runs, on a fake-lane suite whose scenario declares
-        // seedFacts (5a fix round 1, review finding #1).
-        try suite.validateScenarios(relativeTo: repoRoot)
         let reps = repetitionsOverride ?? suite.repetitions
         let startedAt = Date()
         var results: [PerfScenarioResult] = []
@@ -90,7 +87,7 @@ enum PerfRunner {
                              startedAt: startedAt, finishedAt: Date(),
                              environment: PerfEnvironment.capture(headless: headless, toolDeclarationCount: toolCount, repoRoot: repoRoot,
                                                                   toolSandbox: anySandboxed ? "sandboxed" : "host"),
-                             scenarios: results)
+                             scenarios: results, cacheCountsVersion: PerfRunRecord.currentCacheCountsVersion)
     }
 
     /// The parent directory name: "model-only", "tool-use", "fake". Pure path function, callable

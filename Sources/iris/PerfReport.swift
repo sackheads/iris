@@ -26,7 +26,7 @@ enum PerfReport {
             for rung in s.rungs {
                 let ok = rung.repetitions.filter { $0.error == nil }
                 let failed = rung.repetitions.count - ok.count
-                let calls = ok.flatMap { rep in rep.modelCalls + rep.turns.flatMap(\.modelCalls) }
+                let calls = Self.calls(rung)
                 let tokens = PerfStats.median(calls.compactMap { $0.promptTokens }.map(Double.init))
                 let firstToken = PerfStats.median(calls.compactMap(\.firstTokenMs))
                 let cacheRead = PerfStats.median(calls.compactMap { $0.cacheReadTokens }.map(Double.init))
@@ -39,8 +39,8 @@ enum PerfReport {
             out.append("")
             let cache = cacheTable(s)
             if !cache.isEmpty {
-                if let top = s.rungs.max(by: { $0.rung < $1.rung }) {
-                    out.append("- per-round cache (rung \(top.rung), repetition 1):")
+                if let top = s.rungs.max(by: { $0.rung < $1.rung }), let idx = firstOkRepetitionIndex(top) {
+                    out.append("- per-round cache (rung \(top.rung), repetition \(idx + 1)):")
                 }
                 out.append("")
                 out.append(contentsOf: cache)
@@ -73,6 +73,15 @@ enum PerfReport {
     /// prompt token count itself is unknown. Shared with `PerfCompare`, which needs the same
     /// per-call arithmetic to compare uncached tokens across a run pair that both carry cache
     /// fields (5a review #9).
+    /// Successful-repetition model calls for one rung, flattened across both ladder-shaped
+    /// (`modelCalls`) and full-turn (`turns.modelCalls`) repetitions. Shared with `PerfCompare`,
+    /// which needs the same per-call collection to compare tokens across a run pair (5a review:
+    /// previously duplicated inline in both places).
+    static func calls(_ r: PerfRungResult) -> [ModelCallRecord] {
+        r.repetitions.filter { $0.error == nil }
+            .flatMap { rep in rep.modelCalls + rep.turns.flatMap(\.modelCalls) }
+    }
+
     static func uncachedTokens(_ call: ModelCallRecord) -> Double? {
         guard let prompt = call.promptTokens else { return nil }
         guard let read = call.cacheReadTokens else { return Double(prompt) }
@@ -80,14 +89,24 @@ enum PerfReport {
         return Double(prompt - read - write)
     }
 
+    /// Index of the first repetition in `rung` that did not error, or nil if every repetition
+    /// failed. The rung table above already excludes errored repetitions from its medians;
+    /// `cacheTable` must do the same rather than always taking index 0, which used to print a
+    /// partial table (an errored repetition's model calls, often incomplete) with no marker that
+    /// anything was wrong (5a review F7).
+    private static func firstOkRepetitionIndex(_ rung: PerfRungResult) -> Int? {
+        rung.repetitions.firstIndex { $0.error == nil }
+    }
+
     /// A per-round cache breakdown for a multi-turn scenario, built from the top rung's first
-    /// repetition only — one table per repetition would be noise; the rung table above already
-    /// carries the medians. Empty when the top rung has no turns with model calls (rungs 1-3,
-    /// single-turn scenarios).
+    /// successful repetition only — one table per repetition would be noise; the rung table above
+    /// already carries the medians. Empty when the top rung has no turns with model calls (rungs
+    /// 1-3, single-turn scenarios) or every repetition errored.
     static func cacheTable(_ s: PerfScenarioResult) -> [String] {
         guard let top = s.rungs.max(by: { $0.rung < $1.rung }),
-              let first = top.repetitions.first,
-              first.turns.contains(where: { !$0.modelCalls.isEmpty }) else { return [] }
+              let idx = firstOkRepetitionIndex(top) else { return [] }
+        let first = top.repetitions[idx]
+        guard first.turns.contains(where: { !$0.modelCalls.isEmpty }) else { return [] }
         var lines = ["| turn | round | prompt | cache read | cache write | uncached |",
                      "|---|---|---|---|---|---|"]
         for (turnIndex, turn) in first.turns.enumerated() {
