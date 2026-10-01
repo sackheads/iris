@@ -78,9 +78,10 @@ seeds carry only tokens distinctive enough that no prompt but turn 2's shares on
 is exactly `[false, true, false, false, false, false]` and the block appears once, then disappears
 for good; turn 3 calls a tool, so it has more than one model round. `every-turn-facts.json` is the
 realistic case: each of its six turns matches its own seed, so the block changes on every turn.
-`tool-heavy.json` has five turns: turn 1 and turn 3 match different seeds, and turn 2 runs a dozen
-commands one at a time, so turn 2 spans far more than 20 content blocks and the turns after it can
-read their cache only through the explicit end-of-turn-k−2 marker (spec §1). This is the suite that measures prompt-cache behavior across the 5a request
+`tool-heavy.json` has five turns: turns 1, 2 and 3 each match their own seed, and turn 2 runs a
+dozen commands one at a time. Turn 2's entry changes at turn 3 and spans far more than 20 content
+blocks, so turn 3 can read past the system prompt only through the explicit end-of-turn-k−2 marker
+(spec §1; measured old vs new in §3.1). This is the suite that measures prompt-cache behavior across the 5a request
 change (see `docs/specs/2026-09-30-agency-cacheable-prompts.md` §3 for the before/after baselines);
 it needs a configured provider and is not part of `perf/run.sh`'s default sweep, so run it manually:
 `iris --perf run perf/suites/caching.json`.
