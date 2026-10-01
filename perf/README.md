@@ -92,6 +92,13 @@ explanatory note instead of being flagged, and the separate "uncached prompt tok
 informational, since it swings with cache warmth rather than what was sent — is emitted only when
 both sides of the comparison carry cache counts, i.e. never on a straddled pair.
 
+`IRIS_PERF_DECLARE_STATE_TOOLS=1 iris --perf run …` is 5a's tool-list experiment (spec §0.6): the
+state-gated tools (`manage_fact` and the peer tools) are declared on every turn instead of only when
+their state holds. Perf runs pin the peer count to 0, so the peer tools are declared with no
+`# Active Sessions` block. The record says so (`stateGatedToolsAlwaysDeclared`), its recorded tool
+count is the experiment's list, and `--perf compare` on a pair where only one side ran it prints a
+note and marks the prompt-token row informational, since the two sent different tool lists.
+
 `--dump-requests <dir>` on `iris --perf run` writes each round's request body — exactly the body the
 client builds, keys sorted (5a) — reusing
 `AnthropicClient`/`OpenAIClient`'s own `makeURLRequest` builders with the currently configured
