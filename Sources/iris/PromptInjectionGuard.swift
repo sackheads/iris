@@ -21,8 +21,17 @@ struct PromptInjectionGuard {
             // We use NFKC to normalize compatibility characters.
             clean = clean.precomposedStringWithCompatibilityMapping
 
-            // Remove control characters (except common whitespace like newlines/tabs)
-            let controlChars = CharacterSet.controlCharacters.subtracting(CharacterSet.whitespacesAndNewlines)
+            // Remove control characters (except common whitespace like newlines/tabs). Foundation's
+            // `whitespacesAndNewlines` also classifies U+200B (ZERO WIDTH SPACE) as whitespace, so a
+            // straight subtraction lets it survive — and it is the classic vector for splitting a
+            // trigger word (`ig\u{200B}nore`) past a classifier or pattern check while the model
+            // still reads the word (#241). Strip it explicitly. The audit of the other invisible Cf
+            // characters (U+200C/U+200D/U+2060/U+200E/U+200F/U+FEFF/U+00AD and the bidi controls)
+            // found `controlCharacters` already covers them — they are not whitespace — so only
+            // U+200B needs the extra entry.
+            let controlChars = CharacterSet.controlCharacters
+                .subtracting(CharacterSet.whitespacesAndNewlines)
+                .union(CharacterSet(charactersIn: "\u{200B}"))
             clean = clean.components(separatedBy: controlChars).joined()
 
             // 2. Strip common LLM role delimiters that attempt to hijack the conversation
