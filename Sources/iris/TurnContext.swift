@@ -9,15 +9,26 @@ struct TurnContext: Equatable, Sendable {
 
     /// `<turn_context>\n# heading\nbody\n\n# heading\nbody\n</turn_context>`
     func rendered() -> String {
-        let body = sections.map { "# \($0.heading)\n\($0.body)" }.joined(separator: "\n\n")
+        let body = sections.map { "# \(Self.neutralised($0.heading))\n\(Self.neutralised($0.body))" }
+            .joined(separator: "\n\n")
         return "<turn_context>\n\(body)\n</turn_context>"
     }
 
+    /// Section text with every `<` swapped for U+FF1C (fullwidth less-than). Fact text is
+    /// model-written, and SYSTEM.md tells the model that text outside the block is the user's, so a
+    /// fact holding `</turn_context>` must not be able to end the block early. No `<` means no tag
+    /// in any case or spacing. A look-alike rather than `&lt;`: the model reads `a ＜ b` as `a < b`
+    /// without decoding anything, and a fact that already contains `&lt;` (code, HTML) stays exact.
+    static func neutralised(_ text: String) -> String {
+        text.replacingOccurrences(of: "<", with: "\u{FF1C}")
+    }
+
     /// `contents` with the block inserted as the leading part of `contents[anchor]`, when the
-    /// anchor is in range and that entry still encodes to `anchorBytes` (sorted-key JSON of the
-    /// exact `Content` the turn appended). Otherwise `contents` unchanged: a block on the wrong
-    /// message is worse than none. `Content` has no identity and is not Equatable; the whole
-    /// encoded entry is compared, not its first text, so a repeated "yes" cannot match.
+    /// anchor is in range and that entry still encodes to `anchorBytes` (see `anchorBytes(of:)`).
+    /// Otherwise `contents` unchanged: a block on the wrong message is worse than none. `Content`
+    /// has no identity and is not Equatable; the whole encoded entry is compared, not its first
+    /// text, so a *different* entry that shares the first text cannot match. Two entries with
+    /// identical parts do encode the same, which is why the anchor index is taken once per list.
     func applied(to contents: [Content], anchor: Int, anchorBytes: Data?) -> [Content] {
         guard !isEmpty, anchorHolds(in: contents, anchor: anchor, anchorBytes: anchorBytes) else { return contents }
         var out = contents
@@ -32,10 +43,20 @@ struct TurnContext: Equatable, Sendable {
     }
 
     /// The bytes an anchor is validated against: sorted keys, so equal entries are equal bytes.
+    /// Each `inlineData` is stood in for by its MIME type and encoded length, so a screenshot is
+    /// not re-encoded on every round; role, text and every other part still count. The accepted
+    /// limit: an entry identical except for an image of the same type and length matches. Getting
+    /// one at the anchor mid-turn takes the UI removing the turn's entry and re-adding that.
     static func anchorBytes(of content: Content) -> Data? {
+        var stripped = content
+        for i in stripped.parts.indices {
+            if let image = stripped.parts[i].inlineData {
+                stripped.parts[i].inlineData = InlineData(mimeType: image.mimeType, data: "\(image.data.utf8.count)")
+            }
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        return try? encoder.encode(content)
+        return try? encoder.encode(stripped)
     }
 }
 
@@ -57,7 +78,8 @@ struct TurnRequest: Sendable {
         let stateAnchor = stateHistory.lastIndex { $0.role == "user" }
         self.stateAnchor = stateAnchor
         initialAnchor = initialHistory.lastIndex { $0.role == "user" }
-        anchorBytes = stateAnchor.flatMap { TurnContext.anchorBytes(of: stateHistory[$0]) }
+        // An empty context sends history as is (`contents(for:from:)`), so it needs no anchor.
+        anchorBytes = context.isEmpty ? nil : stateAnchor.flatMap { TurnContext.anchorBytes(of: stateHistory[$0]) }
     }
 
     /// The request copy of `history`, and whether this is the first call of the turn to find the
