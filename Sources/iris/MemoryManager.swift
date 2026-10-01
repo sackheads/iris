@@ -10,6 +10,18 @@ class MemoryManager: @unchecked Sendable {
     private var userProfilePath: String { paths.userMd.path }
 
     private init() {
+        ensureDefaults()
+    }
+
+    /// Test/injection seam (5a Task 7 fix round 1): a manager over its OWN `IrisPaths`, so a test
+    /// never mutates the process-global `MemoryManager.shared.paths` (invariant 7) to get
+    /// isolation. `IrisEngine(memory:)` takes one of these the same way it takes `factStore:`.
+    init(paths: IrisPaths) {
+        self.paths = paths
+        ensureDefaults()
+    }
+
+    private func ensureDefaults() {
         try? paths.ensureDirectories()
         if !FileManager.default.fileExists(atPath: memoryPath) {
             try? "Memory is currently empty.".write(toFile: memoryPath, atomically: true, encoding: .utf8)
@@ -18,7 +30,7 @@ class MemoryManager: @unchecked Sendable {
             try? "User profile is currently empty.".write(toFile: userProfilePath, atomically: true, encoding: .utf8)
         }
     }
-    
+
     func getMemory() -> String {
         if let content = try? String(contentsOfFile: memoryPath, encoding: .utf8) {
             return content

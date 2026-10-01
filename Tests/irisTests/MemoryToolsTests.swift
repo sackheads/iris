@@ -2,48 +2,44 @@ import Testing
 import Foundation
 @testable import iris
 
-@Suite("Memory Tools Tests", .serialized)
+/// 5a Task 7 fix round 1: these tests used to swap `MemoryManager.shared.paths` (a process-global
+/// `var`, no synchronization) to isolate each test's content, which raced against any other test
+/// doing the same — including the `MemoryManager(paths:)` injection seam's own tests in
+/// `TurnContextTests.swift`. `MemoryManager(paths:)` removes the need for the swap entirely: each
+/// test constructs its own manager over its own temp root, so `MemoryManager.shared` is never
+/// touched here (invariant 7). No `.serialized` needed either — nothing is shared across tests.
+@Suite("Memory Tools Tests")
 struct MemoryToolsTests {
 
-    /// Routed through `MemoryManagerPathsMutex` (5a Task 7, `TurnContextTests.swift`): `.serialized`
-    /// only orders this suite's OWN tests against each other, not against `GuardedFileCacheTests` —
-    /// a different suite — also swapping this same singleton's `.paths` concurrently. The restore
-    /// happens before `release()`, not in a `defer` after it, so a contender can never start
-    /// swapping `.paths` before this one's restore has landed.
-    private func withTempPaths(_ body: (IrisPaths) -> Void) async {
-        await MemoryManagerPathsMutex.shared.acquire()
+    private func withTempManager(_ body: (MemoryManager, IrisPaths) -> Void) {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("iris-tools-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
         let p = IrisPaths(root: root)
-        try? p.ensureDirectories()
-        let previous = MemoryManager.shared.paths
-        MemoryManager.shared.paths = p
-        body(p)
-        MemoryManager.shared.paths = previous
-        try? FileManager.default.removeItem(at: root)
-        await MemoryManagerPathsMutex.shared.release()
+        let manager = MemoryManager(paths: p)
+        body(manager, p)
     }
 
     @Test("updateSoul writes memory/SOUL.md")
-    func testUpdateSoul() async {
-        await withTempPaths { p in
-            MemoryManager.shared.updateSoul(content: "new soul")
+    func testUpdateSoul() {
+        withTempManager { manager, p in
+            manager.updateSoul(content: "new soul")
             #expect((try? String(contentsOf: p.soulMd, encoding: .utf8)) == "new soul")
         }
     }
 
     @Test("updateMemory writes memory/memory.md")
-    func testUpdateMemory() async {
-        await withTempPaths { p in
-            MemoryManager.shared.updateMemory(content: "new memory")
+    func testUpdateMemory() {
+        withTempManager { manager, p in
+            manager.updateMemory(content: "new memory")
             #expect((try? String(contentsOf: p.memoryMd, encoding: .utf8)) == "new memory")
         }
     }
 
     @Test("updateUserProfile writes memory/USER.md")
-    func testUpdateUserProfile() async {
-        await withTempPaths { p in
-            MemoryManager.shared.updateUserProfile(content: "new user")
+    func testUpdateUserProfile() {
+        withTempManager { manager, p in
+            manager.updateUserProfile(content: "new user")
             #expect((try? String(contentsOf: p.userMd, encoding: .utf8)) == "new user")
         }
     }

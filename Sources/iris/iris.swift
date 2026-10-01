@@ -133,32 +133,30 @@ actor IrisEngine {
     /// process-wide store for every engine ever built, including ones that never touch memory.
     private let injectedFactStore: FactStoreManager?
     var factStore: FactStoreManager { injectedFactStore ?? .shared }
+    /// 5a Task 7 fix round 1: same idiom as `injectedFactStore`/`factStore`. `MemoryManager` has no
+    /// per-instance seam other than `init(paths:)`, so a test that needs an isolated USER.md/SOUL.md
+    /// constructs its own manager and hands it here, instead of mutating the process-global
+    /// `MemoryManager.shared.paths` (invariant 7).
+    private let injectedMemory: MemoryManager?
+    var memory: MemoryManager { injectedMemory ?? .shared }
 
     var systemPrompt: Content!
 
     /// Everything that decides what the guard OUTPUTS for a given file's content, besides the
     /// content itself (5a Task 7). The cached text below is guard output, not raw file content, so
-    /// a profile guarded under one configuration must never be served under another — flipping
-    /// `protectionEnabled`, or a guard tier model appearing/disappearing on disk mid-process, has
-    /// to miss the cache exactly like editing the file does. Mirrors the fields
-    /// `InjectionGuard.classify`'s own cache key uses, computed the same way (`ConfigManager.shared`
-    /// plus `IrisPaths.default.modelsDir`), so this cache can never disagree with what the guard
-    /// would actually do for the current config.
+    /// a profile guarded under one configuration must never be served under another. `config` IS
+    /// `InjectionGuard`'s own cache-key fingerprint (fix round 1) — not a hand-maintained parallel
+    /// copy of its fields, which drifted the first time (it omitted the guard model names and the
+    /// models directory, so swapping guard models without touching protection-enabled would not
+    /// have missed this cache). Reusing the same type is what makes the "mirrors" claim true rather
+    /// than aspirational.
     private struct GuardTextStamp: Equatable {
         let modified: Date?
-        let protectionEnabled: Bool
-        let tier2: InjectionGuard.Tier2Provisioning
-        let tier3: InjectionGuard.Tier3Provisioning
+        let config: InjectionGuard.GuardConfigFingerprint
     }
 
     private func currentGuardTextStamp(modified: Date?) -> GuardTextStamp {
-        let enabled = protectionEnabled ?? ConfigManager.shared.enableAdvancedPromptInjectionProtection
-        let modelsDir = IrisPaths.default.modelsDir
-        let tier2 = InjectionGuard.tier2Provisioning(modelName: ConfigManager.shared.promptGuardCoreMLModel, modelsDir: modelsDir)
-        let tier3 = InjectionGuard.tier3Provisioning(engine: ConfigManager.shared.promptGuardEngine,
-                                                      modelName: ConfigManager.shared.promptGuardModel,
-                                                      modelsDir: modelsDir)
-        return GuardTextStamp(modified: modified, protectionEnabled: enabled, tier2: tier2, tier3: tier3)
+        GuardTextStamp(modified: modified, config: InjectionGuard.currentConfigFingerprint(protectionEnabled: protectionEnabled))
     }
 
     /// Modification date for a guarded file, following symlinks (5a Task 7) — an
@@ -201,20 +199,29 @@ actor IrisEngine {
 
     /// USER.md, sanitized and guarded, cached until the file's content changes, the protection
     /// setting changes, or a guard tier's provisioning state changes (5a Task 7, invariant 6/#130).
+    /// Reads the path and the content from the same `memory` manager in this one place, so the
+    /// stamp and the text it guards can never come from two different `MemoryManager`s.
     private func guardedUserProfileText() async -> String {
-        let path = MemoryManager.shared.paths.userMd.path
+        let manager = memory
+        let path = manager.paths.userMd.path
         let stamp = currentGuardTextStamp(modified: Self.fileModificationDate(atPath: path))
         if let existing = profileStamp, existing.path == path, existing.stamp == stamp,
            let cached = cachedProfileText {
             return cached
         }
-        let userProfile = MemoryManager.shared.getUserProfile()
-        let safeUserProfile = await measureSpan("assembly.userProfile") {
+        let userProfile = manager.getUserProfile()
+        let (safeUserProfile, cacheable) = await measureSpan("assembly.userProfile") {
             let structural = PromptInjectionGuard.sanitizeUntrustedInput(userProfile)
-            return await InjectionGuard.sanitize(structural, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+            return await InjectionGuard.sanitizeCacheable(structural, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         }
-        profileStamp = (path, stamp)
-        cachedProfileText = safeUserProfile
+        // A transient guard error (fix round 1) is shown for THIS turn but never cached: caching it
+        // would pin the user's profile as blocked for every later turn of a long-lived main engine
+        // until something else happens to invalidate the stamp. Leaving `profileStamp` untouched
+        // means the very next call sees "nothing cached for this stamp" and retries.
+        if cacheable {
+            profileStamp = (path, stamp)
+            cachedProfileText = safeUserProfile
+        }
         return safeUserProfile
     }
 
@@ -251,12 +258,16 @@ actor IrisEngine {
             cachedAgentsText.removeValue(forKey: wp)
             return nil
         }
-        let safeAgentsMd = await measureSpan("assembly.agentsMd") {
+        let (safeAgentsMd, cacheable) = await measureSpan("assembly.agentsMd") {
             let structural = PromptInjectionGuard.sanitizeUntrustedInput(agentsMdContent)
-            return await InjectionGuard.sanitize(structural, contextTag: "workspace_rules", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+            return await InjectionGuard.sanitizeCacheable(structural, contextTag: "workspace_rules", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         }
-        agentsStamp[wp] = stamp
-        cachedAgentsText[wp] = safeAgentsMd
+        // Same rule as `guardedUserProfileText`: a transient error is shown this turn but never
+        // recorded, so the next turn retries instead of serving a permanently-blocked workspace.
+        if cacheable {
+            agentsStamp[wp] = stamp
+            cachedAgentsText[wp] = safeAgentsMd
+        }
         return safeAgentsMd
     }
 
@@ -368,11 +379,12 @@ actor IrisEngine {
     /// parameter, so a delegated call never appears in the dump (5a review F4).
     private let requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil) {
         self.state = state
         self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
         self.injectedFactStore = factStore
+        self.injectedMemory = memory
         self.modelTier = tier
         self.principal = principal
         self.roleLabel = roleLabel
@@ -420,7 +432,10 @@ actor IrisEngine {
         if let existing = systemPrompt { return existing }
         return await measure(.contextAssembly) {
             await measureSpan("assembly.systemPrompt") {
-                let soul = await manager.loadSOUL()
+                // `paths: memory.paths` (5a Task 7 fix round 1): a test that injects an isolated
+                // `MemoryManager(paths:)` to pin USER.md must get SOUL.md from the same root too,
+                // not from the process-global `IrisPaths.default` `loadSOUL` defaults to.
+                let soul = await manager.loadSOUL(paths: memory.paths)
                 let activeBundle = SkillBundleManager.shared.activeBundle
                 let skills = await manager.discoverSkills(activeBundle: activeBundle)
                 let steering = SystemSteering.shipped()
@@ -2987,15 +3002,15 @@ actor IrisEngine {
                 PromptInjectionGuard.sanitizeUntrustedInput(blocks.joined(separator: "\n\n")),
                 contextTag: "tool_output_search_memory", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         } else if functionCall.name == "update_user_profile", let content = functionCall.args["content"]?.stringValue {
-            MemoryManager.shared.updateUserProfile(content: content)
+            memory.updateUserProfile(content: content)
             invalidateUserProfile()   // 5a Task 7: this engine must not keep serving the pre-write guarded text
             result = "User profile updated."
         } else if functionCall.name == "update_soul", let content = functionCall.args["content"]?.stringValue {
-            MemoryManager.shared.updateSoul(content: content)
+            memory.updateSoul(content: content)
             systemPrompt = nil   // invalidate cache so the new SOUL loads next turn
             result = "Soul updated. It will take effect on the next turn."
         } else if functionCall.name == "update_memory", let content = functionCall.args["content"]?.stringValue {
-            MemoryManager.shared.updateMemory(content: content)
+            memory.updateMemory(content: content)
             result = "Memory updated."
         } else if functionCall.name == "reflect" {
             result = "Reflection logged. Proceed with your next action."

@@ -156,11 +156,48 @@ public struct InjectionGuard {
         print("[InjectionGuard] Tier 2 CoreML skipped: \(description) is not downloaded/configured. Tier 1 still ran; configure and download it in Settings -> Security to enable tier 2.")
     }
 
-    private static func cacheKey(clean: String, source: String, maxTier: SanitizationTier, protectionEnabled: Bool?,
-                                  tier2ModelsDir: URL, tier3ModelsDir: URL,
-                                  tier2Provisioning: Tier2Provisioning, tier3Provisioning: Tier3Provisioning) -> String {
+    /// Everything that decides what the guard OUTPUTS for given content, besides the content
+    /// itself — the non-content half of `cacheKey`'s input, pulled into its own type (5a Task 7
+    /// fix round 1) so a caller doing its own caching ON TOP of `InjectionGuard` (`IrisEngine`'s
+    /// guarded-file cache) can key on EXACTLY this, rather than a hand-maintained parallel copy
+    /// that can silently drift from `cacheKey` itself. `tier2ModelsDir`/`tier3ModelsDir` are the
+    /// RESOLVED directories (post `?? IrisPaths.default.modelsDir`), not the raw overrides, so two
+    /// equal fingerprints really did resolve to the same filesystem snapshot.
+    public struct GuardConfigFingerprint: Equatable {
+        let protectionEnabled: Bool
+        let promptGuardEngine: String
+        let promptGuardModel: String
+        let promptGuardCoreMLModel: String
+        let tier2ModelsDir: String
+        let tier3ModelsDir: String
+        let tier2Provisioning: Tier2Provisioning
+        let tier3Provisioning: Tier3Provisioning
+    }
+
+    /// Resolves `GuardConfigFingerprint` exactly as `classify` resolves the equivalent locals —
+    /// same `ConfigManager.shared` fields, same provisioning predicates, same `?? IrisPaths.default
+    /// .modelsDir` fallback — so a caller's fingerprint can never disagree with what `classify`
+    /// would actually use for the same parameters. `classify`/`classifyDetailed` call this too
+    /// (rather than recomputing the same five lines locally), which is what keeps the two unable to
+    /// drift apart.
+    static func currentConfigFingerprint(protectionEnabled: Bool?, tier2ModelsDir: URL? = nil,
+                                          tier3ModelsDir: URL? = nil) -> GuardConfigFingerprint {
         let config = ConfigManager.shared
-        let enabled = protectionEnabled ?? config.enableAdvancedPromptInjectionProtection
+        let resolvedTier2ModelsDir = tier2ModelsDir ?? IrisPaths.default.modelsDir
+        let resolvedTier3ModelsDir = tier3ModelsDir ?? IrisPaths.default.modelsDir
+        return GuardConfigFingerprint(
+            protectionEnabled: protectionEnabled ?? config.enableAdvancedPromptInjectionProtection,
+            promptGuardEngine: config.promptGuardEngine,
+            promptGuardModel: config.promptGuardModel,
+            promptGuardCoreMLModel: config.promptGuardCoreMLModel,
+            tier2ModelsDir: resolvedTier2ModelsDir.path,
+            tier3ModelsDir: resolvedTier3ModelsDir.path,
+            tier2Provisioning: tier2Provisioning(modelName: config.promptGuardCoreMLModel, modelsDir: resolvedTier2ModelsDir),
+            tier3Provisioning: tier3Provisioning(engine: config.promptGuardEngine, modelName: config.promptGuardModel, modelsDir: resolvedTier3ModelsDir))
+    }
+
+    private static func cacheKey(clean: String, source: String, maxTier: SanitizationTier,
+                                  fingerprint: GuardConfigFingerprint) -> String {
         // The tier-2 model path is in the key too, so correctness does not lean on CoreMLEvaluator
         // being load-once: a hot-swapped guard model can never be served a stale verdict. The
         // provisioning results (#202 fix round 2, extended to tier 2 by #210) are what actually
@@ -170,10 +207,10 @@ public struct InjectionGuard {
         // after. Both models-dir paths are included for symmetry/defense-in-depth (#210 fix round
         // 1) even though production only ever passes `IrisPaths.default.modelsDir` for both — a
         // test that varies one independently of the other must still get its own cache entry.
-        let parts = [clean, source, String(describing: maxTier), String(enabled),
-                     config.promptGuardEngine, config.promptGuardModel, config.promptGuardCoreMLModel,
-                     tier2ModelsDir.path, tier3ModelsDir.path,
-                     String(describing: tier2Provisioning), String(describing: tier3Provisioning)]
+        let parts = [clean, source, String(describing: maxTier), String(fingerprint.protectionEnabled),
+                     fingerprint.promptGuardEngine, fingerprint.promptGuardModel, fingerprint.promptGuardCoreMLModel,
+                     fingerprint.tier2ModelsDir, fingerprint.tier3ModelsDir,
+                     String(describing: fingerprint.tier2Provisioning), String(describing: fingerprint.tier3Provisioning)]
         let digest = SHA256.hash(data: Data(parts.joined(separator: "\u{0}").utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
@@ -214,6 +251,24 @@ public struct InjectionGuard {
                        contextTag: contextTag)
     }
 
+    /// `sanitize`, plus whether the result is one `InjectionGuard` itself would cache (5a Task 7
+    /// fix round 1). A `.error` tier verdict produces a blocked marker — textually indistinguishable
+    /// from a genuine `.malicious` block — but is deliberately never cached internally (a transient
+    /// model outage must not pin content as blocked for the process; see `testErrorVerdictNotCached`).
+    /// A caller doing its OWN caching on top (`IrisEngine`'s guarded-file cache) must honor the same
+    /// rule, or a one-off hiccup on the long-lived main engine becomes a permanent block for as long
+    /// as that cache lives. Parameters are `sanitize`'s.
+    public static func sanitizeCacheable(_ rawInput: String, contextTag: String = "",
+                                         maxTier: SanitizationTier = .tier1_structural,
+                                         protectionEnabled: Bool? = nil,
+                                         tier2ModelsDir: URL? = nil,
+                                         tier3ModelsDir: URL? = nil) async -> (text: String, cacheable: Bool) {
+        let (outcome, cacheable) = await classifyDetailed(rawInput, contextTag: contextTag, maxTier: maxTier,
+                                                          protectionEnabled: protectionEnabled,
+                                                          tier2ModelsDir: tier2ModelsDir, tier3ModelsDir: tier3ModelsDir)
+        return (wrapped(outcome, contextTag: contextTag), cacheable)
+    }
+
     /// `sanitize`'s second half on its own: the `<untrusted_context>` wrapper around whatever the
     /// tiers decided. A caller that needs to *know* which way a verdict went — `JobRunner`'s watch
     /// paths, whose row and card have to report that the block was withheld (#187 deliverable 4) —
@@ -236,6 +291,21 @@ public struct InjectionGuard {
                          protectionEnabled: Bool? = nil,
                          tier2ModelsDir: URL? = nil,
                          tier3ModelsDir: URL? = nil) async -> GuardOutcome {
+        await classifyDetailed(rawInput, contextTag: contextTag, maxTier: maxTier,
+                               protectionEnabled: protectionEnabled,
+                               tier2ModelsDir: tier2ModelsDir, tier3ModelsDir: tier3ModelsDir).outcome
+    }
+
+    /// `classify`, plus whether the result is one THIS CALL actually stored in `cache` (equivalently:
+    /// whether it came from a `.error` tier verdict rather than a `.malicious` one or a `.safe`/
+    /// `.skipped` pass) — factored out so `sanitizeCacheable` can report that bit without
+    /// `IrisEngine` duplicating tier/cache logic that could then drift from this. `classify` is
+    /// exactly this with the bit dropped; the body is unchanged from before this split.
+    private static func classifyDetailed(_ rawInput: String, contextTag: String = "",
+                         maxTier: SanitizationTier = .tier1_structural,
+                         protectionEnabled: Bool? = nil,
+                         tier2ModelsDir: URL? = nil,
+                         tier3ModelsDir: URL? = nil) async -> (outcome: GuardOutcome, cacheable: Bool) {
         let __turnID = PerformanceProfiler.currentTurnID
         let __start = MonotonicClock.nowMs()
         defer {
@@ -243,46 +313,41 @@ public struct InjectionGuard {
                                               durationMs: (MonotonicClock.nowMs() - __start))
         }
         let source = sanitizeSourceLabel(contextTag)
-        let resolvedTier2ModelsDir = tier2ModelsDir ?? IrisPaths.default.modelsDir
-        let resolvedTier3ModelsDir = tier3ModelsDir ?? IrisPaths.default.modelsDir
-        // Resolved once, up front, so the cache key (below) and the tier-2/tier-3 skip decisions
-        // agree on the exact same filesystem snapshot (#202 fix round 2, extended to tier 2 by #210).
-        let tier2ProvisioningResult = tier2Provisioning(modelName: ConfigManager.shared.promptGuardCoreMLModel,
-                                                         modelsDir: resolvedTier2ModelsDir)
-        let tier3ProvisioningResult = tier3Provisioning(engine: ConfigManager.shared.promptGuardEngine,
-                                              modelName: ConfigManager.shared.promptGuardModel,
-                                              modelsDir: resolvedTier3ModelsDir)
+        let fingerprint = currentConfigFingerprint(protectionEnabled: protectionEnabled,
+                                                    tier2ModelsDir: tier2ModelsDir, tier3ModelsDir: tier3ModelsDir)
 
         // Tier 1: Strict Structural Isolation & Text Normalization
         let clean = measureSpanSync("guard.tier1") { executeTier1(rawInput) }
 
         if maxTier == .tier1_structural {
-            return .passed(clean: clean)
+            // Never reaches `cache` at all (see below) — but it is a pure function of `rawInput`
+            // with no model involved, so it cannot be the kind of transient failure #1 guards
+            // against. Reported cacheable so a caller keying its own cache on content+fingerprint
+            // (5a Task 7) does not treat a tier-1-only result as if it might be an error.
+            return (.passed(clean: clean), true)
         }
 
         // Headless `--bench` runs skip the model-backed tiers: the aux models aren't provisioned
         // and would only add nondeterministic latency to a benchmark. Tier 1 structural
         // sanitization still applies. In-process flag by design — see HeadlessMode.
         if HeadlessMode.isEnabled {
-            return .passed(clean: clean)
+            return (.passed(clean: clean), true)
         }
 
-        let key = cacheKey(clean: clean, source: source, maxTier: maxTier, protectionEnabled: protectionEnabled,
-                            tier2ModelsDir: resolvedTier2ModelsDir, tier3ModelsDir: resolvedTier3ModelsDir,
-                            tier2Provisioning: tier2ProvisioningResult, tier3Provisioning: tier3ProvisioningResult)
+        let key = cacheKey(clean: clean, source: source, maxTier: maxTier, fingerprint: fingerprint)
         if let cached = cache.get(key) {
-            return cached
+            return (cached, true)
         }
 
         // Tier 2: Local Token-Classification (CoreML/ONNX) — evaluates the unwrapped content.
-        let tier2 = await measureSpan("guard.tier2") { await executeTier2CoreML(clean, protectionEnabled: protectionEnabled, provisioning: tier2ProvisioningResult, source: source) }
+        let tier2 = await measureSpan("guard.tier2") { await executeTier2CoreML(clean, protectionEnabled: protectionEnabled, provisioning: fingerprint.tier2Provisioning, source: source) }
         switch tier2 {
         case .error:
-            return .blocked(marker: "[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]")
+            return (.blocked(marker: "[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]"), false)
         case .malicious:
             let blocked = GuardOutcome.blocked(marker: "[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]")
             cache.set(key, blocked)
-            return blocked
+            return (blocked, true)
         case .safe, .skipped:
             // A tier-2 skip (unprovisioned/notConfigured) IS cached, exactly like `.safe` — same
             // reasoning as tier 3's cache (#210 mirrors #202 fix round 2): `tier2Provisioning`
@@ -294,18 +359,18 @@ public struct InjectionGuard {
         if maxTier == .tier2_coreML {
             let passed = GuardOutcome.passed(clean: clean)
             cache.set(key, passed)
-            return passed
+            return (passed, true)
         }
 
         // Tier 3: Behavioral Canary Probe — also evaluates the unwrapped content.
-        let tier3 = await measureSpan("guard.tier3") { await executeTier3Canary(clean, protectionEnabled: protectionEnabled, provisioning: tier3ProvisioningResult) }
+        let tier3 = await measureSpan("guard.tier3") { await executeTier3Canary(clean, protectionEnabled: protectionEnabled, provisioning: fingerprint.tier3Provisioning) }
         switch tier3 {
         case .error:
-            return .blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]")
+            return (.blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"), false)
         case .malicious:
             let blocked = GuardOutcome.blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]")
             cache.set(key, blocked)
-            return blocked
+            return (blocked, true)
         case .safe, .skipped:
             // #202 fix round 2 (reversing fix round 1): a skip IS cached, exactly like `.safe`.
             // Static context (USER.md, AGENTS.md, plugin rules) being re-sanitized through tiers
@@ -315,7 +380,7 @@ public struct InjectionGuard {
             // model file appears on disk, the key changes and the stale skip can never be served.
             let passed = GuardOutcome.passed(clean: clean)
             cache.set(key, passed)
-            return passed
+            return (passed, true)
         }
     }
 
