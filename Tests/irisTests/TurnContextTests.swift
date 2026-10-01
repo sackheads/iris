@@ -324,6 +324,30 @@ private final class FlakyThenHealthyInferenceEngine: AuxiliaryInferenceEngine, @
     }
 }
 
+/// Throws the first time it is asked about text containing `marker`, and answers SAFE otherwise.
+/// USER.md is guarded before AGENTS.md on every turn, so a fail-first engine would spend its one
+/// error on USER.md; keying on the probe text aims the error at the file under test.
+private final class FlakyOnceForMarkerInferenceEngine: AuxiliaryInferenceEngine, @unchecked Sendable {
+    private let lock = NSLock()
+    private var failed = false
+    let marker: String
+    init(marker: String) { self.marker = marker }
+    func loadModel(config: AuxiliaryModelConfig) async throws {}
+    func unloadModel() async {}
+    func generate(prompt: String, jsonSchema: String?) async throws -> String {
+        let fail = lock.withLock { () -> Bool in
+            guard !failed, prompt.contains(marker) else { return false }
+            failed = true
+            return true
+        }
+        if fail {
+            struct TransientError: Error {}
+            throw TransientError()
+        }
+        return "SAFE"
+    }
+}
+
 /// `USER.md` and the workspace's `AGENTS.md` are re-read and re-guarded only when they actually
 /// change (5a Task 7) — the engine-level cache in `IrisEngine.guardedUserProfileText` /
 /// `guardedAgentsMdText` / `assembledSystemPrompt`. `IrisEngine(memory:)` (fix round 1) is an
@@ -634,6 +658,44 @@ struct GuardedFileCacheTests {
                                 protectionEnabled: true, sessionPeerCount: 0, memory: manager)
 
         await AuxiliaryModelManager.$scopedEngines.withValue(["canary": FlakyThenHealthyInferenceEngine()]) {
+            await engine.processInput("one", source: "UI", conversationId: id)
+            await engine.processInput("two", source: "UI", conversationId: id)
+        }
+
+        let requests = client.requests
+        try #require(requests.count == 2)
+        #expect(systemText(requests[0]).contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"),
+                "turn 1: the transient error is shown as blocked for that turn")
+        #expect(!systemText(requests[0]).contains(unique))
+        #expect(systemText(requests[1]).contains(unique),
+                "turn 2: the engine is healthy again and the error was never cached as a permanent block")
+        #expect(!systemText(requests[1]).contains("[CONTENT BLOCKED"))
+    }
+
+    /// The AGENTS.md twin of the test above (5a final review item 6): the workspace file goes
+    /// through the same guarded-text cache, so a transient guard error on it must not stick either.
+    @Test("a transient guard error on AGENTS.md is shown for one turn but never cached as a permanent block")
+    func agentsErrorOutcomeIsNeverCachedAsAPermanentBlock() async throws {
+        let (manager, paths) = tempMemory()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-agents-error-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let unique = "AGENTS error-cache probe \(UUID().uuidString)"
+        try unique.write(to: dir.appendingPathComponent("AGENTS.md"), atomically: true, encoding: .utf8)
+
+        let facts = try FactStoreManager(inMemory: true)
+        let app = AppState()
+        let id = newConversation(app)
+        let idx = try #require(app.conversations.firstIndex(where: { $0.id == id }))
+        app.conversations[idx].workspacePath = dir.path
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], streamResponses: false, factStore: facts,
+                                protectionEnabled: true, sessionPeerCount: 0, memory: manager)
+
+        let canary = FlakyOnceForMarkerInferenceEngine(marker: unique)
+        await AuxiliaryModelManager.$scopedEngines.withValue(["canary": canary]) {
             await engine.processInput("one", source: "UI", conversationId: id)
             await engine.processInput("two", source: "UI", conversationId: id)
         }
