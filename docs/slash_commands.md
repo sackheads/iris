@@ -24,7 +24,7 @@ Iris supports in-app slash commands (`/-commands`) typed into the chat composer 
 | `/facts search` | `/facts search <query>` | Execute an FTS5 full-text search against stored facts. |
 | `/facts probe` | `/facts probe <entity>` | Retrieve all facts associated with a specific entity tag. |
 | `/search` | `/search <query>` | Full-text search across every saved conversation; lists up to 10 matching messages with their conversation title. |
-| `/tokens` | `/tokens` (or `/stats`) | View prompt, candidate, and total token usage breakdown. |
+| `/tokens` | `/tokens` (or `/stats`) | View prompt, candidate, total, cache read, and cache write token usage breakdown (5a; a cache figure never reported by the provider shows as `—`, not zero). |
 | `/sandbox` | `/sandbox [status\|enable\|disable]` | Inspect or configure the subagent `apple/container` Linux VM runtime. |
 | `/new` | `/new` | Create a fresh conversation tab. |
 | `/clear` | `/clear` | Clear message history in the current active conversation. Refused in a pinned conversation (Iris Activity). |

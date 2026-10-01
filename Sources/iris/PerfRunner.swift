@@ -11,7 +11,7 @@ enum PerfRunner {
 
     static func run(suite: PerfSuite, repetitionsOverride: Int? = nil, repoRoot: URL,
                     client: (any LLMClientProtocol)? = nil, headless: Bool,
-                    workspacePath: String? = nil) async throws -> PerfRunRecord {
+                    workspacePath: String? = nil, dumpRequestsDir: URL? = nil) async throws -> PerfRunRecord {
         try suite.validate()
         let reps = repetitionsOverride ?? suite.repetitions
         let startedAt = Date()
@@ -45,8 +45,13 @@ enum PerfRunner {
                         if suite.lane == .fake { effective.clientMode = .fake }
                         // Real-lane tool prompts run unattended with auto-approve: keep them in the VM.
                         let toolExecution: ToolExecutionMode = suite.lane == .real ? .sandboxed : .asConfigured
+                        // Rung is part of the path: a suite running rungs 4 and 5 would otherwise
+                        // have rung 5's dumps overwrite rung 4's at the same <scenario>/<rep> (fix
+                        // round 1, review finding #2).
+                        let dumpDir = dumpRequestsDir?.appendingPathComponent(scenario.name)
+                            .appendingPathComponent("rung-\(rung)").appendingPathComponent("\(i)")
                         let result = await ScenarioRunner.run(effective, guards: guards, toolExecution: toolExecution, clientOverride: client,
-                                                              workspacePath: workspacePath)
+                                                              workspacePath: workspacePath, dumpRequestsTo: dumpDir)
                         if result.toolsSandboxed { anySandboxed = true }
                         let turns = zip(result.turnProfiles, result.finalTexts + Array(repeating: "", count: max(0, result.turnProfiles.count - result.finalTexts.count)))
                             .map { PerfTurn($0, finalText: $1) }
@@ -82,7 +87,7 @@ enum PerfRunner {
                              startedAt: startedAt, finishedAt: Date(),
                              environment: PerfEnvironment.capture(headless: headless, toolDeclarationCount: toolCount, repoRoot: repoRoot,
                                                                   toolSandbox: anySandboxed ? "sandboxed" : "host"),
-                             scenarios: results)
+                             scenarios: results, cacheCountsVersion: PerfRunRecord.currentCacheCountsVersion)
     }
 
     /// The parent directory name: "model-only", "tool-use", "fake". Pure path function, callable

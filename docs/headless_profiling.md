@@ -96,6 +96,7 @@ other field defaults.
 | `latencyMs` | `{ "minMs", "maxMs" }` | none | Fake mode only. Simulates per-call model latency (random in range). Omit for instant (~0). |
 | `scriptedResponses` | array | `[]` | Fake mode only. The model's replies, consumed in order. |
 | `toggles` | `{ guards, hooks, sandbox }` | all `false` | **Advisory metadata only** today — see note below. |
+| `seedFacts` | array of string | none | Facts written to a fresh in-memory fact store before turn 1, so a scenario that depends on the fact-store block appearing/disappearing is deterministic (5a; see `perf/suites/caching.json`). Applies unconditionally — fake lane or real, under `iris --perf run` or `--bench` — because the store is minted fresh per run and never touches `FactStoreManager.shared` or any on-disk home. |
 
 ### Scripted responses (fake mode)
 

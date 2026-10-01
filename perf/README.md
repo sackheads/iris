@@ -67,13 +67,54 @@ arguments (capped at 500 characters; values under credential-looking keys and to
 substrings are replaced with `[redacted]`), promoted baselines included, so a tool storm can be
 read afterwards without committing a secret.
 
+## The caching suite
+
+`perf/suites/caching.json` runs one real-lane, rung-4 scenario (`perf/prompts/caching/six-turns.json`):
+a scripted six-turn conversation whose `seedFacts` are written, before turn 1, into a fresh
+in-memory fact store scoped to that run alone — never the developer's real store and never shared
+across repetitions — so the fact-store block a turn's system prompt carries is deterministic. The
+seeds carry only tokens distinctive enough that no prompt but turn 2's shares one, so the match
+schedule across the six turns is exactly `[false, true, false, false, false, false]`: only turn 2
+matches, and the block appears once, then disappears for good. Turn 3 calls a tool, so it has more
+than one model round. This is the suite that measures today's prompt-cache behavior before the 5a
+behaviour change lands (see `docs/specs/2026-09-30-agency-cacheable-prompts.md` §3); it needs a
+configured provider and is not part of `perf/run.sh`'s default sweep, so run it manually:
+`iris --perf run perf/suites/caching.json`.
+
+Once 5a's request change lands (moving the fact block and peer count out of the system prompt and
+into a per-turn block — a later PR; this instrumentation PR changes no request byte), rungs 2 and 3
+will replay a system prompt that no longer holds either, so they will measure the stable prefix only
+and will not be comparable with pre-5a baselines. Anthropic's prompt tokens already jump across this
+PR's boundary, since they now include cached tokens, so compare uncached tokens across it.
+
+`--dump-requests <dir>` on `iris --perf run` writes each round's request body — the same body the
+client builds, key order aside, until requests are encoded with sorted keys — reusing
+`AnthropicClient`/`OpenAIClient`'s own `makeURLRequest` builders with the currently configured
+streaming flag (Gemini's body is just the request's own JSON encoding, and streaming or not makes
+no difference to it) — to `<dir>/<scenario>/rung-<N>/<rep>/<turn>-<round>.json`, where `<round>` is
+the engine's own model round and matches `ModelCallRecord.round` in the same run's record; a retry
+after a transient failure is named explicitly, `<turn>-<round>-retry<k>.json`, rather than shifting
+into the next round's slot (5a review F4). The rung is part of the path so a suite that dumps more
+than one rung (e.g. 4 and 5) never has one rung's files overwrite another's. Nothing is sent over
+the network; a placeholder API key is used so the dump works even without configured credentials.
+These are what a byte-prefix diff reads to find exactly where two rounds' requests first differ —
+treat a reordering of the same keys as noise, not a real divergence, until sorted-key encoding
+lands.
+
 ## Reading a record
 
 `iris --perf report <run.json>` renders the Markdown summary. Per scenario: a row per rung with
-median and p90 wall-clock and median prompt tokens, the two ratios, the top five named spans
+median and p90 wall-clock, median prompt tokens, median cache read tokens, median cache write
+tokens, and median uncached tokens (prompt minus cache read minus cache write; an unknown cache
+read counts the whole prompt as uncached), the two ratios, the top five named spans
 (`guard.tier3`, `vibecop`, `assembly.userProfile`, ...), and the tool-call rate with a histogram, and, for prompts that declare `expectedTools`, the
 **unexpected tool-call rate**: turns that called any tool outside that list (bait prompts declare
 `[]`, controls declare their one tool, so an extra `read_file` next to a `set_workspace` counts).
+
+For a multi-turn scenario (only `caching` today), the report also carries a per-round cache table
+— turn, round, prompt, cache read, cache write, uncached — built from the top rung's first
+repetition only; a table per repetition would be noise; the rung table's medians already cover
+that.
 
 `first token ms` is the median time from request start to the first streamed token for rungs that
 streamed (4 and 5 when the streaming setting is on); it is `-` for the bare-call rungs and for

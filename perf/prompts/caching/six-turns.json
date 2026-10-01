@@ -1,0 +1,9 @@
+{ "name": "six-turns", "clientMode": "real", "tier": "medium",
+  "seedFacts": ["BLUEHERON ships Thursdays.", "BLUEHERON codename ZIRCONFINCH launches quarterly."],
+  "turns": [
+    { "prompt": "Say hello in five words." },
+    { "prompt": "What do you know about the BLUEHERON codename? One sentence." },
+    { "prompt": "Count the files in /tmp with a shell command and tell me the number." },
+    { "prompt": "Name a prime number between 20 and 30." },
+    { "prompt": "Summarize this conversation in one sentence." },
+    { "prompt": "Reply with the single word: done." } ] }

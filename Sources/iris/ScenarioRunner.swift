@@ -51,7 +51,10 @@ enum ScenarioRunner {
                     guards: GuardMode = .asConfigured,
                     toolExecution: ToolExecutionMode = .asConfigured,
                     clientOverride: (any LLMClientProtocol)? = nil,
-                    workspacePath: String? = nil) async -> ScenarioResult {
+                    workspacePath: String? = nil,
+                    dumpRequestsTo: URL? = nil,
+                    factStore: FactStoreManager? = nil,
+                    retryDelays: [TimeInterval] = [2, 4, 8]) async -> ScenarioResult {
         let state = AppState()
         state.autoApproveTools = true // non-interactive: never block on an approval prompt
         // Pay the Vibecop cost a real run_command pays, unless this run is measuring guards off.
@@ -74,6 +77,24 @@ enum ScenarioRunner {
             case .real:
                 client = LLMClient()
             }
+        }
+
+        // `--dump-requests`: a sink the engine's own main-loop call site invokes directly, tagged
+        // with the engine's own round and retry attempt — not a client wrapper. Wrapping the
+        // client used to see every call that passed through it, including the engine's own retries
+        // and any call forwarded to a grader or subagent engine built on the same client, which
+        // drifted the file numbering away from `ModelCallRecord.round` (5a review F4). Passing the
+        // sink only to the top-level engine built below (never to a delegated engine, which gets
+        // none) keeps the dump to exactly this run's own rounds. The collector is drained and
+        // cleared after each turn below, so round numbers restart at 0 per turn.
+        let roundRequests = dumpRequestsTo != nil ? RoundRequestCollector() : nil
+        let requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)?
+        if let roundRequests {
+            requestDumpSink = { request, round, retryAttempt in
+                roundRequests.append(request, round: round, retryAttempt: retryAttempt)
+            }
+        } else {
+            requestDumpSink = nil
         }
 
         // Guard toggling writes through ConfigManager, whose setters persist. Only a volatile
@@ -117,11 +138,39 @@ enum ScenarioRunner {
         // so this detaches; endSession is idempotent).
         defer { Task { await SandboxSessionManager.shared.endSession(conversationId) } }
 
+        // Seed the fact store before turn 1 so a scenario like `caching` gets a deterministic
+        // fact-store block: turns after this can rely on exactly these facts being present.
+        // Best-effort — a seeding failure must not fail the whole scenario run (5a). Never
+        // `.shared`, the process-global (or, outside a test process, the developer's real
+        // on-disk) fact store: a caller-injected store is used as-is; otherwise, when this
+        // scenario has seeds, a fresh in-memory store is minted for this run alone, unconditionally
+        // — so a repetition never sees another repetition's seeds and a real-lane run never
+        // inherits the developer's own facts (5a fix round 2, review finding #1/#2). There is no
+        // hazard left to gate on: the fresh store never touches `.shared` or any on-disk home, fake
+        // lane or real, volatile copy or not (5a review F5).
+        let seedFacts = scenario.seedFacts ?? []
+        let effectiveFactStore: FactStoreManager?
+        if let factStore {
+            effectiveFactStore = factStore
+            for fact in seedFacts {
+                _ = try? factStore.addFact(content: fact)
+            }
+        } else if !seedFacts.isEmpty {
+            let fresh = try? FactStoreManager(inMemory: true)
+            for fact in seedFacts {
+                _ = try? fresh?.addFact(content: fact)
+            }
+            effectiveFactStore = fresh
+        } else {
+            effectiveFactStore = nil
+        }
+
         // `AppState.init` auto-creates a conversation and this run adds its own above, so the
         // real peer count here is always >= 1 — the #185 session tools would land on every
         // perf-scenario turn and shift the #129/#144 declaration-size baselines this runner
         // exists to measure. Pin it off, matching `ToolSurfaceTrimTests`.
-        let engine = IrisEngine(state: state, tier: scenario.tier, client: client, sessionPeerCount: 0)
+        let engine = IrisEngine(state: state, tier: scenario.tier, client: client, retryDelays: retryDelays,
+                               factStore: effectiveFactStore, sessionPeerCount: 0, requestDumpSink: requestDumpSink)
 
         // Collect this run's finished turn profiles via a task-local sink scoped to the turn loop.
         let collector = TurnCollector()
@@ -129,7 +178,7 @@ enum ScenarioRunner {
         var turnErrors: [String?] = []
         let start = MonotonicClock.nowMs()
         await PerformanceProfiler.$runSink.withValue({ collector.append($0) }) {
-            for turn in scenario.turns {
+            for (turnIndex, turn) in scenario.turns.enumerated() {
                 let before = state.conversations.first { $0.id == conversationId }?.messages.count ?? 0
                 await engine.processInput(turn.prompt, source: turn.source, conversationId: conversationId)
                 let messages = state.conversations.first { $0.id == conversationId }?.messages ?? []
@@ -144,6 +193,10 @@ enum ScenarioRunner {
                 // is the only way to see it.
                 let error = turnMessages.compactMap { LLMErrorMessage.parse($0.content)?.headline }.first
                 turnErrors.append(error)
+
+                if let dumpRequestsTo, let roundRequests {
+                    writeRequestDumps(roundRequests.drain(), turn: turnIndex + 1, to: dumpRequestsTo, tier: scenario.tier)
+                }
             }
         }
         let wallClockMs = (MonotonicClock.nowMs() - start)
@@ -157,6 +210,54 @@ enum ScenarioRunner {
         return ScenarioResult(turnProfiles: collector.all, wallClockMs: wallClockMs,
                               finalTexts: finalTexts, guardsWereOff: guardsOff, vibecopMeasured: state.vibecopUnderAutoApprove,
                               toolsSandboxed: sandboxed, conversationId: conversationId, turnErrors: turnErrors)
+    }
+
+    /// Writes one turn's recorded requests as `<dir>/<turn>-<round>.json`, keyed on the engine's
+    /// own round and retry attempt rather than call order, so files pair 1:1 with the profiler's
+    /// `ModelCallRecord.round` even across a retry: a retry is named `<turn>-<round>-retry<k>.json`
+    /// explicitly rather than shifting into the next round's slot (5a review F4). Uses the
+    /// currently configured provider, model and streaming flag so the body matches what a real
+    /// call would build (5a) — `RequestDump` used to hardcode non-streaming while production
+    /// streams by default, so a dump never matched an actual turn's body (5a review #11). Best
+    /// effort: a write failure is logged, not thrown, so `--dump-requests` never fails the run it
+    /// is only meant to observe.
+    private static func writeRequestDumps(_ entries: [RoundRequestCollector.Entry], turn: Int, to dir: URL, tier: ModelTier) {
+        guard !entries.isEmpty else { return }
+        let provider = ConfigManager.shared.primaryProvider
+        let model = ConfigManager.shared.getModel(for: tier)
+        let stream = ConfigManager.shared.streamResponses
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            print("[ScenarioRunner] --dump-requests: could not create \(dir.path): \(error)")
+            return
+        }
+        for entry in entries {
+            let name = entry.retryAttempt == 0 ? "\(turn)-\(entry.round).json" : "\(turn)-\(entry.round)-retry\(entry.retryAttempt).json"
+            do {
+                let data = try RequestDump.body(for: entry.request, provider: provider, model: model, stream: stream)
+                try data.write(to: dir.appendingPathComponent(name))
+            } catch {
+                print("[ScenarioRunner] --dump-requests: failed to write turn \(turn) round \(entry.round): \(error)")
+            }
+        }
+    }
+}
+
+/// Thread-safe accumulator for one turn's recorded requests, used by `--dump-requests`. Each entry
+/// is tagged with the engine's own round and retry attempt (0 = original call) at the main-loop
+/// call site itself, not inferred from call order (5a review F4). `drain` both returns and clears
+/// so numbering restarts at 0 for the next turn.
+private final class RoundRequestCollector: @unchecked Sendable {
+    struct Entry { var round: Int; var retryAttempt: Int; var request: GeminiRequest }
+    private let lock = NSLock()
+    private var items: [Entry] = []
+    func append(_ request: GeminiRequest, round: Int, retryAttempt: Int) {
+        lock.lock(); items.append(Entry(round: round, retryAttempt: retryAttempt, request: request)); lock.unlock()
+    }
+    func drain() -> [Entry] {
+        lock.lock(); defer { lock.unlock() }
+        let out = items; items = []; return out
     }
 }
 

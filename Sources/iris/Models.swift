@@ -237,6 +237,37 @@ struct UsageMetadata: Codable, Sendable {
     var promptTokenCount: Int?
     var candidatesTokenCount: Int?
     var totalTokenCount: Int?
+    /// Tokens served from the provider's prompt cache. nil means the provider did not say, which
+    /// is not the same as a miss (5a §0.4).
+    var cacheReadTokens: Int? = nil
+    /// Tokens written to the cache this call (Anthropic only). nil when not reported.
+    var cacheWriteTokens: Int? = nil
+
+    // Gemini's own key for the read count, so its usage decodes directly.
+    enum CodingKeys: String, CodingKey {
+        case promptTokenCount, candidatesTokenCount, totalTokenCount
+        case cacheReadTokens = "cachedContentTokenCount"
+        case cacheWriteTokens
+    }
+
+    /// `totalTokenCount` as prompt + output when the provider left it out. The job budgets read
+    /// the total, and Anthropic never sends one, so its runs were charged nothing (5a).
+    func withTotal() -> UsageMetadata {
+        guard totalTokenCount == nil, let p = promptTokenCount, let c = candidatesTokenCount else { return self }
+        var u = self; u.totalTokenCount = p + c; return u
+    }
+
+    /// Anthropic's prompt-side usage is split across three fields (`input_tokens`,
+    /// `cache_read_input_tokens`, `cache_creation_input_tokens`); the sum is the real prompt
+    /// count. nil only when all three are absent — treating a missing `input_tokens` as 0 would
+    /// turn "unknown" into a confident (and wrong) prompt count, which `withTotal()` would then
+    /// bake into a confident total too (5a review F6/F8). Shared by the non-stream parser
+    /// (`AnthropicClient`) and the stream mapper (`AnthropicStreamMapper`) so both apply the same
+    /// rule.
+    static func anthropicPromptTokenCount(input: Int?, cacheRead: Int?, cacheWrite: Int?) -> Int? {
+        guard input != nil || cacheRead != nil || cacheWrite != nil else { return nil }
+        return (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0)
+    }
 }
 
 /// Synthesized in this file (same-file requirement for auto `==`); used by `LLMStreamEvent`

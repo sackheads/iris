@@ -280,6 +280,28 @@ struct TurnBudgetTests {
         #expect(finished.totalTokens == 40, "and `finish` writes the same figure again")
     }
 
+    @Test("an Anthropic-shaped response with no total charges tokensToday as prompt + output (5a)")
+    func anthropicShapedResponseWithNoTotalChargesPromptPlusOutput() async throws {
+        // Anthropic never sends a total; before 5a `updateTokenUsage` added
+        // `usage.totalTokenCount ?? 0`, so a run like this charged the day's budget nothing.
+        let response = GeminiResponse(
+            candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "done")]))],
+            usageMetadata: UsageMetadata(promptTokenCount: 960, candidatesTokenCount: 7, totalTokenCount: nil))
+        let (store, state, engine, _, _) = try harness([response])
+        let job = Job(name: "anthropic-shaped", prompt: "Work.", trigger: .schedule(.interval(seconds: 60)))
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
+                               config: config, activity: RecordingActivity(), sandboxAvailable: { true })
+
+        await runner.fire(job: job, origin: .schedule)
+
+        let utc = Calendar(identifier: .gregorian)
+        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: utc, now: Date()) == 967,
+                "no total from the provider; the budget still sees prompt + output")
+    }
+
     @Test("a run that spends its per-run budget is a failed row and a card that says why")
     func budgetStopIsAFailedRun() async throws {
         let (store, state, engine, client, _) = try harness([

@@ -102,6 +102,8 @@ struct StreamAssembler: Sendable {
             merged.promptTokenCount = Self.maxOf(merged.promptTokenCount, incoming.promptTokenCount)
             merged.candidatesTokenCount = Self.maxOf(merged.candidatesTokenCount, incoming.candidatesTokenCount)
             merged.totalTokenCount = Self.maxOf(merged.totalTokenCount, incoming.totalTokenCount)
+            merged.cacheReadTokens = Self.maxOf(merged.cacheReadTokens, incoming.cacheReadTokens)
+            merged.cacheWriteTokens = Self.maxOf(merged.cacheWriteTokens, incoming.cacheWriteTokens)
             usage = merged
         case .done(let finish, let block):
             finishReason = finish
@@ -132,7 +134,7 @@ struct StreamAssembler: Sendable {
             parts.append(Part(functionCall: bare, thoughtSignature: signature))
         }
         let content = parts.isEmpty ? nil : Content(role: "model", parts: parts)
-        var response = GeminiResponse(candidates: [Candidate(content: content, finishReason: finishReason)], usageMetadata: usage)
+        var response = GeminiResponse(candidates: [Candidate(content: content, finishReason: finishReason)], usageMetadata: usage?.withTotal())
         if let blockReason { response.promptFeedback = PromptFeedback(blockReason: blockReason) }
         return response
     }

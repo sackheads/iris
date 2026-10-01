@@ -32,6 +32,35 @@ struct PerfSuiteTests {
         }
     }
 
+    /// F5 (5a review): the refusal this replaces guarded a hazard that no longer exists — seeding
+    /// mints a fresh in-memory store per run and never touches `.shared`, real lane or fake. A
+    /// fake-lane suite with `seedFacts` must run end to end, seed the fact into the run's own
+    /// store (observable via the scenario's scripted turn), and leave `.shared` untouched.
+    @MainActor
+    @Test("a fake-lane suite with seedFacts runs and seeds, and .shared stays untouched (5a review F5)")
+    func fakeLaneSeedFactsRunsAndSeeds() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-suite-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let marker = "PERFSEED\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        let scenarioPath = dir.appendingPathComponent("seeded.json")
+        try #"""
+        {"name":"seeded-scenario","clientMode":"fake","turns":[{"prompt":"one"}],
+         "scriptedResponses":[{"kind":"text","text":"ack"}],
+         "seedFacts":["The \#(marker) codename ships on Thursdays."]}
+        """#.write(to: scenarioPath, atomically: true, encoding: .utf8)
+        let suite = PerfSuite(name: "s", lane: .fake, repetitions: 1, rungs: [5], scenarios: [scenarioPath.path])
+
+        // The whole suite runs to completion: no fail-fast refusal for a fake-lane scenario with
+        // seedFacts (the hazard it guarded against no longer exists).
+        let record = try await PerfRunner.run(suite: suite, repoRoot: dir, headless: true)
+        #expect(record.scenarios.first?.name == "seeded-scenario")
+
+        // Seeding never reaches the process-global store, fake lane or not.
+        let leaked = try FactStoreManager.shared.search(query: marker, countsAsRetrieval: false)
+        #expect(leaked.isEmpty, "seeding must never reach the process-global store")
+    }
+
     @Test("scenario paths resolve against the repo root")
     func resolvesPaths() throws {
         let suite = try PerfSuite.decode(from: Data(#"{"name":"s","scenarios":["scenarios/echo-latency.json"]}"#.utf8))

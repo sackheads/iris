@@ -17,8 +17,15 @@ struct PerfRunRecord: Codable {
     var finishedAt: Date
     var environment: PerfEnvironment
     var scenarios: [PerfScenarioResult]
+    /// Set by this build when the record is produced; nil means a pre-5a record. Discriminates
+    /// "recorded with cache counts" at the record level rather than by per-call nil-ness: Gemini
+    /// omits `cachedContentTokenCount` on a cache miss, which would otherwise make a post-5a
+    /// Gemini run with no hit read as pre-5a (5a review F2). `PerfCompare` calls two records
+    /// "straddled" when exactly one side carries this marker.
+    var cacheCountsVersion: Int? = nil
 
     static let currentSchemaVersion = 1
+    static let currentCacheCountsVersion = 1
 
     private static let coder: (JSONEncoder, JSONDecoder) = {
         let e = JSONEncoder()

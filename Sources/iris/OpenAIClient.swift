@@ -211,9 +211,14 @@ struct OpenAIClient {
         
         // Parse OpenAI response back to GeminiResponse
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        return try parseResponse(json)
+    }
+
+    /// OpenAI's non-stream Chat Completions response back to `GeminiResponse`.
+    static func parseResponse(_ json: [String: Any]) throws -> GeminiResponse {
         var geminiResponse = GeminiResponse()
         geminiResponse.candidates = []
-        
+
         if let choices = json["choices"] as? [[String: Any]], let first = choices.first, let msg = first["message"] as? [String: Any] {
             var content = Content(role: "model", parts: [])
             
@@ -242,13 +247,16 @@ struct OpenAIClient {
         }
         
         if let usage = json["usage"] as? [String: Any] {
+            let cacheRead = (usage["prompt_tokens_details"] as? [String: Any])?["cached_tokens"] as? Int
             geminiResponse.usageMetadata = UsageMetadata(
                 promptTokenCount: usage["prompt_tokens"] as? Int,
                 candidatesTokenCount: usage["completion_tokens"] as? Int,
-                totalTokenCount: usage["total_tokens"] as? Int
+                totalTokenCount: usage["total_tokens"] as? Int,
+                cacheReadTokens: cacheRead,
+                cacheWriteTokens: nil
             )
         }
-        
+
         return geminiResponse
     }
 }

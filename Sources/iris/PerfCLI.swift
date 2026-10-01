@@ -1,7 +1,7 @@
 import Foundation
 
 enum PerfCommand: Equatable {
-    case run(suite: String, reps: Int?, out: String, fakeOnly: Bool)
+    case run(suite: String, reps: Int?, out: String, fakeOnly: Bool, dumpRequestsDir: String? = nil)
     case report(path: String)
     case compare(baseline: String, current: String, threshold: Double)
 }
@@ -15,7 +15,7 @@ enum PerfCLIError: Error, Equatable, LocalizedError {
 enum PerfCLI {
     static let usage = """
     usage:
-      iris --perf run     <suite.json> [--reps N] [--out DIR] [--fake-only]
+      iris --perf run     <suite.json> [--reps N] [--out DIR] [--fake-only] [--dump-requests DIR]
       iris --perf report  <run.json>
       iris --perf compare <baseline.json> <run.json> [--threshold 0.20]
     """
@@ -48,9 +48,14 @@ enum PerfCLI {
                 guard let s = v else { return .failure(.usage("--out needs a directory")) }
                 out = s
             }
+            var dumpRequestsDir: String?
+            if let v = value("--dump-requests") {
+                guard let s = v else { return .failure(.usage("--dump-requests needs a directory")) }
+                dumpRequestsDir = s
+            }
             guard let suite = rest.first, !suite.hasPrefix("--") else { return .failure(.usage("run needs a suite path")) }
             if rest.count > 1 { return .failure(.usage("unexpected argument \(rest[1])")) }
-            return .success(.run(suite: suite, reps: reps, out: out, fakeOnly: fakeOnly))
+            return .success(.run(suite: suite, reps: reps, out: out, fakeOnly: fakeOnly, dumpRequestsDir: dumpRequestsDir))
         case "report":
             guard let path = rest.first else { return .failure(.usage("report needs a run record path")) }
             if rest.count > 1 { return .failure(.usage("unexpected argument \(rest[1])")) }
@@ -88,7 +93,7 @@ enum PerfCLI {
     static func execute(_ cmd: PerfCommand) async -> Int32 {
         do {
             switch cmd {
-            case .run(let suitePath, let reps, let out, let fakeOnly):
+            case .run(let suitePath, let reps, let out, let fakeOnly, let dumpRequestsDir):
                 let suite = try PerfSuite.load(at: suitePath)
                 if fakeOnly, suite.lane == .real {
                     print("perf: skipping real-lane suite \(suite.name) (--fake-only)")
@@ -134,8 +139,10 @@ enum PerfCLI {
                         try? FileManager.default.removeItem(at: scratch)
                     }
                 }
+                let dumpDir = dumpRequestsDir.map { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : root.appendingPathComponent($0) }
                 let record = try await PerfRunner.run(suite: suite, repetitionsOverride: reps, repoRoot: root,
-                                                      headless: suite.lane == .fake, workspacePath: scratch?.path)
+                                                      headless: suite.lane == .fake, workspacePath: scratch?.path,
+                                                      dumpRequestsDir: dumpDir)
                 print(PerfReport.render(record))
                 let dir = out.hasPrefix("/") ? URL(fileURLWithPath: out) : root.appendingPathComponent(out)
                 let url = try record.write(toDirectory: dir)

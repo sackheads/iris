@@ -80,13 +80,19 @@ struct Scenario: Codable, Sendable {
     var scriptedResponses: [ScriptedResponse]
     /// Tools this prompt warrants. `[]` means none (a bait prompt); nil means unscored.
     var expectedTools: [String]?
+    /// Facts seeded into a fresh in-memory store before turn 1 — never `FactStoreManager.shared`,
+    /// fake lane or real — so a scenario that depends on the fact-store block appearing/
+    /// disappearing (e.g. `caching`) is deterministic. Nil means none (5a).
+    var seedFacts: [String]?
 
     init(name: String, clientMode: ClientMode = .fake, tier: ModelTier = .medium,
          toggles: Toggles = Toggles(), latencyMs: FakeLLMClient.Latency? = nil,
-         turns: [Turn], scriptedResponses: [ScriptedResponse] = [], expectedTools: [String]? = nil) {
+         turns: [Turn], scriptedResponses: [ScriptedResponse] = [], expectedTools: [String]? = nil,
+         seedFacts: [String]? = nil) {
         self.name = name; self.clientMode = clientMode; self.tier = tier
         self.toggles = toggles; self.latencyMs = latencyMs
         self.turns = turns; self.scriptedResponses = scriptedResponses; self.expectedTools = expectedTools
+        self.seedFacts = seedFacts
     }
 
     init(from decoder: Decoder) throws {
@@ -99,6 +105,7 @@ struct Scenario: Codable, Sendable {
         turns = try c.decode([Turn].self, forKey: .turns)
         scriptedResponses = try c.decodeIfPresent([ScriptedResponse].self, forKey: .scriptedResponses) ?? []
         expectedTools = try c.decodeIfPresent([String].self, forKey: .expectedTools)
+        seedFacts = try c.decodeIfPresent([String].self, forKey: .seedFacts)
     }
 
     static func decode(from data: Data) throws -> Scenario {

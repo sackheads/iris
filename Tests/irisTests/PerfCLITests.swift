@@ -18,6 +18,14 @@ struct PerfCLITests {
                 .success(.run(suite: "s.json", reps: 5, out: "/tmp/x", fakeOnly: true)))
     }
 
+    @Test("--dump-requests parses into its own directory (5a)")
+    func dumpRequests() {
+        #expect(PerfCLI.parse(["iris", "--perf", "run", "s.json", "--dump-requests", "/tmp/dumps"]) ==
+                .success(.run(suite: "s.json", reps: nil, out: "perf/runs", fakeOnly: false, dumpRequestsDir: "/tmp/dumps")))
+        #expect(PerfCLI.parse(["iris", "--perf", "run", "s.json", "--dump-requests"]) ==
+                .failure(.usage("--dump-requests needs a directory")))
+    }
+
     @Test("report and compare")
     func reportAndCompare() {
         #expect(PerfCLI.parse(["iris", "--perf", "report", "a.json"]) == .success(.report(path: "a.json")))
@@ -49,6 +57,28 @@ struct PerfCLITests {
         #expect(!PerfCLI.shouldBypassKeychain(provider: "Gemini", geminiAuthMode: GeminiAuthMode.apiKey.rawValue))
         #expect(!PerfCLI.shouldBypassKeychain(provider: "Anthropic", geminiAuthMode: GeminiAuthMode.adc.rawValue))
         #expect(!PerfCLI.shouldBypassKeychain(provider: nil, geminiAuthMode: nil))
+    }
+
+    /// The brief for this suite (task-3, 5a) says `--fake-only` on a real-lane suite should
+    /// "reject" it; what `execute` actually does (and has done since before this task) is skip it
+    /// with a clear message and exit 0, never touching credentials, the Keychain or the network.
+    /// That is the useful behavior for an unattended `--fake-only` sweep across suites of mixed
+    /// lane, so this asserts the existing skip rather than changing it to an error exit.
+    @MainActor
+    @Test("--fake-only skips a real-lane suite with a message instead of running it")
+    func fakeOnlySkipsRealLaneSuite() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-perfcli-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let suitePath = dir.appendingPathComponent("caching.json").path
+        // A suite that never needs its scenario file to exist for this path: the skip happens
+        // right after `PerfSuite.load`, before any scenario is read.
+        try #"{"name":"caching","lane":"real","scenarios":["does-not-exist.json"]}"#
+            .write(toFile: suitePath, atomically: true, encoding: .utf8)
+        let code = await PerfCLI.execute(.run(suite: suitePath, reps: nil, out: dir.appendingPathComponent("runs").path, fakeOnly: true))
+        #expect(code == 0)
+        // Nothing was written: the run never started.
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("runs").path))
     }
 
     @Test("a scratch workspace is a fresh empty directory under the temporary directory (#151)")

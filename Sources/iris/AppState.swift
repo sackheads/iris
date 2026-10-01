@@ -42,22 +42,38 @@ struct TokenUsage: Codable, Equatable, Sendable {
     var promptTokenCount: Int = 0
     var candidatesTokenCount: Int = 0
     var totalTokenCount: Int = 0
+    /// Cumulative cache-hit tokens across the conversation (5a). nil until a provider first
+    /// reports a value: unknown is not the same as zero (spec §0.4), and a zero persisted here
+    /// could never later be told apart from a real zero.
+    var cacheReadTokenCount: Int? = nil
+    var cacheWriteTokenCount: Int? = nil
 
-    init(promptTokenCount: Int = 0, candidatesTokenCount: Int = 0, totalTokenCount: Int = 0) {
+    enum CodingKeys: String, CodingKey {
+        case promptTokenCount, candidatesTokenCount, totalTokenCount, cacheReadTokenCount, cacheWriteTokenCount
+    }
+
+    init(promptTokenCount: Int = 0, candidatesTokenCount: Int = 0, totalTokenCount: Int = 0,
+         cacheReadTokenCount: Int? = nil, cacheWriteTokenCount: Int? = nil) {
         self.promptTokenCount = promptTokenCount
         self.candidatesTokenCount = candidatesTokenCount
         self.totalTokenCount = totalTokenCount
+        self.cacheReadTokenCount = cacheReadTokenCount
+        self.cacheWriteTokenCount = cacheWriteTokenCount
     }
 
     /// Lenient decoder (invariant 1): the synthesized `Decodable` ignores these defaults for
     /// non-Optional fields and throws `keyNotFound` on any absent key, which `ConversationStore`
     /// catches at the row level and skips the WHOLE conversation, not just this field (#204 --
-    /// the confirmed case that motivated auditing every persisted type).
+    /// the confirmed case that motivated auditing every persisted type). The cache fields are
+    /// Optional, so an absent key decodes to nil directly rather than to a `?? 0` fallback: a
+    /// pre-5a conversation has never reported a cache count, and nil is what that means.
     init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         promptTokenCount = try c.decodeIfPresent(Int.self, forKey: .promptTokenCount) ?? 0
         candidatesTokenCount = try c.decodeIfPresent(Int.self, forKey: .candidatesTokenCount) ?? 0
         totalTokenCount = try c.decodeIfPresent(Int.self, forKey: .totalTokenCount) ?? 0
+        cacheReadTokenCount = try c.decodeIfPresent(Int.self, forKey: .cacheReadTokenCount)
+        cacheWriteTokenCount = try c.decodeIfPresent(Int.self, forKey: .cacheWriteTokenCount)
     }
 }
 
@@ -1718,6 +1734,15 @@ class AppState {
             conversations[idx].tokenUsage.promptTokenCount += usage.promptTokenCount ?? 0
             conversations[idx].tokenUsage.candidatesTokenCount += usage.candidatesTokenCount ?? 0
             conversations[idx].tokenUsage.totalTokenCount += usage.totalTokenCount ?? 0
+            // Unknown is not zero (5a §0.4): a nil incoming value leaves the field exactly as it
+            // was, so a provider that has never reported a cache count keeps reading as unknown
+            // rather than accidentally locking in a zero.
+            if let read = usage.cacheReadTokens {
+                conversations[idx].tokenUsage.cacheReadTokenCount = (conversations[idx].tokenUsage.cacheReadTokenCount ?? 0) + read
+            }
+            if let write = usage.cacheWriteTokens {
+                conversations[idx].tokenUsage.cacheWriteTokenCount = (conversations[idx].tokenUsage.cacheWriteTokenCount ?? 0) + write
+            }
             markChanged(conversationId, .metadata)
         }
     }
@@ -3222,6 +3247,8 @@ class AppState {
         - **Prompt Tokens:** \(usage.promptTokenCount)
         - **Candidate Tokens:** \(usage.candidatesTokenCount)
         - **Total Tokens Used:** \(usage.totalTokenCount)
+        - **Cache Read Tokens:** \(usage.cacheReadTokenCount.map(String.init) ?? "—")
+        - **Cache Write Tokens:** \(usage.cacheWriteTokenCount.map(String.init) ?? "—")
         """
         emitCommandOutput(body, format: .markdown, to: convId)
     }

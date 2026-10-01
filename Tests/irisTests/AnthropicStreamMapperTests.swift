@@ -40,6 +40,43 @@ struct AnthropicStreamMapperTests {
         ])
     }
 
+    @Test("message_start carries cache read/write counts, and prompt is their sum with input")
+    func messageStartCacheCounts() throws {
+        let events = try run([
+            ("message_start", #"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":50}}}"#),
+        ])
+        #expect(events == [
+            .usage(UsageMetadata(promptTokenCount: 960, candidatesTokenCount: nil, totalTokenCount: nil,
+                                  cacheReadTokens: 900, cacheWriteTokens: 50)),
+            .done(finishReason: nil),
+        ])
+    }
+
+    /// `message_start` used to require `input_tokens` to emit any usage event at all, which
+    /// dropped cache fields that WERE present whenever `input_tokens` itself was missing (5a
+    /// review F8). Emit whenever any of the three prompt-side fields is present.
+    @Test("message_start without input_tokens still emits usage when cache fields are present")
+    func messageStartCacheCountsWithoutInputTokens() throws {
+        let events = try run([
+            ("message_start", #"{"type":"message_start","message":{"id":"msg_1","usage":{"cache_read_input_tokens":900,"cache_creation_input_tokens":50}}}"#),
+        ])
+        #expect(events == [
+            .usage(UsageMetadata(promptTokenCount: 950, candidatesTokenCount: nil, totalTokenCount: nil,
+                                  cacheReadTokens: 900, cacheWriteTokens: 50)),
+            .done(finishReason: nil),
+        ])
+    }
+
+    /// All three absent (no input, no cache fields): genuinely nothing to report, so no usage
+    /// event — unlike the case above, there is no cache data this would otherwise drop.
+    @Test("message_start with no usage fields at all emits no usage event")
+    func messageStartNoUsageFieldsEmitsNothing() throws {
+        let events = try run([
+            ("message_start", #"{"type":"message_start","message":{"id":"msg_1","usage":{}}}"#),
+        ])
+        #expect(events == [.done(finishReason: nil)])
+    }
+
     @Test("two tool blocks interleaved with text keep their own buffers; an empty input parses as {}")
     func twoTools() throws {
         let events = try run([
@@ -103,6 +140,29 @@ struct AnthropicStreamMapperTests {
             #expect(e.statusCode == 429)
             #expect(e.isRetryable == true)
         } catch { Issue.record("wrong error type \(error)") }
+    }
+
+    /// Anthropic splits usage across two events: `message_start` carries input + cache tokens,
+    /// `message_delta` carries only `output_tokens`. `StreamAssembler.usage` merges field-wise
+    /// (max wins per field, not overwrite), and `response()` fills a still-missing total as
+    /// prompt + output — so the assembled response's total must be exactly prompt (input + read +
+    /// write) + output, not just one event's contribution (5a review #12).
+    @Test("StreamAssembler fills the total from Anthropic's split streaming usage: prompt (input+read+write) + output")
+    func assemblerFillsTotalFromSplitAnthropicUsage() throws {
+        var mapper = AnthropicStreamMapper()
+        var assembler = StreamAssembler()
+        let events = try mapper.handle(SSEEvent(event: "message_start",
+            data: #"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":50}}}"#))
+            + mapper.handle(SSEEvent(event: "message_delta",
+            data: #"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":31}}"#))
+            + mapper.finish()
+        for event in events { assembler.apply(event, now: 1) }
+        let usage = try #require(assembler.response().usageMetadata)
+        #expect(usage.promptTokenCount == 960, "input 10 + read 900 + write 50")
+        #expect(usage.candidatesTokenCount == 31)
+        #expect(usage.totalTokenCount == 991, "prompt (input+read+write) + output")
+        #expect(usage.cacheReadTokens == 900)
+        #expect(usage.cacheWriteTokens == 50)
     }
 
     @Test("a malformed chunk throws instead of being skipped")
