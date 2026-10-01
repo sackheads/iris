@@ -900,6 +900,16 @@ actor IrisEngine {
     /// well as continue through it — a budget stop, say — and whatever arrived has to reach the
     /// transcript either way. Taking them and dropping them on the floor is how the user's
     /// mid-task message disappears.
+    /// Every request of a turn is built here, so each round carries the same turn-context block
+    /// on the same entry (5a §1); `history` itself never sees it. A broken anchor is reported once.
+    private func requestContents(_ history: [Content], _ turn: inout TurnRequest, conversationId: UUID) async -> [Content] {
+        let (contents, firstDrop) = turn.contents(for: history)
+        if firstDrop {
+            await pushToUI(role: .system, text: "turn context omitted: the turn's entry changed", conversationId: conversationId)
+        }
+        return contents
+    }
+
     private func drainPendingInput(conversationId: UUID, hooksSandbox: Bool) async -> Bool {
         let localState = state
         var added = false
@@ -1153,11 +1163,13 @@ actor IrisEngine {
             }
         }
         
-        if !facts.isEmpty, let textPart = currentSystemPrompt.parts.first?.text {
+        // Per-turn content rides this turn's own entry in the request, not the system prompt, so the
+        // cached prefix (tools, system, older history) stays byte-stable across turns (5a §0.2).
+        var turnContext = TurnContext(sections: [])
+        if !facts.isEmpty {
             // The ids go in so `manage_fact` — offered only on these turns — has something to name.
             let factString = facts.map { "- [\($0.id)] \($0.content)" }.joined(separator: "\n")
-            // Append Fact Store Memory last (highly volatile, changes per query)
-            currentSystemPrompt.parts[0].text = textPart + "\n\n# Mid-Term Fact Store Memory (JIT Context)\n" + factString
+            turnContext.sections.append(.init(heading: "Mid-Term Fact Store Memory (JIT Context)", body: factString))
         }
 
         // Read once for the gates below that all ask about this conversation: whether it is an
@@ -1175,10 +1187,11 @@ actor IrisEngine {
         // session either (see the declaration gate below), so it skips the count too — a roster it
         // may not act on is prompt weight, and the hop is work for a value it discards.
         let peerCount = (principal == .main && !isUnattended) ? await sessionPeerCount(excluding: conversationId) : 0
-        if principal == .main, peerCount > 0, let textPart = currentSystemPrompt.parts.first?.text {
+        if principal == .main, peerCount > 0 {
             // #185 §6: one line, never a roster. Detail is available on demand through
             // `list_sessions`; a per-peer list would grow with session count and churn every turn.
-            currentSystemPrompt.parts[0].text = textPart + "\n\n\(peerCount) other session\(peerCount == 1 ? " is" : "s are") active."
+            turnContext.sections.append(.init(heading: "Active Sessions",
+                                              body: "\(peerCount) other session\(peerCount == 1 ? " is" : "s are") active."))
         }
 
         var toolsList = await executor.getTools()
@@ -1552,7 +1565,15 @@ actor IrisEngine {
                 history = modifiedHistory
             }
         }
-        
+
+        // The turn's own entry, taken once here and never recomputed: after round one the last
+        // user-role entry is a tool-result message (tool results are role `user`). The stored index
+        // stays valid because everything that touches `history` mid-turn appends — steers and event
+        // lines in `drainPendingInput`, the model reply, tool results. If anything removes or
+        // rewrites the entry instead (a hook, the UI), the byte check drops the block rather than
+        // putting it on another message.
+        var turnRequest = TurnRequest(context: turnContext, history: history)
+
         // A soft-stop summary turn gets ONLY goal_complete: the model can summarize or finish,
         // but physically cannot keep calling the tool it was looping on. A worded "please stop"
         // does not bind the model (it rationalizes past it — see the loop-detection stop signal),
@@ -1560,7 +1581,7 @@ actor IrisEngine {
         if restrictToGoalComplete {
             toolsList = toolsList.filter { $0.name == "goal_complete" }
         }
-        var request = GeminiRequest(contents: history, systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
+        var request = GeminiRequest(contents: await requestContents(history, &turnRequest, conversationId: conversationId), systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
         
         // Nothing from a previous turn decides this one: a turn cancelled mid-batch could leave a
         // denial behind, and finding it here would end the next turn before it started.
@@ -1617,7 +1638,7 @@ actor IrisEngine {
                 // `drainPendingInput`, which both this round and the budget stop above go through.
                 if await drainPendingInput(conversationId: conversationId, hooksSandbox: hooksSandbox) {
                     history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
-                    request.contents = history
+                    request.contents = await requestContents(history, &turnRequest, conversationId: conversationId)
                 }
 
                 let beforeModelDecision = await HookManager.shared.fireBeforeModel(request: request, useSandbox: hooksSandbox)
@@ -1830,7 +1851,7 @@ actor IrisEngine {
                     let functionResponse = Content(role: "user", parts: responseParts)
                     await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: functionResponse) }
                     history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
-                    request.contents = history
+                    request.contents = await requestContents(history, &turnRequest, conversationId: conversationId)
 
                     // Loop detection: if the same tool call repeats too many times, stop early.
                     if await MainActor.run(body: { localState?.conversations.first(where: { $0.id == conversationId })?.activeGoal != nil }) {

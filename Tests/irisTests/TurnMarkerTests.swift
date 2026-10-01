@@ -45,7 +45,8 @@ struct TurnMarkerTests {
         let contents = try #require(client.requests.last?.contents)
         #expect(contents.count >= 2)
         #expect(contents[contents.count - 2].parts.first?.text?.hasPrefix(IrisEngine.turnEndedEarlyPrefix) == true)
-        #expect(contents.last?.parts.first?.text == "next")
+        // `.last`, not `.first`: the turn entry may lead with its `<turn_context>` part (5a).
+        #expect(contents.last?.parts.last?.text == "next")
         #expect(agentTexts(app, id) == ["part", "ok"])
     }
 
