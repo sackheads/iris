@@ -629,6 +629,27 @@ import urllib.parse
 from html.parser import HTMLParser
 import sys
 import json
+import os
+import ssl
+
+
+def _ssl_context():
+    # A python.org framework build has no default CA file (its
+    # ssl.get_default_verify_paths().cafile is None until the "Install
+    # Certificates.command" step is run), so every HTTPS request fails with
+    # CERTIFICATE_VERIFY_FAILED. Prefer the macOS system bundle, then certifi.
+    ctx = ssl.create_default_context()
+    if ssl.get_default_verify_paths().cafile is None:
+        if os.path.exists("/etc/ssl/cert.pem"):
+            ctx.load_verify_locations(cafile="/etc/ssl/cert.pem")
+        else:
+            try:
+                import certifi
+                ctx.load_verify_locations(cafile=certifi.where())
+            except Exception:
+                pass
+    return ctx
+
 
 class DDGParser(HTMLParser):
     def __init__(self):
@@ -672,7 +693,7 @@ query = sys.argv[1]
 data = urllib.parse.urlencode({"q": query}).encode("utf-8")
 req = urllib.request.Request("https://lite.duckduckgo.com/lite/", data=data, headers={"User-Agent": "Mozilla/5.0"})
 try:
-    html = urllib.request.urlopen(req).read().decode("utf-8")
+    html = urllib.request.urlopen(req, context=_ssl_context()).read().decode("utf-8")
     parser = DDGParser()
     parser.feed(html)
     print(json.dumps(parser.results[:10], indent=2))
@@ -693,22 +714,46 @@ except Exception as e:
             try process.run()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
-            return String(data: data, encoding: .utf8) ?? "Error decoding output"
+            let output = String(data: data, encoding: .utf8) ?? "Error decoding output"
+            if Self.isTLSTrustMissing(output) {
+                return "search_web is unavailable: TLS trust store missing — tell the user"
+            }
+            return output
         } catch {
             return "Error executing search script: \(error)"
         }
     }
 
     /// The `/usr/bin/env python3` process `searchWeb` runs, with the login-shell PATH applied
-    /// (#228). Static and separate from `searchWeb` so a test can assert the environment without
-    /// running the search, which would hit the network.
+    /// (#228) and the macOS trust store exposed via `SSL_CERT_FILE` when needed (#243). Static and
+    /// separate from `searchWeb` so a test can assert the environment without running the search,
+    /// which would hit the network.
     static func searchWebProcess(scriptPath: String, query: String,
                                  environment: [String: String] = ProcessInfo.processInfo.environment) -> Process {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["python3", scriptPath, query]
-        process.environment = BinaryResolver.commandEnvironment(base: environment)
+        process.environment = Self.sslCertEnvironment(base: BinaryResolver.commandEnvironment(base: environment))
         return process
+    }
+
+    /// Adds `SSL_CERT_FILE` to the environment when the macOS system trust store exists and the
+    /// variable isn't already set, so a python.org framework python3 (which has no default CA file)
+    /// can verify TLS in `search_web` (#243). Static and injectable (`certFile`) so a test can pass
+    /// a temp path or a nonexistent one without touching the real system file.
+    static func sslCertEnvironment(base: [String: String], certFile: String = "/etc/ssl/cert.pem") -> [String: String] {
+        var env = base
+        if env["SSL_CERT_FILE"] == nil && FileManager.default.fileExists(atPath: certFile) {
+            env["SSL_CERT_FILE"] = certFile
+        }
+        return env
+    }
+
+    /// Whether the search script's output reports the specific TLS-trust-store failure mode
+    /// (python.org framework python3 without a CA bundle). Surfaced as a distinct message so the
+    /// model tells the user rather than silently falling back to curl/apt-get (#243).
+    static func isTLSTrustMissing(_ output: String) -> Bool {
+        output.range(of: "CERTIFICATE_VERIFY_FAILED", options: .caseInsensitive) != nil
     }
 
     /// Where a skill of this name lives: the one spelling of the folder, for the three tools that
