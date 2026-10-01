@@ -46,20 +46,6 @@ enum ScenarioRunner {
     /// The guards=off notice is printed once per process; PerfRunner asks for .off on every
     /// fake-lane repetition and the test process is never a volatile copy.
     private static var warnedGuardsIgnored = false
-    /// Same one-per-process shape as `warnedGuardsIgnored`, for the seedFacts refusal below.
-    private static var warnedSeedFactsIgnored = false
-
-    /// Whether it is safe to mint a fresh in-memory store and seed `seedFacts` into it at all:
-    /// only under a volatile `IrisPaths` copy (a real-lane perf run routes the whole `~/.iris` home
-    /// there) or under `swift test`. Outside both, seeding is refused rather than silently building
-    /// a fact-store block the scenario's caller has no way to reason about. Pulled out as a pure
-    /// function so the refusal is testable without needing a live non-test process (5a fix round
-    /// 1, review finding #1): `PerfSuite.validateScenarios` is the fail-fast, whole-suite gate;
-    /// this is the second gate, so the guard does not depend on only that one caller validating
-    /// first.
-    static func canSeedFacts(isVolatileCopy: Bool, isTestProcess: Bool) -> Bool {
-        isVolatileCopy || isTestProcess
-    }
 
     static func run(_ scenario: Scenario,
                     guards: GuardMode = .asConfigured,
@@ -67,7 +53,8 @@ enum ScenarioRunner {
                     clientOverride: (any LLMClientProtocol)? = nil,
                     workspacePath: String? = nil,
                     dumpRequestsTo: URL? = nil,
-                    factStore: FactStoreManager? = nil) async -> ScenarioResult {
+                    factStore: FactStoreManager? = nil,
+                    retryDelays: [TimeInterval] = [2, 4, 8]) async -> ScenarioResult {
         let state = AppState()
         state.autoApproveTools = true // non-interactive: never block on an approval prompt
         // Pay the Vibecop cost a real run_command pays, unless this run is measuring guards off.
@@ -78,28 +65,37 @@ enum ScenarioRunner {
         // there rather than in the process cwd (#151). Only run_command is sandboxed.
         if let workspacePath { state.setWorkspace(for: conversationId, path: workspacePath) }
 
-        let baseClient: any LLMClientProtocol
+        let client: any LLMClientProtocol
         if let clientOverride {
-            baseClient = clientOverride
+            client = clientOverride
         } else {
             switch scenario.clientMode {
             case .fake:
                 let responses = scenario.scriptedResponses.map { $0.asGeminiResponse() }
-                baseClient = FakeLLMClient(responses: responses,
+                client = FakeLLMClient(responses: responses,
                                        latency: scenario.latencyMs ?? .init(minMs: 0, maxMs: 0))
             case .real:
-                baseClient = LLMClient()
+                client = LLMClient()
             }
         }
 
-        // `--dump-requests`: wrap the client so every round's exact `GeminiRequest` is captured
-        // before it's forwarded, without perturbing the turn's real (or scripted) response. The
-        // collector is drained and cleared after each turn below, so round numbers restart at 0
-        // per turn, matching `ModelCallRecord.round`.
+        // `--dump-requests`: a sink the engine's own main-loop call site invokes directly, tagged
+        // with the engine's own round and retry attempt — not a client wrapper. Wrapping the
+        // client used to see every call that passed through it, including the engine's own retries
+        // and any call forwarded to a grader or subagent engine built on the same client, which
+        // drifted the file numbering away from `ModelCallRecord.round` (5a review F4). Passing the
+        // sink only to the top-level engine built below (never to a delegated engine, which gets
+        // none) keeps the dump to exactly this run's own rounds. The collector is drained and
+        // cleared after each turn below, so round numbers restart at 0 per turn.
         let roundRequests = dumpRequestsTo != nil ? RoundRequestCollector() : nil
-        let client: any LLMClientProtocol = roundRequests.map { collector in
-            RequestRecordingLLMClient(inner: baseClient) { collector.append($0) }
-        } ?? baseClient
+        let requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)?
+        if let roundRequests {
+            requestDumpSink = { request, round, retryAttempt in
+                roundRequests.append(request, round: round, retryAttempt: retryAttempt)
+            }
+        } else {
+            requestDumpSink = nil
+        }
 
         // Guard toggling writes through ConfigManager, whose setters persist. Only a volatile
         // copy of the store may be written to, so outside one this is a logged no-op.
@@ -147,11 +143,11 @@ enum ScenarioRunner {
         // Best-effort — a seeding failure must not fail the whole scenario run (5a). Never
         // `.shared`, the process-global (or, outside a test process, the developer's real
         // on-disk) fact store: a caller-injected store is used as-is; otherwise, when this
-        // scenario has seeds, a fresh in-memory store is minted for this run alone, so a
-        // repetition never sees another repetition's seeds and a real-lane run never inherits the
-        // developer's own facts (5a fix round 2, review finding #1/#2). Outside a volatile
-        // `IrisPaths` copy and outside `swift test`, there is no safe home for a fresh store's
-        // facts to matter against (a real, non-test, non-perf invocation), so seeding is refused.
+        // scenario has seeds, a fresh in-memory store is minted for this run alone, unconditionally
+        // — so a repetition never sees another repetition's seeds and a real-lane run never
+        // inherits the developer's own facts (5a fix round 2, review finding #1/#2). There is no
+        // hazard left to gate on: the fresh store never touches `.shared` or any on-disk home, fake
+        // lane or real, volatile copy or not (5a review F5).
         let seedFacts = scenario.seedFacts ?? []
         let effectiveFactStore: FactStoreManager?
         if let factStore {
@@ -160,19 +156,11 @@ enum ScenarioRunner {
                 _ = try? factStore.addFact(content: fact)
             }
         } else if !seedFacts.isEmpty {
-            if Self.canSeedFacts(isVolatileCopy: IrisPaths.isVolatileCopy, isTestProcess: NSClassFromString("XCTestCase") != nil) {
-                let fresh = try? FactStoreManager(inMemory: true)
-                for fact in seedFacts {
-                    _ = try? fresh?.addFact(content: fact)
-                }
-                effectiveFactStore = fresh
-            } else {
-                if !warnedSeedFactsIgnored {
-                    warnedSeedFactsIgnored = true
-                    print("[ScenarioRunner] seedFacts ignored: ~/.iris home (IrisPaths) is not a volatile copy")
-                }
-                effectiveFactStore = nil
+            let fresh = try? FactStoreManager(inMemory: true)
+            for fact in seedFacts {
+                _ = try? fresh?.addFact(content: fact)
             }
+            effectiveFactStore = fresh
         } else {
             effectiveFactStore = nil
         }
@@ -181,7 +169,8 @@ enum ScenarioRunner {
         // real peer count here is always >= 1 — the #185 session tools would land on every
         // perf-scenario turn and shift the #129/#144 declaration-size baselines this runner
         // exists to measure. Pin it off, matching `ToolSurfaceTrimTests`.
-        let engine = IrisEngine(state: state, tier: scenario.tier, client: client, factStore: effectiveFactStore, sessionPeerCount: 0)
+        let engine = IrisEngine(state: state, tier: scenario.tier, client: client, retryDelays: retryDelays,
+                               factStore: effectiveFactStore, sessionPeerCount: 0, requestDumpSink: requestDumpSink)
 
         // Collect this run's finished turn profiles via a task-local sink scoped to the turn loop.
         let collector = TurnCollector()
@@ -223,14 +212,17 @@ enum ScenarioRunner {
                               toolsSandboxed: sandboxed, conversationId: conversationId, turnErrors: turnErrors)
     }
 
-    /// Writes one turn's recorded requests as `<dir>/<turn>-<round>.json`, using the currently
-    /// configured provider, model and streaming flag so the body matches what a real call would
-    /// build (5a) — `RequestDump` used to hardcode non-streaming while production streams by
-    /// default, so a dump never matched an actual turn's body (5a review #11). Best effort: a
-    /// write failure is logged, not thrown, so `--dump-requests` never fails the run it is only
-    /// meant to observe.
-    private static func writeRequestDumps(_ requests: [GeminiRequest], turn: Int, to dir: URL, tier: ModelTier) {
-        guard !requests.isEmpty else { return }
+    /// Writes one turn's recorded requests as `<dir>/<turn>-<round>.json`, keyed on the engine's
+    /// own round and retry attempt rather than call order, so files pair 1:1 with the profiler's
+    /// `ModelCallRecord.round` even across a retry: a retry is named `<turn>-<round>-retry<k>.json`
+    /// explicitly rather than shifting into the next round's slot (5a review F4). Uses the
+    /// currently configured provider, model and streaming flag so the body matches what a real
+    /// call would build (5a) — `RequestDump` used to hardcode non-streaming while production
+    /// streams by default, so a dump never matched an actual turn's body (5a review #11). Best
+    /// effort: a write failure is logged, not thrown, so `--dump-requests` never fails the run it
+    /// is only meant to observe.
+    private static func writeRequestDumps(_ entries: [RoundRequestCollector.Entry], turn: Int, to dir: URL, tier: ModelTier) {
+        guard !entries.isEmpty else { return }
         let provider = ConfigManager.shared.primaryProvider
         let model = ConfigManager.shared.getModel(for: tier)
         let stream = ConfigManager.shared.streamResponses
@@ -240,51 +232,32 @@ enum ScenarioRunner {
             print("[ScenarioRunner] --dump-requests: could not create \(dir.path): \(error)")
             return
         }
-        for (round, request) in requests.enumerated() {
+        for entry in entries {
+            let name = entry.retryAttempt == 0 ? "\(turn)-\(entry.round).json" : "\(turn)-\(entry.round)-retry\(entry.retryAttempt).json"
             do {
-                let data = try RequestDump.body(for: request, provider: provider, model: model, stream: stream)
-                try data.write(to: dir.appendingPathComponent("\(turn)-\(round).json"))
+                let data = try RequestDump.body(for: entry.request, provider: provider, model: model, stream: stream)
+                try data.write(to: dir.appendingPathComponent(name))
             } catch {
-                print("[ScenarioRunner] --dump-requests: failed to write turn \(turn) round \(round): \(error)")
+                print("[ScenarioRunner] --dump-requests: failed to write turn \(turn) round \(entry.round): \(error)")
             }
         }
     }
 }
 
-/// Thread-safe accumulator for one turn's recorded requests, used by `--dump-requests`. `drain`
-/// both returns and clears so round numbers restart at 0 for the next turn.
+/// Thread-safe accumulator for one turn's recorded requests, used by `--dump-requests`. Each entry
+/// is tagged with the engine's own round and retry attempt (0 = original call) at the main-loop
+/// call site itself, not inferred from call order (5a review F4). `drain` both returns and clears
+/// so numbering restarts at 0 for the next turn.
 private final class RoundRequestCollector: @unchecked Sendable {
+    struct Entry { var round: Int; var retryAttempt: Int; var request: GeminiRequest }
     private let lock = NSLock()
-    private var items: [GeminiRequest] = []
-    func append(_ r: GeminiRequest) { lock.lock(); items.append(r); lock.unlock() }
-    func drain() -> [GeminiRequest] {
+    private var items: [Entry] = []
+    func append(_ request: GeminiRequest, round: Int, retryAttempt: Int) {
+        lock.lock(); items.append(Entry(round: round, retryAttempt: retryAttempt, request: request)); lock.unlock()
+    }
+    func drain() -> [Entry] {
         lock.lock(); defer { lock.unlock() }
         let out = items; items = []; return out
-    }
-}
-
-/// Forwards every call to `inner` after handing `onRequest` the exact `GeminiRequest` sent, so
-/// `--dump-requests` can capture the wire request a round would send without perturbing the
-/// turn's real (or scripted) response.
-private final class RequestRecordingLLMClient: LLMClientProtocol, @unchecked Sendable {
-    private let inner: any LLMClientProtocol
-    private let onRequest: @Sendable (GeminiRequest) -> Void
-
-    init(inner: any LLMClientProtocol, onRequest: @escaping @Sendable (GeminiRequest) -> Void) {
-        self.inner = inner
-        self.onRequest = onRequest
-    }
-
-    var supportsStreaming: Bool { inner.supportsStreaming }
-
-    func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
-        onRequest(request)
-        return try await inner.generateContent(request: request, tier: tier)
-    }
-
-    func streamContent(request: GeminiRequest, tier: ModelTier) -> AsyncThrowingStream<LLMStreamEvent, Error> {
-        onRequest(request)
-        return inner.streamContent(request: request, tier: tier)
     }
 }
 

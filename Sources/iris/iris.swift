@@ -85,6 +85,17 @@ actor TurnLifetime {
     }
 }
 
+/// Tracks a model round's retry attempt so `requestDumpSink` can name a retry explicitly. `onRetry`
+/// and the retried operation closure both need to see the same counter, and Swift 6 forbids
+/// capturing a mutable local in more than one escaping closure — same idiom as `ScenarioRunner`'s
+/// `RoundRequestCollector` (5a review F4).
+private final class RetryAttemptCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func set(_ v: Int) { lock.lock(); value = v; lock.unlock() }
+    func get() -> Int { lock.lock(); defer { lock.unlock() }; return value }
+}
+
 actor IrisEngine {
     /// The reflection turn fired after a goal completes. Shared with `AppState`, which completes a
     /// goal whose last criteria the user judged — that path returns from this handler long before
@@ -198,7 +209,15 @@ actor IrisEngine {
     /// (invariant 7).
     let recentWrites: RecentWrites
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared) {
+    /// Perf-only: when set, called with the exact `GeminiRequest` about to be sent at this model
+    /// round, the round number, and the retry attempt (0 = original call, 1+ = a retry after a
+    /// transient failure). `--dump-requests` uses this to pair dumped bodies 1:1 with
+    /// `ModelCallRecord.round` even across a retry; nil everywhere else, so normal requests are
+    /// never touched. `SubagentManager` and `GoalEvaluator` build their own engines without this
+    /// parameter, so a delegated call never appears in the dump (5a review F4).
+    private let requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)?
+
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil) {
         self.state = state
         self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
@@ -212,6 +231,7 @@ actor IrisEngine {
         self.streamResponsesOverride = streamResponses
         self.checkpointAutoAdvanceOverride = checkpointAutoAdvance
         self.sessionPeerCountOverride = sessionPeerCount
+        self.requestDumpSink = requestDumpSink
         systemPrompt = nil
     }
 
@@ -1626,12 +1646,20 @@ actor IrisEngine {
                 // re-resolves and sees it — never mid-stream.
                 let streamResponses = streamResponsesOverride ?? ConfigManager.shared.streamResponses
                 let streamed = streamResponses && client.supportsStreaming
+                // `roundForDump` is a `let` snapshot: `modelRound` only advances after `outcome`
+                // resolves, so every attempt below (the original call and any retry) belongs to
+                // this same round.
+                let roundForDump = modelRound
+                let dumpSink = requestDumpSink
+                let retryAttempt = RetryAttemptCounter()
                 let outcome = try await LLMRetry.run(delays: retryDelays, onRetry: { error, attempt, delay in
+                    retryAttempt.set(attempt)
                     await self.pushToUI(role: .system,
                                         text: "[retry] \(error.message); retrying in \(Self.formatDelay(delay)) (attempt \(attempt) of \(self.retryDelays.count))",
                                         conversationId: conversationId)
                 }) {
-                    try await measure(.primaryLLM) {
+                    dumpSink?(requestToSend, roundForDump, retryAttempt.get())
+                    return try await measure(.primaryLLM) {
                         try await self.consumeModelStream(request: requestToSend, streamed: streamed, streamer: streamer)
                     }
                 }

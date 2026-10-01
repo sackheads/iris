@@ -32,31 +32,33 @@ struct PerfSuiteTests {
         }
     }
 
-    /// Review finding #1 (5a fix round 1): a fake-lane scenario with `seedFacts` would write into
-    /// the real, on-disk `FactStoreManager.shared` — `IrisPaths.useVolatileCopy` is only ever
-    /// installed for a real-lane run. This is the fail-fast, whole-suite refusal; the second one
-    /// (`ScenarioRunner.canSeedFacts`) is covered in `ScenarioRunnerOptionsTests`.
-    @Test("a fake-lane scenario with seedFacts is refused at validation time, naming the scenario")
-    func fakeLaneSeedFactsRefused() throws {
+    /// F5 (5a review): the refusal this replaces guarded a hazard that no longer exists — seeding
+    /// mints a fresh in-memory store per run and never touches `.shared`, real lane or fake. A
+    /// fake-lane suite with `seedFacts` must run end to end, seed the fact into the run's own
+    /// store (observable via the scenario's scripted turn), and leave `.shared` untouched.
+    @MainActor
+    @Test("a fake-lane suite with seedFacts runs and seeds, and .shared stays untouched (5a review F5)")
+    func fakeLaneSeedFactsRunsAndSeeds() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-suite-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
+        let marker = "PERFSEED\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
         let scenarioPath = dir.appendingPathComponent("seeded.json")
-        try #"{"name":"seeded-scenario","turns":[{"prompt":"p"}],"seedFacts":["a fact"]}"#
-            .write(to: scenarioPath, atomically: true, encoding: .utf8)
-        let suite = PerfSuite(name: "s", lane: .fake, scenarios: [scenarioPath.path])
-        #expect(throws: PerfSuiteError.seedFactsNeedsRealLane(scenario: "seeded-scenario")) {
-            try suite.validateScenarios(relativeTo: dir)
-        }
-        // A real-lane suite with the same scenario is fine: the guard is lane-specific.
-        let realSuite = PerfSuite(name: "s", lane: .real, scenarios: [scenarioPath.path])
-        #expect(throws: Never.self) { try realSuite.validateScenarios(relativeTo: dir) }
-        // An empty seedFacts array is treated the same as none.
-        let emptyPath = dir.appendingPathComponent("empty.json")
-        try #"{"name":"empty-scenario","turns":[{"prompt":"p"}],"seedFacts":[]}"#
-            .write(to: emptyPath, atomically: true, encoding: .utf8)
-        let emptySuite = PerfSuite(name: "s", lane: .fake, scenarios: [emptyPath.path])
-        #expect(throws: Never.self) { try emptySuite.validateScenarios(relativeTo: dir) }
+        try #"""
+        {"name":"seeded-scenario","clientMode":"fake","turns":[{"prompt":"one"}],
+         "scriptedResponses":[{"kind":"text","text":"ack"}],
+         "seedFacts":["The \#(marker) codename ships on Thursdays."]}
+        """#.write(to: scenarioPath, atomically: true, encoding: .utf8)
+        let suite = PerfSuite(name: "s", lane: .fake, repetitions: 1, rungs: [5], scenarios: [scenarioPath.path])
+
+        // The whole suite runs to completion: no fail-fast refusal for a fake-lane scenario with
+        // seedFacts (the hazard it guarded against no longer exists).
+        let record = try await PerfRunner.run(suite: suite, repoRoot: dir, headless: true)
+        #expect(record.scenarios.first?.name == "seeded-scenario")
+
+        // Seeding never reaches the process-global store, fake lane or not.
+        let leaked = try FactStoreManager.shared.search(query: marker, countsAsRetrieval: false)
+        #expect(leaked.isEmpty, "seeding must never reach the process-global store")
     }
 
     @Test("scenario paths resolve against the repo root")

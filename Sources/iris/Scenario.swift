@@ -80,9 +80,9 @@ struct Scenario: Codable, Sendable {
     var scriptedResponses: [ScriptedResponse]
     /// Tools this prompt warrants. `[]` means none (a bait prompt); nil means unscored.
     var expectedTools: [String]?
-    /// Facts seeded into `FactStoreManager.shared` before turn 1, so a scenario that depends on
-    /// the fact-store block appearing/disappearing (e.g. `caching`) is deterministic. Nil means
-    /// none (5a).
+    /// Facts seeded into a fresh in-memory store before turn 1 — never `FactStoreManager.shared`,
+    /// fake lane or real — so a scenario that depends on the fact-store block appearing/
+    /// disappearing (e.g. `caching`) is deterministic. Nil means none (5a).
     var seedFacts: [String]?
 
     init(name: String, clientMode: ClientMode = .fake, tier: ModelTier = .medium,

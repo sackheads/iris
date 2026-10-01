@@ -5,7 +5,6 @@ enum PerfSuiteError: Error, Equatable, LocalizedError {
     case invalidRung(Int)
     case fakeLaneNeedsFullTurn([Int])
     case invalidRepetitions(Int)
-    case seedFactsNeedsRealLane(scenario: String)
 
     var errorDescription: String? {
         switch self {
@@ -13,8 +12,6 @@ enum PerfSuiteError: Error, Equatable, LocalizedError {
         case .invalidRung(let r): return "rung \(r) is outside 1...5"
         case .fakeLaneNeedsFullTurn(let rs): return "fake lane cannot run rungs \(rs); only 4 and 5 are meaningful without a provider"
         case .invalidRepetitions(let n): return "repetitions must be >= 1, got \(n)"
-        case .seedFactsNeedsRealLane(let name):
-            return "scenario '\(name)' declares seedFacts, but the suite's lane is fake; seedFacts write to FactStoreManager.shared, which is only routed to a volatile copy for a real-lane run"
         }
     }
 }
@@ -65,24 +62,6 @@ struct PerfSuite: Codable, Sendable {
 
     func scenarioURLs(relativeTo root: URL) -> [URL] {
         scenarios.map { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : root.appendingPathComponent($0) }
-    }
-
-    /// Loads every scenario this suite lists and checks lane-dependent scenario content that
-    /// `validate()` cannot see on its own (it only has scenario paths, not their parsed content).
-    /// A fake-lane scenario with `seedFacts` would write into the real, on-disk
-    /// `FactStoreManager.shared` fact store: `IrisPaths.useVolatileCopy` is only ever installed
-    /// for a real-lane run (`PerfCLI.execute`), so a fake lane has no volatile copy to route a
-    /// seed into. `ScenarioRunner` itself also refuses to seed outside a volatile copy (or
-    /// `swift test`) — this is the fail-fast, whole-suite check; that one is the guard that does
-    /// not depend on every caller validating first (5a fix round 1, review finding #1).
-    func validateScenarios(relativeTo root: URL) throws {
-        guard lane == .fake else { return }
-        for url in scenarioURLs(relativeTo: root) {
-            let scenario = try Scenario.load(at: url.path)
-            if let seedFacts = scenario.seedFacts, !seedFacts.isEmpty {
-                throw PerfSuiteError.seedFactsNeedsRealLane(scenario: scenario.name)
-            }
-        }
     }
 }
 

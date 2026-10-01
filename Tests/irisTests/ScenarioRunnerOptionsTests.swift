@@ -157,19 +157,6 @@ struct ScenarioRunnerOptionsTests {
         #expect(leaked.isEmpty, "seeding must never reach the process-global store, even with no injected store")
     }
 
-    /// The actual runtime refusal (outside a volatile copy AND outside `swift test`) cannot be
-    /// exercised end-to-end from inside `swift test` — the process IS the test process — so the
-    /// decision is pulled out as a pure function and tested directly (5a fix round 1, review
-    /// finding #1). This is the second of the two refusals: `PerfSuiteTests` covers the first,
-    /// suite-level one (`validateScenarios`).
-    @Test("seedFacts may be written under a volatile copy or under swift test, never otherwise")
-    func canSeedFactsGate() {
-        #expect(ScenarioRunner.canSeedFacts(isVolatileCopy: true, isTestProcess: false))
-        #expect(ScenarioRunner.canSeedFacts(isVolatileCopy: false, isTestProcess: true))
-        #expect(ScenarioRunner.canSeedFacts(isVolatileCopy: true, isTestProcess: true))
-        #expect(!ScenarioRunner.canSeedFacts(isVolatileCopy: false, isTestProcess: false))
-    }
-
     @Test("a seeding failure (e.g. empty content) is ignored, not thrown")
     func seedFactsIgnoresErrors() async {
         let scenario = Scenario(name: "seeded-empty", clientMode: .fake,
@@ -193,5 +180,64 @@ struct ScenarioRunnerOptionsTests {
             let parsed = try JSONSerialization.jsonObject(with: data)
             #expect(parsed is [String: Any], "\(name) is valid JSON")
         }
+    }
+
+    /// Fails once with a retryable error, then succeeds. Used to prove dumped files pair 1:1 with
+    /// `ModelCallRecord.round` even across a retry (5a review F4): the engine's retry resends the
+    /// same round, not a new one, so the retried request must not shift round 1's dump to a
+    /// different number.
+    private final class FailsOnceThenSucceeds: LLMClientProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            let n: Int = lock.withLock { calls += 1; return calls }
+            if n == 1 {
+                throw APIError.http(provider: "Anthropic", statusCode: 529,
+                                    body: Data(#"{"error":{"type":"overloaded_error","message":"Overloaded"}}"#.utf8))
+            }
+            let part = Part(text: "ack", functionCall: nil, functionResponse: nil, thought_signature: nil, thoughtSignature: nil)
+            return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [part]))], usageMetadata: nil)
+        }
+    }
+
+    @Test("a retried round dumps <turn>-<round>.json and <turn>-<round>-retry1.json, both at round 0 (5a review F4)")
+    func dumpRequestsNameRetriesExplicitly() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-dump-retry-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let singleTurnScenario = Scenario(name: "single", clientMode: .fake, turns: [Scenario.Turn(prompt: "hi")])
+        let result = await ScenarioRunner.run(singleTurnScenario, clientOverride: FailsOnceThenSucceeds(),
+                                              dumpRequestsTo: dir, retryDelays: [0])
+        #expect(result.finalTexts == ["ack"])
+        let files = try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted()
+        #expect(files == ["1-0-retry1.json", "1-0.json"], "both the failed attempt and the retry pair with round 0")
+        // The round that actually got recorded by the profiler matches: exactly one ModelCallRecord
+        // at round 0 for this turn.
+        #expect(result.turnProfiles.first?.modelCalls.map(\ModelCallRecord.round) == [0])
+    }
+
+    /// A sanity baseline for the refactor away from the client-wrapping collector (5a review F4):
+    /// a plain single-round turn still produces exactly one dump, named by the engine's own round.
+    private final class RecordingClient: LLMClientProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+        private(set) var requestCount = 0
+        private let response: GeminiResponse
+        init(response: GeminiResponse) { self.response = response }
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            lock.withLock { requestCount += 1 }
+            return response
+        }
+    }
+
+    @Test("dump-requests records only the top-level engine's own rounds, named <turn>-<round>.json")
+    func dumpRequestsOnlyTopLevelRounds() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-dump-top-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let part = Part(text: "ack", functionCall: nil, functionResponse: nil, thought_signature: nil, thoughtSignature: nil)
+        let response = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [part]))], usageMetadata: nil)
+        let client = RecordingClient(response: response)
+        let singleTurnScenario = Scenario(name: "single", clientMode: .fake, turns: [Scenario.Turn(prompt: "hi")])
+        _ = await ScenarioRunner.run(singleTurnScenario, clientOverride: client, dumpRequestsTo: dir)
+        let files = try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted()
+        #expect(files == ["1-0.json"], "exactly one dump for the one top-level round")
     }
 }
