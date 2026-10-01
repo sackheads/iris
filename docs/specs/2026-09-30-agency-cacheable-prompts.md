@@ -4,7 +4,7 @@ Status: **proposed** (2026-09-30). Deliverable 5 of #187 (the main conversation)
 
 ## Why
 
-A survey of the request path (2026-09-30) found four things. Each alone defeats prefix caching, and together they suggest that Iris gets little or no provider-side cache reuse on any provider. That is inference from code: nothing records cache counts today, which is item 4.
+A survey of the request path (2026-09-30) found four things, each of which can defeat prefix caching. The survey inferred that Iris got little or no provider-side cache reuse on any provider. **The baseline (§3.1) corrected that for Anthropic.** Within one process the tool declarations encode identically, so item 1 did not break Anthropic's cache within a conversation, and non-fact turns read 97–100% of their prompt from cache. What the measurement confirmed is item 3: a turn whose fact block changes forces a full cache re-write of the whole prompt (~20k tokens), which on Claude Opus 5.5 costs about 25× a cached turn (writes 1.25× input, reads 0.05×). Gemini's implicit cache showed no turn-to-turn reuse at all. With any-token fact matching, most real turns are fact turns, so item 3 is the cost that matters.
 
 1. **Tool declarations are not byte-stable.** Tool schemas carry Swift dictionaries (`Schema.properties`) and no client encodes with sorted keys. Measured: one dictionary's contents, encoded 200 times in one process, produced 5–7 distinct byte sequences. Anthropic caches in the order tools → system → messages, so a tool block that changes bytes invalidates everything after it.
 2. **The tool list changes membership per turn.** `manage_fact` is declared only when the fact store matched the input (`iris.swift` ~1253), the peer tools only when peers exist, and the goal and ladder tools by state. Invariant 6 gates these for token cost, a rule measured (#129, #144) with no working cache.
@@ -22,7 +22,7 @@ Each decision names its default and why; the cost of being wrong is what a revie
 5. **The counts reach the places tokens are already read.** `ModelCallRecord` (perf run JSON) and the conversation's `tokenUsage` gain the two fields, both decoded with `decodeIfPresent` (invariant 1: old run files and old conversations must still load, and `--perf compare` must accept a baseline written before this change). `/tokens` shows cache read and write beside prompt tokens; `--perf report` adds columns for cache read, cache write and uncached prompt tokens, where uncached = prompt − read − write.
 6. **The tool list is measured, not changed, in 5a.** Declaration order is already fixed by construction; only membership varies, and not only `manage_fact`: the peer tools appear and disappear whenever another session starts or ends. The experiment declares every state-gated tool (`manage_fact` and the peer tools) on every turn, and its conclusion is meant to generalise to state-gated declarations. Whether a gated tool (e.g. `manage_fact`) should instead be declared on every turn is decided by the §3 experiment, and invariant 6 is amended only if the numbers say so. *Why:* invariant 6 was measured without a cache; with one, a stable declaration costs a cache read while a flapping one costs a full miss. Which one wins depends on sizes this deliverable is the first to measure. *Cost if wrong:* 5a lands with tool flapping still costing misses; the experiment's report says how much.
 
-7. **Invalidators this design does not remove, named so nobody mistakes them for regressions.** `stripInlineDataFromHistory` (`iris.swift` ~1899) removes attachments from history at the end of a turn, so a turn that carried an image is re-sent next turn without it. That entry is turn k−1's, inside the window already expected to be uncached, so the k−2 guarantee holds, but an image's payload is paid for once and never cached. Changing thinking or effort settings invalidates the message cache (and on some models tools and system); the client sends neither today, and whoever adds them should know. A `BeforeModel` hook that rewrites the request (`iris.swift` ~1609–1613) is outside Iris's control. And the cache has a TTL (5 minutes by default, measured start to start): a reply after that misses everything. Whether the system and tools markers should use the 1-hour TTL at double the write price is a decision for 5b or later, with the measured sizes in hand.
+7. **Invalidators this design does not remove, named so nobody mistakes them for regressions.** `stripInlineDataFromHistory` (`iris.swift` ~1899) removes attachments from history at the end of a turn, so a turn that carried an image is re-sent next turn without it. That entry is turn k−1's, inside the window already expected to be uncached, so the k−2 guarantee holds, but an image's payload is paid for once and never cached. Changing thinking or effort settings invalidates the message cache (and on some models tools and system); the client sends neither today, and whoever adds them should know. On Claude Opus 5.5 and Fable 5.1 a history edit (including this design's turn-context block, dropped from its entry on the next turn) also invalidates every later thinking block, and on accounts created on or after 2026-08-31 replaying one is a 400. That is harmless today only because Iris discards Anthropic thinking blocks and never replays them; #314 tracks replaying them with an append-only history (an appended `clear_at` system message for the turn context on Anthropic). A `BeforeModel` hook that rewrites the request (`iris.swift` ~1609–1613) is outside Iris's control. And the cache has a TTL (5 minutes by default, measured start to start): a reply after that misses everything. Whether the system and tools markers should use the 1-hour TTL at double the write price is a decision for 5b or later, with the measured sizes in hand.
 
 ## 1. The request path
 
@@ -88,11 +88,27 @@ Filled in by the implementation: baseline on main, the result after 5a, and the 
 | 2 | 5.0 | 14436 | — |
 | 2 | 6.0 | 14696 | 12103 (82%) |
 
-Reading: no turn reused the previous turn's prefix. Every round from turn 2 to turn 5 re-sent its whole prompt uncached. The two hits match an earlier request rather than the same conversation's previous turn. Repetition 2's turn 1 matched repetition 1's turn 1 for only 8.1k of 13k tokens, although nothing in that prefix should differ between runs, which is consistent with the unsorted key order of "Why" item 1.
+Reading (Gemini): no turn reused the previous turn's prefix. Every round from turn 2 to turn 5 re-sent its whole prompt uncached. The two hits match an earlier request rather than the same conversation's previous turn. Repetition 2's turn 1 matched repetition 1's turn 1 for only 8.1k of 13k tokens, although nothing in that prefix should differ between runs, which is consistent with the unsorted key order of "Why" item 1.
 
 #### Baseline: Anthropic, before the request change
 
-Pending: no Anthropic provider was configured on the measuring machine on 2026-10-01. It runs on the same commit once one is.
+`claude-opus-5-5` (medium tier), main at `61c83d6`, 2026-10-01, same suite, 2 repetitions, request bodies dumped. Pricing at measurement (announcement): input $4/MTok, cache read $0.20 (0.05×), cache write $5 (1.25×, 5-minute TTL).
+
+| turn.round | rep 1: read / write / uncached | rep 2: read / write / uncached |
+|---|---|---|
+| 1.0 | 0 / 19248 / 4 | 19248 / 0 / 4 |
+| 2.0 (fact) | 0 / 19813 / 4 | 9006 / 10800 / 4 |
+| 3.0 | 19248 / 242 / 4 | 19248 / 244 / 4 |
+| 3.1 | 19490 / 276 / 311 | 19492 / 115 / 53 |
+| 4.0 | 19766 / 639 / 4 | 19607 / 238 / 4 |
+| 5.0 | 20405 / 74 / 4 | 19845 / 76 / 4 |
+| 6.0 | 20479 / 146 / 4 | 19921 / 150 / 4 |
+
+Reading (Anthropic): every non-fact turn read 97–100% of its prompt. The fact turn (2) re-wrote the whole prompt because the fact block sits in the system prompt, and turn 3 could then read only turn 1's prefix. The tool round (3.1) read the previous round's prompt despite the skipped `tool_result` breakpoint (§1), which the suite still fixes for the next turn's read. The cost this design removes is the fact turn's full re-write; the suite has one fact turn in six, so the second scenario below measures the realistic case.
+
+#### Scenario: every turn matches a different fact
+
+Added with the after-measurement: a second caching scenario whose seeded facts make every turn match a different fact, so the block changes on every turn as it does with a real fact store. Measured on the baseline commit and after 5a, with the same pricing note.
 
 ## 4. Not in this deliverable
 
