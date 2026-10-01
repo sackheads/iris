@@ -78,15 +78,15 @@ struct AnthropicClient {
         // Cache breakpoints for conversation history.
         // Marking the penultimate message's last block caches all prior history as a stable prefix.
         // Marking the current (last) message's last block seeds the cache for the next turn.
+        // A `tool_result` is marked too: skipping it wrote the entry at the assistant's `tool_use`
+        // instead, so the results were re-sent uncached the next round and the next turn (5a §1).
         let ephemeral: [String: Any] = ["cache_control": ["type": "ephemeral"]]
         func markLastContentBlock(_ messages: inout [[String: Any]], at index: Int) {
             var msg = messages[index]
             if var content = msg["content"] as? [[String: Any]], !content.isEmpty {
-                if content[content.count - 1]["type"] as? String != "tool_result" {
-                    content[content.count - 1].merge(ephemeral) { _, new in new }
-                    msg["content"] = content
-                    messages[index] = msg
-                }
+                content[content.count - 1].merge(ephemeral) { _, new in new }
+                msg["content"] = content
+                messages[index] = msg
             }
         }
         if anthropicMessages.count >= 2 {
