@@ -908,7 +908,10 @@ class AppState {
     /// exactly this is retitled once on launch; one the owner renamed keeps its name (spec §0.1).
     static let legacyActivityConversationTitle = "Iris Activity"
     /// The `meta` key its id is recorded under, so it survives a relaunch and is never created
-    /// twice. Deliberately not "the conversation titled Iris": the user may rename it.
+    /// twice. Deliberately not "the conversation titled Iris": Iris is exempt from rename (spec
+    /// §0.2, `RenameRefusal.pinned`) now, but a title match would still miss a conversation
+    /// mid-retitle from the legacy name, or a future conversation that merely happens to share the
+    /// title — the id recorded here is unambiguous where a title lookup is not.
     static let activityConversationMetaKey = "activity_conversation_id"
 
     /// Returns Iris's (the pinned conversation's) id, creating it (pinned, unselected) and recording it
