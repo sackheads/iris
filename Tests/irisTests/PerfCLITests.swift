@@ -81,16 +81,110 @@ struct PerfCLITests {
         #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("runs").path))
     }
 
-    @Test("a scratch workspace is a fresh empty directory under the temporary directory (#151)")
-    func scratchWorkspace() throws {
-        let a = try PerfCLI.makeScratchWorkspace()
-        let b = try PerfCLI.makeScratchWorkspace()
-        defer { try? FileManager.default.removeItem(at: a); try? FileManager.default.removeItem(at: b) }
-        #expect(a != b)
+    /// Each test gets its own `base`, so none of this collides with a real perf run (which always
+    /// uses `$TMPDIR` itself) or another test's claim — invariant 7, applied to a brand-new global.
+    private func testBase() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("iris-perfcli-test-\(UUID().uuidString)")
+    }
+
+    @Test("the scratch workspace location is fixed across invocations, not a per-run UUID (#321)")
+    func scratchWorkspaceLocationIsFixed() {
+        let base = testBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let a = PerfCLI.scratchWorkspaceURL(base: base)
+        let b = PerfCLI.scratchWorkspaceURL(base: base)
+        #expect(a == b)
+        #expect(a.lastPathComponent == "iris-perf")
+        #expect(a.deletingLastPathComponent().path == base.standardizedFileURL.path)
+    }
+
+    @Test("claiming the workspace gives a fresh empty directory under it (#151)")
+    func claimGivesFreshEmptyDirectory() throws {
+        let base = testBase()
+        defer {
+            PerfCLI.releaseScratchWorkspace(base: base)
+            try? FileManager.default.removeItem(at: base)
+        }
+        let dir = try PerfCLI.claimScratchWorkspace(base: base)
         var isDir: ObjCBool = false
-        #expect(FileManager.default.fileExists(atPath: a.path, isDirectory: &isDir) && isDir.boolValue)
-        #expect(try FileManager.default.contentsOfDirectory(atPath: a.path).isEmpty)
-        #expect(a.path.hasPrefix(FileManager.default.temporaryDirectory.standardizedFileURL.path))
-        #expect(a.lastPathComponent.hasPrefix("iris-perf-"))
+        #expect(FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir) && isDir.boolValue)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).isEmpty)
+        #expect(dir == PerfCLI.scratchWorkspaceURL(base: base))
+    }
+
+    @Test("a leftover directory from a crashed run is reset, not an error (#321)")
+    func claimResetsLeftoverDirectory() throws {
+        let base = testBase()
+        defer {
+            PerfCLI.releaseScratchWorkspace(base: base)
+            try? FileManager.default.removeItem(at: base)
+        }
+        let url = PerfCLI.scratchWorkspaceURL(base: base)
+        try FileManager.default.createDirectory(at: url.appendingPathComponent("iris/memory"), withIntermediateDirectories: true)
+        try Data("stale".utf8).write(to: url.appendingPathComponent("stale.txt"))
+        let claimed = try PerfCLI.claimScratchWorkspace(base: base)
+        #expect(claimed == url)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: claimed.path).isEmpty)
+    }
+
+    @Test("a second claim while the lock is held is refused, not raced (#321)")
+    func secondClaimWhileHeldIsRefused() throws {
+        let base = testBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let lockURL = PerfCLI.scratchLockURL(base: base)
+        try FileManager.default.createDirectory(at: lockURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // pid 1 is launchd: alive, and not us (same idiom as RunJobCLITests' GUILock coverage).
+        try Data("1\n".utf8).write(to: lockURL)
+        #expect(throws: PerfCLIError.self) {
+            try PerfCLI.claimScratchWorkspace(base: base)
+        }
+    }
+
+    @Test("releasing the workspace lets a later claim succeed again (#321)")
+    func releaseAllowsReclaim() throws {
+        let base = testBase()
+        defer {
+            PerfCLI.releaseScratchWorkspace(base: base)
+            try? FileManager.default.removeItem(at: base)
+        }
+        _ = try PerfCLI.claimScratchWorkspace(base: base)
+        PerfCLI.releaseScratchWorkspace(base: base)
+        let again = try PerfCLI.claimScratchWorkspace(base: base)
+        #expect(again == PerfCLI.scratchWorkspaceURL(base: base))
+    }
+
+    // #321: the whole point of a fixed scratch location is that the system prompt's skills list —
+    // specifically each skill's **Path:** line, which is the real absolute `skillFilePath` — comes
+    // out byte-identical across separate runs, rather than cache-busting on a fresh per-run UUID.
+    @Test("the rendered skills list is byte-identical across two runs' homes under the fixed location")
+    func skillsListStableAcrossRunsAtFixedLocation() async throws {
+        let base = testBase()
+        defer {
+            PerfCLI.releaseScratchWorkspace(base: base)
+            try? FileManager.default.removeItem(at: base)
+        }
+        let okf = """
+        ---
+        title: Deploy
+        description: Ship the thing.
+        ---
+        Body.
+        """
+        func seedAndRenderOneRun() async throws -> String {
+            let dir = try PerfCLI.claimScratchWorkspace(base: base)
+            let home = IrisPaths(root: dir.appendingPathComponent(".iris"))
+            try home.ensureDirectories()
+            let skillDir = home.skillsDir.appendingPathComponent("deploy")
+            try FileManager.default.createDirectory(at: skillDir, withIntermediateDirectories: true)
+            try okf.write(to: skillDir.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+            // extraRoots: [] and never PluginManager.shared — this must not touch any process-global.
+            let summary = await SkillManager.shared.discoverSkills(paths: home, extraRoots: [])
+            PerfCLI.releaseScratchWorkspace(base: base)
+            return summary
+        }
+        let runA = try await seedAndRenderOneRun()
+        let runB = try await seedAndRenderOneRun()
+        #expect(runA == runB)
+        #expect(runA.contains("**Path:**"))
     }
 }
