@@ -515,11 +515,14 @@ struct PeerDeliveryTests {
             [.event(.textDelta("ok")), .event(.done(finishReason: nil))],
         ])
         let (app, engine, sender, target) = busyTarget(client)
-        // `false`, deliberately: the ordinary `run_command` approval in round 1 still auto-approves
-        // (Vibecop is disabled under test, which `requestApproval`'s non-`humanOnly` path treats as
-        // an outright APPROVE before ever touching the queue — see `AppState.requestApproval`), so
-        // it never shows up in `pendingApprovals` and cannot be confused with the `schedule_job`
-        // approval this test is actually watching for.
+        // `false`, deliberately, so `schedule_job`'s own `humanOnly` gate is the one actually under
+        // test (`autoApproveTools == true` would short-circuit `requestApproval` before `humanOnly`
+        // is even read). #334/#336 changed Vibecop's disabled state from an outright `APPROVE` to no
+        // verdict, so round 1's ordinary `run_command` call now ALSO reaches `pendingApprovals` —
+        // it has no matching allowlist rule either — before the `schedule_job` approval this test
+        // is actually watching for. Both need approving to let the turn run to completion, so the
+        // loop below drains and approves whatever appears, round by round, rather than assuming
+        // there is exactly one.
         app.autoApproveTools = false
 
         app.sendMessage("start a turn")
@@ -529,13 +532,16 @@ struct PeerDeliveryTests {
         await engine.deliverPeerMessage("please also check something", from: sender, senderName: "peer", to: target)
         await gate.release()
 
-        var queued = false
-        for _ in 0..<400 {
-            if !app.pendingApprovals.isEmpty { queued = true; break }
+        var sawSchedule = false
+        for _ in 0..<800 {
+            if let pending = app.pendingApprovals.first {
+                if pending.toolName == "schedule_job" { sawSchedule = true }
+                app.resolveApproval(id: pending.id, .approve)
+            }
+            if (try? app.store.ledger.jobs().count) == 1 { break }
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
-        #expect(queued, "once a peer's words are injected as a mid-turn steer, job creation for the rest of that turn must ask a human")
-        if queued { app.resolveApproval(id: app.pendingApprovals[0].id, .approve) }
+        #expect(sawSchedule, "once a peer's words are injected as a mid-turn steer, job creation for the rest of that turn must ask a human")
         #expect(await eventually { (try? app.store.ledger.jobs().count) == 1 })
     }
 }
