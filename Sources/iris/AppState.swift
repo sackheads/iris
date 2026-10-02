@@ -605,6 +605,7 @@ class AppState {
         self.store = store
         self.engine = IrisEngine(state: self)
         loadConversations()
+        retitleLegacyPinnedConversation()
         // `selectedConversationId == nil` covers more than an empty store: #187's background job
         // conversations are loaded but never selected, so a store holding nothing else still has
         // to open in a fresh conversation.
@@ -856,10 +857,14 @@ class AppState {
         return newConv.id
     }
 
-    /// #187 — the pinned conversation event cards are delivered to.
-    static let activityConversationTitle = "Iris Activity"
+    /// #187/5b — the pinned conversation: the owner's main conversation, where event cards are
+    /// delivered.
+    static let activityConversationTitle = "Iris"
+    /// 5b's prior default (#187's original "Activity log"). A pinned conversation still titled
+    /// exactly this is retitled once on launch; one the owner renamed keeps its name (spec §0.1).
+    static let legacyActivityConversationTitle = "Iris Activity"
     /// The `meta` key its id is recorded under, so it survives a relaunch and is never created
-    /// twice. Deliberately not "the conversation titled Iris Activity": the user may rename it.
+    /// twice. Deliberately not "the conversation titled Iris": the user may rename it.
     static let activityConversationMetaKey = "activity_conversation_id"
 
     /// Returns the Activity conversation's id, creating it (pinned, unselected) and recording it
@@ -878,6 +883,16 @@ class AppState {
         }
         try? store.setMetaValue(id.uuidString, forKey: Self.activityConversationMetaKey)
         return id
+    }
+
+    /// 5b: the pinned conversation became the main one and took Iris's name. Only the exact old
+    /// default is changed; a title the owner chose is theirs.
+    func retitleLegacyPinnedConversation() {
+        for idx in conversations.indices where conversations[idx].isPinned
+            && conversations[idx].title == Self.legacyActivityConversationTitle {
+            conversations[idx].title = Self.activityConversationTitle
+            markChanged(conversations[idx].id, .metadata)
+        }
     }
 
     /// Why `/clear` will not empty a conversation. nil means it may (#187).
