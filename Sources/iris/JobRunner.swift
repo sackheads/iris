@@ -558,7 +558,7 @@ actor JobRunner {
     /// rather than `interrupted` — the job did exactly what it was asked to — carrying the signal
     /// it saw, with no transcript (so the breaker counts it as the non-event it is) and no card:
     /// cards are for things that happened, and a quiet job checked every five minutes would
-    /// otherwise bury the Activity conversation (§11 ruling 4).
+    /// otherwise bury Iris, the pinned conversation (§11 ruling 4).
     private func recordGateSkip(job: Job, origin: FireOrigin, signal: String, at: Date,
                                 note: String? = nil) async {
         await recordGateRow(job: job, origin: origin, at: at, status: .completed,

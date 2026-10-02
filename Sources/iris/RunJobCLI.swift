@@ -379,8 +379,8 @@ enum RunJobCLI {
         }
         let admission = await runner.fire(job: job, origin: .manual)
         // The card, the transcript and the run's own conversation are in `AppState`'s debounced
-        // save queue; the app flushes at terminate (`AppDelegate`) and so must this, or "the
-        // Activity conversation shows it next time the app opens" (§8) is not true of a CLI run.
+        // save queue; the app flushes at terminate (`AppDelegate`) and so must this, or "Iris, the
+        // pinned conversation, shows it next time the app opens" (§8) is not true of a CLI run.
         state?.flushSave()
         // Explicit, not incidental: both were kept alive across the fire because `JobRunner` holds
         // them weakly, and an engine collected mid-turn closes the row as `interrupted`.

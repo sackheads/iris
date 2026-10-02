@@ -450,7 +450,7 @@ What each answer costs:
 | The gate says | What happens |
 | --- | --- |
 | changed | The job runs, and the signal is recorded on that run's row |
-| nothing changed | A `completed` row with the outcome `gate: no change`, and **no card** — cards are for things that happened, and a five-minute poll would otherwise bury the Activity conversation. It costs no model turn and does not count towards the breaker |
+| nothing changed | A `completed` row with the outcome `gate: no change`, and **no card** — cards are for things that happened, and a five-minute poll would otherwise bury Iris, the pinned conversation. It costs no model turn and does not count towards the breaker |
 | it could not tell (a 404 or 5xx, a response with none of the three headers, a missing path, a mount that has moved, a non-zero exit, a timeout, or any other last line — and a ledger Iris could not read the last signal out of) | An `interrupted` row whose reason starts `gate error`. Three of those **in a row** pause the job with the reason `gate failing`, and that pause gets a card |
 
 If a job's gate is ever changed — no tool does this today — the signals its runs recorded are
@@ -698,9 +698,13 @@ what you can do about it; see "Approve and run" below.
 
 Because Iris reads every other conversation's cards and holds both job-creating tools, calling
 `schedule_job` or `register_directory_watcher` from Iris itself is the one case where creating a
-job asks you first: the call pauses on an ordinary approval dialog, and declining it creates
-nothing. Every other conversation creates jobs and watches the way it always has, without being
-asked.
+job or watch asks you first: the call pauses on an ordinary approval dialog, and declining it
+creates nothing — unless `autoApproveTools` (the switch a headless driver or scenario run sets) is
+on, which exempts this dialog exactly as it exempts every other approval. Every other conversation
+creates a job or watch without that extra ask, but not without review across the board: a
+`schedule_job` carrying `gate_script` is always reviewed once before the job exists, in whichever
+conversation asked for it — Vibecop judges the script and what it may read, and only escalates to
+the ordinary approval dialog if it cannot decide (see "Gates" above).
 
 Delivery never wakes a model turn. The card is a `ChatRole.event` message, drawn as a card and
 never indexed for search; alongside it the card's one-line summary is appended to the destination's
@@ -950,9 +954,9 @@ run row, no card and no stored signal.
 Approvals fail closed exactly as they do at 3 a.m.: no auto-approve, no headless mode, no volatile
 settings copy. A tool call a read-only profile denies, or one that would need a human, is recorded
 as a `blocked on approval` run with the call on it — the same row and the same card a scheduled
-fire would leave, so the card is in the Activity conversation the next time you open the app.
+fire would leave, so the card is in Iris, the pinned conversation, the next time you open the app.
 
-Apart from the run's own two conversations — its hidden transcript and the Activity conversation
+Apart from the run's own two conversations — its hidden transcript and the pinned conversation
 the card lands in — the command leaves nothing behind. The things a *launch* does and a
 measurement must not (creating an empty conversation in a store with nothing selected, appending
 the guard-provisioning and unreadable-row notices) are suppressed for a CLI run; the fire, its

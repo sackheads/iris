@@ -47,7 +47,7 @@ enum TranscriptSizing {
             case .event:
                 // #187: an event row is stored as card JSON but drawn as one line of
                 // `transcriptLine`, so sizing it from `content` would open the sheet several
-                // hundred points too tall for every run in the Activity conversation.
+                // hundred points too tall for every run in Iris, the pinned conversation.
                 let line = EventCard.decode(message.content)?.transcriptLine ?? message.content
                 text = min(textHeight(String(line.prefix(systemRowMeasuredPrefix)), width: textWidth),
                            systemRowTextCap)

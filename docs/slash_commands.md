@@ -28,7 +28,7 @@ Iris supports in-app slash commands (`/-commands`) typed into the chat composer 
 | `/sandbox` | `/sandbox [status\|enable\|disable]` | Inspect or configure the subagent `apple/container` Linux VM runtime. |
 | `/new` | `/new` | Create a fresh conversation tab. |
 | `/clear` | `/clear` | Clear message history in the current active conversation. Refused in a pinned conversation (Iris). |
-| `/archive` | `/archive` | Move this conversation to the archive. Refused while a turn is running or a goal is active on it, and refused on Iris itself — use `/new` to start a fresh Iris instead. |
+| `/archive` | `/archive` | Move this conversation to the archive. Refused while a turn is running or a goal is active on it, and refused on Iris itself — use `/new` for a fresh conversation. |
 | `/unarchive` | `/unarchive` | Return this conversation to the active list. |
 | `/jobs` | `/jobs` | List background jobs — trigger, next fire, last status — plus a line per unacknowledged failure. |
 | `/jobs ack` | `/jobs ack <run id>` | Mark a failed or blocked run as seen; takes a full run id or the first eight or more characters of one. |
