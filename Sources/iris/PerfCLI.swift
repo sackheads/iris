@@ -74,13 +74,65 @@ enum PerfCLI {
         }
     }
 
-    /// A fresh, empty directory for a real-lane run's cwd and workspace, so file tools the model
-    /// calls unattended (only run_command is sandboxed) land here and not in the repo (#151).
-    static func makeScratchWorkspace() throws -> URL {
-        let url = FileManager.default.temporaryDirectory.standardizedFileURL
-            .appendingPathComponent("iris-perf-\(UUID().uuidString)")
+    /// Fixed location for a real-lane run's cwd, workspace and volatile `~/.iris` copy — not a
+    /// per-run UUID. A per-run location put a different absolute path in the skills list's
+    /// `**Path:**` lines on every run (the real `skillFilePath`, unchanged since #151), which
+    /// cache-busted the system prompt on every run's turn 1 and confounded cross-run cache
+    /// comparisons (#321: an earlier placeholder-based fix for the path itself opened a permission
+    /// hole instead — an attended `write_file` to it slipped past the protected-write-dir check —
+    /// so the fix is here, at the one thing that actually varied). `base` is injectable so a test
+    /// exercises this against its own directory instead of the real `$TMPDIR`, where a concurrent
+    /// perf run or another test could collide with it; the app always calls this with the default,
+    /// and `$TMPDIR` is per-user and stable across reboots and rebuilds on macOS.
+    static func scratchWorkspaceURL(base: URL = FileManager.default.temporaryDirectory) -> URL {
+        // `isDirectory: true` explicitly: without it, `appendingPathComponent` stats the path and
+        // only appends a trailing slash once the directory actually exists on disk, so the same
+        // call made before and after `claimScratchWorkspace` creates it returns two URLs that
+        // compare unequal despite naming the same place.
+        base.standardizedFileURL.appendingPathComponent("iris-perf", isDirectory: true)
+    }
+
+    /// The lock guarding exclusive use of `scratchWorkspaceURL`, beside it rather than inside it:
+    /// `claimScratchWorkspace` wipes the directory at the start of every run, and a lock file
+    /// living inside it would vanish with it out from under whoever is holding it.
+    static func scratchLockURL(base: URL = FileManager.default.temporaryDirectory) -> URL {
+        let dir = scratchWorkspaceURL(base: base)
+        return dir.deletingLastPathComponent().appendingPathComponent(dir.lastPathComponent + ".lock")
+    }
+
+    /// Claims the fixed scratch workspace exclusively and resets it to empty.
+    ///
+    /// Still "a fresh, empty directory" for the run's cwd and workspace, as promised when this was
+    /// a per-run UUID (#151) — but reset rather than freshly named, now that the location is fixed
+    /// (#321): a copy left behind by a run that crashed or was interrupted (SIGINT skips
+    /// `PerfCLI.execute`'s cleanup `defer`, and `IrisPaths.makeVolatileCopy`'s `copyItem` throws
+    /// into a destination that already exists) must never leak into the next run.
+    ///
+    /// Reuses `GUILock`'s pid-file protocol rather than inventing a second one: a lock naming a
+    /// dead pid is stale and taken over exactly as the GUI lock is, and a live holder is refused
+    /// rather than raced, so two perf runs started at once cannot clobber the same workspace.
+    static func claimScratchWorkspace(base: URL = FileManager.default.temporaryDirectory) throws -> URL {
+        let url = scratchWorkspaceURL(base: base)
+        let lockURL = scratchLockURL(base: base)
+        switch GUILock.acquireExclusively(at: lockURL) {
+        case .acquired:
+            break
+        case .held(let pid):
+            throw PerfCLIError.usage(
+                "perf: another run (pid \(pid)) already holds the scratch workspace at \(url.path) — wait for it to finish, or stop it")
+        case .blocked(let detail):
+            throw PerfCLIError.usage(
+                "perf: could not claim the scratch workspace lock at \(lockURL.path)" + (detail.map { ": \($0)" } ?? ""))
+        }
+        try? FileManager.default.removeItem(at: url)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    /// Gives back the lock `claimScratchWorkspace` took. Safe to call even when the claim never
+    /// succeeded: `GUILock.release` is itself a no-op unless this process is the holder.
+    static func releaseScratchWorkspace(base: URL = FileManager.default.temporaryDirectory) {
+        GUILock.release(at: scratchLockURL(base: base))
     }
 
     /// True when a real-lane run can skip the Keychain entirely: Gemini over ADC is the only
@@ -121,7 +173,7 @@ enum PerfCLI {
                 var memoryBefore: String?
                 let realMemory = IrisPaths.default.memoryDir   // the real home, before any override
                 if suite.lane == .real {
-                    let dir = try makeScratchWorkspace()
+                    let dir = try claimScratchWorkspace()
                     FileManager.default.changeCurrentDirectoryPath(dir.path)
                     // Memory tools write through IrisPaths.default: route the whole home at a
                     // copy under the scratch directory so USER.md, the fact store and skills
@@ -133,10 +185,13 @@ enum PerfCLI {
                 }
                 defer {
                     // Restore the cwd before deleting the directory it pointed at, so nothing that
-                    // runs after this (today: exit) inherits a dangling working directory.
+                    // runs after this (today: exit) inherits a dangling working directory. The lock
+                    // is released last, after the directory is gone, so a waiting run's claim finds
+                    // nothing left to reset.
                     if let scratch {
                         FileManager.default.changeCurrentDirectoryPath(previousCwd)
                         try? FileManager.default.removeItem(at: scratch)
+                        releaseScratchWorkspace()
                     }
                 }
                 let dumpDir = dumpRequestsDir.map { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : root.appendingPathComponent($0) }

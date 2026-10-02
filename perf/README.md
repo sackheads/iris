@@ -55,13 +55,20 @@ binary and click "Always Allow" before starting a long suite.
 Real-lane suites force `run_command` through the sandbox (the main-agent sandbox default is set
 to sandboxed inside the run's volatile settings copy, never in your preferences), because tool
 prompts run unattended with auto-approve. Only `run_command` is sandboxed: `read_file`,
-`write_file`, and the other file tools act on the host, so a real-lane run also changes its cwd
-to a fresh scratch directory under the temporary folder, binds each throwaway conversation's
-workspace to it, and routes the whole `~/.iris` home (memory, rules, config, plugins copied;
-models symlinked) at a copy inside it, so the memory tools cannot touch your real USER.md, fact
-store or skills; the run exits 3 with a warning if the real memory directory changed anyway; relative and workspace-relative paths land there and the directory is removed
-after the run. An absolute path would still reach the host, which is why prompt files are
-reviewed before they are committed. The record's `toolSandbox` field says which mode ran,
+`write_file`, and the other file tools act on the host, so a real-lane run also changes its cwd to
+a **fixed** scratch directory under the temporary folder (`$TMPDIR/iris-perf`, not a per-run UUID
+— a per-run location put a different absolute path in the skills list's `**Path:**` lines on every
+run, which cache-busted the system prompt and confounded cross-run comparisons, #321), binds each
+throwaway conversation's workspace to it, and routes the whole `~/.iris` home (memory, rules,
+config, plugins copied; models symlinked) at a copy inside it, so the memory tools cannot touch
+your real USER.md, fact store or skills; the run exits 3 with a warning if the real memory
+directory changed anyway; relative and workspace-relative paths land there and the directory is
+reset to empty at the start of every run (not just removed at the end, so a crash or `^C` that
+skips that cleanup cannot leak a stale copy into the next run) and removed after the run too. The
+scratch directory is exclusively locked for the run's length — a second `iris --perf run` started
+while one already holds it is refused with a message naming the holder's pid, rather than racing
+it for the same directory. An absolute path would still reach the host, which is why prompt files
+are reviewed before they are committed. The record's `toolSandbox` field says which mode ran,
 and `compare` refuses to compare records whose modes differ. Records also keep each tool call's
 arguments (capped at 500 characters; values under credential-looking keys and token-shaped
 substrings are replaced with `[redacted]`), promoted baselines included, so a tool storm can be
