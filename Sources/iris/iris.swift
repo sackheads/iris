@@ -1239,18 +1239,25 @@ actor IrisEngine {
         await lifetime.release()
     }
 
-    func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil, lifetime: TurnLifetime? = nil) async {
+    /// `isPeer` (final-review fix wave, #187 §0.5): true only when `AppState.startTurn` is running a
+    /// message delivered by `send_to_session` from another session, never a person typing. Threaded
+    /// the same way `restrictToGoalComplete` already is, down to `executeFunctionCall`, so the
+    /// pinned-conversation job-creation gate can also fire for a peer-originated turn in an
+    /// otherwise-ordinary (non-pinned) conversation — a peer that could make a target conversation
+    /// create a standing job without a human in that conversation ever typing anything is the same
+    /// laundering shape the pinned gate and the subagent refusal both exist to close.
+    func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, isPeer: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil, lifetime: TurnLifetime? = nil) async {
         await withEngineTurn(conversationId, lifetime: lifetime) {
             let turnID = PerformanceProfiler.shared.beginTurn(label: input, source: source)
             let turnStart = CFAbsoluteTimeGetCurrent()
             await PerformanceProfiler.$currentTurnID.withValue(turnID) {
-                await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, turnBudget: turnBudget, usageSink: usageSink)
+                await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, isPeer: isPeer, turnBudget: turnBudget, usageSink: usageSink)
             }
             PerformanceProfiler.shared.endTurn(turnID, totalMs: (CFAbsoluteTimeGetCurrent() - turnStart) * 1000.0)
         }
     }
 
-    private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil) async {
+    private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, isPeer: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil) async {
         if source == "UI" {
             loopDetectors[conversationId] = nil
             blockedResultTrackers[conversationId] = nil
@@ -1403,7 +1410,7 @@ actor IrisEngine {
         if !isUnattended && principal == .main {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris' conversation (your main conversation) — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). Calling this tool from Iris itself asks you to approve the job first, since a standing job created from the conversation that reads every other chat and holds the job tools is not created silently. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris' conversation (your main conversation) — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). Calling this tool from Iris itself, or from a turn a peer session sent, asks the user to approve the job first, since a standing job created from the conversation that reads every other chat and holds the job tools — or on a peer's behalf — is not created silently. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -2000,7 +2007,7 @@ actor IrisEngine {
                                     }
 
                                     let cmdStart = Date()
-                                    let result = await self.executeFunctionCall(call, conversationId: conversationId, workspacePath: workspacePath, restrictToGoalComplete: restrictToGoalComplete)
+                                    let result = await self.executeFunctionCall(call, conversationId: conversationId, workspacePath: workspacePath, restrictToGoalComplete: restrictToGoalComplete, isPeer: isPeer)
                                     let elapsed = Date().timeIntervalSince(cmdStart)
                                     if let id = timingId {
                                         await self.recordCommandDuration(id: id, elapsed: elapsed)
@@ -2461,6 +2468,17 @@ actor IrisEngine {
         let path = ScheduleJobArguments.text(args["path"]) ?? "(no path)"
         var lines = ["path: \(path)"]
         if let profile = ScheduleJobArguments.text(args["profile"]) { lines.append("profile: \(profile)") }
+        // Final-review fix wave (#187): a `mutating` watch accepts the same grant fields
+        // `schedule_job` does (`ToolExecutor.getTools()`'s `register_directory_watcher` schema), and
+        // the dialog was silently dropping them — an owner approving a watch with a wide mount or
+        // network access had no way to see that from this text.
+        if case .success(let mounts?) = ScheduleJobArguments.stringList(args["mounts"], shape: ScheduleJobArguments.mountsShape),
+           !mounts.isEmpty {
+            lines.append("mounts: \(mounts.joined(separator: ", "))")
+        }
+        if case .success(let network?) = ScheduleJobArguments.boolean(args["network"]) {
+            lines.append("network: \(network)")
+        }
         if let instructions = ScheduleJobArguments.text(args["instructions"]) {
             lines.append("prompt: \(Self.truncated(instructions))")
         }
@@ -2765,7 +2783,7 @@ actor IrisEngine {
         profileDeniedThisTurn.remove(conversationId) != nil
     }
 
-    private func executeFunctionCall(_ functionCall: FunctionCall, conversationId: UUID, workspacePath: String?, restrictToGoalComplete: Bool = false) async -> String {
+    private func executeFunctionCall(_ functionCall: FunctionCall, conversationId: UUID, workspacePath: String?, restrictToGoalComplete: Bool = false, isPeer: Bool = false) async -> String {
         let localState = state
         var result = ""
 
@@ -2790,12 +2808,16 @@ actor IrisEngine {
         if Self.jobCreationTools.contains(functionCall.name), principal != .main {
             return Self.subagentJobCreationRefusal
         }
-        // 5b §0.5: Iris reads other chats and holds the job tools, so a standing job created there
-        // is the one place an injection that survived the guard would outlive the turn. A human
-        // says yes — `humanOnly` so neither the allowlist nor a disabled Vibecop's outright
-        // APPROVE can stand in for that click; `autoApproveTools` still can, since that is the
-        // owner's own explicit global override, not a per-call verdict.
-        if Self.jobCreationTools.contains(functionCall.name), isPinned {
+        // 5b §0.5, extended by the final-review fix wave: Iris reads other chats and holds the job
+        // tools, so a standing job created there is the one place an injection that survived the
+        // guard would outlive the turn — and a message delivered by `send_to_session` reaches a
+        // target conversation's turn the same way a person's own words would, so a peer could get a
+        // non-pinned conversation to create a job on its behalf just as easily. Gated on
+        // `isPinned || isPeer`. A human says yes either way — `humanOnly` so neither the allowlist
+        // nor Vibecop's verdict can stand in for that click (`AppState.requestApproval`); headless
+        // and scenario runs set `autoApproveTools`, and `humanOnly` still honors it, since there is
+        // no human in that run to ask.
+        if Self.jobCreationTools.contains(functionCall.name), isPinned || isPeer {
             let details = Self.pinnedJobApprovalDetails(toolName: functionCall.name, args: functionCall.args)
             let approved = await localState?.requestApproval(
                 toolName: functionCall.name, details: details, args: functionCall.args,
@@ -3082,8 +3104,17 @@ actor IrisEngine {
         } else if functionCall.name == "rename_conversation", let newTitle = functionCall.args["title"]?.stringValue {
             // Not declared on the pinned conversation's turns (above), but a forged or stale call
             // must still be refused rather than acted on (invariant 6's undeclared-but-safe half).
-            let ok = await MainActor.run { localState?.renameConversation(id: conversationId, newTitle: newTitle) ?? false }
-            result = ok ? "Conversation renamed to '\(newTitle)'." : "Refused — Iris keeps its name."
+            // A stale call is the "no such conversation" case: by the time a queued or forged call
+            // like this one dispatches, the conversation it named can have been cleaned up already.
+            let refusal = await MainActor.run { () -> AppState.RenameRefusal? in
+                guard let localState else { return .noSuchConversation }
+                return localState.renameConversation(id: conversationId, newTitle: newTitle)
+            }
+            switch refusal {
+            case nil: result = "Conversation renamed to '\(newTitle)'."
+            case .pinned: result = "Refused — Iris keeps its name."
+            case .noSuchConversation: result = "No conversation with that id."
+            }
         } else if functionCall.name == "propose_goal_contract" {
             if let draft = GoalContractParsing.contract(from: functionCall.args) {
                 await MainActor.run { localState?.setDraftContract(for: conversationId, draft) }

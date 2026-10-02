@@ -886,7 +886,7 @@ class AppState {
     /// twice. Deliberately not "the conversation titled Iris": the user may rename it.
     static let activityConversationMetaKey = "activity_conversation_id"
 
-    /// Returns the Activity conversation's id, creating it (pinned, unselected) and recording it
+    /// Returns Iris's (the pinned conversation's) id, creating it (pinned, unselected) and recording it
     /// in `meta` on first use. Stable across calls and across launches; if the recorded id names a
     /// conversation that no longer exists (deleted by hand), a fresh one is created and recorded.
     func activityConversationId() -> UUID {
@@ -1652,7 +1652,7 @@ class AppState {
                     inlineParts = processed.inlineParts
                 }
 
-                await engine.processInput(promptForEngine, source: "UI", conversationId: convId, inlineParts: inlineParts)
+                await engine.processInput(promptForEngine, source: "UI", conversationId: convId, inlineParts: inlineParts, isPeer: isPeer)
 
                 if shouldReflect {
                     if let idx = conversations.firstIndex(where: { $0.id == convId }) {
@@ -1670,7 +1670,7 @@ class AppState {
             }
         } else {
             runThinkingTask(conversationId: convId) { [self] in
-                await engine.processInput(text, source: "UI", conversationId: convId)
+                await engine.processInput(text, source: "UI", conversationId: convId, isPeer: isPeer)
             }
         }
     }
@@ -1731,7 +1731,7 @@ class AppState {
     func installGuardHealthSink() {
         GuardTierHealth.shared.announce = { [weak self] text in
             guard let self else { return false }
-            // The selected conversation when there is one; otherwise Activity, which is where
+            // The selected conversation when there is one; otherwise Iris, which is where
             // background runs already put their user-facing lines. A headless `--run-job` selects
             // nothing, and "no selection" must not mean "swallow the warning".
             let target = self.selectedConversationId ?? self.activityConversationId()
@@ -2322,8 +2322,9 @@ class AppState {
     /// call — either would let a tool meant to always ask a human slip through without ever
     /// opening the dialog. Checked after the background fail-closed block (unattended stays
     /// fail-closed, not promoted to a prompt nobody is there to answer) and after `autoApproveTools`
-    /// (the owner's own explicit global override still wins — a human-only gate is not a stronger
-    /// claim than the switch the owner already flipped).
+    /// (set only by `ScenarioRunner` for a headless or scenario run, never by a person — there is no
+    /// human in that run to ask, so a human-only gate cannot be a stronger claim than the switch
+    /// already means).
     func requestApproval(toolName: String, details: String, args: [String: JSONValue] = [:],
                          workspace: String? = nil,
                          conversationId: UUID? = nil, origin: String = "Main agent",
@@ -2467,7 +2468,7 @@ class AppState {
     ///
     /// The runner says why it refused, because it is the half that knows which conversation the
     /// card went to. Only the case it cannot reach — there is no runner at all — is answered here,
-    /// and Activity is the only destination left to answer it in.
+    /// and Iris is the only destination left to answer it in.
     func approveBlockedCall(runId: UUID) {
         let engine = self.engine
         Task { [weak self] in
@@ -2863,14 +2864,25 @@ class AppState {
         do { try store.apply(batch) } catch { print("Conversation store flush failed: \(error)") }
     }
     
-    /// 5b: refuses on the pinned conversation (spec §0.2) — `false` means it kept its name.
+    /// 5b: refuses on the pinned conversation (spec §0.2). Final-review fix wave (#187): the two
+    /// refusals `renameConversation` used to conflate into a single `Bool` are distinguished here so
+    /// the dispatcher can tell the model (and a test can prove) which one happened — a stale or
+    /// forged call naming a conversation that no longer exists is a different fact than Iris
+    /// refusing to rename itself.
+    enum RenameRefusal: Equatable {
+        case noSuchConversation
+        case pinned
+    }
+
+    /// `nil` means the rename happened. Mirrors `archiveConversation`'s shape: check the refusal
+    /// reasons in order, act only if there are none.
     @discardableResult
-    func renameConversation(id: UUID, newTitle: String) -> Bool {
-        guard let idx = conversations.firstIndex(where: { $0.id == id }) else { return false }
-        guard !conversations[idx].isPinned else { return false }
+    func renameConversation(id: UUID, newTitle: String) -> RenameRefusal? {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }) else { return .noSuchConversation }
+        guard !conversations[idx].isPinned else { return .pinned }
         conversations[idx].title = newTitle
         markChanged(id, .metadata)
-        return true
+        return nil
     }
     
     /// Set by `loadConversations()` when the legacy UserDefaults blob existed but could not be
@@ -3388,7 +3400,7 @@ class AppState {
     }
 
     func handleClearCommand(convId: UUID) {
-        // #187 — a pinned conversation (the Activity log) keeps its history; `/clear` says so
+        // #187 — a pinned conversation (Iris) keeps its history; `/clear` says so
         // rather than silently doing nothing.
         if let refusal = clearRefusal(for: convId) {
             emitCommandOutput(refusal.reason, format: .system, to: convId)

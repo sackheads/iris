@@ -438,8 +438,8 @@ struct JobToolsTests {
         #expect(row["jobName"] as? String == "pr-sweep", "the handle stays quotable")
     }
 
-    /// The run a model is asked about is the one an event card named, and a card can sit in the
-    /// Activity conversation long after the run has dropped out of any recent-runs window. The
+    /// The run a model is asked about is the one an event card named, and a card can sit in Iris,
+    /// the pinned conversation, long after the run has dropped out of any recent-runs window. The
     /// resolver is a primary-key read for a full id and a prefix query for a short one, so neither
     /// has a window to fall out of.
     @Test("a run far outside any recent window is still fetchable by id and by prefix")
@@ -562,10 +562,29 @@ struct JobToolsTests {
         ])
         #expect(minimal.contains("path: /tmp"))
         #expect(!minimal.contains("profile:"))
+        #expect(!minimal.contains("mounts:"))
+        #expect(!minimal.contains("network:"))
         #expect(minimal.contains("prompt: watch it"))
 
         let empty = IrisEngine.pinnedJobApprovalDetails(toolName: "register_directory_watcher", args: [:])
         #expect(empty.contains("path: (no path)"))
+    }
+
+    /// Final-review fix wave (#187): the first version of this dialog silently dropped `mounts` and
+    /// `network` for `register_directory_watcher`, even though the tool accepts both
+    /// (`ToolExecutor.getTools()`'s schema) for a `mutating` watch — an owner approving a watch with
+    /// a wide mount or network access had no way to see that from the dialog.
+    @Test("register_directory_watcher's approval details show mounts and network when given")
+    func registerWatcherApprovalDetailsShowGrant() {
+        let details = IrisEngine.pinnedJobApprovalDetails(toolName: "register_directory_watcher", args: [
+            "path": .string("/repo"),
+            "instructions": .string("rebuild on change"),
+            "profile": .string("mutating"),
+            "mounts": .array([.string("/repo"), .string("/data:ro")]),
+            "network": .bool(true),
+        ])
+        #expect(details.contains("mounts: /repo, /data:ro"))
+        #expect(details.contains("network: true"))
     }
 
     @Test("an unknown tool name falls back to itself rather than crashing")
@@ -679,7 +698,7 @@ struct JobToolsTests {
     /// ever getting a vote. `queued` is true only if a request actually appeared, so "it asked" is
     /// observed, not inferred from the final outcome.
     private func runJobCreationCallThroughRealQueue(_ call: FunctionCall, on app: AppState, as conversationId: UUID,
-                                                    resolution: AppState.ApprovalResolution) async -> (result: String, queued: Bool) {
+                                                    resolution: AppState.ApprovalResolution, isPeer: Bool = false) async -> (result: String, queued: Bool) {
         app.autoApproveTools = false
         let first = GeminiResponse(candidates: [Candidate(content: Content(
             role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil)
@@ -693,7 +712,7 @@ struct JobToolsTests {
         // running and would break out of the loop on its very first iteration — before the child
         // task below gets a chance to reach `enqueueUserApproval` — leaving it stuck forever on an
         // unresolved continuation. The loop here watches `pendingApprovals` alone.
-        async let turn: Void = engine.processInput("go", source: "UI", conversationId: conversationId)
+        async let turn: Void = engine.processInput("go", source: "UI", conversationId: conversationId, isPeer: isPeer)
         var queued = false
         for _ in 0..<400 {
             if !app.pendingApprovals.isEmpty {
@@ -795,48 +814,121 @@ struct JobToolsTests {
         #expect(try app.store.ledger.jobs().count == 1)
     }
 
-    @Test("schedule_job in the pinned conversation reaches the real approval queue despite Vibecop being disabled; approving creates the job")
+    /// Named for the mechanism (`humanOnly` skips both the allowlist and Vibecop, whatever Vibecop's
+    /// own setting is today), not for today's Vibecop default — see `requestApproval`'s `humanOnly`
+    /// parameter. Final-review fix wave (#187): a test name describing a default rather than the
+    /// mechanism misleads once that default changes (#334).
+    @Test("schedule_job in the pinned conversation reaches the real approval queue because humanOnly skips the allowlist and Vibecop; approving creates the job")
     func scheduleJobPinnedRealQueueApproved() async throws {
         let (app, id) = pinnedApp()
         let (result, queued) = await runJobCreationCallThroughRealQueue(
             FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
             on: app, as: id, resolution: .approve)
-        #expect(queued, "a disabled Vibecop must not stand in for the human's click")
+        #expect(queued, "humanOnly must skip the allowlist and Vibecop, not stand in for the human's click")
         #expect(result != IrisEngine.pinnedJobCreationDeclined)
         #expect(try app.store.ledger.jobs().count == 1)
     }
 
-    @Test("register_directory_watcher in the pinned conversation reaches the real approval queue despite Vibecop being disabled; denying creates nothing")
+    @Test("register_directory_watcher in the pinned conversation reaches the real approval queue because humanOnly skips the allowlist and Vibecop; denying creates nothing")
     func registerWatcherPinnedRealQueueDenied() async throws {
         let (app, id) = pinnedApp()
         let (result, queued) = await runJobCreationCallThroughRealQueue(
             FunctionCall(name: "register_directory_watcher",
                         args: ["path": .string("/tmp"), "instructions": .string("watch it")], id: "c1"),
             on: app, as: id, resolution: .deny)
-        #expect(queued, "a disabled Vibecop must not stand in for the human's click")
+        #expect(queued, "humanOnly must skip the allowlist and Vibecop, not stand in for the human's click")
         #expect(result == IrisEngine.pinnedJobCreationDeclined)
         #expect(try app.store.ledger.jobs().isEmpty)
     }
 
+    /// Final-review fix wave (#187): the first version of this test stored a rule for the bare
+    /// string `"sweep"`, but the dispatcher's `details` for the `humanOnly` call is
+    /// `IrisEngine.pinnedJobApprovalDetails(toolName:args:)`'s multi-line rendering — `"name:
+    /// sweep\ntrigger: ...\nprompt: sweep"` — never the bare name. `PermissionManager.isAllowed`
+    /// matches `details` by exact string equality, so that rule could never have matched the real
+    /// call at all; the test could not have told "humanOnly skipped a matching rule" apart from "the
+    /// rule just never matched anything", which is also green with `humanOnly` deleted. The rule is
+    /// now built from the SAME `pinnedJobApprovalDetails` call with the SAME args the dispatcher
+    /// uses, so it is a real match — and `isAllowed` is checked strictly before Vibecop in
+    /// `requestApproval`'s own source order, so a correctly-matching rule makes this test's
+    /// redness-without-`humanOnly` attributable to the allowlist specifically, not to whatever
+    /// Vibecop's default happens to be today (#334 is changing that default; this test does not
+    /// depend on it either way).
     @Test("a matching allowlist rule does not bypass the pinned conversation's human-only gate")
     func allowlistRuleDoesNotBypassPinnedGate() async throws {
         let (app, id) = pinnedApp()
         let paths = try tempIrisPaths()
         defer { try? FileManager.default.removeItem(at: paths.root) }
-        try JSONEncoder().encode([PermissionRule(toolName: "schedule_job", details: "sweep")])
+        let args: [String: JSONValue] = ["name": .string("sweep"), "prompt": .string("sweep"), "intervalSeconds": .int(60)]
+        let expectedDetails = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: args)
+        try JSONEncoder().encode([PermissionRule(toolName: "schedule_job", details: expectedDetails)])
             .write(to: paths.permissionsJSON)
         app.permissions = PermissionManager(paths: paths)
         // Sanity check the fixture: an ordinary (non-humanOnly) call with this rule and these exact
         // arguments really would be auto-allowed, so the test below is proving the gate bypasses
         // the allowlist on purpose — not merely that the rule failed to match for some other reason.
-        #expect(app.permissions.isAllowed(toolName: "schedule_job", details: "sweep", workspace: nil))
+        #expect(app.permissions.isAllowed(toolName: "schedule_job", details: expectedDetails, workspace: nil))
 
         let (result, queued) = await runJobCreationCallThroughRealQueue(
-            FunctionCall(name: "schedule_job",
-                        args: ["name": .string("sweep"), "prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
+            FunctionCall(name: "schedule_job", args: args, id: "c1"),
             on: app, as: id, resolution: .approve)
         #expect(queued, "a matching allowlist rule must not bypass the human-only gate")
         #expect(result != IrisEngine.pinnedJobCreationDeclined)
         #expect(try app.store.ledger.jobs().count == 1)
+    }
+
+    // MARK: A peer-originated turn is gated the same as the pinned conversation (final-review fix wave, #187)
+
+    /// A message delivered by `send_to_session` reaches its target conversation's turn the same way
+    /// a person's own words would — `AppState.startTurn` passes `isPeer` through to
+    /// `engine.processInput`, which this helper does directly (bypassing the real peer-delivery
+    /// machinery in `PeerDeliveryTests`, which is not this gate's concern: this tests only what the
+    /// dispatcher does once a turn is marked `isPeer`, regardless of how it got that way). Without
+    /// this gate a peer could get an otherwise-ordinary, non-pinned conversation to create a
+    /// standing job with nobody in that conversation ever having typed anything — the same
+    /// laundering shape the pinned gate and the subagent refusal both close.
+    @Test("a peer-originated turn in a non-pinned conversation reaches the human prompt for schedule_job")
+    func peerOriginatedTurnAsksForScheduleJob() async throws {
+        let (app, id) = plainApp()
+        let (result, queued) = await runJobCreationCallThroughRealQueue(
+            FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
+            on: app, as: id, resolution: .approve, isPeer: true)
+        #expect(queued, "a peer-originated turn must ask a human before creating a job, same as the pinned conversation")
+        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(try app.store.ledger.jobs().count == 1)
+    }
+
+    @Test("a peer-originated turn in a non-pinned conversation reaches the human prompt for register_directory_watcher, and denying creates nothing")
+    func peerOriginatedTurnAsksForRegisterWatcher() async throws {
+        let (app, id) = plainApp()
+        let (result, queued) = await runJobCreationCallThroughRealQueue(
+            FunctionCall(name: "register_directory_watcher",
+                        args: ["path": .string("/tmp"), "instructions": .string("watch it")], id: "c1"),
+            on: app, as: id, resolution: .deny, isPeer: true)
+        #expect(queued, "a peer-originated turn must ask a human before creating a job, same as the pinned conversation")
+        #expect(result == IrisEngine.pinnedJobCreationDeclined)
+        #expect(try app.store.ledger.jobs().isEmpty)
+    }
+
+    /// The control: the exact same non-pinned conversation and call, with `isPeer` false (an
+    /// ordinary person typing), must NOT ask — proving the gate reacts to `isPeer` specifically and
+    /// is not simply asking unconditionally regardless of who the conversation thinks sent it.
+    @Test("an ordinary (non-peer) turn in a non-pinned conversation does not ask for schedule_job")
+    func ordinaryTurnSkipsApprovalControl() async throws {
+        let (app, id) = plainApp()
+        let (result, queued) = await runJobCreationCallThroughRealQueue(
+            FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
+            on: app, as: id, resolution: .approve, isPeer: false)
+        #expect(!queued, "an ordinary user turn in a non-pinned conversation must not ask for job creation")
+        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(try app.store.ledger.jobs().count == 1)
+    }
+
+    private func plainApp() -> (AppState, UUID) {
+        let app = AppState()
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        return (app, id)
     }
 }

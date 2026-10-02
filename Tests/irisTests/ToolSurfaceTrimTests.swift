@@ -193,13 +193,17 @@ struct ToolSurfaceTrimTests {
         #expect(mem.contains("not present in the current context"))
         #expect(!mem.contains("JIT injection"))
 
-        // The watch declaration is two sentences (#187 deliverable 4, spec §5): what it does and
+        // The watch declaration was two sentences (#187 deliverable 4, spec §5): what it does and
         // that its own writes are safe. The built-in ignore set, the ceiling and the
-        // never-concurrent rule are said in the tool's result, not paid for on every turn.
+        // never-concurrent rule are said in the tool's result, not paid for on every turn. A third,
+        // short sentence was added in the final-review fix wave (#187) — the same one-line approval
+        // note `schedule_job`'s description carries — so the cap moved from 230 to 300 rather than
+        // dropping the note; the ignore/ceiling/never-concurrent detail still stays out.
         let watch = try #require(decls["register_directory_watcher"])
-        #expect(watch.count <= 230)
+        #expect(watch.count <= 300)
         #expect(watch.contains("quiet"))
         #expect(watch.contains("own file-tool writes"))
+        #expect(watch.contains("asks the user"))
         #expect(!watch.contains(".git"))
     }
 
