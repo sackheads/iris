@@ -795,6 +795,38 @@ struct JobToolsTests {
         #expect(try app.store.ledger.jobs().count == 1)
     }
 
+    /// Review #340, item 4 (ruling): parse and validate before the human is ever asked. Before this,
+    /// `ScheduleJobArguments.parse` ran only inside `scheduleJob`'s own handler, well after the
+    /// pinned gate's `requestApproval` — so an owner could be asked to approve a job that was
+    /// malformed and was never going to be created. `CountingApprovalAppState.approvalCount == 0`
+    /// is the load-bearing assertion: it proves `requestApproval` was never even called, not merely
+    /// that its eventual answer didn't matter.
+    @Test("an invalid schedule_job call in the pinned conversation never prompts the human")
+    func scheduleJobInvalidArgsSkipApprovalEntirely() async throws {
+        let (app, id) = pinnedCountingApp()
+        // No `prompt` at all — `ScheduleJobArguments.parse`'s very first check.
+        let (result, approvalCount, _) = await runJobCreationCall(
+            FunctionCall(name: "schedule_job", args: ["intervalSeconds": .int(60)], id: "c1"),
+            on: app, as: id, resolution: true)
+        #expect(approvalCount == 0, "a malformed call must never reach the human prompt")
+        #expect(result.contains("needs a prompt"), "the model must see the real parse error, not the approval decline")
+        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(try app.store.ledger.jobs().isEmpty)
+    }
+
+    /// Same ruling, the watcher's side: `RegisterWatcherArguments.parse` runs before the gate too.
+    @Test("an invalid register_directory_watcher call in the pinned conversation never prompts the human")
+    func registerWatcherInvalidArgsSkipApprovalEntirely() async throws {
+        let (app, id) = pinnedCountingApp()
+        // No `path` at all.
+        let (result, approvalCount, _) = await runJobCreationCall(
+            FunctionCall(name: "register_directory_watcher", args: ["instructions": .string("watch it")], id: "c1"),
+            on: app, as: id, resolution: true)
+        #expect(approvalCount == 0, "a malformed call must never reach the human prompt")
+        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(try app.store.ledger.jobs().isEmpty)
+    }
+
     @Test("schedule_job in a non-pinned conversation creates the job without an approval request")
     func scheduleJobUnpinnedSkipsApproval() async throws {
         let (app, id) = plainCountingApp()

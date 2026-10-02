@@ -2864,7 +2864,24 @@ actor IrisEngine {
         // neither the allowlist nor Vibecop's verdict can stand in for that click
         // (`AppState.requestApproval`); headless and scenario runs set `autoApproveTools`, and
         // `humanOnly` still honors it, since there is no human in that run to ask.
-        if Self.jobCreationTools.contains(functionCall.name), isPinned || hasPeerContent {
+        if Self.jobCreationTools.contains(functionCall.name), isPinned || hasUnattendedInput {
+            // Review #340, item 4 (ruling): parse and validate before the human is ever asked. A
+            // malformed call — a bad cron expression, two gates at once — is going to fail either
+            // way; asking first just spends the owner's attention on a job that was never going to
+            // be created. `GateScriptReview`'s own safety review of `gate_script` is unaffected and
+            // still runs afterward, inside `scheduleJob`/`registerWatcher` once this shape check has
+            // already passed and the human has already said yes.
+            let parseFailure: String?
+            switch functionCall.name {
+            case "schedule_job":
+                if case .failure(let message) = ScheduleJobArguments.parse(functionCall.args) { parseFailure = message.text } else { parseFailure = nil }
+            case "register_directory_watcher":
+                if case .failure(let message) = RegisterWatcherArguments.parse(functionCall.args) { parseFailure = message.text } else { parseFailure = nil }
+            default:
+                parseFailure = nil
+            }
+            if let parseFailure { return parseFailure }
+
             let details = Self.pinnedJobApprovalDetails(toolName: functionCall.name, args: functionCall.args)
             let approved = await localState?.requestApproval(
                 toolName: functionCall.name, details: details, args: functionCall.args,
