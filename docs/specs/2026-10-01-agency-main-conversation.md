@@ -20,7 +20,7 @@ Each decision names its default and why; the cost of being wrong is what a revie
    2. run one reflection pass in place, so durable learning reaches memory before the history leaves context;
    3. create the fresh pinned conversation and **move the pin (the `activity_conversation_id` meta key) now**. Job cards are routed through `activityConversationId()` at each delivery, so every card from here on lands in the new conversation, never in the one about to be archived;
    4. write a summary of the old conversation, at most ~400 tokens (decisions made, open threads, follow-ups the owner asked for). One easy-tier call; the result passes the injection guard, and it becomes the new conversation's first entry;
-   5. archive the old conversation (`/archive`'s mechanism, retitled "Iris — ‹first date›–‹last date›"). It stays searchable and readable. Archiving comes last because any turn start un-archives a conversation (`runThinkingTask`).
+   5. archive the old conversation (`/archive`'s mechanism, retitled "Iris — until ‹date›" (conversations carry no creation date)). It stays searchable and readable. Archiving comes last because any turn start un-archives a conversation (`runThinkingTask`).
    
    Invariant, tested on every path including summary failure: the meta key never points at an archived or missing conversation. If the summary call fails, the rotation still completes, and the new conversation's first entry says no summary was produced and names the archived conversation.
 
