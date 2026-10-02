@@ -439,11 +439,13 @@ it is fenced in:
   removed and symlinks are followed, so what you are shown at creation is what will actually be
   read. The same check runs on every tick — a source that has since been pointed somewhere else,
   or is no longer a directory, is a gate failure and nothing is started;
-- it is reviewed once, at creation, by Vibecop, with the ordinary approval dialog for anything
-  Vibecop escalates or cannot answer. Both are shown the same thing: the script, every mount as
-  `source → target, read-only`, and the timeout — the mounts are the standing permission being
-  granted, and the script is only what is done with them. That review is the last time a human sees
-  it, which is why the sandbox, the read-only mounts and the timeout are not negotiable.
+- when Vibecop is on, it is reviewed once, at creation, by Vibecop, with the ordinary approval
+  dialog for anything Vibecop escalates or cannot answer. Both are shown the same thing: the
+  script, every mount as `source → target, read-only`, and the timeout — the mounts are the
+  standing permission being granted, and the script is only what is done with them. That review is
+  the last time a human sees it, which is why the sandbox, the read-only mounts and the timeout are
+  not negotiable. With Vibecop off, the default, the script is created unreviewed today — nobody
+  sees it before it starts running on its cadence (#334 changes this).
 
 What each answer costs:
 
