@@ -2665,13 +2665,25 @@ class AppState {
         case .deny:
             approved = false
         case .alwaysAllowGlobal:
-            permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
+            // Review #340, item 3 (defense in depth): `ChatView`'s banner already hides the
+            // Always-Allow buttons for a `humanOnly` request, but that is UI-level — any other
+            // caller of `resolveApproval` (a test, a future surface) could still reach this case
+            // for one. `humanOnly` exists specifically so neither the allowlist nor Vibecop can
+            // stand in for a human's click on THIS job (`AppState.requestApproval`); persisting a
+            // rule here would let that same click silently approve every future one, which is the
+            // exact thing `humanOnly` was built to prevent. This call is still honored — the human
+            // did approve it — only the standing rule is refused.
+            if !pending.humanOnly {
+                permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
+            }
             approved = true
         case .alwaysAllowProject:
-            if let workspace = pending.workspace {
-                permissions.allowInProject(toolName: pending.toolName, details: pending.details, workspace: workspace)
-            } else {
-                permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
+            if !pending.humanOnly {
+                if let workspace = pending.workspace {
+                    permissions.allowInProject(toolName: pending.toolName, details: pending.details, workspace: workspace)
+                } else {
+                    permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
+                }
             }
             approved = true
         }
