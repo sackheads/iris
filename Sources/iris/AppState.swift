@@ -226,7 +226,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
 }
 
 struct ToolApprovalRequest: Identifiable {
-    let id = UUID()
+    var id = UUID()
     let toolName: String
     let details: String
     let workspace: String?
@@ -2459,11 +2459,26 @@ class AppState {
         // in the Vibecop/timeout window), do NOT enqueue a request nobody will resolve — the
         // teardown's denyPendingApprovals already ran and would miss a late append.
         if Task.isCancelled { return false }
-        return await withCheckedContinuation { continuation in
-            pendingApprovals.append(ToolApprovalRequest(
-                toolName: toolName, details: details, workspace: workspace,
-                conversationId: conversationId, origin: origin, continuation: continuation))
+        // A bare `withCheckedContinuation` ignores cancellation, so Stop (which cancels the turn's
+        // task, a grader's included) left the turn blocked on the dialog. The handler denies this
+        // one request. It hops to the main actor, which this function holds until the append
+        // below has run, so the request is always on the queue by the time it looks.
+        let requestId = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                pendingApprovals.append(ToolApprovalRequest(
+                    id: requestId, toolName: toolName, details: details, workspace: workspace,
+                    conversationId: conversationId, origin: origin, continuation: continuation))
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.denyApproval(id: requestId) }
         }
+    }
+
+    /// Resolves-false and removes one queued request, if it is still queued.
+    private func denyApproval(id: UUID) {
+        guard let index = pendingApprovals.firstIndex(where: { $0.id == id }) else { return }
+        pendingApprovals.remove(at: index).continuation.resume(returning: false)
     }
 
     /// Resolves-false and removes every queued request for a conversation. Used to unstick a

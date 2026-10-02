@@ -142,4 +142,44 @@ struct VibecopOffApprovalTests {
             Issue.record("a declined dialog must refuse the gate script")
         }
     }
+
+    /// The Stop button cancels the turn's task, and a grader's prompt waits inside that task's
+    /// tree. A bare `withCheckedContinuation` ignores cancellation, so the turn stayed blocked on
+    /// the dialog after Stop. Bounded: a regression is unstuck by hand and fails, never hangs.
+    @Test("cancelling the task waiting on a prompt denies it and takes it off the queue",
+          arguments: [VibecopCallerRole.evaluator, .agent])
+    func cancellationDeniesThePrompt(role: VibecopCallerRole) async throws {
+        let (state, home) = try app()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let cid = state.createNewConversation(isBackground: false, select: false)
+        let other = state.createNewConversation(isBackground: false, select: false)
+        let finished = Locked(false)
+        let waiting = Task { @MainActor in
+            defer { finished.mutate { $0 = true } }
+            return await state.requestApproval(toolName: "run_command", details: "true --x", workspace: nil,
+                                               conversationId: cid, callerRole: role, vibecopEnabled: false)
+        }
+        // A prompt from another conversation, which the cancellation must leave alone.
+        let bystander = Task { @MainActor in
+            await state.enqueueUserApproval(toolName: "run_command", details: "true --y", workspace: nil,
+                                            conversationId: other, origin: "Main agent")
+        }
+        for _ in 0..<400 where state.pendingApprovals.count < 2 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(state.pendingApprovals.count == 2)
+
+        waiting.cancel()
+        for _ in 0..<400 where !finished.value { try? await Task.sleep(nanoseconds: 5_000_000) }
+        let resolvedByCancel = finished.value
+        if !resolvedByCancel { state.denyPendingApprovals(for: cid) }   // unstick a regression
+        let approved = await waiting.value
+        #expect(resolvedByCancel, "cancellation must resume the waiting approval")
+        #expect(approved == false)
+        #expect(!state.pendingApprovals.contains { $0.conversationId == cid })
+        #expect(state.pendingApprovals.map(\.conversationId) == [other])
+
+        state.denyPendingApprovals(for: other)
+        #expect(await bystander.value == false)
+    }
 }
