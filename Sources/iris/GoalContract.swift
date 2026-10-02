@@ -235,6 +235,18 @@ struct GoalContract: Codable, Equatable, Sendable {
         return copy
     }
 
+    /// True iff `path` (absolute) is, with symlinks resolved, inside the workspace the human
+    /// approved this contract for (#336, owner decision: the grader's reads there need no prompt).
+    /// Resolved by `IrisPaths.realPathForAllow`, the allow-side resolver: a `..` component, a
+    /// relative path or a link it cannot resolve is nil, so it asks; a link inside the workspace
+    /// that points out resolves out, so it asks too.
+    func isHumanApprovedRead(_ path: String) -> Bool {
+        guard isLocked, let approvedWorkspace,
+              let base = IrisPaths.realPathForAllow(approvedWorkspace),
+              let real = IrisPaths.realPathForAllow(path) else { return false }
+        return real == base || real.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+    }
+
     /// True iff `command`, trimmed, is byte for byte a check this locked contract still carries AND
     /// one the human approved (#334). No prefix, glob or substring match: `check && rm -rf x` is
     /// not `check`. Bytes, not `String ==`, which treats canonically equivalent Unicode as equal.

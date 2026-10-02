@@ -15,8 +15,10 @@ import Foundation
 struct EvaluatorLockedCheckTests {
     nonisolated static let check = "swift test --filter Foo"
 
-    /// The temp root holds the isolated `~/.iris` and two project directories, `proj` (where the
-    /// contract is approved) and `other`.
+    /// The temp root holds the isolated `~/.iris` (`iris/`) and, OUTSIDE it, two project
+    /// directories: `proj` (where the contract is approved) and `other`. Outside, because the
+    /// `~/.iris` carve-out auto-allows reads under the iris root, and a fixture there would prove
+    /// the carve-out rather than the rule under test.
     private func app() throws -> (AppState, URL) {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("iris-locked-check-\(UUID().uuidString)", isDirectory: true)
@@ -27,11 +29,12 @@ struct EvaluatorLockedCheckTests {
         let state = AppState(store: try ConversationStore.inMemory(),
                              tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
                              createIfEmpty: false, emitLaunchNotices: false)
-        state.permissions = PermissionManager(paths: IrisPaths(root: home))
+        state.permissions = PermissionManager(paths: irisPaths(home))
         return (state, home)
     }
 
     private func proj(_ home: URL) -> URL { home.appendingPathComponent("proj") }
+    private func irisPaths(_ home: URL) -> IrisPaths { IrisPaths(root: home.appendingPathComponent("iris")) }
 
     private func draft(checks: [String] = [check]) -> GoalContract {
         GoalContract(objective: "make Foo pass",
@@ -109,7 +112,9 @@ struct EvaluatorLockedCheckTests {
         #expect(result.queued)
     }
 
-    @Test("a file tool whose details equal a check still asks", arguments: ["read_file", "write_file"])
+    // `read_file` is not here: since #336 a grader read is judged by where it lands (see the
+    // read tests below), and a relative path spelled like a check lands inside the workspace.
+    @Test("a write whose details equal a check still asks", arguments: ["write_file"])
     func fileToolsAsk(tool: String) async throws {
         let (state, home) = try app()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -206,7 +211,7 @@ struct EvaluatorLockedCheckTests {
         let main = state.createNewConversation(select: false)
         var d = draft(checks: [Self.check, "  make lint \n"])
         d.workspace = proj(home).path
-        state.approveGoalContract(for: main, d, paths: IrisPaths(root: home))
+        state.approveGoalContract(for: main, d, paths: irisPaths(home))
         let conv = try #require(state.conversations.first { $0.id == main })
         let locked = try #require(conv.goalContract)
         #expect(locked.isLocked)
@@ -245,7 +250,7 @@ struct EvaluatorLockedCheckTests {
         let main = state.createNewConversation(select: false)
         var d = draft()
         d.workspace = proj(home).path
-        state.approveGoalContract(for: main, d, paths: IrisPaths(root: home))
+        state.approveGoalContract(for: main, d, paths: irisPaths(home))
         // What `set_workspace` does, unasked, after the human approved.
         state.setWorkspace(for: main, path: home.appendingPathComponent("other").path)
 
@@ -267,6 +272,82 @@ struct EvaluatorLockedCheckTests {
         let result = await outcome(state, details: Self.check, in: cid)
         #expect(!result.queued)
         #expect(result.approved)
+    }
+
+    // MARK: Reads inside the approved workspace (owner decision on #336: "Yes, reads only")
+
+    /// `proj/notes.txt`, `other/secret.txt`, and links inside `proj` pointing in and out.
+    private func files(_ home: URL) throws -> (inside: URL, outside: URL) {
+        let inside = proj(home).appendingPathComponent("notes.txt")
+        let outside = home.appendingPathComponent("other/secret.txt")
+        try "notes".write(to: inside, atomically: true, encoding: .utf8)
+        try "secret".write(to: outside, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: proj(home).appendingPathComponent("escape"),
+                                                   withDestinationURL: outside)
+        try FileManager.default.createSymbolicLink(at: proj(home).appendingPathComponent("alias"),
+                                                   withDestinationURL: inside)
+        return (inside, outside)
+    }
+
+    private func readAsks(_ path: (URL) throws -> String, role: VibecopCallerRole = .evaluator,
+                          approved: Bool = true, tool: String = "read_file") async throws -> Bool {
+        let (state, home) = try app()
+        defer { try? FileManager.default.removeItem(at: home) }
+        _ = try files(home)
+        let cid = grader(state, contract(approved: approved, in: proj(home)), workspace: proj(home))
+        let result = await outcome(state, tool: tool, details: try path(home), in: cid, role: role)
+        #expect(result.queued || result.approved, "unasked means approved")
+        return result.queued
+    }
+
+    @Test("a grader read inside the approved workspace runs unasked")
+    func readInsideRuns() async throws {
+        #expect(try await readAsks { self.proj($0).appendingPathComponent("notes.txt").path } == false)
+        #expect(try await readAsks { _ in "notes.txt" } == false, "relative to the grader's directory")
+        #expect(try await readAsks { self.proj($0).appendingPathComponent("alias").path } == false,
+                "a link that stays inside is inside")
+    }
+
+    @Test("a read outside the approved workspace asks")
+    func readOutsideAsks() async throws {
+        #expect(try await readAsks { $0.appendingPathComponent("other/secret.txt").path })
+        #expect(try await readAsks { self.proj($0).appendingPathComponent("../other/secret.txt").path })
+        #expect(try await readAsks { _ in "../other/secret.txt" })
+        #expect(try await readAsks { _ in "/etc/hosts" })
+    }
+
+    @Test("a symlink inside the workspace that points outside asks")
+    func symlinkEscapeAsks() async throws {
+        #expect(try await readAsks { self.proj($0).appendingPathComponent("escape").path })
+        #expect(try await readAsks { _ in "escape" })
+    }
+
+    @Test("an agent-role read inside the workspace asks")
+    func agentReadAsks() async throws {
+        #expect(try await readAsks({ self.proj($0).appendingPathComponent("notes.txt").path }, role: .agent))
+    }
+
+    @Test("the same read with no human approval asks")
+    func unapprovedReadAsks() async throws {
+        #expect(try await readAsks({ self.proj($0).appendingPathComponent("notes.txt").path }, approved: false))
+    }
+
+    @Test("a grader write inside the workspace still asks")
+    func writeInsideAsks() async throws {
+        #expect(try await readAsks({ self.proj($0).appendingPathComponent("notes.txt").path }, tool: "write_file"))
+    }
+
+    @Test("a background grader's read inside the workspace still fails closed")
+    func backgroundReadFailsClosed() async throws {
+        let (state, home) = try app()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let (inside, _) = try files(home)
+        let cid = grader(state, contract(in: proj(home)), workspace: proj(home), background: true)
+        let approved = await state.requestApproval(toolName: "read_file", details: inside.path,
+                                                   workspace: proj(home).path, conversationId: cid,
+                                                   callerRole: .evaluator, vibecopEnabled: false)
+        #expect(!approved)
+        #expect(state.takeBackgroundDenials(for: cid).count == 1)
     }
 
     // MARK: Carried and persisted
