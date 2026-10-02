@@ -181,7 +181,7 @@ Also add `rename_conversation` declaration gating to `ToolSurfaceTrimTests`. A r
   - `renameConversation`: `guard !conversations[idx].isPinned else { return false }`, then return `true` after renaming. Mark it `@discardableResult`.
   - The `rename_conversation` executor: `let ok = await MainActor.run { localState?.renameConversation(...) ?? false }`. Then `result = ok ? "Conversation renamed to '\(newTitle)'." : "Refused — Iris keeps its name."`
   - Declaration (`:1374`): declare only when the trigger prefix is present **and** the conversation is not pinned. Move the `isPinned` read (currently `:1608`) up to the `MainActor.run` tuple at `:1330-1334` and reuse it in both places.
-  - `archiveRefusal`: check `isPinned` after `.noSuchConversation` and return `.pinned`. Add the case's sentence wherever the other refusals are rendered.
+  - `archiveRefusal`: check `isPinned` **last**, after `.turnInFlight` and `.goalActive`, and return `.pinned`. A pinned conversation mid-turn must still read as `.turnInFlight`; Task 8 relies on that. Add the case's sentence wherever the other refusals are rendered.
 
 - [ ] **Step 4: Run them and confirm they pass.** Quote the counts for `PinnedConversationTests`, `ToolSurfaceTrimTests` and `ArchiveConversationTests`.
 
@@ -258,7 +258,7 @@ Branch: `feat/agency-5b-briefing-tools`. Based on main **after PR 1 merges**. It
 @Suite struct BriefingTests {
     private func run(_ name: String, _ status: JobRun.Status, outcome: String? = nil,
                      blockedTool: String? = nil, at t: TimeInterval) -> JobRun {
-        var r = JobRun(jobId: UUID(), jobName: name, triggerKind: .schedule,
+        var r = JobRun(jobId: UUID(), jobName: name, triggerKind: "schedule",
                        startedAt: Date(timeIntervalSince1970: t), status: status)
         r.outcome = outcome; r.blockedTool = blockedTool
         return r
@@ -546,16 +546,19 @@ Branch: `feat/agency-5b-rotation`. Based on main after PR 1.
 - Produces:
   - `extension AppState { func rotatePinned(engine: IrisEngine) async -> String? }`. It returns a refusal sentence, or `nil` on success.
   - `IrisEngine.summarizeForRotation(messages: [ChatMessage]) async -> String?`, which uses `client.generateContent(request:tier: .easy)`.
-  - `static let rotationSummaryPrompt`, and `static func archivedTitle(first: Date, last: Date) -> String`, which returns `"Iris — 2026-09-01–2026-10-01"`.
+  - `static let rotationSummaryPrompt`, and `static func archivedTitle(last: Date) -> String`, which returns `"Iris — until 2026-10-01"`. `Conversation` has no `createdAt` and `ChatMessage` no timestamp, so there is no first date; the spec is amended to match.
 
 - [ ] **Step 1: Write the failing tests.** Use a fake client scripted per call: reflection reply, then summary reply. Use `FakeLLMClient(responses:)` (Sources/iris/FakeLLMClient.swift:23), and a gate built from an `AsyncStream` continuation to hold the summary call open.
   - `happyPath`:
     - after `/new` in pinned, the meta key points at a new conversation, which is pinned and selected, titled "Iris", and whose first message is the summary;
     - the old conversation is archived, unpinned, retitled by `archivedTitle`, and still in `conversations`;
+    - the new conversation's first **history** entry has role `user` and starts `[Summary of the previous Iris conversation`. Anthropic and Gemini reject a history that opens with a model entry;
     - the fake recorded a request containing `"[Reflection Trigger]"`.
   - `cardMidRotationLandsInNewIris` (**Review Focus 1**): hold the summary call open, call `state.deliverEvent(card, to: state.activityConversationId())`, then release. The card's `.event` message is in the new conversation and not the old.
   - `summaryFailureStillRotates`: the summary call throws. The rotation still completes, and the new conversation's first message contains "No summary was produced" and the archived title.
-  - `refusesDuringTurnAndGoal`: with `isThinking[convId] = true` (or however `archiveRefusal` detects a turn in flight; mirror `ArchiveConversationTests`), `/new` returns the turn-in-flight sentence and nothing moves. Do the same for an active goal.
+  - `refusesDuringTurnAndGoal`: with a turn in flight in Iris (mirror `ArchiveConversationTests`' setup for `hasTurnInFlight`), `/new` returns the turn-in-flight sentence **synchronously**, before any task starts, and nothing moves. Do the same for an active goal.
+  - `rotationActuallyArchives`: guards against the vacuous pass. After the happy path, `old.isArchived == true`. The first draft ran the rotation inside the old conversation's own thinking task, so `archiveRefusal` saw that task as a turn in flight and refused its own archive.
+  - `peerTurnDuringRotationSkipsArchive`: a turn starts in the old conversation while the summary is held open, e.g. a peer message. The rotation still moves the pin, but leaves the old conversation unarchived. The new Iris's opening says the previous one was busy and is left in the sidebar, unpinned, under its archive title.
   - `pinNeverPointsAtArchived`: after each of the three paths above, `state.conversations.first { $0.id == UUID(uuidString: metaValue)! }!.isArchived == false`.
   - `newElsewhereUnchanged`: `/new` in a non-pinned conversation creates a tab and doesn't touch the meta key.
 
@@ -568,9 +571,11 @@ extension AppState {
     /// 5b §0.4. The pin moves before anything slow, because cards are routed through
     /// `activityConversationId()` at each delivery; archiving comes last, because any turn start
     /// un-archives (`runThinkingTask`).
-    func rotatePinned(engine: IrisEngine) async -> String? {
+    /// The caller has already refused synchronously (`rotationRefusal`), and runs this under
+    /// `runThinkingTask(conversationId: nil)`. Running it as the old conversation's own task
+    /// would make `archiveRefusal` see itself as a turn in flight and refuse the final archive.
+    func rotatePinned(engine: IrisEngine) async {
         let oldId = activityConversationId()
-        if let refusal = archiveRefusal(for: oldId), refusal != .pinned { return refusal.sentence }
 
         await engine.processInput(Self.reflectionPrompt, source: "System", conversationId: oldId)
 
@@ -581,20 +586,31 @@ extension AppState {
 
         let old = conversations.first { $0.id == oldId }
         let summary = await engine.summarizeForRotation(messages: old?.messages ?? [])
-        let title = Self.archivedTitle(first: old?.createdAt ?? Date(), last: Date())
-        let opening = summary.map { "Summary of the previous Iris conversation (\"\(title)\"):\n\n\($0)" }
-            ?? "No summary was produced. The previous conversation is archived as \"\(title)\"; search_conversations and read_conversation reach it."
-        appendMessage(role: .agent, content: opening, to: newId)
-        appendContentToHistory(Content(role: "model", parts: [Part(text: opening)]), for: newId)
-
+        let title = Self.archivedTitle(last: Date())
         if let o = conversations.firstIndex(where: { $0.id == oldId }) { conversations[o].title = title }
-        _ = archiveConversation(oldId)
-        return nil
+        // A peer can start a turn in the old conversation while the summary runs. Archiving it
+        // then would be refused anyway; say so instead of leaving a silent half-rotation.
+        let archived = archiveRefusal(for: oldId) == nil && archiveConversation(oldId) == nil
+        var opening = summary.map { "[Summary of the previous Iris conversation, \"\(title)\"]\n\n\($0)" }
+            ?? "[No summary was produced. The previous conversation is \"\(title)\"; search_conversations and read_conversation reach it.]"
+        if !archived { opening += "\n\n[It was busy, so it was left unarchived in the sidebar.]" }
+        // User role in history: providers reject a history that opens with a model entry.
+        appendMessage(role: .event, content: opening, to: newId)
+        appendContentToHistory(Content(role: "user", parts: [Part(text: opening)]), for: newId)
+    }
+
+    /// Synchronous, before any task starts, with `/archive`'s sentences. Pinned isn't a refusal here.
+    func rotationRefusal() -> String? {
+        let id = activityConversationId()
+        switch archiveRefusal(for: id) {
+        case nil, .pinned?: return nil
+        case let r?: return r.sentence
+        }
     }
 }
 ```
 
-Adapt the names the code doesn't have: the refusal sentence accessor, `appendContentToHistory`'s exact signature, `createdAt` on `Conversation`, and the `Part` init. Find each with grep. The *order* is what the tests pin. If `archiveConversation` re-creates a conversation because none is selectable, that can't happen here, since the new Iris is selectable.
+Adapt the names the code doesn't have: the refusal sentence accessor, `appendContentToHistory`'s exact signature, the `Part` init, and how an `.event` message with plain (non-card) content renders. If an `.event` must decode as a card, use `.system` for the visible message instead. The history entry stays user-role either way. Find each with grep. The *order* is what the tests pin. If `archiveConversation` re-creates a conversation because none is selectable, that can't happen here, since the new Iris is selectable.
 
 `summarizeForRotation`:
 - Build one user `Content` from the last 200 `.user`/`.agent` messages, using the "owner:"/"iris:" lines as `ConversationReader` writes them.
@@ -602,7 +618,11 @@ Adapt the names the code doesn't have: the refusal sentence accessor, `appendCon
 - Call `client.generateContent(request:tier: .easy)`, catching errors and returning nil.
 - Guard the reply with `InjectionGuard.sanitize(..., contextTag: "rotation_summary", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)`.
 
-The `/new` handler: if the selected conversation is pinned, `runThinkingTask { if let r = await self.rotatePinned(engine: engine) { self.appendMessage(role: .command, content: r, to: convId) } }`. Otherwise keep `createNewConversation()`. Check whether `runThinkingTask` un-archives the *old* id at start. It must be the *old* conversation's task, so starting it is harmless: the archive happens at the end.
+The `/new` handler, when the selected conversation is pinned:
+1. `if let r = rotationRefusal() { appendMessage(role: .command, content: r, to: convId); return }`, synchronously.
+2. Otherwise `runThinkingTask(conversationId: nil) { await self.rotatePinned(engine: engine) }`. Check `runThinkingTask`'s signature; if it cannot take nil, use a plain `Task { @MainActor in … }` held the way other untracked tasks are.
+
+In any other conversation, keep `createNewConversation()`.
 
 - [ ] **Step 4: Run them and confirm they pass.** Quote the count. Also run `ArchiveConversationTests` and `PinnedConversationTests`.
 
@@ -683,7 +703,7 @@ Branch: `feat/agency-5b-anchoring`. Based on main after PR 1.
     1. Before `await engine.processInput(reflectionPrompt, …)`, record `let before = conversations[idx].messages.count`.
     2. After it, take `.agent` messages with index ≥ `before` and join their content.
     3. If the source isn't pinned and the summary isn't `noConsolidationReply`, `await deliverEvent(.reflection(...), to: activityConversationId())`.
-  - **The source chat:** keep the "Triggering automatic memory reflection..." `.system` line. Replace the reflection's `.agent` reply messages in the source with one `.system` line, `"Memory reflection ran; its report is in Iris."` Do this only in `messages`, never in `history`: the model keeps its own reply in context, and the history stays append-only.
+  - **The source chat:** keep the "Triggering automatic memory reflection..." `.system` line. Replace the reflection's `.agent` reply messages in the source with one `.system` line, `"Memory reflection ran; its report is in Iris."`. This is a role change, so it goes through the store's `messagesReplaced` change path, not `updateMessageContent`. Do this only in `messages`, never in `history`: the model keeps its own reply in context, and the history stays append-only.
 
     *Why replace, not suppress:* the reply is streamed while the turn runs, and suppressing a stream mid-flight is invasive. A post-hoc swap in `messages` is one place.
   - **`/reflect`:** it is explicitly requested in place, so the reply stays where it is, and also posts a card if the conversation isn't pinned. Keep it simple: same capture, same card, no swap.
@@ -730,7 +750,8 @@ Branch: `feat/agency-5b-anchoring`. Based on main after PR 1.
   - **`upsert`:** add `action` to the column list, written as `"prompt"` or `"builtin:\(name)"`.
   - **`job(from:)`:** `JobAction(stored: row["action"])`.
   - **`Job`:** `CodingKeys` gains `action`, and `init(from:)` uses `try c.decodeIfPresent(JobAction.self, forKey: .action) ?? .prompt`. Add `action` to the memberwise init with default `.prompt`.
-  - **The runner, in `fire`:** wrap the token-budget admission check (find the call that returns the `pauseBudget` admission) in `if case .prompt = current.action`. A built-in's tokens are zero by construction.
+  - **Admission:** the budget check lives in the pure `admit()` (JobRunner.swift:222-227), not in `fire`. Add a `countsTokens: Bool` parameter, skip the per-job and global budget checks when it is false, and have `fire` pass `current.action == .prompt`. A built-in's tokens are zero by construction. Add a pure `admit()` unit test for both values.
+  - **`recentRuns` (Task 4) excludes built-in runs**, so the digest's own daily run never sits in the briefing: `AND jobId NOT IN (SELECT id FROM jobs WHERE action LIKE 'builtin:%')`. Add a `JobLedgerTests` case.
   - **In `run`, before `openConversation`:**
 
 ```swift
@@ -744,7 +765,7 @@ if case .builtin(let name) = job.action {
     1. `begin` a `JobRun` with no transcript, then `setLastRun`.
     2. Resolve the registry. An unknown name finishes `.failed` with failure reason `"unknown built-in"`.
     3. `await builtin.run(...)`, then `finish(.completed, outcome: result.outcome, tokens: TokenUsage())`.
-    4. If `result.card` is set, build `EventCard(runId:jobId:jobName:status: .completed, outcome:startedAt:finishedAt:)` and `await deliver(card, for: job)`.
+    4. If `result.card` is set, build `EventCard(kind: "job_run", runId:jobId:jobName:status: .completed, outcome:startedAt:finishedAt:)` and `await deliver(card, for: job)`.
   - **`get_job_run`:** check its transcript read (`iris.swift`, near `:2867`). With a nil `transcriptConversationId` it must report the outcome and say there is no transcript. The test pins this, so adjust it if it doesn't.
 
 - [ ] **Step 4: Run them and confirm they pass.** Quote the counts for `JobLedgerTests`, `BuiltinJobTests`, `JobRunnerTests` and `JobToolsTests`.
