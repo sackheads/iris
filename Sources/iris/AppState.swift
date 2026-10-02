@@ -132,20 +132,27 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// #185 -- what this session advertises to peers. Nil until the session describes itself.
     var sessionCard: SessionCard?
 
-    /// Sticky taint (#187 §0.5, structural ruling): true once this conversation has received ANY
-    /// peer-delivered content — an idle `send_to_session` delivery, one queued behind a busy turn
-    /// (whether later drained as its own turn or consumed as a mid-turn steer), or a steer. Never
-    /// cleared once set. Set ONLY by `IrisEngine`'s genuine peer-delivery code paths
-    /// (`deliverSanitizedSystemEvent`'s idle branch, `queuePeerArrival`'s busy branch) — never by
-    /// matching on message text — so it cannot be spoofed by a user or a model writing text that
-    /// merely *looks* like a peer arrival (the same framing, the same "System Event [peer_session]"
-    /// prefix): those still go through the ordinary `appendMessage(role: .user, ...)` /
-    /// `appendMessage(role: .agent, ...)` paths, which never touch this flag. Replaces three rounds
-    /// of per-turn `isPeer` threading (`processInput`'s `isPeer` parameter, `peerSteerInjectedThisTurn`)
-    /// that each left a path open — a restart, a nested continuation, a sibling turn clearing shared
-    /// per-turn state — because the taint lived in transient state instead of being derived from
-    /// what persists.
-    var hasPeerContent: Bool = false
+    /// Sticky taint (#187 §0.5, structural ruling, renamed from `hasPeerContent` under review #340):
+    /// true once this conversation has had a turn started on it by content that was NOT the owner
+    /// present and typing — a peer's `send_to_session` delivery (idle, or queued behind a busy turn
+    /// and later drained as its own turn or consumed as a mid-turn steer) OR a background
+    /// subagent's post-back (`invoke_subagent background: true`, which reports back through
+    /// `handleSystemEvent` whenever it finishes, independent of whatever the owner is doing by
+    /// then). An INLINE (non-background) `invoke_subagent` result is explicitly NOT this: it
+    /// returns as ordinary tool output inside the owner's own turn, so it needs no taint — the
+    /// owner is already there. Never cleared once set.
+    ///
+    /// Set ONLY by `IrisEngine`'s genuine unattended-arrival code paths
+    /// (`deliverSanitizedSystemEvent`'s idle branch — which `handleSystemEvent` and `deliverPeerMessage`
+    /// both route through — and `queuePeerArrival`'s busy branch) — never by matching on message
+    /// text — so it cannot be spoofed by a user or a model writing text that merely *looks* like one
+    /// of these arrivals (the same framing, the same "System Event [...]" prefix): those still go
+    /// through the ordinary `appendMessage(role: .user, ...)` / `appendMessage(role: .agent, ...)`
+    /// paths, which never touch this flag. Replaces three rounds of per-turn `isPeer` threading
+    /// (`processInput`'s `isPeer` parameter, `peerSteerInjectedThisTurn`) that each left a path
+    /// open — a restart, a nested continuation, a sibling turn clearing shared per-turn state —
+    /// because the taint lived in transient state instead of being derived from what persists.
+    var hasUnattendedInput: Bool = false
 
     /// #185 -- surfaced from the store column of the same name (`ConversationStore.swift`), which
     /// every upsert already writes with `Date()`. Was write-only in memory before this: no
@@ -167,7 +174,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasPeerContent
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput
     }
 
     init(from decoder: Decoder) throws {
@@ -204,8 +211,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         sessionCard = try container.decodeIfPresent(SessionCard.self, forKey: .sessionCard)
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         // Invariant 1: a conversation persisted before this ruling has no such key, and absent
-        // means "never touched by a peer", the correct default.
-        hasPeerContent = try container.decodeIfPresent(Bool.self, forKey: .hasPeerContent) ?? false
+        // means "no turn here ever started without the owner present", the correct default.
+        hasUnattendedInput = try container.decodeIfPresent(Bool.self, forKey: .hasUnattendedInput) ?? false
         // Migration: a legacy conversation that had a goal (activeGoal) but no contract is
         // upgraded to a locked single-qualitative-criterion contract so in-flight goals survive.
         if goalContract == nil, let legacy = activeGoal {
@@ -1731,17 +1738,19 @@ class AppState {
         }
     }
 
-    /// #187 §0.5 structural ruling: marks `conversationId` as having received peer content — the
+    /// #187 §0.5 structural ruling (renamed under review #340 — the principle is "content that
+    /// starts a turn without the owner present", not only "peer"): marks `conversationId` with the
     /// sticky taint `executeFunctionCall`'s job-creation gate reads. Called ONLY from `IrisEngine`'s
-    /// two genuine peer-delivery code paths (`deliverSanitizedSystemEvent`'s idle branch,
-    /// `queuePeerArrival`'s busy branch, which covers both a later drain into its own turn and
-    /// consumption as a mid-turn steer) — never from anything that matches on message text, so a
-    /// user or a model writing something that merely looks like a peer arrival never sets this.
-    /// A no-op once already set: the taint never clears.
-    func markConversationTouchedByPeer(_ conversationId: UUID) {
+    /// genuine unattended-arrival code paths — `deliverSanitizedSystemEvent`'s idle branch (which
+    /// both `handleSystemEvent`'s background-subagent post-back and `deliverPeerMessage`'s idle
+    /// delivery route through) and `queuePeerArrival`'s busy branch (covers both a later drain into
+    /// its own turn and consumption as a mid-turn steer) — never from anything that matches on
+    /// message text, so a user or a model writing something that merely looks like one of these
+    /// arrivals never sets this. A no-op once already set: the taint never clears.
+    func markConversationTouchedByUnattendedInput(_ conversationId: UUID) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
-              !conversations[idx].hasPeerContent else { return }
-        conversations[idx].hasPeerContent = true
+              !conversations[idx].hasUnattendedInput else { return }
+        conversations[idx].hasUnattendedInput = true
         markChanged(conversationId, .metadata)
     }
 

@@ -703,12 +703,15 @@ Because Iris reads every other conversation's cards and holds both job-creating 
 watch asks you first: the call pauses on an ordinary approval dialog, and declining it creates
 nothing — unless `autoApproveTools` (the switch a headless driver or scenario run sets) is on,
 which exempts this dialog exactly as it exempts every other approval, since there is nobody there
-to ask. The same ask applies to any conversation that has received a message from another session —
-pinned or not, and regardless of whether the job-creating call is in the same turn the message
-arrived in or a much later one: the taint is sticky for the life of the conversation, survives a
-restart, and is set only by genuine delivery, never by text that merely looks like one. Without
-this, a peer could get an ordinary, non-pinned conversation to create a standing job with nobody in
-that conversation ever having typed anything.
+to ask. The same ask applies to any conversation that has received a message from another session
+or a background subagent's report — pinned or not, and regardless of whether the job-creating call
+is in the same turn that content arrived in or a much later one: the taint is sticky for the life of
+the conversation, survives a restart, and is set only by genuine delivery, never by text that merely
+looks like one. Without this, a peer — or a background subagent reporting back whenever it finishes,
+independent of what the owner is doing by then — could get an ordinary, non-pinned conversation to
+create a standing job with nobody in that conversation ever having typed anything. An INLINE
+(non-background) `invoke_subagent` result is explicitly not this: it returns as ordinary tool output
+inside the owner's own turn, so it needs no taint — the owner is already there.
 
 Every other, ordinarily-driven conversation creates a job or watch without that extra ask — except
 a subagent, which is refused both tools outright (declaration and dispatch) and cannot create one
