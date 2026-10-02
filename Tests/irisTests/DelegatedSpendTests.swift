@@ -13,42 +13,48 @@ struct DelegatedSpendTests {
     // MARK: Fixtures
 
     /// Routes each model call by who is asking: a subagent's system prompt names its role
-    /// ("subagent role: **ROLE**"), the job run's does not. Each queue replays in order and then
-    /// answers with a usage-free text reply, so a straggling extra round costs nothing and the
-    /// figures under test are exactly the scripted ones. Parent and subagents share one client,
-    /// as `invoke_subagent` passes the parent engine's client through.
+    /// ("subagent role: **ROLE**"), an evaluator is the engine offered `submit_evaluation`, and
+    /// anything else is the job run itself. Each queue replays in order and then answers with a
+    /// usage-free text reply, so a straggling extra round costs nothing and the figures under test
+    /// are exactly the scripted ones. Parent and subagents share one client, as `invoke_subagent`
+    /// passes the parent engine's client through.
     final class RoutingClient: LLMClientProtocol, @unchecked Sendable {
         private let lock = NSLock()
         private var queues: [String: [GeminiResponse]]
-        private(set) var calls: [String: Int] = [:]
-        /// Parks the first call for a role until the test opens it.
-        private let gates: [String: JobSchedulerTests.Gate]
+        private var calls: [String: Int] = [:]
+        /// Parks a role's Nth call (1-based) until the test opens the gate.
+        private let gates: [String: (call: Int, gate: JobSchedulerTests.Gate)]
 
-        init(_ queues: [String: [GeminiResponse]], gates: [String: JobSchedulerTests.Gate] = [:]) {
+        init(_ queues: [String: [GeminiResponse]],
+             gates: [String: (call: Int, gate: JobSchedulerTests.Gate)] = [:]) {
             self.queues = queues
             self.gates = gates
         }
 
         static let parent = "PARENT"
+        static let evaluator = "EVALUATOR"
 
         private func role(of request: GeminiRequest) -> String {
+            if request.tools?.contains(where: { $0.functionDeclarations.contains { $0.name == "submit_evaluation" } }) == true {
+                return Self.evaluator
+            }
             let prompt = request.systemInstruction?.parts.compactMap(\.text).joined() ?? ""
             guard let range = prompt.range(of: "subagent role: **") else { return Self.parent }
             let rest = prompt[range.upperBound...]
             return String(rest.prefix { $0 != "*" })
         }
 
-        private func next(for role: String) -> (GeminiResponse, Bool) {
+        private func next(for role: String) -> (GeminiResponse, Int) {
             lock.lock(); defer { lock.unlock() }
             calls[role, default: 0] += 1
-            let first = calls[role] == 1
+            let n = calls[role]!
             if var queue = queues[role], !queue.isEmpty {
                 let response = queue.removeFirst()
                 queues[role] = queue
-                return (response, first)
+                return (response, n)
             }
             return (GeminiResponse(candidates: [Candidate(content: Content(
-                role: "model", parts: [Part(text: "done")]))], usageMetadata: nil), first)
+                role: "model", parts: [Part(text: "done")]))], usageMetadata: nil), n)
         }
 
         func callCount(_ role: String) -> Int {
@@ -58,18 +64,24 @@ struct DelegatedSpendTests {
 
         func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
             let role = role(of: request)
-            let (response, first) = next(for: role)
-            if first, let gate = gates[role] { await gate.arriveAndWait() }
+            let (response, n) = next(for: role)
+            if let parked = gates[role], parked.call == n { await parked.gate.arriveAndWait() }
             return response
+        }
+    }
+
+    /// Records every figure a usage sink is handed.
+    final class RecordingSink: TurnUsageSink, @unchecked Sendable {
+        private let lock = NSLock()
+        private var figures: [Int] = []
+        var recorded: [Int] { lock.withLock { figures } }
+        func record(_ tokens: TokenUsage) async {
+            lock.withLock { figures.append(tokens.totalTokenCount) }
         }
     }
 
     private func usage(_ total: Int) -> UsageMetadata {
         UsageMetadata(promptTokenCount: total - 1, candidatesTokenCount: 1, totalTokenCount: total)
-    }
-
-    private func call(_ name: String, _ args: [String: JSONValue], total: Int) -> GeminiResponse {
-        calls([(name, args)], total: total)
     }
 
     private func calls(_ list: [(String, [String: JSONValue])], total: Int) -> GeminiResponse {
@@ -80,7 +92,7 @@ struct DelegatedSpendTests {
 
     private func text(_ text: String, total: Int) -> GeminiResponse {
         GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: text)]))],
-                       usageMetadata: usage(total))
+                       usageMetadata: total > 0 ? usage(total) : nil)
     }
 
     private func delegate(_ role: String, background: Bool = false) -> (String, [String: JSONValue]) {
@@ -199,7 +211,31 @@ struct DelegatedSpendTests {
         #expect(run.totalTokens == 10 + 200 + 4_000 + 300 + 5)
     }
 
-    // MARK: The mid-run budget
+    @Test("an evaluator grading a delegated unit is charged to the run")
+    func evaluatorSpendIsCharged() async throws {
+        let criteria: JSONValue = .array([.object(["text": .string("it is done"), "kind": .string("qualitative")])])
+        let client = RoutingClient([
+            RoutingClient.parent: [
+                calls([("invoke_subagent", ["role": .string("worker"), "task": .string("Do it."),
+                                            "effort": .string("easy"), "criteria": criteria])], total: 10),
+                text("ok", total: 5)],
+            "WORKER": [calls([finish("worked")], total: 100)],
+            RoutingClient.evaluator: [calls([("submit_evaluation", ["evaluations": .array([])])], total: 900)],
+        ])
+        let (store, state, engine) = try harness(client: client)
+        let job = self.job("graded")
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+
+        await runner(store, state, engine, config).fire(job: job, origin: .schedule)
+
+        #expect(client.callCount(RoutingClient.evaluator) >= 1, "the unit was graded")
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.totalTokens == 10 + 100 + 900 + 5)
+    }
+
+    // MARK: The budget bounds delegation
 
     @Test("the per-run budget trips on parent + subagent, though neither alone reaches it")
     func budgetCountsDelegatedSpend() async throws {
@@ -223,43 +259,148 @@ struct DelegatedSpendTests {
         #expect(run.totalTokens == 110)
     }
 
-    // MARK: After the run
-
-    @Test("what a subagent spends after its run has ended is not charged to that run")
-    func spendAfterTheRunIsNotCharged() async throws {
-        let gate = JobSchedulerTests.Gate()
+    @Test("a subagent whose own rounds spend the run's budget is refused its next round")
+    func subagentIsStoppedAtTheRunBudget() async throws {
         let client = RoutingClient([
-            RoutingClient.parent: [calls([delegate("straggler", background: true)], total: 30),
-                                   text("left it running", total: 20)],
-            "STRAGGLER": [calls([finish("late")], total: 5_000)],
-        ], gates: ["STRAGGLER": gate])
+            RoutingClient.parent: [calls([delegate("worker")], total: 10), text("never reached", total: 1)],
+            "WORKER": [calls([("noop_probe", [:])], total: 120), calls([finish("worked")], total: 1)],
+        ])
         let (store, state, engine) = try harness(client: client)
-        let job = self.job("leaves-a-straggler")
+        let job = self.job("deep-spender", perRunBudget: 100)
         try store.ledger.upsert(job)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
 
         await runner(store, state, engine, config).fire(job: job, origin: .schedule)
-        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
-        #expect(run.status != .running, "the run is over")
-        #expect(run.totalTokens == 50)
 
-        // Now the straggler spends, after the run has been closed.
+        #expect(client.callCount("WORKER") == 1, "10 + 120 is past 100: the subagent makes no second call")
+        #expect(client.callCount(RoutingClient.parent) == 1, "and neither does the run")
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.status == .failed)
+        #expect(run.failureReason == TurnBudget.tokensExceeded)
+        #expect(run.totalTokens == 130, "the overrun is on the row")
+    }
+
+    @Test("a delegated round writes the run's total to its row before the run's next round")
+    func delegatedRoundsReachTheRow() async throws {
+        let gate = JobSchedulerTests.Gate()
+        let client = RoutingClient([
+            RoutingClient.parent: [calls([delegate("worker")], total: 10), text("all done", total: 5)],
+            "WORKER": [calls([("noop_probe", [:])], total: 50), calls([finish("worked")], total: 1)],
+        ], gates: ["WORKER": (call: 2, gate: gate)])
+        let (store, state, engine) = try harness(client: client)
+        let job = self.job("meter")
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+
+        let jobRunner = runner(store, state, engine, config)
+        let fire = Task { await jobRunner.fire(job: job, origin: .schedule) }
         await gate.waitForEntry()
+
+        // Parked in the subagent's second call: the parent has made no round since delegating.
+        let midRun = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(midRun.status == .running)
+        #expect(midRun.totalTokens == 60, "the subagent's first round is on the row while it is still working")
+
         await gate.open()
-        let straggler = try #require(state.conversations.first { $0.title == "Subagent: straggler" })
-        for _ in 0..<200 {
-            if state.conversations.first(where: { $0.id == straggler.id })?.tokenUsage.totalTokenCount == 5_000 { break }
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
-        #expect(state.conversations.first { $0.id == straggler.id }?.tokenUsage.totalTokenCount == 5_000,
+        await fire.value
+        let finished = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(finished.totalTokens == 66)
+    }
+
+    @Test("an attended conversation that delegates has no budget and no sink")
+    func attendedDelegationIsUnchanged() async throws {
+        let client = RoutingClient([
+            RoutingClient.parent: [calls([delegate("worker")], total: 10), text("ok", total: 5)],
+            "WORKER": [calls([("noop_probe", [:])], total: 10_000), calls([finish("worked")], total: 1)],
+        ])
+        let (store, state, engine) = try harness(client: client)
+        let attended = try #require(state.selectedConversationId)
+
+        await engine.processInput("Delegate it.", source: "UI", conversationId: attended)
+
+        #expect(client.callCount("WORKER") == 2, "no budget stopped the subagent")
+        #expect(state.runUsage(for: attended).totalTokenCount == 15,
+                "an attended conversation is charged its own tokens only, as before")
+        #expect(state.registeredRun(for: attended) == nil)
+        #expect(try store.ledger.tokensToday(jobId: nil, calendar: utc, now: Date()) == 0)
+    }
+
+    // MARK: After the run
+
+    @Test("what a subagent spends after its run has ended is charged to nothing, and writes no row")
+    func spendAfterTheRunIsNotCharged() async throws {
+        let client = RoutingClient([
+            "STRAGGLER": [calls([("noop_probe", [:])], total: 5_000), text("late", total: 0)],
+        ])
+        let (_, state, _) = try harness(client: client)
+        let run = state.createNewConversation(isBackground: true, select: false)
+        let sink = RecordingSink()
+        state.registerRun(run, budget: TurnBudget(maxTokens: 100, deadline: Date().addingTimeInterval(600)),
+                          sink: sink)
+        let straggler = state.createNewConversation(isSubagent: true, isBackground: true, select: false)
+        state.linkBackgroundDescendant(straggler, of: run)
+
+        // The run ends: the same drain `JobRunner.readTurn` does.
+        _ = state.takeBackgroundDenials(for: run)
+
+        let engine = IrisEngine(state: state, tier: .easy, principal: .subagent, roleLabel: "straggler",
+                                client: client, protectionEnabled: false, sessionPeerCount: 0)
+        await engine.setSystemPrompt(text: SubagentManager.shared.generateRolePrompt(role: "straggler"))
+        await engine.processInput("Keep going.", source: "System", conversationId: straggler)
+
+        #expect(state.conversations.first { $0.id == straggler }?.tokenUsage.totalTokenCount == 5_000,
                 "the straggler did spend")
-        #expect(state.runUsage(for: run.transcriptConversationId!).totalTokenCount ==
-                state.conversations.first { $0.id == run.transcriptConversationId }?.tokenUsage.totalTokenCount,
-                "nothing delegated is left accruing against the ended run")
-        let after = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
-        #expect(after.totalTokens == 50)
-        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: utc, now: Date()) == 50)
+        #expect(client.callCount("STRAGGLER") == 2, "and was not held to the ended run's budget")
+        #expect(state.runUsage(for: run).totalTokenCount == 0, "none of it is charged to the run")
+        #expect(sink.recorded.isEmpty, "and nothing is written to the run's row")
+    }
+
+    @Test("a grandchild spawned by a subagent that outlived its run accrues under no key")
+    func orphanedGrandchildAccruesNowhere() throws {
+        let (_, state, _) = try harness(client: RoutingClient([:]))
+        let run = state.createNewConversation(isBackground: true, select: false)
+        state.registerRun(run, budget: TurnBudget(maxTokens: 0, deadline: Date().addingTimeInterval(600)),
+                          sink: RecordingSink())
+        let child = state.createNewConversation(isSubagent: true, isBackground: true, select: false)
+        state.linkBackgroundDescendant(child, of: run)
+        _ = state.takeBackgroundDenials(for: run)
+
+        // The lingering child delegates again, after the drain: it is its own root now.
+        let grandchild = state.createNewConversation(isSubagent: true, isBackground: true, select: false)
+        state.linkBackgroundDescendant(grandchild, of: child)
+        state.updateTokenUsage(for: grandchild, usage: usage(700))
+
+        #expect(state.runUsage(for: child).totalTokenCount == 0,
+                "an unregistered root collects nothing, so there is no bucket left to leak")
+        #expect(state.runUsage(for: run).totalTokenCount == 0)
+    }
+
+    // MARK: Background delegation
+
+    @Test("an unattended run is refused background delegation; it would outlive the run's budget")
+    func backgroundDelegationIsRefusedUnattended() async throws {
+        let client = RoutingClient([
+            RoutingClient.parent: [calls([delegate("straggler", background: true)], total: 30),
+                                   text("ok", total: 20)],
+            "STRAGGLER": [calls([finish("late")], total: 5_000)],
+        ])
+        let (store, state, engine) = try harness(client: client)
+        let job = self.job("tries-background")
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+
+        await runner(store, state, engine, config).fire(job: job, origin: .schedule)
+
+        #expect(client.callCount("STRAGGLER") == 0, "no subagent was spawned")
+        #expect(!state.conversations.contains { $0.title == "Subagent: straggler" })
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        let transcript = try #require(state.conversations.first { $0.id == run.transcriptConversationId })
+        let results = transcript.history.flatMap(\.parts).compactMap(\.functionResponse)
+        #expect(results.contains { $0.response.values.contains { $0.stringValue.contains(IrisEngine.unattendedBackgroundDelegationRefusal) } })
+        #expect(run.totalTokens == 50)
     }
 
     // MARK: The day's budget

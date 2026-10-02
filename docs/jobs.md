@@ -823,24 +823,31 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
   a job cannot trip its own breaker by being skipped.
 - **Daily token budget** — **1,000,000 tokens per job** per local calendar day, and **3,000,000
   across every background run together**. The fire that finds the day's tokens sent at or over the
-  figure pauses the job rather than starting. A run still in flight counts too: what it has sent is
-  written to its row after every model round, so a run the app quit in the middle of still counts
-  toward the day's figure for what it had sent. Budgets count every token sent, including tokens a
+  figure pauses the job rather than starting. Budgets count every token sent, including tokens a
   provider served from its prompt cache; before 5a an Anthropic run was charged nothing because
   Anthropic reports no total. A run's tokens include what its delegated subagents (and theirs, and
   any evaluator grading their work) spend **while the run is active**; a subagent still going after
   its run has ended spends against nobody's figure. Delegated tokens are counted once, on the run's
-  row — a subagent has no row of its own.
+  row — a subagent has no row of its own. A run still in flight counts too: the run's total, its
+  subagents' included, is written to its row after every model round — the run's own and every
+  delegated one — so a run the app quit in the middle of, even in the middle of a delegation,
+  still counts toward the day's figure for what it had sent.
 - A refused fire writes a zero-length `interrupted` row and one card naming the figure that tripped
   it, so a pause is never silent.
 
 **During a run**, the turn itself is bounded: **200,000 tokens** and **10 minutes**. The token
-budget is checked between model rounds, against the run's own tokens plus its delegated subagents'
-so far; the deadline does not wait for a round, and does not wait for the turn either. The check is
-the run's own: a subagent is not stopped part-way, so one delegation can carry the run past its
-budget, and the run then stops before its next model round. At the deadline the run is closed `failed`, the Mac is let go back to sleep and
-the job is free to fire again; the turn is asked to stop, and if it is parked somewhere that never
+budget is checked before every model round — the run's own, and those of every subagent and
+evaluator working for it — against the run's tokens so far, its subagents' included, so whichever
+of them would spend past the budget is refused its next round. A round already under way is not
+stopped part-way, so the run can end slightly over its budget, by at most one round of each engine
+running at the time. A run cannot start a subagent in the background (`invoke_subagent` with
+`background`): it is refused, because the subagent would outlive the run's budget and its result
+would start a turn nobody budgeted; delegating synchronously is allowed. The deadline does not wait
+for a round, and does not wait for the turn either. At the deadline the run is closed `failed`, the
+Mac is let go back to sleep and the job is free to fire again; the turn is asked to stop, and if it is parked somewhere that never
 checks — a blocking subprocess, a stream with no timeout — it is abandoned rather than waited on.
+A subagent still working when the deadline closes the run is not stopped by it, and from then on is
+charged to nothing (#323).
 Whichever bound bit, the row and the card say `budget: tokens exceeded` or `budget: time exceeded`.
 The budget stop does not summarize — there is no budget left for a summary — and any message
 you steered in mid-run is written to the transcript before the turn ends, without starting another
