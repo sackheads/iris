@@ -2051,6 +2051,18 @@ class AppState {
         markChanged(conversationId, .metadata)
     }
 
+    /// The panel's Approve: the human's click (#334). Binds the goal's workspace first, so the
+    /// kickoff turn already runs there (#68), then records the checks on screen as approved for
+    /// that directory — the one the grader will run them in — and locks.
+    func approveGoalContract(for conversationId: UUID, _ draft: GoalContract, paths: IrisPaths = .default) {
+        guard conversations.contains(where: { $0.id == conversationId }) else { return }
+        bindGoalWorkspace(for: conversationId, contract: draft, paths: paths)
+        // The grader's own fallback when nothing is bound (`gradeWorkspace` in IrisEngine).
+        let workspace = conversations.first(where: { $0.id == conversationId })?.workspacePath
+            ?? FileManager.default.currentDirectoryPath
+        setGoalContract(for: conversationId, draft.humanApproved(workspace: workspace))
+    }
+
     /// The only sanctioned edit path for a LOCKED contract. Returns false if rejected
     /// (blank rationale) or no contract. `action` is "add" | "remove" | "update".
     @discardableResult
@@ -2332,7 +2344,7 @@ class AppState {
         // Deterministic too: the grader may run, unasked, exactly a check the human approved when
         // locking this contract (#334). Not for the agent or subagents, and not for file tools.
         if callerRole == .evaluator, toolName == "run_command", let id = conversationId,
-           conversations.first(where: { $0.id == id })?.goalContract?.isHumanApprovedCheck(details) == true {
+           conversations.first(where: { $0.id == id })?.goalContract?.isHumanApprovedCheck(details, workingDirectory: workspace) == true {
             return true
         }
 

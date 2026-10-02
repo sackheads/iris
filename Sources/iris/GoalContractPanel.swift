@@ -295,10 +295,9 @@ struct GoalContractPanel: View {
             milestones: milestones,
             workspace: workspace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : workspace
         )
-        // Bind BEFORE locking so the kickoff turn already runs in the right directory (#68).
-        state.bindGoalWorkspace(for: conversation.id, contract: edited)
-        // The human's click: the checks shown here are the ones the grader may run unasked (#334).
-        state.setGoalContract(for: conversation.id, edited.humanApproved())
+        // The human's click: binds the workspace, records the checks shown here as approved
+        // for it, and locks (#334).
+        state.approveGoalContract(for: conversation.id, edited)
         state.sendGoalKickoff(for: conversation.id)
     }
 }
