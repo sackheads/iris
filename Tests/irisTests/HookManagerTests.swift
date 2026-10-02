@@ -415,8 +415,20 @@ import Foundation
         try await Task.sleep(nanoseconds: 100_000_000)
     }
 
-    let firstLogin = BinaryResolver.defaultSearchDirs().first!
-    #expect(path.split(separator: ":").first.map(String.init) == firstLogin)
+    // #319: asserting the hook's first PATH element equals defaultSearchDirs().first is fragile —
+    // the hook's `/bin/zsh -c` still sources ~/.zshenv (every zsh invocation does, login or not),
+    // and a user's own PATH edits there are legitimate and expected to apply to their hooks too.
+    // What #228/#315 actually promise is that the login search dirs are present, in order; assert
+    // that as a subsequence instead of requiring them to be first.
+    let hookPathDirs = path.split(separator: ":").map(String.init)
+    let loginDirs = BinaryResolver.defaultSearchDirs()
+    var remaining = loginDirs[...]
+    for dir in hookPathDirs {
+        if dir == remaining.first {
+            remaining = remaining.dropFirst()
+        }
+    }
+    #expect(remaining.isEmpty, "expected login search dirs \(loginDirs) to appear in order within hook PATH \(hookPathDirs)")
 
     try? FileManager.default.removeItem(at: configURL)
     try? FileManager.default.removeItem(at: markerURL)
