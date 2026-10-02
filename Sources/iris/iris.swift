@@ -6,8 +6,9 @@ import KeyboardShortcuts
 /// it, so the two ways a turn runs away — rounds that keep spending tokens, and a turn that never
 /// comes back — are bounded here rather than left to the user noticing.
 ///
-/// Both figures are absolute, not remaining: the tokens are the conversation's accumulated total
-/// (a job's conversation is fresh, so that total IS the run's cost) and the deadline is a wall
+/// Both figures are absolute, not remaining: the tokens are the run's accumulated total
+/// (`AppState.runUsage`: its fresh conversation plus what its subagents spent while it was
+/// active, #313) and the deadline is a wall
 /// clock instant, so nothing has to be decremented as the turn goes and a check that never runs
 /// cannot leave a stale allowance behind.
 struct TurnBudget: Sendable, Equatable {
@@ -1757,8 +1758,8 @@ actor IrisEngine {
             if Task.isCancelled { earlyEnd = Self.stoppedByUserReason; break }
             // The per-run budget (#187 §4), read before the call this round would make — including
             // the first, so a deadline already passed when the turn starts costs nothing at all.
-            // The conversation's accumulated usage is what is compared: a job's conversation is
-            // fresh, so its total is this run's spend.
+            // The run's accumulated usage is what is compared: its fresh conversation's total plus
+            // what its subagents spent while it was active (#313).
             // A profile denial cannot become allowed later in this turn (#187 §0.2, F6): there is
             // nobody to approve it and no other tool that would do the same thing, so another
             // model round can only produce the same refusal — until the run's token budget or its
@@ -1773,8 +1774,10 @@ actor IrisEngine {
                 break
             }
             if let turnBudget {
+                // The run's spend, delegated subagents' included (#313): a job that delegates
+                // must not stay under its budget by spending through them.
                 let spent = await MainActor.run {
-                    localState?.conversations.first(where: { $0.id == conversationId })?.tokenUsage.totalTokenCount ?? 0
+                    localState?.runUsage(for: conversationId).totalTokenCount ?? 0
                 }
                 if let reason = turnBudget.stopReason(tokensUsed: spent, now: Date()) {
                     turnFinished = true
@@ -1903,7 +1906,7 @@ actor IrisEngine {
                     if let usage = activeResponse.usageMetadata {
                         localState?.updateTokenUsage(for: conversationId, usage: usage)
                     }
-                    return localState?.conversations.first(where: { $0.id == conversationId })?.tokenUsage ?? TokenUsage()
+                    return localState?.runUsage(for: conversationId) ?? TokenUsage()
                 }
                 // What the run has spent, on the run's own row, before the next round can start
                 // (#187 §4). A row only ever costed by its `finish` counts as zero against the
@@ -3701,7 +3704,7 @@ extension IrisEngine {
         return [
             FunctionDeclaration(
                 name: "list_jobs",
-                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, why one is paused, and how the last run ended, plus what each has sent today (tokens sent, not billed cost) and how hard it has been running — `tokensToday` against `dailyBudget`, `runsLastHour` against `maxRunsPerHour` (the breaker), `retryAttempt` out of three, and `policy`, `gateKind` and `profile`, and `grants` — the directories and network a mutating job was created with, null when it has none — with `tokensTodayAllJobs` against `globalDailyBudget` for every background run together, and `unreadableJobs` — how many stored jobs could not be read at all. A figure that is null could not be read, which is not the same as zero. Use it to answer what is scheduled, how much context a job has sent, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
+                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, why one is paused, and how the last run ended, plus what each has sent today (tokens sent, its runs' subagents included, not billed cost) and how hard it has been running — `tokensToday` against `dailyBudget`, `runsLastHour` against `maxRunsPerHour` (the breaker), `retryAttempt` out of three, and `policy`, `gateKind` and `profile`, and `grants` — the directories and network a mutating job was created with, null when it has none — with `tokensTodayAllJobs` against `globalDailyBudget` for every background run together, and `unreadableJobs` — how many stored jobs could not be read at all. A figure that is null could not be read, which is not the same as zero. Use it to answer what is scheduled, how much context a job has sent, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
                 parameters: Schema(type: "OBJECT", properties: [:], required: [])),
             FunctionDeclaration(
                 name: "get_job_run",

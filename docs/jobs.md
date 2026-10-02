@@ -827,13 +827,18 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
   written to its row after every model round, so a run the app quit in the middle of still counts
   toward the day's figure for what it had sent. Budgets count every token sent, including tokens a
   provider served from its prompt cache; before 5a an Anthropic run was charged nothing because
-  Anthropic reports no total.
+  Anthropic reports no total. A run's tokens include what its delegated subagents (and theirs, and
+  any evaluator grading their work) spend **while the run is active**; a subagent still going after
+  its run has ended spends against nobody's figure. Delegated tokens are counted once, on the run's
+  row — a subagent has no row of its own.
 - A refused fire writes a zero-length `interrupted` row and one card naming the figure that tripped
   it, so a pause is never silent.
 
 **During a run**, the turn itself is bounded: **200,000 tokens** and **10 minutes**. The token
-budget is checked between model rounds; the deadline does not wait for a round, and does not wait
-for the turn either. At the deadline the run is closed `failed`, the Mac is let go back to sleep and
+budget is checked between model rounds, against the run's own tokens plus its delegated subagents'
+so far; the deadline does not wait for a round, and does not wait for the turn either. The check is
+the run's own: a subagent is not stopped part-way, so one delegation can carry the run past its
+budget, and the run then stops before its next model round. At the deadline the run is closed `failed`, the Mac is let go back to sleep and
 the job is free to fire again; the turn is asked to stop, and if it is parked somewhere that never
 checks — a blocking subprocess, a stream with no timeout — it is abandoned rather than waited on.
 Whichever bound bit, the row and the card say `budget: tokens exceeded` or `budget: time exceeded`.

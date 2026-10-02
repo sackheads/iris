@@ -1010,7 +1010,8 @@ actor JobRunner {
                                  blockedReason: blockedCall?.reason ?? .approval,
                                  blockedNearest: blockedCall?.grantNearest)
         do {
-            // The conversation is fresh, so its accumulated `tokenUsage` IS this run's cost.
+            // The conversation is fresh, so its accumulated `tokenUsage`, plus what its subagents
+            // spent while the run was active (#313), IS this run's cost.
             try ledger.finish(runId: run.id, status: status, outcome: outcome,
                               failureReason: failureReason, blockedTool: blockedTool,
                               tokens: turn.tokens, finishedAt: finishedAt)
@@ -1465,12 +1466,15 @@ actor JobRunner {
         guard let state else { return nil }
         return await MainActor.run { () -> TurnResult in
             let conversation = state.conversations.first(where: { $0.id == conversationId })
+            // Read before the drain below, which is where the run stops being charged for its
+            // subagents (#313): what they spent up to here is the run's; anything after is not.
+            let tokens = state.runUsage(for: conversationId)
             // Taken, not read: the denials belong to this run, and leaving them behind would mark
             // the next run in the same conversation blocked too (there is no next run in the same
             // conversation today, but the drain is what guarantees that).
             return TurnResult(messages: conversation?.messages ?? [],
                               denials: state.takeBackgroundDenials(for: conversationId),
-                              tokens: conversation?.tokenUsage ?? TokenUsage())
+                              tokens: tokens)
         }
     }
 
