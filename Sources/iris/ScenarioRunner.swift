@@ -39,8 +39,8 @@ struct ScenarioResult: Sendable {
 /// and binds a task-local profiler sink so it collects only its own turns. The one exception is
 /// `guards: .off`, which mutates process-global `ConfigManager` state (only ever inside a
 /// volatile copy) with a non-reentrant save/restore, so two `.off` runs must not overlap;
-/// `PerfRunner` runs them sequentially. Heavy guard tiers are governed process-wide by
-/// `HeadlessMode` (set by `--bench`), not per run.
+/// `PerfRunner` runs them sequentially. Heavy guard tiers are governed by `HeadlessMode`, scoped
+/// to the CLI entry point's task tree (`--bench`, fake-lane `--perf run`), not per run.
 @MainActor
 enum ScenarioRunner {
     /// The guards=off notice is printed once per process; PerfRunner asks for .off on every

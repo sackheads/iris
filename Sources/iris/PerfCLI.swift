@@ -154,9 +154,7 @@ enum PerfCLI {
                 // Settings come from a volatile copy so guard toggles never persist. Must precede
                 // the first touch of ConfigManager.shared (inside the runner).
                 IrisDefaults.useVolatileCopyOfStandard()
-                if suite.lane == .fake {
-                    HeadlessMode.enable()
-                } else {
+                if suite.lane != .fake {
                     // A rebuilt binary prompts for Keychain access on its first secret read, which
                     // blocks an unattended run. Skip the Keychain when the provider never needs it.
                     let provider = IrisDefaults.store.string(forKey: "PRIMARY_PROVIDER") ?? "Gemini"
@@ -167,54 +165,65 @@ enum PerfCLI {
                         print("perf: provider secrets come from the Keychain; a rebuilt binary prompts once before the run can start")
                     }
                 }
-                let root = PerfPaths.repoRoot()   // before any cwd change
-                let previousCwd = FileManager.default.currentDirectoryPath
-                var scratch: URL?
-                var memoryBefore: String?
-                let realMemory = IrisPaths.default.memoryDir   // the real home, before any override
-                if suite.lane == .real {
-                    // If anything between this claim and `scratch = dir` throws, the defer below
-                    // never sees `scratch`: the lock and the half-built directory are left for the
-                    // next run's claim, which reclaims a dead pid's lock and resets the directory.
-                    // That relies on the process exiting after `execute` returns (main.swift); a
-                    // long-lived host calling `execute` repeatedly would keep the lock instead.
-                    let dir = try claimScratchWorkspace()
-                    FileManager.default.changeCurrentDirectoryPath(dir.path)
-                    // Memory tools write through IrisPaths.default: route the whole home at a
-                    // copy under the scratch directory so USER.md, the fact store and skills
-                    // stay untouched. Reads see the same context.
-                    try IrisPaths.useVolatileCopy(at: dir.appendingPathComponent(".iris"))
-                    memoryBefore = IrisPaths.fingerprint(of: realMemory)
-                    print("perf: real-lane file tools, cwd and ~/.iris confined to \(dir.path)")
-                    scratch = dir
-                }
-                defer {
-                    // Restore the cwd before deleting the directory it pointed at, so nothing that
-                    // runs after this (today: exit) inherits a dangling working directory. The lock
-                    // is released last, after the directory is gone, so a waiting run's claim finds
-                    // nothing left to reset.
-                    if let scratch {
-                        FileManager.default.changeCurrentDirectoryPath(previousCwd)
-                        try? FileManager.default.removeItem(at: scratch)
-                        releaseScratchWorkspace()
+                // Scoped to the closure's task tree when the lane is fake (#318) — see
+                // HeadlessMode. For the real `iris --perf run` CLI this is the process's outermost
+                // task and `main.swift` exits right after, so the scope in practice covers the
+                // whole remaining run; a test calling `execute` directly sees it end right here,
+                // leaving the process as it found it.
+                let runSuite: () async throws -> Int32 = {
+                    let root = PerfPaths.repoRoot()   // before any cwd change
+                    let previousCwd = FileManager.default.currentDirectoryPath
+                    var scratch: URL?
+                    var memoryBefore: String?
+                    let realMemory = IrisPaths.default.memoryDir   // the real home, before any override
+                    if suite.lane == .real {
+                        // If anything between this claim and `scratch = dir` throws, the defer below
+                        // never sees `scratch`: the lock and the half-built directory are left for the
+                        // next run's claim, which reclaims a dead pid's lock and resets the directory.
+                        // That relies on the process exiting after `execute` returns (main.swift); a
+                        // long-lived host calling `execute` repeatedly would keep the lock instead.
+                        let dir = try claimScratchWorkspace()
+                        FileManager.default.changeCurrentDirectoryPath(dir.path)
+                        // Memory tools write through IrisPaths.default: route the whole home at a
+                        // copy under the scratch directory so USER.md, the fact store and skills
+                        // stay untouched. Reads see the same context.
+                        try IrisPaths.useVolatileCopy(at: dir.appendingPathComponent(".iris"))
+                        memoryBefore = IrisPaths.fingerprint(of: realMemory)
+                        print("perf: real-lane file tools, cwd and ~/.iris confined to \(dir.path)")
+                        scratch = dir
                     }
+                    defer {
+                        // Restore the cwd before deleting the directory it pointed at, so nothing that
+                        // runs after this (today: exit) inherits a dangling working directory. The lock
+                        // is released last, after the directory is gone, so a waiting run's claim finds
+                        // nothing left to reset.
+                        if let scratch {
+                            FileManager.default.changeCurrentDirectoryPath(previousCwd)
+                            try? FileManager.default.removeItem(at: scratch)
+                            releaseScratchWorkspace()
+                        }
+                    }
+                    let dumpDir = dumpRequestsDir.map { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : root.appendingPathComponent($0) }
+                    // 5a's tool-list experiment: read here, at the entry point, and passed down; never a global.
+                    let declareStateTools = ProcessInfo.processInfo.environment["IRIS_PERF_DECLARE_STATE_TOOLS"] == "1"
+                    if declareStateTools { print("perf: EXPERIMENT — declaring state-gated tools (manage_fact, peer tools) on every turn") }
+                    let record = try await PerfRunner.run(suite: suite, repetitionsOverride: reps, repoRoot: root,
+                                                          headless: suite.lane == .fake, workspacePath: scratch?.path,
+                                                          dumpRequestsDir: dumpDir, declareStateGatedTools: declareStateTools)
+                    print(PerfReport.render(record))
+                    let dir = out.hasPrefix("/") ? URL(fileURLWithPath: out) : root.appendingPathComponent(out)
+                    let url = try record.write(toDirectory: dir)
+                    print("perf: wrote \(url.path)")
+                    if let before = memoryBefore, IrisPaths.fingerprint(of: realMemory) != before {
+                        print("perf: WARNING the real \(realMemory.path) changed during the run; something wrote outside the volatile copy")
+                        return 3
+                    }
+                    return 0
                 }
-                let dumpDir = dumpRequestsDir.map { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : root.appendingPathComponent($0) }
-                // 5a's tool-list experiment: read here, at the entry point, and passed down; never a global.
-                let declareStateTools = ProcessInfo.processInfo.environment["IRIS_PERF_DECLARE_STATE_TOOLS"] == "1"
-                if declareStateTools { print("perf: EXPERIMENT — declaring state-gated tools (manage_fact, peer tools) on every turn") }
-                let record = try await PerfRunner.run(suite: suite, repetitionsOverride: reps, repoRoot: root,
-                                                      headless: suite.lane == .fake, workspacePath: scratch?.path,
-                                                      dumpRequestsDir: dumpDir, declareStateGatedTools: declareStateTools)
-                print(PerfReport.render(record))
-                let dir = out.hasPrefix("/") ? URL(fileURLWithPath: out) : root.appendingPathComponent(out)
-                let url = try record.write(toDirectory: dir)
-                print("perf: wrote \(url.path)")
-                if let before = memoryBefore, IrisPaths.fingerprint(of: realMemory) != before {
-                    print("perf: WARNING the real \(realMemory.path) changed during the run; something wrote outside the volatile copy")
-                    return 3
+                if suite.lane == .fake {
+                    return try await HeadlessMode.withEnabled(runSuite)
                 }
-                return 0
+                return try await runSuite()
             case .report(let path):
                 print(PerfReport.render(try PerfRunRecord.load(at: path)))
                 return 0

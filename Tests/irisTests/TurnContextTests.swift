@@ -590,16 +590,19 @@ struct GuardedFileCacheTests {
         #expect(client.requests.count == 2)
         #expect(systemText(client.requests[0]).contains(unique))
 
-        if !HeadlessMode.isEnabled {
-            // Deltas, not fixed totals: every turn also guards USER.md (`guardedUserProfileText`),
-            // which shares these same scoped mocks, so turn 1 alone legitimately spends one call on
-            // USER.md and one on AGENTS.md (both now against this engine's own isolated `manager` —
-            // see `tempMemory()` — so no other test's content can land here, unlike before fix
-            // round 1). What this test actually pins is that turn 2 adds NONE.
-            #expect(coreMLAfterTurn1 >= 1)
-            #expect(coreML.count == coreMLAfterTurn1, "tier 2 must not re-run against an unchanged turn")
-            #expect(aux.count == auxAfterTurn1, "tier 3 must not re-run against an unchanged turn")
-        }
+        // Deltas, not fixed totals: every turn also guards USER.md (`guardedUserProfileText`),
+        // which shares these same scoped mocks, so turn 1 alone legitimately spends one call on
+        // USER.md and one on AGENTS.md (both now against this engine's own isolated `manager` —
+        // see `tempMemory()` — so no other test's content can land here, unlike before fix
+        // round 1). What this test actually pins is that turn 2 adds NONE.
+        //
+        // Not gated on `HeadlessMode.isEnabled` (#318): headless mode is now task-scoped and
+        // nothing in this test enters that scope, so the gate was always true here — but gating a
+        // guard-call assertion on it at all was the bug: if a fake-lane suite's scope ever leaked
+        // in, this would have silently skipped instead of failing.
+        #expect(coreMLAfterTurn1 >= 1)
+        #expect(coreML.count == coreMLAfterTurn1, "tier 2 must not re-run against an unchanged turn")
+        #expect(aux.count == auxAfterTurn1, "tier 3 must not re-run against an unchanged turn")
     }
 
     @Test("after update_user_profile, the next turn's system prompt contains the new profile text")

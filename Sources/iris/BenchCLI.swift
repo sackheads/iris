@@ -63,10 +63,15 @@ enum BenchCLI {
         // first touched (inside ScenarioRunner.run). Real runs keep Keychain access for auth.
         // Bench runs never write to the user's real preferences.
         IrisDefaults.useVolatileCopyOfStandard()
+        let result: ScenarioResult
         if scenario.clientMode == .fake {
-            HeadlessMode.enable()
+            // Scoped to this call's task tree (#318) — see HeadlessMode. Since this is the
+            // process's outermost task and `main.swift` exits right after, the scope in practice
+            // covers the whole remaining run.
+            result = await HeadlessMode.withEnabled { await ScenarioRunner.run(scenario) }
+        } else {
+            result = await ScenarioRunner.run(scenario)
         }
-        let result = await ScenarioRunner.run(scenario)
         print(BenchSummary.render(scenarioName: scenario.name, result: result))
     }
 }
