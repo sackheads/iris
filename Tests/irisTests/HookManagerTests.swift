@@ -422,6 +422,7 @@ import Foundation
     // that as a subsequence instead of requiring them to be first.
     let hookPathDirs = path.split(separator: ":").map(String.init)
     let loginDirs = BinaryResolver.defaultSearchDirs()
+    #expect(!loginDirs.isEmpty, "defaultSearchDirs() returned nothing — the subsequence check below would pass vacuously")
     var remaining = loginDirs[...]
     for dir in hookPathDirs {
         if dir == remaining.first {
