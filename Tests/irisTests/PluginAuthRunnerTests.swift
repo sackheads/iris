@@ -109,6 +109,75 @@ struct PluginAuthRunnerTests {
         let firstLogin = BinaryResolver.defaultSearchDirs().first!
         #expect(status.output.split(separator: ":").first.map(String.init) == firstLogin)
     }
+
+    // MARK: The settings pane (#336)
+
+    /// An isolated allowlist, so the outcome depends only on the rule a test writes (invariant 7).
+    private func permissions() -> (PermissionManager, URL) {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-plugin-auth-\(UUID().uuidString)", isDirectory: true)
+        return (PermissionManager(paths: IrisPaths(root: home)), home)
+    }
+
+    private func marker() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("iris-auth-open-\(UUID().uuidString)")
+    }
+
+    @Test("opening the pane runs nothing and asks nobody when no rule permits the check")
+    func openRunsNothingUnallowed() async throws {
+        let (perms, home) = permissions()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let m = marker()
+        let status = await PluginAuthRunner.statusOnOpen(auth(check: "touch '\(m.path)'"), config: [:],
+                                                         permissions: perms)
+        #expect(status == nil, "not checked: the pane offers its Check button instead of a prompt elsewhere")
+        #expect(!FileManager.default.fileExists(atPath: m.path))
+    }
+
+    @Test("opening the pane refreshes a check an Always-allow rule already permits")
+    func openRunsAllowlistedCheck() async throws {
+        let (perms, home) = permissions()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let m = marker()
+        defer { try? FileManager.default.removeItem(at: m) }
+        let command = "touch '\(m.path)'"
+        perms.allowGlobally(toolName: "run_command", details: command)
+        let status = await PluginAuthRunner.statusOnOpen(auth(check: command), config: [:], permissions: perms)
+        #expect(status?.signedIn == true)
+        #expect(FileManager.default.fileExists(atPath: m.path))
+    }
+
+    @Test("a check with hidden characters never runs on open, even with a rule for it")
+    func openRefusesHiddenCharacters() async throws {
+        let (perms, home) = permissions()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let m = marker()
+        let command = "true\ntouch '\(m.path)'"
+        perms.allowGlobally(toolName: "run_command", details: command)
+        let status = await PluginAuthRunner.statusOnOpen(auth(check: command), config: [:], permissions: perms)
+        #expect(status == nil)
+        #expect(!FileManager.default.fileExists(atPath: m.path))
+    }
+
+    @Test("the command the pane shows is exactly the command the click runs")
+    func shownIsRun() async throws {
+        var a = auth(check: "nlm status --profile ${config:PROFILE}")
+        a.setupCommand = "nlm login --profile ${config:PROFILE}"
+        let config = ["PROFILE": "my work; rm -rf x"]
+        let shown = PluginAuthRunner.displayCommands(a, config: config)
+        let ran = OSAllocatedUnfairLock(initialState: [String]())
+        let record: PluginAuthRunner.Approver = { cmd in ran.withLock { $0.append(cmd) }; return false }
+        _ = await PluginAuthRunner.check(a, config: config, approve: record)
+        _ = await PluginAuthRunner.runSetup(a, config: config, approve: record)
+        #expect(ran.withLock { $0 } == [shown.check, shown.setup].compactMap { $0 })
+        #expect(shown.check == "nlm status --profile 'my work; rm -rf x'")
+    }
+
+    @Test("an unresolvable reference shows no command, so no button can run one")
+    func unresolvableShowsNothing() {
+        let shown = PluginAuthRunner.displayCommands(auth(check: "echo ${keychain:TOKEN}"), config: [:])
+        #expect(shown.check == nil)
+    }
 }
 
 /// Test-only helper: AuthDeclaration has no memberwise init exposed for `kind` alone.

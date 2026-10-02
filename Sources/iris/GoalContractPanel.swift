@@ -295,9 +295,9 @@ struct GoalContractPanel: View {
             milestones: milestones,
             workspace: workspace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : workspace
         )
-        // Bind BEFORE locking so the kickoff turn already runs in the right directory (#68).
-        state.bindGoalWorkspace(for: conversation.id, contract: edited)
-        state.setGoalContract(for: conversation.id, edited)
+        // The human's click: binds the workspace, records the checks shown here as approved
+        // for it, and locks (#334).
+        state.approveGoalContract(for: conversation.id, edited)
         state.sendGoalKickoff(for: conversation.id)
     }
 }
@@ -642,6 +642,8 @@ private struct LockedCriterionRow: View {
             if criterion.kind == .executable, let check = criterion.check {
                 Text(check)
                     .font(.system(.caption, design: .monospaced))
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
@@ -1176,9 +1178,14 @@ private struct CriterionRow: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
             }
             if criterion.kind == .executable {
-                TextField("Check command (e.g. swift test)", text: $checkText)
+                // Vertical and unlimited, so the whole check wraps into view: an approved check may
+                // run unasked (#334), and a one-line field can scroll a `; curl x | sh` tail out
+                // of sight. The panel's ScrollView and its maxHeight cap bound the height (inv. 8).
+                TextField("Check command (e.g. swift test)", text: $checkText, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.system(.caption, design: .monospaced))
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(6)
                     .background(Color.irisIndigo.opacity(0.07))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -1186,6 +1193,14 @@ private struct CriterionRow: View {
                     .onChange(of: checkText) { _, new in
                         criterion.check = new.isEmpty ? nil : new
                     }
+                // Same test the grader's gate applies, so the note and the behaviour cannot drift.
+                if checkText.containsHiddenCharacters {
+                    Label("This check contains a line break or an invisible character, so the grader will ask you every time before running it.",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .padding(.leading, 138)
+                }
             }
             // Milestone assignment picker (always shown so the user can author the ladder).
             HStack(spacing: 6) {

@@ -200,8 +200,11 @@ handled entirely by the `auth` block and `nlm`'s own credential store.
    wizard never executes them. Sign-in happens after install, from the
    plugin's detail pane. Nothing is written until you press Install.
 5. After install, the detail pane shows a status row driven by
-   `check_command`. Orange with "not signed in" until you click **Sign
-   in**; the subprocess output streams into the pane while `nlm` opens
+   `check_command`, with both commands printed in full beside the
+   **Check** and **Sign in** buttons. The check runs when you click
+   **Check** (or on open, if an "Always allow" rule already covers it);
+   until then the row reads "Not checked". Orange with "not signed in"
+   until you click **Sign in**; the subprocess output streams into the pane while `nlm` opens
    your browser. Once `nlm login --check` exits 0, the row turns green.
 6. If `notebooklm-mcp` is not on `PATH`, the plugin shows `needsConfig`
    with the `install_hint` text (`uv tool install notebooklm-mcp-cli`)

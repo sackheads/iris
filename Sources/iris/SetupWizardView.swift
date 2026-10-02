@@ -287,6 +287,9 @@ struct VibecopStepView: View {
                 .foregroundColor(.secondary)
             
             Toggle("Enable Vibecop", isOn: $config.enableVibecop)
+            Text("Off means every command and file operation asks for your approval, unless you have already allowed it.")
+                .font(.caption)
+                .foregroundColor(.secondary)
             
             if config.enableVibecop {
                 VStack(alignment: .leading, spacing: 12) {
