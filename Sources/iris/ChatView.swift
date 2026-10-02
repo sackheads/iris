@@ -468,7 +468,7 @@ struct ChatView: View {
                                    queueDepth: state.pendingApprovals.count,
                                    onResolve: { resolution in
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                        state.resolveApproval(resolution)
+                        state.resolveApproval(id: request.id, resolution)
                     }
                 })
                 .padding()

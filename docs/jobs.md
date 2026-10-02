@@ -439,13 +439,11 @@ it is fenced in:
   removed and symlinks are followed, so what you are shown at creation is what will actually be
   read. The same check runs on every tick — a source that has since been pointed somewhere else,
   or is no longer a directory, is a gate failure and nothing is started;
-- when Vibecop is on, it is reviewed once, at creation, by Vibecop, with the ordinary approval
-  dialog for anything Vibecop escalates or cannot answer. Both are shown the same thing: the
-  script, every mount as `source → target, read-only`, and the timeout — the mounts are the
-  standing permission being granted, and the script is only what is done with them. That review is
-  the last time a human sees it, which is why the sandbox, the read-only mounts and the timeout are
-  not negotiable. With Vibecop off, the default, the script is created unreviewed today — nobody
-  sees it before it starts running on its cadence (#334 changes this).
+- it is reviewed once, at creation, by Vibecop, with the ordinary approval dialog for anything
+  Vibecop escalates or cannot answer. With Vibecop off, every gate script goes to the dialog. Both are shown the same thing: the script, every mount as
+  `source → target, read-only`, and the timeout — the mounts are the standing permission being
+  granted, and the script is only what is done with them. That review is the last time a human sees
+  it, which is why the sandbox, the read-only mounts and the timeout are not negotiable.
 
 What each answer costs:
 
@@ -716,10 +714,10 @@ inside the owner's own turn, so it needs no taint — the owner is already there
 Every other, ordinarily-driven conversation creates a job or watch without that extra ask — except
 a subagent, which is refused both tools outright (declaration and dispatch) and cannot create one
 at all, however it was asked. Review is not all-or-nothing either way: a `schedule_job` carrying
-`gate_script` is reviewed once before the job exists, in whichever conversation asked for it,
-*when Vibecop is on* — Vibecop judges the script and what it may read, and only escalates to the
-ordinary approval dialog if it cannot decide (see "Gates" above). With Vibecop off, the default,
-the script is approved unreviewed today (#334 changes this).
+`gate_script` is reviewed once before the job exists, in whichever conversation asked for it —
+Vibecop judges the script and what it may read when it is on, and escalates to the ordinary
+approval dialog if it cannot decide; with Vibecop off, the default, every gate script goes to that
+same dialog instead (see "Gates" above). It is never created unreviewed.
 
 Delivery never wakes a model turn. The card is a `ChatRole.event` message, drawn as a card and
 never indexed for search; alongside it the card's one-line summary is appended to the destination's
@@ -772,7 +770,8 @@ that cannot reach it.
 The card for a run that stopped on an approval shows the **whole call** — the tool, every argument,
 and a long body cut to the first 500 characters — because an approval given without sight of the
 payload is worse than no button. Vibecop is asked about that same persisted call when the card is
-written, and its verdict and reason sit beside the button. A verdict is information, not a veto: a
+written, and its verdict and reason sit beside the button; with Vibecop off there is no verdict
+line, only the button. A verdict is information, not a veto: a
 `DENY` still leaves the button there, and clicking it is you overruling Vibecop, not skipping it.
 
 **Approve and run** dispatches exactly that one call, once, as a tracked run of its own: a fresh

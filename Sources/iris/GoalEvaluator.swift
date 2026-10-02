@@ -37,7 +37,7 @@ final class GoalEvaluator: Sendable {
         // The directory the grader inspects. Callers resolve this to the main agent's effective
         // working directory (its bound workspace, or the process cwd it actually ran in), so the
         // grader never has to guess where the work is.
-        let workspaceDir = workspace ?? FileManager.default.currentDirectoryPath
+        let workspaceDir = Self.gradingDirectory(workspace)
 
         let evalId = UUID()
         await MainActor.run {
@@ -118,6 +118,13 @@ final class GoalEvaluator: Sendable {
             app.deleteConversation(evalId)
         }
         return failed
+    }
+
+    /// Where the grader runs: the conversation's bound workspace, or, with none bound, the process
+    /// cwd its `run_command` inherits. One spelling, because the #334 pre-approval compares this
+    /// directory with the one recorded when the human approved the contract.
+    nonisolated static func gradingDirectory(_ workspacePath: String?) -> String {
+        workspacePath ?? FileManager.default.currentDirectoryPath
     }
 
     private static func systemPrompt(for contract: GoalContract, workspaceDir: String) -> String {

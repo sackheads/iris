@@ -35,8 +35,8 @@ struct ApprovalQueueTests {
         await waitForQueue(2)
         #expect(app.pendingApprovals.count == 2)
         #expect(app.pendingApprovals.first?.details == "a", "the head must be the first one queued")
-        app.resolveApproval(.deny)     // head (a) denied
-        app.resolveApproval(.approve)  // next (b) approved
+        app.resolveApproval(id: app.pendingApprovals[0].id, .deny)     // head (a) denied
+        app.resolveApproval(id: app.pendingApprovals[0].id, .approve)  // next (b) approved
         let v1 = await t1.value
         let v2 = await t2.value
         #expect(v1 == false)
@@ -57,7 +57,7 @@ struct ApprovalQueueTests {
         #expect(va == false)
         #expect(app.pendingApprovals.count == 1)
         #expect(app.pendingApprovals.first?.conversationId == b)
-        app.resolveApproval(.approve)
+        app.resolveApproval(id: app.pendingApprovals[0].id, .approve)
         let vb = await rb
         #expect(vb == true)
     }
@@ -98,7 +98,7 @@ struct ApprovalQueueTests {
         if app.pendingApprovals.isEmpty {
             app.denyPendingApprovals(for: cid)
         } else {
-            app.resolveApproval(.approve)
+            app.resolveApproval(id: app.pendingApprovals[0].id, .approve)
         }
         #expect(await gated == true)
     }
@@ -138,7 +138,7 @@ struct ApprovalQueueTests {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         #expect(app.pendingApprovals.count == 1)
-        app.resolveApproval(.alwaysAllowGlobal)
+        app.resolveApproval(id: app.pendingApprovals[0].id, .alwaysAllowGlobal)
         #expect(await globalResult == true, "the human's click still approves THIS call")
         #expect(!app.permissions.isAllowed(toolName: "schedule_job", details: "sweep", workspace: nil),
                 "a humanOnly request must never leave a standing rule behind")
@@ -150,7 +150,7 @@ struct ApprovalQueueTests {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         #expect(app.pendingApprovals.count == 1)
-        app.resolveApproval(.alwaysAllowProject)
+        app.resolveApproval(id: app.pendingApprovals[0].id, .alwaysAllowProject)
         #expect(await projectResult == true, "the human's click still approves THIS call")
         #expect(!app.permissions.isAllowed(toolName: "schedule_job", details: "sweep", workspace: "/tmp/proj"),
                 "a humanOnly request must never leave a standing per-project rule behind either")
@@ -170,6 +170,42 @@ struct ApprovalQueueTests {
         t.cancel()
         let v = await t.value
         #expect(v == false)
+        #expect(app.pendingApprovals.isEmpty)
+    }
+
+    /// A click names the request it was shown. Stop removes a request by id from anywhere in the
+    /// queue (#334), so position is no longer a safe stand-in for identity.
+    @Test("a click resolves the request it was shown, wherever it sits; a stale click resolves nothing")
+    func resolveById() async {
+        let app = AppState(store: try! ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
+        let cid = UUID()
+        func waitForQueue(_ count: Int) async {
+            for _ in 0..<400 where app.pendingApprovals.count < count {
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+        }
+        let a = Task { await app.enqueueUserApproval(toolName: "run_command", details: "a", workspace: nil, conversationId: cid, origin: "Main agent") }
+        await waitForQueue(1)
+        let b = Task { await app.enqueueUserApproval(toolName: "run_command", details: "b", workspace: nil, conversationId: cid, origin: "Main agent") }
+        await waitForQueue(2)
+        let c = Task { await app.enqueueUserApproval(toolName: "run_command", details: "c", workspace: nil, conversationId: cid, origin: "Main agent") }
+        await waitForQueue(3)
+        let ids = app.pendingApprovals.map(\.id)
+        #expect(app.pendingApprovals.map(\.details) == ["a", "b", "c"])
+
+        // A click on B (not the head) resolves B.
+        app.resolveApproval(id: ids[1], .approve)
+        #expect(app.pendingApprovals.map(\.details) == ["a", "c"])
+        // A is cancelled away, as Stop does; a click still showing A must not land on C.
+        a.cancel()
+        for _ in 0..<400 where app.pendingApprovals.count > 1 { try? await Task.sleep(nanoseconds: 5_000_000) }
+        app.resolveApproval(id: ids[0], .approve)
+        #expect(app.pendingApprovals.map(\.details) == ["c"], "a stale click resolves nothing")
+
+        app.resolveApproval(id: ids[2], .deny)
+        #expect(await b.value == true)
+        #expect(await a.value == false)
+        #expect(await c.value == false)
         #expect(app.pendingApprovals.isEmpty)
     }
 }

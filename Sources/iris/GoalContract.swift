@@ -165,6 +165,16 @@ struct GoalContract: Codable, Equatable, Sendable {
     /// exactly as D1 completes it"), and the handler that had the summary returned long ago.
     /// Nil unless a judgement pause is in flight.
     var pendingCompletionSummary: String?
+    /// #334 — the executable checks, trimmed, that the human saw when they clicked Approve on the
+    /// draft. Only `humanApproved(workspace:)` writes it, and only `AppState.approveGoalContract`
+    /// (the panel's Approve) calls that. Locking is not approval: graders, delegated units and the
+    /// legacy migration lock contracts too, and `amend_goal_contract` changes checks with only a
+    /// rationale. An amended check is not here.
+    var approvedChecks: [String] = []
+    /// #334 — where those checks were approved to run: the goal's working directory when Approve
+    /// was clicked, canonical. A check approved for one directory is not approved for another,
+    /// and the agent can move the conversation's workspace with `set_workspace` unasked.
+    var approvedWorkspace: String?
 
     init(id: UUID = UUID(), objective: String, criteria: [Criterion], outOfScope: [String] = [],
          stopBefore: [String] = [], assumptions: [String] = [], changeLog: [ContractChange] = [],
@@ -206,6 +216,51 @@ struct GoalContract: Codable, Equatable, Sendable {
         gateAttempts = try c.decodeIfPresent(Int.self, forKey: .gateAttempts) ?? 0
         awaitingHumanJudgement = try c.decodeIfPresent(Bool.self, forKey: .awaitingHumanJudgement) ?? false
         pendingCompletionSummary = try c.decodeIfPresent(String.self, forKey: .pendingCompletionSummary)
+        approvedChecks = try c.decodeIfPresent([String].self, forKey: .approvedChecks) ?? []
+        approvedWorkspace = try c.decodeIfPresent(String.self, forKey: .approvedWorkspace)
+    }
+
+    /// ASCII space, tab, CR and LF only: U+00A0 and its kin are part of a bash word, not padding.
+    private static let checkPadding = CharacterSet(charactersIn: " \t\r\n")
+    private static func trimmedCheck(_ s: String) -> String { s.trimmingCharacters(in: checkPadding) }
+
+
+    /// This contract as the human approved it, in `workspace`: its current executable checks become
+    /// the approved set, bound to that directory.
+    func humanApproved(workspace: String) -> GoalContract {
+        var copy = self
+        copy.approvedWorkspace = IrisPaths.canonicalPath(workspace)
+        copy.approvedChecks = criteria.compactMap { $0.kind == .executable ? $0.check.map(Self.trimmedCheck) : nil }
+            .filter { !$0.isEmpty }
+        return copy
+    }
+
+    /// True iff `path` (absolute) is, with symlinks resolved, inside the workspace the human
+    /// approved this contract for (#336, owner decision: the grader's reads there need no prompt).
+    /// Resolved by `IrisPaths.realPathForAllow`, the allow-side resolver: a `..` component, a
+    /// relative path or a link it cannot resolve is nil, so it asks; a link inside the workspace
+    /// that points out resolves out, so it asks too.
+    func isHumanApprovedRead(_ path: String) -> Bool {
+        guard isLocked, let approvedWorkspace,
+              let base = IrisPaths.realPathForAllow(approvedWorkspace),
+              let real = IrisPaths.realPathForAllow(path) else { return false }
+        return real == base || real.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+    }
+
+    /// True iff `command`, trimmed, is byte for byte a check this locked contract still carries AND
+    /// one the human approved (#334). No prefix, glob or substring match: `check && rm -rf x` is
+    /// not `check`. Bytes, not `String ==`, which treats canonically equivalent Unicode as equal.
+    ///
+    /// And only in the directory it was approved for, resolved on both sides: the grader runs in
+    /// the conversation's current workspace, which the agent can move after the approval.
+    func isHumanApprovedCheck(_ command: String, workingDirectory: String?) -> Bool {
+        guard isLocked, let approvedWorkspace, let workingDirectory,
+              IrisPaths.canonicalPath(workingDirectory) == approvedWorkspace else { return false }
+        let trimmed = Self.trimmedCheck(command)
+        guard !trimmed.isEmpty, !trimmed.containsHiddenCharacters else { return false }
+        let current = criteria.compactMap { $0.kind == .executable ? $0.check.map(Self.trimmedCheck) : nil }
+        return current.contains { $0.utf8.elementsEqual(trimmed.utf8) }
+            && approvedChecks.contains { $0.utf8.elementsEqual(trimmed.utf8) }
     }
 
     var isLocked: Bool { state == .locked }
@@ -390,6 +445,9 @@ extension GoalContract {
         // Flat and locked: a subagent cannot call `reach_checkpoint` (main-principal only), so a
         // ladder here would loop it to its iteration cap.
         unit.milestones = []
+        // The unit's criteria are the parent's, so the parent's human approval still covers them.
+        unit.approvedChecks = approvedChecks
+        unit.approvedWorkspace = approvedWorkspace
         unit.lock()
         return unit
     }

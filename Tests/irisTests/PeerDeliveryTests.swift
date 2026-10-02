@@ -407,7 +407,7 @@ struct PeerDeliveryTests {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         #expect(queued, "a peer message delivered into an idle, non-pinned conversation must ask before creating a job")
-        if queued { app.resolveApproval(.approve) }
+        if queued { app.resolveApproval(id: app.pendingApprovals[0].id, .approve) }
         #expect(await eventually { (try? app.store.ledger.jobs().count) == 1 })
     }
 
@@ -452,7 +452,7 @@ struct PeerDeliveryTests {
         }
         #expect(queued, "a background subagent's post-back must ask before creating a job, same as a peer message")
         if queued {
-            app.resolveApproval(.approve)
+            app.resolveApproval(id: app.pendingApprovals[0].id, .approve)
         } else {
             app.denyPendingApprovals(for: parent)
         }
@@ -492,7 +492,7 @@ struct PeerDeliveryTests {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         #expect(queued, "a peer message drained into its own turn on a non-pinned conversation must ask before creating a job")
-        if queued { app.resolveApproval(.approve) }
+        if queued { app.resolveApproval(id: app.pendingApprovals[0].id, .approve) }
         #expect(await eventually { (try? app.store.ledger.jobs().count) == 1 })
     }
 
@@ -535,7 +535,7 @@ struct PeerDeliveryTests {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         #expect(queued, "once a peer's words are injected as a mid-turn steer, job creation for the rest of that turn must ask a human")
-        if queued { app.resolveApproval(.approve) }
+        if queued { app.resolveApproval(id: app.pendingApprovals[0].id, .approve) }
         #expect(await eventually { (try? app.store.ledger.jobs().count) == 1 })
     }
 }

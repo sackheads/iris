@@ -913,7 +913,7 @@ actor IrisEngine {
         let autoAdvance = checkpointAutoAdvanceOverride ?? ConfigManager.shared.checkpointAutoAdvance
         let localState = state
         let projected = contract.projectedContract(throughMilestone: contract.currentMilestone)
-        let gradeWorkspace = workspacePath ?? FileManager.default.currentDirectoryPath
+        let gradeWorkspace = GoalEvaluator.gradingDirectory(workspacePath)
         await MainActor.run {
             localState?.recordCompletionSelfReport(for: conversationId, statusJSON: statusReport)
             localState?.beginGoalEvaluation(for: conversationId, contract: projected)
@@ -1434,7 +1434,7 @@ actor IrisEngine {
         if !isUnattended && principal == .main {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris' conversation (your main conversation) — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). Calling this tool from Iris itself, or from a conversation that has received a message from another session or a background subagent's report, asks the user to approve the job first, since a standing job created that way is not created silently. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. When Vibecop is on, a gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris' conversation (your main conversation) — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). Calling this tool from Iris itself, or from a conversation that has received a message from another session or a background subagent's report, asks the user to approve the job first, since a standing job created that way is not created silently. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is always reviewed before the job is created — by Vibecop when it is on, or the ordinary approval dialog when it is not — shown the script, the directories it may read and its timeout together, so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -2315,14 +2315,16 @@ actor IrisEngine {
     /// neither reviewer sees.
     ///
     /// Static, and taking the state it needs, so the decision itself (`GateScriptReview.review`)
-    /// stays testable without an engine.
-    private static func gateScriptReview(state: AppState?, conversationId: UUID?) -> GateScriptReview {
+    /// stays testable without an engine. `vibecopEnabled` is nil in production (the setting
+    /// decides); a test passes it so it never touches `ConfigManager.shared` (invariant 7).
+    static func gateScriptReview(state: AppState?, conversationId: UUID?,
+                                 vibecopEnabled: Bool? = nil) -> GateScriptReview {
         GateScriptReview(
             verdict: { details in
                 guard let state else { return nil }
                 return await state.vibecopVerdict(
                     for: BlockedCall(toolName: "run_command", args: ["command": .string(details)]),
-                    inSandbox: true, vibecopEnabled: nil)
+                    inSandbox: true, vibecopEnabled: vibecopEnabled)
             },
             ask: { details in
                 // The ordinary dialog, not `requestApproval`: that would consult Vibecop a second
@@ -2487,10 +2489,12 @@ actor IrisEngine {
         }
         // Review #340 blocker: this dialog is the ONLY thing an owner sees before approving a job,
         // and `gate_script`/`gate_mounts` carry exactly the kind of capability (arbitrary code, a
-        // mount on a sensitive directory) a human needs to see before clicking approve — with
-        // Vibecop off, `GateScriptReview`'s own check falls back to approving unreviewed, so this
-        // dialog was the last place that gap could have been caught. Every gate_* field the model
-        // can set is rendered here, same as the base job fields above.
+        // mount on a sensitive directory) a human needs to see before clicking approve. `#336`
+        // separately closed the case where `GateScriptReview`'s own review had nothing to show —
+        // Vibecop off now falls to that same approval dialog instead of auto-approving — but this
+        // dialog still needs every gate_* field rendered, both for that escalation and for the
+        // ordinary pinned/tainted-conversation ask this function already serves.
+        // Every gate_* field the model can set is rendered here, same as the base job fields above.
         if let gateURL = ScheduleJobArguments.text(args["gate_url"]) { lines.append("gate_url: \(gateURL)") }
         if let gatePath = ScheduleJobArguments.text(args["gate_path"]) { lines.append("gate_path: \(gatePath)") }
         if let gateScript = ScheduleJobArguments.text(args["gate_script"]) {
@@ -3332,7 +3336,7 @@ actor IrisEngine {
             // in the same place. When no workspace is bound, run_command inherits the process cwd
             // (it never sets currentDirectoryURL), so fall back to that same path — otherwise the
             // grader is dropped context-free and roams the filesystem looking for the artifacts.
-            let gradeWorkspace = workspacePath ?? FileManager.default.currentDirectoryPath
+            let gradeWorkspace = GoalEvaluator.gradingDirectory(workspacePath)
             // Snapshot the pending evaluation and the self-report BEFORE grading; the gate decides
             // whether the goal is cleared at all.
             await MainActor.run {

@@ -251,7 +251,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
 }
 
 struct ToolApprovalRequest: Identifiable {
-    let id = UUID()
+    let id: UUID
     let toolName: String
     let details: String
     let workspace: String?
@@ -267,8 +267,9 @@ struct ToolApprovalRequest: Identifiable {
     let humanOnly: Bool
     let continuation: CheckedContinuation<Bool, Never>
 
-    init(toolName: String, details: String, workspace: String?, conversationId: UUID?, origin: String,
+    init(id: UUID, toolName: String, details: String, workspace: String?, conversationId: UUID?, origin: String,
          humanOnly: Bool = false, continuation: CheckedContinuation<Bool, Never>) {
+        self.id = id
         self.toolName = toolName
         self.details = details
         self.workspace = workspace
@@ -2150,6 +2151,18 @@ class AppState {
         markChanged(conversationId, .metadata)
     }
 
+    /// The panel's Approve: the human's click (#334). Binds the goal's workspace first, so the
+    /// kickoff turn already runs there (#68), then records the checks on screen as approved for
+    /// that directory — the one the grader will run them in — and locks.
+    func approveGoalContract(for conversationId: UUID, _ draft: GoalContract, paths: IrisPaths = .default) {
+        guard conversations.contains(where: { $0.id == conversationId }) else { return }
+        bindGoalWorkspace(for: conversationId, contract: draft, paths: paths)
+        // The directory the grader will run in, by the grader's own rule.
+        let workspace = GoalEvaluator.gradingDirectory(
+            conversations.first(where: { $0.id == conversationId })?.workspacePath)
+        setGoalContract(for: conversationId, draft.humanApproved(workspace: workspace))
+    }
+
     /// The only sanctioned edit path for a LOCKED contract. Returns false if rejected
     /// (blank rationale) or no contract. `action` is "add" | "remove" | "update".
     @discardableResult
@@ -2360,15 +2373,17 @@ class AppState {
     
     /// `args` is what the model sent for this call, carried only so a background denial can record
     /// the whole call rather than its name (spec §6); nothing on the approval path reads it.
-    /// `humanOnly` (5b §0.5 fix, #187): skips the deterministic allowlist and Vibecop entirely and
-    /// goes straight to the user prompt. Vibecop's disabled state returns an outright `APPROVE`
-    /// (`VibecopService.evaluateAction`), and the allowlist is a standing "yes" from some earlier
-    /// call — either would let a tool meant to always ask a human slip through without ever
-    /// opening the dialog. Checked after the background fail-closed block (unattended stays
-    /// fail-closed, not promoted to a prompt nobody is there to answer) and after `autoApproveTools`
-    /// (set only by `ScenarioRunner` for a headless or scenario run, never by a person — there is no
-    /// human in that run to ask, so a human-only gate cannot be a stronger claim than the switch
-    /// already means).
+    /// `humanOnly` (5b §0.5 fix, #187): skips the deterministic allowlist and goes straight to the
+    /// user prompt, checked before it. The allowlist is a standing "yes" from some earlier,
+    /// different call — exactly the kind of stand-in-for-a-human answer a tool meant to always ask
+    /// should never get to use. (`#336` separately fixed Vibecop's disabled state to mean "no
+    /// verdict" rather than an outright `APPROVE`, so an ordinary, non-`humanOnly` call with
+    /// Vibecop off now reaches the same user prompt too — `humanOnly`'s remaining job is the
+    /// allowlist, which Vibecop's state never touched either way.) Checked after the background
+    /// fail-closed block (unattended stays fail-closed, not promoted to a prompt nobody is there to
+    /// answer) and after `autoApproveTools` (set only by `ScenarioRunner` for a headless or scenario
+    /// run, never by a person — there is no human in that run to ask, so a human-only gate cannot be
+    /// a stronger claim than the switch already means).
     func requestApproval(toolName: String, details: String, args: [String: JSONValue] = [:],
                          workspace: String? = nil,
                          conversationId: UUID? = nil, origin: String = "Main agent",
@@ -2433,9 +2448,10 @@ class AppState {
             }
             return true
         }
-        // `humanOnly`: straight to the prompt, bypassing both the allowlist below (a standing
-        // "yes" from some earlier, different call) and Vibecop (whose disabled state is an
-        // outright APPROVE verdict, not an absence of one).
+        // `humanOnly`: straight to the prompt, bypassing the allowlist below (a standing "yes"
+        // from some earlier, different call). Vibecop needs no bypass of its own any more — `#336`
+        // made its disabled state "no verdict" rather than an outright APPROVE, so it already falls
+        // through to this same prompt for an ordinary call too.
         if humanOnly {
             return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
                                              conversationId: conversationId, origin: origin, humanOnly: true)
@@ -2444,6 +2460,19 @@ class AppState {
         if permissions.isAllowed(toolName: toolName, details: details, workspace: workspace) {
             return true
         }
+        // Deterministic too, and only for the grader, never the agent or subagents: exactly a check
+        // the human approved when locking this contract, run where they approved it (#334), and a
+        // read inside that workspace (#336). Never a write, and never any other command.
+        if callerRole == .evaluator, let id = conversationId,
+           let contract = conversations.first(where: { $0.id == id })?.goalContract {
+            if toolName == "run_command", contract.isHumanApprovedCheck(details, workingDirectory: workspace) {
+                return true
+            }
+            if toolName == "read_file",
+               contract.isHumanApprovedRead(ToolExecutor.resolvePath(details, cwd: workspace)) {
+                return true
+            }
+        }
 
         if let decision = await consultVibecop(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
                                                callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled) {
@@ -2451,16 +2480,19 @@ class AppState {
             if decision.decision == "DENY" { return false }
             // ESCALATE → fall through to the user prompt.
         }
+        // nil — Vibecop off, failed or timed out — decides nothing: the user prompt does (#334).
 
         return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
                                          conversationId: conversationId, origin: origin)
     }
 
-    /// Vibecop, bounded by a timeout so a wedged local model can't hang the turn. nil means the
-    /// evaluation failed or timed out (fail open to the user prompt).
+    /// Vibecop, bounded by a timeout so a wedged local model can't hang the turn. nil means
+    /// Vibecop is off, or the evaluation failed or timed out: no verdict, so the user prompt decides.
     /// Uses adaptive timeout: if the Ollama model is cold (unloaded), give it 30s to load.
     private func consultVibecop(toolName: String, details: String, workspace: String?, inSandbox: Bool,
                                 callerRole: VibecopCallerRole, allowedCommands: [String], vibecopEnabled: Bool?) async -> VibecopDecision? {
+        // Off is checked before the Ollama warm-up probe below, which would otherwise build an engine for nothing.
+        guard vibecopEnabled ?? ConfigManager.shared.enableVibecop else { return nil }
         do {
             let configuredTimeout = Double(ConfigManager.shared.vibecopTimeoutSeconds)
             let engineType = AuxiliaryEngineType(rawValue: ConfigManager.shared.vibecopEngine) ?? .llamaCPP
@@ -2553,11 +2585,26 @@ class AppState {
         // in the Vibecop/timeout window), do NOT enqueue a request nobody will resolve — the
         // teardown's denyPendingApprovals already ran and would miss a late append.
         if Task.isCancelled { return false }
-        return await withCheckedContinuation { continuation in
-            pendingApprovals.append(ToolApprovalRequest(
-                toolName: toolName, details: details, workspace: workspace,
-                conversationId: conversationId, origin: origin, humanOnly: humanOnly, continuation: continuation))
+        // A bare `withCheckedContinuation` ignores cancellation, so Stop (which cancels the turn's
+        // task, a grader's included) left the turn blocked on the dialog. The handler denies this
+        // one request. It hops to the main actor, which this function holds until the append
+        // below has run, so the request is always on the queue by the time it looks.
+        let requestId = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                pendingApprovals.append(ToolApprovalRequest(
+                    id: requestId, toolName: toolName, details: details, workspace: workspace,
+                    conversationId: conversationId, origin: origin, humanOnly: humanOnly, continuation: continuation))
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.denyApproval(id: requestId) }
         }
+    }
+
+    /// Resolves-false and removes one queued request, if it is still queued.
+    private func denyApproval(id: UUID) {
+        guard let index = pendingApprovals.firstIndex(where: { $0.id == id }) else { return }
+        pendingApprovals.remove(at: index).continuation.resume(returning: false)
     }
 
     /// Resolves-false and removes every queued request for a conversation. Used to unstick a
@@ -2658,9 +2705,12 @@ class AppState {
         backgroundRunAncestor[id] ?? id
     }
 
-    func resolveApproval(_ resolution: ApprovalResolution) {
-        guard !pendingApprovals.isEmpty else { return }
-        let pending = pendingApprovals.removeFirst()
+    /// Resolves the request the click was shown, by id: Stop removes requests from anywhere in the
+    /// queue (#334), so the head is not necessarily what the banner showed. A click on a request
+    /// that is gone resolves nothing.
+    func resolveApproval(id: UUID, _ resolution: ApprovalResolution) {
+        guard let index = pendingApprovals.firstIndex(where: { $0.id == id }) else { return }
+        let pending = pendingApprovals.remove(at: index)
         var approved = false
         switch resolution {
         case .approve:

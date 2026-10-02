@@ -751,7 +751,7 @@ struct JobToolsTests {
         for _ in 0..<400 {
             if !app.pendingApprovals.isEmpty {
                 queued = true
-                app.resolveApproval(resolution)
+                app.resolveApproval(id: app.pendingApprovals[0].id, resolution)
                 break
             }
             try? await Task.sleep(nanoseconds: 5_000_000)
@@ -881,9 +881,10 @@ struct JobToolsTests {
     }
 
     /// Named for the mechanism (`humanOnly` skips both the allowlist and Vibecop, whatever Vibecop's
-    /// own setting is today), not for today's Vibecop default — see `requestApproval`'s `humanOnly`
+    /// own setting is), not for a particular Vibecop default — see `requestApproval`'s `humanOnly`
     /// parameter. Final-review fix wave (#187): a test name describing a default rather than the
-    /// mechanism misleads once that default changes (#334).
+    /// mechanism would have misled once #334/#336 changed Vibecop's disabled-state default from an
+    /// outright `APPROVE` to no verdict.
     @Test("schedule_job in the pinned conversation reaches the real approval queue because humanOnly skips the allowlist and Vibecop; approving creates the job")
     func scheduleJobPinnedRealQueueApproved() async throws {
         let (app, id) = pinnedApp()
@@ -917,9 +918,8 @@ struct JobToolsTests {
     /// now built from the SAME `pinnedJobApprovalDetails` call with the SAME args the dispatcher
     /// uses, so it is a real match — and `isAllowed` is checked strictly before Vibecop in
     /// `requestApproval`'s own source order, so a correctly-matching rule makes this test's
-    /// redness-without-`humanOnly` attributable to the allowlist specifically, not to whatever
-    /// Vibecop's default happens to be today (#334 is changing that default; this test does not
-    /// depend on it either way).
+    /// redness-without-`humanOnly` attributable to the allowlist specifically, not to Vibecop's
+    /// default (#334/#336 changed that default; this test does not depend on it either way).
     @Test("a matching allowlist rule does not bypass the pinned conversation's human-only gate")
     func allowlistRuleDoesNotBypassPinnedGate() async throws {
         let (app, id) = pinnedApp()
@@ -1104,7 +1104,7 @@ struct JobToolsTests {
         for _ in 0..<400 {
             if !app.pendingApprovals.isEmpty {
                 queued = true
-                app.resolveApproval(.approve)
+                app.resolveApproval(id: app.pendingApprovals[0].id, .approve)
                 break
             }
             try? await Task.sleep(nanoseconds: 5_000_000)
@@ -1166,7 +1166,7 @@ struct JobToolsTests {
         for _ in 0..<800 {
             if !app.pendingApprovals.isEmpty {
                 queued = true
-                app.resolveApproval(.approve)
+                app.resolveApproval(id: app.pendingApprovals[0].id, .approve)
                 break
             }
             try? await Task.sleep(nanoseconds: 5_000_000)
