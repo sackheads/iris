@@ -368,7 +368,7 @@ struct RunJobCLITests {
                                 out: { _ in }, err: { _ in })
 
         let reloaded = try store.loadAll().conversations
-        // Exactly two, both the run's: its hidden transcript and the Activity conversation the
+        // Exactly two, both the run's: its hidden transcript and the pinned conversation (Iris) the
         // card was delivered to. No "New Conversation", no launch notice.
         #expect(reloaded.count == 2, "found: \(reloaded.map(\.title))")
         #expect(reloaded.contains { $0.isBackground })
@@ -497,8 +497,8 @@ struct RunJobCLITests {
         #expect(out.text.contains("tokens:"))
         #expect(out.text.contains("duration:"))
 
-        // §8: the card is delivered like any run, so the Activity conversation shows it the next
-        // time the app opens — which means it has to be ON DISK when the CLI exits, not only in
+        // §8: the card is delivered like any run, so Iris, the pinned conversation, shows it the
+        // next time the app opens — which means it has to be ON DISK when the CLI exits, not only in
         // the app state the CLI threw away.
         let reloaded = try store.loadAll().conversations
         let cards = reloaded.flatMap { $0.messages.compactMap { EventCard.decode($0.content) } }

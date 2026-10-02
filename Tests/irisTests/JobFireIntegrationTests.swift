@@ -77,7 +77,7 @@ struct JobFireIntegrationTests {
         #expect(state.conversations.first { $0.id == selectedId }?.messages.isEmpty == true)
         #expect(state.selectedConversationId == selectedId, "and the selection did not move")
 
-        // The one thing the user does see: a card in the Activity conversation.
+        // The one thing the user does see: a card in Iris, the pinned conversation.
         let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
         let card = try #require(activity.messages.compactMap { EventCard.decode($0.content) }.first)
         #expect(card.runId == run.id)
