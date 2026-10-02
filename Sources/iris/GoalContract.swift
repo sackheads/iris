@@ -224,17 +224,6 @@ struct GoalContract: Codable, Equatable, Sendable {
     private static let checkPadding = CharacterSet(charactersIn: " \t\r\n")
     private static func trimmedCheck(_ s: String) -> String { s.trimmingCharacters(in: checkPadding) }
 
-    /// A check the human could not have seen whole: a newline, carriage return or any other
-    /// control character, a format character (bidi overrides, zero-width), or a line/paragraph
-    /// separator can push or disguise a tail like `; curl x | sh` out of view.
-    private static func hidesText(_ s: String) -> Bool {
-        s.unicodeScalars.contains { scalar in
-            switch scalar.properties.generalCategory {
-            case .control, .format, .lineSeparator, .paragraphSeparator: return true
-            default: return false
-            }
-        }
-    }
 
     /// This contract as the human approved it, in `workspace`: its current executable checks become
     /// the approved set, bound to that directory.
@@ -256,7 +245,7 @@ struct GoalContract: Codable, Equatable, Sendable {
         guard isLocked, let approvedWorkspace, let workingDirectory,
               IrisPaths.canonicalPath(workingDirectory) == approvedWorkspace else { return false }
         let trimmed = Self.trimmedCheck(command)
-        guard !trimmed.isEmpty, !Self.hidesText(trimmed) else { return false }
+        guard !trimmed.isEmpty, !trimmed.containsHiddenCharacters else { return false }
         let wanted = Array(trimmed.utf8)
         let current = criteria.compactMap { $0.kind == .executable ? $0.check.map(Self.trimmedCheck) : nil }
         return current.contains { Array($0.utf8) == wanted }

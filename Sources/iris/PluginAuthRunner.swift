@@ -9,21 +9,41 @@ struct PluginAuthStatus: Sendable, Equatable {
 /// Orchestrates `kind: external` auth declared in a plugin manifest. Iris never stores these
 /// credentials — the tool owns them.
 ///
-/// Both `check_command` and `setup_command` come from an untrusted `plugin.md`, so both pass
-/// through `AppState.requestApproval` (PermissionManager fast path → Vibecop → user prompt)
-/// before anything executes. `ToolExecutor` itself applies no gate — the gate lives on the
-/// agent tool-call path — so the runner invokes it explicitly. `${config:KEY}` values are
+/// Both `check_command` and `setup_command` come from an untrusted `plugin.md`, so neither runs
+/// without consent, and every caller must say whose (`approve` has no default). The settings pane
+/// is not the chat window, where the approval queue renders, so it never asks through that
+/// queue: a prompt raised there parked the pane until the user found the banner (#336). Instead
+/// the pane shows each command in full and runs it when the user clicks the button beside it —
+/// the click is the consent (`userClicked`) — and on open it refreshes the status only for a
+/// `check_command` an "Always allow" rule already permits (`statusOnOpen`). `ToolExecutor` itself
+/// applies no gate — the gate lives on the agent tool-call path — so the runner applies it. `${config:KEY}` values are
 /// single-quoted for the shell before substitution, so a saved config value containing `;`
 /// or backticks cannot inject into the command. `${keychain:KEY}` references are never
 /// resolved here: `secrets: [:]` makes them throw instead of interpolating a credential.
 enum PluginAuthRunner {
-    /// Approval hook. Defaults to the same gate as an agent-issued `run_command`; tests inject
-    /// a stub so they neither prompt nor start Vibecop.
+    /// Approval hook: true lets the expanded command run.
     typealias Approver = @Sendable (String) async -> Bool
 
-    static let defaultApprover: Approver = { command in
-        await AppState.shared.requestApproval(
-            toolName: "run_command", details: command, origin: "Plugin auth")
+    /// The user clicked the button beside the command, which the pane shows in full. Never used
+    /// for a command with hidden characters: the pane disables the button for those.
+    static let userClicked: Approver = { _ in true }
+
+    /// The commands exactly as they would run, for the pane to show beside its buttons. nil when
+    /// none is declared or a reference does not resolve (then nothing runs either).
+    static func displayCommands(_ auth: IPFManifest.AuthDeclaration,
+                                config: [String: String]) -> (check: String?, setup: String?) {
+        (auth.checkCommand.flatMap { expandForShell($0, config: config) },
+         auth.setupCommand.flatMap { expandForShell($0, config: config) })
+    }
+
+    /// The status row on open, with nobody asked: the check runs only when an "Always allow" rule
+    /// already permits that exact command. nil means "not checked" — the pane offers its button.
+    static func statusOnOpen(_ auth: IPFManifest.AuthDeclaration, config: [String: String],
+                             permissions: PermissionManager) async -> PluginAuthStatus? {
+        guard let command = displayCommands(auth, config: config).check,
+              !command.containsHiddenCharacters,
+              permissions.isAllowed(toolName: "run_command", details: command, workspace: nil) else { return nil }
+        return await check(auth, config: config, approve: { _ in true })
     }
 
     /// Single-quotes a value for `/bin/sh` so it is always one literal word.
@@ -38,7 +58,7 @@ enum PluginAuthRunner {
     }
 
     static func check(_ auth: IPFManifest.AuthDeclaration, config: [String: String],
-                      approve: Approver = defaultApprover) async -> PluginAuthStatus {
+                      approve: Approver) async -> PluginAuthStatus {
         guard let raw = auth.checkCommand, let command = expandForShell(raw, config: config) else {
             return PluginAuthStatus(signedIn: false, output: "No check_command declared or reference unresolvable")
         }
@@ -97,7 +117,7 @@ enum PluginAuthRunner {
     }
 
     static func runSetup(_ auth: IPFManifest.AuthDeclaration, config: [String: String],
-                         approve: Approver = defaultApprover) async -> String {
+                         approve: Approver) async -> String {
         guard let raw = auth.setupCommand, let command = expandForShell(raw, config: config) else {
             return "No setup_command declared or reference unresolvable"
         }

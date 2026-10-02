@@ -282,14 +282,17 @@ reference in quotes yourself: write `--profile ${config:PROFILE}`, not
 allowed in auth commands; a command that contains one is reported as
 unresolvable and never runs.
 
-Both commands pass the same permission gate as any other command Iris
-runs (persisted "always allow" rules, then Vibecop, then a user prompt)
-before they execute. `setup_command` then runs through `run_command`;
-`check_command` runs via `/bin/sh -c`. Both commands are displayed to the
-user at install time, in the wizard's Configuration step. `check_command`
-also runs whenever the plugin's settings pane is shown, to refresh the
-status row, so the first open may prompt for approval until the user
-chooses "Always allow".
+Neither command runs without the user's consent. Both are displayed to the
+user at install time, in the wizard's Configuration step, and again, in
+full, in the plugin's settings pane beside the **Check** and **Sign in**
+buttons; clicking a button is the consent to the command shown beside it
+(Sign in consents to `setup_command` and the `check_command` that follows
+it). When the pane opens, `check_command` runs only if a persisted "Always
+allow" rule already permits that exact command; otherwise the row reads
+"Not checked" until the user clicks **Check**. A command containing a line
+break or another invisible character is shown with a warning and cannot be
+run from the pane. `setup_command` runs through `run_command`;
+`check_command` runs via `/bin/sh -c`.
 
 This model covers three real cases: a plain API-key server (`secrets`
 only, no `auth`), a tool with only external browser-based sign-in (`auth`
