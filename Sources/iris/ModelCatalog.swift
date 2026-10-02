@@ -27,21 +27,35 @@ struct ModelProbeResult: Identifiable, Equatable, Sendable {
 /// `URLSession` that routes through `MockURLProtocol`.
 struct ModelCatalog: Sendable {
     let provider: LLMProvider
-    /// Empty for Gemini in ADC mode.
+    /// Empty for Gemini in ADC mode and for Anthropic on Vertex.
     let apiKey: String
     /// "" means the provider's default endpoint.
     let baseURL: String
     /// Gemini only; ignored for Anthropic/OpenAI.
     let geminiADC: Bool
+    /// Anthropic only: set when the provider authenticates through Vertex AI (#181).
+    let anthropicVertex: AnthropicVertexTarget?
     let session: URLSession
 
-    init(provider: LLMProvider, apiKey: String, baseURL: String, geminiADC: Bool = false, session: URLSession = .shared) {
+    init(provider: LLMProvider, apiKey: String, baseURL: String, geminiADC: Bool = false,
+         anthropicVertex: AnthropicVertexTarget? = nil, session: URLSession = .shared) {
         self.provider = provider
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.geminiADC = geminiADC
+        self.anthropicVertex = anthropicVertex
         self.session = session
     }
+
+    /// The Claude ids Iris knows Vertex can serve, probed one by one because Vertex has no list
+    /// endpoint for a publisher's models. A project sees a subset; a model released after this
+    /// list is still usable by typing its id into a tier field. Spelled as Vertex wants them.
+    static let knownVertexClaudeModels: [String] = [
+        "claude-fable-5-1", "claude-fable-5",
+        "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5@20251101",
+        "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+    ]
 
     // MARK: - #207 listing
 
@@ -201,7 +215,11 @@ struct ModelCatalog: Sendable {
         case .gemini:
             models = try await listGeminiModels(adcToken: adcToken, quotaProject: quotaProject)
         case .anthropic:
-            models = try await listAnthropicModels()
+            if let anthropicVertex {
+                models = try await listVertexClaudeModels(target: anthropicVertex, adcToken: adcToken)
+            } else {
+                models = try await listAnthropicModels()
+            }
         case .openai:
             models = try await listOpenAIModelsImpl()
         }
@@ -287,6 +305,27 @@ struct ModelCatalog: Sendable {
         }
     }
 
+    /// One GET per known id against the location's host; a 200 means the project can see it.
+    /// Non-200s (404 for a model the project has not enabled, 403 for a permissions gap) drop
+    /// the id silently: the picker shows what works, and the tier field still takes any id.
+    private func listVertexClaudeModels(target: AnthropicVertexTarget, adcToken: String?) async throws -> [ModelInfo] {
+        guard let adcToken, !adcToken.isEmpty else {
+            throw APIError(message: "Missing ADC access token for Vertex AI. Run `gcloud auth application-default login`.")
+        }
+        var found: [ModelInfo] = []
+        for id in Self.knownVertexClaudeModels {
+            guard let url = URL(string: "https://\(target.host)/v1/publishers/anthropic/models/\(id)") else { continue }
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.addValue("Bearer \(adcToken)", forHTTPHeaderField: "Authorization")
+            request.addValue(target.project, forHTTPHeaderField: "x-goog-user-project")
+            if (try? await performRequest(request, provider: "Anthropic (Vertex AI)")) != nil {
+                found.append(ModelInfo(id: id, displayName: nil))
+            }
+        }
+        return found
+    }
+
     private func listOpenAIModelsImpl() async throws -> [ModelInfo] {
         let url = try Self.listURL(provider: .openai, baseURL: baseURL)
         var request = URLRequest(url: url)
@@ -344,7 +383,16 @@ struct ModelCatalog: Sendable {
         )
         switch provider {
         case .anthropic:
-            let urlRequest = try AnthropicClient.makeURLRequest(request: request, model: model, apiKey: apiKey, baseURL: baseURL, stream: false)
+            let transport: AnthropicTransport
+            if let anthropicVertex {
+                guard let adcToken, !adcToken.isEmpty else {
+                    throw APIError(message: "Missing ADC access token for Vertex AI. Run `gcloud auth application-default login`.")
+                }
+                transport = .vertex(project: anthropicVertex.project, location: anthropicVertex.location, accessToken: adcToken)
+            } else {
+                transport = .direct(apiKey: apiKey, baseURL: baseURL)
+            }
+            let urlRequest = try AnthropicClient.makeURLRequest(request: request, model: model, transport: transport, stream: false)
             _ = try await performRequest(urlRequest, provider: "Anthropic")
         case .openai:
             let urlRequest = try OpenAIClient.makeURLRequest(request: request, model: model, apiKey: apiKey, baseURL: baseURL, stream: false)

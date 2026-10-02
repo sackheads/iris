@@ -270,10 +270,35 @@ struct SettingsView: View {
                         TextField("Hard Subagent Model", text: $config.geminiModelHard)
                             .help("Used for complex reasoning and evaluation.")
                     } else if config.primaryProvider == LLMProvider.anthropic.rawValue {
-                        SecureField("Anthropic API Key", text: $config.anthropicAPIKey)
-                            .help("Required for Anthropic Claude models to function.")
-                        TextField("Anthropic Base URL (Optional)", text: $config.anthropicBaseURL)
-                            .help("Leave blank for default endpoint")
+                        Picker("Authentication Method", selection: $config.anthropicAuthMode) {
+                            ForEach(AnthropicAuthMode.allCases) { mode in
+                                Text(mode.rawValue).tag(mode.rawValue)
+                            }
+                        }
+
+                        if config.anthropicAuthMode == AnthropicAuthMode.vertex.rawValue {
+                            TextField("Vertex AI Project (required)", text: $config.anthropicVertexProject)
+                                .help("The Google Cloud project whose Vertex AI serves Claude. Prefilled from your ADC quota project when empty; the two are often different projects.")
+                            TextField("Vertex AI Location", text: $config.anthropicVertexLocation)
+                                .help("global (recommended; the only location that serves current-generation models), us or eu for a multi-region, or a region such as us-east5 for Sonnet 4.6 and earlier.")
+                            Text("Claude is called through Vertex AI with Application Default Credentials (ADC). Authenticate locally via:\n`gcloud auth application-default login --scopes=\"https://www.googleapis.com/auth/cloud-platform\"`\nThe model fields take Anthropic's ids; a dated id such as claude-haiku-4-5-20251001 is sent to Vertex as claude-haiku-4-5@20251001. A model the catalog does not list can still be typed in.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .task(id: config.anthropicAuthMode) {
+                                    // Prefill, never substitute (#181): an empty field takes the ADC quota
+                                    // project as a starting point; a typed project is left alone.
+                                    guard config.anthropicVertexProject.trimmingCharacters(in: .whitespaces).isEmpty,
+                                          let quota = await ADCCredentialManager.shared.getQuotaProject() else { return }
+                                    if config.anthropicVertexProject.trimmingCharacters(in: .whitespaces).isEmpty {
+                                        config.anthropicVertexProject = quota
+                                    }
+                                }
+                        } else {
+                            SecureField("Anthropic API Key", text: $config.anthropicAPIKey)
+                                .help("Required for Anthropic Claude models to function.")
+                            TextField("Anthropic Base URL (Optional)", text: $config.anthropicBaseURL)
+                                .help("Leave blank for default endpoint")
+                        }
                         TextField("Easy Subagent Model", text: $config.anthropicModelEasy)
                             .help("Used for simple and repetitive tasks.")
                         TextField("Primary / Medium Model", text: $config.anthropicModelMedium)
@@ -1231,15 +1256,16 @@ struct SettingsView: View {
 
     /// The primary provider's current credentials, read once per run so a run reflects the
     /// settings at the moment the button was pressed rather than racing an in-flight edit.
-    private func currentProviderCredentials() -> (provider: LLMProvider, apiKey: String, baseURL: String, geminiADC: Bool) {
+    private func currentProviderCredentials() -> (provider: LLMProvider, apiKey: String, baseURL: String, geminiADC: Bool,
+                                                  anthropicVertex: AnthropicVertexTarget?) {
         let provider = LLMProvider(rawValue: config.primaryProvider) ?? .gemini
         switch provider {
         case .anthropic:
-            return (provider, config.anthropicAPIKey, config.anthropicBaseURL, false)
+            return (provider, config.anthropicAPIKey, config.anthropicBaseURL, false, AnthropicVertexTarget.current(from: config))
         case .openai:
-            return (provider, config.openAIAPIKey, config.openAIBaseURL, false)
+            return (provider, config.openAIAPIKey, config.openAIBaseURL, false, nil)
         case .gemini:
-            return (provider, config.geminiAPIKey, config.geminiBaseURL, config.geminiAuthMode == GeminiAuthMode.adc.rawValue)
+            return (provider, config.geminiAPIKey, config.geminiBaseURL, config.geminiAuthMode == GeminiAuthMode.adc.rawValue, nil)
         }
     }
 
@@ -1310,7 +1336,7 @@ struct SettingsView: View {
     private func runModelTests() {
         guard !isTestingModels else { return }
         modelTestTask?.cancel()
-        let (provider, apiKey, baseURL, geminiADC) = currentProviderCredentials()
+        let (provider, apiKey, baseURL, geminiADC, anthropicVertex) = currentProviderCredentials()
         let visionModel = config.auxiliaryVisionEngine == "cloud" ? config.auxiliaryVisionModel : nil
         let targets = ModelCatalog.probeTargets(
             easy: config.getModel(for: .easy),
@@ -1331,11 +1357,15 @@ struct SettingsView: View {
             if geminiADC {
                 quotaProject = await ADCCredentialManager.shared.getQuotaProject()
                 adcToken = try? await ADCCredentialManager.shared.getAccessToken()
+            } else if anthropicVertex != nil {
+                // The Vertex project is the quota project; only the token is needed here (#181).
+                quotaProject = nil
+                adcToken = try? await ADCCredentialManager.shared.getAccessToken()
             } else {
                 adcToken = nil
                 quotaProject = nil
             }
-            let catalog = ModelCatalog(provider: provider, apiKey: apiKey, baseURL: baseURL, geminiADC: geminiADC)
+            let catalog = ModelCatalog(provider: provider, apiKey: apiKey, baseURL: baseURL, geminiADC: geminiADC, anthropicVertex: anthropicVertex)
             await withTaskGroup(of: ModelProbeResult.self) { group in
                 for target in targets {
                     group.addTask {
@@ -1355,7 +1385,7 @@ struct SettingsView: View {
     private func fetchModelList() {
         guard !isListingModels else { return }
         modelListTask?.cancel()
-        let (provider, apiKey, baseURL, geminiADC) = currentProviderCredentials()
+        let (provider, apiKey, baseURL, geminiADC, anthropicVertex) = currentProviderCredentials()
 
         isListingModels = true
         modelListError = nil
@@ -1367,8 +1397,10 @@ struct SettingsView: View {
             if geminiADC {
                 quotaProject = await ADCCredentialManager.shared.getQuotaProject()
                 adcToken = try? await ADCCredentialManager.shared.getAccessToken()
+            } else if anthropicVertex != nil {
+                adcToken = try? await ADCCredentialManager.shared.getAccessToken()
             }
-            let catalog = ModelCatalog(provider: provider, apiKey: apiKey, baseURL: baseURL, geminiADC: geminiADC)
+            let catalog = ModelCatalog(provider: provider, apiKey: apiKey, baseURL: baseURL, geminiADC: geminiADC, anthropicVertex: anthropicVertex)
             do {
                 let models = try await catalog.listModels(adcToken: adcToken, quotaProject: quotaProject)
                 if !Task.isCancelled { modelListResults = models }

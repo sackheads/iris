@@ -81,6 +81,28 @@ gcloud config set project your-gcp-project-id
 
 ---
 
+## Claude on Vertex AI (Anthropic provider)
+
+The same ADC login also serves **Anthropic → Authentication Method → Vertex AI (ADC)**, which
+calls Claude models hosted in a Google Cloud project through Vertex AI (#181). Differences from
+the Gemini ADC path:
+
+* **The project is a setting, not the quota project.** Enter the project whose Vertex AI serves
+  Claude in *Vertex AI Project*. Settings prefills it from your ADC quota project when the field
+  is empty, but never substitutes it silently: the project that holds your quota and the project
+  that hosts Claude are routinely different. That project is also sent as `x-goog-user-project`.
+* **Location.** `global` (the default, and the only location that serves current-generation
+  models such as `claude-sonnet-5` and `claude-fable-5`), `us` or `eu` for a multi-region
+  endpoint, or a region such as `us-east5` for Sonnet 4.6 and earlier.
+* **Model ids.** The tier fields take Anthropic's ids. Vertex spells a dated id with `@`, so
+  `claude-haiku-4-5-20251001` is sent as `claude-haiku-4-5@20251001`; bare ids pass through.
+  *List Available Models…* probes the Claude ids Iris knows about and shows the ones your
+  project can see; a model released later can still be typed into a tier field.
+* **Enablement.** A model must be enabled for the project in Model Garden before Vertex will
+  serve it; until then the request fails with a 404 naming the publisher model.
+* **Scope.** Vertex needs `https://www.googleapis.com/auth/cloud-platform`, the same scope the
+  Gemini Vertex path uses, so one `gcloud auth application-default login` covers both.
+
 ## Troubleshooting
 
 | Error | Cause | Solution |

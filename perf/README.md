@@ -46,8 +46,8 @@ spans while rung 5 turns do not.
 
 Every rebuild changes the binary's ad-hoc signature, and the Keychain re-prompts each new binary
 on its first secret read, which silently blocks an unattended run. Real-lane runs on Gemini over
-ADC never touch the Keychain (the token comes from gcloud), so they run unattended after a
-rebuild. Any API-key configuration prompts once per rebuild; run one quick command with the new
+ADC, or on Anthropic through Vertex AI (ADC), never touch the Keychain (the token comes from
+gcloud), so they run unattended after a rebuild. Any API-key configuration prompts once per rebuild; run one quick command with the new
 binary and click "Always Allow" before starting a long suite.
 
 ## Real-lane tool execution

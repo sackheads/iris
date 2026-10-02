@@ -1,10 +1,42 @@
 import Foundation
 
 struct AnthropicClient {
-    /// The full request for one call. `stream` adds the provider's streaming switch and nothing else.
+    /// The full request for one call against `api.anthropic.com` (or a proxy at `baseURL`).
     static func makeURLRequest(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "", stream: Bool) throws -> URLRequest {
-        guard !apiKey.isEmpty else {
-            throw URLError(.userAuthenticationRequired)
+        try makeURLRequest(request: request, model: model, transport: .direct(apiKey: apiKey, baseURL: baseURL), stream: stream)
+    }
+
+    /// Vertex spells a dated model id with `@` where the API uses `-` (`claude-haiku-4-5-20251001`
+    /// is `claude-haiku-4-5@20251001`); bare ids (`claude-sonnet-5`) are the same on both. Applied
+    /// in the Vertex transport only, so a tier field can hold the API's spelling for either.
+    static func vertexModelID(_ model: String) -> String {
+        guard let dash = model.lastIndex(of: "-") else { return model }
+        let suffix = model[model.index(after: dash)...]
+        guard suffix.count == 8, suffix.allSatisfy(\.isNumber) else { return model }
+        return model[..<dash] + "@" + suffix
+    }
+
+    /// `global` has no regional host; `us`/`eu` are multi-region hosts; anything else is a region.
+    static func vertexEndpointURL(project: String, location: String, model: String, stream: Bool) throws -> URL {
+        let host = AnthropicVertexTarget(project: project, location: location).host
+        let method = stream ? "streamRawPredict" : "rawPredict"
+        let string = "https://\(host)/v1/projects/\(project)/locations/\(location)/publishers/anthropic/models/\(vertexModelID(model)):\(method)"
+        guard let url = URL(string: string) else { throw APIError(message: "Invalid Vertex AI endpoint: \(string)") }
+        return url
+    }
+
+    /// The full request for one call. `stream` adds the provider's streaming switch and nothing
+    /// else. The transport decides the URL, the auth headers, and whether the model is named in
+    /// the body (API) or the path (Vertex, which takes `anthropic_version` in the body instead).
+    static func makeURLRequest(request: GeminiRequest, model: String, transport: AnthropicTransport, stream: Bool) throws -> URLRequest {
+        switch transport {
+        case .direct(let apiKey, _):
+            guard !apiKey.isEmpty else { throw URLError(.userAuthenticationRequired) }
+        case .vertex(let project, _, let accessToken):
+            guard !project.trimmingCharacters(in: .whitespaces).isEmpty else {
+                throw APIError(message: "Anthropic on Vertex AI needs a Google Cloud project.")
+            }
+            guard !accessToken.isEmpty else { throw URLError(.userAuthenticationRequired) }
         }
         
         var anthropicMessages: [[String: Any]] = []
@@ -123,10 +155,13 @@ struct AnthropicClient {
         }
 
         var body: [String: Any] = [
-            "model": model,
             "max_tokens": 4096,
             "messages": anthropicMessages
         ]
+        switch transport {
+        case .direct: body["model"] = model
+        case .vertex: body["anthropic_version"] = AnthropicTransport.vertexAnthropicVersion
+        }
         
         if !systemPrompt.isEmpty {
             body["system"] = [["type": "text", "text": systemPrompt, "cache_control": ["type": "ephemeral"]]]
@@ -182,23 +217,32 @@ struct AnthropicClient {
         
         if stream { body["stream"] = true }
 
-        var endpointUrl = "https://api.anthropic.com/v1/messages"
-        if !baseURL.isEmpty {
-            if baseURL.hasSuffix("/messages") {
-                endpointUrl = baseURL
-            } else {
-                let trimmed = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                endpointUrl = "\(trimmed)/messages"
+        var urlRequest: URLRequest
+        switch transport {
+        case .direct(let apiKey, let baseURL):
+            var endpointUrl = "https://api.anthropic.com/v1/messages"
+            if !baseURL.isEmpty {
+                if baseURL.hasSuffix("/messages") {
+                    endpointUrl = baseURL
+                } else {
+                    let trimmed = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                    endpointUrl = "\(trimmed)/messages"
+                }
             }
+            guard let url = URL(string: endpointUrl) else {
+                throw APIError(message: "Invalid baseURL configuration: \(endpointUrl)")
+            }
+            urlRequest = URLRequest(url: url)
+            urlRequest.addValue(apiKey, forHTTPHeaderField: "x-api-key")
+            urlRequest.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        case .vertex(let project, let location, let accessToken):
+            urlRequest = URLRequest(url: try vertexEndpointURL(project: project, location: location, model: model, stream: stream))
+            urlRequest.addValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            // The quota project, as the Gemini ADC path sends it: billing and quota land on the
+            // project that serves the model, not on whatever the ADC file names.
+            urlRequest.addValue(project, forHTTPHeaderField: "x-goog-user-project")
         }
-        
-        guard let url = URL(string: endpointUrl) else {
-            throw APIError(message: "Invalid baseURL configuration: \(endpointUrl)")
-        }
-        var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
-        urlRequest.addValue(apiKey, forHTTPHeaderField: "x-api-key")
-        urlRequest.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         urlRequest.addValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
 
@@ -208,13 +252,25 @@ struct AnthropicClient {
 
     /// One streamed call: the same request with the streaming switch on, mapped to stream events.
     static func streamContent(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "") -> AsyncThrowingStream<LLMStreamEvent, Error> {
+        streamContent(request: request, model: model) { .direct(apiKey: apiKey, baseURL: baseURL) }
+    }
+
+    /// `transport` is resolved inside the stream's own task, because the Vertex transport needs
+    /// an access token and fetching it is async; a failure there surfaces as the stream's error,
+    /// recorded like any other failed call.
+    static func streamContent(request: GeminiRequest, model: String,
+                              transport: @escaping @Sendable () async throws -> AnthropicTransport) -> AsyncThrowingStream<LLMStreamEvent, Error> {
         LLMStreaming.stream(provider: "Anthropic", mapper: AnthropicStreamMapper()) {
-            try makeURLRequest(request: request, model: model, apiKey: apiKey, baseURL: baseURL, stream: true)
+            try makeURLRequest(request: request, model: model, transport: try await transport(), stream: true)
         }
     }
 
     static func generateContent(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "") async throws -> GeminiResponse {
-        let urlRequest = try makeURLRequest(request: request, model: model, apiKey: apiKey, baseURL: baseURL, stream: false)
+        try await generateContent(request: request, model: model, transport: .direct(apiKey: apiKey, baseURL: baseURL))
+    }
+
+    static func generateContent(request: GeminiRequest, model: String, transport: AnthropicTransport) async throws -> GeminiResponse {
+        let urlRequest = try makeURLRequest(request: request, model: model, transport: transport, stream: false)
         let (data, response) = try await URLSession.shared.data(for: urlRequest)
         
         guard let httpResponse = response as? HTTPURLResponse else {
