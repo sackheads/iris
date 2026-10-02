@@ -370,4 +370,119 @@ struct PeerDeliveryTests {
         let drained = await eventually { app.pendingUserMessageCount(for: target) == 0 }
         #expect(drained, "the queued send must reach the target once the turn it waited on ends")
     }
+
+    // MARK: Job creation through the real peer-delivery entry point (residual fix, #187 §0.5)
+
+    /// Coordinator's re-review found a critical residual: `deliverPeerMessage`'s IDLE path calls
+    /// `deliverSanitizedSystemEvent`, which called `processInput` with no `isPeer` at all — only the
+    /// busy/queued path (through `AppState.startTurn`, which already threaded `isPeer`) was flagged.
+    /// Idle is the far more common path, so a peer could get an idle, non-pinned conversation to
+    /// create a standing job with nobody asked, essentially every time. Fixed by adding `isPeer` to
+    /// `deliverSanitizedSystemEvent` and passing `true` from `deliverPeerMessage`'s idle branch.
+    ///
+    /// Driven through the real `deliverPeerMessage` entry point rather than
+    /// `engine.processInput(isPeer: true)` directly (what `JobToolsTests`' peer tests do) — those
+    /// tests cannot catch a regression in `deliverPeerMessage`'s own plumbing, only in
+    /// `executeFunctionCall`'s gate once `isPeer` is already set.
+    @Test("a peer message delivered to an idle, non-pinned target reaches the human prompt before creating a job")
+    func idleDeliveryAsksBeforeSchedulingJob() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        app.autoApproveTools = false
+        let sender = UUID(), target = UUID()
+        app.createNewConversation(id: sender)
+        app.createNewConversation(id: target)
+        let call = FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1")
+        let client = FakeLLMClient(responses: [
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil),
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
+        ])
+        let engine = IrisEngine(state: app, tier: .medium, client: client, retryDelays: [], protectionEnabled: false)
+
+        _ = await engine.deliverPeerMessage("schedule a sweep", from: sender, senderName: "peer", to: target)
+
+        var queued = false
+        for _ in 0..<400 {
+            if !app.pendingApprovals.isEmpty { queued = true; break }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(queued, "a peer message delivered into an idle, non-pinned conversation must ask before creating a job")
+        if queued { app.resolveApproval(.approve) }
+        #expect(await eventually { (try? app.store.ledger.jobs().count) == 1 })
+    }
+
+    /// The busy-target counterpart: the peer message is queued while the target is mid-turn, and —
+    /// since this script's first round makes no tool call — is drained into a brand-new turn once
+    /// that turn ends (`AppState.startTurn`'s drain path, already correctly threading `isPeer` since
+    /// the previous fix round). Included here to confirm the real `deliverPeerMessage` entry point's
+    /// busy branch still reaches the human prompt end to end, not just the unit-level mechanism.
+    @Test("a peer message queued behind a busy, non-pinned target reaches the human prompt once drained into its own turn")
+    func busyDeliveryDrainsAndAsksBeforeSchedulingJob() async throws {
+        let gate = PeerDeliveryGate()
+        let scheduleCall = FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1")
+        let client = ScriptedStreamClient([
+            [.event(.textDelta("hi")), .block { await gate.wait() }, .event(.done(finishReason: nil))],
+            [.event(.functionCall(scheduleCall)), .event(.done(finishReason: "tool_use"))],
+            [.event(.textDelta("ok")), .event(.done(finishReason: nil))],
+        ])
+        let (app, engine, sender, target) = busyTarget(client)
+        app.autoApproveTools = false
+
+        app.sendMessage("start a turn")
+        #expect(await eventually { client.calls == 1 })
+        #expect(app.hasTurnInFlight(for: target))
+
+        await engine.deliverPeerMessage("schedule a sweep", from: sender, senderName: "peer", to: target)
+        await gate.release()
+
+        var queued = false
+        for _ in 0..<400 {
+            if !app.pendingApprovals.isEmpty { queued = true; break }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(queued, "a peer message drained into its own turn on a non-pinned conversation must ask before creating a job")
+        if queued { app.resolveApproval(.approve) }
+        #expect(await eventually { (try? app.store.ledger.jobs().count) == 1 })
+    }
+
+    /// Coordinator's ruling on a peer STEER (distinct from a peer-originated turn): once a peer's
+    /// words are injected mid-turn as a steer (`drainPendingInput`, from the busy-delivery queue),
+    /// job creation for the REST of that turn takes the pinned-conversation gate too — the turn
+    /// itself started from the user's own words (`app.sendMessage`), so `isPeer` on the turn is
+    /// `false`, but the peer-tainted steer must still gate `schedule_job` called in a later round of
+    /// the SAME turn. Tracked per-turn on `IrisEngine.peerSteerInjectedThisTurn`, set by
+    /// `drainPendingInput` and read by `executeFunctionCall`.
+    @Test("a peer steer injected mid-turn gates job creation for the rest of that turn, even though the turn did not start as a peer turn")
+    func peerSteerMidTurnGatesLaterJobCreation() async throws {
+        let gate = PeerDeliveryGate()
+        let readCall = FunctionCall(name: "run_command", args: ["command": .string("echo hi")], id: "c1")
+        let scheduleCall = FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c2")
+        let client = ScriptedStreamClient([
+            [.event(.functionCall(readCall)), .block { await gate.wait() }, .event(.done(finishReason: "tool_use"))],
+            [.event(.functionCall(scheduleCall)), .event(.done(finishReason: "tool_use"))],
+            [.event(.textDelta("ok")), .event(.done(finishReason: nil))],
+        ])
+        let (app, engine, sender, target) = busyTarget(client)
+        // `false`, deliberately: the ordinary `run_command` approval in round 1 still auto-approves
+        // (Vibecop is disabled under test, which `requestApproval`'s non-`humanOnly` path treats as
+        // an outright APPROVE before ever touching the queue — see `AppState.requestApproval`), so
+        // it never shows up in `pendingApprovals` and cannot be confused with the `schedule_job`
+        // approval this test is actually watching for.
+        app.autoApproveTools = false
+
+        app.sendMessage("start a turn")
+        #expect(await eventually { client.calls == 1 })
+        #expect(app.hasTurnInFlight(for: target))
+
+        await engine.deliverPeerMessage("please also check something", from: sender, senderName: "peer", to: target)
+        await gate.release()
+
+        var queued = false
+        for _ in 0..<400 {
+            if !app.pendingApprovals.isEmpty { queued = true; break }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(queued, "once a peer's words are injected as a mid-turn steer, job creation for the rest of that turn must ask a human")
+        if queued { app.resolveApproval(.approve) }
+        #expect(await eventually { (try? app.store.ledger.jobs().count) == 1 })
+    }
 }

@@ -931,4 +931,60 @@ struct JobToolsTests {
         app.createNewConversation(id: id)
         return (app, id)
     }
+
+    // MARK: Continuations carry the ending turn's peer influence (residual fix, #187 §0.5)
+
+    /// Coordinator's ruling: the goal-completion skill-check reflection (`goalCompletionSkillCheck`)
+    /// is a continuation of the turn that just called `goal_complete`, not a fresh request — it must
+    /// carry whichever peer influence that turn had. Set up with `activeGoal` but no `goalContract`,
+    /// so `goal_complete`'s handler skips the grading branch entirely (`contractToGrade` is `nil`)
+    /// and goes straight to the continuation — the shortest path to it.
+    ///
+    /// The outer turn itself is driven with `isPeer: true` (standing in for either an actual
+    /// peer-originated turn or one a peer steer tainted — both feed the same `isPeer` value into
+    /// this recursive call, per the fix). Without carrying it through, the nested skill-check turn
+    /// would default to `isPeer: false` and its own `schedule_job` call would NOT be gated — this
+    /// test only passes because the carry-through actually happens.
+    @Test("the goal-completion skill-check continuation carries the ending turn's peer influence, gating its own schedule_job call")
+    func goalCompletionContinuationCarriesPeerInfluence() async throws {
+        let (app, id) = plainApp()
+        app.autoApproveTools = false
+        guard let idx = app.conversations.firstIndex(where: { $0.id == id }) else {
+            Issue.record("conversation not found")
+            return
+        }
+        app.conversations[idx].activeGoal = "do the thing"
+
+        let goalCompleteCall = FunctionCall(name: "goal_complete", args: ["summary": .string("done")], id: "c1")
+        let scheduleCall = FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c2")
+        // Response order, since the skill-check turn runs to completion INSIDE goal_complete's own
+        // handler, before the outer turn's own next round ever happens (FakeLLMClient is a plain
+        // FIFO queue shared across nested `processInput` calls on one engine): (1) the outer turn's
+        // goal_complete call, (2) the nested skill-check turn's schedule_job call, (3) the nested
+        // turn's own closing text, (4) the outer turn's closing text (reacting to goal_complete's
+        // tool result).
+        let client = FakeLLMClient(responses: [
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: goalCompleteCall)]))], usageMetadata: nil),
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: scheduleCall)]))], usageMetadata: nil),
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "done")]))], usageMetadata: nil),
+        ])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+
+        async let turn: Void = engine.processInput("continue", source: "UI", conversationId: id, isPeer: true)
+        var queued = false
+        for _ in 0..<400 {
+            if !app.pendingApprovals.isEmpty {
+                queued = true
+                app.resolveApproval(.approve)
+                break
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        if !queued { app.denyPendingApprovals(for: id) }
+        await turn
+        #expect(queued, "the skill-check continuation after goal_complete must carry isPeer, gating its own schedule_job call")
+        #expect(try app.store.ledger.jobs().count == 1)
+    }
 }

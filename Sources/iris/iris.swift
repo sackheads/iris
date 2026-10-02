@@ -481,7 +481,14 @@ actor IrisEngine {
     /// that has ALREADY run `sanitizeArrival` itself can hand off without a second sanitisation
     /// pass. `deliverPeerMessage`'s idle path (#185 review round 3) is the one caller that needs
     /// this: it sanitizes once, re-checks the target's busy state, and only then reaches here.
-    private func deliverSanitizedSystemEvent(_ safeMessage: String, source: String, conversationId: UUID, wasArchived: Bool) async {
+    /// `isPeer` (residual fix, #187 §0.5): `false` for `handleSystemEvent`'s only caller (a subagent
+    /// post-back), `true` for `deliverPeerMessage`'s idle-target call — this was the gap the
+    /// coordinator's re-review found. `deliverPeerMessage`'s BUSY path is flagged correctly (it
+    /// enqueues through `AppState.startTurn`, which already threads `isPeer`), but the far more
+    /// common IDLE path called `processInput` straight through here with no `isPeer` at all, so the
+    /// pinned-conversation job-creation gate never saw it: a peer delivered into an idle, non-pinned
+    /// conversation could get it to create a standing job with no human asked, every time.
+    private func deliverSanitizedSystemEvent(_ safeMessage: String, source: String, conversationId: UUID, wasArchived: Bool, isPeer: Bool = false) async {
         let localState = state
         await MainActor.run {
             // #182 §6.2: an arrival lands with the user looking elsewhere, so the line that
@@ -493,7 +500,7 @@ actor IrisEngine {
             let notice = wasArchived ? "Un-archived: work arrived from \(source).\n\n" : ""
             localState?.appendMessage(role: .system, content: notice + safeMessage, to: conversationId)
         }
-        await processInput(safeMessage, source: source, conversationId: conversationId)
+        await processInput(safeMessage, source: source, conversationId: conversationId, isPeer: isPeer)
     }
 
     /// The structural guard, then the tier-3 injection guard, tagged by `source`. Factored out of
@@ -569,7 +576,7 @@ actor IrisEngine {
         }
         Task {
             let wasArchived = await MainActor.run { localState?.unarchiveConversation(targetId) ?? false }
-            await self.deliverSanitizedSystemEvent(safe, source: Self.peerSource, conversationId: targetId, wasArchived: wasArchived)
+            await self.deliverSanitizedSystemEvent(safe, source: Self.peerSource, conversationId: targetId, wasArchived: wasArchived, isPeer: true)
             // The claim is given back only once the turn it authorised is over. Releasing at
             // handoff instead would reopen a gap between this function returning and
             // `withEngineTurn` registering the turn — the very gap the claim exists to close.
@@ -1109,6 +1116,11 @@ actor IrisEngine {
             let content = Content(role: "user", parts: [Part(text: "\(label): \(steerText)")])
             await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
             added = true
+            // Residual fix (#187 §0.5, coordinator ruling): once a peer's words are actually in this
+            // turn's history, the rest of the turn's job-creation calls take the pinned-conversation
+            // gate too — a peer steering an ordinary, non-pinned turn is the same laundering shape a
+            // peer-originated turn is. A blocked steer (the `continue` above) never reaches here.
+            if steer.isPeer { peerSteerInjectedThisTurn.insert(conversationId) }
         }
 
         let eventLines = await MainActor.run { localState?.takePendingEventLines(for: conversationId) ?? [] }
@@ -1410,7 +1422,7 @@ actor IrisEngine {
         if !isUnattended && principal == .main {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris' conversation (your main conversation) — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). Calling this tool from Iris itself, or from a turn a peer session sent, asks the user to approve the job first, since a standing job created from the conversation that reads every other chat and holds the job tools — or on a peer's behalf — is not created silently. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris' conversation (your main conversation) — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). Calling this tool from Iris itself, or from a turn a peer session sent, asks the user to approve the job first, since a standing job created from the conversation that reads every other chat and holds the job tools — or on a peer's behalf — is not created silently. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. When Vibecop is on, a gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -1428,7 +1440,7 @@ actor IrisEngine {
                     "profile": Schema(type: "STRING", description: "'readOnly' (default) or 'mutating'. Use 'mutating' only when the job's work must change something: its commands always run in the container VM, so it needs the runtime installed and sandboxing switched on, and that is re-checked at every fire."),
                     "gate_url": Schema(type: "STRING", description: "Only run the job when a HEAD request to this http(s) URL shows a new ETag, Last-Modified or Content-Length. Needs no sandbox."),
                     "gate_path": Schema(type: "STRING", description: "Only run the job when this absolute path changes: a file's mtime, size or contents, or the newest modification anywhere under a directory. The path must already exist, and a directory must hold fewer than 20,000 entries — checking a whole home folder on a cadence is refused, so name a narrower path or use gate_script. Needs no sandbox."),
-                    "gate_script": Schema(type: "STRING", description: "Only run the job when this shell script says so. It runs inside the sandbox VM on every tick, and its LAST line of stdout must be exactly CHANGED or UNCHANGED (the exit code is not the verdict; a non-zero exit is a gate failure). Everything it printed before that line is handed to the run as untrusted context. Requires the container runtime and sandboxing; reviewed once before the job is created."),
+                    "gate_script": Schema(type: "STRING", description: "Only run the job when this shell script says so. It runs inside the sandbox VM on every tick, and its LAST line of stdout must be exactly CHANGED or UNCHANGED (the exit code is not the verdict; a non-zero exit is a gate failure). Everything it printed before that line is handed to the run as untrusted context. Requires the container runtime and sandboxing; reviewed once before the job is created when Vibecop is on."),
                     "gate_mounts": Schema(type: "ARRAY", description: "Directories the gate script can read, as '/host/dir' or '/host/dir:/path/in/container'. Always mounted read-only, and recorded as the directory the path resolves to. A single file cannot be mounted — give its directory. The whole filesystem and Iris's own configuration cannot be mounted at all, so name the narrowest directory the check needs.", items: Schema(type: "STRING")),
                     "gate_timeout_seconds": Schema(type: "INTEGER", description: "How long the gate script may take before it is killed and counted as a failure (default 60, clamped to 5-600)."),
                     "overlap": Schema(type: "STRING", description: "What a fire does when the previous run has not finished: 'skip' (default — the fire is dropped and recorded) or 'queue' (one fire is held and taken as soon as that run ends; never more than one)."),
@@ -1760,8 +1772,11 @@ actor IrisEngine {
         var request = GeminiRequest(contents: await requestContents(history, from: .initial, &turnRequest, conversationId: conversationId), systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
         
         // Nothing from a previous turn decides this one: a turn cancelled mid-batch could leave a
-        // denial behind, and finding it here would end the next turn before it started.
+        // denial behind, and finding it here would end the next turn before it started. Same
+        // reasoning for a prior turn's peer steer (residual fix, #187 §0.5) — it must not leak
+        // into a turn that never saw one.
         profileDeniedThisTurn.remove(conversationId)
+        peerSteerInjectedThisTurn.remove(conversationId)
 
         var modelRound = 0
         var turnFinished = false
@@ -2160,6 +2175,13 @@ actor IrisEngine {
             } else {
                 await pushToUI(role: .system, text: "Auto-continuing goal loop (iteration \(activeGoalResult.1))...", conversationId: conversationId)
                 repromptTasks[conversationId]?.cancel()
+                // Residual fix (#187 §0.5): captured now, synchronously, before the sleep below —
+                // `peerSteerInjectedThisTurn` is cleared at the START of the very turn this
+                // reprompt starts, so reading it lazily inside the closure would be reading state
+                // the new turn may have already reset. The continuation carries whichever influence
+                // THIS (ending) turn had: it is the same unit of agentic work continuing, not a
+                // fresh request from whoever is attributed as its `source`.
+                let carriesPeerInfluence = isPeer || peerSteerInjectedThisTurn.contains(conversationId)
                 repromptTasks[conversationId] = Task { [weak self] in
                     try? await Task.sleep(nanoseconds: 1_500_000_000)
                     guard !Task.isCancelled, let self else { return }
@@ -2187,7 +2209,7 @@ actor IrisEngine {
                     let reprompt = oracle.isEmpty
                         ? "Continue working on your goal. What is your next step? \(closing)"
                         : "\(oracle)\n\nContinue working toward the objective above. What is your next step? \(closing)"
-                    await self.processInput(reprompt, source: "System", conversationId: conversationId)
+                    await self.processInput(reprompt, source: "System", conversationId: conversationId, isPeer: carriesPeerInfluence)
                 }
             }
         }
@@ -2783,6 +2805,17 @@ actor IrisEngine {
         profileDeniedThisTurn.remove(conversationId) != nil
     }
 
+    /// Residual fix (#187 §0.5, coordinator ruling): the conversations whose CURRENT turn had a
+    /// peer's message injected as a mid-turn steer (`drainPendingInput`, via the busy-delivery
+    /// queue). A peer steer is not the same as a peer-originated turn — the turn itself may have
+    /// started from the user's own words — but once a peer's words are in it, the rest of that
+    /// turn's job-creation calls take the same `humanOnly` gate a peer-originated turn or the pinned
+    /// conversation would, same reasoning as `profileDeniedThisTurn`: set by the dispatch/drain
+    /// side (actor-isolated, so the concurrent tool batch and the drain loop can both touch it
+    /// safely), read by `executeFunctionCall`, and reset at the start of each new turn so a prior
+    /// turn's steer cannot leak into this one.
+    private var peerSteerInjectedThisTurn: Set<UUID> = []
+
     private func executeFunctionCall(_ functionCall: FunctionCall, conversationId: UUID, workspacePath: String?, restrictToGoalComplete: Bool = false, isPeer: Bool = false) async -> String {
         let localState = state
         var result = ""
@@ -2808,16 +2841,19 @@ actor IrisEngine {
         if Self.jobCreationTools.contains(functionCall.name), principal != .main {
             return Self.subagentJobCreationRefusal
         }
-        // 5b §0.5, extended by the final-review fix wave: Iris reads other chats and holds the job
-        // tools, so a standing job created there is the one place an injection that survived the
-        // guard would outlive the turn — and a message delivered by `send_to_session` reaches a
-        // target conversation's turn the same way a person's own words would, so a peer could get a
-        // non-pinned conversation to create a job on its behalf just as easily. Gated on
-        // `isPinned || isPeer`. A human says yes either way — `humanOnly` so neither the allowlist
-        // nor Vibecop's verdict can stand in for that click (`AppState.requestApproval`); headless
-        // and scenario runs set `autoApproveTools`, and `humanOnly` still honors it, since there is
-        // no human in that run to ask.
-        if Self.jobCreationTools.contains(functionCall.name), isPinned || isPeer {
+        // 5b §0.5, extended by the final-review fix wave and the residual fix after it: Iris reads
+        // other chats and holds the job tools, so a standing job created there is the one place an
+        // injection that survived the guard would outlive the turn — and a message delivered by
+        // `send_to_session` reaches a target conversation's turn the same way a person's own words
+        // would, so a peer could get a non-pinned conversation to create a job on its behalf just as
+        // easily, whether it started the turn (`isPeer`) or arrived mid-turn as a steer
+        // (`peerSteerInjectedThisTurn`, set by `drainPendingInput` once the peer's words are
+        // actually in this turn's history — the rest of that turn is gated too). A human says yes
+        // either way — `humanOnly` so neither the allowlist nor Vibecop's verdict can stand in for
+        // that click (`AppState.requestApproval`); headless and scenario runs set `autoApproveTools`,
+        // and `humanOnly` still honors it, since there is no human in that run to ask.
+        if Self.jobCreationTools.contains(functionCall.name),
+           isPinned || isPeer || peerSteerInjectedThisTurn.contains(conversationId) {
             let details = Self.pinnedJobApprovalDetails(toolName: functionCall.name, args: functionCall.args)
             let approved = await localState?.requestApproval(
                 toolName: functionCall.name, details: details, args: functionCall.args,
@@ -3332,7 +3368,10 @@ actor IrisEngine {
             }
             await pushToUI(role: .agent, text: summary, conversationId: conversationId)
             if principal == .main {
-                await processInput(IrisEngine.goalCompletionSkillCheck, source: "System", conversationId: conversationId)
+                // Residual fix (#187 §0.5): carries whichever peer influence the just-completed turn
+                // had — this reflection is a continuation of it, not a fresh request.
+                await processInput(IrisEngine.goalCompletionSkillCheck, source: "System", conversationId: conversationId,
+                                  isPeer: isPeer || peerSteerInjectedThisTurn.contains(conversationId))
             }
             result = "Goal marked as complete. Summary: \(summary)"
         } else if functionCall.name == "reach_checkpoint", principal == .main {

@@ -1661,11 +1661,15 @@ class AppState {
                     }
                     let reflectionPrompt = "System Event [Reflection Trigger]: It's time to consolidate your memories. Reflect on the recent conversation. Have you learned any new user preferences, project structures, or recurring workflows? If so, use `update_soul` to evolve your persona, `update_user_profile` to update the user profile, `update_memory` to consolidate durable facts, and `create_skill`/`update_skill` for procedural skills. When you learn something durable — a lesson, recipe, decision, or reusable artifact — archive it to your permanent library at `~/.iris/memory/library/` (see your Library Management skill). Output a transparent summary of the gist of the updates for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'"
                     appendMessage(role: .system, content: "Triggering automatic memory reflection...", to: convId)
-                    await engine.processInput(reflectionPrompt, source: "System", conversationId: convId)
+                    // Residual-fix audit (#187 §0.5): same reasoning as the turn above — a
+                    // continuation of it, not a fresh request, and schedule_job/register_directory_
+                    // watcher are declared on this turn like any other (reflection carries no
+                    // special tool-list exclusion).
+                    await engine.processInput(reflectionPrompt, source: "System", conversationId: convId, isPeer: isPeer)
                 } else if shouldRename {
                     let renamePrompt = "System Event [Rename Trigger]: Evaluate the conversation history and use the `rename_conversation` tool to assign a short, descriptive title (1-4 words) that captures the true gist of this conversation."
                     appendMessage(role: .system, content: "Triggering automatic conversation rename...", to: convId)
-                    await engine.processInput(renamePrompt, source: "System", conversationId: convId)
+                    await engine.processInput(renamePrompt, source: "System", conversationId: convId, isPeer: isPeer)
                 }
             }
         } else {
