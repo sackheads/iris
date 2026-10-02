@@ -1355,7 +1355,11 @@ actor IrisEngine {
         // No unattended job creation (the agency epic's standing ruling): a background run may
         // not write itself a cadence or a watch, so the two tools that do are not declared to it
         // at all — undeclared costs it nothing, and `executeFunctionCall` refuses the call anyway.
-        if isUnattended { toolsList.removeAll { Self.jobCreationTools.contains($0.name) } }
+        // Fix round 2 (#187): nor to a subagent or evaluator — `register_directory_watcher` comes
+        // from `executor.getTools()` above unconditionally, with no principal check of its own, so
+        // a `.subagent` (never pinned itself) could create the standing job the pinned-conversation
+        // gate exists to stop, laundering it through `invoke_subagent`.
+        if isUnattended || principal != .main { toolsList.removeAll { Self.jobCreationTools.contains($0.name) } }
         // Add set_workspace tool dynamically — not to a background turn (#282 §0.10, invariant 6):
         // its grant is its boundary, and `executeFunctionCall` refuses the call anyway.
         if !isUnattended {
@@ -1392,8 +1396,11 @@ actor IrisEngine {
         }
         
         toolsList.append(SubagentManager.toolDeclaration())
-        
-        if !isUnattended {
+
+        // Fix round 2 (#187): `principal == .main` too — appended here unconditionally for any
+        // attended turn, this would re-add the tool the `removeAll` above just stripped for a
+        // subagent or evaluator (which runs before this declaration exists to be removed).
+        if !isUnattended && principal == .main {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
             description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris' conversation (your main conversation) — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). Calling this tool from Iris itself asks you to approve the job first, since a standing job created from the conversation that reads every other chat and holds the job tools is not created silently. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
@@ -1604,7 +1611,7 @@ actor IrisEngine {
         }
 
         // #187 §9, invariant 6: the job tools are declared in a pinned conversation and nowhere
-        // else. The Activity conversation is the one place a person is already reading about runs,
+        // else. Iris, the pinned conversation, is the one place a person is already reading about runs,
         // so it is the one place the two declarations earn their prompt tokens; everywhere else
         // they would be a standing cost for a question nobody asked. The gate itself is pure
         // (`jobToolDeclarations`) so both answers are testable without a turn. `isPinned` is the
@@ -2418,6 +2425,83 @@ actor IrisEngine {
     /// run is a run that grows its own footprint with nobody asked.
     static let jobCreationTools: Set<String> = ["schedule_job", "register_directory_watcher"]
 
+    /// What the owner sees on the pinned conversation's approval dialog for a job-creating call
+    /// (fix round 2, #187). Before this, `details` was `args["name"] ?? args["path"] ?? toolName`,
+    /// which showed "schedule_job: schedule_job" for a call with neither — telling a reviewer
+    /// nothing about what they were approving. Built from the model's raw, unvalidated arguments
+    /// (the approval happens before `ScheduleJobArguments.parse`/`RegisterWatcherArguments.parse`
+    /// run), so a malformed call still shows what was asked for rather than failing to build a
+    /// dialog at all. Pure and `nonisolated` so it is unit-testable without an engine or a turn.
+    nonisolated static func pinnedJobApprovalDetails(toolName: String, args: [String: JSONValue]) -> String {
+        switch toolName {
+        case "schedule_job": return scheduleJobApprovalDetails(args)
+        case "register_directory_watcher": return registerWatcherApprovalDetails(args)
+        default: return toolName
+        }
+    }
+
+    private nonisolated static func scheduleJobApprovalDetails(_ args: [String: JSONValue]) -> String {
+        let name = ScheduleJobArguments.text(args["name"]) ?? "(unnamed)"
+        var lines = ["name: \(name)", "trigger: \(scheduleTriggerSummary(args))"]
+        if let profile = ScheduleJobArguments.text(args["profile"]) { lines.append("profile: \(profile)") }
+        if case .success(let mounts?) = ScheduleJobArguments.stringList(args["mounts"], shape: ScheduleJobArguments.mountsShape),
+           !mounts.isEmpty {
+            lines.append("mounts: \(mounts.joined(separator: ", "))")
+        }
+        if case .success(let network?) = ScheduleJobArguments.boolean(args["network"]) {
+            lines.append("network: \(network)")
+        }
+        if let prompt = ScheduleJobArguments.text(args["prompt"]) {
+            lines.append("prompt: \(Self.truncated(prompt))")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private nonisolated static func registerWatcherApprovalDetails(_ args: [String: JSONValue]) -> String {
+        let path = ScheduleJobArguments.text(args["path"]) ?? "(no path)"
+        var lines = ["path: \(path)"]
+        if let profile = ScheduleJobArguments.text(args["profile"]) { lines.append("profile: \(profile)") }
+        if let instructions = ScheduleJobArguments.text(args["instructions"]) {
+            lines.append("prompt: \(Self.truncated(instructions))")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Cut to ~300 characters, on a whole-character boundary, with an ellipsis marking the cut —
+    /// long enough to be useful on a dialog, short enough that a model cannot bury the part that
+    /// matters (mounts, a gate script's capability) below the fold with a wall of prompt text.
+    private nonisolated static func truncated(_ text: String, limit: Int = 300) -> String {
+        guard text.count > limit else { return text }
+        return String(text.prefix(limit)) + "…"
+    }
+
+    /// The schedule half of the dialog, in the same vocabulary the model used to ask for it — cron,
+    /// an interval, or the loose hour/minute/weekday fields — rather than resolving it into a
+    /// concrete next-fire time: a malformed schedule must still show what was asked for, and
+    /// resolution can fail for reasons (a bad cron string, a bad time zone) that have nothing to do
+    /// with whether the owner should approve creating SOME job with this prompt.
+    private nonisolated static func scheduleTriggerSummary(_ args: [String: JSONValue]) -> String {
+        if let cron = ScheduleJobArguments.text(args["cron"]) {
+            let tz = ScheduleJobArguments.text(args["timezone"])
+            return tz.map { "cron '\(cron)' (\($0))" } ?? "cron '\(cron)'"
+        }
+        if let interval = ScheduleJobArguments.integer(args["intervalSeconds"]) {
+            return "every \(interval)s"
+        }
+        var parts: [String] = []
+        if let hour = ScheduleJobArguments.integer(args["hour"]) { parts.append("hour \(hour)") }
+        if let minute = ScheduleJobArguments.integer(args["minute"]) { parts.append("minute \(minute)") }
+        if case .array(let days)? = args["weekdays"] {
+            let numbers = days.compactMap { ScheduleJobArguments.integer($0) }
+            if !numbers.isEmpty { parts.append("weekdays \(numbers.map(String.init).joined(separator: ","))") }
+        } else if let weekday = ScheduleJobArguments.integer(args["weekday"]) {
+            parts.append("weekday \(weekday)")
+        }
+        if let day = ScheduleJobArguments.integer(args["day"]) { parts.append("day \(day)") }
+        if let month = ScheduleJobArguments.integer(args["month"]) { parts.append("month \(month)") }
+        return parts.isEmpty ? "no schedule given" : parts.joined(separator: ", ")
+    }
+
     /// What the dispatcher tells a background run that tried to read the peer roster or advertise
     /// itself to it. Same reason as the send refusal: it is not a session in either direction.
     static let unattendedSessionListRefusal =
@@ -2432,6 +2516,17 @@ actor IrisEngine {
     /// What the dispatcher tells a background run that reached for one anyway.
     static let unattendedJobCreationRefusal =
         "A background run cannot create jobs or watches; describe what you want and the user can create it."
+
+    /// What the dispatcher tells a subagent or evaluator that reached for a job-creating tool.
+    /// Reviewer finding (fix round 2, #187): neither tool was declaration-gated on `principal`, so
+    /// `register_directory_watcher` (unconditionally in `ToolExecutor.getTools()`) and
+    /// `schedule_job` (gated only on `!isUnattended`) reached an attended `.subagent`'s tool list —
+    /// `invoke_subagent` from the pinned conversation could delegate to one and have IT create the
+    /// job the pinned gate above exists to stop, laundering the approval. Declaration is gated on
+    /// `principal == .main` alongside `isUnattended` (see `buildRequest`); this is the dispatch
+    /// half for a forged or stale call.
+    static let subagentJobCreationRefusal =
+        "A subagent cannot create jobs; ask the conversation that delegated to you to create it."
 
     /// What the model is told when the owner declined a job or watch proposed from the pinned
     /// conversation (5b §0.5). Iris reads every other chat and holds the job tools, so a standing
@@ -2689,13 +2784,19 @@ actor IrisEngine {
         if Self.jobCreationTools.contains(functionCall.name), isUnattended {
             return Self.unattendedJobCreationRefusal
         }
+        // Fix round 2 (#187): a subagent or evaluator reaching for either tool anyway — declaration
+        // gating (`buildRequest`) only stops a well-behaved model, same reasoning as the refusal
+        // above.
+        if Self.jobCreationTools.contains(functionCall.name), principal != .main {
+            return Self.subagentJobCreationRefusal
+        }
         // 5b §0.5: Iris reads other chats and holds the job tools, so a standing job created there
         // is the one place an injection that survived the guard would outlive the turn. A human
         // says yes — `humanOnly` so neither the allowlist nor a disabled Vibecop's outright
         // APPROVE can stand in for that click; `autoApproveTools` still can, since that is the
         // owner's own explicit global override, not a per-call verdict.
         if Self.jobCreationTools.contains(functionCall.name), isPinned {
-            let details = functionCall.args["name"]?.stringValue ?? functionCall.args["path"]?.stringValue ?? functionCall.name
+            let details = Self.pinnedJobApprovalDetails(toolName: functionCall.name, args: functionCall.args)
             let approved = await localState?.requestApproval(
                 toolName: functionCall.name, details: details, args: functionCall.args,
                 workspace: workspacePath, conversationId: conversationId, origin: approvalOrigin,

@@ -3,7 +3,7 @@ import Foundation
 @testable import iris
 
 /// #187 §9, invariant 6 — `list_jobs` and `get_job_run` cost prompt tokens on every turn they are
-/// declared, and only a pinned conversation (the Activity conversation) is about jobs at all. The
+/// declared, and only a pinned conversation (Iris) is about jobs at all. The
 /// gate is a pure function so both answers can be pinned without driving a turn; one turn through
 /// a capturing client then proves the real tool list is actually assembled from it.
 @MainActor
@@ -493,6 +493,86 @@ struct JobToolsTests {
         #expect(result.contains("No run with that id."))
     }
 
+    // MARK: The pinned-conversation approval dialog shows what is being created (fix round 2, #187)
+
+    /// Before this, `details` on the pinned gate's `requestApproval` call was
+    /// `args["name"] ?? args["path"] ?? toolName` — a `schedule_job` with neither showed the owner
+    /// "schedule_job: schedule_job" on the approval dialog, telling them nothing about what they
+    /// were approving. `pinnedJobApprovalDetails` is pure and built from the model's raw,
+    /// unvalidated arguments (the approval happens before either tool's `parse`), so a malformed
+    /// call still shows what was asked for.
+    @Test("schedule_job's approval details show the name, trigger, profile, grant and a truncated prompt")
+    func scheduleJobApprovalDetailsShowWhatIsBeingCreated() {
+        let full = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: [
+            "name": .string("nightly-sweep"),
+            "cron": .string("0 9 * * 1-5"),
+            "timezone": .string("America/Los_Angeles"),
+            "profile": .string("mutating"),
+            "mounts": .array([.string("/repo"), .string("/data:ro")]),
+            "network": .bool(true),
+            "prompt": .string(String(repeating: "a", count: 400)),
+        ])
+        #expect(full.contains("name: nightly-sweep"))
+        #expect(full.contains("trigger: cron '0 9 * * 1-5' (America/Los_Angeles)"))
+        #expect(full.contains("profile: mutating"))
+        #expect(full.contains("mounts: /repo, /data:ro"))
+        #expect(full.contains("network: true"))
+        #expect(full.contains("prompt: " + String(repeating: "a", count: 300) + "…"))
+        #expect(!full.contains(String(repeating: "a", count: 301)), "the prompt must be cut, not merely marked")
+
+        // Minimal call: an interval schedule, no name, no grant, no profile — the fallbacks and the
+        // omitted optional sections, not the gate's full shape.
+        let minimal = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: [
+            "prompt": .string("sweep"), "intervalSeconds": .int(3600),
+        ])
+        #expect(minimal.contains("name: (unnamed)"))
+        #expect(minimal.contains("trigger: every 3600s"))
+        #expect(!minimal.contains("profile:"))
+        #expect(!minimal.contains("mounts:"))
+        #expect(!minimal.contains("network:"))
+        #expect(minimal.contains("prompt: sweep"))
+
+        // The loose hour/minute/weekdays form, with no cron and no interval given.
+        let loose = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: [
+            "prompt": .string("digest"), "hour": .int(9), "minute": .int(30),
+            "weekdays": .array([.int(2), .int(3), .int(4), .int(5), .int(6)]),
+        ])
+        #expect(loose.contains("trigger: hour 9, minute 30, weekdays 2,3,4,5,6"))
+
+        // Nothing resolvable at all — a malformed or empty call must still produce SOME dialog text
+        // rather than an empty or crashing one.
+        let empty = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: [:])
+        #expect(empty.contains("name: (unnamed)"))
+        #expect(empty.contains("trigger: no schedule given"))
+    }
+
+    @Test("register_directory_watcher's approval details show the path, profile and a truncated prompt")
+    func registerWatcherApprovalDetailsShowWhatIsBeingCreated() {
+        let full = IrisEngine.pinnedJobApprovalDetails(toolName: "register_directory_watcher", args: [
+            "path": .string("/Users/me/project"),
+            "instructions": .string(String(repeating: "b", count: 400)),
+            "profile": .string("mutating"),
+        ])
+        #expect(full.contains("path: /Users/me/project"))
+        #expect(full.contains("profile: mutating"))
+        #expect(full.contains("prompt: " + String(repeating: "b", count: 300) + "…"))
+
+        let minimal = IrisEngine.pinnedJobApprovalDetails(toolName: "register_directory_watcher", args: [
+            "path": .string("/tmp"), "instructions": .string("watch it"),
+        ])
+        #expect(minimal.contains("path: /tmp"))
+        #expect(!minimal.contains("profile:"))
+        #expect(minimal.contains("prompt: watch it"))
+
+        let empty = IrisEngine.pinnedJobApprovalDetails(toolName: "register_directory_watcher", args: [:])
+        #expect(empty.contains("path: (no path)"))
+    }
+
+    @Test("an unknown tool name falls back to itself rather than crashing")
+    func unknownToolApprovalDetailsFallsBack() {
+        #expect(IrisEngine.pinnedJobApprovalDetails(toolName: "mystery_tool", args: [:]) == "mystery_tool")
+    }
+
     // MARK: Creating a job from Iris asks first (5b §0.5, #187)
 
     /// Fix round 1 (coordinator ruling, 2026-10-02): `requestApproval`'s own Vibecop consult
@@ -513,6 +593,11 @@ struct JobToolsTests {
     @MainActor
     private final class CountingApprovalAppState: AppState {
         private(set) var approvalCount = 0
+        /// Fix round 2 (#187, reviewer finding 8): the override used to ignore `humanOnly` entirely,
+        /// so a regression that dropped `humanOnly: true` from the dispatcher's call would have
+        /// passed every test in this file silently. Recorded on every call so the pinned tests below
+        /// can assert it was actually true, not merely that SOME approval happened.
+        private(set) var lastHumanOnly: Bool?
         var resolution = true
 
         override func requestApproval(toolName: String, details: String, args: [String: JSONValue] = [:],
@@ -522,6 +607,7 @@ struct JobToolsTests {
                                       vibecopEnabled: Bool? = nil, grantedMount: ContainerMount? = nil,
                                       humanOnly: Bool = false) async -> Bool {
             approvalCount += 1
+            lastHumanOnly = humanOnly
             return resolution
         }
     }
@@ -567,7 +653,7 @@ struct JobToolsTests {
     /// Drives one engine turn with the model issuing `call` against a `CountingApprovalAppState`,
     /// reading back the model's result and how many approval requests the dispatcher made.
     private func runJobCreationCall(_ call: FunctionCall, on app: CountingApprovalAppState,
-                                    as conversationId: UUID, resolution: Bool) async -> (result: String, approvalCount: Int) {
+                                    as conversationId: UUID, resolution: Bool) async -> (result: String, approvalCount: Int, humanOnly: Bool?) {
         app.autoApproveTools = false
         app.resolution = resolution
         let first = GeminiResponse(candidates: [Candidate(content: Content(
@@ -583,7 +669,7 @@ struct JobToolsTests {
             guard case .string(let s)? = part.functionResponse?.response["result"] else { return nil }
             return s
         }.last ?? ""
-        return (result, app.approvalCount)
+        return (result, app.approvalCount, app.lastHumanOnly)
     }
 
     /// Drives one engine turn against a REAL `AppState`'s `pendingApprovals` queue. Races a poll
@@ -617,6 +703,12 @@ struct JobToolsTests {
             }
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
+        // Reviewer fix round 2: the poll above is bounded, but `await turn` below is not — if the
+        // approval never got queued (a regression, or a slow CI run outlasting 400 iterations), the
+        // continuation inside `enqueueUserApproval` would never resolve and this call would hang the
+        // whole suite rather than fail it. Deny whatever is pending (a no-op if the queue is already
+        // empty) before awaiting, so that case is a fast, visible test failure instead of a hang.
+        if !queued { app.denyPendingApprovals(for: conversationId) }
         await turn
         let history = app.conversations.first { $0.id == conversationId }?.history ?? []
         let result = history.flatMap { $0.parts }.compactMap { part -> String? in
@@ -629,10 +721,11 @@ struct JobToolsTests {
     @Test("schedule_job in the pinned conversation is denied: no job is created, model told so")
     func scheduleJobPinnedDenied() async throws {
         let (app, id) = pinnedCountingApp()
-        let (result, approvalCount) = await runJobCreationCall(
+        let (result, approvalCount, humanOnly) = await runJobCreationCall(
             FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
             on: app, as: id, resolution: false)
         #expect(approvalCount == 1)
+        #expect(humanOnly == true, "the pinned gate must ask humanOnly, not whatever requestApproval defaults to")
         #expect(result == IrisEngine.pinnedJobCreationDeclined)
         #expect(try app.store.ledger.jobs().isEmpty)
     }
@@ -640,10 +733,11 @@ struct JobToolsTests {
     @Test("schedule_job in the pinned conversation, approved, creates the job")
     func scheduleJobPinnedApproved() async throws {
         let (app, id) = pinnedCountingApp()
-        let (result, approvalCount) = await runJobCreationCall(
+        let (result, approvalCount, humanOnly) = await runJobCreationCall(
             FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
             on: app, as: id, resolution: true)
         #expect(approvalCount == 1)
+        #expect(humanOnly == true, "the pinned gate must ask humanOnly, not whatever requestApproval defaults to")
         #expect(result != IrisEngine.pinnedJobCreationDeclined)
         #expect(try app.store.ledger.jobs().count == 1)
     }
@@ -651,7 +745,7 @@ struct JobToolsTests {
     @Test("schedule_job in a non-pinned conversation creates the job without an approval request")
     func scheduleJobUnpinnedSkipsApproval() async throws {
         let (app, id) = plainCountingApp()
-        let (result, approvalCount) = await runJobCreationCall(
+        let (result, approvalCount, _) = await runJobCreationCall(
             FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
             on: app, as: id, resolution: true)
         #expect(approvalCount == 0, "a non-pinned conversation must never ask approval for job creation")
@@ -662,11 +756,12 @@ struct JobToolsTests {
     @Test("register_directory_watcher in the pinned conversation is denied: no job is created")
     func registerWatcherPinnedDenied() async throws {
         let (app, id) = pinnedCountingApp()
-        let (result, approvalCount) = await runJobCreationCall(
+        let (result, approvalCount, humanOnly) = await runJobCreationCall(
             FunctionCall(name: "register_directory_watcher",
                         args: ["path": .string("/tmp"), "instructions": .string("watch it")], id: "c1"),
             on: app, as: id, resolution: false)
         #expect(approvalCount == 1)
+        #expect(humanOnly == true, "the pinned gate must ask humanOnly, not whatever requestApproval defaults to")
         #expect(result == IrisEngine.pinnedJobCreationDeclined)
         #expect(try app.store.ledger.jobs().isEmpty)
     }
@@ -676,11 +771,12 @@ struct JobToolsTests {
         let (app, id) = pinnedCountingApp()
         let dir = try scratchDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let (result, approvalCount) = await runJobCreationCall(
+        let (result, approvalCount, humanOnly) = await runJobCreationCall(
             FunctionCall(name: "register_directory_watcher",
                         args: ["path": .string(dir.path), "instructions": .string("watch it")], id: "c1"),
             on: app, as: id, resolution: true)
         #expect(approvalCount == 1)
+        #expect(humanOnly == true, "the pinned gate must ask humanOnly, not whatever requestApproval defaults to")
         #expect(result != IrisEngine.pinnedJobCreationDeclined)
         #expect(try app.store.ledger.jobs().count == 1)
     }
@@ -690,7 +786,7 @@ struct JobToolsTests {
         let (app, id) = plainCountingApp()
         let dir = try scratchDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let (result, approvalCount) = await runJobCreationCall(
+        let (result, approvalCount, _) = await runJobCreationCall(
             FunctionCall(name: "register_directory_watcher",
                         args: ["path": .string(dir.path), "instructions": .string("watch it")], id: "c1"),
             on: app, as: id, resolution: true)
