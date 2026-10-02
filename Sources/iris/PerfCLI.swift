@@ -173,6 +173,11 @@ enum PerfCLI {
                 var memoryBefore: String?
                 let realMemory = IrisPaths.default.memoryDir   // the real home, before any override
                 if suite.lane == .real {
+                    // If anything between this claim and `scratch = dir` throws, the defer below
+                    // never sees `scratch`: the lock and the half-built directory are left for the
+                    // next run's claim, which reclaims a dead pid's lock and resets the directory.
+                    // That relies on the process exiting after `execute` returns (main.swift); a
+                    // long-lived host calling `execute` repeatedly would keep the lock instead.
                     let dir = try claimScratchWorkspace()
                     FileManager.default.changeCurrentDirectoryPath(dir.path)
                     // Memory tools write through IrisPaths.default: route the whole home at a
