@@ -2294,12 +2294,20 @@ class AppState {
     
     /// `args` is what the model sent for this call, carried only so a background denial can record
     /// the whole call rather than its name (spec §6); nothing on the approval path reads it.
+    /// `humanOnly` (5b §0.5 fix, #187): skips the deterministic allowlist and Vibecop entirely and
+    /// goes straight to the user prompt. Vibecop's disabled state returns an outright `APPROVE`
+    /// (`VibecopService.evaluateAction`), and the allowlist is a standing "yes" from some earlier
+    /// call — either would let a tool meant to always ask a human slip through without ever
+    /// opening the dialog. Checked after the background fail-closed block (unattended stays
+    /// fail-closed, not promoted to a prompt nobody is there to answer) and after `autoApproveTools`
+    /// (the owner's own explicit global override still wins — a human-only gate is not a stronger
+    /// claim than the switch the owner already flipped).
     func requestApproval(toolName: String, details: String, args: [String: JSONValue] = [:],
                          workspace: String? = nil,
                          conversationId: UUID? = nil, origin: String = "Main agent",
                          inSandbox: Bool = false, callerRole: VibecopCallerRole = .agent,
                          allowedCommands: [String] = [], vibecopEnabled: Bool? = nil,
-                         grantedMount: ContainerMount? = nil) async -> Bool {
+                         grantedMount: ContainerMount? = nil, humanOnly: Bool = false) async -> Bool {
         // No pre-granted-approval branch here, deliberately (#187 R21, 2026-09-21): a call a
         // person clicked "Approve and run" on is dispatched by `IrisEngine.executeApprovedCall`,
         // which runs the tool through the hook layer directly and never enters this function. The
@@ -2357,6 +2365,13 @@ class AppState {
                                          callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled)
             }
             return true
+        }
+        // `humanOnly`: straight to the prompt, bypassing both the allowlist below (a standing
+        // "yes" from some earlier, different call) and Vibecop (whose disabled state is an
+        // outright APPROVE verdict, not an absence of one).
+        if humanOnly {
+            return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
+                                             conversationId: conversationId, origin: origin)
         }
         // Fast path: deterministic permissions.
         if permissions.isAllowed(toolName: toolName, details: details, workspace: workspace) {

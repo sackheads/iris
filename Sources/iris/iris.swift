@@ -2691,12 +2691,15 @@ actor IrisEngine {
         }
         // 5b §0.5: Iris reads other chats and holds the job tools, so a standing job created there
         // is the one place an injection that survived the guard would outlive the turn. A human
-        // says yes.
+        // says yes — `humanOnly` so neither the allowlist nor a disabled Vibecop's outright
+        // APPROVE can stand in for that click; `autoApproveTools` still can, since that is the
+        // owner's own explicit global override, not a per-call verdict.
         if Self.jobCreationTools.contains(functionCall.name), isPinned {
             let details = functionCall.args["name"]?.stringValue ?? functionCall.args["path"]?.stringValue ?? functionCall.name
             let approved = await localState?.requestApproval(
                 toolName: functionCall.name, details: details, args: functionCall.args,
-                workspace: workspacePath, conversationId: conversationId, origin: approvalOrigin) ?? false
+                workspace: workspacePath, conversationId: conversationId, origin: approvalOrigin,
+                humanOnly: true) ?? false
             guard approved else { return Self.pinnedJobCreationDeclined }
         }
         // #282 §0.10, the same shape: a background run's grant is its boundary, and `set_workspace`

@@ -62,6 +62,45 @@ struct ApprovalQueueTests {
         #expect(vb == true)
     }
 
+    /// 5b §0.5 fix (#187): `requestApproval`'s deterministic allowlist and its Vibecop consult
+    /// (disabled-state verdict is an outright APPROVE, not an absence of one) could both stand in
+    /// for a human click. `humanOnly` routes past both. Same call, same stored rule, twice: once
+    /// ordinary (auto-approved, no queue entry) and once `humanOnly` (queued, needs a resolution).
+    @Test("humanOnly reaches the queue even when a stored rule would otherwise answer")
+    func humanOnlyReachesTheQueueDespiteAStoredRule() async throws {
+        let app = AppState()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-approvalqueue-\(UUID().uuidString)", isDirectory: true)
+        let paths = IrisPaths(root: root)
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try JSONEncoder().encode([PermissionRule(toolName: "note_tool", details: "demo")])
+            .write(to: paths.permissionsJSON)
+        app.permissions = PermissionManager(paths: paths)
+
+        let ordinary = await app.requestApproval(toolName: "note_tool", details: "demo", workspace: nil)
+        #expect(ordinary == true)
+        #expect(app.pendingApprovals.isEmpty)
+
+        async let gated = app.requestApproval(toolName: "note_tool", details: "demo",
+                                              workspace: nil, humanOnly: true)
+        for _ in 0..<200 where app.pendingApprovals.isEmpty {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(app.pendingApprovals.count == 1, "humanOnly must reach the queue despite the stored rule")
+        app.resolveApproval(.approve)
+        #expect(await gated == true)
+    }
+
+    @Test("humanOnly still honors the owner's autoApproveTools switch")
+    func humanOnlyHonorsAutoApprove() async {
+        let app = AppState()
+        app.autoApproveTools = true
+        let approved = await app.requestApproval(toolName: "schedule_job", details: "x", workspace: nil, humanOnly: true)
+        #expect(approved == true)
+        #expect(app.pendingApprovals.isEmpty)
+    }
+
     @Test("enqueue in a cancelled task returns false and leaves the queue empty")
     func cancelledEnqueueNoLeak() async {
         let app = AppState()

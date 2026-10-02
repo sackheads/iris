@@ -495,18 +495,21 @@ struct JobToolsTests {
 
     // MARK: Creating a job from Iris asks first (5b §0.5, #187)
 
-    /// `requestApproval`'s own Vibecop consult auto-approves whenever Vibecop is disabled
-    /// (`ConfigManager.shared.enableVibecop`, which reads false under test every time — a fresh,
-    /// volatile per-process `UserDefaults` suite with nothing written to it, per `IrisDefaults`),
-    /// short-circuiting before the call ever reaches `pendingApprovals`. That is `requestApproval`'s
-    /// existing, pre-5b behavior for every gated tool (`run_command`, `write_file`, …), not
-    /// something 5b introduces, and it leaves no deterministic way to drive a real human verdict
-    /// through the full stack without mutating the global config a concurrent suite might be
-    /// reading (invariant 7). Overriding `requestApproval` instead keeps the test on AppState's one
-    /// non-final seam: it still exercises the dispatcher's real call — the exact tool name, args and
-    /// conversation id the gate in `executeFunctionCall` passes — while the test, not Vibecop,
-    /// supplies the verdict. `approvalCount` is incremented only when the override fires, so "no
-    /// approval request was made" is a count of zero, never inferred from the outcome.
+    /// Fix round 1 (coordinator ruling, 2026-10-02): `requestApproval`'s own Vibecop consult
+    /// auto-approved whenever Vibecop was disabled (`ConfigManager.shared.enableVibecop`, which
+    /// reads false under test every time — a fresh, volatile per-process `UserDefaults` suite with
+    /// nothing written to it, per `IrisDefaults`), short-circuiting before the call ever reached
+    /// `pendingApprovals` — the allowlist could do the same. `AppState.requestApproval`'s new
+    /// `humanOnly` parameter (checked after the background fail-closed block and the
+    /// `autoApproveTools` branch) skips both and goes straight to the prompt, so the real queue is
+    /// now reachable deterministically; the tests below drive it directly rather than mocking it.
+    ///
+    /// `CountingApprovalAppState` stays for the cheap approve/deny/non-pinned-control triples below
+    /// — it still exercises the dispatcher's real call (the exact tool name, args and conversation
+    /// id the gate in `executeFunctionCall` passes) while avoiding a 400-iteration poll loop per
+    /// test. `approvalCount` is incremented only when the override fires, so "no approval request
+    /// was made" is a count of zero, never inferred from the outcome. At least one test per tool
+    /// (below) goes through the real `pendingApprovals` queue end to end instead.
     @MainActor
     private final class CountingApprovalAppState: AppState {
         private(set) var approvalCount = 0
@@ -516,7 +519,8 @@ struct JobToolsTests {
                                       workspace: String? = nil, conversationId: UUID? = nil,
                                       origin: String = "Main agent", inSandbox: Bool = false,
                                       callerRole: VibecopCallerRole = .agent, allowedCommands: [String] = [],
-                                      vibecopEnabled: Bool? = nil, grantedMount: ContainerMount? = nil) async -> Bool {
+                                      vibecopEnabled: Bool? = nil, grantedMount: ContainerMount? = nil,
+                                      humanOnly: Bool = false) async -> Bool {
             approvalCount += 1
             return resolution
         }
@@ -550,6 +554,16 @@ struct JobToolsTests {
         return dir
     }
 
+    /// An `IrisPaths` under a temp directory, so an injected `PermissionManager` reads and writes
+    /// nothing the machine running the test already has.
+    private func tempIrisPaths() throws -> IrisPaths {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-jobtools-perms-\(UUID().uuidString)", isDirectory: true)
+        let paths = IrisPaths(root: root)
+        try paths.ensureDirectories()
+        return paths
+    }
+
     /// Drives one engine turn with the model issuing `call` against a `CountingApprovalAppState`,
     /// reading back the model's result and how many approval requests the dispatcher made.
     private func runJobCreationCall(_ call: FunctionCall, on app: CountingApprovalAppState,
@@ -570,6 +584,46 @@ struct JobToolsTests {
             return s
         }.last ?? ""
         return (result, app.approvalCount)
+    }
+
+    /// Drives one engine turn against a REAL `AppState`'s `pendingApprovals` queue. Races a poll
+    /// loop against the turn (the same shape `ApprovalQueueTests` uses for `enqueueUserApproval`
+    /// directly) and resolves the first request it sees — deterministic now that `humanOnly`
+    /// guarantees `requestApproval` reaches `enqueueUserApproval` without Vibecop or the allowlist
+    /// ever getting a vote. `queued` is true only if a request actually appeared, so "it asked" is
+    /// observed, not inferred from the final outcome.
+    private func runJobCreationCallThroughRealQueue(_ call: FunctionCall, on app: AppState, as conversationId: UUID,
+                                                    resolution: AppState.ApprovalResolution) async -> (result: String, queued: Bool) {
+        app.autoApproveTools = false
+        let first = GeminiResponse(candidates: [Candidate(content: Content(
+            role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil)
+        let final = GeminiResponse(candidates: [Candidate(content: Content(
+            role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil)
+        let client = FakeLLMClient(responses: [first, final])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+        // Driven via `engine.processInput` directly rather than `AppState.sendMessage`, so
+        // `hasTurnInFlight` (which tracks `sendMessage`'s own bookkeeping) never sees this turn as
+        // running and would break out of the loop on its very first iteration — before the child
+        // task below gets a chance to reach `enqueueUserApproval` — leaving it stuck forever on an
+        // unresolved continuation. The loop here watches `pendingApprovals` alone.
+        async let turn: Void = engine.processInput("go", source: "UI", conversationId: conversationId)
+        var queued = false
+        for _ in 0..<400 {
+            if !app.pendingApprovals.isEmpty {
+                queued = true
+                app.resolveApproval(resolution)
+                break
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        await turn
+        let history = app.conversations.first { $0.id == conversationId }?.history ?? []
+        let result = history.flatMap { $0.parts }.compactMap { part -> String? in
+            guard case .string(let s)? = part.functionResponse?.response["result"] else { return nil }
+            return s
+        }.last ?? ""
+        return (result, queued)
     }
 
     @Test("schedule_job in the pinned conversation is denied: no job is created, model told so")
@@ -641,6 +695,51 @@ struct JobToolsTests {
                         args: ["path": .string(dir.path), "instructions": .string("watch it")], id: "c1"),
             on: app, as: id, resolution: true)
         #expect(approvalCount == 0, "a non-pinned conversation must never ask approval for job creation")
+        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(try app.store.ledger.jobs().count == 1)
+    }
+
+    @Test("schedule_job in the pinned conversation reaches the real approval queue despite Vibecop being disabled; approving creates the job")
+    func scheduleJobPinnedRealQueueApproved() async throws {
+        let (app, id) = pinnedApp()
+        let (result, queued) = await runJobCreationCallThroughRealQueue(
+            FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
+            on: app, as: id, resolution: .approve)
+        #expect(queued, "a disabled Vibecop must not stand in for the human's click")
+        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(try app.store.ledger.jobs().count == 1)
+    }
+
+    @Test("register_directory_watcher in the pinned conversation reaches the real approval queue despite Vibecop being disabled; denying creates nothing")
+    func registerWatcherPinnedRealQueueDenied() async throws {
+        let (app, id) = pinnedApp()
+        let (result, queued) = await runJobCreationCallThroughRealQueue(
+            FunctionCall(name: "register_directory_watcher",
+                        args: ["path": .string("/tmp"), "instructions": .string("watch it")], id: "c1"),
+            on: app, as: id, resolution: .deny)
+        #expect(queued, "a disabled Vibecop must not stand in for the human's click")
+        #expect(result == IrisEngine.pinnedJobCreationDeclined)
+        #expect(try app.store.ledger.jobs().isEmpty)
+    }
+
+    @Test("a matching allowlist rule does not bypass the pinned conversation's human-only gate")
+    func allowlistRuleDoesNotBypassPinnedGate() async throws {
+        let (app, id) = pinnedApp()
+        let paths = try tempIrisPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        try JSONEncoder().encode([PermissionRule(toolName: "schedule_job", details: "sweep")])
+            .write(to: paths.permissionsJSON)
+        app.permissions = PermissionManager(paths: paths)
+        // Sanity check the fixture: an ordinary (non-humanOnly) call with this rule and these exact
+        // arguments really would be auto-allowed, so the test below is proving the gate bypasses
+        // the allowlist on purpose — not merely that the rule failed to match for some other reason.
+        #expect(app.permissions.isAllowed(toolName: "schedule_job", details: "sweep", workspace: nil))
+
+        let (result, queued) = await runJobCreationCallThroughRealQueue(
+            FunctionCall(name: "schedule_job",
+                        args: ["name": .string("sweep"), "prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
+            on: app, as: id, resolution: .approve)
+        #expect(queued, "a matching allowlist rule must not bypass the human-only gate")
         #expect(result != IrisEngine.pinnedJobCreationDeclined)
         #expect(try app.store.ledger.jobs().count == 1)
     }
