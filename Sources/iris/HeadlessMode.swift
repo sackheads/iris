@@ -16,20 +16,27 @@ import Foundation
 /// skipping them the moment that happened, rather than failing.
 ///
 /// `$scoped` is the same seam as `CoreMLEvaluator.$scopedModel` / `AuxiliaryModelManager.$scopedEngines`:
-/// visible only inside the `withEnabled` body and the structured tasks it spawns (task groups,
-/// `async let`), so a fake-lane run through `execute`/`run` leaves the process exactly as it
-/// found it the moment that call returns — nothing to reset, nothing for a later suite to inherit.
+/// visible inside the `withEnabled` body and every task it spawns — including an *unstructured*
+/// `Task { ... }`, not only a task group's children or an `async let`. Swift copies the creating
+/// task's task-locals into a plain `Task {}` the same way; `SubagentManager` depends on exactly
+/// this when it starts a subagent's engine loop from inside a fake-lane run
+/// (`Task { await engine.processInput(...) }`, `SubagentManager.swift` ~126), which must see the
+/// same `HeadlessMode.isEnabled` its parent does. Only `Task.detached` breaks the chain — see below.
+///
+/// Because of that inheritance, a fake-lane run through `execute`/`run` leaves the process exactly
+/// as it found it the moment `withEnabled`'s body returns — nothing to reset, nothing for a later
+/// suite to inherit.
 ///
 /// `withEnabled` is bound at the CLI entry point itself, wrapping everything from there to that
 /// call's return. For the real `iris --bench` / `iris --perf run` processes that span is, in
 /// practice, the entire remaining process run — `main.swift` exits right after — so this reads
-/// identically to the old process-global flag for real CLI behavior. The one thing a task-local
-/// does NOT cover is a `Task.detached` spawned inside that call tree: a detached task starts a new
-/// task tree and does not inherit `$scoped`. None of today's detached tasks in that path
-/// (`ToolExecutor`'s file-I/O helpers, `AppState`'s store-write/ledger tasks) read `isEnabled` or
-/// re-derive a `KeychainManager`/`ConversationStore` singleton — they operate on an instance
-/// already resolved inside the scope — but a new detached task on this path must be checked
-/// against the readers below before assuming it sees headless mode.
+/// identically to the old process-global flag for real CLI behavior. The one thing this scope does
+/// NOT cover is a `Task.detached` spawned inside that call tree: it starts an unrelated task tree
+/// and does not inherit `$scoped`. None of today's detached tasks in that path (`ToolExecutor`'s
+/// file-I/O helpers, `AppState`'s store-write/ledger tasks) read `isEnabled` or re-derive a
+/// `KeychainManager`/`ConversationStore` singleton — they operate on an instance already resolved
+/// inside the scope — but a new detached task on this path must be checked against the readers
+/// below before assuming it sees headless mode.
 ///
 /// Readers, and where each gets its value:
 ///   - `KeychainManager.usesInMemoryStore` — computed once, at `KeychainManager.shared`'s first

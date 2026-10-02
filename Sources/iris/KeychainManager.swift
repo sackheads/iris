@@ -16,8 +16,8 @@ public final class KeychainManager: @unchecked Sendable {
     /// persists — macOS re-prompts for the login password on every SecItem call, which blocks
     /// headless test runs. XCTest is only linked into the test bundle, never the shipping app,
     /// so its presence is a reliable "running under tests" signal. `HeadlessMode` extends the
-    /// same in-memory behavior to the `--bench` CLI, which is an identically ad-hoc-signed
-    /// `swift run` binary that would otherwise block on a Keychain prompt.
+    /// same in-memory behavior to the `--bench` CLI and `--perf run`'s fake lane, both identically
+    /// ad-hoc-signed `swift run` binaries that would otherwise block on a Keychain prompt.
     let usesInMemoryStore = NSClassFromString("XCTestCase") != nil || HeadlessMode.isEnabled || KeychainManager.headlessBypassRequested
 
     /// Set by `--perf` for a real-lane run whose provider needs no Keychain secret (Gemini over

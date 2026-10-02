@@ -795,8 +795,10 @@ struct GuardedFileCacheTests {
     }
 
     /// Fix round 1, item 4: the signal that distinguishes old from new for USER.md, independent of
-    /// `HeadlessMode` (which the counting-mock tests above have to guard against — see their
-    /// comments). `assembly.userProfile`'s span is recorded only when `guardedUserProfileText()`
+    /// `HeadlessMode` — which the counting-mock tests above no longer need to guard against
+    /// (#318): the flag is task-scoped now, and nothing in this file ever enters that scope, so it
+    /// reads `false` throughout regardless of what ran earlier in the process.
+    /// `assembly.userProfile`'s span is recorded only when `guardedUserProfileText()`
     /// actually performs a guard pass; a cache hit returns before `measureSpan` is ever entered, so
     /// the pre-Task-7 code (which always performs the pass) fails this on turn 2. Captured via
     /// `PerformanceProfiler`'s task-scoped `runSink` (its own invariant-7 seam, mirroring

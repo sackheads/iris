@@ -34,6 +34,22 @@ struct RunJobCLITests {
                        usageMetadata: nil)
     }
 
+    /// Samples `HeadlessMode.isEnabled` from inside the live model call — the only place a
+    /// task-local scope is actually visible. Reading `isEnabled` after `RunJobCLI.run` returns (as
+    /// this suite used to) can never catch a regression: `HeadlessMode.withEnabled`'s scope closes
+    /// the moment its body returns, which is before `run` hands control back to its caller, so a
+    /// `run` that wrapped itself in `withEnabled` would still read `false` afterward. Sampling
+    /// during the call is the only way to tell the two apart (#318 fix round 1).
+    final class HeadlessProbingLLMClient: LLMClientProtocol, @unchecked Sendable {
+        private let inner: FakeLLMClient
+        private(set) var sawHeadlessDuringCall = false
+        init(responses: [GeminiResponse]) { inner = FakeLLMClient(responses: responses) }
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            if HeadlessMode.isEnabled { sawHeadlessDuringCall = true }
+            return try await inner.generateContent(request: request, tier: tier)
+        }
+    }
+
     private func callResponse(_ name: String, _ args: [String: JSONValue]) -> GeminiResponse {
         GeminiResponse(candidates: [Candidate(content: Content(
             role: "model", parts: [Part(functionCall: FunctionCall(name: name, args: args))]))],
@@ -489,19 +505,23 @@ struct RunJobCLITests {
         #expect(cards.contains { $0.runId == run.id && $0.status == .completed })
     }
 
-    @Test("a CLI run touches neither HeadlessMode nor the volatile defaults")
+    @Test("a CLI run never executes inside a headless scope, and touches no volatile defaults")
     func aRunLeavesTheProcessGlobalsAlone() async throws {
         let store = try ConversationStore.inMemory()
         let job = self.job(name: "quiet")
         try store.ledger.upsert(job)
+        let client = HeadlessProbingLLMClient(responses: [textResponse("ok")])
         let code = await RunJobCLI.run(RunJobCLI.Invocation(target: "quiet"), store: store,
-                                       client: FakeLLMClient(responses: [textResponse("ok")]),
+                                       client: client,
                                        lockPath: lockPath(), protectionEnabled: false,
                                        out: { _ in }, err: { _ in })
         #expect(code == RunJobCLI.Exit.completed)
-        // The three switches a headless *profiling* run flips, and the reason approvals in a
-        // `--run-job` fire fail closed exactly as they do unattended (§8).
-        #expect(!HeadlessMode.isEnabled)
+        // Sampled from inside the model call (see `HeadlessProbingLLMClient`), not after `run`
+        // returns: `HeadlessMode` is now a task-local scope rather than a flag that flips and stays
+        // flipped, so the only reliable witness is a reader still inside the call tree while the
+        // scope would be active. This is the switch that keeps a `--run-job` fire's approvals
+        // fail-closed exactly as they are unattended (§8).
+        #expect(!client.sawHeadlessDuringCall, "a --run-job call must never execute inside a headless scope")
         #expect(!IrisDefaults.isVolatileCopy)
         #expect(!IrisPaths.isVolatileCopy)
     }

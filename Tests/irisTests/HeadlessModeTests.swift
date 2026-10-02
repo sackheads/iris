@@ -53,15 +53,18 @@ struct HeadlessModeTests {
         #expect(sawEnabledInChild)
     }
 
-    /// By design: a task-local is only visible to the task that set it and the structured children
-    /// that task spawns (task groups, `async let`). `Task.detached` starts an unrelated task tree,
-    /// so it does not inherit `$scoped` even when started from inside `withEnabled`'s body — this
-    /// mirrors `CoreMLEvaluator.$scopedModel` and `AuxiliaryModelManager.$scopedEngines`, which have
-    /// the same gap. Today's detached tasks on the CLI entry points' call path (`ToolExecutor`'s
-    /// file-I/O helpers, `AppState`'s store-write and ledger tasks) never read `HeadlessMode.isEnabled`
-    /// or re-derive a `KeychainManager`/`ConversationStore` singleton, so none of them are affected —
-    /// but a future detached task on that path would silently read the process default (`false`)
-    /// instead of the CLI's intent, exactly the hazard AGENTS invariant 7 calls out for task-locals.
+    /// By design: a task-local is visible to the task that set it and every task it spawns,
+    /// *including* a plain unstructured `Task { ... }` (Swift copies the creating task's
+    /// task-locals into it) — but NOT a `Task.detached`, which starts an unrelated task tree with
+    /// no inherited context. This mirrors `CoreMLEvaluator.$scopedModel` and
+    /// `AuxiliaryModelManager.$scopedEngines`, which have the same gap; AGENTS invariant 7 doesn't
+    /// spell this particular case out, but it's the same family of "a scope doesn't reach where you
+    /// assumed it would" hazard those seams exist to guard against. Today's detached tasks on the
+    /// CLI entry points' call path (`ToolExecutor`'s file-I/O helpers, `AppState`'s store-write and
+    /// ledger tasks) never read `HeadlessMode.isEnabled` or re-derive a
+    /// `KeychainManager`/`ConversationStore` singleton, so none of them are affected — but a future
+    /// detached task on that path would silently read the process default (`false`) instead of the
+    /// CLI's intent.
     @Test("a detached task started inside the scope does not inherit it")
     func detachedTaskDoesNotInherit() async {
         var sawInsideDetached: Bool?
@@ -69,5 +72,56 @@ struct HeadlessModeTests {
             sawInsideDetached = await Task.detached { HeadlessMode.isEnabled }.value
         }
         #expect(sawInsideDetached == false)
+    }
+
+    // MARK: - The CLI entry points actually enter the scope (fix round 1, item 3)
+    //
+    // The tests above cover the seam in isolation; they would stay green even if someone deleted
+    // the `HeadlessMode.withEnabled` call from `BenchCLI.run` or `PerfCLI.execute`'s fake lane,
+    // since nothing exercises those entry points. `BenchCLI.runScenario` and
+    // `PerfCLI.runSuiteRespectingLane` are the halves of each entry point that make the
+    // fake/not-fake decision and enter the scope — extracted so these tests can call them directly
+    // without also calling `IrisDefaults.useVolatileCopyOfStandard()`, a separate process-wide
+    // latch (#324) that neither `run` nor `execute` resets and that no test may trip.
+
+    @MainActor
+    @Test("BenchCLI's fake lane actually enters the headless scope")
+    func benchCLIFakeLaneEntersScope() async {
+        let probe = HeadlessProbingLLMClient(responses: [
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "done")]))], usageMetadata: nil)
+        ])
+        // `clientOverride` wins over `scenario.clientMode`, so the probe answers directly —
+        // `defaultScenario`'s own `scriptedResponses` are never consulted.
+        _ = await BenchCLI.runScenario(BenchCLI.defaultScenario, clientOverride: probe)
+        #expect(probe.sawHeadlessDuringCall)
+    }
+
+    @MainActor
+    @Test("PerfCLI's fake-lane suite actually enters the headless scope")
+    func perfCLIFakeLaneEntersScope() async throws {
+        let probe = HeadlessProbingLLMClient(responses: [
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "Canberra.")]))], usageMetadata: nil)
+        ])
+        let suite = PerfSuite(name: "scope-probe", lane: .fake, repetitions: 1, rungs: [5],
+                              scenarios: ["perf/prompts/fake/text-only.json"])
+        let code = try await PerfCLI.runSuiteRespectingLane(suite, repetitionsOverride: 1,
+                                                            out: FileManager.default.temporaryDirectory
+                                                                .appendingPathComponent("iris-perfcli-scope-\(UUID().uuidString)").path,
+                                                            dumpRequestsDir: nil, client: probe)
+        #expect(code == 0)
+        #expect(probe.sawHeadlessDuringCall)
+    }
+}
+
+/// Samples `HeadlessMode.isEnabled` from inside a live model call. See
+/// `RunJobCLITests.HeadlessProbingLLMClient` for the same pattern and the reason sampling must
+/// happen during the call rather than by reading `isEnabled` afterward.
+private final class HeadlessProbingLLMClient: LLMClientProtocol, @unchecked Sendable {
+    private let inner: FakeLLMClient
+    private(set) var sawHeadlessDuringCall = false
+    init(responses: [GeminiResponse]) { inner = FakeLLMClient(responses: responses) }
+    func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+        if HeadlessMode.isEnabled { sawHeadlessDuringCall = true }
+        return try await inner.generateContent(request: request, tier: tier)
     }
 }
