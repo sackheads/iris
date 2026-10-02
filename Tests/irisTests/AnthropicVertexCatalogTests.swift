@@ -63,7 +63,7 @@ struct AnthropicVertexCatalogTests {
                     Data(#"{"error":{"code":404,"message":"not found"}}"#.utf8))
         }) { session in
             let catalog = ModelCatalog(provider: .anthropic, apiKey: "", baseURL: "",
-                                       anthropicVertex: AnthropicVertexTarget(project: "p", location: "us-east5"), session: session)
+                                       anthropicVertex: AnthropicVertexTarget(project: "test-project", location: "us-east5"), session: session)
             return try await catalog.listModels(adcToken: "t")
         }
         #expect(hosts.withLock { $0 } == ["us-east5-aiplatform.googleapis.com"])
@@ -119,6 +119,54 @@ struct AnthropicVertexCatalogTests {
             return try await catalog.listModels(adcToken: "ya29.t")
         }
         #expect(models.map(\.id) == ["claude-sonnet-5"])
+    }
+
+    /// A body regression (a wrong anthropic_version, a probe body that failed to build) makes
+    /// every id answer 400; that must surface, not read as "no Claude models".
+    @Test("when nothing is served and every failure is a 400, the 400 is thrown")
+    func allBadRequestsThrow() async {
+        await withMock({ request in
+            (HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!,
+             Data(#"{"error":{"code":400,"message":"anthropic_version: field required"}}"#.utf8))
+        }) { session in
+            let catalog = ModelCatalog(provider: .anthropic, apiKey: "", baseURL: "", anthropicVertex: Self.target, session: session)
+            do {
+                _ = try await catalog.listModels(adcToken: "ya29.t")
+                Issue.record("expected the 400 to surface")
+            } catch {
+                #expect((error as? APIError)?.statusCode == 400)
+            }
+        }
+    }
+
+    /// Twelve concurrent probes can trip a 429; a rate-limited model is still enabled, so it is
+    /// listed with the failure on it instead of vanishing as if it were not.
+    @Test("a 429 or 5xx beside a 200 is listed as unverified, not dropped")
+    func transientFailuresAreShown() async throws {
+        let models = try await withMock({ request in
+            let id = request.url!.lastPathComponent.replacingOccurrences(of: ":rawPredict", with: "")
+            switch id {
+            case "claude-sonnet-5":
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                        Data(#"{"id":"m","type":"message","role":"assistant","content":[],"usage":{"input_tokens":8,"output_tokens":1}}"#.utf8))
+            case "claude-opus-5":
+                return (HTTPURLResponse(url: request.url!, statusCode: 429, httpVersion: nil, headerFields: nil)!,
+                        Data(#"{"error":{"code":429,"message":"Quota exceeded"}}"#.utf8))
+            case "claude-opus-4-8":
+                return (HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!,
+                        Data(#"{"error":{"code":503,"message":"overloaded"}}"#.utf8))
+            default:
+                return (HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!,
+                        Data(#"{"error":{"code":404,"message":"not found"}}"#.utf8))
+            }
+        }) { session in
+            let catalog = ModelCatalog(provider: .anthropic, apiKey: "", baseURL: "", anthropicVertex: Self.target, session: session)
+            return try await catalog.listModels(adcToken: "ya29.t")
+        }
+        #expect(models.map(\.id) == ["claude-opus-5", "claude-opus-4-8", "claude-sonnet-5"], "catalog order, with the unverified ones kept")
+        #expect(models.first { $0.id == "claude-opus-5" }?.displayName?.contains("429") == true)
+        #expect(models.first { $0.id == "claude-opus-4-8" }?.displayName?.contains("503") == true)
+        #expect(models.first { $0.id == "claude-sonnet-5" }?.displayName == nil)
     }
 
     @Test("a 400 for an id the location rejects drops the id like a 404")

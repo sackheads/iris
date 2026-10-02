@@ -310,14 +310,21 @@ struct ModelCatalog: Sendable {
         }
     }
 
-    /// One one-token `rawPredict` per known id, concurrently, at the configured location. A 200
-    /// means the project can call it there. A 404 (not enabled in Model Garden, or not served at
-    /// this location) and a 400 (an id this location's API rejects) drop the id. A 403 can mean
-    /// either a project-wide problem (wrong project, missing scope) or a per-model one (Vertex
-    /// returns 403 for a model whose publisher terms, such as data sharing, the project has not
-    /// accepted), so the rule is by outcome, not by status: if any probe succeeded the failures
-    /// are per-model and are dropped; if none did and any failure was not a 404/400, that error
-    /// is thrown, so a wrong project reads as the error it is rather than as "no Claude models".
+    /// One one-token `rawPredict` per known id, concurrently, at the configured location. These
+    /// are billed calls, Opus and Fable included, which is why the Settings caption says so.
+    ///
+    /// A 200 means the project can call the model there. The rest is classified by outcome, not
+    /// by status alone, because Vertex uses the same codes for different things:
+    /// - 404: not enabled in Model Garden, or not served at this location → left out.
+    /// - 400: the location's API rejected the id → left out; but if **every** probe was a 400
+    ///   and nothing was served, that is a request-body regression (a wrong `anthropic_version`,
+    ///   a probe body that failed to build) and the 400 is thrown rather than read as "no models".
+    /// - 403: either project-wide (wrong project, missing scope) or per-model (publisher terms
+    ///   such as data sharing not accepted). If anything was served it is per-model and the model
+    ///   is left out; if nothing was, it is thrown.
+    /// - 429 and 5xx: transient. Twelve concurrent probes can trip a 429, and a rate-limited model
+    ///   is still enabled, so when anything was served these are **listed as unverified** with
+    ///   the status on the row rather than vanishing; when nothing was, the first is thrown.
     /// Cancellation stops the remaining probes.
     private func listVertexClaudeModels(target: AnthropicVertexTarget, adcToken: String?) async throws -> [ModelInfo] {
         guard let adcToken, !adcToken.isEmpty else {
@@ -326,7 +333,7 @@ struct ModelCatalog: Sendable {
         let transport = AnthropicTransport.vertex(project: target.project, location: target.location, accessToken: adcToken)
         let probe = GeminiRequest(contents: [Content(role: "user", parts: [Part(text: "hi")])], systemInstruction: nil, tools: nil)
         let known = Self.knownVertexClaudeModels
-        enum Outcome { case served, absent, failed(APIError) }
+        enum Outcome { case served, notServed, rejected(APIError), transient(APIError), failed(APIError) }
         let outcomes: [(Int, Outcome)] = try await withThrowingTaskGroup(of: (Int, Outcome).self) { group in
             for (index, id) in known.enumerated() {
                 group.addTask {
@@ -336,24 +343,38 @@ struct ModelCatalog: Sendable {
                     do {
                         _ = try await performRequest(request, provider: transport.providerLabel)
                         return (index, .served)
-                    } catch let error as APIError where error.statusCode == 404 || error.statusCode == 400 {
-                        return (index, .absent)
                     } catch let error as APIError {
-                        return (index, .failed(error))
+                        switch error.statusCode ?? 0 {
+                        case 404: return (index, .notServed)
+                        case 400: return (index, .rejected(error))
+                        case 429, 500...599: return (index, .transient(error))
+                        default: return (index, .failed(error))
+                        }
                     }
                 }
             }
             var out: [(Int, Outcome)] = []
             for try await outcome in group { out.append(outcome) }
-            return out
+            return out.sorted { $0.0 < $1.0 }
         }
-        let served = outcomes.compactMap { index, outcome -> Int? in if case .served = outcome { return index } else { return nil } }.sorted()
-        if served.isEmpty, let first = outcomes.sorted(by: { $0.0 < $1.0 }).lazy.compactMap({ _, outcome -> APIError? in
-            if case .failed(let error) = outcome { return error } else { return nil }
-        }).first {
-            throw first
+        let anyServed = outcomes.contains { if case .served = $0.1 { return true } else { return false } }
+        if !anyServed {
+            for (_, outcome) in outcomes { if case .failed(let error) = outcome { throw error } }
+            for (_, outcome) in outcomes { if case .transient(let error) = outcome { throw error } }
+            let anyNotServed = outcomes.contains { if case .notServed = $0.1 { return true } else { return false } }
+            if !anyNotServed, let rejected = outcomes.lazy.compactMap({ _, o -> APIError? in if case .rejected(let e) = o { return e } else { return nil } }).first {
+                throw rejected
+            }
+            return []
         }
-        return served.map { ModelInfo(id: known[$0], displayName: nil) }
+        return outcomes.compactMap { index, outcome in
+            switch outcome {
+            case .served: return ModelInfo(id: known[index], displayName: nil)
+            case .transient(let error):
+                return ModelInfo(id: known[index], displayName: "not verified: HTTP \(error.statusCode.map(String.init) ?? "error") — retry")
+            case .notServed, .rejected, .failed: return nil
+            }
+        }
     }
 
     /// The probe body with `max_tokens` lowered to 1: the question is whether the call is

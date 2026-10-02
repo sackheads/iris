@@ -678,7 +678,7 @@ final class AnthropicClientTests: XCTestCase {
         }
         do {
             _ = try await AnthropicClient.generateContent(request: request, model: "claude-sonnet-5",
-                                                          transport: .vertex(project: "p", location: "us-east5", accessToken: "t"))
+                                                          transport: .vertex(project: "test-project", location: "us-east5", accessToken: "t"))
             XCTFail("expected a 404")
         } catch let error as APIError {
             XCTAssertEqual(error.statusCode, 404)

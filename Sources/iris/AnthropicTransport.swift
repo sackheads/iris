@@ -34,11 +34,13 @@ enum AnthropicTransport: Equatable, Sendable {
             && location.allSatisfy { $0.isASCII && ($0.isLowercase || $0.isNumber || $0 == "-") }
     }
 
-    /// A project id is lowercase letters, digits and hyphens (legacy domain-scoped ids also carry
-    /// `.` and `:`); it is a path segment, so a slash, `?` or `#` must never reach the URL.
+    /// The GCP project-id grammar: 6 to 30 characters, lowercase letters, digits and hyphens,
+    /// starting with a letter and not ending with a hyphen; legacy domain-scoped ids carry a
+    /// hostname prefix (`example.com:my-project`), which is labels joined by single dots. It is a
+    /// path segment, so nothing else may reach the URL.
     static func isValidProject(_ project: String) -> Bool {
-        !project.isEmpty && project.count <= 64
-            && project.allSatisfy { $0.isASCII && ($0.isLowercase || $0.isNumber || $0 == "-" || $0 == "." || $0 == ":") }
+        let pattern = /^(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*:)?[a-z][a-z0-9-]{4,28}[a-z0-9]$/
+        return project.wholeMatch(of: pattern) != nil
     }
 
     /// The transport the Anthropic provider is configured for. `accessToken` is only called in

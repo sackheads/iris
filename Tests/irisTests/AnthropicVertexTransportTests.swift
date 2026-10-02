@@ -36,14 +36,14 @@ struct AnthropicVertexTransportTests {
     @Test("multi-region and regional locations pick their own hosts")
     func locationHosts() throws {
         let us = try AnthropicClient.makeURLRequest(request: Self.request, model: "claude-sonnet-5",
-                                                    transport: .vertex(project: "p", location: "us", accessToken: "t"), stream: false)
+                                                    transport: .vertex(project: "test-project", location: "us", accessToken: "t"), stream: false)
         #expect(us.url?.host == "aiplatform.us.rep.googleapis.com")
         #expect(us.url?.path.contains("/locations/us/") == true)
         let eu = try AnthropicClient.makeURLRequest(request: Self.request, model: "claude-sonnet-5",
-                                                    transport: .vertex(project: "p", location: "eu", accessToken: "t"), stream: false)
+                                                    transport: .vertex(project: "test-project", location: "eu", accessToken: "t"), stream: false)
         #expect(eu.url?.host == "aiplatform.eu.rep.googleapis.com")
         let regional = try AnthropicClient.makeURLRequest(request: Self.request, model: "claude-sonnet-4-6",
-                                                          transport: .vertex(project: "p", location: "us-east5", accessToken: "t"), stream: false)
+                                                          transport: .vertex(project: "test-project", location: "us-east5", accessToken: "t"), stream: false)
         #expect(regional.url?.host == "us-east5-aiplatform.googleapis.com")
         #expect(regional.url?.path.contains("/locations/us-east5/") == true)
     }
@@ -106,7 +106,7 @@ struct AnthropicVertexTransportTests {
         }
         #expect(throws: (any Error).self) {
             _ = try AnthropicClient.makeURLRequest(request: Self.request, model: "m",
-                                                   transport: .vertex(project: "p", location: "global", accessToken: ""), stream: false)
+                                                   transport: .vertex(project: "test-project", location: "global", accessToken: ""), stream: false)
         }
     }
 
@@ -134,7 +134,7 @@ struct AnthropicVertexTransportTests {
         for location in ["foo.example.com/x?", "US-EAST5", "us east5", "", "global#"] {
             #expect(throws: (any Error).self, "location \(location.debugDescription)") {
                 _ = try AnthropicClient.makeURLRequest(request: Self.request, model: "m",
-                                                       transport: .vertex(project: "p", location: location, accessToken: "t"), stream: false)
+                                                       transport: .vertex(project: "test-project", location: location, accessToken: "t"), stream: false)
             }
         }
         for project in ["bad/project", "p?x=1", "P"] {
@@ -144,12 +144,18 @@ struct AnthropicVertexTransportTests {
             }
         }
         #expect(AnthropicTransport.isValidProject("example.com:legacy-project"))
+        #expect(AnthropicTransport.isValidProject("gke-claude-dev"))
         #expect(AnthropicTransport.isValidLocation("europe-west1"))
+        // The GCP project-id grammar: 6-30 chars, starts with a letter, no trailing hyphen; a
+        // domain-scoped prefix is a hostname, so no empty labels.
+        for bad in ["a..b:proj-ect", "-leading", "trailing-", "short", "9starts-with-digit", "has_underscore", "UPPER-case-id", ".dot:proj-ect"] {
+            #expect(!AnthropicTransport.isValidProject(bad), Comment(rawValue: bad))
+        }
     }
 
     @Test("errors name Vertex AI and the location, so a 404 reads as 'not served here'")
     func providerLabel() {
-        #expect(AnthropicTransport.vertex(project: "p", location: "us-east5", accessToken: "t").providerLabel == "Anthropic (Vertex AI, us-east5)")
+        #expect(AnthropicTransport.vertex(project: "test-project", location: "us-east5", accessToken: "t").providerLabel == "Anthropic (Vertex AI, us-east5)")
         #expect(AnthropicTransport.direct(apiKey: "k", baseURL: "").providerLabel == "Anthropic")
     }
 
