@@ -132,6 +132,21 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// #185 -- what this session advertises to peers. Nil until the session describes itself.
     var sessionCard: SessionCard?
 
+    /// Sticky taint (#187 §0.5, structural ruling): true once this conversation has received ANY
+    /// peer-delivered content — an idle `send_to_session` delivery, one queued behind a busy turn
+    /// (whether later drained as its own turn or consumed as a mid-turn steer), or a steer. Never
+    /// cleared once set. Set ONLY by `IrisEngine`'s genuine peer-delivery code paths
+    /// (`deliverSanitizedSystemEvent`'s idle branch, `queuePeerArrival`'s busy branch) — never by
+    /// matching on message text — so it cannot be spoofed by a user or a model writing text that
+    /// merely *looks* like a peer arrival (the same framing, the same "System Event [peer_session]"
+    /// prefix): those still go through the ordinary `appendMessage(role: .user, ...)` /
+    /// `appendMessage(role: .agent, ...)` paths, which never touch this flag. Replaces three rounds
+    /// of per-turn `isPeer` threading (`processInput`'s `isPeer` parameter, `peerSteerInjectedThisTurn`)
+    /// that each left a path open — a restart, a nested continuation, a sibling turn clearing shared
+    /// per-turn state — because the taint lived in transient state instead of being derived from
+    /// what persists.
+    var hasPeerContent: Bool = false
+
     /// #185 -- surfaced from the store column of the same name (`ConversationStore.swift`), which
     /// every upsert already writes with `Date()`. Was write-only in memory before this: no
     /// property decoded it back, so it existed only as an ORDER BY clause the search path used.
@@ -152,7 +167,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasPeerContent
     }
 
     init(from decoder: Decoder) throws {
@@ -188,6 +203,9 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         // sessionCard key at all, and a missing key must decode as "uncarded", not throw.
         sessionCard = try container.decodeIfPresent(SessionCard.self, forKey: .sessionCard)
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        // Invariant 1: a conversation persisted before this ruling has no such key, and absent
+        // means "never touched by a peer", the correct default.
+        hasPeerContent = try container.decodeIfPresent(Bool.self, forKey: .hasPeerContent) ?? false
         // Migration: a legacy conversation that had a goal (activeGoal) but no contract is
         // upgraded to a locked single-qualitative-criterion contract so in-flight goals survive.
         if goalContract == nil, let legacy = activeGoal {
@@ -1652,7 +1670,7 @@ class AppState {
                     inlineParts = processed.inlineParts
                 }
 
-                await engine.processInput(promptForEngine, source: "UI", conversationId: convId, inlineParts: inlineParts, isPeer: isPeer)
+                await engine.processInput(promptForEngine, source: "UI", conversationId: convId, inlineParts: inlineParts)
 
                 if shouldReflect {
                     if let idx = conversations.firstIndex(where: { $0.id == convId }) {
@@ -1661,20 +1679,16 @@ class AppState {
                     }
                     let reflectionPrompt = "System Event [Reflection Trigger]: It's time to consolidate your memories. Reflect on the recent conversation. Have you learned any new user preferences, project structures, or recurring workflows? If so, use `update_soul` to evolve your persona, `update_user_profile` to update the user profile, `update_memory` to consolidate durable facts, and `create_skill`/`update_skill` for procedural skills. When you learn something durable — a lesson, recipe, decision, or reusable artifact — archive it to your permanent library at `~/.iris/memory/library/` (see your Library Management skill). Output a transparent summary of the gist of the updates for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'"
                     appendMessage(role: .system, content: "Triggering automatic memory reflection...", to: convId)
-                    // Residual-fix audit (#187 §0.5): same reasoning as the turn above — a
-                    // continuation of it, not a fresh request, and schedule_job/register_directory_
-                    // watcher are declared on this turn like any other (reflection carries no
-                    // special tool-list exclusion).
-                    await engine.processInput(reflectionPrompt, source: "System", conversationId: convId, isPeer: isPeer)
+                    await engine.processInput(reflectionPrompt, source: "System", conversationId: convId)
                 } else if shouldRename {
                     let renamePrompt = "System Event [Rename Trigger]: Evaluate the conversation history and use the `rename_conversation` tool to assign a short, descriptive title (1-4 words) that captures the true gist of this conversation."
                     appendMessage(role: .system, content: "Triggering automatic conversation rename...", to: convId)
-                    await engine.processInput(renamePrompt, source: "System", conversationId: convId, isPeer: isPeer)
+                    await engine.processInput(renamePrompt, source: "System", conversationId: convId)
                 }
             }
         } else {
             runThinkingTask(conversationId: convId) { [self] in
-                await engine.processInput(text, source: "UI", conversationId: convId, isPeer: isPeer)
+                await engine.processInput(text, source: "UI", conversationId: convId)
             }
         }
     }
@@ -1715,6 +1729,20 @@ class AppState {
             }
             markChanged(conversationId, .messagesAppended(from: conversations[idx].messages.count - 1))
         }
+    }
+
+    /// #187 §0.5 structural ruling: marks `conversationId` as having received peer content — the
+    /// sticky taint `executeFunctionCall`'s job-creation gate reads. Called ONLY from `IrisEngine`'s
+    /// two genuine peer-delivery code paths (`deliverSanitizedSystemEvent`'s idle branch,
+    /// `queuePeerArrival`'s busy branch, which covers both a later drain into its own turn and
+    /// consumption as a mid-turn steer) — never from anything that matches on message text, so a
+    /// user or a model writing something that merely looks like a peer arrival never sets this.
+    /// A no-op once already set: the taint never clears.
+    func markConversationTouchedByPeer(_ conversationId: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              !conversations[idx].hasPeerContent else { return }
+        conversations[idx].hasPeerContent = true
+        markChanged(conversationId, .metadata)
     }
 
     /// A launch-time system line, persisted like any other message but written at most once per

@@ -468,6 +468,15 @@ final class ConversationStore: Sendable {
                 t.add(column: "sandboxGrant", .text)
             }
         }
+        // #187 §0.5 structural ruling: the sticky peer-content taint. One boolean column, NULL for
+        // every conversation that predates it, which reads back as false — "never touched by a
+        // peer", the correct default for a conversation that has none of the rows this flag would
+        // have been set from.
+        m.registerMigration("v13_peer_content") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "hasPeerContent", .boolean)
+            }
+        }
         return m
     }
 
@@ -684,24 +693,25 @@ final class ConversationStore: Sendable {
                     messageCountSinceReflection = ?, goalIterationCount = ?, mainAgentSandbox = ?,
                     tokenUsage = ?, goalContract = ?, subagentResult = ?, checkpointHistory = ?,
                     lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?,
-                    isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?
+                    isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
+                    hasPeerContent = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  history, evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
-                                 c.jobProfile?.rawValue, grant, c.id.uuidString])
+                                 c.jobProfile?.rawValue, grant, c.hasPeerContent, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
                 INSERT INTO conversations (id, position, title, createdAt, updatedAt, workspacePath, activeGoal,
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
-                    isBackground, isPinned, sessionCard, jobProfile, sandboxGrant)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasPeerContent)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
-                                 c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant])
+                                 c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasPeerContent])
         }
     }
 
@@ -990,6 +1000,18 @@ final class ConversationStore: Sendable {
                 case .unconvertible:
                     print("WARNING: unreadable isPinned for conversation \(id); defaulting to unpinned")
                     c.isPinned = false
+                }
+                // #187 §0.5 structural ruling: degrades to false (untainted) like the flags above.
+                // The narrow direction here is "false" — a conversation a garbled flag cost its
+                // taint is read as never having one, same as a pre-migration row with NULL — never
+                // "true", which would gate job creation in a conversation that may never have had
+                // peer content at all.
+                switch Self.readBool(row, "hasPeerContent") {
+                case .null: c.hasPeerContent = false
+                case .value(let v): c.hasPeerContent = v
+                case .unconvertible:
+                    print("WARNING: unreadable hasPeerContent for conversation \(id); defaulting to untainted")
+                    c.hasPeerContent = false
                 }
 
                 // #187 deliverable 3 — degrades like the flags above rather than costing the
