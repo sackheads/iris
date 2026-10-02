@@ -296,6 +296,25 @@ struct ApproveAndRunTests {
         #expect(card.offersApproval, "a human click overrides a DENY; it does not skip the evaluation")
     }
 
+    @Test("with Vibecop off the card offers the click and carries no verdict (#334)")
+    func vibecopOffCardHasNoVerdict() async throws {
+        let (_, state, engine) = try harness()
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        config.enableVibecop = false
+        let runner = JobRunner(state: state, engine: engine, ledger: try ConversationStore.inMemory().ledger,
+                               endSandboxSession: { _ in }, config: config, sandboxAvailable: { true })
+        let spy = SpyVibecop(decision: "DENY")
+        let call = BlockedCall(toolName: "run_command", args: ["command": .string("rm -rf x")], reason: .approval)
+
+        let offer = await AuxiliaryModelManager.$scopedEngines.withValue(["vibecop": spy]) {
+            await runner.approvalOffer(for: call, job: job())
+        }
+        #expect(offer.refusal == nil, "the click is still offered")
+        #expect(offer.verdict == nil && offer.reason == nil, "off is no verdict, not an APPROVE beside the button")
+        #expect(spy.calls == 0)
+    }
+
     @Test("nothing is asked of Vibecop for a call no click can approve")
     func vibecopIsNotConsultedForAProfileDenial() async throws {
         let (store, state, engine) = try harness([

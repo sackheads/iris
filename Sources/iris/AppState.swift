@@ -2336,16 +2336,19 @@ class AppState {
             if decision.decision == "DENY" { return false }
             // ESCALATE → fall through to the user prompt.
         }
+        // nil — Vibecop off, failed or timed out — decides nothing: the user prompt does (#334).
 
         return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
                                          conversationId: conversationId, origin: origin)
     }
 
-    /// Vibecop, bounded by a timeout so a wedged local model can't hang the turn. nil means the
-    /// evaluation failed or timed out (fail open to the user prompt).
+    /// Vibecop, bounded by a timeout so a wedged local model can't hang the turn. nil means
+    /// Vibecop is off, or the evaluation failed or timed out: no verdict, so the user prompt decides.
     /// Uses adaptive timeout: if the Ollama model is cold (unloaded), give it 30s to load.
     private func consultVibecop(toolName: String, details: String, workspace: String?, inSandbox: Bool,
                                 callerRole: VibecopCallerRole, allowedCommands: [String], vibecopEnabled: Bool?) async -> VibecopDecision? {
+        // Off is checked before the Ollama warm-up probe below, which would otherwise build an engine for nothing.
+        guard vibecopEnabled ?? ConfigManager.shared.enableVibecop else { return nil }
         do {
             let configuredTimeout = Double(ConfigManager.shared.vibecopTimeoutSeconds)
             let engineType = AuxiliaryEngineType(rawValue: ConfigManager.shared.vibecopEngine) ?? .llamaCPP

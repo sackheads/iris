@@ -51,12 +51,13 @@ final class VibecopService: @unchecked Sendable {
 
     /// `vibecopEnabled` overrides the settings gate; nil consults the config, which is what
     /// production always does. Injectable so tests never mutate `ConfigManager.shared`.
+    ///
+    /// nil when Vibecop is off: no pre-screen, so no decision. Never a stand-in APPROVE — that
+    /// let every gated call through unasked on a default install (#334).
     func evaluateAction(toolName: String, details: String, workspace: String?, inSandbox: Bool = false,
                         callerRole: VibecopCallerRole = .agent, allowedCommands: [String] = [],
-                        vibecopEnabled: Bool? = nil) async throws -> VibecopDecision {
-        guard vibecopEnabled ?? ConfigManager.shared.enableVibecop else {
-            return VibecopDecision(decision: "APPROVE", reason: "Vibecop is disabled in settings.")
-        }
+                        vibecopEnabled: Bool? = nil) async throws -> VibecopDecision? {
+        guard vibecopEnabled ?? ConfigManager.shared.enableVibecop else { return nil }
         
         let manager = AuxiliaryModelManager.shared
         

@@ -2275,14 +2275,16 @@ actor IrisEngine {
     /// neither reviewer sees.
     ///
     /// Static, and taking the state it needs, so the decision itself (`GateScriptReview.review`)
-    /// stays testable without an engine.
-    private static func gateScriptReview(state: AppState?, conversationId: UUID?) -> GateScriptReview {
+    /// stays testable without an engine. `vibecopEnabled` is nil in production (the setting
+    /// decides); a test passes it so it never touches `ConfigManager.shared` (invariant 7).
+    static func gateScriptReview(state: AppState?, conversationId: UUID?,
+                                 vibecopEnabled: Bool? = nil) -> GateScriptReview {
         GateScriptReview(
             verdict: { details in
                 guard let state else { return nil }
                 return await state.vibecopVerdict(
                     for: BlockedCall(toolName: "run_command", args: ["command": .string(details)]),
-                    inSandbox: true, vibecopEnabled: nil)
+                    inSandbox: true, vibecopEnabled: vibecopEnabled)
             },
             ask: { details in
                 // The ordinary dialog, not `requestApproval`: that would consult Vibecop a second
