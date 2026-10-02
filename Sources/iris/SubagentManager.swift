@@ -175,9 +175,9 @@ final class SubagentManager: @unchecked Sendable {
         if termination.status == .completed, let unit, unit.grade {
             // The directory the subagent actually worked in. With no bound workspace its
             // run_command inherits the process cwd, so the grader is pointed at the same place.
-            let workspace = await MainActor.run {
+            let workspace = GoalEvaluator.gradingDirectory(await MainActor.run {
                 appState.conversations.first { $0.id == subagentId }?.workspacePath
-            } ?? FileManager.default.currentDirectoryPath
+            })
             verdict = await GoalEvaluator.shared.evaluate(contract: unit.contract, workspace: workspace,
                                                           originatingConversationId: subagentId,
                                                           app: appState, client: client ?? LLMClient(),

@@ -2057,9 +2057,9 @@ class AppState {
     func approveGoalContract(for conversationId: UUID, _ draft: GoalContract, paths: IrisPaths = .default) {
         guard conversations.contains(where: { $0.id == conversationId }) else { return }
         bindGoalWorkspace(for: conversationId, contract: draft, paths: paths)
-        // The grader's own fallback when nothing is bound (`gradeWorkspace` in IrisEngine).
-        let workspace = conversations.first(where: { $0.id == conversationId })?.workspacePath
-            ?? FileManager.default.currentDirectoryPath
+        // The directory the grader will run in, by the grader's own rule.
+        let workspace = GoalEvaluator.gradingDirectory(
+            conversations.first(where: { $0.id == conversationId })?.workspacePath)
         setGoalContract(for: conversationId, draft.humanApproved(workspace: workspace))
     }
 

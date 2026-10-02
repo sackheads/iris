@@ -892,7 +892,7 @@ actor IrisEngine {
         let autoAdvance = checkpointAutoAdvanceOverride ?? ConfigManager.shared.checkpointAutoAdvance
         let localState = state
         let projected = contract.projectedContract(throughMilestone: contract.currentMilestone)
-        let gradeWorkspace = workspacePath ?? FileManager.default.currentDirectoryPath
+        let gradeWorkspace = GoalEvaluator.gradingDirectory(workspacePath)
         await MainActor.run {
             localState?.recordCompletionSelfReport(for: conversationId, statusJSON: statusReport)
             localState?.beginGoalEvaluation(for: conversationId, contract: projected)
@@ -3114,7 +3114,7 @@ actor IrisEngine {
             // in the same place. When no workspace is bound, run_command inherits the process cwd
             // (it never sets currentDirectoryURL), so fall back to that same path — otherwise the
             // grader is dropped context-free and roams the filesystem looking for the artifacts.
-            let gradeWorkspace = workspacePath ?? FileManager.default.currentDirectoryPath
+            let gradeWorkspace = GoalEvaluator.gradingDirectory(workspacePath)
             // Snapshot the pending evaluation and the self-report BEFORE grading; the gate decides
             // whether the goal is cleared at all.
             await MainActor.run {

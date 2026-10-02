@@ -246,10 +246,9 @@ struct GoalContract: Codable, Equatable, Sendable {
               IrisPaths.canonicalPath(workingDirectory) == approvedWorkspace else { return false }
         let trimmed = Self.trimmedCheck(command)
         guard !trimmed.isEmpty, !trimmed.containsHiddenCharacters else { return false }
-        let wanted = Array(trimmed.utf8)
         let current = criteria.compactMap { $0.kind == .executable ? $0.check.map(Self.trimmedCheck) : nil }
-        return current.contains { Array($0.utf8) == wanted }
-            && approvedChecks.contains { Array($0.utf8) == wanted }
+        return current.contains { $0.utf8.elementsEqual(trimmed.utf8) }
+            && approvedChecks.contains { $0.utf8.elementsEqual(trimmed.utf8) }
     }
 
     var isLocked: Bool { state == .locked }
