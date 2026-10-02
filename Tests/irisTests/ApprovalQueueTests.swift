@@ -78,17 +78,28 @@ struct ApprovalQueueTests {
             .write(to: paths.permissionsJSON)
         app.permissions = PermissionManager(paths: paths)
 
-        let ordinary = await app.requestApproval(toolName: "note_tool", details: "demo", workspace: nil)
+        let cid = UUID()
+        let ordinary = await app.requestApproval(toolName: "note_tool", details: "demo",
+                                                 workspace: nil, conversationId: cid)
         #expect(ordinary == true)
         #expect(app.pendingApprovals.isEmpty)
 
-        async let gated = app.requestApproval(toolName: "note_tool", details: "demo",
-                                              workspace: nil, humanOnly: true)
+        async let gated = app.requestApproval(toolName: "note_tool", details: "demo", workspace: nil,
+                                              conversationId: cid, humanOnly: true)
         for _ in 0..<200 where app.pendingApprovals.isEmpty {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         #expect(app.pendingApprovals.count == 1, "humanOnly must reach the queue despite the stored rule")
-        app.resolveApproval(.approve)
+        // Fix round 2: the poll above is bounded, but `await gated` below is not — `resolveApproval`
+        // is a no-op on an empty queue, so if the assertion above ever failed (nothing queued),
+        // nothing would resolve the continuation and `await gated` would hang the whole suite
+        // rather than fail this one test. `denyPendingApprovals` is scoped to `cid` and a no-op if
+        // there is nothing queued for it, so either branch leaves the continuation resolved.
+        if app.pendingApprovals.isEmpty {
+            app.denyPendingApprovals(for: cid)
+        } else {
+            app.resolveApproval(.approve)
+        }
         #expect(await gated == true)
     }
 
