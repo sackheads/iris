@@ -127,6 +127,16 @@ struct EvaluatorLockedCheckTests {
         #expect(try await asks(check, approving: [check]), "a newline or control character can hide a tail")
     }
 
+    @Test("the draft panel's warning and the gate agree on which checks always ask", arguments: [
+        check, "./check.sh\nrm -rf x", "./check.sh\u{202E}", "make test", "./check.sh\u{200B}",
+    ])
+    func panelWarningMatchesGate(check: String) {
+        let ws = FileManager.default.temporaryDirectory.path
+        var approved = draft(checks: [check]).humanApproved(workspace: ws)
+        approved.lock()
+        #expect(check.containsHiddenCharacters == !approved.isHumanApprovedCheck(check, workingDirectory: ws))
+    }
+
     @Test("only ASCII space, tab, CR and LF are trimmed: a non-breaking space is part of the word")
     func nonBreakingSpaceAsks() async throws {
         #expect(try await asks("\u{00A0}./check.sh", approving: ["./check.sh"]))

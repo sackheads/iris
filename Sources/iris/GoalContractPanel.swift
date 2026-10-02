@@ -1193,6 +1193,14 @@ private struct CriterionRow: View {
                     .onChange(of: checkText) { _, new in
                         criterion.check = new.isEmpty ? nil : new
                     }
+                // Same test the grader's gate applies, so the note and the behaviour cannot drift.
+                if checkText.containsHiddenCharacters {
+                    Label("This check contains a line break or an invisible character, so the grader will ask you every time before running it.",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .padding(.leading, 138)
+                }
             }
             // Milestone assignment picker (always shown so the user can author the ladder).
             HStack(spacing: 6) {
