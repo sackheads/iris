@@ -1,0 +1,8 @@
+{ "name": "tool-heavy", "clientMode": "real", "tier": "medium",
+  "seedFacts": ["GRANITEWREN collects agates.", "TIDEMARTEN catalogs ferns.", "OSPREYLARK restores harpsichords."],
+  "turns": [
+    { "prompt": "Greet GRANITEWREN in five words." },
+    { "prompt": "For TIDEMARTEN: run `ls`, `pwd`, `whoami`, `date`, `uname -a`, `df -h /`, `echo one`, `echo two`, `echo three`, `echo four`, `echo five`, `echo six` as separate commands, one at a time, then summarize." },
+    { "prompt": "Suggest a hobby for OSPREYLARK in one sentence." },
+    { "prompt": "Name a prime number between 40 and 50." },
+    { "prompt": "Reply with the single word: done." } ] }

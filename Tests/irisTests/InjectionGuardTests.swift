@@ -383,6 +383,74 @@ struct InjectionGuardTests {
         }
     }
 
+    /// `sanitizeCacheable` (5a Task 7 fix round 1): a caller doing its own caching on top of
+    /// `InjectionGuard` (`IrisEngine`'s guarded-file cache) must be able to tell an `.error` block
+    /// — never cached internally, see `testErrorVerdictNotCached` above — from one `InjectionGuard`
+    /// itself would cache, since the two are textually indistinguishable (`"[CONTENT BLOCKED BY
+    /// TIER 3 CANARY GUARD]"` either way).
+    @Test("sanitizeCacheable reports an error block as not cacheable, and a real verdict as cacheable")
+    func testSanitizeCacheableDistinguishesErrorFromCachedVerdict() async throws {
+        let payload = "Cacheability probe \(UUID().uuidString)"
+        let modelsDir = try provisionedModelsDir()
+        defer { try? FileManager.default.removeItem(at: modelsDir) }
+        await CoreMLEvaluator.$scopedModel.withValue(.init(MockCoreMLModel(probability: 0.0))) {
+            await AuxiliaryModelManager.$scopedEngines.withValue(["canary": MockInferenceEngine(shouldHijack: false, shouldThrow: true)]) {
+                let (text, cacheable) = await InjectionGuard.sanitizeCacheable(payload, maxTier: .tier3_canary, protectionEnabled: true, tier3ModelsDir: modelsDir)
+                #expect(text.contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
+                #expect(!cacheable, "a transient error must never be reported as cacheable")
+            }
+            await AuxiliaryModelManager.$scopedEngines.withValue(["canary": MockInferenceEngine(shouldHijack: false)]) {
+                let (text, cacheable) = await InjectionGuard.sanitizeCacheable(payload, maxTier: .tier3_canary, protectionEnabled: true, tier3ModelsDir: modelsDir)
+                #expect(text.contains("Cacheability probe"))
+                #expect(cacheable, "a real passed verdict must be reported as cacheable")
+            }
+            // Third call: the second call cached the verdict inside InjectionGuard itself, so this
+            // is a cache hit — also reported as cacheable (the earlier outcome genuinely was cached).
+            await AuxiliaryModelManager.$scopedEngines.withValue(["canary": MockInferenceEngine(shouldHijack: true)]) {
+                let (text, cacheable) = await InjectionGuard.sanitizeCacheable(payload, maxTier: .tier3_canary, protectionEnabled: true, tier3ModelsDir: modelsDir)
+                #expect(text.contains("Cacheability probe"), "served from InjectionGuard's own cache, not the hijacking mock")
+                #expect(cacheable)
+            }
+        }
+    }
+
+    /// `GuardConfigFingerprint` (5a Task 7 fix round 1): `cacheKey` used to inline `promptGuardEngine`
+    /// / `promptGuardModel` / `promptGuardCoreMLModel` / the models directories as loose locals, and
+    /// `IrisEngine`'s own copy of "what decides the guard's output" (`GuardTextStamp`, before this
+    /// fix) omitted all of them, keeping only the two `Tier2Provisioning`/`Tier3Provisioning` enums.
+    /// `Tier3Provisioning` is `.provisioned` for ANY of `cloud`/`ollama`/`mlx` regardless of model
+    /// name (its own doc comment), so that omission meant switching between two cloud models, or
+    /// between `cloud` and `ollama` outright, looked identical to a stamp that only tracked
+    /// provisioning — a profile guarded under the old model would keep being served after the
+    /// switch. This cannot be driven through a live `ConfigManager.shared` mutation (invariant 7
+    /// forbids it, and `InjectionGuard` has no injectable seam for the model NAME, only for the
+    /// models directory) — so it is pinned directly on the struct and on `currentConfigFingerprint`'s
+    /// read-through to the (unmutated) live config.
+    @Test("GuardConfigFingerprint differs on engine/model identity alone, with identical provisioning")
+    func fingerprintSensitiveToModelIdentityNotJustProvisioning() {
+        let a = InjectionGuard.GuardConfigFingerprint(
+            protectionEnabled: true, promptGuardEngine: "cloud", promptGuardModel: "model-a",
+            promptGuardCoreMLModel: "coreml-a", tier2ModelsDir: "/models", tier3ModelsDir: "/models",
+            tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        let differentModel = InjectionGuard.GuardConfigFingerprint(
+            protectionEnabled: true, promptGuardEngine: "cloud", promptGuardModel: "model-b",
+            promptGuardCoreMLModel: "coreml-a", tier2ModelsDir: "/models", tier3ModelsDir: "/models",
+            tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        let differentEngine = InjectionGuard.GuardConfigFingerprint(
+            protectionEnabled: true, promptGuardEngine: "ollama", promptGuardModel: "model-a",
+            promptGuardCoreMLModel: "coreml-a", tier2ModelsDir: "/models", tier3ModelsDir: "/models",
+            tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        #expect(a != differentModel, "same provisioning, different model name — must be a different guard config")
+        #expect(a != differentEngine, "same provisioning, different engine — must be a different guard config")
+
+        // Read-through check: `currentConfigFingerprint` is actually wired to these three
+        // `ConfigManager.shared` fields, not just capable of holding them. Read-only — never set.
+        let live = InjectionGuard.currentConfigFingerprint(protectionEnabled: true)
+        #expect(live.promptGuardEngine == ConfigManager.shared.promptGuardEngine)
+        #expect(live.promptGuardModel == ConfigManager.shared.promptGuardModel)
+        #expect(live.promptGuardCoreMLModel == ConfigManager.shared.promptGuardCoreMLModel)
+    }
+
 }
 
 final class MockInferenceEngine: AuxiliaryInferenceEngine, @unchecked Sendable {

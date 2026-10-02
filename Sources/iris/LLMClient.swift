@@ -109,13 +109,24 @@ struct LLMClient {
             }
         }
 
-        let encoder = JSONEncoder()
-        encoder.keyEncodingStrategy = .useDefaultKeys
-        let requestData = try encoder.encode(cleanRequest)
-        urlRequest.httpBody = requestData
+        urlRequest.httpBody = try LLMClient.encodeGeminiBody(cleanRequest)
 
         LLMRequestPolicy.apply(to: &urlRequest)
         return urlRequest
+    }
+
+    /// The Gemini wire body is nothing but the request's own JSON encoding (no re-serialisation
+    /// step like Anthropic/OpenAI's schema round-trip), so this is the whole of what
+    /// `makeGeminiURLRequest` sends. Kept as a pure, synchronous, `static` function — unlike the
+    /// rest of that method, it depends on neither `ConfigManager.shared` nor the async ADC
+    /// handshake, so it's testable for byte-stability without touching process-global config
+    /// (AGENTS.md invariant 7). `RequestDump` uses it too, so the dumped and the sent body stay
+    /// in sync.
+    static func encodeGeminiBody(_ request: GeminiRequest) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .useDefaultKeys
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(request)
     }
 
     var supportsStreaming: Bool { true }

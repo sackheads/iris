@@ -69,26 +69,43 @@ read afterwards without committing a secret.
 
 ## The caching suite
 
-`perf/suites/caching.json` runs one real-lane, rung-4 scenario (`perf/prompts/caching/six-turns.json`):
-a scripted six-turn conversation whose `seedFacts` are written, before turn 1, into a fresh
+`perf/suites/caching.json` runs three real-lane, rung-4 scenarios from `perf/prompts/caching/`.
+Each scenario's `seedFacts` are written, before turn 1, into a fresh
 in-memory fact store scoped to that run alone — never the developer's real store and never shared
-across repetitions — so the fact-store block a turn's system prompt carries is deterministic. The
-seeds carry only tokens distinctive enough that no prompt but turn 2's shares one, so the match
-schedule across the six turns is exactly `[false, true, false, false, false, false]`: only turn 2
-matches, and the block appears once, then disappears for good. Turn 3 calls a tool, so it has more
-than one model round. This is the suite that measures today's prompt-cache behavior before the 5a
-behaviour change lands (see `docs/specs/2026-09-30-agency-cacheable-prompts.md` §3); it needs a
-configured provider and is not part of `perf/run.sh`'s default sweep, so run it manually:
+across repetitions — so the fact-store block a turn's request carries is deterministic, and
+`PerfSuiteFilesTests` pins each scenario's match schedule. `six-turns.json` is the best case: its
+seeds carry only tokens distinctive enough that no prompt but turn 2's shares one, so the schedule
+is exactly `[false, true, false, false, false, false]` and the block appears once, then disappears
+for good; turn 3 calls a tool, so it has more than one model round. `every-turn-facts.json` is the
+realistic case: each of its six turns matches its own seed, so the block changes on every turn.
+`tool-heavy.json` has five turns: turns 1, 2 and 3 each match their own seed, and turn 2 runs a
+dozen commands one at a time. Turn 2's entry changes at turn 3 and spans far more than 20 content
+blocks, so turn 3 can read past the system prompt only through the explicit end-of-turn-k−2 marker
+(spec §1; measured old vs new in §3.1). This is the suite that measures prompt-cache behavior across the 5a request
+change (see `docs/specs/2026-09-30-agency-cacheable-prompts.md` §3 for the before/after baselines);
+it needs a configured provider and is not part of `perf/run.sh`'s default sweep, so run it manually:
 `iris --perf run perf/suites/caching.json`.
 
-Once 5a's request change lands (moving the fact block and peer count out of the system prompt and
-into a per-turn block — a later PR; this instrumentation PR changes no request byte), rungs 2 and 3
-will replay a system prompt that no longer holds either, so they will measure the stable prefix only
-and will not be comparable with pre-5a baselines. Anthropic's prompt tokens already jump across this
-PR's boundary, since they now include cached tokens, so compare uncached tokens across it.
+Since 5a's request change landed (the fact block and peer count moved out of the system prompt and
+into a per-turn `<turn_context>` block on the turn's own user entry), rungs 2 and 3 replay a system
+prompt that no longer holds either, so they measure the stable prefix only and are not comparable
+with pre-5a baselines. Anthropic's prompt tokens also jump across the 5a boundary, since they now
+include cached tokens. `--perf compare` accounts for this itself rather than needing a manual
+workaround: "prompt tokens" is the metric the regression gate reads, so on a pair that straddles the
+boundary (one side carries cache counts, the other doesn't) that row is marked informational with an
+explanatory note instead of being flagged, and the separate "uncached prompt tokens" row — always
+informational, since it swings with cache warmth rather than what was sent — is emitted only when
+both sides of the comparison carry cache counts, i.e. never on a straddled pair.
 
-`--dump-requests <dir>` on `iris --perf run` writes each round's request body — the same body the
-client builds, key order aside, until requests are encoded with sorted keys — reusing
+`IRIS_PERF_DECLARE_STATE_TOOLS=1 iris --perf run …` is 5a's tool-list experiment (spec §0.6): the
+state-gated tools (`manage_fact` and the peer tools) are declared on every turn instead of only when
+their state holds. Perf runs pin the peer count to 0, so the peer tools are declared with no
+`# Active Sessions` block. The record says so (`stateGatedToolsAlwaysDeclared`), its recorded tool
+count is the experiment's list, and `--perf compare` on a pair where only one side ran it prints a
+note and marks the prompt-token row informational, since the two sent different tool lists.
+
+`--dump-requests <dir>` on `iris --perf run` writes each round's request body — exactly the body the
+client builds, keys sorted (5a) — reusing
 `AnthropicClient`/`OpenAIClient`'s own `makeURLRequest` builders with the currently configured
 streaming flag (Gemini's body is just the request's own JSON encoding, and streaming or not makes
 no difference to it) — to `<dir>/<scenario>/rung-<N>/<rep>/<turn>-<round>.json`, where `<round>` is
@@ -97,9 +114,9 @@ after a transient failure is named explicitly, `<turn>-<round>-retry<k>.json`, r
 into the next round's slot (5a review F4). The rung is part of the path so a suite that dumps more
 than one rung (e.g. 4 and 5) never has one rung's files overwrite another's. Nothing is sent over
 the network; a placeholder API key is used so the dump works even without configured credentials.
-These are what a byte-prefix diff reads to find exactly where two rounds' requests first differ —
-treat a reordering of the same keys as noise, not a real divergence, until sorted-key encoding
-lands.
+These are what a byte-prefix diff reads to find exactly where two rounds' requests first differ:
+every request-path encoder now sorts keys, so a divergence it finds is real content or prefix
+drift, never key reordering.
 
 ## Reading a record
 

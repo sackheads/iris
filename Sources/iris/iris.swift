@@ -132,9 +132,176 @@ actor IrisEngine {
     /// against its own store. Resolved lazily: forcing `.shared` at construction would open the
     /// process-wide store for every engine ever built, including ones that never touch memory.
     private let injectedFactStore: FactStoreManager?
+    /// 5a's tool-list experiment (spec §0.6): declare the state-gated tools (`manage_fact` and,
+    /// on an attended `.main` turn, the peer tools) on every turn instead of only when their state
+    /// holds, so a perf run can measure what the flapping costs in cache misses. Only
+    /// `iris --perf run` sets it, from `IRIS_PERF_DECLARE_STATE_TOOLS=1`.
+    private let declareStateGatedTools: Bool
     var factStore: FactStoreManager { injectedFactStore ?? .shared }
+    /// 5a Task 7 fix round 1: same idiom as `injectedFactStore`/`factStore`. `MemoryManager` has no
+    /// per-instance seam other than `init(paths:)`, so a test that needs an isolated USER.md/SOUL.md
+    /// constructs its own manager and hands it here, instead of mutating the process-global
+    /// `MemoryManager.shared.paths` (invariant 7).
+    private let injectedMemory: MemoryManager?
+    var memory: MemoryManager { injectedMemory ?? .shared }
 
     var systemPrompt: Content!
+
+    /// Everything that decides what the guard OUTPUTS for a given file's content, besides the
+    /// content itself (5a Task 7). The cached text below is guard output, not raw file content, so
+    /// a profile guarded under one configuration must never be served under another. `config` IS
+    /// `InjectionGuard`'s own cache-key fingerprint (fix round 1) — not a hand-maintained parallel
+    /// copy of its fields, which drifted the first time (it omitted the guard model names and the
+    /// models directory, so swapping guard models without touching protection-enabled would not
+    /// have missed this cache). Reusing the same type is what makes the "mirrors" claim true rather
+    /// than aspirational.
+    private struct GuardTextStamp: Equatable {
+        let modified: Date?
+        let config: InjectionGuard.GuardConfigFingerprint
+    }
+
+    private func currentGuardTextStamp(modified: Date?) -> GuardTextStamp {
+        GuardTextStamp(modified: modified, config: InjectionGuard.currentConfigFingerprint(protectionEnabled: protectionEnabled))
+    }
+
+    /// Modification date for a guarded file, following symlinks (5a Task 7) — an
+    /// `AGENTS.md -> CLAUDE.md` link must refresh when its TARGET is edited, not only when the link
+    /// itself is re-pointed. `FileManager.attributesOfItem(atPath:)` is `lstat` and stops at the
+    /// link, which is why this goes through `resolvingSymlinksInPath()` + `resourceValues` instead
+    /// (#307 relies on exactly that distinction elsewhere). `nil` for a missing or unreadable file
+    /// is itself a valid, stable stamp value, not an error to retry.
+    private static func fileModificationDate(atPath path: String) -> Date? {
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        return try? resolved.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+    }
+
+    /// `USER.md`'s guard-output cache (5a Task 7). `path` is tracked alongside the stamp, not just
+    /// the stamp alone, so a change to WHERE `MemoryManager` reads USER.md from — never happens
+    /// today — still misses the cache rather than serving another path's guarded text.
+    /// `invalidateUserProfile()` clears this for the engine that ran `update_user_profile`; the
+    /// mtime comparison in `guardedUserProfileText()` is what notices the file changed for every
+    /// OTHER engine reading the same USER.md — a subagent, an evaluator, or another conversation's
+    /// main engine — none of which saw that tool call and none of which this method can reach.
+    private var profileStamp: (path: String, stamp: GuardTextStamp)?
+    private var cachedProfileText: String?
+
+    /// `AGENTS.md`'s guard-output cache, per workspace path (5a Task 7). A workspace path absent
+    /// from `agentsStamp` means "not checked yet, or the file was missing last time" — both compare
+    /// unequal to any stamp with a real `modified` date, so a file that newly appears is read on the
+    /// very next check.
+    private var agentsStamp: [String: GuardTextStamp] = [:]
+    private var cachedAgentsText: [String: String] = [:]
+
+    /// The fully composed system prompt (base + USER.md + AGENTS.md), per workspace (5a Task 7).
+    /// Keyed on the three already-deduplicated inputs rather than re-deriving a stamp of its own:
+    /// concatenation is pure, so equal inputs guarantee an equal result, and this layer can never
+    /// drift from what `guardedUserProfileText`/`guardedAgentsMdText` already decided was unchanged.
+    private var composedPromptCache: [String: (base: String, profile: String, agents: String?, content: Content)] = [:]
+
+    /// Sentinel key for `composedPromptCache`/`agentsStamp` when a conversation has no bound
+    /// workspace — distinct from any real path, including the empty string.
+    private static let noWorkspaceCacheKey = "\u{0}iris-no-workspace\u{0}"
+
+    /// USER.md, sanitized and guarded, cached until the file's content changes, the protection
+    /// setting changes, or a guard tier's provisioning state changes (5a Task 7, invariant 6/#130).
+    /// Reads the path and the content from the same `memory` manager in this one place, so the
+    /// stamp and the text it guards can never come from two different `MemoryManager`s.
+    private func guardedUserProfileText() async -> String {
+        let manager = memory
+        let path = manager.paths.userMd.path
+        let stamp = currentGuardTextStamp(modified: Self.fileModificationDate(atPath: path))
+        if let existing = profileStamp, existing.path == path, existing.stamp == stamp,
+           let cached = cachedProfileText {
+            return cached
+        }
+        let userProfile = manager.getUserProfile()
+        let (safeUserProfile, cacheable) = await measureSpan("assembly.userProfile") {
+            let structural = PromptInjectionGuard.sanitizeUntrustedInput(userProfile)
+            return await InjectionGuard.sanitizeCacheable(structural, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+        }
+        // A transient guard error (fix round 1) is shown for THIS turn but never cached: caching it
+        // would pin the user's profile as blocked for every later turn of a long-lived main engine
+        // until something else happens to invalidate the stamp. Leaving `profileStamp` untouched
+        // means the very next call sees "nothing cached for this stamp" and retries.
+        if cacheable {
+            profileStamp = (path, stamp)
+            cachedProfileText = safeUserProfile
+        }
+        return safeUserProfile
+    }
+
+    /// Clears the USER.md guard-output cache. Called by the `update_user_profile` handler so the
+    /// engine that just rewrote the file does not keep serving the text it guarded before the
+    /// write. Every other engine reading the same USER.md never calls this — the mtime check in
+    /// `guardedUserProfileText()` is what covers them, on their own next turn.
+    func invalidateUserProfile() {
+        profileStamp = nil
+        cachedProfileText = nil
+    }
+
+    /// The workspace's `AGENTS.md`, sanitized and guarded, cached per workspace path until its
+    /// content changes (including through a symlink target), the protection setting changes, or a
+    /// guard tier's provisioning state changes (5a Task 7). `nil` means no file at that path right
+    /// now — a conversation with no `AGENTS.md` costs nothing beyond the one stat per turn.
+    private func guardedAgentsMdText(workspacePath: String?) async -> String? {
+        guard let wp = workspacePath else { return nil }
+        let agentsMdPath = Self.expandTilde(wp)
+        let fullPath = (agentsMdPath as NSString).appendingPathComponent("AGENTS.md")
+        guard let modified = Self.fileModificationDate(atPath: fullPath) else {
+            // No file (or unreadable): nothing to cache, and this absence IS the stamp — drop
+            // whatever was recorded while a file existed here on an earlier turn.
+            agentsStamp.removeValue(forKey: wp)
+            cachedAgentsText.removeValue(forKey: wp)
+            return nil
+        }
+        let stamp = currentGuardTextStamp(modified: modified)
+        if agentsStamp[wp] == stamp, let cached = cachedAgentsText[wp] {
+            return cached
+        }
+        guard let agentsMdContent = try? String(contentsOfFile: fullPath, encoding: .utf8) else {
+            agentsStamp.removeValue(forKey: wp)
+            cachedAgentsText.removeValue(forKey: wp)
+            return nil
+        }
+        let (safeAgentsMd, cacheable) = await measureSpan("assembly.agentsMd") {
+            let structural = PromptInjectionGuard.sanitizeUntrustedInput(agentsMdContent)
+            return await InjectionGuard.sanitizeCacheable(structural, contextTag: "workspace_rules", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+        }
+        // Same rule as `guardedUserProfileText`: a transient error is shown this turn but never
+        // recorded, so the next turn retries instead of serving a permanently-blocked workspace.
+        if cacheable {
+            agentsStamp[wp] = stamp
+            cachedAgentsText[wp] = safeAgentsMd
+        }
+        return safeAgentsMd
+    }
+
+    /// The per-turn system prompt: the cached base from `ensureSystemPrompt()` plus USER.md and the
+    /// bound workspace's `AGENTS.md`, both re-read only when they actually change (5a Task 7). The
+    /// composed result is itself cached per workspace so two unchanged turns hand back the identical
+    /// `Content` value — what keeps the provider's prompt cache hitting (5a §0.2).
+    private func assembledSystemPrompt(workspacePath: String?) async -> Content {
+        let base = await ensureSystemPrompt()
+        guard let baseText = base.parts.first?.text else { return base }
+        let profileText = await guardedUserProfileText()
+        let agentsText = await guardedAgentsMdText(workspacePath: workspacePath)
+        let key = workspacePath ?? Self.noWorkspaceCacheKey
+
+        if let cached = composedPromptCache[key], cached.base == baseText,
+           cached.profile == profileText, cached.agents == agentsText {
+            return cached.content
+        }
+
+        var text = baseText + "\n\n# User Profile (USER.md)\n" + profileText
+        if let agentsText {
+            text += "\n\n# Project Workspace Rules (AGENTS.md)\n" + agentsText
+        }
+        var composed = base
+        composed.parts[0].text = text
+        composedPromptCache[key] = (baseText, profileText, agentsText, composed)
+        return composed
+    }
+
     var modelTier: ModelTier
     let principal: Principal
     let roleLabel: String?
@@ -217,11 +384,12 @@ actor IrisEngine {
     /// parameter, so a delegated call never appears in the dump (5a review F4).
     private let requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false) {
         self.state = state
         self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
         self.injectedFactStore = factStore
+        self.injectedMemory = memory
         self.modelTier = tier
         self.principal = principal
         self.roleLabel = roleLabel
@@ -232,6 +400,7 @@ actor IrisEngine {
         self.checkpointAutoAdvanceOverride = checkpointAutoAdvance
         self.sessionPeerCountOverride = sessionPeerCount
         self.requestDumpSink = requestDumpSink
+        self.declareStateGatedTools = declareStateGatedTools
         systemPrompt = nil
     }
 
@@ -269,7 +438,10 @@ actor IrisEngine {
         if let existing = systemPrompt { return existing }
         return await measure(.contextAssembly) {
             await measureSpan("assembly.systemPrompt") {
-                let soul = await manager.loadSOUL()
+                // `paths: memory.paths` (5a Task 7 fix round 1): a test that injects an isolated
+                // `MemoryManager(paths:)` to pin USER.md must get SOUL.md from the same root too,
+                // not from the process-global `IrisPaths.default` `loadSOUL` defaults to.
+                let soul = await manager.loadSOUL(paths: memory.paths)
                 let activeBundle = SkillBundleManager.shared.activeBundle
                 let skills = await manager.discoverSkills(activeBundle: activeBundle)
                 let steering = SystemSteering.shipped()
@@ -886,6 +1058,17 @@ actor IrisEngine {
         }
     }
 
+    /// Every request of a turn is built here, so each round carries the same turn-context block
+    /// on the same entry (5a §1); `history` itself never sees it. A broken anchor is reported once.
+    private func requestContents(_ history: [Content], from list: TurnRequest.HistoryList, _ turn: inout TurnRequest,
+                                 conversationId: UUID) async -> [Content] {
+        let (contents, firstDrop) = turn.contents(for: history, from: list)
+        if firstDrop {
+            await pushToUI(role: .system, text: "turn context omitted from this request: the turn's entry changed", conversationId: conversationId)
+        }
+        return contents
+    }
+
     /// Everything that arrived while the last round was running, into history, at a round
     /// boundary: the user's mid-task messages first (#172), then the event lines for cards
     /// delivered mid-turn (#187 §8.3). Returns whether anything was added, which is the caller's
@@ -1117,47 +1300,28 @@ actor IrisEngine {
         var history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
         let workspacePath = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.workspacePath }
         
-        var currentSystemPrompt = await ensureSystemPrompt()
-        
-        let userProfile = MemoryManager.shared.getUserProfile()
-        
+        // USER.md and AGENTS.md are re-read and re-guarded only when they actually change — by
+        // content (via modification date, following symlinks), by the protection setting, or by a
+        // guard tier's provisioning state (5a Task 7). An unchanged turn gets back the identical
+        // `Content` it got last time, keeping the system prompt byte-stable for the provider's
+        // prompt cache (5a §0.2).
+        let currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath)
+
         let facts = measureSpanSync("assembly.factSearch") {
             (try? factStore.search(query: input, limit: 5)) ?? []
         }
-        
+
         if !facts.isEmpty {
             try? factStore.reinforceFacts(ids: facts.map { $0.id })
         }
-        
-    if let textPart = currentSystemPrompt.parts.first?.text {
-        // Append USER.md first (mostly static)
-        let safeUserProfile = await measureSpan("assembly.userProfile") {
-            let structural = PromptInjectionGuard.sanitizeUntrustedInput(userProfile)
-            return await InjectionGuard.sanitize(structural, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
-        }
-        currentSystemPrompt.parts[0].text = textPart + "\n\n# User Profile (USER.md)\n" + safeUserProfile
-    }
-        
-        if let wp = workspacePath {
-            let agentsMdPath = (wp as NSString).expandingTildeInPath
-            let fullPath = (agentsMdPath as NSString).appendingPathComponent("AGENTS.md")
-            if let agentsMdContent = try? String(contentsOfFile: fullPath, encoding: .utf8) {
-                if let textPart = currentSystemPrompt.parts.first?.text {
-                    // Append AGENTS.md next (static per workspace)
-                    let safeAgentsMd = await measureSpan("assembly.agentsMd") {
-                        let structural = PromptInjectionGuard.sanitizeUntrustedInput(agentsMdContent)
-                        return await InjectionGuard.sanitize(structural, contextTag: "workspace_rules", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
-                    }
-                    currentSystemPrompt.parts[0].text = textPart + "\n\n# Project Workspace Rules (AGENTS.md)\n" + safeAgentsMd
-                }
-            }
-        }
-        
-        if !facts.isEmpty, let textPart = currentSystemPrompt.parts.first?.text {
+
+        // Per-turn content rides this turn's own entry in the request, not the system prompt, so the
+        // cached prefix (tools, system, older history) stays byte-stable across turns (5a §0.2).
+        var turnContext = TurnContext(sections: [])
+        if !facts.isEmpty {
             // The ids go in so `manage_fact` — offered only on these turns — has something to name.
             let factString = facts.map { "- [\($0.id)] \($0.content)" }.joined(separator: "\n")
-            // Append Fact Store Memory last (highly volatile, changes per query)
-            currentSystemPrompt.parts[0].text = textPart + "\n\n# Mid-Term Fact Store Memory (JIT Context)\n" + factString
+            turnContext.sections.append(.init(heading: "Mid-Term Fact Store Memory (JIT Context)", body: factString))
         }
 
         // Read once for the gates below that all ask about this conversation: whether it is an
@@ -1175,10 +1339,11 @@ actor IrisEngine {
         // session either (see the declaration gate below), so it skips the count too — a roster it
         // may not act on is prompt weight, and the hop is work for a value it discards.
         let peerCount = (principal == .main && !isUnattended) ? await sessionPeerCount(excluding: conversationId) : 0
-        if principal == .main, peerCount > 0, let textPart = currentSystemPrompt.parts.first?.text {
+        if principal == .main, peerCount > 0 {
             // #185 §6: one line, never a roster. Detail is available on demand through
             // `list_sessions`; a per-peer list would grow with session count and churn every turn.
-            currentSystemPrompt.parts[0].text = textPart + "\n\n\(peerCount) other session\(peerCount == 1 ? " is" : "s are") active."
+            turnContext.sections.append(.init(heading: "Active Sessions",
+                                              body: "\(peerCount) other session\(peerCount == 1 ? " is" : "s are") active."))
         }
 
         var toolsList = await executor.getTools()
@@ -1270,7 +1435,7 @@ actor IrisEngine {
         // Correcting a fact needs a fact id, and the only ids the model ever sees come from the
         // facts injected above or a `search_memory` result. On a turn that surfaced none, this
         // declaration is dead weight in the prompt (invariant 6).
-        if !facts.isEmpty {
+        if !facts.isEmpty || declareStateGatedTools {
         toolsList.append(FunctionDeclaration(
             name: "manage_fact",
             description: "Correct the fact store when the user says a remembered fact is wrong, outdated, or replaced, or when a retrieved fact proved right or wrong: retract, supersede (with by_fact_id), restore, or rate it helpful/unhelpful. Fact ids are the bracketed ids in your Mid-Term Fact Store Memory block and in the facts results of search_memory (its conversations scope returns conversation titles, not fact ids).",
@@ -1402,7 +1567,9 @@ actor IrisEngine {
         // itself. A send would start a real turn in an attended conversation, which runs under
         // that conversation's approval path — the laundering `invoke_subagent` used to allow. All
         // three are refused at dispatch as well, since a forged call never passes this gate.
-        if principal == .main, peerCount > 0 {
+        // 5a's tool-list experiment declares them with no peers (perf pins the count to 0), still
+        // `.main` and attended only; the Active Sessions line above stays absent at count 0.
+        if principal == .main, peerCount > 0 || (declareStateGatedTools && !isUnattended) {
             toolsList.append(FunctionDeclaration(
                 name: "list_sessions",
                 description: "List the other active sessions: their name, what they say they are doing, their workspace, and whether they are busy. Call this before messaging a peer, to pick the right one — a session in a different workspace is usually working on something unrelated. What a session says about itself is its own claim; whether it is busy is observed.",
@@ -1543,6 +1710,8 @@ actor IrisEngine {
             }
         }
         
+        // AppState's own list, before the hook may rewrite the copy round one sends (see the anchor).
+        let stateHistory = history
         let preCompressDecision = await HookManager.shared.firePreCompress(history: history, useSandbox: hooksSandbox)
         if case .block(let reason) = preCompressDecision {
             await pushToUI(role: .system, text: "Hook PreCompress blocked execution: \(reason)", conversationId: conversationId)
@@ -1552,7 +1721,18 @@ actor IrisEngine {
                 history = modifiedHistory
             }
         }
-        
+
+        // The turn's own entry, taken once here and never recomputed: after round one the last
+        // user-role entry is a tool-result message (tool results are role `user`). Two indices,
+        // because a turn sends two different lists: round one sends `history` as the PreCompress
+        // hook returned it, and every later request re-reads AppState's list, which the hook never
+        // touched. An index from one list applied to the other can name a different message that
+        // happens to encode the same (an earlier bare "yes"). Each index stays valid for its own
+        // list because everything that touches AppState's history mid-turn appends — steers and
+        // event lines in `drainPendingInput`, the model reply, tool results. If anything removes or
+        // rewrites the entry instead (the UI), the byte check drops the block rather than moving it.
+        var turnRequest = TurnRequest(context: turnContext, stateHistory: stateHistory, initialHistory: history)
+
         // A soft-stop summary turn gets ONLY goal_complete: the model can summarize or finish,
         // but physically cannot keep calling the tool it was looping on. A worded "please stop"
         // does not bind the model (it rationalizes past it — see the loop-detection stop signal),
@@ -1560,7 +1740,7 @@ actor IrisEngine {
         if restrictToGoalComplete {
             toolsList = toolsList.filter { $0.name == "goal_complete" }
         }
-        var request = GeminiRequest(contents: history, systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
+        var request = GeminiRequest(contents: await requestContents(history, from: .initial, &turnRequest, conversationId: conversationId), systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
         
         // Nothing from a previous turn decides this one: a turn cancelled mid-batch could leave a
         // denial behind, and finding it here would end the next turn before it started.
@@ -1617,7 +1797,7 @@ actor IrisEngine {
                 // `drainPendingInput`, which both this round and the budget stop above go through.
                 if await drainPendingInput(conversationId: conversationId, hooksSandbox: hooksSandbox) {
                     history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
-                    request.contents = history
+                    request.contents = await requestContents(history, from: .state, &turnRequest, conversationId: conversationId)
                 }
 
                 let beforeModelDecision = await HookManager.shared.fireBeforeModel(request: request, useSandbox: hooksSandbox)
@@ -1651,14 +1831,16 @@ actor IrisEngine {
                 // this same round.
                 let roundForDump = modelRound
                 let dumpSink = requestDumpSink
-                let retryAttempt = RetryAttemptCounter()
+                // Only allocated when a dump sink is set: the counter exists purely to name a
+                // retry for the dump, and normal use (no sink) should do no extra work per call.
+                let retryAttempt = dumpSink != nil ? RetryAttemptCounter() : nil
                 let outcome = try await LLMRetry.run(delays: retryDelays, onRetry: { error, attempt, delay in
-                    retryAttempt.set(attempt)
+                    retryAttempt?.set(attempt)
                     await self.pushToUI(role: .system,
                                         text: "[retry] \(error.message); retrying in \(Self.formatDelay(delay)) (attempt \(attempt) of \(self.retryDelays.count))",
                                         conversationId: conversationId)
                 }) {
-                    dumpSink?(requestToSend, roundForDump, retryAttempt.get())
+                    dumpSink?(requestToSend, roundForDump, retryAttempt?.get() ?? 0)
                     return try await measure(.primaryLLM) {
                         try await self.consumeModelStream(request: requestToSend, streamed: streamed, streamer: streamer)
                     }
@@ -1830,7 +2012,7 @@ actor IrisEngine {
                     let functionResponse = Content(role: "user", parts: responseParts)
                     await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: functionResponse) }
                     history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
-                    request.contents = history
+                    request.contents = await requestContents(history, from: .state, &turnRequest, conversationId: conversationId)
 
                     // Loop detection: if the same tool call repeats too many times, stop early.
                     if await MainActor.run(body: { localState?.conversations.first(where: { $0.id == conversationId })?.activeGoal != nil }) {
@@ -2830,14 +3012,15 @@ actor IrisEngine {
                 PromptInjectionGuard.sanitizeUntrustedInput(blocks.joined(separator: "\n\n")),
                 contextTag: "tool_output_search_memory", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         } else if functionCall.name == "update_user_profile", let content = functionCall.args["content"]?.stringValue {
-            MemoryManager.shared.updateUserProfile(content: content)
+            memory.updateUserProfile(content: content)
+            invalidateUserProfile()   // 5a Task 7: this engine must not keep serving the pre-write guarded text
             result = "User profile updated."
         } else if functionCall.name == "update_soul", let content = functionCall.args["content"]?.stringValue {
-            MemoryManager.shared.updateSoul(content: content)
+            memory.updateSoul(content: content)
             systemPrompt = nil   // invalidate cache so the new SOUL loads next turn
             result = "Soul updated. It will take effect on the next turn."
         } else if functionCall.name == "update_memory", let content = functionCall.args["content"]?.stringValue {
-            MemoryManager.shared.updateMemory(content: content)
+            memory.updateMemory(content: content)
             result = "Memory updated."
         } else if functionCall.name == "reflect" {
             result = "Reflection logged. Proceed with your next action."
@@ -3522,7 +3705,7 @@ extension IrisEngine {
                 parameters: Schema(type: "OBJECT", properties: [:], required: [])),
             FunctionDeclaration(
                 name: "get_job_run",
-                description: "Read back one background job run: how it ended, what it cost, and the last thing the run itself said. Use it when the user asks about a run an event card mentioned — the card names the run by the first eight characters of its id, which is enough.",
+                description: "Read back one background job run: how it ended, how many tokens it sent (tokens sent, not billed cost), and the last thing the run itself said. Use it when the user asks about a run an event card mentioned — the card names the run by the first eight characters of its id, which is enough.",
                 parameters: Schema(type: "OBJECT", properties: [
                     "run_id": Schema(type: "STRING", description: "The run's id, or the first eight or more characters of it as an event card shows.")
                 ], required: ["run_id"])),

@@ -294,4 +294,39 @@ struct PerfCompareTests {
         #expect(PerfCompare.render(c, threshold: 0.2).contains("cache"), "the note reaches the rendered report")
         #expect(PerfCompare.exitCode(c) == 0, "the straddle note explains the only row that moved; the gate must not fail on it")
     }
+
+    /// The tool-list experiment changes what is sent, so a pair where only one side ran it is not
+    /// like-for-like on prompt size. Compare still runs (the latency rows are valid), but says so
+    /// and keeps the prompt-token row from failing the gate (5a final review item 3).
+    @Test("records that differ in the tool-list experiment get a note and an informational prompt-token row")
+    func experimentMismatchIsNotedAndInformational() {
+        let baseCall = ModelCallRecord(round: 0, model: "m", latencyMs: 100, promptTokens: 1000, outputTokens: 3,
+                                       returnedToolCalls: false, cacheReadTokens: 0, cacheWriteTokens: 0)
+        var base = record(medianMs: 100)
+        base.scenarios[0].rungs = [rung([baseCall])]
+        base.cacheCountsVersion = 1
+
+        let currCall = ModelCallRecord(round: 0, model: "m", latencyMs: 100, promptTokens: 1400, outputTokens: 3,
+                                       returnedToolCalls: false, cacheReadTokens: 0, cacheWriteTokens: 0)
+        var curr = record(medianMs: 100)
+        curr.scenarios[0].rungs = [rung([currCall])]
+        curr.cacheCountsVersion = 1
+        curr.environment.stateGatedToolsAlwaysDeclared = true
+
+        let c = PerfCompare.compare(baseline: base, current: curr, threshold: 0.2)
+        #expect(c.refusal == nil, "a note, not a refusal")
+        let prompt = c.rows.first { $0.metric == "prompt tokens" }
+        #expect(prompt?.before == 1000 && prompt?.after == 1400)
+        #expect(prompt?.flagged == false)
+        #expect(c.notes.contains { $0.contains("IRIS_PERF_DECLARE_STATE_TOOLS") })
+        #expect(PerfCompare.render(c, threshold: 0.2).contains("IRIS_PERF_DECLARE_STATE_TOOLS"))
+        #expect(PerfCompare.exitCode(c) == 0)
+
+        // Same setting on both sides (true/true): no note, and the row flags as usual.
+        var base2 = base
+        base2.environment.stateGatedToolsAlwaysDeclared = true
+        let c2 = PerfCompare.compare(baseline: base2, current: curr, threshold: 0.2)
+        #expect(c2.notes.isEmpty)
+        #expect(c2.flagged.map(\.metric) == ["prompt tokens"])
+    }
 }

@@ -30,9 +30,11 @@ struct SessionToolsTests {
         return client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? []
     }
 
-    /// Same harness as `toolNames`, but reads the system-prompt TEXT actually carried on the
-    /// captured request instead of the declared tool names — the count line lives in the prompt,
-    /// not the tool list.
+    /// Same harness as `toolNames`, but reads the prompt TEXT actually carried on the captured
+    /// request instead of the declared tool names. Since 5a the count line rides the turn's own
+    /// entry (its `<turn_context>` part), not the system prompt, so both are read: a line that
+    /// slipped back into the system prompt would still be found and fail the "absent" checks,
+    /// and `countLineOnTurnEntry` pins that it is not there.
     private func systemPromptText(principal: Principal = .main, sessionPeerCount: Int? = nil,
                                   prepare: (AppState, UUID) -> Void = { _, _ in }) async -> String {
         let app = AppState()
@@ -44,7 +46,25 @@ struct SessionToolsTests {
         let engine = IrisEngine(state: app, tier: .medium, principal: principal, client: client,
                                 retryDelays: [], sessionPeerCount: sessionPeerCount)
         await engine.processInput("hello", source: "UI", conversationId: id)
-        return client.requests.first?.systemInstruction?.parts.compactMap(\.text).joined() ?? ""
+        let request = client.requests.first
+        let system = request?.systemInstruction?.parts.compactMap(\.text).joined() ?? ""
+        let turnEntry = request?.contents.first?.parts.compactMap(\.text).joined() ?? ""
+        return system + "\n" + turnEntry
+    }
+
+    @Test("the standing count line rides the turn's entry, not the system prompt (5a)")
+    func countLineOnTurnEntry() async {
+        let app = AppState()
+        let id = UUID()
+        app.conversations.removeAll()
+        app.createNewConversation(id: id)
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], sessionPeerCount: 2)
+        await engine.processInput("hello", source: "UI", conversationId: id)
+        let request = client.requests.first
+        #expect(request?.systemInstruction?.parts.compactMap(\.text).joined().contains("other session") == false)
+        #expect(request?.contents.first?.parts.first?.text?.contains("2 other sessions are active.") == true)
     }
 
     @Test("the standing count line is singular for exactly one peer")

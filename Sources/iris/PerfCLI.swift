@@ -140,9 +140,12 @@ enum PerfCLI {
                     }
                 }
                 let dumpDir = dumpRequestsDir.map { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : root.appendingPathComponent($0) }
+                // 5a's tool-list experiment: read here, at the entry point, and passed down; never a global.
+                let declareStateTools = ProcessInfo.processInfo.environment["IRIS_PERF_DECLARE_STATE_TOOLS"] == "1"
+                if declareStateTools { print("perf: EXPERIMENT — declaring state-gated tools (manage_fact, peer tools) on every turn") }
                 let record = try await PerfRunner.run(suite: suite, repetitionsOverride: reps, repoRoot: root,
                                                       headless: suite.lane == .fake, workspacePath: scratch?.path,
-                                                      dumpRequestsDir: dumpDir)
+                                                      dumpRequestsDir: dumpDir, declareStateGatedTools: declareStateTools)
                 print(PerfReport.render(record))
                 let dir = out.hasPrefix("/") ? URL(fileURLWithPath: out) : root.appendingPathComponent(out)
                 let url = try record.write(toDirectory: dir)

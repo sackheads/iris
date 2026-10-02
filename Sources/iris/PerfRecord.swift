@@ -104,6 +104,9 @@ struct PerfEnvironment: Codable {
     var toolSandbox: String? = nil
     /// Whether rungs 4-5 streamed. Informational: compare does not refuse on a mismatch.
     var streaming: Bool? = nil
+    /// 5a's tool-list experiment ran: the state-gated tools (`manage_fact` and the peer tools)
+    /// were declared on every turn. nil on records written before 5a and on ordinary runs.
+    var stateGatedToolsAlwaysDeclared: Bool? = nil
 }
 
 struct PerfScenarioResult: Codable {

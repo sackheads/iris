@@ -12,8 +12,8 @@ struct PerfComparison {
     }
     var refusal: String?
     var rows: [Row]
-    /// Advisory lines that aren't per-row regressions: today, just the cache-count straddle
-    /// warning (5a review #9).
+    /// Advisory lines that aren't per-row regressions: the cache-count straddle warning (5a
+    /// review #9) and a tool-list experiment mismatch.
     var notes: [String] = []
     var flagged: [Row] { rows.filter(\.flagged) }
 }
@@ -43,6 +43,10 @@ enum PerfCompare {
         let currentHasCacheCounts = current.cacheCountsVersion != nil
         let bothHaveCacheCounts = baselineHasCacheCounts && currentHasCacheCounts
         let straddledCacheCounts = baselineHasCacheCounts != currentHasCacheCounts
+        // The tool-list experiment changes what is sent, so prompt size is not like-for-like
+        // when only one side ran it. Latency still is: a note, not a refusal (5a final review).
+        let straddledExperiment = (baseline.environment.stateGatedToolsAlwaysDeclared ?? false)
+            != (current.environment.stateGatedToolsAlwaysDeclared ?? false)
         func row(_ scenario: String, _ rung: Int?, _ metric: String, _ a: Double, _ b: Double, informational: Bool = false) {
             let change = PerfStats.percentChange(from: a, to: b)
             let pastFloor = metric != "median ms" || (b - a) >= minFlaggedDeltaMs
@@ -76,7 +80,7 @@ enum PerfCompare {
                 // side marked), "prompt tokens" rises by the cached portion across the boundary;
                 // that row stays informational too, and a note explains why (5a review F2/F3).
                 if let bt = medianPromptTokens(br), let ct = medianPromptTokens(r) {
-                    row(cur.name, r.rung, "prompt tokens", bt, ct, informational: straddledCacheCounts)
+                    row(cur.name, r.rung, "prompt tokens", bt, ct, informational: straddledCacheCounts || straddledExperiment)
                 }
                 if bothHaveCacheCounts, let bt = medianUncachedTokens(br), let ct = medianUncachedTokens(r) {
                     row(cur.name, r.rung, "uncached prompt tokens", bt, ct, informational: true)
@@ -86,9 +90,13 @@ enum PerfCompare {
                 row(cur.name, nil, "overhead ratio", a, b)
             }
         }
-        let notes = straddledCacheCounts
-            ? ["baseline and current straddle the 5a cache-count change: one side reports cache counts and the other doesn't, so the prompt-token row is informational only."]
-            : []
+        var notes: [String] = []
+        if straddledCacheCounts {
+            notes.append("baseline and current straddle the 5a cache-count change: one side reports cache counts and the other doesn't, so the prompt-token row is informational only.")
+        }
+        if straddledExperiment {
+            notes.append("only one side ran the tool-list experiment (IRIS_PERF_DECLARE_STATE_TOOLS), so the two sent different tool lists and the prompt-token row is informational only.")
+        }
         return PerfComparison(refusal: nil, rows: rows, notes: notes)
     }
 

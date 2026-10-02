@@ -18,13 +18,17 @@ struct LadderSample: Sendable {
 /// Iris adds. Rungs 4 and 5 are ordinary `ScenarioRunner` turns and live in `PerfRunner`.
 enum PerfLadder {
     /// Run one engine turn against a capturing client with guards off, and keep the request it
-    /// built. This is exactly the system prompt and tool list a real turn sends.
+    /// built. This is exactly the system prompt and tool list a real turn sends; under the
+    /// tool-list experiment (`declareStateGatedTools`) that is the experiment's list, so the
+    /// recorded `toolDeclarationCount` and rung 3 match what the scenario turns sent.
     @MainActor
-    static func capture(for scenario: Scenario, workspacePath: String? = nil) async -> LadderCapture {
+    static func capture(for scenario: Scenario, workspacePath: String? = nil,
+                        declareStateGatedTools: Bool = false) async -> LadderCapture {
         let client = CapturingLLMClient(reply: "ok")
         var one = scenario
         one.turns = Array(scenario.turns.prefix(1))
-        _ = await ScenarioRunner.run(one, guards: .off, clientOverride: client, workspacePath: workspacePath)
+        _ = await ScenarioRunner.run(one, guards: .off, clientOverride: client, workspacePath: workspacePath,
+                                     declareStateGatedTools: declareStateGatedTools)
         let request = client.requests.first
         let count = request?.tools?.reduce(0) { $0 + $1.functionDeclarations.count } ?? 0
         return LadderCapture(systemInstruction: request?.systemInstruction, tools: request?.tools, toolCount: count)

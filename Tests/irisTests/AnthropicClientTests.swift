@@ -334,11 +334,9 @@ final class AnthropicClientTests: XCTestCase {
             XCTAssertEqual(modelContent?[0]["name"] as? String, "calculate")
             let input = modelContent?[0]["input"] as? [String: Any]
             XCTAssertEqual(input?["equation"] as? String, "5+5")
-            if let cacheControl = modelContent?[0]["cache_control"] as? [String: Any] {
-                XCTAssertEqual(cacheControl["type"] as? String, "ephemeral")
-            } else {
-                XCTFail("Missing cache_control on penultimate message (tool_use block)")
-            }
+            // One turn entry, at index 0: nothing precedes it, so the only message marker is the
+            // last block (5a final review item 1; see AnthropicCacheBreakpointTests).
+            XCTAssertNil(modelContent?[0]["cache_control"], "a within-turn tool_use is not a turn boundary")
             
             // Turn 3: user tool_result
             XCTAssertEqual(messages[2]["role"] as? String, "user")
@@ -346,7 +344,8 @@ final class AnthropicClientTests: XCTestCase {
             XCTAssertEqual(userContent?.count, 1)
             XCTAssertEqual(userContent?[0]["type"] as? String, "tool_result")
             XCTAssertEqual(userContent?[0]["tool_use_id"] as? String, "call_1")
-            XCTAssertNil(userContent?[0]["cache_control"], "tool_result should not have cache_control")
+            XCTAssertEqual((userContent?[0]["cache_control"] as? [String: Any])?["type"] as? String, "ephemeral",
+                           "the last block is marked even when it is a tool_result (5a §1)")
             
             let responseJson: [String: Any] = [
                 "id": "msg_04",
@@ -500,9 +499,8 @@ final class AnthropicClientTests: XCTestCase {
                 XCTAssertEqual(toolUseBlock["type"] as? String, "tool_use")
                 XCTAssertEqual(toolUseBlock["name"] as? String, "get_weather")
                 
-                // Verify cache_control on the last block of the second message
-                let cacheControl1 = toolUseBlock["cache_control"] as? [String: String]
-                XCTAssertEqual(cacheControl1?["type"], "ephemeral")
+                // A within-turn tool_use is not a turn boundary, so it carries no marker
+                XCTAssertNil(toolUseBlock["cache_control"])
                 
                 // Extract the tool_use_id that was synthesized
                 let synthesizedId = toolUseBlock["id"] as? String
@@ -520,9 +518,9 @@ final class AnthropicClientTests: XCTestCase {
                 XCTAssertEqual(toolResultBlock["type"] as? String, "tool_result")
                 XCTAssertEqual(toolResultBlock["tool_use_id"] as? String, synthesizedId, "tool_result block must match the tool_use_id of the preceding functionCall")
                 
-                // Verify cache_control on the last block of the third message
+                // The last block is marked even when it is a tool_result (5a §1)
                 let cacheControl2 = toolResultBlock["cache_control"] as? [String: String]
-                XCTAssertNil(cacheControl2, "cache_control should be skipped on tool_result blocks")
+                XCTAssertEqual(cacheControl2?["type"], "ephemeral")
                 
                 expectation.fulfill()
             } else {

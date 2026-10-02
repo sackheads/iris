@@ -215,6 +215,21 @@ struct ScenarioRunnerOptionsTests {
         #expect(result.turnProfiles.first?.modelCalls.map(\ModelCallRecord.round) == [0])
     }
 
+    /// `IrisEngine` allocates the retry-attempt counter only when a dump sink is set (task 8,
+    /// carried item 3): with no `dumpRequestsTo`, `requestDumpSink` is nil, so the counter is never
+    /// built and `onRetry` sets nothing. There is no seam to observe the allocation itself without
+    /// adding test-only instrumentation to production code, so this proves the behavior that
+    /// matters instead: a retried round still succeeds, with no dump sink, exactly as it did
+    /// before the counter became conditional.
+    @Test("a retry still succeeds with no dump sink configured (no counter needed)")
+    func retrySucceedsWithNoDumpSink() async throws {
+        let singleTurnScenario = Scenario(name: "single", clientMode: .fake, turns: [Scenario.Turn(prompt: "hi")])
+        let result = await ScenarioRunner.run(singleTurnScenario, clientOverride: FailsOnceThenSucceeds(),
+                                              retryDelays: [0])
+        #expect(result.finalTexts == ["ack"])
+        #expect(result.turnErrors == [nil])
+    }
+
     /// A sanity baseline for the refactor away from the client-wrapping collector (5a review F4):
     /// a plain single-round turn still produces exactly one dump, named by the engine's own round.
     private final class RecordingClient: LLMClientProtocol, @unchecked Sendable {

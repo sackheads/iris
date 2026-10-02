@@ -48,6 +48,20 @@ struct PerfRunnerTests {
         #expect((record.environment.toolDeclarationCount ?? 0) > 10)
     }
 
+    @Test("the recorded tool count under the tool-list experiment includes manage_fact (5a)")
+    func experimentToolCount() async throws {
+        let suite = PerfSuite(name: "x", lane: .fake, repetitions: 1, rungs: [5], scenarios: ["perf/prompts/fake/text-only.json"])
+        let gated = try await PerfRunner.run(suite: suite, repoRoot: root, headless: true)
+        let declared = try await PerfRunner.run(suite: suite, repoRoot: root, headless: true, declareStateGatedTools: true)
+        let scenario = Scenario(name: "cap", clientMode: .real, turns: [Scenario.Turn(prompt: "hello")])
+        let capture = await PerfLadder.capture(for: scenario, declareStateGatedTools: true)
+        let names = capture.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? []
+        #expect(names.contains("manage_fact"))
+        #expect(declared.environment.stateGatedToolsAlwaysDeclared == true)
+        #expect(declared.environment.toolDeclarationCount == capture.toolCount)
+        #expect((declared.environment.toolDeclarationCount ?? 0) > (gated.environment.toolDeclarationCount ?? 0))
+    }
+
     @Test("repetitions override wins over the suite file")
     func repetitionsOverride() async throws {
         let suite = PerfSuite(name: "o", lane: .fake, repetitions: 5, scenarios: ["perf/prompts/fake/text-only.json"])
