@@ -63,11 +63,23 @@ enum BenchCLI {
         // first touched (inside ScenarioRunner.run). Real runs keep Keychain access for auth.
         // Bench runs never write to the user's real preferences.
         IrisDefaults.useVolatileCopyOfStandard()
-        if scenario.clientMode == .fake {
-            HeadlessMode.enable()
-        }
-        let result = await ScenarioRunner.run(scenario)
+        let result = await runScenario(scenario)
         print(BenchSummary.render(scenarioName: scenario.name, result: result))
+    }
+
+    /// Runs `scenario`, entering `HeadlessMode`'s scope first when it's a fake run. Separated from
+    /// `run` so a test can exercise exactly this decision — does the fake lane actually enter the
+    /// scope — without calling `IrisDefaults.useVolatileCopyOfStandard()`, which is its own
+    /// process-wide latch (#324) and not this seam's concern. `clientOverride` exists only for that
+    /// test seam; production never passes it. Scoped to this call's task tree (#318) — see
+    /// `HeadlessMode`. Since this is the process's outermost task and `main.swift` exits right
+    /// after, the scope in practice covers the whole remaining real-CLI run.
+    @MainActor
+    static func runScenario(_ scenario: Scenario, clientOverride: (any LLMClientProtocol)? = nil) async -> ScenarioResult {
+        if scenario.clientMode == .fake {
+            return await HeadlessMode.withEnabled { await ScenarioRunner.run(scenario, clientOverride: clientOverride) }
+        }
+        return await ScenarioRunner.run(scenario, clientOverride: clientOverride)
     }
 }
 

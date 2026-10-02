@@ -127,8 +127,10 @@ Tool approval is auto-granted in the harness (`AppState.autoApproveTools`), so
 
 > **`toggles` caveat:** the three toggles are carried in the schema but are **not
 > wired up** — per-run mutation of the global guard config raced with parallel
-> tests, so guards/hooks are governed process-wide by `HeadlessMode` instead.
-> Leaving them at `false` is correct; setting them `true` has no effect today.
+> tests, so guards/hooks are governed by `HeadlessMode` instead, scoped to the
+> CLI entry point's task tree (`--bench`, fake-lane `--perf run`) rather than
+> process-wide. Leaving them at `false` is correct; setting them `true` has no
+> effect today.
 
 ## Adding a scenario
 

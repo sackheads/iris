@@ -580,10 +580,12 @@ struct SearchMemoryScopeTests {
     }
 
     // The tier itself is deliberately not asserted. A test could show tier 3 failing closed in a
-    // process with no prompt-guard model, but whether that happens depends on `HeadlessMode`, the
-    // CoreML load state and the guard's cache — all process-global and all reachable by whichever
-    // suites happen to run alongside, which made exactly that assertion pass alone and fail in a
-    // combined run. The wrapper is asserted above; the tier is a one-line read at the call site.
+    // process with no prompt-guard model, but whether that happens depends on the CoreML load
+    // state and the guard's cache — both process-global and reachable by whichever suites happen
+    // to run alongside, which made exactly that assertion pass alone and fail in a combined run.
+    // `HeadlessMode` is no longer one of these: it is task-scoped (#318), and this suite never
+    // enters that scope, so it cannot be affected by what another suite did with it. The wrapper
+    // is asserted above; the tier is a one-line read at the call site.
 
     @Test("a failed search is reported as a failure, not as an empty result")
     func storeFailureIsNotSilence() async throws {
