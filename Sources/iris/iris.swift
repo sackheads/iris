@@ -1326,11 +1326,14 @@ actor IrisEngine {
         }
 
         // Read once for the gates below that all ask about this conversation: whether it is an
-        // unattended run, whether it has a goal to complete, and what a job run of it may do.
-        let (isUnattended, hasActiveGoal, jobProfile) = await MainActor.run { () -> (Bool, Bool, JobProfile?) in
+        // unattended run, whether it has a goal to complete, what a job run of it may do, and
+        // whether it is the pinned conversation (5b: gates both the job tools below and the
+        // rename-trigger declaration — a subagent/evaluator conversation is never in
+        // `localState?.conversations` at all, so `isPinned` reads false for them at no extra cost).
+        let (isUnattended, hasActiveGoal, jobProfile, isPinned) = await MainActor.run { () -> (Bool, Bool, JobProfile?, Bool) in
             let conversation = localState?.conversations.first(where: { $0.id == conversationId })
             return (conversation?.isBackground == true, conversation?.activeGoal != nil,
-                    conversation?.jobProfile)
+                    conversation?.jobProfile, conversation?.isPinned == true)
         }
 
         // #185 §6: computed once per turn and reused below for the session-tools declaration
@@ -1370,8 +1373,10 @@ actor IrisEngine {
         
         // Offered only on the rename-trigger turn (`/rename` and the automatic third-message
         // trigger both send this prefix). On plain turns the model renamed unprompted on first
-        // messages, the only tool eagerness the perf suite measured (#132).
-        if input.hasPrefix(Self.renameTriggerPrefix) {
+        // messages, the only tool eagerness the perf suite measured (#132). 5b: never on the
+        // pinned conversation — it is exempt from rename on all four paths (spec §0.2), so the
+        // declaration would be dead weight the model could still be tempted to reach for.
+        if input.hasPrefix(Self.renameTriggerPrefix) && !isPinned {
             toolsList.append(FunctionDeclaration(
                 name: "rename_conversation",
                 description: "Rename the current conversation to a short, descriptive title as instructed by the System Event.",
@@ -1601,13 +1606,9 @@ actor IrisEngine {
         // else. The Activity conversation is the one place a person is already reading about runs,
         // so it is the one place the two declarations earn their prompt tokens; everywhere else
         // they would be a standing cost for a question nobody asked. The gate itself is pure
-        // (`jobToolDeclarations`) so both answers are testable without a turn.
-        // `.main` only, and the ternary rather than an `if` around the hop for the same reason
-        // `peerCount` above uses one: a subagent/evaluator turn should not pay a MainActor hop for
-        // a value it can never act on (its own conversation is never the pinned one).
-        let isPinned = principal == .main ? await MainActor.run {
-            localState?.conversations.first(where: { $0.id == conversationId })?.isPinned == true
-        } : false
+        // (`jobToolDeclarations`) so both answers are testable without a turn. `isPinned` is the
+        // shared read from the preamble tuple above — a subagent/evaluator conversation is never
+        // the pinned one, so this costs it nothing extra.
         toolsList.append(contentsOf: Self.jobToolDeclarations(isPinned: isPinned))
 
         // Main-agent only. A subagent runs against a unit contract the PARENT authored (slice B3);
@@ -2957,8 +2958,10 @@ actor IrisEngine {
                 }
             }
         } else if functionCall.name == "rename_conversation", let newTitle = functionCall.args["title"]?.stringValue {
-            await MainActor.run { localState?.renameConversation(id: conversationId, newTitle: newTitle) }
-            result = "Conversation renamed to '\(newTitle)'."
+            // Not declared on the pinned conversation's turns (above), but a forged or stale call
+            // must still be refused rather than acted on (invariant 6's undeclared-but-safe half).
+            let ok = await MainActor.run { localState?.renameConversation(id: conversationId, newTitle: newTitle) ?? false }
+            result = ok ? "Conversation renamed to '\(newTitle)'." : "Refused — Iris keeps its name."
         } else if functionCall.name == "propose_goal_contract" {
             if let draft = GoalContractParsing.contract(from: functionCall.args) {
                 await MainActor.run { localState?.setDraftContract(for: conversationId, draft) }

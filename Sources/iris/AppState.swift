@@ -1353,12 +1353,17 @@ class AppState {
         case noSuchConversation
         case turnInFlight
         case goalActive
+        /// 5b: archiving the pinned conversation is what `/new` does, in the order that keeps the
+        /// pin valid (spec §0.2, §0.4). Checked last — a pinned conversation mid-turn must still
+        /// report `.turnInFlight`, since Task 8's rotation relies on that ordering.
+        case pinned
 
         var reason: String {
             switch self {
             case .noSuchConversation: return "that conversation no longer exists"
             case .turnInFlight: return "a turn is still running"
             case .goalActive: return "a goal is active — /stop it first"
+            case .pinned: return "Iris can't be archived. Use /new to start a fresh Iris; the current one is archived and stays searchable."
             }
         }
     }
@@ -1371,6 +1376,7 @@ class AppState {
         }
         if hasTurnInFlight(for: conversationId) { return .turnInFlight }
         if conv.activeGoal != nil { return .goalActive }
+        if conv.isPinned { return .pinned }
         return nil
     }
 
@@ -1504,6 +1510,12 @@ class AppState {
             }
             return
         } else if trimmed.hasPrefix("/rename") {
+            // 5b: the pinned conversation is exempt from all four rename paths (spec §0.2); this
+            // is the `/rename` one. No model call — there is nothing to decide.
+            if conversations.first(where: { $0.id == convId })?.isPinned == true {
+                appendMessage(role: .command, content: "Iris keeps its name.", to: convId)
+                return
+            }
             appendMessage(role: .system, content: "Triggering automatic conversation rename...", to: convId)
             let renamePrompt = "System Event [Rename Trigger]: Evaluate the conversation history and use the `rename_conversation` tool to assign a short, descriptive title (1-4 words) that captures the true gist of this conversation."
             runThinkingTask(conversationId: convId) { [self] in
@@ -1516,7 +1528,10 @@ class AppState {
             // not understood.
             let alreadyArchived = conversations.first { $0.id == convId }?.isArchived == true
             if let refusal = archiveConversation(convId) {
-                appendMessage(role: .system, content: "Cannot archive: \(refusal.reason).", to: convId)
+                // `.pinned`'s sentence is a complete, standalone refusal (it names `/new` as the
+                // way out) rather than a clause for "Cannot archive: …" (spec §0.2).
+                let line = refusal == .pinned ? refusal.reason : "Cannot archive: \(refusal.reason)."
+                appendMessage(role: .system, content: line, to: convId)
             } else if alreadyArchived {
                 appendMessage(role: .system, content: "Already archived.", to: convId)
             }
@@ -1563,7 +1578,9 @@ class AppState {
             markChanged(convId, .metadata)
 
             let userMessagesCount = conversations[idx].messages.filter { $0.role == .user }.count
-            let shouldRename = userMessagesCount == 3 && conversations[idx].messageCountSinceReflection == 3
+            // 5b: the pinned conversation is exempt from the 3-message auto-rename trigger
+            // (spec §0.2) — it keeps the name "Iris".
+            let shouldRename = !conversations[idx].isPinned && userMessagesCount == 3 && conversations[idx].messageCountSinceReflection == 3
             let shouldReflect = conversations[idx].messageCountSinceReflection >= 30
             if shouldReflect {
                 conversations[idx].messageCountSinceReflection = 0
@@ -1663,8 +1680,9 @@ class AppState {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].messages.append(ChatMessage(id: id, role: role, content: content, attachments: attachments))
 
-            // Auto-title generation based on first message
-            if role == .user && conversations[idx].messages.filter({ $0.role == .user }).count == 1 {
+            // Auto-title generation based on first message. 5b: not for the pinned conversation —
+            // it keeps the name "Iris" even right after a rotation's fresh first message (spec §0.2).
+            if role == .user && !conversations[idx].isPinned && conversations[idx].messages.filter({ $0.role == .user }).count == 1 {
                 let displayTitle = content.isEmpty ? (attachments.first?.filename ?? "Attachment") : content
                 conversations[idx].title = String(displayTitle.prefix(30)) + (displayTitle.count > 30 ? "..." : "")
                 markChanged(conversationId, .metadata)
@@ -2808,11 +2826,14 @@ class AppState {
         do { try store.apply(batch) } catch { print("Conversation store flush failed: \(error)") }
     }
     
-    func renameConversation(id: UUID, newTitle: String) {
-        if let idx = conversations.firstIndex(where: { $0.id == id }) {
-            conversations[idx].title = newTitle
-            markChanged(id, .metadata)
-        }
+    /// 5b: refuses on the pinned conversation (spec §0.2) — `false` means it kept its name.
+    @discardableResult
+    func renameConversation(id: UUID, newTitle: String) -> Bool {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }) else { return false }
+        guard !conversations[idx].isPinned else { return false }
+        conversations[idx].title = newTitle
+        markChanged(id, .metadata)
+        return true
     }
     
     /// Set by `loadConversations()` when the legacy UserDefaults blob existed but could not be
