@@ -151,7 +151,26 @@ struct SubagentJobCreationTests {
         ])
         let engine = IrisEngine(state: app, tier: .medium, principal: .subagent, client: client,
                                 retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
-        await engine.processInput("go", source: "UI", conversationId: id)
+        // Final-review fix wave (#187): a regression that let a subagent's job-creation call reach
+        // the pinned-conversation gate anyway would suspend on a real approval request that a plain
+        // `await engine.processInput(...)` here never resolves — hanging the whole suite rather than
+        // failing this one test. `denyTask` watches `pendingApprovals` concurrently and denies
+        // anything that shows up (none should, if the subagent refusal above is still in place),
+        // so that regression is a fast, visible failure instead; it costs the normal (fast) case
+        // nothing, since `await turnTask.value` returns as soon as the real turn finishes, not after
+        // a fixed poll.
+        let turnTask = Task { await engine.processInput("go", source: "UI", conversationId: id) }
+        let denyTask = Task {
+            while !Task.isCancelled {
+                if !app.pendingApprovals.isEmpty {
+                    app.denyPendingApprovals(for: id)
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+        }
+        await turnTask.value
+        denyTask.cancel()
         let responses = app.conversations.first { $0.id == id }?.history
             .flatMap { $0.parts }
             .compactMap { $0.functionResponse } ?? []

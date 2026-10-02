@@ -40,8 +40,15 @@ import Foundation
     @Test func renameRefusedOnPinned() throws {
         let (_, state) = try app()
         let id = state.activityConversationId()
-        #expect(state.renameConversation(id: id, newTitle: "Something") == false)
+        #expect(state.renameConversation(id: id, newTitle: "Something") == .pinned)
         #expect(state.conversations.first { $0.id == id }?.title == "Iris")
+    }
+
+    /// Final-review fix wave (#187): `renameConversation` used to conflate "no such conversation"
+    /// into the same `false` the pinned refusal returned.
+    @Test func renameRefusesUnknownId() throws {
+        let (_, state) = try app()
+        #expect(state.renameConversation(id: UUID(), newTitle: "Something") == .noSuchConversation)
     }
 
     @Test func archiveRefusedOnPinned() throws {
@@ -80,6 +87,11 @@ import Foundation
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         #expect(sawInFlight, "expected .turnInFlight to outrank .pinned while a turn is running")
+        // Final-review fix wave (#187): `NeverReplies` sleeps 10s before it would ever throw, and
+        // nothing stopped the turn it started — the test returned while that sleep kept running in
+        // the background for the rest of the 10s regardless. `interruptActiveConversation` cancels
+        // the tracked task, which cancels the `Task.sleep` inside `NeverReplies` almost immediately.
+        state.interruptActiveConversation()
     }
 
     /// Records every request the engine sends and answers each with fixed plain text — no tool
