@@ -1,8 +1,7 @@
 import Foundation
 
 /// The payload of a `ChatRole.event` message (#187 deliverable 2): what a background job run did,
-/// delivered into the pinned "Iris Activity" conversation and drawn as a one-line card by
-/// `EventCardView`.
+/// delivered into the pinned "Iris" conversation and drawn as a one-line card by `EventCardView`.
 ///
 /// It is stored as JSON inside `ChatMessage.content` rather than as new columns on the message
 /// row: an event card is a *snapshot* of the run at the moment it was delivered, not a live view

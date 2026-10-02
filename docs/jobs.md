@@ -687,14 +687,20 @@ A run ends in one of five statuses:
 A run that says nothing is a failure, not a success: "it worked and had nothing to report" and "it
 never got as far as a reply" must not look the same on a card.
 
-## Event cards and the Iris Activity conversation
+## Event cards and the Iris conversation
 
 When a run ends, one **event card** is delivered: job name, status, the one-line outcome, tokens,
 and a "View run" button onto the transcript. It goes to the job's destination conversation if it
-has one, and otherwise to **Iris Activity** — a pinned conversation Iris creates on first use and
-keeps at the top of the sidebar. (Pinned conversations refuse `/clear`.) A run that stopped on a
-refused call gets a second half as well — the call in full, and what you can do about it; see
-"Approve and run" below.
+has one, and otherwise to **Iris** — the pinned conversation Iris creates on first use, keeps at
+the top of the sidebar, and treats as your main conversation. (Pinned conversations refuse
+`/clear`.) A run that stopped on a refused call gets a second half as well — the call in full, and
+what you can do about it; see "Approve and run" below.
+
+Because Iris reads every other conversation's cards and holds both job-creating tools, calling
+`schedule_job` or `register_directory_watcher` from Iris itself is the one case where creating a
+job asks you first: the call pauses on an ordinary approval dialog, and declining it creates
+nothing. Every other conversation creates jobs and watches the way it always has, without being
+asked.
 
 Delivery never wakes a model turn. The card is a `ChatRole.event` message, drawn as a card and
 never indexed for search; alongside it the card's one-line summary is appended to the destination's
@@ -781,7 +787,7 @@ and executes on the host when no container resolves. That is deliberate rather t
 configuration the user wrote, in a file only the user edits, so it is not something an unattended
 model can reach for. The rule above is about what the model can issue.
 
-A refusal is said in the conversation the card is in — the job's destination, or Iris Activity —
+A refusal is said in the conversation the card is in — the job's destination, or Iris —
 because a sentence in a conversation you do not have open is the same as silence.
 
 Three calls are never offered the button at all, and are refused again by the runner (and, for

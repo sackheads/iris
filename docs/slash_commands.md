@@ -27,8 +27,8 @@ Iris supports in-app slash commands (`/-commands`) typed into the chat composer 
 | `/tokens` | `/tokens` (or `/stats`) | View prompt, candidate, total, cache read, and cache write token usage breakdown (5a; a cache figure never reported by the provider shows as `—`, not zero). |
 | `/sandbox` | `/sandbox [status\|enable\|disable]` | Inspect or configure the subagent `apple/container` Linux VM runtime. |
 | `/new` | `/new` | Create a fresh conversation tab. |
-| `/clear` | `/clear` | Clear message history in the current active conversation. Refused in a pinned conversation (Iris Activity). |
-| `/archive` | `/archive` | Move this conversation to the archive. Refused while a turn is running or a goal is active on it. |
+| `/clear` | `/clear` | Clear message history in the current active conversation. Refused in a pinned conversation (Iris). |
+| `/archive` | `/archive` | Move this conversation to the archive. Refused while a turn is running or a goal is active on it, and refused on Iris itself — use `/new` to start a fresh Iris instead. |
 | `/unarchive` | `/unarchive` | Return this conversation to the active list. |
 | `/jobs` | `/jobs` | List background jobs — trigger, next fire, last status — plus a line per unacknowledged failure. |
 | `/jobs ack` | `/jobs ack <run id>` | Mark a failed or blocked run as seen; takes a full run id or the first eight or more characters of one. |
@@ -45,4 +45,4 @@ Iris supports in-app slash commands (`/-commands`) typed into the chat composer 
 | `/goal` | `/goal <description>` | Activate an autonomous goal-driven loop. Iris executes tools until complete. |
 | `/reflect` | `/reflect` | Trigger manual memory reflection, fact consolidation, and OKF frontmatter grooming. |
 | `/vibecop init` | `/vibecop init` | Analyze active workspace and generate `.iris/vibecop.md` security rules. |
-| `/rename` | `/rename` | Automatically analyze conversation history and assign a 1–4 word title. |
+| `/rename` | `/rename` | Automatically analyze conversation history and assign a 1–4 word title. Refused on Iris itself, which keeps its name. |

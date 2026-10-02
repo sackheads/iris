@@ -105,8 +105,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// #187 — a conversation a scheduled job runs in: never shown in the sidebar, never selected,
     /// but persisted and searchable so a finished run's transcript can be opened from its card.
     var isBackground: Bool = false
-    /// #187 — sorted to the top of the sidebar and refused by `/clear`. The "Iris Activity"
-    /// conversation event cards are delivered to is the first user of this.
+    /// #187 — sorted to the top of the sidebar and refused by `/clear`. The "Iris" conversation
+    /// event cards are delivered to is the first user of this.
     var isPinned: Bool = false
     /// #187 deliverable 3 — the profile of the job whose run this background conversation holds.
     /// Stamped by `JobRunner.openConversation`; the engine's tool-list builder narrows a

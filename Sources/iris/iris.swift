@@ -1328,8 +1328,9 @@ actor IrisEngine {
         // Read once for the gates below that all ask about this conversation: whether it is an
         // unattended run, whether it has a goal to complete, what a job run of it may do, and
         // whether it is the pinned conversation (5b: gates both the job tools below and the
-        // rename-trigger declaration — a subagent/evaluator conversation is never in
-        // `localState?.conversations` at all, so `isPinned` reads false for them at no extra cost).
+        // rename-trigger declaration — a subagent or evaluator conversation lives in
+        // `localState?.conversations` like any other, but it is never the pinned one, so
+        // `isPinned` reads false for it at no extra cost).
         let (isUnattended, hasActiveGoal, jobProfile, isPinned) = await MainActor.run { () -> (Bool, Bool, JobProfile?, Bool) in
             let conversation = localState?.conversations.first(where: { $0.id == conversationId })
             return (conversation?.isBackground == true, conversation?.activeGoal != nil,
@@ -1395,7 +1396,7 @@ actor IrisEngine {
         if !isUnattended {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris' conversation (your main conversation) — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). Calling this tool from Iris itself asks you to approve the job first, since a standing job created from the conversation that reads every other chat and holds the job tools is not created silently. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -2432,6 +2433,12 @@ actor IrisEngine {
     static let unattendedJobCreationRefusal =
         "A background run cannot create jobs or watches; describe what you want and the user can create it."
 
+    /// What the model is told when the owner declined a job or watch proposed from the pinned
+    /// conversation (5b §0.5). Iris reads every other chat and holds the job tools, so a standing
+    /// job created there is the one place an injection that survived the guard would outlive the
+    /// turn — the dispatcher asks a human before writing the row, same as an ordinary approval.
+    static let pinnedJobCreationDeclined = "The owner declined creating this job."
+
     /// §0.10: the grant is the boundary, and nothing a run does may move it.
     static let unattendedWorkspaceRefusal = "Not run: a background run cannot change its workspace; widen the job's grant instead."
 
@@ -2668,11 +2675,12 @@ actor IrisEngine {
         var result = ""
 
         // One hop for the gates below and the grant the executor mounts (they ask the same
-        // conversation three questions), rather than one per tool call per gate: an ordinary chat
-        // pays this on every call and is none of them.
-        let (isUnattended, jobProfile, sandboxGrant) = await MainActor.run { () -> (Bool, JobProfile?, JobGrant?) in
+        // conversation four questions now), rather than one per tool call per gate: an ordinary
+        // chat pays this on every call and is none of them.
+        let (isUnattended, jobProfile, sandboxGrant, isPinned) = await MainActor.run { () -> (Bool, JobProfile?, JobGrant?, Bool) in
             let conversation = localState?.conversations.first(where: { $0.id == conversationId })
-            return (conversation?.isBackground == true, conversation?.jobProfile, conversation?.sandboxGrant)
+            return (conversation?.isBackground == true, conversation?.jobProfile, conversation?.sandboxGrant,
+                    conversation?.isPinned == true)
         }
 
         // The epic's standing ruling: no unattended job creation. Neither tool is declared to a
@@ -2680,6 +2688,16 @@ actor IrisEngine {
         // model — the refusal has to live at the point that would actually write the row.
         if Self.jobCreationTools.contains(functionCall.name), isUnattended {
             return Self.unattendedJobCreationRefusal
+        }
+        // 5b §0.5: Iris reads other chats and holds the job tools, so a standing job created there
+        // is the one place an injection that survived the guard would outlive the turn. A human
+        // says yes.
+        if Self.jobCreationTools.contains(functionCall.name), isPinned {
+            let details = functionCall.args["name"]?.stringValue ?? functionCall.args["path"]?.stringValue ?? functionCall.name
+            let approved = await localState?.requestApproval(
+                toolName: functionCall.name, details: details, args: functionCall.args,
+                workspace: workspacePath, conversationId: conversationId, origin: approvalOrigin) ?? false
+            guard approved else { return Self.pinnedJobCreationDeclined }
         }
         // #282 §0.10, the same shape: a background run's grant is its boundary, and `set_workspace`
         // is the tool that would move it. Undeclared to it (see `buildRequest`), refused here.

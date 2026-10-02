@@ -492,4 +492,156 @@ struct JobToolsTests {
             on: app, as: id)
         #expect(result.contains("No run with that id."))
     }
+
+    // MARK: Creating a job from Iris asks first (5b §0.5, #187)
+
+    /// `requestApproval`'s own Vibecop consult auto-approves whenever Vibecop is disabled
+    /// (`ConfigManager.shared.enableVibecop`, which reads false under test every time — a fresh,
+    /// volatile per-process `UserDefaults` suite with nothing written to it, per `IrisDefaults`),
+    /// short-circuiting before the call ever reaches `pendingApprovals`. That is `requestApproval`'s
+    /// existing, pre-5b behavior for every gated tool (`run_command`, `write_file`, …), not
+    /// something 5b introduces, and it leaves no deterministic way to drive a real human verdict
+    /// through the full stack without mutating the global config a concurrent suite might be
+    /// reading (invariant 7). Overriding `requestApproval` instead keeps the test on AppState's one
+    /// non-final seam: it still exercises the dispatcher's real call — the exact tool name, args and
+    /// conversation id the gate in `executeFunctionCall` passes — while the test, not Vibecop,
+    /// supplies the verdict. `approvalCount` is incremented only when the override fires, so "no
+    /// approval request was made" is a count of zero, never inferred from the outcome.
+    @MainActor
+    private final class CountingApprovalAppState: AppState {
+        private(set) var approvalCount = 0
+        var resolution = true
+
+        override func requestApproval(toolName: String, details: String, args: [String: JSONValue] = [:],
+                                      workspace: String? = nil, conversationId: UUID? = nil,
+                                      origin: String = "Main agent", inSandbox: Bool = false,
+                                      callerRole: VibecopCallerRole = .agent, allowedCommands: [String] = [],
+                                      vibecopEnabled: Bool? = nil, grantedMount: ContainerMount? = nil) async -> Bool {
+            approvalCount += 1
+            return resolution
+        }
+    }
+
+    private func pinnedCountingApp() -> (CountingApprovalAppState, UUID) {
+        let app = CountingApprovalAppState()
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        if let idx = app.conversations.firstIndex(where: { $0.id == id }) {
+            app.conversations[idx].isPinned = true
+        }
+        return (app, id)
+    }
+
+    private func plainCountingApp() -> (CountingApprovalAppState, UUID) {
+        let app = CountingApprovalAppState()
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        return (app, id)
+    }
+
+    /// A scratch directory for `register_directory_watcher`'s approved path — the dispatcher's
+    /// pinned-conversation gate runs before `RegisterWatcherArguments.parse`, but a call that
+    /// clears the gate still has to resolve a real directory to actually write the job row.
+    private func scratchDirectory() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-jobtools-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Drives one engine turn with the model issuing `call` against a `CountingApprovalAppState`,
+    /// reading back the model's result and how many approval requests the dispatcher made.
+    private func runJobCreationCall(_ call: FunctionCall, on app: CountingApprovalAppState,
+                                    as conversationId: UUID, resolution: Bool) async -> (result: String, approvalCount: Int) {
+        app.autoApproveTools = false
+        app.resolution = resolution
+        let first = GeminiResponse(candidates: [Candidate(content: Content(
+            role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil)
+        let final = GeminiResponse(candidates: [Candidate(content: Content(
+            role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil)
+        let client = FakeLLMClient(responses: [first, final])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0)
+        await engine.processInput("go", source: "UI", conversationId: conversationId)
+        let history = app.conversations.first { $0.id == conversationId }?.history ?? []
+        let result = history.flatMap { $0.parts }.compactMap { part -> String? in
+            guard case .string(let s)? = part.functionResponse?.response["result"] else { return nil }
+            return s
+        }.last ?? ""
+        return (result, app.approvalCount)
+    }
+
+    @Test("schedule_job in the pinned conversation is denied: no job is created, model told so")
+    func scheduleJobPinnedDenied() async throws {
+        let (app, id) = pinnedCountingApp()
+        let (result, approvalCount) = await runJobCreationCall(
+            FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
+            on: app, as: id, resolution: false)
+        #expect(approvalCount == 1)
+        #expect(result == IrisEngine.pinnedJobCreationDeclined)
+        #expect(try app.store.ledger.jobs().isEmpty)
+    }
+
+    @Test("schedule_job in the pinned conversation, approved, creates the job")
+    func scheduleJobPinnedApproved() async throws {
+        let (app, id) = pinnedCountingApp()
+        let (result, approvalCount) = await runJobCreationCall(
+            FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
+            on: app, as: id, resolution: true)
+        #expect(approvalCount == 1)
+        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(try app.store.ledger.jobs().count == 1)
+    }
+
+    @Test("schedule_job in a non-pinned conversation creates the job without an approval request")
+    func scheduleJobUnpinnedSkipsApproval() async throws {
+        let (app, id) = plainCountingApp()
+        let (result, approvalCount) = await runJobCreationCall(
+            FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1"),
+            on: app, as: id, resolution: true)
+        #expect(approvalCount == 0, "a non-pinned conversation must never ask approval for job creation")
+        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(try app.store.ledger.jobs().count == 1)
+    }
+
+    @Test("register_directory_watcher in the pinned conversation is denied: no job is created")
+    func registerWatcherPinnedDenied() async throws {
+        let (app, id) = pinnedCountingApp()
+        let (result, approvalCount) = await runJobCreationCall(
+            FunctionCall(name: "register_directory_watcher",
+                        args: ["path": .string("/tmp"), "instructions": .string("watch it")], id: "c1"),
+            on: app, as: id, resolution: false)
+        #expect(approvalCount == 1)
+        #expect(result == IrisEngine.pinnedJobCreationDeclined)
+        #expect(try app.store.ledger.jobs().isEmpty)
+    }
+
+    @Test("register_directory_watcher in the pinned conversation, approved, creates the job")
+    func registerWatcherPinnedApproved() async throws {
+        let (app, id) = pinnedCountingApp()
+        let dir = try scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (result, approvalCount) = await runJobCreationCall(
+            FunctionCall(name: "register_directory_watcher",
+                        args: ["path": .string(dir.path), "instructions": .string("watch it")], id: "c1"),
+            on: app, as: id, resolution: true)
+        #expect(approvalCount == 1)
+        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(try app.store.ledger.jobs().count == 1)
+    }
+
+    @Test("register_directory_watcher in a non-pinned conversation creates the job without an approval request")
+    func registerWatcherUnpinnedSkipsApproval() async throws {
+        let (app, id) = plainCountingApp()
+        let dir = try scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (result, approvalCount) = await runJobCreationCall(
+            FunctionCall(name: "register_directory_watcher",
+                        args: ["path": .string(dir.path), "instructions": .string("watch it")], id: "c1"),
+            on: app, as: id, resolution: true)
+        #expect(approvalCount == 0, "a non-pinned conversation must never ask approval for job creation")
+        #expect(result != IrisEngine.pinnedJobCreationDeclined)
+        #expect(try app.store.ledger.jobs().count == 1)
+    }
 }
