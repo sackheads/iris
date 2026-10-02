@@ -378,6 +378,9 @@ struct SettingsView: View {
             Form {
                 Section(header: Text("Vibecop Guardian").font(.headline)) {
                     Toggle("Enable Vibecop", isOn: $config.enableVibecop)
+                    Text("Off means every command and file operation asks for your approval, unless you have already allowed it.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                     
                     if config.enableVibecop {
                         Picker("Engine", selection: $config.vibecopEngine) {

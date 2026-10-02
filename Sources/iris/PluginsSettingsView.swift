@@ -286,19 +286,56 @@ struct PluginDetailView: View {
                     }
                 }
                 ForEach(Array((plugin.manifest.auth ?? []).enumerated()), id: \.offset) { index, auth in
-                    HStack {
-                        Text(auth.label ?? "Account").frame(width: 160, alignment: .trailing)
-                        if authStatuses[index]?.signedIn == true {
-                            Label("Signed in", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-                        } else {
-                            Label("Sign in required", systemImage: "exclamationmark.circle").foregroundStyle(.orange)
-                        }
-                        Button("Sign In") { runSetup(index: index, auth: auth) }
-                    }
+                    authRow(index: index, auth: auth)
                 }
             }
             .padding(6)
         }
+    }
+
+    /// One `auth` entry. Both commands are shown in full beside the buttons that run them, because
+    /// the click is the consent (#336): nothing here asks through the chat window's approval queue.
+    private func authRow(index: Int, auth: IPFManifest.AuthDeclaration) -> some View {
+        let commands = PluginAuthRunner.displayCommands(auth, config: configDrafts)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(auth.label ?? "Account").frame(width: 160, alignment: .trailing)
+                switch authStatuses[index]?.signedIn {
+                case true?:
+                    Label("Signed in", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                case false?:
+                    Label("Sign in required", systemImage: "exclamationmark.circle").foregroundStyle(.orange)
+                case nil:
+                    Label("Not checked", systemImage: "questionmark.circle").foregroundStyle(.secondary)
+                }
+                Button("Check") { runCheck(index: index, auth: auth) }
+                    .disabled(!Self.runnable(commands.check))
+                Button("Sign In") { runSetup(index: index, auth: auth) }
+                    .disabled(!Self.runnable(commands.setup))
+            }
+            ForEach([("Check runs", commands.check), ("Sign In runs", commands.setup)], id: \.0) { label, command in
+                if let command {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(label):").font(.caption).foregroundStyle(.secondary)
+                        Text(command)
+                            .font(.system(.caption, design: .monospaced))
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                        if command.containsHiddenCharacters {
+                            Text("This command contains line breaks or invisible characters, so it cannot be run from here.")
+                                .font(.caption).foregroundStyle(.red)
+                        }
+                    }
+                    .padding(.leading, 168)
+                }
+            }
+        }
+    }
+
+    private static func runnable(_ command: String?) -> Bool {
+        guard let command else { return false }
+        return !command.containsHiddenCharacters
     }
 
     private var serversCard: some View {
@@ -354,8 +391,11 @@ struct PluginDetailView: View {
         configDrafts = plugin.state.configValues
         let secrets = KeychainManager.shared.secrets(service: KeychainManager.pluginService(plugin.manifest.id))
         secretDrafts = secrets
+        // Only what an "Always allow" rule already permits runs on open; the rest wait for a click (#336).
+        let permissions = AppState.shared.permissions
         for (index, auth) in (plugin.manifest.auth ?? []).enumerated() {
-            authStatuses[index] = await PluginAuthRunner.check(auth, config: configDrafts)
+            authStatuses[index] = await PluginAuthRunner.statusOnOpen(auth, config: configDrafts,
+                                                                      permissions: permissions)
         }
     }
 
@@ -379,10 +419,21 @@ struct PluginDetailView: View {
         }
     }
 
+    /// The click on "Check", beside the command it runs, is the consent.
+    private func runCheck(index: Int, auth: IPFManifest.AuthDeclaration) {
+        Task {
+            authStatuses[index] = await PluginAuthRunner.check(auth, config: configDrafts,
+                                                               approve: PluginAuthRunner.userClicked)
+        }
+    }
+
+    /// The click on "Sign In", beside both commands, is the consent to the setup command and to
+    /// the check that follows it.
     private func runSetup(index: Int, auth: IPFManifest.AuthDeclaration) {
         Task {
-            _ = await PluginAuthRunner.runSetup(auth, config: configDrafts)
-            authStatuses[index] = await PluginAuthRunner.check(auth, config: configDrafts)
+            _ = await PluginAuthRunner.runSetup(auth, config: configDrafts, approve: PluginAuthRunner.userClicked)
+            authStatuses[index] = await PluginAuthRunner.check(auth, config: configDrafts,
+                                                               approve: PluginAuthRunner.userClicked)
         }
     }
 }
