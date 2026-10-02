@@ -232,7 +232,26 @@ struct ToolApprovalRequest: Identifiable {
     let workspace: String?
     let conversationId: UUID?
     let origin: String
+    /// Fix round 2 (#187): true for a `humanOnly` request (the pinned conversation's job-creation
+    /// gate) — one that bypassed the deterministic allowlist on the way in specifically so neither
+    /// it nor Vibecop could stand in for a human click. "Always Allow" would write a `PermissionRule`
+    /// a `humanOnly` call never reads (it skips `permissions.isAllowed` entirely), so the dialog
+    /// must not offer a choice that looks like it changes future behavior but cannot. Not
+    /// `Codable` — `ToolApprovalRequest` holds a `CheckedContinuation` and is never persisted, only
+    /// ever constructed fresh by `enqueueUserApproval` for the lifetime of one pending ask.
+    let humanOnly: Bool
     let continuation: CheckedContinuation<Bool, Never>
+
+    init(toolName: String, details: String, workspace: String?, conversationId: UUID?, origin: String,
+         humanOnly: Bool = false, continuation: CheckedContinuation<Bool, Never>) {
+        self.toolName = toolName
+        self.details = details
+        self.workspace = workspace
+        self.conversationId = conversationId
+        self.origin = origin
+        self.humanOnly = humanOnly
+        self.continuation = continuation
+    }
 }
 
 @MainActor
@@ -1353,9 +1372,12 @@ class AppState {
         case noSuchConversation
         case turnInFlight
         case goalActive
-        /// 5b: archiving the pinned conversation is what `/new` does, in the order that keeps the
-        /// pin valid (spec §0.2, §0.4). Checked last — a pinned conversation mid-turn must still
-        /// report `.turnInFlight`, since Task 8's rotation relies on that ordering.
+        /// 5b: the pinned conversation may never be archived directly (spec §0.2, §0.4). Checked
+        /// last — a pinned conversation mid-turn must still report `.turnInFlight`, which a later
+        /// task's `/new` rotation (not yet shipped: PR 3, not this one) will rely on. Fix round 2
+        /// (reviewer finding, #187): the reason string and this comment both used to describe that
+        /// future rotation — "/new starts a fresh Iris and archives the current one" — as if PR 1
+        /// already did it; `/new` here is still the plain `createNewConversation()` it always was.
         case pinned
 
         var reason: String {
@@ -1363,7 +1385,7 @@ class AppState {
             case .noSuchConversation: return "that conversation no longer exists"
             case .turnInFlight: return "a turn is still running"
             case .goalActive: return "a goal is active — /stop it first"
-            case .pinned: return "Iris can't be archived. Use /new to start a fresh Iris; the current one is archived and stays searchable."
+            case .pinned: return "Iris can't be archived; use /new for a fresh conversation."
             }
         }
     }
@@ -2371,7 +2393,7 @@ class AppState {
         // outright APPROVE verdict, not an absence of one).
         if humanOnly {
             return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
-                                             conversationId: conversationId, origin: origin)
+                                             conversationId: conversationId, origin: origin, humanOnly: true)
         }
         // Fast path: deterministic permissions.
         if permissions.isAllowed(toolName: toolName, details: details, workspace: workspace) {
@@ -2481,7 +2503,7 @@ class AppState {
     /// Appends an approval request and awaits the user's decision. The queue/continuation seam,
     /// separated from `requestApproval`'s permission/Vibecop fast paths so it is unit-testable.
     func enqueueUserApproval(toolName: String, details: String, workspace: String?,
-                             conversationId: UUID?, origin: String) async -> Bool {
+                             conversationId: UUID?, origin: String, humanOnly: Bool = false) async -> Bool {
         // If our task was already cancelled (e.g. a subagent torn down while we were suspended
         // in the Vibecop/timeout window), do NOT enqueue a request nobody will resolve — the
         // teardown's denyPendingApprovals already ran and would miss a late append.
@@ -2489,7 +2511,7 @@ class AppState {
         return await withCheckedContinuation { continuation in
             pendingApprovals.append(ToolApprovalRequest(
                 toolName: toolName, details: details, workspace: workspace,
-                conversationId: conversationId, origin: origin, continuation: continuation))
+                conversationId: conversationId, origin: origin, humanOnly: humanOnly, continuation: continuation))
         }
     }
 

@@ -1234,16 +1234,23 @@ struct ApprovalBannerView: View {
                 .cornerRadius(4)
             
             HStack {
-                Button(action: { onResolve(.alwaysAllowGlobal) }) {
-                    Text("Always Allow (Global)")
-                }
-                
-                if request.workspace != nil {
-                    Button(action: { onResolve(.alwaysAllowProject) }) {
-                        Text("Always Allow (Project)")
+                // Fix round 2 (#187): a `humanOnly` request bypassed the allowlist on the way in so
+                // neither it nor Vibecop could stand in for this click — "Always Allow" would write
+                // a `PermissionRule` a `humanOnly` call never reads (`requestApproval` skips
+                // `permissions.isAllowed` for it entirely), so offering it here is a choice that
+                // looks like it changes future behavior and cannot.
+                if !request.humanOnly {
+                    Button(action: { onResolve(.alwaysAllowGlobal) }) {
+                        Text("Always Allow (Global)")
+                    }
+
+                    if request.workspace != nil {
+                        Button(action: { onResolve(.alwaysAllowProject) }) {
+                            Text("Always Allow (Project)")
+                        }
                     }
                 }
-                
+
                 Spacer()
                 
                 Button(role: .cancel, action: { onResolve(.deny) }) {
