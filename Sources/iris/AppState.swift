@@ -2329,6 +2329,12 @@ class AppState {
         if permissions.isAllowed(toolName: toolName, details: details, workspace: workspace) {
             return true
         }
+        // Deterministic too: the grader may run, unasked, exactly a check the human approved when
+        // locking this contract (#334). Not for the agent or subagents, and not for file tools.
+        if callerRole == .evaluator, toolName == "run_command", let id = conversationId,
+           conversations.first(where: { $0.id == id })?.goalContract?.isHumanApprovedCheck(details) == true {
+            return true
+        }
 
         if let decision = await consultVibecop(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
                                                callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled) {

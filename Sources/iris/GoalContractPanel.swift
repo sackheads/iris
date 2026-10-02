@@ -297,7 +297,8 @@ struct GoalContractPanel: View {
         )
         // Bind BEFORE locking so the kickoff turn already runs in the right directory (#68).
         state.bindGoalWorkspace(for: conversation.id, contract: edited)
-        state.setGoalContract(for: conversation.id, edited)
+        // The human's click: the checks shown here are the ones the grader may run unasked (#334).
+        state.setGoalContract(for: conversation.id, edited.humanApproved())
         state.sendGoalKickoff(for: conversation.id)
     }
 }

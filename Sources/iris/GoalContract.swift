@@ -165,6 +165,11 @@ struct GoalContract: Codable, Equatable, Sendable {
     /// exactly as D1 completes it"), and the handler that had the summary returned long ago.
     /// Nil unless a judgement pause is in flight.
     var pendingCompletionSummary: String?
+    /// #334 — the executable checks, trimmed, that the human saw when they clicked Approve on the
+    /// draft. Only `humanApproved()` writes it, and only the panel's Approve calls that. Locking
+    /// is not approval: graders, delegated units and the legacy migration lock contracts too, and
+    /// `amend_goal_contract` changes checks with only a rationale. An amended check is not here.
+    var approvedChecks: [String] = []
 
     init(id: UUID = UUID(), objective: String, criteria: [Criterion], outOfScope: [String] = [],
          stopBefore: [String] = [], assumptions: [String] = [], changeLog: [ContractChange] = [],
@@ -206,6 +211,29 @@ struct GoalContract: Codable, Equatable, Sendable {
         gateAttempts = try c.decodeIfPresent(Int.self, forKey: .gateAttempts) ?? 0
         awaitingHumanJudgement = try c.decodeIfPresent(Bool.self, forKey: .awaitingHumanJudgement) ?? false
         pendingCompletionSummary = try c.decodeIfPresent(String.self, forKey: .pendingCompletionSummary)
+        approvedChecks = try c.decodeIfPresent([String].self, forKey: .approvedChecks) ?? []
+    }
+
+    private static func trimmedCheck(_ s: String) -> String { s.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// This contract as the human approved it: its current executable checks become the approved set.
+    func humanApproved() -> GoalContract {
+        var copy = self
+        copy.approvedChecks = criteria.compactMap { $0.kind == .executable ? $0.check.map(Self.trimmedCheck) : nil }
+            .filter { !$0.isEmpty }
+        return copy
+    }
+
+    /// True iff `command`, trimmed, is byte for byte a check this locked contract still carries AND
+    /// one the human approved (#334). No prefix, glob or substring match: `check && rm -rf x` is
+    /// not `check`. Bytes, not `String ==`, which treats canonically equivalent Unicode as equal.
+    func isHumanApprovedCheck(_ command: String) -> Bool {
+        guard isLocked else { return false }
+        let wanted = Array(Self.trimmedCheck(command).utf8)
+        guard !wanted.isEmpty else { return false }
+        let current = criteria.compactMap { $0.kind == .executable ? $0.check.map(Self.trimmedCheck) : nil }
+        return current.contains { Array($0.utf8) == wanted }
+            && approvedChecks.contains { Array($0.utf8) == wanted }
     }
 
     var isLocked: Bool { state == .locked }
@@ -390,6 +418,8 @@ extension GoalContract {
         // Flat and locked: a subagent cannot call `reach_checkpoint` (main-principal only), so a
         // ladder here would loop it to its iteration cap.
         unit.milestones = []
+        // The unit's criteria are the parent's, so the parent's human approval still covers them.
+        unit.approvedChecks = approvedChecks
         unit.lock()
         return unit
     }
