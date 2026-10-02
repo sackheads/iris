@@ -6,8 +6,9 @@ import KeyboardShortcuts
 /// it, so the two ways a turn runs away — rounds that keep spending tokens, and a turn that never
 /// comes back — are bounded here rather than left to the user noticing.
 ///
-/// Both figures are absolute, not remaining: the tokens are the conversation's accumulated total
-/// (a job's conversation is fresh, so that total IS the run's cost) and the deadline is a wall
+/// Both figures are absolute, not remaining: the tokens are the run's accumulated total
+/// (`AppState.runUsage`: its fresh conversation plus what its subagents spent while it was
+/// active, #313) and the deadline is a wall
 /// clock instant, so nothing has to be decremented as the turn goes and a check that never runs
 /// cannot leave a stale allowance behind.
 struct TurnBudget: Sendable, Equatable {
@@ -1757,8 +1758,8 @@ actor IrisEngine {
             if Task.isCancelled { earlyEnd = Self.stoppedByUserReason; break }
             // The per-run budget (#187 §4), read before the call this round would make — including
             // the first, so a deadline already passed when the turn starts costs nothing at all.
-            // The conversation's accumulated usage is what is compared: a job's conversation is
-            // fresh, so its total is this run's spend.
+            // The run's accumulated usage is what is compared: its fresh conversation's total plus
+            // what its subagents spent while it was active (#313).
             // A profile denial cannot become allowed later in this turn (#187 §0.2, F6): there is
             // nobody to approve it and no other tool that would do the same thing, so another
             // model round can only produce the same refusal — until the run's token budget or its
@@ -1772,11 +1773,19 @@ actor IrisEngine {
                                             reason: Self.stopReason(for: refused))
                 break
             }
-            if let turnBudget {
-                let spent = await MainActor.run {
-                    localState?.conversations.first(where: { $0.id == conversationId })?.tokenUsage.totalTokenCount ?? 0
+            // The run's budget and spend, delegated subagents' included (#313). A subagent or
+            // evaluator working for a job run is held to that run's registered budget, so a job
+            // cannot stay under its budget by spending through them; an engine handed a budget
+            // directly and working for no registered run keeps that one.
+            let (budget, spent) = await MainActor.run { () -> (TurnBudget?, Int) in
+                if let (run, accounting) = localState?.registeredRun(for: conversationId) {
+                    return (accounting.budget, localState?.runUsage(for: run).totalTokenCount ?? 0)
                 }
-                if let reason = turnBudget.stopReason(tokensUsed: spent, now: Date()) {
+                guard turnBudget != nil else { return (nil, 0) }
+                return (turnBudget, localState?.runUsage(for: conversationId).totalTokenCount ?? 0)
+            }
+            if let budget {
+                if let reason = budget.stopReason(tokensUsed: spent, now: Date()) {
                     turnFinished = true
                     // The drain consumes queued steers into history and no follow-up turn starts
                     // (R8). Both halves are deliberate. Leaving them queued would be worse than
@@ -1899,16 +1908,21 @@ actor IrisEngine {
                 history = await MainActor.run {
                     localState?.conversations.first(where: { $0.id == conversationId })?.history ?? []
                 }
-                let spentSoFar = await MainActor.run { () -> TokenUsage in
+                let (spentSoFar, runSink) = await MainActor.run { () -> (TokenUsage, (any TurnUsageSink)?) in
                     if let usage = activeResponse.usageMetadata {
                         localState?.updateTokenUsage(for: conversationId, usage: usage)
                     }
-                    return localState?.conversations.first(where: { $0.id == conversationId })?.tokenUsage ?? TokenUsage()
+                    // A delegated round meters the run it works for (#313), so a quit in the
+                    // middle of a delegation still leaves that spend on the run's row.
+                    if let (run, accounting) = localState?.registeredRun(for: conversationId) {
+                        return (localState?.runUsage(for: run) ?? TokenUsage(), accounting.sink)
+                    }
+                    return (localState?.runUsage(for: conversationId) ?? TokenUsage(), usageSink)
                 }
                 // What the run has spent, on the run's own row, before the next round can start
                 // (#187 §4). A row only ever costed by its `finish` counts as zero against the
                 // day's budget when the app quits mid-turn and nothing ever finishes it.
-                if let usageSink { await usageSink.record(spentSoFar) }
+                if let runSink { await runSink.record(spentSoFar) }
                 
                 var hasFunctionCall = false
                 
@@ -2420,6 +2434,11 @@ actor IrisEngine {
     /// §0.10: the grant is the boundary, and nothing a run does may move it.
     static let unattendedWorkspaceRefusal = "Not run: a background run cannot change its workspace; widen the job's grant instead."
 
+    /// #313: a background subagent would outlive the turn that started it, spending against no
+    /// run's budget, and its result would start a turn nobody budgeted. Synchronous delegation is
+    /// bounded by the run's budget and stays allowed.
+    static let unattendedBackgroundDelegationRefusal = "Not run: a background run cannot start a subagent in the background; call invoke_subagent again without `background` and it will run within this run's budget."
+
     /// The failure reason written onto runs that were still `running` when the app came up: the
     /// last process died in the middle of them and nothing will ever finish them.
     static let interruptedByQuitReason = "app was not running"
@@ -2665,6 +2684,10 @@ actor IrisEngine {
         // is the tool that would move it. Undeclared to it (see `buildRequest`), refused here.
         if functionCall.name == "set_workspace", isUnattended {
             return Self.unattendedWorkspaceRefusal
+        }
+        if functionCall.name == "invoke_subagent", isUnattended,
+           functionCall.args["background"]?.stringValue.lowercased() == "true" {
+            return Self.unattendedBackgroundDelegationRefusal
         }
 
         // #187 §0.2, §4: a readOnly job run fails closed on a tool its profile denies, before any
@@ -3701,11 +3724,11 @@ extension IrisEngine {
         return [
             FunctionDeclaration(
                 name: "list_jobs",
-                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, why one is paused, and how the last run ended, plus what each has sent today (tokens sent, not billed cost) and how hard it has been running — `tokensToday` against `dailyBudget`, `runsLastHour` against `maxRunsPerHour` (the breaker), `retryAttempt` out of three, and `policy`, `gateKind` and `profile`, and `grants` — the directories and network a mutating job was created with, null when it has none — with `tokensTodayAllJobs` against `globalDailyBudget` for every background run together, and `unreadableJobs` — how many stored jobs could not be read at all. A figure that is null could not be read, which is not the same as zero. Use it to answer what is scheduled, how much context a job has sent, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
+                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, why one is paused, and how the last run ended, plus what each has sent today (tokens sent, its runs' subagents included, not billed cost) and how hard it has been running — `tokensToday` against `dailyBudget`, `runsLastHour` against `maxRunsPerHour` (the breaker), `retryAttempt` out of three, and `policy`, `gateKind` and `profile`, and `grants` — the directories and network a mutating job was created with, null when it has none — with `tokensTodayAllJobs` against `globalDailyBudget` for every background run together, and `unreadableJobs` — how many stored jobs could not be read at all. A figure that is null could not be read, which is not the same as zero. Use it to answer what is scheduled, how much context a job has sent, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
                 parameters: Schema(type: "OBJECT", properties: [:], required: [])),
             FunctionDeclaration(
                 name: "get_job_run",
-                description: "Read back one background job run: how it ended, how many tokens it sent (tokens sent, not billed cost), and the last thing the run itself said. Use it when the user asks about a run an event card mentioned — the card names the run by the first eight characters of its id, which is enough.",
+                description: "Read back one background job run: how it ended, how many tokens it sent (tokens sent, its subagents included, not billed cost), and the last thing the run itself said. Use it when the user asks about a run an event card mentioned — the card names the run by the first eight characters of its id, which is enough.",
                 parameters: Schema(type: "OBJECT", properties: [
                     "run_id": Schema(type: "STRING", description: "The run's id, or the first eight or more characters of it as an event card shows.")
                 ], required: ["run_id"])),

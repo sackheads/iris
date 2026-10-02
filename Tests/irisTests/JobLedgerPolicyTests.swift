@@ -203,6 +203,25 @@ struct JobLedgerPolicyTests {
                 "and against the global ceiling too")
     }
 
+    @Test("an out-of-order report never lowers a running row's figures (#313)")
+    func recordUsageNeverLowers() throws {
+        // A run's parallel subagents each report the run's running total, and their writes can
+        // land in any order: an older, smaller total arriving last must not undo a newer one.
+        let store = try ConversationStore.inMemory()
+        let job = try seedJob(store, "j")
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        let run = makeRun(job, at: now, status: .running, tokens: 0)
+        try store.ledger.begin(run: run)
+        try store.ledger.recordUsage(runId: run.id, tokens: TokenUsage(promptTokenCount: 70,
+                                                                       candidatesTokenCount: 20,
+                                                                       totalTokenCount: 90))
+        try store.ledger.recordUsage(runId: run.id, tokens: TokenUsage(promptTokenCount: 30,
+                                                                       candidatesTokenCount: 10,
+                                                                       totalTokenCount: 40))
+        let back = try #require(try store.ledger.run(id: run.id))
+        #expect(back.totalTokens == 90 && back.promptTokens == 70 && back.candidateTokens == 20)
+    }
+
     @Test("a report from a turn the deadline already gave up on cannot reopen or rewrite the row")
     func recordUsageOnlyWritesARunningRow() throws {
         let store = try ConversationStore.inMemory()

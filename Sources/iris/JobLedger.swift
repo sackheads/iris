@@ -337,10 +337,14 @@ extension JobLedger {
     /// `status = 'running'` in the WHERE clause, and no `unknownRun` throw: a turn the deadline
     /// already gave up on goes on running, and its next round must not write over the `failed` row
     /// the timeout wrote. A no-op is the expected answer here, not an error.
+    ///
+    /// Never lowers a figure: several engines of one run (its own and its parallel subagents,
+    /// #313) report the running total, and their writes can land out of order.
     func recordUsage(runId: UUID, tokens: TokenUsage) throws {
         try writer.write { db in
             try db.execute(sql: """
-                UPDATE job_runs SET promptTokens = ?, candidateTokens = ?, totalTokens = ?
+                UPDATE job_runs SET promptTokens = MAX(promptTokens, ?),
+                    candidateTokens = MAX(candidateTokens, ?), totalTokens = MAX(totalTokens, ?)
                 WHERE id = ? AND status = ?
                 """, arguments: [
                     tokens.promptTokenCount, tokens.candidatesTokenCount, tokens.totalTokenCount,

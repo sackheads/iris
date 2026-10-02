@@ -206,14 +206,14 @@ final class SubagentManager: @unchecked Sendable {
     static func toolDeclaration() -> FunctionDeclaration {
         FunctionDeclaration(
             name: "invoke_subagent",
-            description: "Spawn an isolated subagent with a constrained persona to execute a task. By default, this blocks until the subagent completes. Set 'background' to true to run it asynchronously and receive a notification when it finishes. Criteria are optional; when you provide them, the run is graded by an independent evaluator and the verdict is returned to you alongside the subagent's own (unverified) summary.",
+            description: "Spawn an isolated subagent with a constrained persona to execute a task. By default, this blocks until the subagent completes. Set 'background' to true to run it asynchronously and receive a notification when it finishes (not in a background job run, where it is refused). Criteria are optional; when you provide them, the run is graded by an independent evaluator and the verdict is returned to you alongside the subagent's own (unverified) summary.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
                     "role": Schema(type: "STRING", description: "The persona (e.g., code_reviewer, security_auditor, researcher, engineer)"),
                     "task": Schema(type: "STRING", description: "The exact task prompt for the subagent"),
                     "effort": Schema(type: "STRING", description: "The reasoning effort required. 'easy' for simple/repetitive lookups, 'medium' for standard tasks, 'hard' for complex problem solving."),
-                    "background": Schema(type: "BOOLEAN", description: "Optional. If true, returns immediately while the subagent runs in the background. The system will notify you with the results when done."),
+                    "background": Schema(type: "BOOLEAN", description: "Optional. If true, returns immediately while the subagent runs in the background. The system will notify you with the results when done. Refused in a background job run, where delegation must block."),
                     "criteria": Schema(type: "ARRAY", description: "Optional definition of done for this delegated unit. When present, the subagent runs against these criteria and an independent grader verifies them, returning a trusted verdict. You author them — the subagent does not negotiate them.", items: Schema(type: "OBJECT", properties: [
                         "text": Schema(type: "STRING", description: "The criterion — what 'done' looks like for this unit."),
                         "kind": Schema(type: "STRING", description: "executable | qualitative | humanJudged"),

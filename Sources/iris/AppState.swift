@@ -294,7 +294,20 @@ class AppState {
     /// denial: the ledger row and the event card belong to the job, not to the scratch
     /// conversation the run delegated into (and which is often deleted before anyone could drain
     /// it). Entries are dropped when the run they belong to is drained.
-    private var backgroundRunAncestor: [UUID: UUID] = [:]
+    @ObservationIgnored private var backgroundRunAncestor: [UUID: UUID] = [:]
+    /// What linked descendants have spent, per background run (#313). Accrued in
+    /// `updateTokenUsage` only while the run is registered in `activeRuns`, and dropped with the
+    /// run's denials. Transient: never persisted, never on a `Codable` type.
+    @ObservationIgnored private var backgroundRunDelegatedUsage: [UUID: TokenUsage] = [:]
+    /// What a job run in flight is held to and where its spend is written (#313), registered by
+    /// `JobRunner` for the run's conversation and dropped at the drain. Every engine working for
+    /// the run — the run's own and any subagent or evaluator linked to it — checks this budget and
+    /// writes this sink, so a delegated round is bounded and metered like one of the run's own.
+    struct RunAccounting {
+        let budget: TurnBudget
+        let sink: any TurnUsageSink
+    }
+    @ObservationIgnored private var activeRuns: [UUID: RunAccounting] = [:]
     var availableUpdate: ReleaseInfo?
     var isCheckingForUpdates = false
     var updateCheckStatusMessage: String?
@@ -1745,6 +1758,19 @@ class AppState {
             }
             markChanged(conversationId, .metadata)
         }
+        // A descendant of an active background run is also charged to that run (#313). Keyed by
+        // the run, never by the descendant, so each token lands on exactly one run row.
+        // Only into a registered run: a subagent orphaned by a drain can still link a child of
+        // its own, under a root nothing will ever drain.
+        if let run = backgroundRunAncestor[conversationId], activeRuns[run] != nil {
+            var delegated = backgroundRunDelegatedUsage[run] ?? TokenUsage()
+            delegated.promptTokenCount += usage.promptTokenCount ?? 0
+            delegated.candidatesTokenCount += usage.candidatesTokenCount ?? 0
+            delegated.totalTokenCount += usage.totalTokenCount ?? 0
+            if let read = usage.cacheReadTokens { delegated.cacheReadTokenCount = (delegated.cacheReadTokenCount ?? 0) + read }
+            if let write = usage.cacheWriteTokens { delegated.cacheWriteTokenCount = (delegated.cacheWriteTokenCount ?? 0) + write }
+            backgroundRunDelegatedUsage[run] = delegated
+        }
     }
     
     func clearGoal(for conversationId: UUID) {
@@ -2468,6 +2494,10 @@ class AppState {
         backgroundDenials.removeValue(forKey: conversationId)
         // The run is over, so nothing it spawned can be refused anything more.
         backgroundRunAncestor = backgroundRunAncestor.filter { $0.value != conversationId }
+        // And nothing it spawned is charged to it any more (#313): a subagent that outlives its
+        // run spends against nobody's row. Callers read `runUsage` before draining.
+        backgroundRunDelegatedUsage.removeValue(forKey: conversationId)
+        activeRuns.removeValue(forKey: conversationId)
         return denials
     }
 
@@ -2475,6 +2505,37 @@ class AppState {
     /// `parent` is part of, so a denial anywhere in the tree is drained with the run.
     func linkBackgroundDescendant(_ child: UUID, of parent: UUID) {
         backgroundRunAncestor[child] = backgroundRunRoot(of: parent)
+    }
+
+    func registerRun(_ runConversationId: UUID, budget: TurnBudget, sink: any TurnUsageSink) {
+        activeRuns[runConversationId] = RunAccounting(budget: budget, sink: sink)
+    }
+
+    /// The registration of the run `conversationId` is, or works for, with the run's id; nil for
+    /// an attended conversation and for anything whose run has ended.
+    func registeredRun(for conversationId: UUID) -> (run: UUID, accounting: RunAccounting)? {
+        let run = backgroundRunRoot(of: conversationId)
+        return activeRuns[run].map { (run, $0) }
+    }
+
+    /// What a background run has spent so far:its own conversation's usage plus everything its
+    /// linked descendants spent while linked (#313). This is the figure the run row, the mid-run
+    /// `TurnBudget` check and so `tokensToday` read. For a conversation that is not a run it is
+    /// just that conversation's own usage.
+    func runUsage(for runConversationId: UUID) -> TokenUsage {
+        var usage = conversations.first(where: { $0.id == runConversationId })?.tokenUsage ?? TokenUsage()
+        if let delegated = backgroundRunDelegatedUsage[runConversationId] {
+            usage.promptTokenCount += delegated.promptTokenCount
+            usage.candidatesTokenCount += delegated.candidatesTokenCount
+            usage.totalTokenCount += delegated.totalTokenCount
+            if let read = delegated.cacheReadTokenCount {
+                usage.cacheReadTokenCount = (usage.cacheReadTokenCount ?? 0) + read
+            }
+            if let write = delegated.cacheWriteTokenCount {
+                usage.cacheWriteTokenCount = (usage.cacheWriteTokenCount ?? 0) + write
+            }
+        }
+        return usage
     }
 
     /// The background run `id` belongs to — itself when it is the run, or when nothing linked it.

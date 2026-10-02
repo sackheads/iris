@@ -931,12 +931,17 @@ actor JobRunner {
         // Escape appending "Interrupted." to whatever the user is reading, for the rest of the
         // session.
         let lifetime = TurnLifetime()
+        let usageSink = LedgerUsageSink(ledger: ledger, runId: run.id, jobName: job.name)
+        // The same budget and sink for every engine working for this run (#313): a subagent or
+        // evaluator it delegates to is refused its next round once the run is over budget, and
+        // its rounds reach the row. Dropped at the drain in `readTurn`.
+        if let state {
+            await MainActor.run { state.registerRun(conversationId, budget: budget, sink: usageSink) }
+        }
         let turnTask = Task { [weak engine, weak orphanState = state] in
             await engine?.processInput(prompt, source: "job:\(job.name)",
                                        conversationId: conversationId, turnBudget: budget,
-                                       usageSink: LedgerUsageSink(ledger: ledger, runId: run.id,
-                                                                  jobName: job.name),
-                                       lifetime: lifetime)
+                                       usageSink: usageSink, lifetime: lifetime)
             // Claimed the instant the turn is back, before anything else can suspend: having won,
             // this run ended on its own terms and is never an overrun, whatever the watchdog does
             // next. A turn that lost — one the deadline already gave up on — claims nothing and
@@ -1010,7 +1015,8 @@ actor JobRunner {
                                  blockedReason: blockedCall?.reason ?? .approval,
                                  blockedNearest: blockedCall?.grantNearest)
         do {
-            // The conversation is fresh, so its accumulated `tokenUsage` IS this run's cost.
+            // The conversation is fresh, so its accumulated `tokenUsage`, plus what its subagents
+            // spent while the run was active (#313), IS this run's cost.
             try ledger.finish(runId: run.id, status: status, outcome: outcome,
                               failureReason: failureReason, blockedTool: blockedTool,
                               tokens: turn.tokens, finishedAt: finishedAt)
@@ -1465,12 +1471,15 @@ actor JobRunner {
         guard let state else { return nil }
         return await MainActor.run { () -> TurnResult in
             let conversation = state.conversations.first(where: { $0.id == conversationId })
+            // Read before the drain below, which is where the run stops being charged for its
+            // subagents (#313): what they spent up to here is the run's; anything after is not.
+            let tokens = state.runUsage(for: conversationId)
             // Taken, not read: the denials belong to this run, and leaving them behind would mark
             // the next run in the same conversation blocked too (there is no next run in the same
             // conversation today, but the drain is what guarantees that).
             return TurnResult(messages: conversation?.messages ?? [],
                               denials: state.takeBackgroundDenials(for: conversationId),
-                              tokens: conversation?.tokenUsage ?? TokenUsage())
+                              tokens: tokens)
         }
     }
 
