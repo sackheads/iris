@@ -697,14 +697,22 @@ the top of the sidebar, and treats as your main conversation. (Pinned conversati
 what you can do about it; see "Approve and run" below.
 
 Because Iris reads every other conversation's cards and holds both job-creating tools, calling
-`schedule_job` or `register_directory_watcher` from Iris itself is the one case where creating a
-job or watch asks you first: the call pauses on an ordinary approval dialog, and declining it
-creates nothing — unless `autoApproveTools` (the switch a headless driver or scenario run sets) is
-on, which exempts this dialog exactly as it exempts every other approval. Every other conversation
-creates a job or watch without that extra ask, but not without review across the board: a
-`schedule_job` carrying `gate_script` is always reviewed once before the job exists, in whichever
-conversation asked for it — Vibecop judges the script and what it may read, and only escalates to
-the ordinary approval dialog if it cannot decide (see "Gates" above).
+`schedule_job` or `register_directory_watcher` from Iris itself is one case where creating a job or
+watch asks you first: the call pauses on an ordinary approval dialog, and declining it creates
+nothing — unless `autoApproveTools` (the switch a headless driver or scenario run sets) is on,
+which exempts this dialog exactly as it exempts every other approval, since there is nobody there
+to ask. The same ask applies to a turn a peer session sent into *any* conversation, pinned or not —
+a message delivered by `send_to_session` reaches a conversation's turn the same way a person's own
+words would, so without this a peer could get an ordinary, non-pinned conversation to create a
+standing job with nobody in that conversation ever having typed anything.
+
+Every other, ordinarily-driven conversation creates a job or watch without that extra ask — except
+a subagent, which is refused both tools outright (declaration and dispatch) and cannot create one
+at all, however it was asked. Review is not all-or-nothing either way: a `schedule_job` carrying
+`gate_script` is reviewed once before the job exists, in whichever conversation asked for it,
+*when Vibecop is on* — Vibecop judges the script and what it may read, and only escalates to the
+ordinary approval dialog if it cannot decide (see "Gates" above). With Vibecop off, the default,
+the script is approved unreviewed today (#334 changes this).
 
 Delivery never wakes a model turn. The card is a `ChatRole.event` message, drawn as a card and
 never indexed for search; alongside it the card's one-line summary is appended to the destination's
