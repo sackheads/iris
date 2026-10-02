@@ -281,7 +281,7 @@ struct SettingsView: View {
                                 .help("The Google Cloud project whose Vertex AI serves Claude. Prefilled from your ADC quota project when empty; the two are often different projects.")
                             TextField("Vertex AI Location", text: $config.anthropicVertexLocation)
                                 .help("global (recommended; the only location that serves current-generation models), us or eu for a multi-region, or a region such as us-east5 for Sonnet 4.6 and earlier.")
-                            Text("Claude is called through Vertex AI with Application Default Credentials (ADC). Authenticate locally via:\n`gcloud auth application-default login --scopes=\"https://www.googleapis.com/auth/cloud-platform\"`\nThe model fields take Anthropic's ids; a dated id such as claude-haiku-4-5-20251001 is sent to Vertex as claude-haiku-4-5@20251001. A model the catalog does not list can still be typed in.")
+                            Text("Claude is called through Vertex AI with Application Default Credentials (ADC). Authenticate locally via:\n`gcloud auth application-default login --scopes=\"https://www.googleapis.com/auth/cloud-platform\"`\nThe model fields take Anthropic's ids; a dated id such as claude-haiku-4-5-20251001 is sent to Vertex as claude-haiku-4-5@20251001. Listing models sends one one-token request per known Claude id at this location; a model the list lacks can still be typed in.")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .task(id: config.anthropicAuthMode) {

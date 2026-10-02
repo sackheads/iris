@@ -530,19 +530,26 @@ class ConfigManager: @unchecked Sendable {
     }
     
     var isConfigured: Bool {
-        switch primaryProvider {
+        Self.isConfigured(provider: primaryProvider, geminiAuthMode: geminiAuthMode, geminiAPIKey: geminiAPIKey,
+                          anthropicAuthMode: anthropicAuthMode, anthropicAPIKey: anthropicAPIKey,
+                          anthropicVertexProject: anthropicVertexProject, openAIAPIKey: openAIAPIKey)
+    }
+
+    /// The pure rule behind `isConfigured`, so a test can state every branch with literals and
+    /// never write a key into the process-global Keychain store (invariant 7).
+    static func isConfigured(provider: String, geminiAuthMode: String, geminiAPIKey: String,
+                             anthropicAuthMode: String, anthropicAPIKey: String, anthropicVertexProject: String,
+                             openAIAPIKey: String) -> Bool {
+        func present(_ s: String) -> Bool { !s.trimmingCharacters(in: .whitespaces).isEmpty }
+        switch provider {
         case LLMProvider.anthropic.rawValue:
-            if anthropicAuthMode == AnthropicAuthMode.vertex.rawValue {
-                return !anthropicVertexProject.trimmingCharacters(in: .whitespaces).isEmpty
-            }
-            return !anthropicAPIKey.trimmingCharacters(in: .whitespaces).isEmpty
+            if anthropicAuthMode == AnthropicAuthMode.vertex.rawValue { return present(anthropicVertexProject) }
+            return present(anthropicAPIKey)
         case LLMProvider.openai.rawValue:
-            return !openAIAPIKey.trimmingCharacters(in: .whitespaces).isEmpty
+            return present(openAIAPIKey)
         default:
-            if geminiAuthMode == GeminiAuthMode.adc.rawValue {
-                return true
-            }
-            return !geminiAPIKey.trimmingCharacters(in: .whitespaces).isEmpty
+            if geminiAuthMode == GeminiAuthMode.adc.rawValue { return true }
+            return present(geminiAPIKey)
         }
     }
     

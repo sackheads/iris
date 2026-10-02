@@ -19,29 +19,39 @@ struct AnthropicVertexCatalogTests {
 
     private static let target = AnthropicVertexTarget(project: "gke-claude-dev", location: "global")
 
-    @Test("listModels probes each known id with a bearer token and keeps the ones that answer 200")
+    @Test("listModels sends one one-token rawPredict per known id and keeps the ones that answer 200")
     func listProbesKnownIDs() async throws {
-        let seen = OSAllocatedUnfairLock(initialState: [String]())
+        let seen = OSAllocatedUnfairLock(initialState: [URLRequest]())
         let models = try await withMock({ request in
+            seen.withLock { $0.append(request) }
             let url = request.url!
-            seen.withLock { $0.append(url.absoluteString) }
-            #expect(request.httpMethod == "GET")
+            #expect(request.httpMethod == "POST")
+            #expect(url.absoluteString.hasSuffix(":rawPredict"))
             #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer ya29.t")
             #expect(request.value(forHTTPHeaderField: "x-goog-user-project") == "gke-claude-dev")
             #expect(request.value(forHTTPHeaderField: "x-api-key") == nil)
-            let id = url.lastPathComponent
-            let ok = id == "claude-sonnet-5" || id == "claude-haiku-4-5"
+            let id = url.lastPathComponent.replacingOccurrences(of: ":rawPredict", with: "")
+            let ok = id == "claude-sonnet-5" || id == "claude-haiku-4-5@20251001"
             let status = ok ? 200 : 404
-            let body = ok ? #"{"name":"publishers/anthropic/models/\#(id)","versionId":"default"}"# : #"{"error":{"code":404,"message":"not found"}}"#
+            let body = ok
+                ? #"{"id":"msg_vrtx_1","type":"message","role":"assistant","content":[{"type":"text","text":"H"}],"usage":{"input_tokens":8,"output_tokens":1}}"#
+                : #"{"error":{"code":404,"message":"Publisher model not found or your project does not have access"}}"#
             return (HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
         }) { session in
             let catalog = ModelCatalog(provider: .anthropic, apiKey: "", baseURL: "", anthropicVertex: Self.target, session: session)
             return try await catalog.listModels(adcToken: "ya29.t", quotaProject: "ignored-for-vertex")
         }
-        #expect(models.map(\.id) == ["claude-sonnet-5", "claude-haiku-4-5"])
-        let urls = seen.withLock { $0 }
-        #expect(urls.count == ModelCatalog.knownVertexClaudeModels.count)
-        #expect(urls.allSatisfy { $0.hasPrefix("https://aiplatform.googleapis.com/v1/publishers/anthropic/models/") })
+        // Anthropic spelling in the result, so a pick is valid in either auth mode.
+        #expect(models.map(\.id) == ["claude-sonnet-5", "claude-haiku-4-5-20251001"])
+        let requests = seen.withLock { $0 }
+        #expect(requests.count == ModelCatalog.knownVertexClaudeModels.count)
+        #expect(requests.allSatisfy { $0.url!.absoluteString.hasPrefix("https://aiplatform.googleapis.com/v1/projects/gke-claude-dev/locations/global/publishers/anthropic/models/") })
+        for request in requests {
+            let data = try #require(request.bodyData)
+            let body = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            #expect(body["max_tokens"] as? Int == 1, "a probe costs one output token")
+            #expect(body["anthropic_version"] as? String == "vertex-2023-10-16")
+        }
     }
 
     @Test("a regional location probes the regional host")
@@ -49,7 +59,8 @@ struct AnthropicVertexCatalogTests {
         let hosts = OSAllocatedUnfairLock(initialState: Set<String>())
         _ = try await withMock({ request in
             hosts.withLock { _ = $0.insert(request.url!.host!) }
-            return (HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data("{}".utf8))
+            return (HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!,
+                    Data(#"{"error":{"code":404,"message":"not found"}}"#.utf8))
         }) { session in
             let catalog = ModelCatalog(provider: .anthropic, apiKey: "", baseURL: "",
                                        anthropicVertex: AnthropicVertexTarget(project: "p", location: "us-east5"), session: session)
@@ -73,6 +84,60 @@ struct AnthropicVertexCatalogTests {
         }
     }
 
+    @Test("when every probe fails and any failure is not a 404/400, that error is thrown, never an empty catalog")
+    func nonNotFoundFailureThrows() async {
+        await withMock({ request in
+            (HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!,
+             Data(#"{"error":{"code":403,"message":"Permission denied on resource project"}}"#.utf8))
+        }) { session in
+            let catalog = ModelCatalog(provider: .anthropic, apiKey: "", baseURL: "", anthropicVertex: Self.target, session: session)
+            do {
+                _ = try await catalog.listModels(adcToken: "ya29.t")
+                Issue.record("expected the 403 to surface")
+            } catch {
+                #expect((error as? APIError)?.statusCode == 403)
+                #expect((error as? APIError)?.message.contains("Vertex AI") == true)
+            }
+        }
+    }
+
+    /// Measured on gke-claude-dev: a model whose publisher terms the project has not accepted
+    /// answers 403 ("requires data sharing to be enabled for publisher 'anthropic'") while its
+    /// neighbours answer 200. That is a per-model condition, not a wrong project.
+    @Test("a 403 beside a 200 is a per-model condition and only drops that model")
+    func mixedFailuresKeepSuccesses() async throws {
+        let models = try await withMock({ request in
+            let id = request.url!.lastPathComponent.replacingOccurrences(of: ":rawPredict", with: "")
+            if id == "claude-sonnet-5" {
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                        Data(#"{"id":"m","type":"message","role":"assistant","content":[],"usage":{"input_tokens":8,"output_tokens":1}}"#.utf8))
+            }
+            return (HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!,
+                    Data(#"{"error":{"code":403,"message":"Access to this model requires data sharing to be enabled for publisher 'anthropic'."}}"#.utf8))
+        }) { session in
+            let catalog = ModelCatalog(provider: .anthropic, apiKey: "", baseURL: "", anthropicVertex: Self.target, session: session)
+            return try await catalog.listModels(adcToken: "ya29.t")
+        }
+        #expect(models.map(\.id) == ["claude-sonnet-5"])
+    }
+
+    @Test("a 400 for an id the location rejects drops the id like a 404")
+    func badRequestDrops() async throws {
+        let models = try await withMock({ request in
+            let id = request.url!.lastPathComponent.replacingOccurrences(of: ":rawPredict", with: "")
+            if id == "claude-sonnet-5" {
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                        Data(#"{"id":"m","type":"message","role":"assistant","content":[],"usage":{"input_tokens":8,"output_tokens":1}}"#.utf8))
+            }
+            return (HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!,
+                    Data(#"{"error":{"code":400,"message":"is not supported"}}"#.utf8))
+        }) { session in
+            let catalog = ModelCatalog(provider: .anthropic, apiKey: "", baseURL: "", anthropicVertex: Self.target, session: session)
+            return try await catalog.listModels(adcToken: "ya29.t")
+        }
+        #expect(models.map(\.id) == ["claude-sonnet-5"])
+    }
+
     @Test("probe sends the Vertex request shape for the tier's model, with the dated id mapped")
     func probeUsesVertexTransport() async throws {
         let captured = OSAllocatedUnfairLock(initialState: [URLRequest]())
@@ -94,13 +159,19 @@ struct AnthropicVertexCatalogTests {
         #expect(body["model"] == nil)
     }
 
-    @Test("the known list covers Iris's shipped Anthropic tier defaults, spelled as Vertex wants them")
+    @Test("the known list is in Anthropic spelling and covers ConfigManager's shipped Anthropic tier defaults")
     func knownListCoversDefaults() {
         let known = ModelCatalog.knownVertexClaudeModels
-        // The easy default is dated on the API; Vertex's catalog entry is the bare id.
-        #expect(known.contains("claude-haiku-4-5"))
-        #expect(known.contains("claude-sonnet-5"))
-        #expect(known.contains("claude-fable-5"))
+        #expect(known.allSatisfy { !$0.contains("@") }, "a pick must stay valid when the user switches back to API-key mode")
         #expect(Set(known).count == known.count, "no duplicate probes")
+        let name = "iris-181-cat-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: name)!
+        defer { store.removePersistentDomain(forName: name); IrisDefaults.removeSuiteFile(named: name, in: IrisDefaults.preferencesDirectory) }
+        let config = ConfigManager(store: store)
+        for tier in [ModelTier.easy, .medium, .hard] {
+            config.primaryProvider = LLMProvider.anthropic.rawValue
+            let shipped = config.getModel(for: tier)
+            #expect(known.contains(shipped), "shipped \(tier) default \(shipped) is not in the probe list")
+        }
     }
 }

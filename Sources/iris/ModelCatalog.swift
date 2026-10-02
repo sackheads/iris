@@ -47,14 +47,19 @@ struct ModelCatalog: Sendable {
         self.session = session
     }
 
-    /// The Claude ids Iris knows Vertex can serve, probed one by one because Vertex has no list
-    /// endpoint for a publisher's models. A project sees a subset; a model released after this
-    /// list is still usable by typing its id into a tier field. Spelled as Vertex wants them.
+    /// The Claude ids Iris knows Vertex can serve, each probed with a one-token `rawPredict`,
+    /// because nothing cheaper answers the real question: the publisher-model GET is the public
+    /// catalog (200 on `global` for every id whether or not the project enabled it, 404 on every
+    /// regional host even for models served there) and `count-tokens` behaves the same (measured
+    /// 2026-10-02 against gke-claude-dev; see PR #333). A project sees a subset; a model released
+    /// after this list is still usable by typing its id into a tier field. Spelled as Anthropic
+    /// spells them, so a pick writes an id that is valid in either auth mode; the Vertex transport
+    /// maps the dated ones.
     static let knownVertexClaudeModels: [String] = [
         "claude-fable-5-1", "claude-fable-5",
-        "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5@20251101",
+        "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5-20251101",
         "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6",
-        "claude-haiku-4-5",
+        "claude-haiku-4-5-20251001",
     ]
 
     // MARK: - #207 listing
@@ -305,25 +310,58 @@ struct ModelCatalog: Sendable {
         }
     }
 
-    /// One GET per known id against the location's host; a 200 means the project can see it.
-    /// Non-200s (404 for a model the project has not enabled, 403 for a permissions gap) drop
-    /// the id silently: the picker shows what works, and the tier field still takes any id.
+    /// One one-token `rawPredict` per known id, concurrently, at the configured location. A 200
+    /// means the project can call it there. A 404 (not enabled in Model Garden, or not served at
+    /// this location) and a 400 (an id this location's API rejects) drop the id. A 403 can mean
+    /// either a project-wide problem (wrong project, missing scope) or a per-model one (Vertex
+    /// returns 403 for a model whose publisher terms, such as data sharing, the project has not
+    /// accepted), so the rule is by outcome, not by status: if any probe succeeded the failures
+    /// are per-model and are dropped; if none did and any failure was not a 404/400, that error
+    /// is thrown, so a wrong project reads as the error it is rather than as "no Claude models".
+    /// Cancellation stops the remaining probes.
     private func listVertexClaudeModels(target: AnthropicVertexTarget, adcToken: String?) async throws -> [ModelInfo] {
         guard let adcToken, !adcToken.isEmpty else {
             throw APIError(message: "Missing ADC access token for Vertex AI. Run `gcloud auth application-default login`.")
         }
-        var found: [ModelInfo] = []
-        for id in Self.knownVertexClaudeModels {
-            guard let url = URL(string: "https://\(target.host)/v1/publishers/anthropic/models/\(id)") else { continue }
-            var request = URLRequest(url: url)
-            request.httpMethod = "GET"
-            request.addValue("Bearer \(adcToken)", forHTTPHeaderField: "Authorization")
-            request.addValue(target.project, forHTTPHeaderField: "x-goog-user-project")
-            if (try? await performRequest(request, provider: "Anthropic (Vertex AI)")) != nil {
-                found.append(ModelInfo(id: id, displayName: nil))
+        let transport = AnthropicTransport.vertex(project: target.project, location: target.location, accessToken: adcToken)
+        let probe = GeminiRequest(contents: [Content(role: "user", parts: [Part(text: "hi")])], systemInstruction: nil, tools: nil)
+        let known = Self.knownVertexClaudeModels
+        enum Outcome { case served, absent, failed(APIError) }
+        let outcomes: [(Int, Outcome)] = try await withThrowingTaskGroup(of: (Int, Outcome).self) { group in
+            for (index, id) in known.enumerated() {
+                group.addTask {
+                    try Task.checkCancellation()
+                    var request = try AnthropicClient.makeURLRequest(request: probe, model: id, transport: transport, stream: false)
+                    request.httpBody = Self.oneTokenBody(request.httpBody)
+                    do {
+                        _ = try await performRequest(request, provider: transport.providerLabel)
+                        return (index, .served)
+                    } catch let error as APIError where error.statusCode == 404 || error.statusCode == 400 {
+                        return (index, .absent)
+                    } catch let error as APIError {
+                        return (index, .failed(error))
+                    }
+                }
             }
+            var out: [(Int, Outcome)] = []
+            for try await outcome in group { out.append(outcome) }
+            return out
         }
-        return found
+        let served = outcomes.compactMap { index, outcome -> Int? in if case .served = outcome { return index } else { return nil } }.sorted()
+        if served.isEmpty, let first = outcomes.sorted(by: { $0.0 < $1.0 }).lazy.compactMap({ _, outcome -> APIError? in
+            if case .failed(let error) = outcome { return error } else { return nil }
+        }).first {
+            throw first
+        }
+        return served.map { ModelInfo(id: known[$0], displayName: nil) }
+    }
+
+    /// The probe body with `max_tokens` lowered to 1: the question is whether the call is
+    /// accepted, not what the model says, and the answer should cost one output token.
+    static func oneTokenBody(_ body: Data?) -> Data? {
+        guard let body, var json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { return body }
+        json["max_tokens"] = 1
+        return try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
     }
 
     private func listOpenAIModelsImpl() async throws -> [ModelInfo] {

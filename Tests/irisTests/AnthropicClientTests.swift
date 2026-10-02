@@ -603,4 +603,88 @@ final class AnthropicClientTests: XCTestCase {
         
         XCTAssertEqual(response.candidates?.first?.content?.parts.first?.text, "I see the image.")
     }
+
+    // MARK: - #181 Vertex AI transport, end to end through the client
+
+    func testVertexGenerateContentGoesThroughTheTransportAndKeepsCacheUsage() async throws {
+        let request = GeminiRequest(contents: [Content(role: "user", parts: [Part(text: "hi")])], systemInstruction: nil, tools: nil)
+        MockURLProtocol.handler = { urlRequest in
+            XCTAssertEqual(urlRequest.url?.absoluteString, "https://aiplatform.googleapis.com/v1/projects/gke-claude-dev/locations/global/publishers/anthropic/models/claude-haiku-4-5@20251001:rawPredict")
+            XCTAssertEqual(urlRequest.value(forHTTPHeaderField: "Authorization"), "Bearer ya29.t")
+            XCTAssertEqual(urlRequest.value(forHTTPHeaderField: "x-goog-user-project"), "gke-claude-dev")
+            XCTAssertNil(urlRequest.value(forHTTPHeaderField: "x-api-key"))
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(urlRequest.bodyData)) as? [String: Any])
+            XCTAssertEqual(body["anthropic_version"] as? String, "vertex-2023-10-16")
+            XCTAssertNil(body["model"])
+            let reply = #"{"model":"claude-haiku-4-5-20251001","id":"msg_vrtx_011","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":14,"cache_creation_input_tokens":50,"cache_read_input_tokens":900,"output_tokens":4}}"#
+            return (HTTPURLResponse(url: urlRequest.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(reply.utf8))
+        }
+        let response = try await AnthropicClient.generateContent(
+            request: request, model: "claude-haiku-4-5-20251001",
+            transport: .vertex(project: "gke-claude-dev", location: "global", accessToken: "ya29.t"))
+        XCTAssertEqual(response.candidates?.first?.content?.parts.first?.text, "ok")
+        XCTAssertEqual(response.usageMetadata?.cacheReadTokens, 900)
+        XCTAssertEqual(response.usageMetadata?.cacheWriteTokens, 50)
+        XCTAssertEqual(response.usageMetadata?.promptTokenCount, 964)
+        XCTAssertEqual(response.usageMetadata?.totalTokenCount, 968)
+    }
+
+    func testVertexStreamGoesThroughTheTransportAndKeepsCacheUsage() async throws {
+        let request = GeminiRequest(contents: [Content(role: "user", parts: [Part(text: "hi")])], systemInstruction: nil, tools: nil)
+        let sse = """
+        event: message_start
+        data: {"type":"message_start","message":{"id":"msg_vrtx_1","type":"message","role":"assistant","content":[],"usage":{"input_tokens":14,"cache_creation_input_tokens":50,"cache_read_input_tokens":900,"output_tokens":1}}}
+
+        event: content_block_start
+        data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+        event: content_block_delta
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}
+
+        event: content_block_stop
+        data: {"type":"content_block_stop","index":0}
+
+        event: message_delta
+        data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}
+
+        event: message_stop
+        data: {"type":"message_stop"}
+
+        """
+        MockURLProtocol.handler = { urlRequest in
+            XCTAssertTrue(urlRequest.url?.absoluteString.hasSuffix("/models/claude-sonnet-5:streamRawPredict") == true)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(urlRequest.bodyData)) as? [String: Any])
+            XCTAssertEqual(body["stream"] as? Bool, true)
+            XCTAssertEqual(body["anthropic_version"] as? String, "vertex-2023-10-16")
+            return (HTTPURLResponse(url: urlRequest.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "text/event-stream"])!, Data(sse.utf8))
+        }
+        var assembler = StreamAssembler()
+        let stream = AnthropicClient.streamContent(request: request, model: "claude-sonnet-5") {
+            .vertex(project: "gke-claude-dev", location: "global", accessToken: "ya29.t")
+        }
+        for try await event in stream { assembler.apply(event, now: 0) }
+        let response = assembler.response()
+        XCTAssertEqual(response.candidates?.first?.content?.parts.first?.text, "ok")
+        XCTAssertEqual(response.usageMetadata?.cacheReadTokens, 900)
+        XCTAssertEqual(response.usageMetadata?.cacheWriteTokens, 50)
+        XCTAssertEqual(response.usageMetadata?.promptTokenCount, 964)
+    }
+
+    func testVertexHTTPErrorNamesVertexAndTheLocation() async {
+        let request = GeminiRequest(contents: [Content(role: "user", parts: [Part(text: "hi")])], systemInstruction: nil, tools: nil)
+        MockURLProtocol.handler = { urlRequest in
+            (HTTPURLResponse(url: urlRequest.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!,
+             Data(#"{"error":{"code":404,"message":"Publisher Model not found","status":"NOT_FOUND"}}"#.utf8))
+        }
+        do {
+            _ = try await AnthropicClient.generateContent(request: request, model: "claude-sonnet-5",
+                                                          transport: .vertex(project: "p", location: "us-east5", accessToken: "t"))
+            XCTFail("expected a 404")
+        } catch let error as APIError {
+            XCTAssertEqual(error.statusCode, 404)
+            XCTAssertTrue(error.message.contains("Anthropic (Vertex AI, us-east5)"), error.message)
+        } catch {
+            XCTFail("unexpected error \(error)")
+        }
+    }
 }

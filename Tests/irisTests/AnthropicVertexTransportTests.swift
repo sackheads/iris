@@ -110,11 +110,47 @@ struct AnthropicVertexTransportTests {
         }
     }
 
-    @Test("two equal Vertex requests built separately are identical bytes (5a sorted keys)")
+    /// Two requests whose schema dictionaries were filled in opposite key orders, as 5a's
+    /// `RequestByteStabilityTests` does: equal values that would encode differently without
+    /// sorted keys.
+    private static func request(order reversed: Bool) -> GeminiRequest {
+        let keys = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"]
+        var properties: [String: Schema] = [:]
+        for key in (reversed ? keys.reversed() : keys) { properties[key] = Schema(type: "STRING", description: key) }
+        return GeminiRequest(contents: [Content(role: "user", parts: [Part(text: "hi")])], systemInstruction: nil,
+                             tools: [Tool(functionDeclarations: [FunctionDeclaration(name: "t", description: "d",
+                                                                                     parameters: Schema(type: "OBJECT", properties: properties, required: keys))])])
+    }
+
+    @Test("two equal Vertex requests built from differently ordered inputs are identical bytes (5a sorted keys)")
     func byteStable() throws {
-        let a = try AnthropicClient.makeURLRequest(request: Self.request, model: "claude-sonnet-5", transport: Self.vertex, stream: false).httpBody
-        let b = try AnthropicClient.makeURLRequest(request: Self.request, model: "claude-sonnet-5", transport: Self.vertex, stream: false).httpBody
+        let a = try AnthropicClient.makeURLRequest(request: Self.request(order: false), model: "claude-sonnet-5", transport: Self.vertex, stream: false).httpBody
+        let b = try AnthropicClient.makeURLRequest(request: Self.request(order: true), model: "claude-sonnet-5", transport: Self.vertex, stream: false).httpBody
         #expect(a == b)
+    }
+
+    @Test("a location or project that is not a plain id is refused before the token goes anywhere")
+    func hostInjectionRefused() {
+        for location in ["foo.example.com/x?", "US-EAST5", "us east5", "", "global#"] {
+            #expect(throws: (any Error).self, "location \(location.debugDescription)") {
+                _ = try AnthropicClient.makeURLRequest(request: Self.request, model: "m",
+                                                       transport: .vertex(project: "p", location: location, accessToken: "t"), stream: false)
+            }
+        }
+        for project in ["bad/project", "p?x=1", "P"] {
+            #expect(throws: (any Error).self, "project \(project.debugDescription)") {
+                _ = try AnthropicClient.makeURLRequest(request: Self.request, model: "m",
+                                                       transport: .vertex(project: project, location: "global", accessToken: "t"), stream: false)
+            }
+        }
+        #expect(AnthropicTransport.isValidProject("example.com:legacy-project"))
+        #expect(AnthropicTransport.isValidLocation("europe-west1"))
+    }
+
+    @Test("errors name Vertex AI and the location, so a 404 reads as 'not served here'")
+    func providerLabel() {
+        #expect(AnthropicTransport.vertex(project: "p", location: "us-east5", accessToken: "t").providerLabel == "Anthropic (Vertex AI, us-east5)")
+        #expect(AnthropicTransport.direct(apiKey: "k", baseURL: "").providerLabel == "Anthropic")
     }
 
     @Test("the direct transport is unchanged: api.anthropic.com, x-api-key, model in the body")

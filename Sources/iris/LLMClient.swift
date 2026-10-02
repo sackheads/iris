@@ -134,9 +134,12 @@ struct LLMClient {
     /// The Anthropic provider's transport for this call (#181): the API key, or Vertex AI with an
     /// ADC token from the same manager the Gemini ADC path uses.
     static func anthropicTransport(config: ConfigManager) async throws -> AnthropicTransport {
-        try await AnthropicTransport.resolve(config: config) {
-            try await ADCCredentialManager.shared.getAccessToken()
-        }
+        try await anthropicTransport(config: config) { try await ADCCredentialManager.shared.getAccessToken() }
+    }
+
+    /// The injectable form, so a test can resolve Vertex mode without a real ADC login.
+    static func anthropicTransport(config: ConfigManager, accessToken: () async throws -> String) async throws -> AnthropicTransport {
+        try await AnthropicTransport.resolve(config: config, accessToken: accessToken)
     }
 
     func streamContent(request: GeminiRequest, tier: ModelTier) -> AsyncThrowingStream<LLMStreamEvent, Error> {

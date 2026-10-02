@@ -32,9 +32,15 @@ struct AnthropicClient {
         switch transport {
         case .direct(let apiKey, _):
             guard !apiKey.isEmpty else { throw URLError(.userAuthenticationRequired) }
-        case .vertex(let project, _, let accessToken):
+        case .vertex(let project, let location, let accessToken):
             guard !project.trimmingCharacters(in: .whitespaces).isEmpty else {
                 throw APIError(message: "Anthropic on Vertex AI needs a Google Cloud project.")
+            }
+            guard AnthropicTransport.isValidProject(project) else {
+                throw APIError(message: "Vertex AI project \"\(project)\" is not a valid project id.")
+            }
+            guard AnthropicTransport.isValidLocation(location) else {
+                throw APIError(message: "Vertex AI location \"\(location)\" is not valid: use global, us, eu, or a region such as us-east5.")
             }
             guard !accessToken.isEmpty else { throw URLError(.userAuthenticationRequired) }
         }
@@ -260,8 +266,9 @@ struct AnthropicClient {
     /// recorded like any other failed call.
     static func streamContent(request: GeminiRequest, model: String,
                               transport: @escaping @Sendable () async throws -> AnthropicTransport) -> AsyncThrowingStream<LLMStreamEvent, Error> {
-        LLMStreaming.stream(provider: "Anthropic", mapper: AnthropicStreamMapper()) {
-            try makeURLRequest(request: request, model: model, transport: try await transport(), stream: true)
+        LLMStreaming.stream(mapper: AnthropicStreamMapper()) {
+            let resolved = try await transport()
+            return (try makeURLRequest(request: request, model: model, transport: resolved, stream: true), resolved.providerLabel)
         }
     }
 
@@ -279,7 +286,7 @@ struct AnthropicClient {
         
         if httpResponse.statusCode != 200 {
             print("API Error (\(httpResponse.statusCode)): \(String(data: data, encoding: .utf8) ?? "<non-utf8 body>")")
-            throw APIError.http(provider: "Anthropic", statusCode: httpResponse.statusCode, body: data,
+            throw APIError.http(provider: transport.providerLabel, statusCode: httpResponse.statusCode, body: data,
                                 headers: httpResponse.allHeaderFields)
         }
         

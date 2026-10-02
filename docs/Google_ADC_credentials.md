@@ -96,8 +96,12 @@ the Gemini ADC path:
   endpoint, or a region such as `us-east5` for Sonnet 4.6 and earlier.
 * **Model ids.** The tier fields take Anthropic's ids. Vertex spells a dated id with `@`, so
   `claude-haiku-4-5-20251001` is sent as `claude-haiku-4-5@20251001`; bare ids pass through.
-  *List Available Models…* probes the Claude ids Iris knows about and shows the ones your
-  project can see; a model released later can still be typed into a tier field.
+  *List Available Models…* sends one one-token request per Claude id Iris knows about, at the
+  configured location, and shows the ones your project can call there (a few dozen tokens in
+  total); a model released later can still be typed into a tier field. A model the project cannot
+  call (not enabled in Model Garden, or one whose publisher terms such as data sharing the project
+  has not accepted, which Vertex reports as a 403) is left out; a mistake that fails every model,
+  such as the wrong project or a missing scope, is reported as an error, not as an empty list.
 * **Enablement.** A model must be enabled for the project in Model Garden before Vertex will
   serve it; until then the request fails with a 404 naming the publisher model.
 * **Scope.** Vertex needs `https://www.googleapis.com/auth/cloud-platform`, the same scope the
