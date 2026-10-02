@@ -546,6 +546,40 @@ struct JobToolsTests {
         #expect(empty.contains("trigger: no schedule given"))
     }
 
+    /// Review #340, blocker 2: the dialog built from `scheduleJobApprovalDetails` never rendered
+    /// `gate_url`, `gate_path`, `gate_script`, `gate_mounts` or `gate_timeout_seconds` — with
+    /// Vibecop off, `GateScriptReview`'s own check falls back to approving `gate_script` unreviewed
+    /// (see docs/jobs.md), so this dialog was the only remaining place a human could have caught a
+    /// gate mount on a sensitive directory or an arbitrary script before approving the job that
+    /// carries it. `gate_script` is truncated the same way `prompt` already is.
+    @Test("schedule_job's approval details show every gate_* field when given, gate_script truncated")
+    func scheduleJobApprovalDetailsShowGateFields() {
+        let full = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: [
+            "prompt": .string("sweep"), "intervalSeconds": .int(60),
+            "gate_url": .string("https://example.com/status"),
+            "gate_path": .string("/Users/me/project/VERSION"),
+            "gate_script": .string(String(repeating: "c", count: 400)),
+            "gate_mounts": .array([.string("/Users/me/project"), .string("/data:ro")]),
+            "gate_timeout_seconds": .int(30),
+        ])
+        #expect(full.contains("gate_url: https://example.com/status"))
+        #expect(full.contains("gate_path: /Users/me/project/VERSION"))
+        #expect(full.contains("gate_script: " + String(repeating: "c", count: 300) + "…"))
+        #expect(!full.contains(String(repeating: "c", count: 301)), "gate_script must be cut, not merely marked")
+        #expect(full.contains("gate_mounts: /Users/me/project, /data:ro"))
+        #expect(full.contains("gate_timeout_seconds: 30"))
+
+        // None given: no gate_* line appears at all, same omission shape as the base fields.
+        let noGate = IrisEngine.pinnedJobApprovalDetails(toolName: "schedule_job", args: [
+            "prompt": .string("sweep"), "intervalSeconds": .int(60),
+        ])
+        #expect(!noGate.contains("gate_url:"))
+        #expect(!noGate.contains("gate_path:"))
+        #expect(!noGate.contains("gate_script:"))
+        #expect(!noGate.contains("gate_mounts:"))
+        #expect(!noGate.contains("gate_timeout_seconds:"))
+    }
+
     @Test("register_directory_watcher's approval details show the path, profile and a truncated prompt")
     func registerWatcherApprovalDetailsShowWhatIsBeingCreated() {
         let full = IrisEngine.pinnedJobApprovalDetails(toolName: "register_directory_watcher", args: [

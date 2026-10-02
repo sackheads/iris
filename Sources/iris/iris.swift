@@ -2485,6 +2485,24 @@ actor IrisEngine {
         if let prompt = ScheduleJobArguments.text(args["prompt"]) {
             lines.append("prompt: \(Self.truncated(prompt))")
         }
+        // Review #340 blocker: this dialog is the ONLY thing an owner sees before approving a job,
+        // and `gate_script`/`gate_mounts` carry exactly the kind of capability (arbitrary code, a
+        // mount on a sensitive directory) a human needs to see before clicking approve — with
+        // Vibecop off, `GateScriptReview`'s own check falls back to approving unreviewed, so this
+        // dialog was the last place that gap could have been caught. Every gate_* field the model
+        // can set is rendered here, same as the base job fields above.
+        if let gateURL = ScheduleJobArguments.text(args["gate_url"]) { lines.append("gate_url: \(gateURL)") }
+        if let gatePath = ScheduleJobArguments.text(args["gate_path"]) { lines.append("gate_path: \(gatePath)") }
+        if let gateScript = ScheduleJobArguments.text(args["gate_script"]) {
+            lines.append("gate_script: \(Self.truncated(gateScript))")
+        }
+        if case .success(let gateMounts?) = ScheduleJobArguments.stringList(args["gate_mounts"], shape: ScheduleJobArguments.gateMountsShape),
+           !gateMounts.isEmpty {
+            lines.append("gate_mounts: \(gateMounts.joined(separator: ", "))")
+        }
+        if let gateTimeout = ScheduleJobArguments.integer(args["gate_timeout_seconds"]) {
+            lines.append("gate_timeout_seconds: \(gateTimeout)")
+        }
         return lines.joined(separator: "\n")
     }
 
