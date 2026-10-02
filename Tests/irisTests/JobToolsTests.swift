@@ -960,6 +960,33 @@ struct JobToolsTests {
         #expect(conv.hasPeerContent, "the taint must survive a reload, not just live in the AppState that set it")
     }
 
+    /// M3 (coordinator re-review): the test above taints the conversation BEFORE its first flush,
+    /// so only `upsertMetadata`'s INSERT branch ever runs — a bug confined to the UPDATE branch
+    /// (`ConversationStore.swift`'s `UPDATE conversations SET ... hasPeerContent = ? ...`) would
+    /// pass it silently. This flushes an already-persisted, untainted conversation first, confirms
+    /// it reads back untainted, THEN taints and flushes again, so the second flush is an UPDATE of
+    /// an existing row.
+    @Test("the peer-content taint survives a reload when set on an already-persisted conversation (UPDATE path)")
+    func taintSurvivesReloadViaUpdate() throws {
+        let store = try ConversationStore.inMemory()
+        let app = AppState(store: store)
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        app.flushSave()   // first flush: INSERT, hasPeerContent still false
+
+        let beforeTaint = try store.loadAll()
+        #expect(beforeTaint.conversations.first { $0.id == id }?.hasPeerContent == false,
+                "sanity: the row must exist, untainted, before the UPDATE this test is actually about")
+
+        app.markConversationTouchedByPeer(id)
+        app.flushSave()   // second flush: UPDATE of the existing row
+
+        let reloaded = try store.loadAll()
+        let conv = try #require(reloaded.conversations.first { $0.id == id })
+        #expect(conv.hasPeerContent, "the taint must survive a reload via the UPDATE path too, not just INSERT")
+    }
+
     private func plainApp() -> (AppState, UUID) {
         let app = AppState()
         app.conversations.removeAll()
@@ -1080,6 +1107,15 @@ struct JobToolsTests {
         }
         if !queued { app.denyPendingApprovals(for: id) }
         await turn
+        // M2 (coordinator re-review): `queued` alone could pass for the wrong reason — nothing
+        // here proves the five `reflect` calls actually tripped loop detection and ran the REAL
+        // `softStopWithSummary`, rather than, say, the test's own setup happening to taint the
+        // conversation regardless of what the engine did. `softStopMarker` is pushed to the
+        // transcript only by `softStopWithSummary` itself, so finding it is direct evidence the
+        // soft-stop path ran, not an inference from the gate firing.
+        let transcript = app.conversations.first { $0.id == id }?.messages.map(\.content).joined(separator: "\n") ?? ""
+        #expect(transcript.contains(IrisEngine.softStopMarker),
+                "the soft-stop path must actually have run — otherwise this test cannot tell its gate check apart from an unrelated one")
         #expect(queued, "the soft-stop summary turn's skill-check continuation must see the conversation's own taint")
         #expect(try app.store.ledger.jobs().count == 1)
     }

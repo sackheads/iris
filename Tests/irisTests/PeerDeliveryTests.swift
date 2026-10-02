@@ -374,16 +374,17 @@ struct PeerDeliveryTests {
     // MARK: Job creation through the real peer-delivery entry point (residual fix, #187 §0.5)
 
     /// Coordinator's re-review found a critical residual: `deliverPeerMessage`'s IDLE path calls
-    /// `deliverSanitizedSystemEvent`, which called `processInput` with no `isPeer` at all — only the
-    /// busy/queued path (through `AppState.startTurn`, which already threaded `isPeer`) was flagged.
-    /// Idle is the far more common path, so a peer could get an idle, non-pinned conversation to
-    /// create a standing job with nobody asked, essentially every time. Fixed by adding `isPeer` to
-    /// `deliverSanitizedSystemEvent` and passing `true` from `deliverPeerMessage`'s idle branch.
+    /// `deliverSanitizedSystemEvent`, which called `processInput` without marking the conversation
+    /// at all — only the busy/queued path (through `queuePeerArrival`) was flagged. Idle is the far
+    /// more common path, so a peer could get an idle, non-pinned conversation to create a standing
+    /// job with nobody asked, essentially every time. Fixed by marking the conversation's sticky
+    /// `hasPeerContent` taint (`AppState.markConversationTouchedByPeer`) from
+    /// `deliverSanitizedSystemEvent`'s idle branch too, not just `queuePeerArrival`'s busy one.
     ///
-    /// Driven through the real `deliverPeerMessage` entry point rather than
-    /// `engine.processInput(isPeer: true)` directly (what `JobToolsTests`' peer tests do) — those
-    /// tests cannot catch a regression in `deliverPeerMessage`'s own plumbing, only in
-    /// `executeFunctionCall`'s gate once `isPeer` is already set.
+    /// Driven through the real `deliverPeerMessage` entry point rather than calling
+    /// `AppState.markConversationTouchedByPeer` directly (what `JobToolsTests`' tainted-conversation
+    /// tests do) — those tests cannot catch a regression in `deliverPeerMessage`'s own plumbing,
+    /// only in `executeFunctionCall`'s gate once the conversation is already tainted.
     @Test("a peer message delivered to an idle, non-pinned target reaches the human prompt before creating a job")
     func idleDeliveryAsksBeforeSchedulingJob() async throws {
         let app = AppState(); app.conversations.removeAll()
@@ -412,9 +413,11 @@ struct PeerDeliveryTests {
 
     /// The busy-target counterpart: the peer message is queued while the target is mid-turn, and —
     /// since this script's first round makes no tool call — is drained into a brand-new turn once
-    /// that turn ends (`AppState.startTurn`'s drain path, already correctly threading `isPeer` since
-    /// the previous fix round). Included here to confirm the real `deliverPeerMessage` entry point's
-    /// busy branch still reaches the human prompt end to end, not just the unit-level mechanism.
+    /// that turn ends. `queuePeerArrival` (the busy branch) marks the conversation's sticky
+    /// `hasPeerContent` taint at enqueue time, before the drain ever runs, so the drained turn's own
+    /// `schedule_job` call is gated regardless of how the turn it lands in got started. Included
+    /// here to confirm the real `deliverPeerMessage` entry point's busy branch still reaches the
+    /// human prompt end to end, not just the unit-level mechanism.
     @Test("a peer message queued behind a busy, non-pinned target reaches the human prompt once drained into its own turn")
     func busyDeliveryDrainsAndAsksBeforeSchedulingJob() async throws {
         let gate = PeerDeliveryGate()
@@ -447,10 +450,11 @@ struct PeerDeliveryTests {
     /// Coordinator's ruling on a peer STEER (distinct from a peer-originated turn): once a peer's
     /// words are injected mid-turn as a steer (`drainPendingInput`, from the busy-delivery queue),
     /// job creation for the REST of that turn takes the pinned-conversation gate too — the turn
-    /// itself started from the user's own words (`app.sendMessage`), so `isPeer` on the turn is
-    /// `false`, but the peer-tainted steer must still gate `schedule_job` called in a later round of
-    /// the SAME turn. Tracked per-turn on `IrisEngine.peerSteerInjectedThisTurn`, set by
-    /// `drainPendingInput` and read by `executeFunctionCall`.
+    /// itself started from the user's own words (`app.sendMessage`), not a peer. The taint is set on
+    /// the CONVERSATION, not the turn: `queuePeerArrival` marks `hasPeerContent` the moment the
+    /// steer is enqueued, before this turn's `drainPendingInput` ever consumes it as a mid-turn
+    /// steer, so `schedule_job` called in a later round of this same turn reads an already-tainted
+    /// conversation in `executeFunctionCall`'s gate.
     @Test("a peer steer injected mid-turn gates job creation for the rest of that turn, even though the turn did not start as a peer turn")
     func peerSteerMidTurnGatesLaterJobCreation() async throws {
         let gate = PeerDeliveryGate()
