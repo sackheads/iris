@@ -226,7 +226,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
 }
 
 struct ToolApprovalRequest: Identifiable {
-    var id = UUID()
+    let id: UUID
     let toolName: String
     let details: String
     let workspace: String?
@@ -2579,9 +2579,12 @@ class AppState {
         backgroundRunAncestor[id] ?? id
     }
 
-    func resolveApproval(_ resolution: ApprovalResolution) {
-        guard !pendingApprovals.isEmpty else { return }
-        let pending = pendingApprovals.removeFirst()
+    /// Resolves the request the click was shown, by id: Stop removes requests from anywhere in the
+    /// queue (#334), so the head is not necessarily what the banner showed. A click on a request
+    /// that is gone resolves nothing.
+    func resolveApproval(id: UUID, _ resolution: ApprovalResolution) {
+        guard let index = pendingApprovals.firstIndex(where: { $0.id == id }) else { return }
+        let pending = pendingApprovals.remove(at: index)
         var approved = false
         switch resolution {
         case .approve:

@@ -71,7 +71,7 @@ struct EvaluatorLockedCheckTests {
             if state.pendingApprovals.contains(where: { $0.conversationId == cid }) { queued = true; break }
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
-        if queued { state.resolveApproval(.deny) } else { state.denyPendingApprovals(for: cid) }
+        if queued { state.resolveApproval(id: state.pendingApprovals[0].id, .deny) } else { state.denyPendingApprovals(for: cid) }
         return (queued, await call.value)
     }
 

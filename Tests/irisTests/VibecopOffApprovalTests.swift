@@ -39,7 +39,7 @@ struct VibecopOffApprovalTests {
         if queued {
             #expect(state.pendingApprovals.first?.toolName == tool)
             #expect(state.pendingApprovals.first?.details == details)
-            state.resolveApproval(answer)
+            state.resolveApproval(id: state.pendingApprovals[0].id, answer)
         } else {
             state.denyPendingApprovals(for: cid)
         }
@@ -133,7 +133,7 @@ struct VibecopOffApprovalTests {
             if state.pendingApprovals.contains(where: { $0.origin == "Gate script" }) { queued = true; break }
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
-        if queued { state.resolveApproval(.deny) } else { state.denyPendingApprovals(for: cid) }
+        if queued { state.resolveApproval(id: state.pendingApprovals[0].id, .deny) } else { state.denyPendingApprovals(for: cid) }
         let result = await outcome.value
         #expect(queued, "the review must ask the person, not take a disabled Vibecop's APPROVE")
         if case .failure(let message) = result {
