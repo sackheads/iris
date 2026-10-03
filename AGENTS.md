@@ -92,6 +92,18 @@ Check the PR is actually merged (`gh pr list --head <branch> --state all`) befor
 squash merge means `git branch --merged` will not list it. Never remove a worktree with
 uncommitted files without asking.
 
+About 4 GB of each `.build` is `index-build`: SourceKit-LSP's background index, built whenever an
+editor or LSP client opens the tree. `swift build` and `swift test` never need it. A worktree is
+not browsed, so switch it off when you create one:
+
+```sh
+mkdir -p <worktree>/.sourcekit-lsp && echo '{"backgroundIndexing": false}' > <worktree>/.sourcekit-lsp/config.json
+```
+
+It must sit at the worktree's root: SourceKit-LSP does not read it from a parent directory (tested
+2026-10-02). `.sourcekit-lsp/` is in `.git/info/exclude`, which every worktree shares, so it does not
+make the tree look dirty. An existing `index-build` can be deleted at any time.
+
 ## Project layout
 
 ```
