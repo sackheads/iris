@@ -25,7 +25,11 @@ enum ConversationReader {
     static let continuationQuoteMarker = "  | "
 
     static func quoteContinuationLines(_ content: String) -> String {
-        let lines = content.components(separatedBy: .newlines)
+        // "\r\n" first, as one line break: `.newlines` splits on each character separately, so an
+        // unnormalized "\r\n" (pasted Windows text) would otherwise produce an empty line between
+        // the `\r` and `\n` halves of the same break — a blank "  | " quote marker with nothing
+        // after it.
+        let lines = content.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: .newlines)
         guard lines.count > 1 else { return content }
         return ([lines[0]] + lines.dropFirst().map { continuationQuoteMarker + $0 }).joined(separator: "\n")
     }

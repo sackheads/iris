@@ -274,6 +274,14 @@ struct ConversationReaderTests {
         #expect(quoted == "first\n  | second\n  | third")
     }
 
+    /// Task 6 (final review, fix wave): `\r\n` must be treated as ONE line break, not two —
+    /// `.newlines` splits on `\r` and `\n` separately, so an unnormalized pasted-Windows break
+    /// used to produce an empty line between them: a `"  | "` marker quoting nothing.
+    @Test func windowsLineBreakIsOneLineNotAnEmptyOne() {
+        let quoted = ConversationReader.quoteContinuationLines("first\r\nsecond")
+        #expect(quoted == "first\n  | second")
+    }
+
     @Test func singleLineContentIsUnchanged() {
         #expect(ConversationReader.quoteContinuationLines("just one line") == "just one line")
     }
