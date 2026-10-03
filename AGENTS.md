@@ -74,6 +74,24 @@ Exit 1 means another session has the screen: message the holder named in the out
 `--wait SECS`. Never start GUI work without the lease, and never edit or delete the lease file by
 hand. If the skill isn't installed, ask the user rather than skipping this.
 
+### Worktrees: remove them when their PR merges
+
+Every worktree builds its own `.build`, and one Swift build of iris is about 9 GB. Five finished
+worktrees left behind filled the disk to under 9 GB free and failed a build with ENOSPC mid-task.
+A worktree is scratch for one PR: once that PR is merged (or closed), remove it and its local branch
+in the same step that reports the merge.
+
+```sh
+git -C <worktree> status --porcelain          # must be empty; if not, the files exist nowhere else
+git worktree remove <worktree>                # --force only for a harness-locked tree that is clean
+git branch -D <branch>                        # -D: squash merges leave the branch unmerged to git
+git worktree prune
+```
+
+Check the PR is actually merged (`gh pr list --head <branch> --state all`) before deleting: a
+squash merge means `git branch --merged` will not list it. Never remove a worktree with
+uncommitted files without asking.
+
 ## Project layout
 
 ```
@@ -169,6 +187,7 @@ docs/                     # design specs, plans, reviews, roadmaps
 - [ ] If you added a view to the composer's `VStack` in `ChatView`: it is wrapped in a `ScrollView` and capped with `.frame(maxHeight:)` (Invariant 8)
 - [ ] If you changed user-facing or agent-visible behaviour: you searched for what it made **untrue** — in `README.md` and in agent-facing strings (`oracleText`, tool `description` fields, system prompts) — and fixed what you found. Finding nothing is fine; not looking is not (Invariant 9)
 - [ ] No large build artefacts committed (`.build/`, `*.o`, `*.onnx` model weights, etc.)
+- [ ] After the PR merges: its worktree and local branch are removed (see Worktrees, above)
 
 ## House style
 
