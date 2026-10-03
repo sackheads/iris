@@ -3102,9 +3102,13 @@ actor IrisEngine {
             // reads the function name alone, so the invariant ("in no other conversation") is
             // enforced again here, where a forged call would otherwise have its effect — the same
             // defense in depth the session tools use.
-            let (isPinned, store) = await MainActor.run { () -> (Bool, ConversationStore?) in
+            // Subagent conversations are filtered out of persistence, so the store should never hold
+            // one — but `read_conversation` refuses them, so search excludes any live in-memory
+            // subagent id too rather than rely on that filter alone (#187 review).
+            let (isPinned, store, subagentIds) = await MainActor.run { () -> (Bool, ConversationStore?, Set<UUID>) in
                 (localState?.conversations.first(where: { $0.id == conversationId })?.isPinned == true,
-                 localState?.store)
+                 localState?.store,
+                 Set(localState?.conversations.filter(\.isSubagent).map(\.id) ?? []))
             }
             guard isPinned, let ledger = store?.ledger else {
                 result = "Refused — the job tools are only available in a pinned conversation."
@@ -3200,9 +3204,13 @@ actor IrisEngine {
             // Same defense in depth as list_jobs/get_job_run just above: declaration gating stops
             // a well-behaved model, dispatch reads the function name alone, so the invariant is
             // enforced again here, where a forged or stale call would otherwise have its effect.
-            let (isPinned, store) = await MainActor.run { () -> (Bool, ConversationStore?) in
+            // Subagent conversations are filtered out of persistence, so the store should never hold
+            // one — but `read_conversation` refuses them, so search excludes any live in-memory
+            // subagent id too rather than rely on that filter alone (#187 review).
+            let (isPinned, store, subagentIds) = await MainActor.run { () -> (Bool, ConversationStore?, Set<UUID>) in
                 (localState?.conversations.first(where: { $0.id == conversationId })?.isPinned == true,
-                 localState?.store)
+                 localState?.store,
+                 Set(localState?.conversations.filter(\.isSubagent).map(\.id) ?? []))
             }
             guard isPinned, let store else {
                 result = "Refused — search_conversations is only available in a pinned conversation."
@@ -3218,7 +3226,8 @@ actor IrisEngine {
                 // transcript (#187 §0.5) — the latter is `get_job_run`'s to read, with its run
                 // context, not a keyword hit with none.
                 let hits = try store.searchConversations(query: query, limit: limit,
-                                                         excluding: [conversationId], includeBackground: false)
+                                                         excluding: subagentIds.union([conversationId]),
+                                                         includeBackground: false)
                 body = hits.isEmpty
                     ? "No matching conversations."
                     : hits.map { hit in

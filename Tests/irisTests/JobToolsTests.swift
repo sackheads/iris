@@ -611,6 +611,28 @@ struct JobToolsTests {
         #expect(result.contains("No matching conversations."))
     }
 
+    /// #187 review: subagent conversations are never persisted, so this is defense in depth — one
+    /// that is somehow in the store, while live in memory as a subagent, must never come back.
+    @Test("search_conversations never returns a subagent conversation, even one in the store")
+    func searchConversationsExcludesSubagent() async throws {
+        let (app, id) = pinnedApp()
+        var sub = Conversation(id: UUID(), title: "subagent task")
+        sub.isSubagent = true
+        sub.messages = [ChatMessage(role: .agent, content: "kestrel found in the subagent's work")]
+        var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
+        try app.store.apply([ConversationWrite(id: sub.id, snapshot: sub, changes: s)])
+        app.conversations.append(sub)
+        // The fixture is real: the store holds and finds it when nothing excludes it.
+        #expect(try app.store.searchConversations(query: "kestrel").contains { $0.conversationId == sub.id })
+
+        let result = await runToolCall(
+            FunctionCall(name: "search_conversations", args: ["query": .string("kestrel")], id: "c1"),
+            on: app, as: id)
+
+        #expect(!result.contains(sub.id.uuidString))
+        #expect(result.contains("No matching conversations."))
+    }
+
     @Test("an archived conversation's message is still returned")
     func searchConversationsIncludesArchived() async throws {
         let (app, id) = pinnedApp()
