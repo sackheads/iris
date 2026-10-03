@@ -3182,7 +3182,14 @@ actor IrisEngine {
                     result = "Could not read the run: \(error)."
                 }
             }
-        } else if functionCall.name == "search_conversations", let query = functionCall.args["query"]?.stringValue {
+        } else if functionCall.name == "search_conversations" {
+            guard let query = functionCall.args["query"]?.stringValue, !query.isEmpty else {
+                // Falling through to the unknown-tool fallback here would read as "no such tool"
+                // rather than "you forgot an argument" — `manage_fact needs a fact_id.` is the same
+                // shape for the same reason (fix round 1 review).
+                result = "search_conversations needs a query."
+                return result
+            }
             // Same defense in depth as list_jobs/get_job_run just above: declaration gating stops
             // a well-behaved model, dispatch reads the function name alone, so the invariant is
             // enforced again here, where a forged or stale call would otherwise have its effect.
@@ -3194,6 +3201,8 @@ actor IrisEngine {
                 result = "Refused — search_conversations is only available in a pinned conversation."
                 return result
             }
+            // Negative or zero is not "unlimited" — SQLite reads a negative `LIMIT` that way, so an
+            // unclamped value would be a real bug, not a cosmetic one (fix round 1 review).
             let rawLimit = ScheduleJobArguments.integer(functionCall.args["limit"]) ?? 10
             let limit = min(max(rawLimit, 1), 25)
             let body: String
@@ -3203,26 +3212,37 @@ actor IrisEngine {
                 // context, not a keyword hit with none.
                 let hits = try store.searchConversations(query: query, limit: limit,
                                                          excluding: [conversationId], includeBackground: false)
-                let iso = ISO8601DateFormatter()
                 body = hits.isEmpty
                     ? "No matching conversations."
                     : hits.map { hit in
                         // A snippet is another chat's text, so it is flattened to one line here —
                         // otherwise an embedded newline could forge a second
-                        // "id · title · date · #ordinal role:" line of its own.
-                        let flatSnippet = hit.snippet.components(separatedBy: .newlines).joined(separator: " ")
+                        // "id · title · date · #ordinal role:" line of its own. The title is just
+                        // as untrusted: auto-titling takes the raw first characters of a user
+                        // message (newlines included) and `rename_conversation` stores raw text of
+                        // any length, so it is flattened and capped the same way (fix round 1
+                        // review).
+                        let flatSnippet = Self.flattenHitLineField(hit.snippet)
+                        let flatTitle = Self.capCardField(Self.flattenHitLineField(hit.title), cap: Self.hitTitleCap)
                         // "owner"/"iris", not the raw role name: `sanitizeUntrustedInput` strips
                         // "user:" (and "system:"/"assistant:"/"model:") anywhere in the guarded
                         // text as a role-hijack defense, which would silently eat a literal
                         // "user:" label here. `read_conversation` uses the same two words for the
                         // same reason.
                         let speaker = hit.role == .user ? "owner" : "iris"
-                        return "\(hit.conversationId.uuidString) · \(hit.title) · \(iso.string(from: hit.updatedAt)) · #\(hit.ordinal) \(speaker): \(flatSnippet)"
+                        // A date the store could not parse is omitted rather than defaulted to
+                        // "now" — that would tell the model a stale hit was just touched (fix round
+                        // 1 review). UTC, explicitly labeled, never the process's local time zone,
+                        // so the same hit reads identically wherever this runs.
+                        let dateSegment = hit.updatedAt.map { "\(Self.hitDateString($0)) · " } ?? ""
+                        return "\(hit.conversationId.uuidString) · \(flatTitle) · \(dateSegment)#\(hit.ordinal) \(speaker): \(flatSnippet)"
                     }.joined(separator: "\n")
             } catch {
                 // Same reasoning as search_memory just below: a failed search is not a search that
-                // found nothing.
-                body = "Conversation search failed: \(error)"
+                // found nothing. The raw error is logged, not shown — a model reading a bare
+                // `Error` description gains nothing actionable from it (fix round 1 review).
+                print("search_conversations failed: \(error)")
+                body = "Conversation search failed; try a simpler query."
             }
             // This branch returns its own result directly, so it never passes through
             // `executeToolWithHooks`'s guard — snippets are other chats' text, guarded exactly as
@@ -4025,6 +4045,33 @@ extension IrisEngine {
                     "limit": Schema(type: "INTEGER", description: "Maximum number of hits to return (default 10, max 25).")
                 ], required: ["query"])),
         ]
+    }
+
+    /// `search_conversations`'s title field is capped like a session card field (fix round 1
+    /// review): `rename_conversation` stores a title of any length, raw.
+    nonisolated static let hitTitleCap = 80
+
+    /// Flattens one field of a `search_conversations` hit line to a single line. Both the snippet
+    /// (another chat's text) and the title (auto-titled from the raw first characters of a user
+    /// message, newlines included, or set verbatim by `rename_conversation`) are untrusted this
+    /// way: an embedded newline — or U+2028 LINE SEPARATOR, or a bare CR, both of which
+    /// `CharacterSet.newlines` also covers — could otherwise split the line or forge a second
+    /// "id · title · date · #ordinal role:" line of its own (fix round 1 review).
+    nonisolated static func flattenHitLineField(_ text: String) -> String {
+        text.components(separatedBy: .newlines).joined(separator: " ")
+    }
+
+    /// `yyyy-MM-dd HH:mm UTC`, fixed to UTC and `en_US_POSIX` by default — never the process's
+    /// current/local time zone and locale, so the same hit reads identically wherever this runs.
+    /// `timeZone` is a parameter (rather than hardcoded) purely so a test can inject a value and
+    /// assert the formatting directly, without ever reading or depending on the process's own
+    /// default (fix round 1 review).
+    nonisolated static func hitDateString(_ date: Date, timeZone: TimeZone = TimeZone(identifier: "UTC")!) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd HH:mm 'UTC'"
+        return formatter.string(from: date)
     }
 
     /// `list_jobs`'s body: one object per job, in the ledger's order, wrapped with the count of

@@ -491,8 +491,23 @@ struct ConversationSearchTests {
         var utc = Calendar(identifier: .gregorian)
         utc.timeZone = TimeZone(identifier: "UTC")!
         let hit = try #require(try store.searchConversations(query: "shearwaters").first)
-        #expect(utc.dateComponents([.year, .month, .day], from: hit.updatedAt)
+        let updatedAt = try #require(hit.updatedAt)
+        #expect(utc.dateComponents([.year, .month, .day], from: updatedAt)
                     == DateComponents(year: 2024, month: 6, day: 1))
+    }
+
+    /// Fix round 1 review: a fallback to `Date()` here would tell the model a stale hit was just
+    /// touched. `nil` is the honest answer when the column cannot be read as a date at all.
+    @Test("a hit whose updatedAt column cannot be parsed carries nil, not now")
+    func unparsableUpdatedAtIsNil() throws {
+        let store = try ConversationStore.inMemory()
+        let c = conversation(title: "t", [ChatMessage(role: .user, content: "about fulmars")])
+        try store.apply([created(c)])
+        try store.rawWrite("UPDATE conversations SET updatedAt = 'not-a-date' WHERE id = ?",
+                           arguments: [c.id.uuidString])
+
+        let hit = try #require(try store.searchConversations(query: "fulmars").first)
+        #expect(hit.updatedAt == nil)
     }
 }
 

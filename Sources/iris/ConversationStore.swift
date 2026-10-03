@@ -139,11 +139,13 @@ struct ConversationHit: Sendable, Equatable {
     let ordinal: Int
     let snippet: String
     /// The conversation's own `updatedAt` (#187 §0.5), so `search_conversations` can show a date
-    /// without a second query. Defaulted so existing hand-built fixtures (`SidebarSearchTests`,
-    /// `SidebarSearchResultsTests`) do not all need updating for a field they do not assert on.
-    let updatedAt: Date
+    /// without a second query. `nil` when the stored column could not be parsed as a date — a
+    /// fallback to "now" would tell the model a stale hit was just touched (fix round 1 review).
+    /// Defaulted so existing hand-built fixtures (`SidebarSearchTests`, `SidebarSearchResultsTests`)
+    /// do not all need updating for a field they do not assert on.
+    let updatedAt: Date?
 
-    init(conversationId: UUID, title: String, role: ChatRole, ordinal: Int, snippet: String, updatedAt: Date = .distantPast) {
+    init(conversationId: UUID, title: String, role: ChatRole, ordinal: Int, snippet: String, updatedAt: Date? = nil) {
         self.conversationId = conversationId
         self.title = title
         self.role = role
@@ -1317,11 +1319,13 @@ final class ConversationStore: Sendable {
                       let ordinal: Int = row["ord"],
                       let role = Self.readText(row, "role").flatMap(ChatRole.init(rawValue:))
                 else { return nil }
-                // Same read as `loadAll`'s: GRDB's typed `Date` subscript is pickier about the
-                // stored format than this fallback, and a hit should not vanish over an unparsed
-                // timestamp.
+                // GRDB's typed `Date` subscript is pickier about the stored format than
+                // `fromDatabaseValue`, and a hit should not vanish over an unparsed timestamp —
+                // but unlike `loadAll`'s `?? Date()`, there is no good default to report here: a
+                // hit from 2019 falling back to "now" would tell the model it was just touched
+                // (fix round 1 review). `nil` and the caller omits the date instead.
                 let updatedAtValue: DatabaseValue = row["updatedAt"]
-                let updatedAt = Date.fromDatabaseValue(updatedAtValue) ?? Date()
+                let updatedAt = Date.fromDatabaseValue(updatedAtValue)
                 return ConversationHit(conversationId: id,
                                        title: Self.readText(row, "title") ?? "Untitled",
                                        role: role,
