@@ -384,8 +384,12 @@ actor IrisEngine {
     /// never touched. `SubagentManager` and `GoalEvaluator` build their own engines without this
     /// parameter, so a delegated call never appears in the dump (5a review F4).
     private let requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)?
+    /// Perf-only: awaited at the start of every model round (with the turn's round number) before
+    /// the round drains queued input, so a scenario can deliver an event card that this same
+    /// round picks up — deterministically mid-turn (5b). Nil everywhere else.
+    private let roundStartHook: (@Sendable (Int) async -> Void)?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, roundStartHook: (@Sendable (Int) async -> Void)? = nil) {
         self.state = state
         self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
@@ -401,6 +405,7 @@ actor IrisEngine {
         self.checkpointAutoAdvanceOverride = checkpointAutoAdvance
         self.sessionPeerCountOverride = sessionPeerCount
         self.requestDumpSink = requestDumpSink
+        self.roundStartHook = roundStartHook
         self.declareStateGatedTools = declareStateGatedTools
         systemPrompt = nil
     }
@@ -1857,6 +1862,7 @@ actor IrisEngine {
             do {
                 // Mid-task user messages (#172) and then the event lines (#187 §8.3) — see
                 // `drainPendingInput`, which both this round and the budget stop above go through.
+                if let roundStartHook { await roundStartHook(modelRound) }
                 if await drainPendingInput(conversationId: conversationId, hooksSandbox: hooksSandbox) {
                     history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
                     request.contents = await requestContents(history, from: .state, &turnRequest, conversationId: conversationId)

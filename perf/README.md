@@ -76,7 +76,7 @@ read afterwards without committing a secret.
 
 ## The caching suite
 
-`perf/suites/caching.json` runs three real-lane, rung-4 scenarios from `perf/prompts/caching/`.
+`perf/suites/caching.json` runs four real-lane, rung-4 scenarios from `perf/prompts/caching/`.
 Each scenario's `seedFacts` are written, before turn 1, into a fresh
 in-memory fact store scoped to that run alone — never the developer's real store and never shared
 across repetitions — so the fact-store block a turn's request carries is deterministic, and
@@ -88,7 +88,14 @@ realistic case: each of its six turns matches its own seed, so the block changes
 `tool-heavy.json` has five turns: turns 1, 2 and 3 each match their own seed, and turn 2 runs a
 dozen commands one at a time. Turn 2's entry changes at turn 3 and spans far more than 20 content
 blocks, so turn 3 can read past the system prompt only through the explicit end-of-turn-k−2 marker
-(spec §1; measured old vs new in §3.1). This is the suite that measures prompt-cache behavior across the 5a request
+(spec §1; measured old vs new in §3.1). `pinned-briefing.json` (5b) runs four turns in the
+pinned conversation (`"pinned": true`) and writes a job-ledger row before turns 2, 3 and 4
+(`turns[].ledgerRuns`), so the `# Recent Activity` briefing in the turn context changes on every
+turn; turn 3 asks for a shell command and delivers an event card at the start of its second model
+round (`turns[].eventCard`), so the card's line lands mid-turn. Its one seed matches no prompt: it
+exists so the run gets a fresh fact store and no fact block. It is graded by the same §3 criteria
+as the others. Its `scriptedResponses` let it run on the fake lane too, which exercises the fields
+but reports no cache counts. The field reference is in `docs/headless_profiling.md`. This is the suite that measures prompt-cache behavior across the 5a request
 change (see `docs/specs/2026-09-30-agency-cacheable-prompts.md` §3 for the before/after baselines);
 it needs a configured provider and is not part of `perf/run.sh`'s default sweep, so run it manually:
 `iris --perf run perf/suites/caching.json`.

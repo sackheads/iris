@@ -29,6 +29,9 @@ struct ScenarioResult: Sendable {
     /// instead of throwing, so a failed turn still produces a `CommandProfile` — this is how a
     /// caller (e.g. `PerfRunner`) tells a failed rung-4/5 repetition from a successful one.
     var turnErrors: [String?]
+    /// Turns (1-based) whose scenario event card landed while the turn was still running, i.e. at
+    /// its second model round. A turn with an `eventCard` that is missing here got it afterwards.
+    var midTurnEventCards: [Int] = []
 }
 
 /// Drives the iris core end-to-end without any UI: stands up a fresh `AppState`, builds an
@@ -56,12 +59,26 @@ enum ScenarioRunner {
                     factStore: FactStoreManager? = nil,
                     retryDelays: [TimeInterval] = [2, 4, 8],
                     declareStateGatedTools: Bool = false) async -> ScenarioResult {
-        let state = AppState()
+        // A scenario that writes ledger rows or pins gets an explicit in-memory store, never one
+        // resolved from the environment: those writes must not be able to reach a real database.
+        let ownStore: ConversationStore? = scenario.usesOwnStore ? (try? ConversationStore.inMemory()) : nil
+        if scenario.usesOwnStore, ownStore == nil {
+            print("[ScenarioRunner] could not open an in-memory store; running without pin or ledger rows")
+        }
+        let state = ownStore.map { AppState(store: $0) } ?? AppState()
         state.autoApproveTools = true // non-interactive: never block on an approval prompt
         // Pay the Vibecop cost a real run_command pays, unless this run is measuring guards off.
         state.vibecopUnderAutoApprove = guards != .off
-        let conversationId = UUID()
-        state.createNewConversation(id: conversationId)
+        let ledger = ownStore?.ledger
+        let conversationId: UUID
+        if scenario.pinned, ownStore != nil {
+            // The real pinned conversation, made the way the app makes it, so every pinned-only
+            // gate (briefing, tools, rename exemptions) reads it exactly as in production.
+            conversationId = state.activityConversationId()
+        } else {
+            conversationId = UUID()
+            state.createNewConversation(id: conversationId)
+        }
         // Headless real-lane runs bind a scratch directory so workspace-relative file tools land
         // there rather than in the process cwd (#151). Only run_command is sandboxed.
         if let workspacePath { state.setWorkspace(for: conversationId, path: workspacePath) }
@@ -170,9 +187,23 @@ enum ScenarioRunner {
         // real peer count here is always >= 1 — the #185 session tools would land on every
         // perf-scenario turn and shift the #129/#144 declaration-size baselines this runner
         // exists to measure. Pin it off, matching `ToolSurfaceTrimTests`.
+        // A turn's event card is delivered at the start of its second model round (round 1), so
+        // the line is queued while the turn is in flight and that same round drains it.
+        let cards = EventCardSchedule()
+        let roundStartHook: (@Sendable (Int) async -> Void)?
+        if let ledger, scenario.turns.contains(where: { $0.eventCard != nil }) {
+            roundStartHook = { @MainActor round in
+                guard round == 1, let (turn, run) = cards.take() else { return }
+                await ScenarioLedgerSeed.deliver(run, ledger: ledger, state: state, to: conversationId)
+                cards.midTurn.append(turn)
+            }
+        } else {
+            roundStartHook = nil
+        }
+
         let engine = IrisEngine(state: state, tier: scenario.tier, client: client, retryDelays: retryDelays,
                                factStore: effectiveFactStore, sessionPeerCount: 0, requestDumpSink: requestDumpSink,
-                               declareStateGatedTools: declareStateGatedTools)
+                               declareStateGatedTools: declareStateGatedTools, roundStartHook: roundStartHook)
 
         // Collect this run's finished turn profiles via a task-local sink scoped to the turn loop.
         let collector = TurnCollector()
@@ -181,8 +212,20 @@ enum ScenarioRunner {
         let start = MonotonicClock.nowMs()
         await PerformanceProfiler.$runSink.withValue({ collector.append($0) }) {
             for (turnIndex, turn) in scenario.turns.enumerated() {
+                if let ledger {
+                    for run in turn.ledgerRuns ?? [] {
+                        do { try ScenarioLedgerSeed.write(run, to: ledger) }
+                        catch { print("[ScenarioRunner] turn \(turnIndex + 1): could not seed ledger row \(run.name): \(error)") }
+                    }
+                    if let card = turn.eventCard { cards.arm(turn: turnIndex + 1, run: card) }
+                }
                 let before = state.conversations.first { $0.id == conversationId }?.messages.count ?? 0
                 await engine.processInput(turn.prompt, source: turn.source, conversationId: conversationId)
+                // A one-round turn never reached round 1: the card still arrives, after the turn.
+                if let ledger, let (turn, run) = cards.take() {
+                    print("[ScenarioRunner] turn \(turn) ended after one model round; its event card was delivered after the turn")
+                    await ScenarioLedgerSeed.deliver(run, ledger: ledger, state: state, to: conversationId)
+                }
                 let messages = state.conversations.first { $0.id == conversationId }?.messages ?? []
                 // Only the messages this turn appended: scanning the whole conversation would let
                 // a turn with no agent message (e.g. an engine-level failure) inherit the previous
@@ -211,7 +254,8 @@ enum ScenarioRunner {
 
         return ScenarioResult(turnProfiles: collector.all, wallClockMs: wallClockMs,
                               finalTexts: finalTexts, guardsWereOff: guardsOff, vibecopMeasured: state.vibecopUnderAutoApprove,
-                              toolsSandboxed: sandboxed, conversationId: conversationId, turnErrors: turnErrors)
+                              toolsSandboxed: sandboxed, conversationId: conversationId, turnErrors: turnErrors,
+                              midTurnEventCards: cards.midTurn)
     }
 
     /// Writes one turn's recorded requests as `<dir>/<turn>-<round>.json`, keyed on the engine's
@@ -245,6 +289,55 @@ enum ScenarioRunner {
                 print("[ScenarioRunner] --dump-requests: failed to write turn \(turn) round \(entry.round): \(error)")
             }
         }
+    }
+}
+
+/// Scenario ledger rows and event cards (5b). A row is a finished run of a disabled job created
+/// on first use by name; nothing schedules it, and the store is the run's own in-memory one.
+enum ScenarioLedgerSeed {
+    @discardableResult
+    static func write(_ run: Scenario.LedgerRun, to ledger: JobLedger, at date: Date = Date()) throws -> JobRun {
+        let job: Job
+        if let existing = try ledger.job(named: run.name) {
+            job = existing
+        } else {
+            job = Job(name: run.name, prompt: "perf scenario row", trigger: .schedule(.interval(seconds: 3600)), enabled: false)
+            try ledger.upsert(job)
+        }
+        var row = JobRun(jobId: job.id, jobName: job.name, triggerKind: job.trigger.kind, startedAt: date, status: run.status)
+        row.finishedAt = date
+        row.outcome = run.outcome
+        try ledger.begin(run: row)
+        return row
+    }
+
+    static func card(for row: JobRun) -> EventCard {
+        EventCard(runId: row.id, jobId: row.jobId, jobName: row.jobName, status: row.status, outcome: row.outcome,
+                  startedAt: row.startedAt, finishedAt: row.finishedAt ?? row.startedAt)
+    }
+
+    /// Writes the row, then delivers its card the way `JobRunner` does: through `deliverEvent`,
+    /// which queues the line for an in-flight turn or appends it to an idle one's history.
+    @MainActor
+    static func deliver(_ run: Scenario.LedgerRun, ledger: JobLedger, state: AppState, to conversationId: UUID) async {
+        do {
+            let row = try write(run, to: ledger)
+            await state.deliverEvent(card(for: row), to: conversationId)
+        } catch {
+            print("[ScenarioRunner] could not seed event card row \(run.name): \(error)")
+        }
+    }
+}
+
+/// The one event card waiting to be delivered during the current turn.
+@MainActor
+private final class EventCardSchedule {
+    private var pending: (turn: Int, run: Scenario.LedgerRun)?
+    var midTurn: [Int] = []
+    func arm(turn: Int, run: Scenario.LedgerRun) { pending = (turn, run) }
+    func take() -> (Int, Scenario.LedgerRun)? {
+        defer { pending = nil }
+        return pending.map { ($0.turn, $0.run) }
     }
 }
 

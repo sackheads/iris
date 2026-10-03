@@ -53,13 +53,37 @@ struct PerfSuiteFilesTests {
             #expect(scenario.clientMode == .real, Comment(rawValue: url.path))
             // six-turns: one fact turn in six (the best case); every-turn-facts: one seed per turn;
             // tool-heavy: a long tool turn between two fact turns (the k-2 read point, §1).
-            let expected: [String: (turns: Int, seeds: Int)] = ["six-turns": (6, 2), "every-turn-facts": (6, 6), "tool-heavy": (5, 3)]
+            // pinned-briefing: one seed that matches nothing, so its fact store is a fresh empty-ish
+            // one and only the briefing changes (5b).
+            let expected: [String: (turns: Int, seeds: Int)] = ["six-turns": (6, 2), "every-turn-facts": (6, 6), "tool-heavy": (5, 3),
+                                                                 "pinned-briefing": (4, 1)]
             let shape = expected[scenario.name]
             #expect(shape != nil, "unexpected caching scenario \(scenario.name)")
             #expect(scenario.turns.count == shape?.turns)
             #expect(scenario.seedFacts?.count == shape?.seeds)
         }
-        #expect(suite.scenarios.count == 3)
+        #expect(suite.scenarios.count == 4)
+    }
+
+    /// 5b §3 "Perf": a pinned conversation whose briefing changes every turn, with an event card
+    /// mid-turn. The seed exists only to give the run a fresh store of its own (with no seeds the
+    /// engine reads the shared one), and must match no turn, so the fact block never appears.
+    @Test("pinned-briefing.json: pinned, ledger rows before turns 2-4, a card on the tool turn, no fact matches (5b)")
+    func pinnedBriefingSchedule() throws {
+        let scenario = try Scenario.load(at: root.appendingPathComponent("perf/prompts/caching/pinned-briefing.json").path)
+        #expect(scenario.pinned)
+        #expect(scenario.turns.map { ($0.ledgerRuns ?? []).count } == [0, 1, 1, 1])
+        #expect(scenario.turns.map { $0.eventCard != nil } == [false, false, true, false])
+        // The card lands mid-turn only if turn 3 has a second round, so it asks for a command.
+        #expect(scenario.turns[2].prompt.contains("shell command"))
+        // The fake-lane script gives turn 3 its tool round too: 4 turns, 5 responses.
+        #expect(scenario.scriptedResponses.count == 5)
+        #expect(scenario.scriptedResponses[2].kind == .toolCalls)
+        let store = try FactStoreManager(inMemory: true)
+        for seed in try #require(scenario.seedFacts) { try store.addFact(content: seed) }
+        for turn in scenario.turns {
+            #expect(try store.search(query: turn.prompt, countsAsRetrieval: false).isEmpty, "\(turn.prompt)")
+        }
     }
 
     /// The real fact-store match schedule for six-turns.json, built the way `ScenarioRunner` now
