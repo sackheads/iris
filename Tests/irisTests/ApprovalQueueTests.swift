@@ -62,6 +62,106 @@ struct ApprovalQueueTests {
         #expect(vb == true)
     }
 
+    /// 5b §0.5 fix (#187): `requestApproval`'s deterministic allowlist and its Vibecop consult
+    /// (disabled-state verdict is an outright APPROVE, not an absence of one) could both stand in
+    /// for a human click. `humanOnly` routes past both. Same call, same stored rule, twice: once
+    /// ordinary (auto-approved, no queue entry) and once `humanOnly` (queued, needs a resolution).
+    @Test("humanOnly reaches the queue even when a stored rule would otherwise answer")
+    func humanOnlyReachesTheQueueDespiteAStoredRule() async throws {
+        let app = AppState()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-approvalqueue-\(UUID().uuidString)", isDirectory: true)
+        let paths = IrisPaths(root: root)
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try JSONEncoder().encode([PermissionRule(toolName: "note_tool", details: "demo")])
+            .write(to: paths.permissionsJSON)
+        app.permissions = PermissionManager(paths: paths)
+
+        let cid = UUID()
+        let ordinary = await app.requestApproval(toolName: "note_tool", details: "demo",
+                                                 workspace: nil, conversationId: cid)
+        #expect(ordinary == true)
+        #expect(app.pendingApprovals.isEmpty)
+
+        async let gated = app.requestApproval(toolName: "note_tool", details: "demo", workspace: nil,
+                                              conversationId: cid, humanOnly: true)
+        // Coordinator's flakiness ruling (review #340 follow-up): widened from a 5ms tick to a
+        // modest 25ms (40 iterations, same ~1s ceiling as 200 * 5ms) to ease MainActor pressure.
+        for _ in 0..<40 where app.pendingApprovals.isEmpty {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(app.pendingApprovals.count == 1, "humanOnly must reach the queue despite the stored rule")
+        // Fix round 2: the poll above is bounded, but `await gated` below is not — `resolveApproval`
+        // is a no-op on an empty queue, so if the assertion above ever failed (nothing queued),
+        // nothing would resolve the continuation and `await gated` would hang the whole suite
+        // rather than fail this one test. `denyPendingApprovals` is scoped to `cid` and a no-op if
+        // there is nothing queued for it, so either branch leaves the continuation resolved.
+        if app.pendingApprovals.isEmpty {
+            app.denyPendingApprovals(for: cid)
+        } else {
+            app.resolveApproval(id: app.pendingApprovals[0].id, .approve)
+        }
+        #expect(await gated == true)
+    }
+
+    @Test("humanOnly still honors the owner's autoApproveTools switch")
+    func humanOnlyHonorsAutoApprove() async {
+        let app = AppState()
+        app.autoApproveTools = true
+        let approved = await app.requestApproval(toolName: "schedule_job", details: "x", workspace: nil, humanOnly: true)
+        #expect(approved == true)
+        #expect(app.pendingApprovals.isEmpty)
+    }
+
+    /// Review #340, item 3 (defense in depth): `ChatView`'s banner already hides the Always-Allow
+    /// buttons for a `humanOnly` request, but that is UI-level only — any other caller of
+    /// `resolveApproval` could still reach `.alwaysAllowGlobal`/`.alwaysAllowProject` for one.
+    /// `humanOnly` exists specifically so neither the allowlist nor Vibecop can stand in for a
+    /// human's click on THIS job; persisting a rule here would let that one click silently approve
+    /// every future one, defeating the whole point. Driven directly through `enqueueUserApproval` +
+    /// `resolveApproval`, bypassing `ChatView` entirely, so a regression in the UI-level
+    /// button-hiding cannot hide a regression here.
+    @Test("resolveApproval refuses to persist an Always-Allow rule for a humanOnly request")
+    func alwaysAllowNeverPersistsForHumanOnly() async throws {
+        let app = AppState()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-approvalqueue-\(UUID().uuidString)", isDirectory: true)
+        let paths = IrisPaths(root: root)
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: root) }
+        app.permissions = PermissionManager(paths: paths)
+        let cid = UUID()
+
+        async let globalResult = app.enqueueUserApproval(toolName: "schedule_job", details: "sweep",
+                                                          workspace: nil, conversationId: cid,
+                                                          origin: "Main agent", humanOnly: true)
+        // Coordinator's flakiness ruling (review #340 follow-up): widened from a 5ms tick to a
+        // modest 25ms (40 iterations, same ~1s ceiling as 200 * 5ms) to ease MainActor pressure.
+        for _ in 0..<40 where app.pendingApprovals.isEmpty {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(app.pendingApprovals.count == 1)
+        app.resolveApproval(id: app.pendingApprovals[0].id, .alwaysAllowGlobal)
+        #expect(await globalResult == true, "the human's click still approves THIS call")
+        #expect(!app.permissions.isAllowed(toolName: "schedule_job", details: "sweep", workspace: nil),
+                "a humanOnly request must never leave a standing rule behind")
+
+        async let projectResult = app.enqueueUserApproval(toolName: "schedule_job", details: "sweep",
+                                                           workspace: "/tmp/proj", conversationId: cid,
+                                                           origin: "Main agent", humanOnly: true)
+        // Coordinator's flakiness ruling (review #340 follow-up): widened from a 5ms tick to a
+        // modest 25ms (40 iterations, same ~1s ceiling as 200 * 5ms) to ease MainActor pressure.
+        for _ in 0..<40 where app.pendingApprovals.isEmpty {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(app.pendingApprovals.count == 1)
+        app.resolveApproval(id: app.pendingApprovals[0].id, .alwaysAllowProject)
+        #expect(await projectResult == true, "the human's click still approves THIS call")
+        #expect(!app.permissions.isAllowed(toolName: "schedule_job", details: "sweep", workspace: "/tmp/proj"),
+                "a humanOnly request must never leave a standing per-project rule behind either")
+    }
+
     @Test("enqueue in a cancelled task returns false and leaves the queue empty")
     func cancelledEnqueueNoLeak() async {
         let app = AppState()

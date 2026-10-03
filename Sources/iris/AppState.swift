@@ -105,8 +105,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// #187 — a conversation a scheduled job runs in: never shown in the sidebar, never selected,
     /// but persisted and searchable so a finished run's transcript can be opened from its card.
     var isBackground: Bool = false
-    /// #187 — sorted to the top of the sidebar and refused by `/clear`. The "Iris Activity"
-    /// conversation event cards are delivered to is the first user of this.
+    /// #187 — sorted to the top of the sidebar and refused by `/clear`. The "Iris" conversation
+    /// event cards are delivered to is the first user of this.
     var isPinned: Bool = false
     /// #187 deliverable 3 — the profile of the job whose run this background conversation holds.
     /// Stamped by `JobRunner.openConversation`; the engine's tool-list builder narrows a
@@ -132,6 +132,28 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// #185 -- what this session advertises to peers. Nil until the session describes itself.
     var sessionCard: SessionCard?
 
+    /// Sticky taint (#187 §0.5, structural ruling, renamed from `hasPeerContent` under review #340):
+    /// true once this conversation has had a turn started on it by content that was NOT the owner
+    /// present and typing — a peer's `send_to_session` delivery (idle, or queued behind a busy turn
+    /// and later drained as its own turn or consumed as a mid-turn steer) OR a background
+    /// subagent's post-back (`invoke_subagent background: true`, which reports back through
+    /// `handleSystemEvent` whenever it finishes, independent of whatever the owner is doing by
+    /// then). An INLINE (non-background) `invoke_subagent` result is explicitly NOT this: it
+    /// returns as ordinary tool output inside the owner's own turn, so it needs no taint — the
+    /// owner is already there. Never cleared once set.
+    ///
+    /// Set ONLY by `IrisEngine`'s genuine unattended-arrival code paths
+    /// (`deliverSanitizedSystemEvent`'s idle branch — which `handleSystemEvent` and `deliverPeerMessage`
+    /// both route through — and `queuePeerArrival`'s busy branch) — never by matching on message
+    /// text — so it cannot be spoofed by a user or a model writing text that merely *looks* like one
+    /// of these arrivals (the same framing, the same "System Event [...]" prefix): those still go
+    /// through the ordinary `appendMessage(role: .user, ...)` / `appendMessage(role: .agent, ...)`
+    /// paths, which never touch this flag. Replaces three rounds of per-turn `isPeer` threading
+    /// (`processInput`'s `isPeer` parameter, `peerSteerInjectedThisTurn`) that each left a path
+    /// open — a restart, a nested continuation, a sibling turn clearing shared per-turn state —
+    /// because the taint lived in transient state instead of being derived from what persists.
+    var hasUnattendedInput: Bool = false
+
     /// #185 -- surfaced from the store column of the same name (`ConversationStore.swift`), which
     /// every upsert already writes with `Date()`. Was write-only in memory before this: no
     /// property decoded it back, so it existed only as an ORDER BY clause the search path used.
@@ -152,7 +174,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput
     }
 
     init(from decoder: Decoder) throws {
@@ -188,6 +210,9 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         // sessionCard key at all, and a missing key must decode as "uncarded", not throw.
         sessionCard = try container.decodeIfPresent(SessionCard.self, forKey: .sessionCard)
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        // Invariant 1: a conversation persisted before this ruling has no such key, and absent
+        // means "no turn here ever started without the owner present", the correct default.
+        hasUnattendedInput = try container.decodeIfPresent(Bool.self, forKey: .hasUnattendedInput) ?? false
         // Migration: a legacy conversation that had a goal (activeGoal) but no contract is
         // upgraded to a locked single-qualitative-criterion contract so in-flight goals survive.
         if goalContract == nil, let legacy = activeGoal {
@@ -232,7 +257,27 @@ struct ToolApprovalRequest: Identifiable {
     let workspace: String?
     let conversationId: UUID?
     let origin: String
+    /// Fix round 2 (#187): true for a `humanOnly` request (the pinned conversation's job-creation
+    /// gate) — one that bypassed the deterministic allowlist on the way in specifically so neither
+    /// it nor Vibecop could stand in for a human click. "Always Allow" would write a `PermissionRule`
+    /// a `humanOnly` call never reads (it skips `permissions.isAllowed` entirely), so the dialog
+    /// must not offer a choice that looks like it changes future behavior but cannot. Not
+    /// `Codable` — `ToolApprovalRequest` holds a `CheckedContinuation` and is never persisted, only
+    /// ever constructed fresh by `enqueueUserApproval` for the lifetime of one pending ask.
+    let humanOnly: Bool
     let continuation: CheckedContinuation<Bool, Never>
+
+    init(id: UUID, toolName: String, details: String, workspace: String?, conversationId: UUID?, origin: String,
+         humanOnly: Bool = false, continuation: CheckedContinuation<Bool, Never>) {
+        self.id = id
+        self.toolName = toolName
+        self.details = details
+        self.workspace = workspace
+        self.conversationId = conversationId
+        self.origin = origin
+        self.humanOnly = humanOnly
+        self.continuation = continuation
+    }
 }
 
 @MainActor
@@ -605,6 +650,7 @@ class AppState {
         self.store = store
         self.engine = IrisEngine(state: self)
         loadConversations()
+        retitleLegacyPinnedConversation()
         // `selectedConversationId == nil` covers more than an empty store: #187's background job
         // conversations are loaded but never selected, so a store holding nothing else still has
         // to open in a fresh conversation.
@@ -856,13 +902,20 @@ class AppState {
         return newConv.id
     }
 
-    /// #187 — the pinned conversation event cards are delivered to.
-    static let activityConversationTitle = "Iris Activity"
+    /// #187/5b — the pinned conversation: the owner's main conversation, where event cards are
+    /// delivered.
+    static let activityConversationTitle = "Iris"
+    /// 5b's prior default (#187's original "Activity log"). A pinned conversation still titled
+    /// exactly this is retitled once on launch; one the owner renamed keeps its name (spec §0.1).
+    static let legacyActivityConversationTitle = "Iris Activity"
     /// The `meta` key its id is recorded under, so it survives a relaunch and is never created
-    /// twice. Deliberately not "the conversation titled Iris Activity": the user may rename it.
+    /// twice. Deliberately not "the conversation titled Iris": Iris is exempt from rename (spec
+    /// §0.2, `RenameRefusal.pinned`) now, but a title match would still miss a conversation
+    /// mid-retitle from the legacy name, or a future conversation that merely happens to share the
+    /// title — the id recorded here is unambiguous where a title lookup is not.
     static let activityConversationMetaKey = "activity_conversation_id"
 
-    /// Returns the Activity conversation's id, creating it (pinned, unselected) and recording it
+    /// Returns Iris's (the pinned conversation's) id, creating it (pinned, unselected) and recording it
     /// in `meta` on first use. Stable across calls and across launches; if the recorded id names a
     /// conversation that no longer exists (deleted by hand), a fresh one is created and recorded.
     func activityConversationId() -> UUID {
@@ -878,6 +931,16 @@ class AppState {
         }
         try? store.setMetaValue(id.uuidString, forKey: Self.activityConversationMetaKey)
         return id
+    }
+
+    /// 5b: the pinned conversation became the main one and took Iris's name. Only the exact old
+    /// default is changed; a title the owner chose is theirs.
+    func retitleLegacyPinnedConversation() {
+        for idx in conversations.indices where conversations[idx].isPinned
+            && conversations[idx].title == Self.legacyActivityConversationTitle {
+            conversations[idx].title = Self.activityConversationTitle
+            markChanged(conversations[idx].id, .metadata)
+        }
     }
 
     /// Why `/clear` will not empty a conversation. nil means it may (#187).
@@ -1338,12 +1401,20 @@ class AppState {
         case noSuchConversation
         case turnInFlight
         case goalActive
+        /// 5b: the pinned conversation may never be archived directly (spec §0.2, §0.4). Checked
+        /// last — a pinned conversation mid-turn must still report `.turnInFlight`, which a later
+        /// task's `/new` rotation (not yet shipped: PR 3, not this one) will rely on. Fix round 2
+        /// (reviewer finding, #187): the reason string and this comment both used to describe that
+        /// future rotation — "/new starts a fresh Iris and archives the current one" — as if PR 1
+        /// already did it; `/new` here is still the plain `createNewConversation()` it always was.
+        case pinned
 
         var reason: String {
             switch self {
             case .noSuchConversation: return "that conversation no longer exists"
             case .turnInFlight: return "a turn is still running"
             case .goalActive: return "a goal is active — /stop it first"
+            case .pinned: return "Iris can't be archived; use /new for a fresh conversation."
             }
         }
     }
@@ -1356,6 +1427,7 @@ class AppState {
         }
         if hasTurnInFlight(for: conversationId) { return .turnInFlight }
         if conv.activeGoal != nil { return .goalActive }
+        if conv.isPinned { return .pinned }
         return nil
     }
 
@@ -1489,6 +1561,12 @@ class AppState {
             }
             return
         } else if trimmed.hasPrefix("/rename") {
+            // 5b: the pinned conversation is exempt from all four rename paths (spec §0.2); this
+            // is the `/rename` one. No model call — there is nothing to decide.
+            if conversations.first(where: { $0.id == convId })?.isPinned == true {
+                appendMessage(role: .command, content: "Iris keeps its name.", to: convId)
+                return
+            }
             appendMessage(role: .system, content: "Triggering automatic conversation rename...", to: convId)
             let renamePrompt = "System Event [Rename Trigger]: Evaluate the conversation history and use the `rename_conversation` tool to assign a short, descriptive title (1-4 words) that captures the true gist of this conversation."
             runThinkingTask(conversationId: convId) { [self] in
@@ -1501,7 +1579,10 @@ class AppState {
             // not understood.
             let alreadyArchived = conversations.first { $0.id == convId }?.isArchived == true
             if let refusal = archiveConversation(convId) {
-                appendMessage(role: .system, content: "Cannot archive: \(refusal.reason).", to: convId)
+                // `.pinned`'s sentence is a complete, standalone refusal (it names `/new` as the
+                // way out) rather than a clause for "Cannot archive: …" (spec §0.2).
+                let line = refusal == .pinned ? refusal.reason : "Cannot archive: \(refusal.reason)."
+                appendMessage(role: .system, content: line, to: convId)
             } else if alreadyArchived {
                 appendMessage(role: .system, content: "Already archived.", to: convId)
             }
@@ -1548,7 +1629,9 @@ class AppState {
             markChanged(convId, .metadata)
 
             let userMessagesCount = conversations[idx].messages.filter { $0.role == .user }.count
-            let shouldRename = userMessagesCount == 3 && conversations[idx].messageCountSinceReflection == 3
+            // 5b: the pinned conversation is exempt from the 3-message auto-rename trigger
+            // (spec §0.2) — it keeps the name "Iris".
+            let shouldRename = !conversations[idx].isPinned && userMessagesCount == 3 && conversations[idx].messageCountSinceReflection == 3
             let shouldReflect = conversations[idx].messageCountSinceReflection >= 30
             if shouldReflect {
                 conversations[idx].messageCountSinceReflection = 0
@@ -1648,14 +1731,31 @@ class AppState {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].messages.append(ChatMessage(id: id, role: role, content: content, attachments: attachments))
 
-            // Auto-title generation based on first message
-            if role == .user && conversations[idx].messages.filter({ $0.role == .user }).count == 1 {
+            // Auto-title generation based on first message. 5b: not for the pinned conversation —
+            // it keeps the name "Iris" even right after a rotation's fresh first message (spec §0.2).
+            if role == .user && !conversations[idx].isPinned && conversations[idx].messages.filter({ $0.role == .user }).count == 1 {
                 let displayTitle = content.isEmpty ? (attachments.first?.filename ?? "Attachment") : content
                 conversations[idx].title = String(displayTitle.prefix(30)) + (displayTitle.count > 30 ? "..." : "")
                 markChanged(conversationId, .metadata)
             }
             markChanged(conversationId, .messagesAppended(from: conversations[idx].messages.count - 1))
         }
+    }
+
+    /// #187 §0.5 structural ruling (renamed under review #340 — the principle is "content that
+    /// starts a turn without the owner present", not only "peer"): marks `conversationId` with the
+    /// sticky taint `executeFunctionCall`'s job-creation gate reads. Called ONLY from `IrisEngine`'s
+    /// genuine unattended-arrival code paths — `deliverSanitizedSystemEvent`'s idle branch (which
+    /// both `handleSystemEvent`'s background-subagent post-back and `deliverPeerMessage`'s idle
+    /// delivery route through) and `queuePeerArrival`'s busy branch (covers both a later drain into
+    /// its own turn and consumption as a mid-turn steer) — never from anything that matches on
+    /// message text, so a user or a model writing something that merely looks like one of these
+    /// arrivals never sets this. A no-op once already set: the taint never clears.
+    func markConversationTouchedByUnattendedInput(_ conversationId: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              !conversations[idx].hasUnattendedInput else { return }
+        conversations[idx].hasUnattendedInput = true
+        markChanged(conversationId, .metadata)
     }
 
     /// A launch-time system line, persisted like any other message but written at most once per
@@ -1676,7 +1776,7 @@ class AppState {
     func installGuardHealthSink() {
         GuardTierHealth.shared.announce = { [weak self] text in
             guard let self else { return false }
-            // The selected conversation when there is one; otherwise Activity, which is where
+            // The selected conversation when there is one; otherwise Iris, which is where
             // background runs already put their user-facing lines. A headless `--run-job` selects
             // nothing, and "no selection" must not mean "swallow the warning".
             let target = self.selectedConversationId ?? self.activityConversationId()
@@ -2273,12 +2373,23 @@ class AppState {
     
     /// `args` is what the model sent for this call, carried only so a background denial can record
     /// the whole call rather than its name (spec §6); nothing on the approval path reads it.
+    /// `humanOnly` (5b §0.5 fix, #187): skips the deterministic allowlist and goes straight to the
+    /// user prompt, checked before it. The allowlist is a standing "yes" from some earlier,
+    /// different call — exactly the kind of stand-in-for-a-human answer a tool meant to always ask
+    /// should never get to use. (`#336` separately fixed Vibecop's disabled state to mean "no
+    /// verdict" rather than an outright `APPROVE`, so an ordinary, non-`humanOnly` call with
+    /// Vibecop off now reaches the same user prompt too — `humanOnly`'s remaining job is the
+    /// allowlist, which Vibecop's state never touched either way.) Checked after the background
+    /// fail-closed block (unattended stays fail-closed, not promoted to a prompt nobody is there to
+    /// answer) and after `autoApproveTools` (set only by `ScenarioRunner` for a headless or scenario
+    /// run, never by a person — there is no human in that run to ask, so a human-only gate cannot be
+    /// a stronger claim than the switch already means).
     func requestApproval(toolName: String, details: String, args: [String: JSONValue] = [:],
                          workspace: String? = nil,
                          conversationId: UUID? = nil, origin: String = "Main agent",
                          inSandbox: Bool = false, callerRole: VibecopCallerRole = .agent,
                          allowedCommands: [String] = [], vibecopEnabled: Bool? = nil,
-                         grantedMount: ContainerMount? = nil) async -> Bool {
+                         grantedMount: ContainerMount? = nil, humanOnly: Bool = false) async -> Bool {
         // No pre-granted-approval branch here, deliberately (#187 R21, 2026-09-21): a call a
         // person clicked "Approve and run" on is dispatched by `IrisEngine.executeApprovedCall`,
         // which runs the tool through the hook layer directly and never enters this function. The
@@ -2336,6 +2447,14 @@ class AppState {
                                          callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled)
             }
             return true
+        }
+        // `humanOnly`: straight to the prompt, bypassing the allowlist below (a standing "yes"
+        // from some earlier, different call). Vibecop needs no bypass of its own any more — `#336`
+        // made its disabled state "no verdict" rather than an outright APPROVE, so it already falls
+        // through to this same prompt for an ordinary call too.
+        if humanOnly {
+            return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
+                                             conversationId: conversationId, origin: origin, humanOnly: true)
         }
         // Fast path: deterministic permissions.
         if permissions.isAllowed(toolName: toolName, details: details, workspace: workspace) {
@@ -2425,7 +2544,7 @@ class AppState {
     ///
     /// The runner says why it refused, because it is the half that knows which conversation the
     /// card went to. Only the case it cannot reach — there is no runner at all — is answered here,
-    /// and Activity is the only destination left to answer it in.
+    /// and Iris is the only destination left to answer it in.
     func approveBlockedCall(runId: UUID) {
         let engine = self.engine
         Task { [weak self] in
@@ -2461,7 +2580,7 @@ class AppState {
     /// Appends an approval request and awaits the user's decision. The queue/continuation seam,
     /// separated from `requestApproval`'s permission/Vibecop fast paths so it is unit-testable.
     func enqueueUserApproval(toolName: String, details: String, workspace: String?,
-                             conversationId: UUID?, origin: String) async -> Bool {
+                             conversationId: UUID?, origin: String, humanOnly: Bool = false) async -> Bool {
         // If our task was already cancelled (e.g. a subagent torn down while we were suspended
         // in the Vibecop/timeout window), do NOT enqueue a request nobody will resolve — the
         // teardown's denyPendingApprovals already ran and would miss a late append.
@@ -2475,7 +2594,7 @@ class AppState {
             await withCheckedContinuation { continuation in
                 pendingApprovals.append(ToolApprovalRequest(
                     id: requestId, toolName: toolName, details: details, workspace: workspace,
-                    conversationId: conversationId, origin: origin, continuation: continuation))
+                    conversationId: conversationId, origin: origin, humanOnly: humanOnly, continuation: continuation))
             }
         } onCancel: {
             Task { @MainActor [weak self] in self?.denyApproval(id: requestId) }
@@ -2599,13 +2718,25 @@ class AppState {
         case .deny:
             approved = false
         case .alwaysAllowGlobal:
-            permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
+            // Review #340, item 3 (defense in depth): `ChatView`'s banner already hides the
+            // Always-Allow buttons for a `humanOnly` request, but that is UI-level — any other
+            // caller of `resolveApproval` (a test, a future surface) could still reach this case
+            // for one. `humanOnly` exists specifically so neither the allowlist nor Vibecop can
+            // stand in for a human's click on THIS job (`AppState.requestApproval`); persisting a
+            // rule here would let that same click silently approve every future one, which is the
+            // exact thing `humanOnly` was built to prevent. This call is still honored — the human
+            // did approve it — only the standing rule is refused.
+            if !pending.humanOnly {
+                permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
+            }
             approved = true
         case .alwaysAllowProject:
-            if let workspace = pending.workspace {
-                permissions.allowInProject(toolName: pending.toolName, details: pending.details, workspace: workspace)
-            } else {
-                permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
+            if !pending.humanOnly {
+                if let workspace = pending.workspace {
+                    permissions.allowInProject(toolName: pending.toolName, details: pending.details, workspace: workspace)
+                } else {
+                    permissions.allowGlobally(toolName: pending.toolName, details: pending.details)
+                }
             }
             approved = true
         }
@@ -2839,11 +2970,25 @@ class AppState {
         do { try store.apply(batch) } catch { print("Conversation store flush failed: \(error)") }
     }
     
-    func renameConversation(id: UUID, newTitle: String) {
-        if let idx = conversations.firstIndex(where: { $0.id == id }) {
-            conversations[idx].title = newTitle
-            markChanged(id, .metadata)
-        }
+    /// 5b: refuses on the pinned conversation (spec §0.2). Final-review fix wave (#187): the two
+    /// refusals `renameConversation` used to conflate into a single `Bool` are distinguished here so
+    /// the dispatcher can tell the model (and a test can prove) which one happened — a stale or
+    /// forged call naming a conversation that no longer exists is a different fact than Iris
+    /// refusing to rename itself.
+    enum RenameRefusal: Equatable {
+        case noSuchConversation
+        case pinned
+    }
+
+    /// `nil` means the rename happened. Mirrors `archiveConversation`'s shape: check the refusal
+    /// reasons in order, act only if there are none.
+    @discardableResult
+    func renameConversation(id: UUID, newTitle: String) -> RenameRefusal? {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }) else { return .noSuchConversation }
+        guard !conversations[idx].isPinned else { return .pinned }
+        conversations[idx].title = newTitle
+        markChanged(id, .metadata)
+        return nil
     }
     
     /// Set by `loadConversations()` when the legacy UserDefaults blob existed but could not be
@@ -3361,7 +3506,7 @@ class AppState {
     }
 
     func handleClearCommand(convId: UUID) {
-        // #187 — a pinned conversation (the Activity log) keeps its history; `/clear` says so
+        // #187 — a pinned conversation (Iris) keeps its history; `/clear` says so
         // rather than silently doing nothing.
         if let refusal = clearRefusal(for: convId) {
             emitCommandOutput(refusal.reason, format: .system, to: convId)

@@ -3,7 +3,7 @@ import Foundation
 @testable import iris
 
 /// #187 §6 — what a job fire actually is now: a turn in a hidden conversation of its own, a row in
-/// `job_runs`, and one event card in the Activity conversation. The pure half (`outcome`,
+/// `job_runs`, and one event card in Iris, the pinned conversation. The pure half (`outcome`,
 /// `status`) is tested on its own because the precedence between a denial, an `[LLM_ERROR]` and a
 /// soft stop is the part that decides whether a person is told something went wrong.
 @MainActor
@@ -198,7 +198,7 @@ struct JobRunnerTests {
         #expect(run.failureReason == nil)
         #expect(run.blockedTool == nil)
 
-        // Exactly one card, in the Activity conversation.
+        // Exactly one card, in Iris, the pinned conversation.
         let activityId = state.activityConversationId()
         let activity = try #require(state.conversations.first { $0.id == activityId })
         let cards = activity.messages.filter { $0.role == .event }

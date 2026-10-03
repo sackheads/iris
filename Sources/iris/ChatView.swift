@@ -542,18 +542,19 @@ struct ChatView: View {
                 // click, so the re-check writes the same system line `/archive` does rather
                 // than dropping its result on the floor.
                 let refusal = state.archiveRefusal(for: conv.id)
-                Button(refusal == nil ? "Archive" : "Archive (\(refusal!.reason))") {
+                // `.pinned`'s reason is already a complete sentence naming `/new` (spec §0.2), not
+                // a clause for "Cannot archive: …" or a parenthetical.
+                Button(refusal == nil ? "Archive" : (refusal == .pinned ? "Archive (pinned)" : "Archive (\(refusal!.reason))")) {
                     if let denied = state.archiveConversation(conv.id) {
-                        let line = "Cannot archive: \(denied.reason)."
+                        let line = denied == .pinned ? denied.reason : "Cannot archive: \(denied.reason)."
                         // The row right-clicked is usually *not* the conversation on screen, so
                         // writing only into its transcript hides the refusal behind a click the
                         // user has no reason to make. It goes where they are looking, and into
                         // the refused conversation too so its own history records it.
                         state.appendMessage(role: .system, content: line, to: conv.id)
                         if let selected = state.selectedConversationId, selected != conv.id {
-                            state.appendMessage(role: .system,
-                                                content: "Cannot archive \"\(conv.title)\": \(denied.reason).",
-                                                to: selected)
+                            let peerLine = denied == .pinned ? denied.reason : "Cannot archive \"\(conv.title)\": \(denied.reason)."
+                            state.appendMessage(role: .system, content: peerLine, to: selected)
                         }
                     }
                 }
@@ -1233,16 +1234,23 @@ struct ApprovalBannerView: View {
                 .cornerRadius(4)
             
             HStack {
-                Button(action: { onResolve(.alwaysAllowGlobal) }) {
-                    Text("Always Allow (Global)")
-                }
-                
-                if request.workspace != nil {
-                    Button(action: { onResolve(.alwaysAllowProject) }) {
-                        Text("Always Allow (Project)")
+                // Fix round 2 (#187): a `humanOnly` request bypassed the allowlist on the way in so
+                // neither it nor Vibecop could stand in for this click — "Always Allow" would write
+                // a `PermissionRule` a `humanOnly` call never reads (`requestApproval` skips
+                // `permissions.isAllowed` for it entirely), so offering it here is a choice that
+                // looks like it changes future behavior and cannot.
+                if !request.humanOnly {
+                    Button(action: { onResolve(.alwaysAllowGlobal) }) {
+                        Text("Always Allow (Global)")
+                    }
+
+                    if request.workspace != nil {
+                        Button(action: { onResolve(.alwaysAllowProject) }) {
+                            Text("Always Allow (Project)")
+                        }
                     }
                 }
-                
+
                 Spacer()
                 
                 Button(role: .cancel, action: { onResolve(.deny) }) {

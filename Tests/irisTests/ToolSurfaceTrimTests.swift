@@ -141,6 +141,22 @@ struct ToolSurfaceTrimTests {
         #expect(!draft.contains("amend_goal_contract"))
     }
 
+    /// 5b: the pinned conversation is exempt from rename on every path (spec §0.2), so a
+    /// rename-trigger turn sent into it must not even declare the tool — invariant 6's "undeclared
+    /// is the cheap half" for a tool a pinned turn may never use.
+    @Test("rename_conversation is never declared on a rename-trigger turn in the pinned conversation")
+    func renameNotDeclaredWhenPinned() async {
+        let prompt = IrisEngine.renameTriggerPrefix + ": Evaluate the conversation history and use the `rename_conversation` tool to assign a short, descriptive title."
+        let unpinned = await toolNames(prompt: prompt)
+        #expect(unpinned.contains("rename_conversation"), "control: the declaration is normally offered on this trigger")
+
+        let pinned = await toolNames(prompt: prompt) { app, id in
+            guard let idx = app.conversations.firstIndex(where: { $0.id == id }) else { return }
+            app.conversations[idx].isPinned = true
+        }
+        #expect(!pinned.contains("rename_conversation"))
+    }
+
     /// #133 slice 2: the second eagerness set traced every remaining unprompted or missed call to
     /// a description that either invited a call on a mention or failed to invite one on a request.
     @Test("tool descriptions state when to call, not just what the tool is (#133 slice 2)")
@@ -177,13 +193,17 @@ struct ToolSurfaceTrimTests {
         #expect(mem.contains("not present in the current context"))
         #expect(!mem.contains("JIT injection"))
 
-        // The watch declaration is two sentences (#187 deliverable 4, spec §5): what it does and
+        // The watch declaration was two sentences (#187 deliverable 4, spec §5): what it does and
         // that its own writes are safe. The built-in ignore set, the ceiling and the
-        // never-concurrent rule are said in the tool's result, not paid for on every turn.
+        // never-concurrent rule are said in the tool's result, not paid for on every turn. A third,
+        // short sentence was added in the final-review fix wave (#187) — the same one-line approval
+        // note `schedule_job`'s description carries — so the cap moved from 230 to 300 rather than
+        // dropping the note; the ignore/ceiling/never-concurrent detail still stays out.
         let watch = try #require(decls["register_directory_watcher"])
-        #expect(watch.count <= 230)
+        #expect(watch.count <= 300)
         #expect(watch.contains("quiet"))
         #expect(watch.contains("own file-tool writes"))
+        #expect(watch.contains("asks the user"))
         #expect(!watch.contains(".git"))
     }
 

@@ -19,9 +19,11 @@ private actor PeerDeliveryGate {
 }
 
 private func eventually(_ timeoutMs: Int = 3000, _ condition: @MainActor @Sendable () -> Bool) async -> Bool {
-    for _ in 0..<(timeoutMs / 10) {
+    // Coordinator's flakiness ruling (review #340 follow-up): widened from a 10ms tick to 25ms to
+    // ease MainActor pressure under the full suite's load.
+    for _ in 0..<(timeoutMs / 25) {
         if await condition() { return true }
-        try? await Task.sleep(nanoseconds: 10_000_000)
+        try? await Task.sleep(nanoseconds: 25_000_000)
     }
     return await condition()
 }
@@ -369,5 +371,187 @@ struct PeerDeliveryTests {
         await gate.release()
         let drained = await eventually { app.pendingUserMessageCount(for: target) == 0 }
         #expect(drained, "the queued send must reach the target once the turn it waited on ends")
+    }
+
+    // MARK: Job creation through the real peer-delivery entry point (residual fix, #187 §0.5)
+
+    /// Coordinator's re-review found a critical residual: `deliverPeerMessage`'s IDLE path calls
+    /// `deliverSanitizedSystemEvent`, which called `processInput` without marking the conversation
+    /// at all — only the busy/queued path (through `queuePeerArrival`) was flagged. Idle is the far
+    /// more common path, so a peer could get an idle, non-pinned conversation to create a standing
+    /// job with nobody asked, essentially every time. Fixed by marking the conversation's sticky
+    /// `hasUnattendedInput` taint (`AppState.markConversationTouchedByUnattendedInput`) from
+    /// `deliverSanitizedSystemEvent`'s idle branch too, not just `queuePeerArrival`'s busy one.
+    ///
+    /// Driven through the real `deliverPeerMessage` entry point rather than calling
+    /// `AppState.markConversationTouchedByUnattendedInput` directly (what `JobToolsTests`' tainted-conversation
+    /// tests do) — those tests cannot catch a regression in `deliverPeerMessage`'s own plumbing,
+    /// only in `executeFunctionCall`'s gate once the conversation is already tainted.
+    @Test("a peer message delivered to an idle, non-pinned target reaches the human prompt before creating a job")
+    func idleDeliveryAsksBeforeSchedulingJob() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        app.autoApproveTools = false
+        let sender = UUID(), target = UUID()
+        app.createNewConversation(id: sender)
+        app.createNewConversation(id: target)
+        let call = FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1")
+        let client = FakeLLMClient(responses: [
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil),
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
+        ])
+        let engine = IrisEngine(state: app, tier: .medium, client: client, retryDelays: [], protectionEnabled: false)
+
+        _ = await engine.deliverPeerMessage("schedule a sweep", from: sender, senderName: "peer", to: target)
+
+        var queued = false
+        // Coordinator's flakiness ruling (review #340 follow-up): widened from a 5ms tick to a
+        // modest 25ms (80 iterations, same ~2s ceiling as 400 * 5ms) to ease MainActor pressure.
+        for _ in 0..<80 {
+            if !app.pendingApprovals.isEmpty { queued = true; break }
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(queued, "a peer message delivered into an idle, non-pinned conversation must ask before creating a job")
+        if queued { app.resolveApproval(id: app.pendingApprovals[0].id, .approve) }
+        #expect(await eventually { (try? app.store.ledger.jobs().count) == 1 })
+    }
+
+    /// Review #340's blocker: the taint principle is "content that starts a turn without the owner
+    /// present", and a background subagent's post-back is exactly that — it reports in on its own
+    /// schedule, whenever `SubagentManager.shared.runSubagent` finishes, regardless of what the
+    /// owner is doing by then. `work` reproduced a gap where `handleSystemEvent` (the function the
+    /// background branch of `invoke_subagent` actually calls back through — see `iris.swift`'s
+    /// `executeFunctionCall`, `isBackground` branch) never marked the parent conversation at all, so
+    /// its very next turn could dispatch `schedule_job` unprompted. Driven through the real
+    /// `handleSystemEvent` entry point with `source: "SubagentManager"` — the exact call the spawned
+    /// `Task` in `executeFunctionCall` makes — rather than a stand-in, so a regression in
+    /// `handleSystemEvent`'s own plumbing cannot hide behind a unit-level taint test. An INLINE
+    /// (non-background) `invoke_subagent` result never reaches `handleSystemEvent`: it returns as
+    /// ordinary tool output inside the owner's own turn, so it is explicitly out of scope here (see
+    /// `docs/jobs.md`).
+    @Test("a background subagent's post-back reaches the human prompt before creating a job")
+    func backgroundSubagentPostBackAsksBeforeSchedulingJob() async throws {
+        let app = AppState(); app.conversations.removeAll()
+        app.autoApproveTools = false
+        let parent = UUID()
+        app.createNewConversation(id: parent)
+        #expect(app.conversations.first { $0.id == parent }?.hasUnattendedInput == false,
+                "sanity: the parent must start untainted, or this test cannot tell the gate apart from the pinned one")
+        let call = FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1")
+        let client = FakeLLMClient(responses: [
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil),
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
+        ])
+        let engine = IrisEngine(state: app, tier: .medium, client: client, retryDelays: [], protectionEnabled: false)
+
+        // `async let`, not a direct `await`: `handleSystemEvent` drives the turn that blocks on
+        // `enqueueUserApproval`'s continuation, which only the poll loop below ever resolves. A
+        // direct `await` here deadlocks the whole suite instead of failing this one test — exactly
+        // the mistake `runJobCreationCallThroughRealQueue`'s own comment warns about.
+        async let turn: Void = engine.handleSystemEvent("Background subagent result:\nI cleaned up.", source: "SubagentManager", conversationId: parent)
+
+        var queued = false
+        // Coordinator's flakiness ruling (review #340 follow-up): widened from a 5ms tick to a
+        // modest 25ms (80 iterations, same ~2s ceiling as 400 * 5ms) to ease MainActor pressure.
+        for _ in 0..<80 {
+            if !app.pendingApprovals.isEmpty { queued = true; break }
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(queued, "a background subagent's post-back must ask before creating a job, same as a peer message")
+        if queued {
+            app.resolveApproval(id: app.pendingApprovals[0].id, .approve)
+        } else {
+            app.denyPendingApprovals(for: parent)
+        }
+        await turn
+        #expect(await eventually { (try? app.store.ledger.jobs().count) == 1 })
+    }
+
+    /// The busy-target counterpart: the peer message is queued while the target is mid-turn, and —
+    /// since this script's first round makes no tool call — is drained into a brand-new turn once
+    /// that turn ends. `queuePeerArrival` (the busy branch) marks the conversation's sticky
+    /// `hasUnattendedInput` taint at enqueue time, before the drain ever runs, so the drained turn's own
+    /// `schedule_job` call is gated regardless of how the turn it lands in got started. Included
+    /// here to confirm the real `deliverPeerMessage` entry point's busy branch still reaches the
+    /// human prompt end to end, not just the unit-level mechanism.
+    @Test("a peer message queued behind a busy, non-pinned target reaches the human prompt once drained into its own turn")
+    func busyDeliveryDrainsAndAsksBeforeSchedulingJob() async throws {
+        let gate = PeerDeliveryGate()
+        let scheduleCall = FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c1")
+        let client = ScriptedStreamClient([
+            [.event(.textDelta("hi")), .block { await gate.wait() }, .event(.done(finishReason: nil))],
+            [.event(.functionCall(scheduleCall)), .event(.done(finishReason: "tool_use"))],
+            [.event(.textDelta("ok")), .event(.done(finishReason: nil))],
+        ])
+        let (app, engine, sender, target) = busyTarget(client)
+        app.autoApproveTools = false
+
+        app.sendMessage("start a turn")
+        #expect(await eventually { client.calls == 1 })
+        #expect(app.hasTurnInFlight(for: target))
+
+        await engine.deliverPeerMessage("schedule a sweep", from: sender, senderName: "peer", to: target)
+        await gate.release()
+
+        var queued = false
+        // Coordinator's flakiness ruling (review #340 follow-up): widened from a 5ms tick to a
+        // modest 25ms (80 iterations, same ~2s ceiling as 400 * 5ms) to ease MainActor pressure.
+        for _ in 0..<80 {
+            if !app.pendingApprovals.isEmpty { queued = true; break }
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(queued, "a peer message drained into its own turn on a non-pinned conversation must ask before creating a job")
+        if queued { app.resolveApproval(id: app.pendingApprovals[0].id, .approve) }
+        #expect(await eventually { (try? app.store.ledger.jobs().count) == 1 })
+    }
+
+    /// Coordinator's ruling on a peer STEER (distinct from a peer-originated turn): once a peer's
+    /// words are injected mid-turn as a steer (`drainPendingInput`, from the busy-delivery queue),
+    /// job creation for the REST of that turn takes the pinned-conversation gate too — the turn
+    /// itself started from the user's own words (`app.sendMessage`), not a peer. The taint is set on
+    /// the CONVERSATION, not the turn: `queuePeerArrival` marks `hasUnattendedInput` the moment the
+    /// steer is enqueued, before this turn's `drainPendingInput` ever consumes it as a mid-turn
+    /// steer, so `schedule_job` called in a later round of this same turn reads an already-tainted
+    /// conversation in `executeFunctionCall`'s gate.
+    @Test("a peer steer injected mid-turn gates job creation for the rest of that turn, even though the turn did not start as a peer turn")
+    func peerSteerMidTurnGatesLaterJobCreation() async throws {
+        let gate = PeerDeliveryGate()
+        let readCall = FunctionCall(name: "run_command", args: ["command": .string("echo hi")], id: "c1")
+        let scheduleCall = FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)], id: "c2")
+        let client = ScriptedStreamClient([
+            [.event(.functionCall(readCall)), .block { await gate.wait() }, .event(.done(finishReason: "tool_use"))],
+            [.event(.functionCall(scheduleCall)), .event(.done(finishReason: "tool_use"))],
+            [.event(.textDelta("ok")), .event(.done(finishReason: nil))],
+        ])
+        let (app, engine, sender, target) = busyTarget(client)
+        // `false`, deliberately, so `schedule_job`'s own `humanOnly` gate is the one actually under
+        // test (`autoApproveTools == true` would short-circuit `requestApproval` before `humanOnly`
+        // is even read). #334/#336 changed Vibecop's disabled state from an outright `APPROVE` to no
+        // verdict, so round 1's ordinary `run_command` call now ALSO reaches `pendingApprovals` —
+        // it has no matching allowlist rule either — before the `schedule_job` approval this test
+        // is actually watching for. Both need approving to let the turn run to completion, so the
+        // loop below drains and approves whatever appears, round by round, rather than assuming
+        // there is exactly one.
+        app.autoApproveTools = false
+
+        app.sendMessage("start a turn")
+        #expect(await eventually { client.calls == 1 })
+        #expect(app.hasTurnInFlight(for: target))
+
+        await engine.deliverPeerMessage("please also check something", from: sender, senderName: "peer", to: target)
+        await gate.release()
+
+        var sawSchedule = false
+        // Coordinator's flakiness ruling (review #340 follow-up): widened from a 5ms tick to a
+        // modest 25ms (160 iterations, same ~4s ceiling as 800 * 5ms) to ease MainActor pressure.
+        for _ in 0..<160 {
+            if let pending = app.pendingApprovals.first {
+                if pending.toolName == "schedule_job" { sawSchedule = true }
+                app.resolveApproval(id: pending.id, .approve)
+            }
+            if (try? app.store.ledger.jobs().count) == 1 { break }
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(sawSchedule, "once a peer's words are injected as a mid-turn steer, job creation for the rest of that turn must ask a human")
+        #expect(await eventually { (try? app.store.ledger.jobs().count) == 1 })
     }
 }

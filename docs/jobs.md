@@ -450,7 +450,7 @@ What each answer costs:
 | The gate says | What happens |
 | --- | --- |
 | changed | The job runs, and the signal is recorded on that run's row |
-| nothing changed | A `completed` row with the outcome `gate: no change`, and **no card** — cards are for things that happened, and a five-minute poll would otherwise bury the Activity conversation. It costs no model turn and does not count towards the breaker |
+| nothing changed | A `completed` row with the outcome `gate: no change`, and **no card** — cards are for things that happened, and a five-minute poll would otherwise bury Iris, the pinned conversation. It costs no model turn and does not count towards the breaker |
 | it could not tell (a 404 or 5xx, a response with none of the three headers, a missing path, a mount that has moved, a non-zero exit, a timeout, or any other last line — and a ledger Iris could not read the last signal out of) | An `interrupted` row whose reason starts `gate error`. Three of those **in a row** pause the job with the reason `gate failing`, and that pause gets a card |
 
 If a job's gate is ever changed — no tool does this today — the signals its runs recorded are
@@ -687,14 +687,37 @@ A run ends in one of five statuses:
 A run that says nothing is a failure, not a success: "it worked and had nothing to report" and "it
 never got as far as a reply" must not look the same on a card.
 
-## Event cards and the Iris Activity conversation
+## Event cards and the Iris conversation
 
 When a run ends, one **event card** is delivered: job name, status, the one-line outcome, tokens,
 and a "View run" button onto the transcript. It goes to the job's destination conversation if it
-has one, and otherwise to **Iris Activity** — a pinned conversation Iris creates on first use and
-keeps at the top of the sidebar. (Pinned conversations refuse `/clear`.) A run that stopped on a
-refused call gets a second half as well — the call in full, and what you can do about it; see
-"Approve and run" below.
+has one, and otherwise to **Iris** — the pinned conversation Iris creates on first use, keeps at
+the top of the sidebar, and treats as your main conversation. (Pinned conversations refuse
+`/clear`.) A run that stopped on a refused call gets a second half as well — the call in full, and
+what you can do about it; see "Approve and run" below.
+
+Because Iris reads every other conversation's cards and holds both job-creating tools, calling
+`schedule_job` or `register_directory_watcher` from Iris itself is one case where creating a job or
+watch asks you first: the call pauses on an ordinary approval dialog, and declining it creates
+nothing — unless `autoApproveTools` (the switch a headless driver or scenario run sets) is on,
+which exempts this dialog exactly as it exempts every other approval, since there is nobody there
+to ask. The same ask applies to any conversation that has received a message from another session
+or a background subagent's report — pinned or not, and regardless of whether the job-creating call
+is in the same turn that content arrived in or a much later one: the taint is sticky for the life of
+the conversation, survives a restart, and is set only by genuine delivery, never by text that merely
+looks like one. Without this, a peer — or a background subagent reporting back whenever it finishes,
+independent of what the owner is doing by then — could get an ordinary, non-pinned conversation to
+create a standing job with nobody in that conversation ever having typed anything. An INLINE
+(non-background) `invoke_subagent` result is explicitly not this: it returns as ordinary tool output
+inside the owner's own turn, so it needs no taint — the owner is already there.
+
+Every other, ordinarily-driven conversation creates a job or watch without that extra ask — except
+a subagent, which is refused both tools outright (declaration and dispatch) and cannot create one
+at all, however it was asked. Review is not all-or-nothing either way: a `schedule_job` carrying
+`gate_script` is reviewed once before the job exists, in whichever conversation asked for it —
+Vibecop judges the script and what it may read when it is on, and escalates to the ordinary
+approval dialog if it cannot decide; with Vibecop off, the default, every gate script goes to that
+same dialog instead (see "Gates" above). It is never created unreviewed.
 
 Delivery never wakes a model turn. The card is a `ChatRole.event` message, drawn as a card and
 never indexed for search; alongside it the card's one-line summary is appended to the destination's
@@ -782,7 +805,7 @@ and executes on the host when no container resolves. That is deliberate rather t
 configuration the user wrote, in a file only the user edits, so it is not something an unattended
 model can reach for. The rule above is about what the model can issue.
 
-A refusal is said in the conversation the card is in — the job's destination, or Iris Activity —
+A refusal is said in the conversation the card is in — the job's destination, or Iris —
 because a sentence in a conversation you do not have open is the same as silence.
 
 Three calls are never offered the button at all, and are refused again by the runner (and, for
@@ -945,9 +968,9 @@ run row, no card and no stored signal.
 Approvals fail closed exactly as they do at 3 a.m.: no auto-approve, no headless mode, no volatile
 settings copy. A tool call a read-only profile denies, or one that would need a human, is recorded
 as a `blocked on approval` run with the call on it — the same row and the same card a scheduled
-fire would leave, so the card is in the Activity conversation the next time you open the app.
+fire would leave, so the card is in Iris, the pinned conversation, the next time you open the app.
 
-Apart from the run's own two conversations — its hidden transcript and the Activity conversation
+Apart from the run's own two conversations — its hidden transcript and the pinned conversation
 the card lands in — the command leaves nothing behind. The things a *launch* does and a
 measurement must not (creating an empty conversation in a store with nothing selected, appending
 the guard-provisioning and unreadable-row notices) are suppressed for a CLI run; the fire, its

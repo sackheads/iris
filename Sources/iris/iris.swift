@@ -474,14 +474,29 @@ actor IrisEngine {
 
         // Sanitize incoming system events (especially those from subagents) to prevent injection
         let safeMessage = await sanitizeArrival(message, source: source)
-        await deliverSanitizedSystemEvent(safeMessage, source: source, conversationId: activeId, wasArchived: wasArchived)
+        // Review #340: `handleSystemEvent`'s only caller is a background subagent's post-back
+        // (`invoke_subagent background: true`, reporting back whenever it finishes — independent of
+        // whatever the owner is doing by then). That starts a turn on this conversation without the
+        // owner present, the same shape `deliverPeerMessage` closes for a peer — so it takes the
+        // same sticky taint. An INLINE (non-background) `invoke_subagent` result never reaches here:
+        // it returns as ordinary tool output inside the owner's own turn (`executeFunctionCall`'s
+        // `invoke_subagent` branch), so it needs none of this — the owner is already there.
+        await deliverSanitizedSystemEvent(safeMessage, source: source, conversationId: activeId, wasArchived: wasArchived, isUnattendedInput: true)
     }
 
     /// The append-notice-and-drive-the-turn tail of `handleSystemEvent`, factored out so a caller
     /// that has ALREADY run `sanitizeArrival` itself can hand off without a second sanitisation
     /// pass. `deliverPeerMessage`'s idle path (#185 review round 3) is the one caller that needs
     /// this: it sanitizes once, re-checks the target's busy state, and only then reaches here.
-    private func deliverSanitizedSystemEvent(_ safeMessage: String, source: String, conversationId: UUID, wasArchived: Bool) async {
+    /// `isUnattendedInput` (#187 §0.5 structural ruling, renamed under review #340 — the principle
+    /// is "content that starts a turn without the owner present", not only "peer"): `true` for both
+    /// of this function's callers (`handleSystemEvent`'s background-subagent post-back,
+    /// `deliverPeerMessage`'s idle-target call). Marks the conversation's sticky taint
+    /// (`AppState.markConversationTouchedByUnattendedInput`) rather than threading a flag through
+    /// the turn that follows — three rounds of per-turn threading each left a path open (a restart,
+    /// a nested continuation, a sibling turn's shared per-turn state being cleared out from under
+    /// it), because the gate lived in transient state instead of being derived from what persists.
+    private func deliverSanitizedSystemEvent(_ safeMessage: String, source: String, conversationId: UUID, wasArchived: Bool, isUnattendedInput: Bool = false) async {
         let localState = state
         await MainActor.run {
             // #182 §6.2: an arrival lands with the user looking elsewhere, so the line that
@@ -492,6 +507,7 @@ actor IrisEngine {
             // out of what they are reading.
             let notice = wasArchived ? "Un-archived: work arrived from \(source).\n\n" : ""
             localState?.appendMessage(role: .system, content: notice + safeMessage, to: conversationId)
+            if isUnattendedInput { localState?.markConversationTouchedByUnattendedInput(conversationId) }
         }
         await processInput(safeMessage, source: source, conversationId: conversationId)
     }
@@ -569,7 +585,7 @@ actor IrisEngine {
         }
         Task {
             let wasArchived = await MainActor.run { localState?.unarchiveConversation(targetId) ?? false }
-            await self.deliverSanitizedSystemEvent(safe, source: Self.peerSource, conversationId: targetId, wasArchived: wasArchived)
+            await self.deliverSanitizedSystemEvent(safe, source: Self.peerSource, conversationId: targetId, wasArchived: wasArchived, isUnattendedInput: true)
             // The claim is given back only once the turn it authorised is over. Releasing at
             // handoff instead would reopen a gap between this function returning and
             // `withEngineTurn` registering the turn — the very gap the claim exists to close.
@@ -599,6 +615,11 @@ actor IrisEngine {
         await MainActor.run {
             localState?.appendMessage(role: .system, content: safe, to: targetId)
             localState?.enqueuePendingUserMessage(text: safe, attachments: [], for: targetId, isPeer: true)
+            // #187 §0.5 structural ruling: marked here, at enqueue time, covers both of this
+            // entry's eventual consumers — drained into its own turn once the busy turn ends
+            // (`AppState.startTurn`'s drain path) or consumed as a mid-turn steer
+            // (`drainPendingInput`) — so neither path needs its own marking logic.
+            localState?.markConversationTouchedByUnattendedInput(targetId)
         }
     }
 
@@ -1109,6 +1130,9 @@ actor IrisEngine {
             let content = Content(role: "user", parts: [Part(text: "\(label): \(steerText)")])
             await MainActor.run { localState?.appendContentToHistory(for: conversationId, content: content) }
             added = true
+            // #187 §0.5 structural ruling: no per-turn marking needed here — a peer steer can only
+            // reach this loop via `queuePeerArrival`'s busy path, which already marked the
+            // conversation's sticky taint at enqueue time, before this drain ever ran.
         }
 
         let eventLines = await MainActor.run { localState?.takePendingEventLines(for: conversationId) ?? [] }
@@ -1239,6 +1263,13 @@ actor IrisEngine {
         await lifetime.release()
     }
 
+    /// #187 §0.5 structural ruling: no `isPeer` parameter here any more. Three rounds tried
+    /// threading one down to `executeFunctionCall` (mirroring `restrictToGoalComplete`) and each
+    /// left a path open — a process restart, a nested continuation, a sibling turn clearing shared
+    /// per-turn state — because the fact the job-creation gate needs ("has a turn ever started on
+    /// this conversation without the owner present") lived in transient call-chain state instead of
+    /// being derived from what persists. See `Conversation.hasUnattendedInput` /
+    /// `AppState.markConversationTouchedByUnattendedInput`.
     func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil, lifetime: TurnLifetime? = nil) async {
         await withEngineTurn(conversationId, lifetime: lifetime) {
             let turnID = PerformanceProfiler.shared.beginTurn(label: input, source: source)
@@ -1326,11 +1357,15 @@ actor IrisEngine {
         }
 
         // Read once for the gates below that all ask about this conversation: whether it is an
-        // unattended run, whether it has a goal to complete, and what a job run of it may do.
-        let (isUnattended, hasActiveGoal, jobProfile) = await MainActor.run { () -> (Bool, Bool, JobProfile?) in
+        // unattended run, whether it has a goal to complete, what a job run of it may do, and
+        // whether it is the pinned conversation (5b: gates both the job tools below and the
+        // rename-trigger declaration — a subagent or evaluator conversation lives in
+        // `localState?.conversations` like any other, but it is never the pinned one, so
+        // `isPinned` reads false for it at no extra cost).
+        let (isUnattended, hasActiveGoal, jobProfile, isPinned) = await MainActor.run { () -> (Bool, Bool, JobProfile?, Bool) in
             let conversation = localState?.conversations.first(where: { $0.id == conversationId })
             return (conversation?.isBackground == true, conversation?.activeGoal != nil,
-                    conversation?.jobProfile)
+                    conversation?.jobProfile, conversation?.isPinned == true)
         }
 
         // #185 §6: computed once per turn and reused below for the session-tools declaration
@@ -1351,7 +1386,11 @@ actor IrisEngine {
         // No unattended job creation (the agency epic's standing ruling): a background run may
         // not write itself a cadence or a watch, so the two tools that do are not declared to it
         // at all — undeclared costs it nothing, and `executeFunctionCall` refuses the call anyway.
-        if isUnattended { toolsList.removeAll { Self.jobCreationTools.contains($0.name) } }
+        // Fix round 2 (#187): nor to a subagent or evaluator — `register_directory_watcher` comes
+        // from `executor.getTools()` above unconditionally, with no principal check of its own, so
+        // a `.subagent` (never pinned itself) could create the standing job the pinned-conversation
+        // gate exists to stop, laundering it through `invoke_subagent`.
+        if isUnattended || principal != .main { toolsList.removeAll { Self.jobCreationTools.contains($0.name) } }
         // Add set_workspace tool dynamically — not to a background turn (#282 §0.10, invariant 6):
         // its grant is its boundary, and `executeFunctionCall` refuses the call anyway.
         if !isUnattended {
@@ -1370,8 +1409,10 @@ actor IrisEngine {
         
         // Offered only on the rename-trigger turn (`/rename` and the automatic third-message
         // trigger both send this prefix). On plain turns the model renamed unprompted on first
-        // messages, the only tool eagerness the perf suite measured (#132).
-        if input.hasPrefix(Self.renameTriggerPrefix) {
+        // messages, the only tool eagerness the perf suite measured (#132). 5b: never on the
+        // pinned conversation — it is exempt from rename on all four paths (spec §0.2), so the
+        // declaration would be dead weight the model could still be tempted to reach for.
+        if input.hasPrefix(Self.renameTriggerPrefix) && !isPinned {
             toolsList.append(FunctionDeclaration(
                 name: "rename_conversation",
                 description: "Rename the current conversation to a short, descriptive title as instructed by the System Event.",
@@ -1386,11 +1427,14 @@ actor IrisEngine {
         }
         
         toolsList.append(SubagentManager.toolDeclaration())
-        
-        if !isUnattended {
+
+        // Fix round 2 (#187): `principal == .main` too — appended here unconditionally for any
+        // attended turn, this would re-add the tool the `removeAll` above just stripped for a
+        // subagent or evaluator (which runs before this declaration exists to be removed).
+        if !isUnattended && principal == .main {
         toolsList.append(FunctionDeclaration(
             name: "schedule_job",
-            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris Activity' conversation — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is reviewed before the job is created — the script, the directories it may read and its timeout together — so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
+            description: "Create a recurring job. Give a cron expression (five fields: minute hour day-of-month month day-of-week, 0 = Sunday) with an optional IANA timezone, or intervalSeconds, or hour/minute/weekdays (1 = Sunday … 7 = Saturday). The job persists across restarts; by default a job that was due while the app was asleep runs once on wake rather than replaying every tick it missed, which `catch_up` changes, and by default a fire that finds the previous run still going is dropped, which `overlap` changes. Each fire runs in the background, in a hidden conversation of its own, and reports one card into the pinned 'Iris' conversation (your main conversation) — it does not interrupt this one, and nobody is there to approve a gated tool, so a job whose work needs approval stops and says so, unless the job was created with a grant that covers it (mounts and network, below). Calling this tool from Iris itself, or from a conversation that has received a message from another session or a background subagent's report, asks the user to approve the job first, since a standing job created that way is not created silently. A job is read-only unless you say otherwise, and a read-only fire is offered only tools that read: files, memory, the web, and commands run inside the sandbox VM. Every tool that changes anything is refused — writing files, saving or editing facts, memory, soul or profile, creating skills, scheduling work, setting a workspace, messaging a session, delegating, sending mail, creating calendar or task items, and any command outside the VM. Pass profile 'mutating' when the job must change something; it is accepted only when the container runtime is installed and sandboxing is switched on, and a fire that finds the VM gone is refused rather than run on the host. A job can also carry a gate, checked on its cadence, so it only runs when something actually changed: gate_url (a HEAD request whose ETag, Last-Modified or Content-Length moved), gate_path (a file's mtime, size or contents, or the newest change under a directory), or gate_script (a shell script run inside the sandbox VM with the directories in gate_mounts attached read-only). A gate script's verdict is the LAST LINE of its standard output, which must be exactly CHANGED or UNCHANGED — never the exit code, which means different things to diff and grep; anything else, a non-zero exit or a timeout counts as a gate failure, and three in a row pause the job. Whatever the script printed before that line is given to the run as untrusted context. A gate script is always reviewed before the job is created — by Vibecop when it is on, or the ordinary approval dialog when it is not — shown the script, the directories it may read and its timeout together, so mount only what the check actually needs. A gate that finds nothing changed costs no model turn at all. Use this whenever the user asks to be reminded of something or to have something done on a schedule. Never use shell cron for this; calling this tool is the whole job. Example: every weekday at 9 → cron '0 9 * * 1-5'.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -1408,7 +1452,7 @@ actor IrisEngine {
                     "profile": Schema(type: "STRING", description: "'readOnly' (default) or 'mutating'. Use 'mutating' only when the job's work must change something: its commands always run in the container VM, so it needs the runtime installed and sandboxing switched on, and that is re-checked at every fire."),
                     "gate_url": Schema(type: "STRING", description: "Only run the job when a HEAD request to this http(s) URL shows a new ETag, Last-Modified or Content-Length. Needs no sandbox."),
                     "gate_path": Schema(type: "STRING", description: "Only run the job when this absolute path changes: a file's mtime, size or contents, or the newest modification anywhere under a directory. The path must already exist, and a directory must hold fewer than 20,000 entries — checking a whole home folder on a cadence is refused, so name a narrower path or use gate_script. Needs no sandbox."),
-                    "gate_script": Schema(type: "STRING", description: "Only run the job when this shell script says so. It runs inside the sandbox VM on every tick, and its LAST line of stdout must be exactly CHANGED or UNCHANGED (the exit code is not the verdict; a non-zero exit is a gate failure). Everything it printed before that line is handed to the run as untrusted context. Requires the container runtime and sandboxing; reviewed once before the job is created."),
+                    "gate_script": Schema(type: "STRING", description: "Only run the job when this shell script says so. It runs inside the sandbox VM on every tick, and its LAST line of stdout must be exactly CHANGED or UNCHANGED (the exit code is not the verdict; a non-zero exit is a gate failure). Everything it printed before that line is handed to the run as untrusted context. Requires the container runtime and sandboxing; reviewed once before the job is created when Vibecop is on."),
                     "gate_mounts": Schema(type: "ARRAY", description: "Directories the gate script can read, as '/host/dir' or '/host/dir:/path/in/container'. Always mounted read-only, and recorded as the directory the path resolves to. A single file cannot be mounted — give its directory. The whole filesystem and Iris's own configuration cannot be mounted at all, so name the narrowest directory the check needs.", items: Schema(type: "STRING")),
                     "gate_timeout_seconds": Schema(type: "INTEGER", description: "How long the gate script may take before it is killed and counted as a failure (default 60, clamped to 5-600)."),
                     "overlap": Schema(type: "STRING", description: "What a fire does when the previous run has not finished: 'skip' (default — the fire is dropped and recorded) or 'queue' (one fire is held and taken as soon as that run ends; never more than one)."),
@@ -1598,16 +1642,12 @@ actor IrisEngine {
         }
 
         // #187 §9, invariant 6: the job tools are declared in a pinned conversation and nowhere
-        // else. The Activity conversation is the one place a person is already reading about runs,
+        // else. Iris, the pinned conversation, is the one place a person is already reading about runs,
         // so it is the one place the two declarations earn their prompt tokens; everywhere else
         // they would be a standing cost for a question nobody asked. The gate itself is pure
-        // (`jobToolDeclarations`) so both answers are testable without a turn.
-        // `.main` only, and the ternary rather than an `if` around the hop for the same reason
-        // `peerCount` above uses one: a subagent/evaluator turn should not pay a MainActor hop for
-        // a value it can never act on (its own conversation is never the pinned one).
-        let isPinned = principal == .main ? await MainActor.run {
-            localState?.conversations.first(where: { $0.id == conversationId })?.isPinned == true
-        } : false
+        // (`jobToolDeclarations`) so both answers are testable without a turn. `isPinned` is the
+        // shared read from the preamble tuple above — a subagent/evaluator conversation is never
+        // the pinned one, so this costs it nothing extra.
         toolsList.append(contentsOf: Self.jobToolDeclarations(isPinned: isPinned))
 
         // Main-agent only. A subagent runs against a unit contract the PARENT authored (slice B3);
@@ -2418,6 +2458,114 @@ actor IrisEngine {
     /// run is a run that grows its own footprint with nobody asked.
     static let jobCreationTools: Set<String> = ["schedule_job", "register_directory_watcher"]
 
+    /// What the owner sees on the pinned conversation's approval dialog for a job-creating call
+    /// (fix round 2, #187). Before this, `details` was `args["name"] ?? args["path"] ?? toolName`,
+    /// which showed "schedule_job: schedule_job" for a call with neither — telling a reviewer
+    /// nothing about what they were approving. Built from the model's raw, unvalidated arguments
+    /// (the approval happens before `ScheduleJobArguments.parse`/`RegisterWatcherArguments.parse`
+    /// run), so a malformed call still shows what was asked for rather than failing to build a
+    /// dialog at all. Pure and `nonisolated` so it is unit-testable without an engine or a turn.
+    nonisolated static func pinnedJobApprovalDetails(toolName: String, args: [String: JSONValue]) -> String {
+        switch toolName {
+        case "schedule_job": return scheduleJobApprovalDetails(args)
+        case "register_directory_watcher": return registerWatcherApprovalDetails(args)
+        default: return toolName
+        }
+    }
+
+    private nonisolated static func scheduleJobApprovalDetails(_ args: [String: JSONValue]) -> String {
+        let name = ScheduleJobArguments.text(args["name"]) ?? "(unnamed)"
+        var lines = ["name: \(name)", "trigger: \(scheduleTriggerSummary(args))"]
+        if let profile = ScheduleJobArguments.text(args["profile"]) { lines.append("profile: \(profile)") }
+        if case .success(let mounts?) = ScheduleJobArguments.stringList(args["mounts"], shape: ScheduleJobArguments.mountsShape),
+           !mounts.isEmpty {
+            lines.append("mounts: \(mounts.joined(separator: ", "))")
+        }
+        if case .success(let network?) = ScheduleJobArguments.boolean(args["network"]) {
+            lines.append("network: \(network)")
+        }
+        if let prompt = ScheduleJobArguments.text(args["prompt"]) {
+            lines.append("prompt: \(Self.truncated(prompt))")
+        }
+        // Review #340 blocker: this dialog is the ONLY thing an owner sees before approving a job,
+        // and `gate_script`/`gate_mounts` carry exactly the kind of capability (arbitrary code, a
+        // mount on a sensitive directory) a human needs to see before clicking approve. `#336`
+        // separately closed the case where `GateScriptReview`'s own review had nothing to show —
+        // Vibecop off now falls to that same approval dialog instead of auto-approving — but this
+        // dialog still needs every gate_* field rendered, both for that escalation and for the
+        // ordinary pinned/tainted-conversation ask this function already serves.
+        // Every gate_* field the model can set is rendered here, same as the base job fields above.
+        if let gateURL = ScheduleJobArguments.text(args["gate_url"]) { lines.append("gate_url: \(gateURL)") }
+        if let gatePath = ScheduleJobArguments.text(args["gate_path"]) { lines.append("gate_path: \(gatePath)") }
+        if let gateScript = ScheduleJobArguments.text(args["gate_script"]) {
+            lines.append("gate_script: \(Self.truncated(gateScript))")
+        }
+        if case .success(let gateMounts?) = ScheduleJobArguments.stringList(args["gate_mounts"], shape: ScheduleJobArguments.gateMountsShape),
+           !gateMounts.isEmpty {
+            lines.append("gate_mounts: \(gateMounts.joined(separator: ", "))")
+        }
+        if let gateTimeout = ScheduleJobArguments.integer(args["gate_timeout_seconds"]) {
+            lines.append("gate_timeout_seconds: \(gateTimeout)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private nonisolated static func registerWatcherApprovalDetails(_ args: [String: JSONValue]) -> String {
+        let path = ScheduleJobArguments.text(args["path"]) ?? "(no path)"
+        var lines = ["path: \(path)"]
+        if let profile = ScheduleJobArguments.text(args["profile"]) { lines.append("profile: \(profile)") }
+        // Final-review fix wave (#187): a `mutating` watch accepts the same grant fields
+        // `schedule_job` does (`ToolExecutor.getTools()`'s `register_directory_watcher` schema), and
+        // the dialog was silently dropping them — an owner approving a watch with a wide mount or
+        // network access had no way to see that from this text.
+        if case .success(let mounts?) = ScheduleJobArguments.stringList(args["mounts"], shape: ScheduleJobArguments.mountsShape),
+           !mounts.isEmpty {
+            lines.append("mounts: \(mounts.joined(separator: ", "))")
+        }
+        if case .success(let network?) = ScheduleJobArguments.boolean(args["network"]) {
+            lines.append("network: \(network)")
+        }
+        if let instructions = ScheduleJobArguments.text(args["instructions"]) {
+            lines.append("prompt: \(Self.truncated(instructions))")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Cut to ~300 characters, on a whole-character boundary, with an ellipsis marking the cut —
+    /// long enough to be useful on a dialog, short enough that a model cannot bury the part that
+    /// matters (mounts, a gate script's capability) below the fold with a wall of prompt text.
+    private nonisolated static func truncated(_ text: String, limit: Int = 300) -> String {
+        guard text.count > limit else { return text }
+        return String(text.prefix(limit)) + "…"
+    }
+
+    /// The schedule half of the dialog, in the same vocabulary the model used to ask for it — cron,
+    /// an interval, or the loose hour/minute/weekday fields — rather than resolving it into a
+    /// concrete next-fire time: a malformed schedule must still show what was asked for, and
+    /// resolution can fail for reasons (a bad cron string, a bad time zone) that have nothing to do
+    /// with whether the owner should approve creating SOME job with this prompt.
+    private nonisolated static func scheduleTriggerSummary(_ args: [String: JSONValue]) -> String {
+        if let cron = ScheduleJobArguments.text(args["cron"]) {
+            let tz = ScheduleJobArguments.text(args["timezone"])
+            return tz.map { "cron '\(cron)' (\($0))" } ?? "cron '\(cron)'"
+        }
+        if let interval = ScheduleJobArguments.integer(args["intervalSeconds"]) {
+            return "every \(interval)s"
+        }
+        var parts: [String] = []
+        if let hour = ScheduleJobArguments.integer(args["hour"]) { parts.append("hour \(hour)") }
+        if let minute = ScheduleJobArguments.integer(args["minute"]) { parts.append("minute \(minute)") }
+        if case .array(let days)? = args["weekdays"] {
+            let numbers = days.compactMap { ScheduleJobArguments.integer($0) }
+            if !numbers.isEmpty { parts.append("weekdays \(numbers.map(String.init).joined(separator: ","))") }
+        } else if let weekday = ScheduleJobArguments.integer(args["weekday"]) {
+            parts.append("weekday \(weekday)")
+        }
+        if let day = ScheduleJobArguments.integer(args["day"]) { parts.append("day \(day)") }
+        if let month = ScheduleJobArguments.integer(args["month"]) { parts.append("month \(month)") }
+        return parts.isEmpty ? "no schedule given" : parts.joined(separator: ", ")
+    }
+
     /// What the dispatcher tells a background run that tried to read the peer roster or advertise
     /// itself to it. Same reason as the send refusal: it is not a session in either direction.
     static let unattendedSessionListRefusal =
@@ -2432,6 +2580,23 @@ actor IrisEngine {
     /// What the dispatcher tells a background run that reached for one anyway.
     static let unattendedJobCreationRefusal =
         "A background run cannot create jobs or watches; describe what you want and the user can create it."
+
+    /// What the dispatcher tells a subagent or evaluator that reached for a job-creating tool.
+    /// Reviewer finding (fix round 2, #187): neither tool was declaration-gated on `principal`, so
+    /// `register_directory_watcher` (unconditionally in `ToolExecutor.getTools()`) and
+    /// `schedule_job` (gated only on `!isUnattended`) reached an attended `.subagent`'s tool list —
+    /// `invoke_subagent` from the pinned conversation could delegate to one and have IT create the
+    /// job the pinned gate above exists to stop, laundering the approval. Declaration is gated on
+    /// `principal == .main` alongside `isUnattended` (see `buildRequest`); this is the dispatch
+    /// half for a forged or stale call.
+    static let subagentJobCreationRefusal =
+        "A subagent cannot create jobs; ask the conversation that delegated to you to create it."
+
+    /// What the model is told when the owner declined a job or watch proposed from the pinned
+    /// conversation (5b §0.5). Iris reads every other chat and holds the job tools, so a standing
+    /// job created there is the one place an injection that survived the guard would outlive the
+    /// turn — the dispatcher asks a human before writing the row, same as an ordinary approval.
+    static let pinnedJobCreationDeclined = "The owner declined creating this job."
 
     /// §0.10: the grant is the boundary, and nothing a run does may move it.
     static let unattendedWorkspaceRefusal = "Not run: a background run cannot change its workspace; widen the job's grant instead."
@@ -2669,11 +2834,12 @@ actor IrisEngine {
         var result = ""
 
         // One hop for the gates below and the grant the executor mounts (they ask the same
-        // conversation three questions), rather than one per tool call per gate: an ordinary chat
-        // pays this on every call and is none of them.
-        let (isUnattended, jobProfile, sandboxGrant) = await MainActor.run { () -> (Bool, JobProfile?, JobGrant?) in
+        // conversation five questions now), rather than one per tool call per gate: an ordinary
+        // chat pays this on every call and is none of them.
+        let (isUnattended, jobProfile, sandboxGrant, isPinned, hasUnattendedInput) = await MainActor.run { () -> (Bool, JobProfile?, JobGrant?, Bool, Bool) in
             let conversation = localState?.conversations.first(where: { $0.id == conversationId })
-            return (conversation?.isBackground == true, conversation?.jobProfile, conversation?.sandboxGrant)
+            return (conversation?.isBackground == true, conversation?.jobProfile, conversation?.sandboxGrant,
+                    conversation?.isPinned == true, conversation?.hasUnattendedInput == true)
         }
 
         // The epic's standing ruling: no unattended job creation. Neither tool is declared to a
@@ -2681,6 +2847,51 @@ actor IrisEngine {
         // model — the refusal has to live at the point that would actually write the row.
         if Self.jobCreationTools.contains(functionCall.name), isUnattended {
             return Self.unattendedJobCreationRefusal
+        }
+        // Fix round 2 (#187): a subagent or evaluator reaching for either tool anyway — declaration
+        // gating (`buildRequest`) only stops a well-behaved model, same reasoning as the refusal
+        // above.
+        if Self.jobCreationTools.contains(functionCall.name), principal != .main {
+            return Self.subagentJobCreationRefusal
+        }
+        // 5b §0.5, structural ruling (#187, broadened under review #340): Iris reads other chats
+        // and holds the job tools, so a standing job created there is the one place an injection
+        // that survived the guard would outlive the turn — and so is any conversation a turn was
+        // ever started on without the owner present, whether that was a peer's `send_to_session`
+        // message or a background subagent's post-back reporting in on its own schedule. Gated on
+        // `conversation.hasUnattendedInput` (`AppState.markConversationTouchedByUnattendedInput`), a
+        // sticky, persisted taint set the moment any such content reaches the conversation — not on
+        // transient per-turn state: three earlier rounds of threading a per-call `isPeer` flag
+        // through `processInput`/`executeFunctionCall` each left a path open (a restart, a nested
+        // continuation, a sibling turn clearing shared state), because the gate lived in state that
+        // didn't survive the shape of a real turn. A human says yes either way — `humanOnly` so
+        // neither the allowlist nor Vibecop's verdict can stand in for that click
+        // (`AppState.requestApproval`); headless and scenario runs set `autoApproveTools`, and
+        // `humanOnly` still honors it, since there is no human in that run to ask.
+        if Self.jobCreationTools.contains(functionCall.name), isPinned || hasUnattendedInput {
+            // Review #340, item 4 (ruling): parse and validate before the human is ever asked. A
+            // malformed call — a bad cron expression, two gates at once — is going to fail either
+            // way; asking first just spends the owner's attention on a job that was never going to
+            // be created. `GateScriptReview`'s own safety review of `gate_script` is unaffected and
+            // still runs afterward, inside `scheduleJob`/`registerWatcher` once this shape check has
+            // already passed and the human has already said yes.
+            let parseFailure: String?
+            switch functionCall.name {
+            case "schedule_job":
+                if case .failure(let message) = ScheduleJobArguments.parse(functionCall.args) { parseFailure = message.text } else { parseFailure = nil }
+            case "register_directory_watcher":
+                if case .failure(let message) = RegisterWatcherArguments.parse(functionCall.args) { parseFailure = message.text } else { parseFailure = nil }
+            default:
+                parseFailure = nil
+            }
+            if let parseFailure { return parseFailure }
+
+            let details = Self.pinnedJobApprovalDetails(toolName: functionCall.name, args: functionCall.args)
+            let approved = await localState?.requestApproval(
+                toolName: functionCall.name, details: details, args: functionCall.args,
+                workspace: workspacePath, conversationId: conversationId, origin: approvalOrigin,
+                humanOnly: true) ?? false
+            guard approved else { return Self.pinnedJobCreationDeclined }
         }
         // #282 §0.10, the same shape: a background run's grant is its boundary, and `set_workspace`
         // is the tool that would move it. Undeclared to it (see `buildRequest`), refused here.
@@ -2959,8 +3170,19 @@ actor IrisEngine {
                 }
             }
         } else if functionCall.name == "rename_conversation", let newTitle = functionCall.args["title"]?.stringValue {
-            await MainActor.run { localState?.renameConversation(id: conversationId, newTitle: newTitle) }
-            result = "Conversation renamed to '\(newTitle)'."
+            // Not declared on the pinned conversation's turns (above), but a forged or stale call
+            // must still be refused rather than acted on (invariant 6's undeclared-but-safe half).
+            // A stale call is the "no such conversation" case: by the time a queued or forged call
+            // like this one dispatches, the conversation it named can have been cleaned up already.
+            let refusal = await MainActor.run { () -> AppState.RenameRefusal? in
+                guard let localState else { return .noSuchConversation }
+                return localState.renameConversation(id: conversationId, newTitle: newTitle)
+            }
+            switch refusal {
+            case nil: result = "Conversation renamed to '\(newTitle)'."
+            case .pinned: result = "Refused — Iris keeps its name."
+            case .noSuchConversation: result = "No conversation with that id."
+            }
         } else if functionCall.name == "propose_goal_contract" {
             if let draft = GoalContractParsing.contract(from: functionCall.args) {
                 await MainActor.run { localState?.setDraftContract(for: conversationId, draft) }
