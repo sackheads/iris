@@ -3251,18 +3251,20 @@ actor IrisEngine {
                 PromptInjectionGuard.sanitizeUntrustedInput(body),
                 contextTag: "tool_output_search_conversations", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         } else if functionCall.name == "read_conversation" {
-            guard let idString = functionCall.args["id"]?.stringValue, !idString.isEmpty else {
-                result = "read_conversation needs an id."
-                return result
-            }
             // Same defense in depth as search_conversations just above: declaration gating stops a
             // well-behaved model, dispatch reads the function name alone, so the invariant is
             // enforced again here, where a forged or stale call would otherwise have its effect.
+            // Checked before the id is even looked at, so an unpinned caller always gets the
+            // pinned refusal rather than a sentence about its (irrelevant) argument.
             let isPinned = await MainActor.run {
                 localState?.conversations.first(where: { $0.id == conversationId })?.isPinned == true
             }
             guard isPinned else {
                 result = "Refused — read_conversation is only available in a pinned conversation."
+                return result
+            }
+            guard let idString = functionCall.args["id"]?.stringValue, !idString.isEmpty else {
+                result = "read_conversation needs an id."
                 return result
             }
             guard let targetId = UUID(uuidString: idString) else {
@@ -3295,17 +3297,16 @@ actor IrisEngine {
             }
             let rawFrom = ScheduleJobArguments.integer(functionCall.args["from"]) ?? 0
             let rawCount = ScheduleJobArguments.integer(functionCall.args["count"]) ?? ConversationReader.maxMessages
-            // Each message's content is sanitized BEFORE paging assembles the "#n speaker:" lines,
-            // so another conversation's text can't forge "user:"/"assistant:"/"system:"/"model:"
-            // role labels of its own (same reasoning as search_conversations's hit-field
-            // flattening). `ConversationReader.page` separately neutralizes a body line that
-            // imitates "#12 owner:" itself, by indenting continuation lines.
-            let sanitizedMessages = target.messages.map { m -> ChatMessage in
-                var copy = m
-                copy.content = PromptInjectionGuard.sanitizeUntrustedInput(m.content)
-                return copy
+            // Each visible message's content is sanitized as `page` assembles the "#n speaker:"
+            // lines, so another conversation's text can't forge "user:"/"assistant:"/"system:"/
+            // "model:" role labels of its own (same reasoning as search_conversations's hit-field
+            // flattening) — and only the messages this call actually considers emitting are run
+            // through it, not the whole conversation's history. `ConversationReader.page`
+            // separately neutralizes a body line that imitates "#12 owner:" or "(more from #N)"
+            // itself, by quoting continuation lines.
+            let (body, _) = ConversationReader.page(target.messages, from: rawFrom, count: rawCount) {
+                PromptInjectionGuard.sanitizeUntrustedInput($0)
             }
-            let (body, _) = ConversationReader.page(sanitizedMessages, from: rawFrom, count: rawCount)
             // This branch returns its own result directly, so it never passes through
             // `executeToolWithHooks`'s guard — another conversation's text is guarded exactly as
             // search_conversations's hits are, once, here.
