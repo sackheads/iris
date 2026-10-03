@@ -80,7 +80,7 @@ enum Briefing {
         return "paused"
     }
 
-    /// One line, no role markers, no `<`, capped. A job's name is set by whoever created it.
+    /// One line, no role markers, no `<`, capped in UTF-8 bytes. A job's name is set by whoever created it.
     ///
     /// Order matters (fix round 1, review): `<` and every newline are stripped from the RAW text
     /// first, before `sanitizeUntrustedInput` runs. The sanitiser matches its role markers by
@@ -113,8 +113,14 @@ enum Briefing {
         // form that folds into one gets through.
         flat = String(String.UnicodeScalarView(flat.unicodeScalars.filter { !fieldDelimiters.contains($0) }))
         flat = flat.trimmingCharacters(in: .whitespaces)
-        return String(flat.prefix(60))
+        // Bytes, not `Character`s: one letter plus 50,000 combining marks is one Character of
+        // ~100 KB, and this lands in the harness-authority turn context (#187 review).
+        return ConversationReader.utf8Prefix(flat, maxBytes: nameMaxBytes)
     }
+
+    /// 90 bytes: 90 ASCII characters, or 30 CJK ones — the old 60-Character cap would otherwise
+    /// cut a short CJK name to 20.
+    static let nameMaxBytes = 90
 
     /// `·` (U+00B7) and the dots that read as one: Greek ano teleia (folds to U+00B7), hyphenation
     /// point, bullet and dot operators, word-separator middle dot, katakana middle dot (and its

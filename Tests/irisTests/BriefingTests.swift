@@ -189,6 +189,16 @@ import Foundation
         #expect(n.unicodeScalars.first == "a", "the rest of the name survives")
     }
 
+    /// #187 review: the name cap is UTF-8 bytes. One letter plus 50,000 combining marks is one
+    /// `Character`, so a 60-Character cap let ~100 KB through.
+    @Test func nameCapIsBytesNotGraphemes() {
+        let n = Briefing.name("a" + String(repeating: "\u{0301}", count: 50_000))
+        #expect(n.utf8.count <= Briefing.nameMaxBytes)
+        #expect(n.utf8.count >= Briefing.nameMaxBytes - 1, "cut inside the cluster, not to nothing")
+        #expect(Briefing.name(String(repeating: "語", count: 30)) == String(repeating: "語", count: 30),
+                "a 30-character CJK name fits whole")
+    }
+
     private func job(_ name: String, pausedReason: String?) -> Job {
         Job(name: name, prompt: "p", trigger: .schedule(.interval(seconds: 60)), pausedReason: pausedReason)
     }

@@ -686,6 +686,16 @@ actor IrisEngine {
         value.count > cap ? String(value.prefix(cap)) + "…" : value
     }
 
+    /// `capCardField`, bounded in UTF-8 bytes rather than `Character`s, ellipsis included. A
+    /// `Character` has no size bound (one letter plus 50,000 combining marks is one), so a
+    /// Character cap on text another party controls is no cap (#187 review). Cuts on a scalar
+    /// boundary via `ConversationReader.utf8Prefix`.
+    nonisolated static func capFieldBytes(_ value: String, maxBytes: Int) -> String {
+        guard value.utf8.count > maxBytes else { return value }
+        let ellipsis = "…"
+        return ConversationReader.utf8Prefix(value, maxBytes: max(maxBytes - ellipsis.utf8.count, 0)) + ellipsis
+    }
+
     /// `PATH_MAX` on Darwin. A path longer than this cannot name a file, so accepting one only
     /// defers the failure to whatever tries to use it.
     nonisolated static let maxWorkspacePathLength = 1024
@@ -3238,8 +3248,10 @@ actor IrisEngine {
                         // message (newlines included) and `rename_conversation` stores raw text of
                         // any length, so it is flattened and capped the same way (fix round 1
                         // review).
-                        let flatSnippet = Self.flattenHitLineField(hit.snippet)
-                        let flatTitle = Self.capCardField(Self.flattenHitLineField(hit.title), cap: Self.hitTitleCap)
+                        let flatSnippet = Self.capFieldBytes(Self.flattenHitLineField(hit.snippet),
+                                                             maxBytes: Self.hitSnippetMaxBytes)
+                        let flatTitle = Self.capFieldBytes(Self.flattenHitLineField(hit.title),
+                                                           maxBytes: Self.hitTitleMaxBytes)
                         // "owner"/"iris", not the raw role name: `sanitizeUntrustedInput` strips
                         // "user:" (and "system:"/"assistant:"/"model:") anywhere in the guarded
                         // text as a role-hijack defense, which would silently eat a literal
@@ -4165,9 +4177,15 @@ extension IrisEngine {
         ]
     }
 
-    /// `search_conversations`'s title field is capped like a session card field (fix round 1
-    /// review): `rename_conversation` stores a title of any length, raw.
-    nonisolated static let hitTitleCap = 80
+    /// `search_conversations`'s title field is capped (fix round 1 review): `rename_conversation`
+    /// stores a title of any length, raw. In UTF-8 bytes, ellipsis included (#187 review): 240 is
+    /// the old 80-Character cap's worth of CJK, and lets an ASCII title run to 237 characters.
+    nonisolated static let hitTitleMaxBytes = 240
+
+    /// FTS5's `snippet()` bounds a snippet at 12 tokens, not bytes: one token can be a megabyte of
+    /// letters with no space, or one letter carrying 50,000 combining marks. 600 bytes is several
+    /// times an ordinary 12-word snippet.
+    nonisolated static let hitSnippetMaxBytes = 600
 
     /// Flattens one field of a `search_conversations` hit line to a single line. Both the snippet
     /// (another chat's text) and the title (auto-titled from the raw first characters of a user

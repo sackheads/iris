@@ -744,10 +744,10 @@ struct JobToolsTests {
         #expect(result.components(separatedBy: "\n").filter { $0.contains("·") }.count == 1)
     }
 
-    @Test("a title over 80 characters is truncated")
+    @Test("a long title is truncated to the byte cap")
     func searchConversationsCapsLongTitle() async throws {
         let (app, id) = pinnedApp()
-        var c = Conversation(id: UUID(), title: String(repeating: "x", count: 200))
+        var c = Conversation(id: UUID(), title: String(repeating: "x", count: 600))
         c.messages = [ChatMessage(role: .user, content: "about curlews")]
         var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
         try app.store.apply([ConversationWrite(id: c.id, snapshot: c, changes: s)])
@@ -757,11 +757,43 @@ struct JobToolsTests {
             on: app, as: id)
 
         // Not the capped text's exact suffix: the guard's own NFKC normalization pass
-        // (`precomposedStringWithCompatibilityMapping`) expands `capCardField`'s "…" to "..." before
-        // this result is ever read, which is a property of the shared guard, not of the cap.
-        #expect(!result.contains(String(repeating: "x", count: 200)))
-        #expect(result.contains(String(repeating: "x", count: 80)))
-        #expect(!result.contains(String(repeating: "x", count: 81)))
+        // (`precomposedStringWithCompatibilityMapping`) expands the "…" to "..." before this
+        // result is ever read, which is a property of the shared guard, not of the cap.
+        let kept = IrisEngine.hitTitleMaxBytes - "…".utf8.count
+        #expect(result.contains(String(repeating: "x", count: kept)))
+        #expect(!result.contains(String(repeating: "x", count: kept + 1)))
+    }
+
+    /// #187 review: a title and a snippet are capped in UTF-8 bytes. One letter plus 50,000
+    /// combining marks is one `Character` of ~100 KB, and FTS5's `snippet()` bounds tokens, not
+    /// bytes, so either would otherwise arrive whole.
+    @Test("a combining-mark flood in a title or a snippet is capped in bytes")
+    func searchConversationsCapsFieldsInBytes() async throws {
+        let (app, id) = pinnedApp()
+        let flood = "a" + String(repeating: "\u{0301}", count: 50_000)
+        var c = Conversation(id: UUID(), title: flood)
+        c.messages = [ChatMessage(role: .user, content: "about godwits " + flood + " " + String(repeating: "q", count: 50_000))]
+        var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
+        try app.store.apply([ConversationWrite(id: c.id, snapshot: c, changes: s)])
+
+        let result = await runToolCall(
+            FunctionCall(name: "search_conversations", args: ["query": .string("godwits")], id: "c1"),
+            on: app, as: id)
+
+        let line = try #require(result.components(separatedBy: "\n").first { $0.contains(c.id.uuidString) })
+        let fields = line.components(separatedBy: " · ")
+        #expect(fields.count >= 3)
+        #expect(fields[1].utf8.count <= IrisEngine.hitTitleMaxBytes, "title field")
+        // The id, title and date fields, the "#0 owner: " head, and a capped snippet.
+        #expect(line.utf8.count <= 36 + IrisEngine.hitTitleMaxBytes + IrisEngine.hitSnippetMaxBytes + 64,
+                Comment(rawValue: "hit line is \(line.utf8.count) bytes"))
+    }
+
+    @Test func capFieldBytesBoundsAndMarks() {
+        #expect(IrisEngine.capFieldBytes("short", maxBytes: 10) == "short")
+        let capped = IrisEngine.capFieldBytes(String(repeating: "😀", count: 10), maxBytes: 10)
+        #expect(capped == "😀…")
+        #expect(capped.utf8.count <= 10)
     }
 
     @Test("a missing query says so rather than falling through to an unknown-tool error")

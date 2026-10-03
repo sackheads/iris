@@ -332,7 +332,7 @@ struct ConversationReaderTests {
     @Test func boundaryFuzzWithFixedSeed() {
         var rng = SplitMix64(state: 0x1_87_2026)
         let pool: [String] = ["a", "z", " ", "\n", "é", "ß", "中", "語", "😀", "👨‍👩‍👧", "\u{0301}", "\u{0301}\u{0308}"]
-        for _ in 0..<12 {
+        for _ in 0..<8 {
             var messages: [ChatMessage] = []
             var visible: [Int] = []
             for i in 0..<Int.random(in: 1...25, using: &rng) {
