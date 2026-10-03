@@ -162,7 +162,10 @@ struct ConversationReaderTests {
         var guardCounter = 0
         while true {
             guardCounter += 1
-            #expect(guardCounter < 50, "should finish well under 50 calls for this fixture")
+            guard guardCounter < 50 else {
+                Issue.record("should finish well under 50 calls for this fixture")
+                break
+            }
             let (text, next) = ConversationReader.page(messages, from: from, count: 20)
             #expect(text.count <= ConversationReader.maxCharacters,
                    Comment(rawValue: "page starting at #\(from) must respect the cap, markers included"))
@@ -224,7 +227,10 @@ struct ConversationReaderTests {
         var guardCounter = 0
         while true {
             guardCounter += 1
-            #expect(guardCounter < 10, "paging should finish well under 10 calls for 45 messages at 20/page")
+            guard guardCounter < 10 else {
+                Issue.record("paging should finish well under 10 calls for 45 messages at 20/page")
+                break
+            }
             let (text, next) = ConversationReader.page(all, from: from, count: 20)
             seen += text.components(separatedBy: "\n\n").filter { $0.hasPrefix("#") }.count
             guard let next else { break }
