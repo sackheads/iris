@@ -1654,13 +1654,13 @@ actor IrisEngine {
             ))
         }
 
-        // #187 §9, invariant 6: the job tools are declared in a pinned conversation and nowhere
-        // else. Iris, the pinned conversation, is the one place a person is already reading about runs,
-        // so it is the one place the two declarations earn their prompt tokens; everywhere else
-        // they would be a standing cost for a question nobody asked. The gate itself is pure
-        // (`jobToolDeclarations`) so both answers are testable without a turn. `isPinned` is the
-        // shared read from the preamble tuple above — a subagent/evaluator conversation is never
-        // the pinned one, so this costs it nothing extra.
+        // #187 §9, invariant 6: the job tools and search_conversations are declared in a pinned
+        // conversation and nowhere else. Iris, the pinned conversation, is the one place a person
+        // is already reading about runs and other chats, so it is the one place these declarations
+        // earn their prompt tokens; everywhere else they would be a standing cost for a question
+        // nobody asked. The gate itself is pure (`jobToolDeclarations`) so every answer is testable
+        // without a turn. `isPinned` is the shared read from the preamble tuple above — a
+        // subagent/evaluator conversation is never the pinned one, so this costs it nothing extra.
         toolsList.append(contentsOf: Self.jobToolDeclarations(isPinned: isPinned))
 
         // Main-agent only. A subagent runs against a unit contract the PARENT authored (slice B3);
@@ -3182,6 +3182,54 @@ actor IrisEngine {
                     result = "Could not read the run: \(error)."
                 }
             }
+        } else if functionCall.name == "search_conversations", let query = functionCall.args["query"]?.stringValue {
+            // Same defense in depth as list_jobs/get_job_run just above: declaration gating stops
+            // a well-behaved model, dispatch reads the function name alone, so the invariant is
+            // enforced again here, where a forged or stale call would otherwise have its effect.
+            let (isPinned, store) = await MainActor.run { () -> (Bool, ConversationStore?) in
+                (localState?.conversations.first(where: { $0.id == conversationId })?.isPinned == true,
+                 localState?.store)
+            }
+            guard isPinned, let store else {
+                result = "Refused — search_conversations is only available in a pinned conversation."
+                return result
+            }
+            let rawLimit = ScheduleJobArguments.integer(functionCall.args["limit"]) ?? 10
+            let limit = min(max(rawLimit, 1), 25)
+            let body: String
+            do {
+                // Excludes this (pinned) conversation's own history and every background job's
+                // transcript (#187 §0.5) — the latter is `get_job_run`'s to read, with its run
+                // context, not a keyword hit with none.
+                let hits = try store.searchConversations(query: query, limit: limit,
+                                                         excluding: [conversationId], includeBackground: false)
+                let iso = ISO8601DateFormatter()
+                body = hits.isEmpty
+                    ? "No matching conversations."
+                    : hits.map { hit in
+                        // A snippet is another chat's text, so it is flattened to one line here —
+                        // otherwise an embedded newline could forge a second
+                        // "id · title · date · #ordinal role:" line of its own.
+                        let flatSnippet = hit.snippet.components(separatedBy: .newlines).joined(separator: " ")
+                        // "owner"/"iris", not the raw role name: `sanitizeUntrustedInput` strips
+                        // "user:" (and "system:"/"assistant:"/"model:") anywhere in the guarded
+                        // text as a role-hijack defense, which would silently eat a literal
+                        // "user:" label here. `read_conversation` uses the same two words for the
+                        // same reason.
+                        let speaker = hit.role == .user ? "owner" : "iris"
+                        return "\(hit.conversationId.uuidString) · \(hit.title) · \(iso.string(from: hit.updatedAt)) · #\(hit.ordinal) \(speaker): \(flatSnippet)"
+                    }.joined(separator: "\n")
+            } catch {
+                // Same reasoning as search_memory just below: a failed search is not a search that
+                // found nothing.
+                body = "Conversation search failed: \(error)"
+            }
+            // This branch returns its own result directly, so it never passes through
+            // `executeToolWithHooks`'s guard — snippets are other chats' text, guarded exactly as
+            // search_memory's conversations scope is.
+            result = await InjectionGuard.sanitize(
+                PromptInjectionGuard.sanitizeUntrustedInput(body),
+                contextTag: "tool_output_search_conversations", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
         } else if functionCall.name == "rename_conversation", let newTitle = functionCall.args["title"]?.stringValue {
             // Not declared on the pinned conversation's turns (above), but a forged or stale call
             // must still be refused rather than acted on (invariant 6's undeclared-but-safe half).
@@ -3688,7 +3736,7 @@ actor IrisEngine {
         "google_calendar_list_events", "google_calendar_create_event",
         "google_docs_get", "google_drive_search", "google_sheets_get",
         "gmail_list_unread", "gmail_send_email",
-        "list_jobs", "get_job_run",
+        "list_jobs", "get_job_run", "search_conversations",
     ]
 
     /// What this call actually wrote, from its arguments and the sentence the tool returned.
@@ -3949,13 +3997,13 @@ actor IrisEngine {
 
 // MARK: - Job tools (#187 §9)
 
-/// `list_jobs` and `get_job_run`, and the JSON they answer with. The declarations are a pure
-/// function of the gate rather than two `append`s inside the turn builder so the invariant they
-/// carry — that no conversation but a pinned one is charged for them — is testable without
-/// driving a turn against a model.
+/// `list_jobs`, `get_job_run` and `search_conversations`, and the JSON or text they answer with.
+/// The declarations are a pure function of the gate rather than `append`s inside the turn builder
+/// so the invariant they carry — that no conversation but a pinned one is charged for them — is
+/// testable without driving a turn against a model.
 extension IrisEngine {
-    /// The two job tools when `isPinned`, nothing otherwise. Appended verbatim by the per-turn
-    /// tool-list builder.
+    /// `list_jobs`, `get_job_run` and `search_conversations` when `isPinned`, nothing otherwise.
+    /// Appended verbatim by the per-turn tool-list builder.
     nonisolated static func jobToolDeclarations(isPinned: Bool) -> [FunctionDeclaration] {
         guard isPinned else { return [] }
         return [
@@ -3969,6 +4017,13 @@ extension IrisEngine {
                 parameters: Schema(type: "OBJECT", properties: [
                     "run_id": Schema(type: "STRING", description: "The run's id, or the first eight or more characters of it as an event card shows.")
                 ], required: ["run_id"])),
+            FunctionDeclaration(
+                name: "search_conversations",
+                description: "Search your other conversations with the owner, live and archived, by keywords. Returns each hit's conversation id, title, date, position and a snippet; pass the id and position to read_conversation to read around it. Background job transcripts are not searched — use get_job_run.",
+                parameters: Schema(type: "OBJECT", properties: [
+                    "query": Schema(type: "STRING", description: "The query string to search for."),
+                    "limit": Schema(type: "INTEGER", description: "Maximum number of hits to return (default 10, max 25).")
+                ], required: ["query"])),
         ]
     }
 

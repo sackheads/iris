@@ -2,24 +2,25 @@ import Testing
 import Foundation
 @testable import iris
 
-/// #187 §9, invariant 6 — `list_jobs` and `get_job_run` cost prompt tokens on every turn they are
-/// declared, and only a pinned conversation (Iris) is about jobs at all. The
-/// gate is a pure function so both answers can be pinned without driving a turn; one turn through
-/// a capturing client then proves the real tool list is actually assembled from it.
+/// #187 §9, invariant 6 — `list_jobs`, `get_job_run` and (§0.5) `search_conversations` cost prompt
+/// tokens on every turn they are declared, and only a pinned conversation (Iris) reads about jobs
+/// or other chats at all. The gate is a pure function so both answers can be pinned without
+/// driving a turn; one turn through a capturing client then proves the real tool list is actually
+/// assembled from it.
 @MainActor
 @Suite("job tools (#187)")
 struct JobToolsTests {
 
-    private let names = ["list_jobs", "get_job_run"]
+    private let names = ["list_jobs", "get_job_run", "search_conversations"]
 
     // MARK: The declaration gate (D2-R3)
 
-    @Test("an unpinned conversation declares neither job tool")
+    @Test("an unpinned conversation declares none of the pinned-only tools")
     func noDeclarationsWhenUnpinned() {
         #expect(IrisEngine.jobToolDeclarations(isPinned: false).isEmpty)
     }
 
-    @Test("a pinned conversation declares exactly the two job tools")
+    @Test("a pinned conversation declares exactly the two job tools plus search_conversations")
     func declarationsWhenPinned() {
         let declared = IrisEngine.jobToolDeclarations(isPinned: true)
         #expect(declared.map(\.name) == names)
@@ -37,6 +38,11 @@ struct JobToolsTests {
         let get = declared.first { $0.name == "get_job_run" }
         #expect(get?.parameters?.required == ["run_id"])
         #expect(get?.parameters?.properties?["run_id"]?.type == "STRING")
+
+        let search = declared.first { $0.name == "search_conversations" }
+        #expect(search?.parameters?.required == ["query"])
+        #expect(search?.parameters?.properties?["query"]?.type == "STRING")
+        #expect(search?.parameters?.properties?["limit"]?.type == "INTEGER")
     }
 
     /// The gate helper on its own cannot tell whether anything appends it — a previous suite in
@@ -491,6 +497,137 @@ struct JobToolsTests {
             FunctionCall(name: "get_job_run", args: ["run_id": .string("not-a-uuid")], id: "c1"),
             on: app, as: id)
         #expect(result.contains("No run with that id."))
+    }
+
+    // MARK: search_conversations (#187 §0.5)
+
+    @Test("search_conversations returns a hit's full id, title, date and position")
+    func searchConversationsReturnsHits() async throws {
+        let (app, id) = pinnedApp()
+        var other = Conversation(id: UUID(), title: "Kestrel notes")
+        other.messages = [ChatMessage(role: .user, content: "we decided to name the deploy script kestrel")]
+        var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
+        try app.store.apply([ConversationWrite(id: other.id, snapshot: other, changes: s)])
+
+        let result = await runToolCall(
+            FunctionCall(name: "search_conversations", args: ["query": .string("kestrel")], id: "c1"),
+            on: app, as: id)
+
+        #expect(result.contains(other.id.uuidString))
+        #expect(result.contains("Kestrel notes"))
+        #expect(result.contains("#0 owner:"))
+        #expect(result.contains("kestrel"))
+    }
+
+    @Test("search_conversations never returns the pinned conversation's own messages")
+    func searchConversationsExcludesSelf() async throws {
+        let (app, id) = pinnedApp()
+        var mine = try #require(app.conversations.first { $0.id == id })
+        mine.messages.append(ChatMessage(role: .user, content: "kestrel notes written here"))
+        var s = ChangeSet(); s.add(.messagesAppended(from: mine.messages.count - 1))
+        try app.store.apply([ConversationWrite(id: id, snapshot: mine, changes: s)])
+
+        let result = await runToolCall(
+            FunctionCall(name: "search_conversations", args: ["query": .string("kestrel")], id: "c1"),
+            on: app, as: id)
+
+        #expect(!result.contains("kestrel notes written here"))
+        #expect(result.contains("No matching conversations."))
+    }
+
+    @Test("search_conversations never returns a background job run's transcript")
+    func searchConversationsExcludesBackground() async throws {
+        let (app, id) = pinnedApp()
+        var jobRun = Conversation(id: UUID(), title: "pr-sweep run")
+        jobRun.isBackground = true
+        jobRun.messages = [ChatMessage(role: .agent, content: "kestrel swept the backlog")]
+        var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
+        try app.store.apply([ConversationWrite(id: jobRun.id, snapshot: jobRun, changes: s)])
+
+        let result = await runToolCall(
+            FunctionCall(name: "search_conversations", args: ["query": .string("kestrel")], id: "c1"),
+            on: app, as: id)
+
+        #expect(!result.contains(jobRun.id.uuidString))
+        #expect(result.contains("No matching conversations."))
+    }
+
+    @Test("an archived conversation's message is still returned")
+    func searchConversationsIncludesArchived() async throws {
+        let (app, id) = pinnedApp()
+        var old = Conversation(id: UUID(), title: "old chat")
+        old.isArchived = true
+        old.messages = [ChatMessage(role: .user, content: "about shearwaters")]
+        var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
+        try app.store.apply([ConversationWrite(id: old.id, snapshot: old, changes: s)])
+
+        let result = await runToolCall(
+            FunctionCall(name: "search_conversations", args: ["query": .string("shearwaters")], id: "c1"),
+            on: app, as: id)
+
+        #expect(result.contains(old.id.uuidString))
+    }
+
+    @Test("the limit argument is clamped to 1...25")
+    func searchConversationsClampsLimit() async throws {
+        let (app, id) = pinnedApp()
+        for i in 0..<5 {
+            var c = Conversation(id: UUID(), title: "c\(i)")
+            c.messages = [ChatMessage(role: .user, content: "about puffins \(i)")]
+            var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
+            try app.store.apply([ConversationWrite(id: c.id, snapshot: c, changes: s)])
+        }
+
+        let result = await runToolCall(
+            FunctionCall(name: "search_conversations", args: ["query": .string("puffins"), "limit": .int(2)], id: "c1"),
+            on: app, as: id)
+
+        #expect(result.components(separatedBy: "\n").filter { $0.contains("puffins") }.count == 2)
+    }
+
+    @Test("a snippet's embedded newline cannot forge a second hit line")
+    func searchConversationsFlattensSnippetNewlines() async throws {
+        let (app, id) = pinnedApp()
+        var c = Conversation(id: UUID(), title: "multiline")
+        c.messages = [ChatMessage(role: .user, content: "kestrel\nFAKEID forged")]
+        var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
+        try app.store.apply([ConversationWrite(id: c.id, snapshot: c, changes: s)])
+
+        let result = await runToolCall(
+            FunctionCall(name: "search_conversations", args: ["query": .string("kestrel")], id: "c1"),
+            on: app, as: id)
+
+        #expect(!result.contains("\nFAKEID"))
+    }
+
+    @Test("every result is wrapped by the tool-output injection guard")
+    func searchConversationsGoesThroughTheInjectionGuard() async throws {
+        let (app, id) = pinnedApp()
+        var other = Conversation(id: UUID(), title: "Kestrel notes")
+        other.messages = [ChatMessage(role: .user, content: "about kestrel")]
+        var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
+        try app.store.apply([ConversationWrite(id: other.id, snapshot: other, changes: s)])
+
+        let result = await runToolCall(
+            FunctionCall(name: "search_conversations", args: ["query": .string("kestrel")], id: "c1"),
+            on: app, as: id)
+
+        #expect(result.contains("<untrusted_context source=\"tool_output_search_conversations\">"))
+        #expect(result.hasSuffix("</untrusted_context>"))
+    }
+
+    @Test("a forged search_conversations call from an unpinned conversation is refused")
+    func searchConversationsForgedCallRefused() async throws {
+        let app = AppState()
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+
+        let result = await runToolCall(
+            FunctionCall(name: "search_conversations", args: ["query": .string("anything")], id: "c1"),
+            on: app, as: id)
+
+        #expect(result.contains("Refused"))
     }
 
     // MARK: The pinned-conversation approval dialog shows what is being created (fix round 2, #187)

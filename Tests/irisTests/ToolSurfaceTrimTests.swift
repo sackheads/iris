@@ -54,6 +54,12 @@ struct ToolSurfaceTrimTests {
         #expect(!names.contains("amend_goal_contract"))
         #expect(names.contains("run_command"))
         #expect(names.count <= 18, "expected the plain-turn surface to shrink from 30; got \(names.count): \(names)")
+        // #187 §0.5, invariant 6: search_conversations (like list_jobs/get_job_run before it) is
+        // declared only in the pinned conversation, so a plain, unpinned turn's count must not grow
+        // when it is added.
+        #expect(!names.contains("search_conversations"))
+        #expect(!names.contains("list_jobs"))
+        #expect(!names.contains("get_job_run"))
     }
 
     /// #168: `manage_fact` needs a fact id, and the only ids the model sees come from the facts

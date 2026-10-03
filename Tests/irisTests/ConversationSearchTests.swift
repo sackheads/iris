@@ -444,6 +444,56 @@ struct ConversationSearchTests {
         #expect(try store.searchConversations(query: "   ").isEmpty)
         #expect(try store.searchConversations(query: "!!! ***").isEmpty)
     }
+
+    // MARK: 6 — the search_conversations filter (#187 §0.5)
+
+    @Test("includeBackground: false excludes a background conversation's message; the default includes it")
+    func includeBackgroundFilter() throws {
+        let store = try ConversationStore.inMemory()
+        var c = conversation(title: "job run", [ChatMessage(role: .agent, content: "about wrens")])
+        c.isBackground = true
+        try store.apply([created(c)])
+
+        #expect(try store.searchConversations(query: "wrens", includeBackground: false).isEmpty)
+        #expect(try store.searchConversations(query: "wrens").count == 1)
+    }
+
+    @Test("an archived conversation's message is still returned")
+    func archivedConversationsAreIncluded() throws {
+        let store = try ConversationStore.inMemory()
+        var c = conversation(title: "old chat", [ChatMessage(role: .user, content: "about swifts")])
+        c.isArchived = true
+        try store.apply([created(c)])
+
+        #expect(try store.searchConversations(query: "swifts", includeBackground: false).count == 1)
+    }
+
+    @Test("excluding: an id removes that conversation's hits")
+    func excludingFilter() throws {
+        let store = try ConversationStore.inMemory()
+        let a = conversation(title: "a", [ChatMessage(role: .user, content: "about terns")])
+        let b = conversation(title: "b", [ChatMessage(role: .user, content: "about terns too")])
+        try store.apply([created(a), created(b)])
+
+        let hits = try store.searchConversations(query: "terns", excluding: [a.id])
+        #expect(hits.count == 1)
+        #expect(hits.first?.conversationId == b.id)
+    }
+
+    @Test("each hit carries the conversation's updatedAt")
+    func hitsCarryUpdatedAt() throws {
+        let store = try ConversationStore.inMemory()
+        let c = conversation(title: "t", [ChatMessage(role: .user, content: "about shearwaters")])
+        try store.apply([created(c)])
+        try store.rawWrite("UPDATE conversations SET updatedAt = '2024-06-01 00:00:00.000' WHERE id = ?",
+                           arguments: [c.id.uuidString])
+
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let hit = try #require(try store.searchConversations(query: "shearwaters").first)
+        #expect(utc.dateComponents([.year, .month, .day], from: hit.updatedAt)
+                    == DateComponents(year: 2024, month: 6, day: 1))
+    }
 }
 
 // MARK: - tool surface
