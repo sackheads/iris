@@ -19,9 +19,11 @@ private actor PeerDeliveryGate {
 }
 
 private func eventually(_ timeoutMs: Int = 3000, _ condition: @MainActor @Sendable () -> Bool) async -> Bool {
-    for _ in 0..<(timeoutMs / 10) {
+    // Coordinator's flakiness ruling (review #340 follow-up): widened from a 10ms tick to 25ms to
+    // ease MainActor pressure under the full suite's load.
+    for _ in 0..<(timeoutMs / 25) {
         if await condition() { return true }
-        try? await Task.sleep(nanoseconds: 10_000_000)
+        try? await Task.sleep(nanoseconds: 25_000_000)
     }
     return await condition()
 }
@@ -402,9 +404,11 @@ struct PeerDeliveryTests {
         _ = await engine.deliverPeerMessage("schedule a sweep", from: sender, senderName: "peer", to: target)
 
         var queued = false
-        for _ in 0..<400 {
+        // Coordinator's flakiness ruling (review #340 follow-up): widened from a 5ms tick to a
+        // modest 25ms (80 iterations, same ~2s ceiling as 400 * 5ms) to ease MainActor pressure.
+        for _ in 0..<80 {
             if !app.pendingApprovals.isEmpty { queued = true; break }
-            try? await Task.sleep(nanoseconds: 5_000_000)
+            try? await Task.sleep(nanoseconds: 25_000_000)
         }
         #expect(queued, "a peer message delivered into an idle, non-pinned conversation must ask before creating a job")
         if queued { app.resolveApproval(id: app.pendingApprovals[0].id, .approve) }
@@ -446,9 +450,11 @@ struct PeerDeliveryTests {
         async let turn: Void = engine.handleSystemEvent("Background subagent result:\nI cleaned up.", source: "SubagentManager", conversationId: parent)
 
         var queued = false
-        for _ in 0..<400 {
+        // Coordinator's flakiness ruling (review #340 follow-up): widened from a 5ms tick to a
+        // modest 25ms (80 iterations, same ~2s ceiling as 400 * 5ms) to ease MainActor pressure.
+        for _ in 0..<80 {
             if !app.pendingApprovals.isEmpty { queued = true; break }
-            try? await Task.sleep(nanoseconds: 5_000_000)
+            try? await Task.sleep(nanoseconds: 25_000_000)
         }
         #expect(queued, "a background subagent's post-back must ask before creating a job, same as a peer message")
         if queued {
@@ -487,9 +493,11 @@ struct PeerDeliveryTests {
         await gate.release()
 
         var queued = false
-        for _ in 0..<400 {
+        // Coordinator's flakiness ruling (review #340 follow-up): widened from a 5ms tick to a
+        // modest 25ms (80 iterations, same ~2s ceiling as 400 * 5ms) to ease MainActor pressure.
+        for _ in 0..<80 {
             if !app.pendingApprovals.isEmpty { queued = true; break }
-            try? await Task.sleep(nanoseconds: 5_000_000)
+            try? await Task.sleep(nanoseconds: 25_000_000)
         }
         #expect(queued, "a peer message drained into its own turn on a non-pinned conversation must ask before creating a job")
         if queued { app.resolveApproval(id: app.pendingApprovals[0].id, .approve) }
@@ -533,13 +541,15 @@ struct PeerDeliveryTests {
         await gate.release()
 
         var sawSchedule = false
-        for _ in 0..<800 {
+        // Coordinator's flakiness ruling (review #340 follow-up): widened from a 5ms tick to a
+        // modest 25ms (160 iterations, same ~4s ceiling as 800 * 5ms) to ease MainActor pressure.
+        for _ in 0..<160 {
             if let pending = app.pendingApprovals.first {
                 if pending.toolName == "schedule_job" { sawSchedule = true }
                 app.resolveApproval(id: pending.id, .approve)
             }
             if (try? app.store.ledger.jobs().count) == 1 { break }
-            try? await Task.sleep(nanoseconds: 5_000_000)
+            try? await Task.sleep(nanoseconds: 25_000_000)
         }
         #expect(sawSchedule, "once a peer's words are injected as a mid-turn steer, job creation for the rest of that turn must ask a human")
         #expect(await eventually { (try? app.store.ledger.jobs().count) == 1 })

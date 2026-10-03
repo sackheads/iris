@@ -82,9 +82,12 @@ import Foundation
         state.installEngine(engine)
         state.sendMessage("hello")
         var sawInFlight = false
-        for _ in 0..<200 {
+        // Flakiness follow-up (#340/5b): widened from a 10ms tick to a modest 25ms (80 iterations,
+        // same ~2s ceiling as 200 * 10ms) — the positive case still stops on the first iteration
+        // that sees it, and a tighter tick only costs MainActor pressure under the full suite.
+        for _ in 0..<80 {
             if state.archiveRefusal(for: id) == .turnInFlight { sawInFlight = true; break }
-            try? await Task.sleep(nanoseconds: 10_000_000)
+            try? await Task.sleep(nanoseconds: 25_000_000)
         }
         #expect(sawInFlight, "expected .turnInFlight to outrank .pinned while a turn is running")
         // Final-review fix wave (#187): `NeverReplies` sleeps 10s before it would ever throw, and
@@ -129,8 +132,11 @@ import Foundation
             // rename/reflection follow-up call — waiting for it to clear (rather than a fixed
             // sleep) is what makes the next `sendMessage` start turn N+1 instead of enqueuing a
             // pending message behind a turn the harness only guessed had finished.
-            for _ in 0..<1000 where state.hasTurnInFlight(for: id) {
-                try await Task.sleep(nanoseconds: 10_000_000)
+            // Flakiness follow-up (#340/5b): widened from a 10ms tick to a modest 25ms (400
+            // iterations, same ~10s ceiling as 1000 * 10ms) to ease MainActor pressure under the
+            // full suite; the expected case still exits as soon as the turn clears.
+            for _ in 0..<400 where state.hasTurnInFlight(for: id) {
+                try await Task.sleep(nanoseconds: 25_000_000)
             }
         }
         return client.requests

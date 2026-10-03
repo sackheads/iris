@@ -158,7 +158,9 @@ struct SubagentJobCreationTests {
         // anything that shows up (none should, if the subagent refusal above is still in place),
         // so that regression is a fast, visible failure instead; it costs the normal (fast) case
         // nothing, since `await turnTask.value` returns as soon as the real turn finishes, not after
-        // a fixed poll.
+        // a fixed poll. Coordinator's flakiness ruling (review #340 follow-up): the tick still runs
+        // for the whole turn, not just a bounded give-up window, so it is widened from 5ms to a
+        // modest 25ms like every other poll this branch added, to ease MainActor pressure.
         let turnTask = Task { await engine.processInput("go", source: "UI", conversationId: id) }
         let denyTask = Task {
             while !Task.isCancelled {
@@ -166,7 +168,7 @@ struct SubagentJobCreationTests {
                     app.denyPendingApprovals(for: id)
                     break
                 }
-                try? await Task.sleep(nanoseconds: 5_000_000)
+                try? await Task.sleep(nanoseconds: 25_000_000)
             }
         }
         await turnTask.value

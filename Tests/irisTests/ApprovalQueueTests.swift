@@ -86,8 +86,10 @@ struct ApprovalQueueTests {
 
         async let gated = app.requestApproval(toolName: "note_tool", details: "demo", workspace: nil,
                                               conversationId: cid, humanOnly: true)
-        for _ in 0..<200 where app.pendingApprovals.isEmpty {
-            try? await Task.sleep(nanoseconds: 5_000_000)
+        // Coordinator's flakiness ruling (review #340 follow-up): widened from a 5ms tick to a
+        // modest 25ms (40 iterations, same ~1s ceiling as 200 * 5ms) to ease MainActor pressure.
+        for _ in 0..<40 where app.pendingApprovals.isEmpty {
+            try? await Task.sleep(nanoseconds: 25_000_000)
         }
         #expect(app.pendingApprovals.count == 1, "humanOnly must reach the queue despite the stored rule")
         // Fix round 2: the poll above is bounded, but `await gated` below is not — `resolveApproval`
@@ -134,8 +136,10 @@ struct ApprovalQueueTests {
         async let globalResult = app.enqueueUserApproval(toolName: "schedule_job", details: "sweep",
                                                           workspace: nil, conversationId: cid,
                                                           origin: "Main agent", humanOnly: true)
-        for _ in 0..<200 where app.pendingApprovals.isEmpty {
-            try? await Task.sleep(nanoseconds: 5_000_000)
+        // Coordinator's flakiness ruling (review #340 follow-up): widened from a 5ms tick to a
+        // modest 25ms (40 iterations, same ~1s ceiling as 200 * 5ms) to ease MainActor pressure.
+        for _ in 0..<40 where app.pendingApprovals.isEmpty {
+            try? await Task.sleep(nanoseconds: 25_000_000)
         }
         #expect(app.pendingApprovals.count == 1)
         app.resolveApproval(id: app.pendingApprovals[0].id, .alwaysAllowGlobal)
@@ -146,8 +150,10 @@ struct ApprovalQueueTests {
         async let projectResult = app.enqueueUserApproval(toolName: "schedule_job", details: "sweep",
                                                            workspace: "/tmp/proj", conversationId: cid,
                                                            origin: "Main agent", humanOnly: true)
-        for _ in 0..<200 where app.pendingApprovals.isEmpty {
-            try? await Task.sleep(nanoseconds: 5_000_000)
+        // Coordinator's flakiness ruling (review #340 follow-up): widened from a 5ms tick to a
+        // modest 25ms (40 iterations, same ~1s ceiling as 200 * 5ms) to ease MainActor pressure.
+        for _ in 0..<40 where app.pendingApprovals.isEmpty {
+            try? await Task.sleep(nanoseconds: 25_000_000)
         }
         #expect(app.pendingApprovals.count == 1)
         app.resolveApproval(id: app.pendingApprovals[0].id, .alwaysAllowProject)
