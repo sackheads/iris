@@ -316,18 +316,22 @@ struct JobRetryTests {
     private final class Signal: @unchecked Sendable {
         private let lock = NSLock()
         private var count = 0
-        private var waiters: [(target: Int, id: UUID, continuation: CheckedContinuation<Bool, Never>)] = []
+        private var waiters: [(target: Int, id: UUID, continuation: CheckedContinuation<Bool, Never>,
+                               timer: Task<Void, Never>)] = []
 
         var value: Int { lock.withLock { count } }
 
         func bump() {
-            let ready = lock.withLock { () -> [CheckedContinuation<Bool, Never>] in
+            let ready = lock.withLock { () -> [(CheckedContinuation<Bool, Never>, Task<Void, Never>)] in
                 count += 1
-                let due = waiters.filter { $0.target <= count }.map(\.continuation)
+                let due = waiters.filter { $0.target <= count }.map { ($0.continuation, $0.timer) }
                 waiters.removeAll { $0.target <= count }
                 return due
             }
-            for continuation in ready { continuation.resume(returning: true) }
+            for (continuation, timer) in ready {
+                timer.cancel()
+                continuation.resume(returning: true)
+            }
         }
 
         /// `true` once the count is at least `target`; `false` if `seconds` pass first.
@@ -336,18 +340,20 @@ struct JobRetryTests {
             return await withCheckedContinuation { continuation in
                 let already = lock.withLock { () -> Bool in
                     if count >= target { return true }
-                    waiters.append((target, id, continuation))
+                    // Cancelled by `bump` once the count gets there, so a reached wait leaves no
+                    // timer behind; one that fires after that finds its waiter gone and does nothing.
+                    let timer = Task.detached { [self] in
+                        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                        let expired = lock.withLock { () -> CheckedContinuation<Bool, Never>? in
+                            guard let index = waiters.firstIndex(where: { $0.id == id }) else { return nil }
+                            return waiters.remove(at: index).continuation
+                        }
+                        expired?.resume(returning: false)
+                    }
+                    waiters.append((target, id, continuation, timer))
                     return false
                 }
-                if already { continuation.resume(returning: true); return }
-                Task.detached { [self] in
-                    try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                    let expired = lock.withLock { () -> CheckedContinuation<Bool, Never>? in
-                        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return nil }
-                        return waiters.remove(at: index).continuation
-                    }
-                    expired?.resume(returning: false)
-                }
+                if already { continuation.resume(returning: true) }
             }
         }
     }
@@ -753,10 +759,14 @@ struct JobRetryTests {
                                activity: RecordingActivity())
 
         let first = Task { await runner.fire(job: j, origin: .watcher(paths: ["/tmp/in/a.txt"])) }
-        await gate.waitForEntry()
-        await runner.fire(job: j, origin: .watcher(paths: ["/tmp/in/b.txt"]))
+        // Bounded, like the deadline tests: a queue-path regression otherwise stalls the run until
+        // the 600 s default deadline. Opened on the way out so a failed test still unwinds.
+        defer { Task { await gate.open() } }
+        try #require(await finished(Task { await gate.waitForEntry() }) != nil, "the first fire reached the model")
+        let held = Task { await runner.fire(job: j, origin: .watcher(paths: ["/tmp/in/b.txt"])) }
+        try #require(await finished(held) != nil, "the second fire was held, not run alongside the first")
         await gate.open()
-        _ = await first.value
+        try #require(await finished(first) != nil, "the first run and its held re-fire finished")
 
         let runs = try store.ledger.runs(jobId: j.id, limit: 10)
         #expect(runs.count == 2, "the held fire ran")
