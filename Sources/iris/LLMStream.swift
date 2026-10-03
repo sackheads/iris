@@ -224,10 +224,17 @@ struct SSELineBuffer {
 enum LLMStreaming {
     static func stream<M: StreamMapper>(provider: String, mapper: M,
                                         makeRequest: @escaping @Sendable () async throws -> URLRequest) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+        stream(mapper: mapper) { (try await makeRequest(), provider) }
+    }
+
+    /// The form where the request builder also names the provider, for a client whose label is
+    /// only known once its transport is resolved (#181: "Anthropic (Vertex AI, us-east5)").
+    static func stream<M: StreamMapper>(mapper: M,
+                                        makeRequest: @escaping @Sendable () async throws -> (URLRequest, String)) -> AsyncThrowingStream<LLMStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let urlRequest = try await makeRequest()
+                    let (urlRequest, provider) = try await makeRequest()
                     let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
                     guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
                     if http.statusCode != 200 {

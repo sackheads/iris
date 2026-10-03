@@ -135,10 +135,13 @@ enum PerfCLI {
         GUILock.release(at: scratchLockURL(base: base))
     }
 
-    /// True when a real-lane run can skip the Keychain entirely: Gemini over ADC is the only
-    /// configuration whose credentials live outside it.
-    static func shouldBypassKeychain(provider: String?, geminiAuthMode: String?) -> Bool {
-        provider == "Gemini" && geminiAuthMode == GeminiAuthMode.adc.rawValue
+    /// True when a real-lane run can skip the Keychain entirely: Gemini over ADC and Anthropic on
+    /// Vertex AI (#181) are the configurations whose credentials live outside it.
+    static func shouldBypassKeychain(provider: String?, geminiAuthMode: String?,
+                                     anthropicAuthMode: String? = nil) -> Bool {
+        if provider == "Gemini" { return geminiAuthMode == GeminiAuthMode.adc.rawValue }
+        if provider == "Anthropic" { return anthropicAuthMode == AnthropicAuthMode.vertex.rawValue }
+        return false
     }
 
     /// Runs `suite`, entering `HeadlessMode`'s scope first when the lane is fake. Separated from
@@ -228,7 +231,8 @@ enum PerfCLI {
                     // blocks an unattended run. Skip the Keychain when the provider never needs it.
                     let provider = IrisDefaults.store.string(forKey: "PRIMARY_PROVIDER") ?? "Gemini"
                     let authMode = IrisDefaults.store.string(forKey: "GEMINI_AUTH_MODE") ?? GeminiAuthMode.apiKey.rawValue
-                    if shouldBypassKeychain(provider: provider, geminiAuthMode: authMode) {
+                    let anthropicMode = IrisDefaults.store.string(forKey: "ANTHROPIC_AUTH_MODE") ?? AnthropicAuthMode.apiKey.rawValue
+                    if shouldBypassKeychain(provider: provider, geminiAuthMode: authMode, anthropicAuthMode: anthropicMode) {
                         KeychainManager.requestHeadlessBypass()
                     } else {
                         print("perf: provider secrets come from the Keychain; a rebuilt binary prompts once before the run can start")

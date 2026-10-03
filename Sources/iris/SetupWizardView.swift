@@ -176,8 +176,32 @@ struct BaseModelStepView: View {
                             .textFieldStyle(.roundedBorder)
                     }
                 } else if config.primaryProvider == LLMProvider.anthropic.rawValue {
-                    SecureField("Anthropic API Key", text: $config.anthropicAPIKey)
-                        .textFieldStyle(.roundedBorder)
+                    Picker("Authentication", selection: $config.anthropicAuthMode) {
+                        ForEach(AnthropicAuthMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode.rawValue)
+                        }
+                    }
+                    .pickerStyle(.radioGroup)
+
+                    if config.anthropicAuthMode == AnthropicAuthMode.vertex.rawValue {
+                        TextField("Vertex AI Project (required)", text: $config.anthropicVertexProject)
+                            .textFieldStyle(.roundedBorder)
+                        TextField("Vertex AI Location (global, us, eu, or a region)", text: $config.anthropicVertexLocation)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Uses Application Default Credentials: run `gcloud auth application-default login --scopes=\"https://www.googleapis.com/auth/cloud-platform\"` first.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .task(id: config.anthropicAuthMode) {
+                                guard config.anthropicVertexProject.trimmingCharacters(in: .whitespaces).isEmpty,
+                                      let quota = await ADCCredentialManager.shared.getQuotaProject() else { return }
+                                if config.anthropicVertexProject.trimmingCharacters(in: .whitespaces).isEmpty {
+                                    config.anthropicVertexProject = quota
+                                }
+                            }
+                    } else {
+                        SecureField("Anthropic API Key", text: $config.anthropicAPIKey)
+                            .textFieldStyle(.roundedBorder)
+                    }
                 } else if config.primaryProvider == LLMProvider.openai.rawValue {
                     SecureField("OpenAI API Key", text: $config.openAIAPIKey)
                         .textFieldStyle(.roundedBorder)

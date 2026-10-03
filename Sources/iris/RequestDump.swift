@@ -24,10 +24,16 @@ enum RequestDump {
     /// discard the transport for and write to disk instead.
     static let placeholderAPIKey = "perf-dump-placeholder"
 
-    static func body(for request: GeminiRequest, provider: String, model: String, stream: Bool) throws -> Data {
+    static func body(for request: GeminiRequest, provider: String, model: String, stream: Bool,
+                     anthropicVertex: AnthropicVertexTarget? = nil) throws -> Data {
         switch provider {
         case LLMProvider.anthropic.rawValue:
-            let urlRequest = try AnthropicClient.makeURLRequest(request: request, model: model, apiKey: placeholderAPIKey, stream: stream)
+            // #181: in Vertex mode the body differs (anthropic_version, no model), so the dump
+            // goes through the same transport branch; the placeholder token only reaches a header.
+            let transport: AnthropicTransport = anthropicVertex.map {
+                .vertex(project: $0.project, location: $0.location, accessToken: placeholderAPIKey)
+            } ?? .direct(apiKey: placeholderAPIKey, baseURL: "")
+            let urlRequest = try AnthropicClient.makeURLRequest(request: request, model: model, transport: transport, stream: stream)
             return urlRequest.httpBody ?? Data()
         case LLMProvider.openai.rawValue:
             let urlRequest = try OpenAIClient.makeURLRequest(request: request, model: model, apiKey: placeholderAPIKey, stream: stream)

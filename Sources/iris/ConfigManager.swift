@@ -12,7 +12,17 @@ public enum LLMProvider: String, CaseIterable, Identifiable, Sendable {
 public enum GeminiAuthMode: String, CaseIterable, Identifiable, Sendable {
     case apiKey = "API Key"
     case adc = "Application Default Credentials (ADC)"
-    
+
+    public var id: String { rawValue }
+}
+
+/// How the Anthropic provider authenticates (#181). `vertex` calls Claude models hosted in a
+/// Google Cloud project through Vertex AI with Application Default Credentials, the same `gcloud`
+/// login the Gemini ADC mode uses; the provider, tiers and tools stay Anthropic's.
+public enum AnthropicAuthMode: String, CaseIterable, Identifiable, Sendable {
+    case apiKey = "API Key"
+    case vertex = "Vertex AI (ADC)"
+
     public var id: String { rawValue }
 }
 
@@ -95,6 +105,27 @@ class ConfigManager: @unchecked Sendable {
     
     var anthropicBaseURL: String {
         didSet { store.set(anthropicBaseURL, forKey: "ANTHROPIC_BASE_URL") }
+    }
+
+    var anthropicAuthMode: String {
+        didSet { store.set(anthropicAuthMode, forKey: "ANTHROPIC_AUTH_MODE") }
+    }
+    /// The Google Cloud project whose Vertex AI serves Claude. Required in Vertex mode: it is
+    /// prefilled from the ADC quota project in Settings but never substituted silently, because
+    /// the two are routinely different projects (#181).
+    var anthropicVertexProject: String {
+        didSet { store.set(anthropicVertexProject, forKey: "ANTHROPIC_VERTEX_PROJECT") }
+    }
+    /// `global`, `us`, `eu`, or a region. A blank value reads back as `global`, so an emptied
+    /// field never produces an empty path segment.
+    var anthropicVertexLocation: String {
+        didSet { store.set(anthropicVertexLocation, forKey: "ANTHROPIC_VERTEX_LOCATION") }
+    }
+    static let defaultVertexLocation = "global"
+    /// `anthropicVertexLocation` as the request path needs it: trimmed, `global` when blank.
+    var effectiveVertexLocation: String {
+        let trimmed = anthropicVertexLocation.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? Self.defaultVertexLocation : trimmed
     }
     
     var openAIAPIKey: String {
@@ -309,6 +340,10 @@ class ConfigManager: @unchecked Sendable {
         let savedProvider = store.string(forKey: "PRIMARY_PROVIDER") ?? "Gemini"
         self.primaryProvider = savedProvider
         self.geminiAuthMode = store.string(forKey: "GEMINI_AUTH_MODE") ?? GeminiAuthMode.apiKey.rawValue
+        self.anthropicAuthMode = store.string(forKey: "ANTHROPIC_AUTH_MODE") ?? AnthropicAuthMode.apiKey.rawValue
+        self.anthropicVertexProject = store.string(forKey: "ANTHROPIC_VERTEX_PROJECT") ?? ""
+        let savedLocation = (store.string(forKey: "ANTHROPIC_VERTEX_LOCATION") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        self.anthropicVertexLocation = savedLocation.isEmpty ? Self.defaultVertexLocation : savedLocation
         
         self.appearanceTheme = store.string(forKey: "APPEARANCE_THEME") ?? "system"
         
@@ -495,16 +530,26 @@ class ConfigManager: @unchecked Sendable {
     }
     
     var isConfigured: Bool {
-        switch primaryProvider {
+        Self.isConfigured(provider: primaryProvider, geminiAuthMode: geminiAuthMode, geminiAPIKey: geminiAPIKey,
+                          anthropicAuthMode: anthropicAuthMode, anthropicAPIKey: anthropicAPIKey,
+                          anthropicVertexProject: anthropicVertexProject, openAIAPIKey: openAIAPIKey)
+    }
+
+    /// The pure rule behind `isConfigured`, so a test can state every branch with literals and
+    /// never write a key into the process-global Keychain store (invariant 7).
+    static func isConfigured(provider: String, geminiAuthMode: String, geminiAPIKey: String,
+                             anthropicAuthMode: String, anthropicAPIKey: String, anthropicVertexProject: String,
+                             openAIAPIKey: String) -> Bool {
+        func present(_ s: String) -> Bool { !s.trimmingCharacters(in: .whitespaces).isEmpty }
+        switch provider {
         case LLMProvider.anthropic.rawValue:
-            return !anthropicAPIKey.trimmingCharacters(in: .whitespaces).isEmpty
+            if anthropicAuthMode == AnthropicAuthMode.vertex.rawValue { return present(anthropicVertexProject) }
+            return present(anthropicAPIKey)
         case LLMProvider.openai.rawValue:
-            return !openAIAPIKey.trimmingCharacters(in: .whitespaces).isEmpty
+            return present(openAIAPIKey)
         default:
-            if geminiAuthMode == GeminiAuthMode.adc.rawValue {
-                return true
-            }
-            return !geminiAPIKey.trimmingCharacters(in: .whitespaces).isEmpty
+            if geminiAuthMode == GeminiAuthMode.adc.rawValue { return true }
+            return present(geminiAPIKey)
         }
     }
     

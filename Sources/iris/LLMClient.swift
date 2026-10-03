@@ -131,6 +131,17 @@ struct LLMClient {
 
     var supportsStreaming: Bool { true }
 
+    /// The Anthropic provider's transport for this call (#181): the API key, or Vertex AI with an
+    /// ADC token from the same manager the Gemini ADC path uses.
+    static func anthropicTransport(config: ConfigManager) async throws -> AnthropicTransport {
+        try await anthropicTransport(config: config) { try await ADCCredentialManager.shared.getAccessToken() }
+    }
+
+    /// The injectable form, so a test can resolve Vertex mode without a real ADC login.
+    static func anthropicTransport(config: ConfigManager, accessToken: () async throws -> String) async throws -> AnthropicTransport {
+        try await AnthropicTransport.resolve(config: config, accessToken: accessToken)
+    }
+
     func streamContent(request: GeminiRequest, tier: ModelTier) -> AsyncThrowingStream<LLMStreamEvent, Error> {
         let config = ConfigManager.shared
         let provider = config.primaryProvider
@@ -143,7 +154,9 @@ struct LLMClient {
         }
         let inner: AsyncThrowingStream<LLMStreamEvent, Error>
         if provider == LLMProvider.anthropic.rawValue {
-            inner = AnthropicClient.streamContent(request: request, model: modelName, apiKey: config.anthropicAPIKey, baseURL: config.anthropicBaseURL)
+            inner = AnthropicClient.streamContent(request: request, model: modelName) {
+                try await Self.anthropicTransport(config: config)
+            }
         } else if provider == LLMProvider.openai.rawValue {
             inner = OpenAIClient.streamContent(request: request, model: modelName, apiKey: config.openAIAPIKey, baseURL: config.openAIBaseURL)
         } else {
@@ -190,7 +203,8 @@ struct LLMClient {
         do {
             let response: GeminiResponse
             if provider == LLMProvider.anthropic.rawValue {
-                response = try await AnthropicClient.generateContent(request: request, model: modelName, apiKey: config.anthropicAPIKey, baseURL: config.anthropicBaseURL)
+                response = try await AnthropicClient.generateContent(request: request, model: modelName,
+                                                                     transport: try await Self.anthropicTransport(config: config))
             } else if provider == LLMProvider.openai.rawValue {
                 response = try await OpenAIClient.generateContent(request: request, model: modelName, apiKey: config.openAIAPIKey, baseURL: config.openAIBaseURL)
             } else {

@@ -27,21 +27,40 @@ struct ModelProbeResult: Identifiable, Equatable, Sendable {
 /// `URLSession` that routes through `MockURLProtocol`.
 struct ModelCatalog: Sendable {
     let provider: LLMProvider
-    /// Empty for Gemini in ADC mode.
+    /// Empty for Gemini in ADC mode and for Anthropic on Vertex.
     let apiKey: String
     /// "" means the provider's default endpoint.
     let baseURL: String
     /// Gemini only; ignored for Anthropic/OpenAI.
     let geminiADC: Bool
+    /// Anthropic only: set when the provider authenticates through Vertex AI (#181).
+    let anthropicVertex: AnthropicVertexTarget?
     let session: URLSession
 
-    init(provider: LLMProvider, apiKey: String, baseURL: String, geminiADC: Bool = false, session: URLSession = .shared) {
+    init(provider: LLMProvider, apiKey: String, baseURL: String, geminiADC: Bool = false,
+         anthropicVertex: AnthropicVertexTarget? = nil, session: URLSession = .shared) {
         self.provider = provider
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.geminiADC = geminiADC
+        self.anthropicVertex = anthropicVertex
         self.session = session
     }
+
+    /// The Claude ids Iris knows Vertex can serve, each probed with a one-token `rawPredict`,
+    /// because nothing cheaper answers the real question: the publisher-model GET is the public
+    /// catalog (200 on `global` for every id whether or not the project enabled it, 404 on every
+    /// regional host even for models served there) and `count-tokens` behaves the same (measured
+    /// 2026-10-02 against gke-claude-dev; see PR #333). A project sees a subset; a model released
+    /// after this list is still usable by typing its id into a tier field. Spelled as Anthropic
+    /// spells them, so a pick writes an id that is valid in either auth mode; the Vertex transport
+    /// maps the dated ones.
+    static let knownVertexClaudeModels: [String] = [
+        "claude-fable-5-1", "claude-fable-5",
+        "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5-20251101",
+        "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6",
+        "claude-haiku-4-5-20251001",
+    ]
 
     // MARK: - #207 listing
 
@@ -201,7 +220,11 @@ struct ModelCatalog: Sendable {
         case .gemini:
             models = try await listGeminiModels(adcToken: adcToken, quotaProject: quotaProject)
         case .anthropic:
-            models = try await listAnthropicModels()
+            if let anthropicVertex {
+                models = try await listVertexClaudeModels(target: anthropicVertex, adcToken: adcToken)
+            } else {
+                models = try await listAnthropicModels()
+            }
         case .openai:
             models = try await listOpenAIModelsImpl()
         }
@@ -287,6 +310,81 @@ struct ModelCatalog: Sendable {
         }
     }
 
+    /// One one-token `rawPredict` per known id, concurrently, at the configured location. These
+    /// are billed calls, Opus and Fable included, which is why the Settings caption says so.
+    ///
+    /// A 200 means the project can call the model there. The rest is classified by outcome, not
+    /// by status alone, because Vertex uses the same codes for different things:
+    /// - 404: not enabled in Model Garden, or not served at this location → left out.
+    /// - 400: the location's API rejected the id → left out; but if **every** probe was a 400
+    ///   and nothing was served, that is a request-body regression (a wrong `anthropic_version`,
+    ///   a probe body that failed to build) and the 400 is thrown rather than read as "no models".
+    /// - 403: either project-wide (wrong project, missing scope) or per-model (publisher terms
+    ///   such as data sharing not accepted). If anything was served it is per-model and the model
+    ///   is left out; if nothing was, it is thrown.
+    /// - 429 and 5xx: transient. Twelve concurrent probes can trip a 429, and a rate-limited model
+    ///   is still enabled, so when anything was served these are **listed as unverified** with
+    ///   the status on the row rather than vanishing; when nothing was, the first is thrown.
+    /// Cancellation stops the remaining probes.
+    private func listVertexClaudeModels(target: AnthropicVertexTarget, adcToken: String?) async throws -> [ModelInfo] {
+        guard let adcToken, !adcToken.isEmpty else {
+            throw APIError(message: "Missing ADC access token for Vertex AI. Run `gcloud auth application-default login`.")
+        }
+        let transport = AnthropicTransport.vertex(project: target.project, location: target.location, accessToken: adcToken)
+        let probe = GeminiRequest(contents: [Content(role: "user", parts: [Part(text: "hi")])], systemInstruction: nil, tools: nil)
+        let known = Self.knownVertexClaudeModels
+        enum Outcome { case served, notServed, rejected(APIError), transient(APIError), failed(APIError) }
+        let outcomes: [(Int, Outcome)] = try await withThrowingTaskGroup(of: (Int, Outcome).self) { group in
+            for (index, id) in known.enumerated() {
+                group.addTask {
+                    try Task.checkCancellation()
+                    var request = try AnthropicClient.makeURLRequest(request: probe, model: id, transport: transport, stream: false)
+                    request.httpBody = Self.oneTokenBody(request.httpBody)
+                    do {
+                        _ = try await performRequest(request, provider: transport.providerLabel)
+                        return (index, .served)
+                    } catch let error as APIError {
+                        switch error.statusCode ?? 0 {
+                        case 404: return (index, .notServed)
+                        case 400: return (index, .rejected(error))
+                        case 429, 500...599: return (index, .transient(error))
+                        default: return (index, .failed(error))
+                        }
+                    }
+                }
+            }
+            var out: [(Int, Outcome)] = []
+            for try await outcome in group { out.append(outcome) }
+            return out.sorted { $0.0 < $1.0 }
+        }
+        let anyServed = outcomes.contains { if case .served = $0.1 { return true } else { return false } }
+        if !anyServed {
+            for (_, outcome) in outcomes { if case .failed(let error) = outcome { throw error } }
+            for (_, outcome) in outcomes { if case .transient(let error) = outcome { throw error } }
+            let anyNotServed = outcomes.contains { if case .notServed = $0.1 { return true } else { return false } }
+            if !anyNotServed, let rejected = outcomes.lazy.compactMap({ _, o -> APIError? in if case .rejected(let e) = o { return e } else { return nil } }).first {
+                throw rejected
+            }
+            return []
+        }
+        return outcomes.compactMap { index, outcome in
+            switch outcome {
+            case .served: return ModelInfo(id: known[index], displayName: nil)
+            case .transient(let error):
+                return ModelInfo(id: known[index], displayName: "not verified: HTTP \(error.statusCode.map(String.init) ?? "error") — retry")
+            case .notServed, .rejected, .failed: return nil
+            }
+        }
+    }
+
+    /// The probe body with `max_tokens` lowered to 1: the question is whether the call is
+    /// accepted, not what the model says, and the answer should cost one output token.
+    static func oneTokenBody(_ body: Data?) -> Data? {
+        guard let body, var json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { return body }
+        json["max_tokens"] = 1
+        return try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
+    }
+
     private func listOpenAIModelsImpl() async throws -> [ModelInfo] {
         let url = try Self.listURL(provider: .openai, baseURL: baseURL)
         var request = URLRequest(url: url)
@@ -344,7 +442,16 @@ struct ModelCatalog: Sendable {
         )
         switch provider {
         case .anthropic:
-            let urlRequest = try AnthropicClient.makeURLRequest(request: request, model: model, apiKey: apiKey, baseURL: baseURL, stream: false)
+            let transport: AnthropicTransport
+            if let anthropicVertex {
+                guard let adcToken, !adcToken.isEmpty else {
+                    throw APIError(message: "Missing ADC access token for Vertex AI. Run `gcloud auth application-default login`.")
+                }
+                transport = .vertex(project: anthropicVertex.project, location: anthropicVertex.location, accessToken: adcToken)
+            } else {
+                transport = .direct(apiKey: apiKey, baseURL: baseURL)
+            }
+            let urlRequest = try AnthropicClient.makeURLRequest(request: request, model: model, transport: transport, stream: false)
             _ = try await performRequest(urlRequest, provider: "Anthropic")
         case .openai:
             let urlRequest = try OpenAIClient.makeURLRequest(request: request, model: model, apiKey: apiKey, baseURL: baseURL, stream: false)
