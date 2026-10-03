@@ -228,6 +228,7 @@ enum ScenarioRunner {
         let provider = ConfigManager.shared.primaryProvider
         let model = ConfigManager.shared.getModel(for: tier)
         let stream = ConfigManager.shared.streamResponses
+        let anthropicVertex = AnthropicVertexTarget.current(from: ConfigManager.shared)
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         } catch {
@@ -237,7 +238,8 @@ enum ScenarioRunner {
         for entry in entries {
             let name = entry.retryAttempt == 0 ? "\(turn)-\(entry.round).json" : "\(turn)-\(entry.round)-retry\(entry.retryAttempt).json"
             do {
-                let data = try RequestDump.body(for: entry.request, provider: provider, model: model, stream: stream)
+                let data = try RequestDump.body(for: entry.request, provider: provider, model: model, stream: stream,
+                                                anthropicVertex: anthropicVertex)
                 try data.write(to: dir.appendingPathComponent(name))
             } catch {
                 print("[ScenarioRunner] --dump-requests: failed to write turn \(turn) round \(entry.round): \(error)")

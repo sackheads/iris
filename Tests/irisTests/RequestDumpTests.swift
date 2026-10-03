@@ -27,6 +27,24 @@ struct RequestDumpTests {
         #expect(expectedObj == dumpedObj)
     }
 
+    /// #181: in Vertex mode the dump must be the Vertex body (anthropic_version, no model), built
+    /// through the same transport branch production uses, with a placeholder token that never
+    /// reaches the body.
+    @Test("Anthropic dump in Vertex mode matches the Vertex transport's body structurally")
+    func anthropicVertexMatchesProduction() throws {
+        let target = AnthropicVertexTarget(project: "gke-claude-dev", location: "global")
+        let expected = try AnthropicClient.makeURLRequest(
+            request: request, model: "claude-haiku-4-5-20251001",
+            transport: .vertex(project: "gke-claude-dev", location: "global", accessToken: "real-token-never-used-here"), stream: false).httpBody
+        let dumped = try RequestDump.body(for: request, provider: LLMProvider.anthropic.rawValue, model: "claude-haiku-4-5-20251001",
+                                          stream: false, anthropicVertex: target)
+        let expectedObj = try JSONSerialization.jsonObject(with: try #require(expected)) as? NSDictionary
+        let dumpedObj = try JSONSerialization.jsonObject(with: dumped) as? NSDictionary
+        #expect(expectedObj == dumpedObj)
+        #expect(dumpedObj?["anthropic_version"] as? String == "vertex-2023-10-16")
+        #expect(dumpedObj?["model"] == nil)
+    }
+
     @Test("OpenAI dump matches makeURLRequest's own body structurally")
     func openAIMatchesProduction() throws {
         let expected = try OpenAIClient.makeURLRequest(request: request, model: "gpt-x", apiKey: "real-key-never-used-here", stream: false).httpBody

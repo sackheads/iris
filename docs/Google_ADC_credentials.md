@@ -81,6 +81,33 @@ gcloud config set project your-gcp-project-id
 
 ---
 
+## Claude on Vertex AI (Anthropic provider)
+
+The same ADC login also serves **Anthropic → Authentication Method → Vertex AI (ADC)**, which
+calls Claude models hosted in a Google Cloud project through Vertex AI (#181). Differences from
+the Gemini ADC path:
+
+* **The project is a setting, not the quota project.** Enter the project whose Vertex AI serves
+  Claude in *Vertex AI Project*. Settings prefills it from your ADC quota project when the field
+  is empty, but never substitutes it silently: the project that holds your quota and the project
+  that hosts Claude are routinely different. That project is also sent as `x-goog-user-project`.
+* **Location.** `global` (the default, and the only location that serves current-generation
+  models such as `claude-sonnet-5` and `claude-fable-5`), `us` or `eu` for a multi-region
+  endpoint, or a region such as `us-east5` for Sonnet 4.6 and earlier.
+* **Model ids.** The tier fields take Anthropic's ids. Vertex spells a dated id with `@`, so
+  `claude-haiku-4-5-20251001` is sent as `claude-haiku-4-5@20251001`; bare ids pass through.
+  *List Available Models…* sends one **billed** one-token request per Claude id Iris knows about,
+  Opus and Fable included, at the configured location, and shows the ones your project can call
+  there (a few dozen tokens in total); a model released later can still be typed into a tier
+  field. A model that answered 429 or a 5xx is listed as "not verified" with the status. A model the project cannot
+  call (not enabled in Model Garden, or one whose publisher terms such as data sharing the project
+  has not accepted, which Vertex reports as a 403) is left out; a mistake that fails every model,
+  such as the wrong project or a missing scope, is reported as an error, not as an empty list.
+* **Enablement.** A model must be enabled for the project in Model Garden before Vertex will
+  serve it; until then the request fails with a 404 naming the publisher model.
+* **Scope.** Vertex needs `https://www.googleapis.com/auth/cloud-platform`, the same scope the
+  Gemini Vertex path uses, so one `gcloud auth application-default login` covers both.
+
 ## Troubleshooting
 
 | Error | Cause | Solution |
