@@ -1361,11 +1361,13 @@ actor IrisEngine {
         // whether it is the pinned conversation (5b: gates both the job tools below and the
         // rename-trigger declaration — a subagent or evaluator conversation lives in
         // `localState?.conversations` like any other, but it is never the pinned one, so
-        // `isPinned` reads false for it at no extra cost).
-        let (isUnattended, hasActiveGoal, jobProfile, isPinned) = await MainActor.run { () -> (Bool, Bool, JobProfile?, Bool) in
+        // `isPinned` reads false for it at no extra cost). The ledger reference rides the same hop
+        // (fix round 1, review) rather than a second `MainActor.run` just for it — a stored
+        // property read, free either way.
+        let (isUnattended, hasActiveGoal, jobProfile, isPinned, ledger) = await MainActor.run { () -> (Bool, Bool, JobProfile?, Bool, JobLedger?) in
             let conversation = localState?.conversations.first(where: { $0.id == conversationId })
             return (conversation?.isBackground == true, conversation?.activeGoal != nil,
-                    conversation?.jobProfile, conversation?.isPinned == true)
+                    conversation?.jobProfile, conversation?.isPinned == true, localState?.store.ledger)
         }
 
         // #185 §6: computed once per turn and reused below for the session-tools declaration
@@ -1384,7 +1386,7 @@ actor IrisEngine {
 
         // 5b §0.3: the pinned conversation only, built fresh from the ledger every turn.
         // Best-effort — a ledger read that throws omits the section, never fails the turn.
-        if isPinned, let ledger = await MainActor.run(body: { localState?.store.ledger }) {
+        if isPinned, let ledger {
             if let failures = try? ledger.unacknowledgedFailures(),
                let jobs = try? ledger.jobs(),
                let recent = try? ledger.recentRuns(limit: Briefing.recentCap + failures.count),

@@ -525,16 +525,29 @@ extension JobLedger {
     }
 
     /// Every run but the ones in flight, newest first — the briefing's "recent" half (5b §0.3).
-    /// Excludes `running` rows (not yet a story to tell) and gate-unchanged completions
-    /// (`JobRunner.gateUnchangedOutcome`): a gate job that fires every few minutes and finds
-    /// nothing to do would otherwise crowd out every run worth mentioning.
+    /// Excludes:
+    /// - `running` rows (not yet a story to tell);
+    /// - gate-unchanged completions, matched by PREFIX (`JobRunner.gateUnchangedOutcome` + "%"):
+    ///   a catch-up fire folds its count onto the same outcome ("gate: no change (27 earlier
+    ///   occurrences skipped)"), so an exact match alone lets that variant through. A gate job
+    ///   that fires every few minutes and finds nothing to do would otherwise crowd out every run
+    ///   worth mentioning;
+    /// - stillborn rows (fix round 1, review): `status == .interrupted` with no
+    ///   `transcriptConversationId` is an overlap skip or an admission/gate row that never ran a
+    ///   turn at all (`JobRunner.recordStillborn`, same marker `runsStarted` already keys on — see
+    ///   its doc comment above). A *real* `.interrupted` row — the app quit mid-run
+    ///   (`closeRunningRuns`, `closeInterrupted`) — keeps its transcript id and is still reported.
     func recentRuns(limit: Int) throws -> [JobRun] {
         try decodeRuns(
             sql: """
-                SELECT * FROM job_runs WHERE status != ? AND (outcome IS NULL OR outcome != ?)
+                SELECT * FROM job_runs
+                WHERE status != ?
+                  AND NOT (status = ? AND transcriptConversationId IS NULL)
+                  AND (outcome IS NULL OR outcome NOT LIKE ?)
                 ORDER BY startedAt DESC, rowid DESC LIMIT ?
                 """,
-            arguments: [JobRun.Status.running.rawValue, JobRunner.gateUnchangedOutcome, limit])
+            arguments: [JobRun.Status.running.rawValue, JobRun.Status.interrupted.rawValue,
+                       JobRunner.gateUnchangedOutcome + "%", limit])
     }
 
     /// How many of this job's runs started a turn at or after `since` — the breaker's question,

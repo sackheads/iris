@@ -234,4 +234,43 @@ struct JobLedgerTests {
         let limited = try store.ledger.recentRuns(limit: 2)
         #expect(limited.map(\.id) == [completed2.id, completed1.id])
     }
+
+    @Test("recentRuns excludes stillborn interrupted rows (no transcript) but keeps a genuinely interrupted run")
+    func recentRunsExcludesStillbornInterrupted() throws {
+        let store = try ConversationStore.inMemory()
+        let job = makeJob("j")
+        try store.ledger.upsert(job)
+        let t0 = Date(timeIntervalSince1970: 2_000_000)
+        // No transcript: an overlap skip or a gate/admission row (`JobRunner.recordStillborn`) —
+        // begun and finished at the same instant, no turn ever happened.
+        let stillborn = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                               startedAt: t0, status: .interrupted)
+        // A real run the app quit in the middle of keeps the transcript id it was begun with.
+        let quitMidRun = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                                startedAt: t0.addingTimeInterval(1), status: .interrupted,
+                                transcriptConversationId: UUID())
+        try store.ledger.begin(run: stillborn)
+        try store.ledger.begin(run: quitMidRun)
+
+        let recent = try store.ledger.recentRuns(limit: 10)
+        #expect(recent.map(\.id) == [quitMidRun.id])
+    }
+
+    @Test("recentRuns excludes the gate-unchanged outcome even with a catch-up note folded in")
+    func recentRunsExcludesGateUnchangedWithNote() throws {
+        let store = try ConversationStore.inMemory()
+        let job = makeJob("j")
+        try store.ledger.upsert(job)
+        let t0 = Date(timeIntervalSince1970: 3_000_000)
+        var withNote = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                              startedAt: t0, status: .completed)
+        withNote.outcome = JobRunner.gateUnchangedOutcome + " (27 earlier occurrences skipped)"
+        let ordinary = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                              startedAt: t0.addingTimeInterval(1), status: .completed)
+        try store.ledger.begin(run: withNote)
+        try store.ledger.begin(run: ordinary)
+
+        let recent = try store.ledger.recentRuns(limit: 10)
+        #expect(recent.map(\.id) == [ordinary.id])
+    }
 }

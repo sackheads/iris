@@ -901,4 +901,17 @@ struct BriefingEngineTests {
         try #require(requests.count == 1)
         #expect(!leadText(requests[0]).contains("# Recent Activity"))
     }
+
+    /// Fix round 1 (review): best-effort means best-effort. No new seam needed — dropping the
+    /// table underneath the real `JobLedger` is the minimal way to make a genuine SQLite read
+    /// throw, without faking the ledger type.
+    @Test("a ledger read that throws omits the briefing without failing the turn")
+    func ledgerThrowOmitsBriefingWithoutFailingTheTurn() async throws {
+        let store = try ConversationStore.inMemory()
+        try await store.writer.write { db in try db.execute(sql: "DROP TABLE job_runs") }
+
+        let requests = try await run(pinned: true, store: store)
+        try #require(requests.count == 1, "the turn still completed")
+        #expect(!leadText(requests[0]).contains("# Recent Activity"))
+    }
 }
