@@ -1550,7 +1550,7 @@ actor IrisEngine {
         }
         toolsList.append(FunctionDeclaration(
             name: "search_memory",
-            description: "Search Iris's memory. scope facts (default) searches saved facts; conversations searches what was said in past conversations (titles only, no ids — in Iris, the pinned conversation, use search_conversations and read_conversation instead for ids, positions and paging); all searches both. Use it only when the user refers to something not present in the current context.",
+            description: Self.searchMemoryDescription(isPinned: isPinned),
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -1659,13 +1659,14 @@ actor IrisEngine {
             ))
         }
 
-        // #187 §9, invariant 6: the job tools and search_conversations are declared in a pinned
-        // conversation and nowhere else. Iris, the pinned conversation, is the one place a person
-        // is already reading about runs and other chats, so it is the one place these declarations
-        // earn their prompt tokens; everywhere else they would be a standing cost for a question
-        // nobody asked. The gate itself is pure (`jobToolDeclarations`) so every answer is testable
-        // without a turn. `isPinned` is the shared read from the preamble tuple above — a
-        // subagent/evaluator conversation is never the pinned one, so this costs it nothing extra.
+        // #187 §9, invariant 6: the job tools, search_conversations and read_conversation are
+        // declared in a pinned conversation and nowhere else. Iris, the pinned conversation, is
+        // the one place a person is already reading about runs and other chats, so it is the one
+        // place these declarations earn their prompt tokens; everywhere else they would be a
+        // standing cost for a question nobody asked. The gate itself is pure
+        // (`jobToolDeclarations`) so every answer is testable without a turn. `isPinned` is the
+        // shared read from the preamble tuple above — a subagent/evaluator conversation is never
+        // the pinned one, so this costs it nothing extra.
         toolsList.append(contentsOf: Self.jobToolDeclarations(isPinned: isPinned))
 
         // Main-agent only. A subagent runs against a unit contract the PARENT authored (slice B3);
@@ -4106,13 +4107,24 @@ actor IrisEngine {
 
 // MARK: - Job tools (#187 §9)
 
-/// `list_jobs`, `get_job_run` and `search_conversations`, and the JSON or text they answer with.
-/// The declarations are a pure function of the gate rather than `append`s inside the turn builder
-/// so the invariant they carry — that no conversation but a pinned one is charged for them — is
-/// testable without driving a turn against a model.
+/// `list_jobs`, `get_job_run`, `search_conversations` and `read_conversation`, and the JSON or
+/// text they answer with. The declarations are a pure function of the gate rather than `append`s
+/// inside the turn builder so the invariant they carry — that no conversation but a pinned one is
+/// charged for them — is testable without driving a turn against a model.
 extension IrisEngine {
-    /// `list_jobs`, `get_job_run` and `search_conversations` when `isPinned`, nothing otherwise.
-    /// Appended verbatim by the per-turn tool-list builder.
+    /// `search_memory`'s description, with the pointer to `search_conversations` and
+    /// `read_conversation` appended only when `isPinned` (review, invariant 6): those two tools
+    /// are themselves declared only in the pinned conversation (`jobToolDeclarations` above), so
+    /// naming them on every other turn would cost prompt tokens for a pointer to tools an unpinned
+    /// model never has and might still try to call.
+    nonisolated static func searchMemoryDescription(isPinned: Bool) -> String {
+        let base = "Search Iris's memory. scope facts (default) searches saved facts; conversations searches what was said in past conversations (titles only, no ids); all searches both. Use it only when the user refers to something not present in the current context."
+        guard isPinned else { return base }
+        return base + " In Iris, the pinned conversation, search_conversations and read_conversation give ids, positions and paging into past conversations instead."
+    }
+
+    /// `list_jobs`, `get_job_run`, `search_conversations` and `read_conversation` when `isPinned`,
+    /// nothing otherwise. Appended verbatim by the per-turn tool-list builder.
     nonisolated static func jobToolDeclarations(isPinned: Bool) -> [FunctionDeclaration] {
         guard isPinned else { return [] }
         return [
