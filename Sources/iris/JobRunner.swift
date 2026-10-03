@@ -62,6 +62,10 @@ actor JobRunner {
     /// How long the deadline watchdog sleeps between looks at the wall clock. Injected only so a
     /// test can drive the loop round more than once without waiting a minute to do it.
     private let watchdogSlice: TimeInterval
+    /// The wall clock the run deadline is set and watched on. Injected only so a test can hold the
+    /// deadline off until its turn has reached the point under test, then move it (#335); a real
+    /// one-second deadline raced a busy suite to the model call and sometimes won.
+    private let deadlineClock: @Sendable () -> Date
     /// How a run keeps the Mac awake for its own duration (§4). Injected so a test can watch the
     /// begin/end pair instead of asserting on the machine's real power state.
     private let activity: any ActivityAPI
@@ -125,7 +129,8 @@ actor JobRunner {
          sandboxAvailable: (@Sendable () -> Bool)? = nil,
          gateEvaluator: (@Sendable (Gate, String?) async -> GateResult)? = nil,
          lastGateSignal: (@Sendable (UUID) throws -> String?)? = nil,
-         watchdogSlice: TimeInterval = JobRunner.defaultWatchdogSlice) {
+         watchdogSlice: TimeInterval = JobRunner.defaultWatchdogSlice,
+         deadlineClock: @escaping @Sendable () -> Date = Date.init) {
         self.state = state
         self.engine = engine
         self.ledger = ledger
@@ -147,6 +152,7 @@ actor JobRunner {
             catch { return "\(error)" }
         }
         self.watchdogSlice = watchdogSlice
+        self.deadlineClock = deadlineClock
     }
 
     // MARK: Admission (#187 §4)
@@ -907,10 +913,11 @@ actor JobRunner {
         }
         let prompt = promptBuild.text
 
-        // The wall clock, not the injected `now`: this deadline bounds a turn that is happening
-        // right now, so a test (or a replayed occurrence) that pins the ledger's clock to another
-        // instant must not make every run time out before its first model call.
-        let deadline = Date().addingTimeInterval(TimeInterval(limits.runTimeoutSeconds))
+        // The wall clock (`deadlineClock`), not the injected `now`: this deadline bounds a turn
+        // that is happening right now, so a test (or a replayed occurrence) that pins the ledger's
+        // clock to another instant must not make every run time out before its first model call.
+        let deadlineClock = self.deadlineClock
+        let deadline = deadlineClock().addingTimeInterval(TimeInterval(limits.runTimeoutSeconds))
         let budget = TurnBudget(maxTokens: limits.perRunTokens, deadline: deadline)
         // Stay awake for this run, and no longer: the watchdog gives the assertion back at the
         // deadline even when the turn overruns it, so a wedged run cannot hold the Mac awake for
@@ -964,7 +971,7 @@ actor JobRunner {
             // the deadline it exists to enforce — holding the assertion, and the run, open for
             // all of it. A slice is at most a minute, so that overshoot is at most a minute.
             while true {
-                let seconds = deadline.timeIntervalSinceNow
+                let seconds = deadline.timeIntervalSince(deadlineClock())
                 if seconds <= 0 { break }
                 // Not `try?`: a cancelled sleep means the run finished first, and the two things
                 // below are the deadline's alone to do.

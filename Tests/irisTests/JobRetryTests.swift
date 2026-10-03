@@ -310,21 +310,110 @@ struct JobRetryTests {
 
     // MARK: The sleep assertion
 
+    /// A count a test can wait on without a poll window: `reach` returns the moment the count gets
+    /// there. Bounded all the same, so a run that never gets there fails the test instead of
+    /// hanging the suite.
+    private final class Signal: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        private var waiters: [(target: Int, id: UUID, continuation: CheckedContinuation<Bool, Never>)] = []
+
+        var value: Int { lock.withLock { count } }
+
+        func bump() {
+            let ready = lock.withLock { () -> [CheckedContinuation<Bool, Never>] in
+                count += 1
+                let due = waiters.filter { $0.target <= count }.map(\.continuation)
+                waiters.removeAll { $0.target <= count }
+                return due
+            }
+            for continuation in ready { continuation.resume(returning: true) }
+        }
+
+        /// `true` once the count is at least `target`; `false` if `seconds` pass first.
+        func reach(_ target: Int, within seconds: TimeInterval = 30) async -> Bool {
+            let id = UUID()
+            return await withCheckedContinuation { continuation in
+                let already = lock.withLock { () -> Bool in
+                    if count >= target { return true }
+                    waiters.append((target, id, continuation))
+                    return false
+                }
+                if already { continuation.resume(returning: true); return }
+                Task.detached { [self] in
+                    try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                    let expired = lock.withLock { () -> CheckedContinuation<Bool, Never>? in
+                        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return nil }
+                        return waiters.remove(at: index).continuation
+                    }
+                    expired?.resume(returning: false)
+                }
+            }
+        }
+    }
+
+    /// The run deadline's clock, held still until the test moves it (#335). A real one-second
+    /// deadline raced a busy suite to the model call and sometimes won, failing the assertion that
+    /// the turn got there. `reads` counts the watchdog's looks at it.
+    private final class ManualClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var current = Date()
+        let reads = Signal()
+
+        func now() -> Date {
+            defer { reads.bump() }
+            return lock.withLock { current }
+        }
+
+        func advance(by seconds: TimeInterval) { lock.withLock { current += seconds } }
+    }
+
+    /// Resumes its continuation once, with whichever answer arrives first.
+    private final class FirstAnswer<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<T?, Never>?
+        init(_ continuation: CheckedContinuation<T?, Never>) { self.continuation = continuation }
+        func resolve(_ value: T?) {
+            let taken = lock.withLock { () -> CheckedContinuation<T?, Never>? in
+                defer { continuation = nil }
+                return continuation
+            }
+            taken?.resume(returning: value)
+        }
+    }
+
+    /// The task's value, or `nil` if it has not finished within `seconds`: the bound that turns
+    /// "the deadline never ended the run" into a failure rather than a hung suite.
+    private func finished<T: Sendable>(_ task: Task<T, Never>, within seconds: TimeInterval = 30) async -> T? {
+        await withCheckedContinuation { continuation in
+            let answer = FirstAnswer<T>(continuation)
+            Task { answer.resolve(await task.value) }
+            Task.detached {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                answer.resolve(nil)
+            }
+        }
+    }
+
+    /// Long enough that the engine's own round check, which reads the real clock, never trips:
+    /// the manual clock is the only thing that can bring these deadlines on.
+    private static let heldTimeout = 600
+
     /// A client that parks inside the model call until the test lets it go, so the assertion's
     /// begin/end can be observed *while* the turn is still in flight.
     private final class GatedClient: LLMClientProtocol, @unchecked Sendable {
         private let lock = NSLock()
         private var released = false
-        private var calls = 0
         private let response: GeminiResponse
+        let calls = Signal()
 
         init(response: GeminiResponse) { self.response = response }
 
-        var callCount: Int { lock.withLock { calls } }
+        var callCount: Int { calls.value }
         func release() { lock.withLock { released = true } }
 
         func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
-            lock.withLock { calls += 1 }
+            calls.bump()
             while !lock.withLock({ released }) {
                 try await Task.sleep(nanoseconds: 10_000_000)
             }
@@ -352,6 +441,8 @@ struct JobRetryTests {
         private var streamCalls = 0
         private var replayCalls = 0
         private let response: GeminiResponse
+        /// Every park, ever: what a test waits on before it lets the deadline arrive.
+        let parks = Signal()
 
         init(response: GeminiResponse) { self.response = response }
 
@@ -374,6 +465,7 @@ struct JobRetryTests {
             return AsyncThrowingStream<LLMStreamEvent, Error>(unfolding: { [self] in
                 await withCheckedContinuation { continuation in
                     lock.withLock { parked.append(continuation) }
+                    parks.bump()
                 }
             })
         }
@@ -418,12 +510,13 @@ struct JobRetryTests {
                                activity: activity)
 
         let fire = Task { await runner.fire(job: j, origin: .schedule) }
-        await waitFor("the turn to reach the model") { client.callCount == 1 }
+        defer { client.release() }
+        try #require(await client.calls.reach(1), "the turn reached the model")
         #expect(activity.events == [.begin("Iris job pr-sweep")],
                 "the assertion is held while the turn is in flight")
 
         client.release()
-        _ = await fire.value
+        try #require(await finished(fire) != nil, "the released turn ended the run")
         #expect(activity.events == [.begin("Iris job pr-sweep"), .end])
     }
 
@@ -433,15 +526,23 @@ struct JobRetryTests {
         // inside a model call, so the deadline has to cancel the turn itself.
         let client = GatedClient(response: textResponse("tick"))
         let (store, state, engine) = try harness([], client: client)
-        let j = job(timeoutSeconds: 1)
+        let j = job(timeoutSeconds: Self.heldTimeout)
         try store.ledger.upsert(j)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         let activity = RecordingActivity()
+        let clock = ManualClock()
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
-                               activity: activity)
+                               activity: activity, watchdogSlice: 0.01, deadlineClock: clock.now)
 
-        await runner.fire(job: j, origin: .schedule)
+        let fire = Task { await runner.fire(job: j, origin: .schedule) }
+        // Only a failed test needs this: a passing one never releases the call.
+        defer { client.release() }
+        // The deadline cannot arrive before the turn is inside the model call: the clock it is
+        // watched on does not move until here.
+        try #require(await client.calls.reach(1), "the turn reached the model")
+        clock.advance(by: TimeInterval(Self.heldTimeout + 1))
+        try #require(await finished(fire) != nil, "the deadline ended a turn parked in the model call")
 
         #expect(client.callCount == 1, "and it was never released")
         let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
@@ -461,18 +562,21 @@ struct JobRetryTests {
         // later tick wrote another skip row. The job stopped, and nothing said why.
         let client = WedgedClient(response: textResponse("too late"))
         let (store, state, engine) = try harness([], client: client, streamResponses: true)
-        let j = job(timeoutSeconds: 1)
+        let j = job(timeoutSeconds: Self.heldTimeout)
         try store.ledger.upsert(j)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         let activity = RecordingActivity()
+        let clock = ManualClock()
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
-                               activity: activity)
+                               activity: activity, watchdogSlice: 0.01, deadlineClock: clock.now)
         defer { client.releaseAll() }
 
-        // No timeout around this on purpose: if the deadline cannot end the wait, the right
-        // failure is the suite hanging here, which is exactly what the shipped bug did.
-        await runner.fire(job: j, origin: .schedule)
+        let fire = Task { await runner.fire(job: j, origin: .schedule) }
+        try #require(await client.parks.reach(1), "the turn parked in the model call")
+        clock.advance(by: TimeInterval(Self.heldTimeout + 1))
+        // Bounded, where the shipped bug hung forever: a wait the deadline cannot end fails here.
+        try #require(await finished(fire) != nil, "the deadline ended the wait on a turn that never returns")
 
         #expect(client.parkedCount == 1, "the turn is still parked in the model call")
         #expect(client.replayCount == 0,
@@ -489,7 +593,10 @@ struct JobRetryTests {
 
         // The other half of the wedge: the job has to be firable again. A second fire admitted is
         // proof `inFlight` was given back.
-        let second = await runner.fire(job: j, origin: .manual)
+        let secondFire = Task { await runner.fire(job: j, origin: .manual) }
+        try #require(await client.parks.reach(2), "the second fire reached the model rather than being skipped")
+        clock.advance(by: TimeInterval(Self.heldTimeout + 1))
+        let second = try #require(await finished(secondFire), "the second run ended at its deadline too")
         #expect(second == .run, "got: \(String(describing: second))")
         #expect(client.callCount == 2, "the second fire reached the model rather than being skipped")
         let runs = try store.ledger.runs(jobId: j.id, limit: 5)
@@ -524,21 +631,29 @@ struct JobRetryTests {
 
     @Test("the watchdog re-reads the clock every slice, so a short slice still ends the run once")
     func theWatchdogLoopsUntilTheDeadline() async throws {
-        // R17's loop had no test: every other deadline test takes its first slice and exits, so an
-        // inverted condition or a slice that never shrinks would spin unnoticed. A tenth of a
-        // second against a one-second timeout is about ten times round.
+        // R17's loop had no test: an inverted condition, or a loop that stops re-reading the
+        // clock, would spin (or end the run early) unnoticed. Here the loop must go round several
+        // times on a clock that has not reached the deadline, leave the run alone while it does,
+        // and end it once on the first look after the clock gets there.
         let client = WedgedClient(response: textResponse("too late"))
         let (store, state, engine) = try harness([], client: client, streamResponses: true)
-        let j = job(timeoutSeconds: 1)
+        let j = job(timeoutSeconds: Self.heldTimeout)
         try store.ledger.upsert(j)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         let activity = RecordingActivity()
+        let clock = ManualClock()
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
-                               activity: activity, watchdogSlice: 0.1)
+                               activity: activity, watchdogSlice: 0.02, deadlineClock: clock.now)
         defer { client.releaseAll() }
 
-        await runner.fire(job: j, origin: .schedule)
+        let fire = Task { await runner.fire(job: j, origin: .schedule) }
+        try #require(await client.parks.reach(1), "the turn parked in the model call")
+        let looked = clock.reads.value
+        try #require(await clock.reads.reach(looked + 3), "the watchdog kept re-reading the clock")
+        #expect(activity.events == [.begin("Iris job pr-sweep")], "and left the run alone while short of the deadline")
+        clock.advance(by: TimeInterval(Self.heldTimeout + 1))
+        try #require(await finished(fire) != nil, "the first look past the deadline ended the run")
 
         let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
         #expect(run.status == .failed)
@@ -575,21 +690,25 @@ struct JobRetryTests {
         // turn returns first, so the deadline behind it has nothing left to say.
         let client = GatedClient(response: textResponse("tick"))
         let (store, state, engine) = try harness([], client: client)
-        let j = job(timeoutSeconds: 2)
+        let j = job(timeoutSeconds: Self.heldTimeout)
         try store.ledger.upsert(j)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
         let activity = RecordingActivity()
+        let clock = ManualClock()
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
-                               activity: activity)
+                               activity: activity, watchdogSlice: 0.01, deadlineClock: clock.now)
 
         let fire = Task { await runner.fire(job: j, origin: .schedule) }
-        await waitFor("the turn to reach the model") { client.callCount == 1 }
-        // Late in the window, so the watchdog is awake and armed behind the turn rather than
-        // nowhere near it — but far enough inside it that a loaded machine cannot invert the two.
-        try await Task.sleep(nanoseconds: 1_000_000_000)
+        defer { client.release() }
+        try #require(await client.calls.reach(1), "the turn reached the model")
+        // The watchdog is awake and armed behind the turn, looking at the clock, before the turn
+        // is let go. The clock is held, so the deadline cannot get in first however loaded the
+        // machine is; which of two simultaneous claims wins is the `DeadlineFlag` tests' job.
+        let looked = clock.reads.value
+        try #require(await clock.reads.reach(looked + 2), "the watchdog is armed")
         client.release()
-        _ = await fire.value
+        try #require(await finished(fire) != nil, "the released turn ended the run")
 
         let run = try #require(try store.ledger.runs(jobId: j.id, limit: 1).first)
         #expect(run.status == .completed)
