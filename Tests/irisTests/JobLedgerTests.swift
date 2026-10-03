@@ -209,4 +209,29 @@ struct JobLedgerTests {
         #expect(count == 1 && bg == nil && pinned == nil)
         #expect(tables.isSuperset(of: ["jobs", "job_runs"]))
     }
+
+    @Test("recentRuns excludes running and gate-unchanged rows, newest first, honors limit")
+    func recentRunsFiltering() throws {
+        let store = try ConversationStore.inMemory()
+        let job = makeJob("j")
+        try store.ledger.upsert(job)
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        func mk(_ status: JobRun.Status, at offset: TimeInterval) -> JobRun {
+            JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                   startedAt: t0.addingTimeInterval(offset), status: status)
+        }
+        var gateUnchanged = mk(.completed, at: 1)
+        gateUnchanged.outcome = JobRunner.gateUnchangedOutcome
+        let running = mk(.running, at: 2)
+        let failed = mk(.failed, at: 3)
+        let completed1 = mk(.completed, at: 4)
+        let completed2 = mk(.completed, at: 5)
+        for r in [gateUnchanged, running, failed, completed1, completed2] { try store.ledger.begin(run: r) }
+
+        let recent = try store.ledger.recentRuns(limit: 10)
+        #expect(recent.map(\.id) == [completed2.id, completed1.id, failed.id])
+
+        let limited = try store.ledger.recentRuns(limit: 2)
+        #expect(limited.map(\.id) == [completed2.id, completed1.id])
+    }
 }

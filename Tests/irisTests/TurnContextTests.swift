@@ -837,3 +837,68 @@ struct GuardedFileCacheTests {
         #expect(collector.profiles[2].spans["assembly.userProfile"] != nil, "turn 3: changed file must re-guard")
     }
 }
+
+/// The `Recent Activity` briefing (5b §0.3): engine-level wiring. Only the pinned conversation
+/// gets the section, only when the ledger has something to say, built fresh from a real
+/// `JobLedger` over an in-memory `ConversationStore` — never a fake.
+@MainActor
+@Suite("Recent Activity briefing (5b §0.3)")
+struct BriefingEngineTests {
+    private func leadText(_ request: GeminiRequest) -> String {
+        request.contents.first?.parts.first?.text ?? ""
+    }
+
+    private func run(pinned: Bool, store: ConversationStore) async throws -> [GeminiRequest] {
+        let facts = try FactStoreManager(inMemory: true)
+        let app = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        if pinned, let idx = app.conversations.firstIndex(where: { $0.id == id }) {
+            app.conversations[idx].isPinned = true
+        }
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], streamResponses: false, factStore: facts,
+                                protectionEnabled: false, sessionPeerCount: 0)
+        await engine.processInput("hi", source: "UI", conversationId: id)
+        return client.requests
+    }
+
+    @Test("a pinned conversation with a failed run gets the Recent Activity heading")
+    func pinnedWithFailureGetsHeading() async throws {
+        let store = try ConversationStore.inMemory()
+        let job = Job(name: "sweep", prompt: "p", trigger: .schedule(.interval(seconds: 60)))
+        try store.ledger.upsert(job)
+        let failedRun = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                               startedAt: Date(), status: .failed)
+        try store.ledger.begin(run: failedRun)
+
+        let requests = try await run(pinned: true, store: store)
+        try #require(requests.count == 1)
+        #expect(leadText(requests[0]).contains("# Recent Activity"))
+        #expect(leadText(requests[0]).contains("sweep"))
+    }
+
+    @Test("a non-pinned conversation does not get the heading, even with the same failing ledger")
+    func nonPinnedNoHeading() async throws {
+        let store = try ConversationStore.inMemory()
+        let job = Job(name: "sweep", prompt: "p", trigger: .schedule(.interval(seconds: 60)))
+        try store.ledger.upsert(job)
+        let failedRun = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                               startedAt: Date(), status: .failed)
+        try store.ledger.begin(run: failedRun)
+
+        let requests = try await run(pinned: false, store: store)
+        try #require(requests.count == 1)
+        #expect(!leadText(requests[0]).contains("# Recent Activity"))
+    }
+
+    @Test("a pinned conversation with an empty ledger gets no heading at all")
+    func emptyLedgerNoHeading() async throws {
+        let store = try ConversationStore.inMemory()
+        let requests = try await run(pinned: true, store: store)
+        try #require(requests.count == 1)
+        #expect(!leadText(requests[0]).contains("# Recent Activity"))
+    }
+}

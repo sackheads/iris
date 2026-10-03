@@ -1382,6 +1382,17 @@ actor IrisEngine {
                                               body: "\(peerCount) other session\(peerCount == 1 ? " is" : "s are") active."))
         }
 
+        // 5b §0.3: the pinned conversation only, built fresh from the ledger every turn.
+        // Best-effort — a ledger read that throws omits the section, never fails the turn.
+        if isPinned, let ledger = await MainActor.run(body: { localState?.store.ledger }) {
+            if let failures = try? ledger.unacknowledgedFailures(),
+               let jobs = try? ledger.jobs(),
+               let recent = try? ledger.recentRuns(limit: Briefing.recentCap + failures.count),
+               let section = Briefing.section(failures: failures, paused: jobs.filter { $0.pausedReason != nil }, recent: recent) {
+                turnContext.sections.append(section)
+            }
+        }
+
         var toolsList = await executor.getTools()
         // No unattended job creation (the agency epic's standing ruling): a background run may
         // not write itself a cadence or a watch, so the two tools that do are not declared to it

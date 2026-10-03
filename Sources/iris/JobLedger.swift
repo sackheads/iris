@@ -524,6 +524,19 @@ extension JobLedger {
             arguments: [JobRun.Status.failed.rawValue, JobRun.Status.blockedOnApproval.rawValue])
     }
 
+    /// Every run but the ones in flight, newest first — the briefing's "recent" half (5b §0.3).
+    /// Excludes `running` rows (not yet a story to tell) and gate-unchanged completions
+    /// (`JobRunner.gateUnchangedOutcome`): a gate job that fires every few minutes and finds
+    /// nothing to do would otherwise crowd out every run worth mentioning.
+    func recentRuns(limit: Int) throws -> [JobRun] {
+        try decodeRuns(
+            sql: """
+                SELECT * FROM job_runs WHERE status != ? AND (outcome IS NULL OR outcome != ?)
+                ORDER BY startedAt DESC, rowid DESC LIMIT ?
+                """,
+            arguments: [JobRun.Status.running.rawValue, JobRunner.gateUnchangedOutcome, limit])
+    }
+
     /// How many of this job's runs started a turn at or after `since` — the breaker's question,
     /// asked with `since = now - 1h`. Inclusive at the boundary, like `dueJobs`.
     ///
