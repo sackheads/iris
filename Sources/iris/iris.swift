@@ -3827,6 +3827,27 @@ actor IrisEngine {
         "list_jobs", "get_job_run", "search_conversations", "read_conversation",
     ]
 
+    /// The tools `buildRequest` declares inline (identity, memory, sessions, goals, delegation)
+    /// plus `SubagentManager`'s, excluded from `pathWritingTools`/`toolsThatWriteNoPath` above
+    /// because they write through their own managers rather than the file tools (§4 is out of
+    /// scope for them) — but still real, callable tool names. Paired with those two sets below so
+    /// `Briefing` can tell a real tool name a run was blocked calling from a model-chosen,
+    /// well-formed but nonexistent one (#187 review). Spelled out rather than derived, same
+    /// tradeoff as `toolsThatWriteNoPath`: a tool added here later and forgotten just makes
+    /// `Briefing` under-report a real block as a plain "blocked", not a security hole.
+    nonisolated static let inlineDeclaredToolNames: Set<String> = [
+        "set_workspace", "rename_conversation", "schedule_job", "save_fact", "manage_fact",
+        "reflect", "goal_complete", "search_memory", "update_user_profile", "update_soul",
+        "update_memory", "propose_goal_contract", "list_sessions", "send_to_session",
+        "set_session_card", "amend_goal_contract", "reach_checkpoint", "waive_criterion",
+        "invoke_subagent", "delegate_milestone",
+    ]
+
+    /// Every tool name the app can ever declare to any conversation, main-agent or subagent, any
+    /// gate state. Used only to recognise a real tool name — see `Briefing.section`.
+    nonisolated static let allDeclaredToolNames: Set<String> =
+        pathWritingTools.union(toolsThatWriteNoPath).union(inlineDeclaredToolNames)
+
     /// What this call actually wrote, from its arguments and the sentence the tool returned.
     ///
     /// Reading the result rather than trusting the call is what keeps a refusal, a hook block or a

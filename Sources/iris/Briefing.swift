@@ -19,23 +19,31 @@ enum Briefing {
     /// here rather than reaching into `JobRunner`'s formatter.
     private static let budgetReasonPrefix = "daily token budget reached"
 
-    static func section(failures: [JobRun], paused: [Job], recent: [JobRun]) -> TurnContext.Section? {
+    /// `knownTools` defaults to the live declared surface so production call sites get it for
+    /// free; tests pass their own set to keep this function pure and dependency-free.
+    static func section(failures: [JobRun], paused: [Job], recent: [JobRun],
+                        knownTools: Set<String> = IrisEngine.allDeclaredToolNames) -> TurnContext.Section? {
         var lines: [String] = paused.map {
             "- \(name($0.name)) · \(pausedWord($0.pausedReason)) (job \(short($0.id)))"
         }
-        lines += failures.map(line)
+        lines += failures.map { line($0, knownTools: knownTools) }
         let shown = Set(failures.map(\.id))
-        lines += recent.filter { !shown.contains($0.id) }.prefix(recentCap).map(line)
+        lines += recent.filter { !shown.contains($0.id) }.prefix(recentCap).map { line($0, knownTools: knownTools) }
         guard !lines.isEmpty else { return nil }
         return .init(heading: heading, body: lines.joined(separator: "\n"))
     }
 
-    private static func line(_ run: JobRun) -> String {
-        "- \(name(run.jobName)) · \(reason(run)) (run \(short(run.id)))"
+    private static func line(_ run: JobRun, knownTools: Set<String>) -> String {
+        "- \(name(run.jobName)) · \(reason(run, knownTools: knownTools)) (run \(short(run.id)))"
     }
 
-    private static func reason(_ run: JobRun) -> String {
-        if run.status == .blockedOnApproval, let tool = run.blockedTool, isToolName(tool) {
+    /// A blocked run's `blockedTool` is a tool name the MODEL chose, not one the harness wrote —
+    /// a well-formed but nonexistent name (hallucinated, or injected) must not reach the
+    /// harness-authority turn context as `blocked: <name>` (#187 review). Checked against the real
+    /// declared surface rather than a character-shape check: a plausible-looking fake tool name
+    /// passes any character check that a real one would.
+    private static func reason(_ run: JobRun, knownTools: Set<String>) -> String {
+        if run.status == .blockedOnApproval, let tool = run.blockedTool, knownTools.contains(tool) {
             return "blocked: \(tool)"
         }
         if let word = reasonWord(run.failureReason) { return word }
@@ -72,10 +80,6 @@ enum Briefing {
         return "paused"
     }
 
-    private static func isToolName(_ s: String) -> Bool {
-        !s.isEmpty && s.count <= 40 && s.allSatisfy { $0.isASCII && ($0.isLowercase || $0.isNumber || $0 == "_") }
-    }
-
     /// One line, no role markers, no `<`, capped. A job's name is set by whoever created it.
     ///
     /// Order matters (fix round 1, review): `<` and every newline are stripped from the RAW text
@@ -87,9 +91,7 @@ enum Briefing {
     /// the sanitiser had already passed the still-spliced text, and removing `<` afterwards
     /// reassembled the very marker it exists to catch.
     static func name(_ raw: String) -> String {
-        var flat = raw
-            .replacingOccurrences(of: "<", with: "")
-            .components(separatedBy: .newlines).joined(separator: " ")
+        var flat = IrisEngine.flattenHitLineField(raw.replacingOccurrences(of: "<", with: ""))
         flat = PromptInjectionGuard.sanitizeUntrustedInput(flat)
         // The sanitiser only strips its own exact strings, case-insensitively, and only when
         // nothing sits between the word and the colon. A marker with a space before the colon, or

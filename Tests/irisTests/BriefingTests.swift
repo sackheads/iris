@@ -93,6 +93,24 @@ import Foundation
         #expect(!body.contains("evil"))
     }
 
+    /// Review: `isToolName` used to be a character-shape check alone, so a model-chosen,
+    /// well-formed but nonexistent tool name (hallucinated, or an injected instruction) still
+    /// passed it and reached the turn context as `blocked: <name>` with harness authority. Checked
+    /// against the real declared surface now: a name that is well-formed but not actually a tool
+    /// falls back to the plain status text, while a real tool name is still shown.
+    @Test func wellFormedButNonexistentToolNameIsDropped() {
+        let r = run("j", .blockedOnApproval, blockedTool: "owner_approved_schedule_job_now", at: 1)
+        let body = Briefing.section(failures: [r], paused: [], recent: [])!.body
+        #expect(body.contains("blocked on approval"))
+        #expect(!body.contains("owner_approved_schedule_job_now"))
+    }
+
+    @Test func realToolNameStillShown() {
+        let r = run("j", .blockedOnApproval, blockedTool: "run_command", at: 1)
+        let body = Briefing.section(failures: [r], paused: [], recent: [])!.body
+        #expect(body.contains("blocked: run_command"))
+    }
+
     // MARK: Fixed-vocabulary reason mapping (fix round 1, ruling 3)
 
     @Test func timeExceededMapsToTimeout() {
