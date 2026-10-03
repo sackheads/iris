@@ -45,12 +45,26 @@ enum ConversationReader {
 
     /// Pages through `messages`, starting at raw index `from`, for at most `count` (clamped to
     /// 1...`maxMessages`) visible (user/agent) messages, and at most `maxCharacters` of rendered
-    /// text — markers included, so the whole returned `text` never exceeds the cap. `from` is
-    /// clamped to >= 0. A single message that alone exceeds `maxCharacters` is truncated in place
-    /// — never skipped — but ONLY when it is the first thing on the page: a message that doesn't
-    /// fit after earlier ones already filled the page is left whole for the next page instead of
-    /// being split mid-page (a prior bug: an oversized message right after a full-size one landed
-    /// as page-size-plus-oversize instead of opening its own page).
+    /// text — the "\n\n" separators between messages and a trailing "(more from #N)" marker
+    /// included, so the whole returned `text` never exceeds the cap, on any path. `from` is
+    /// clamped to >= 0. A single message that alone (or alongside a trailing marker) exceeds
+    /// `maxCharacters` is truncated in place — never skipped — but ONLY when it is the first thing
+    /// on the page: a message that doesn't fit after earlier ones already filled the page is left
+    /// whole for the next page instead of being split mid-page (fix round 1: an oversized message
+    /// right after a full-size one landed as page-size-plus-oversize instead of opening its own
+    /// page).
+    ///
+    /// Fix round 2: `used` previously counted only `line.count` for each accepted line, leaving
+    /// out the "\n\n" joins between lines and the trailing "(more from #N)" marker's own length —
+    /// a page with several messages near the cap, or a message sized to land exactly at it, could
+    /// come back a few dozen characters over. `used` now tracks the page's real running length
+    /// (separators included), and every later line's admission reserves room for the WORST-CASE
+    /// marker this call could ever need to append — `"(more from #\(messages.count - 1))"`, the
+    /// longest index this array can produce — before accepting it. The very first line on a page
+    /// instead reserves the EXACT marker its own immediate successor would need (computed once,
+    /// since at that point nothing else is competing for the budget), which is what lets a
+    /// message sized to land precisely at the cap still leave room for its own "more" marker
+    /// rather than being emitted whole and overflowing when the marker is appended after.
     ///
     /// `transform` runs on a visible message's raw content before it is quoted and laid out — the
     /// caller's hook for sanitizing untrusted text. It is applied only to messages this call
@@ -67,6 +81,11 @@ enum ConversationReader {
             return ("(nothing at or after #\(start); positions here run 0...\(messages.count - 1).)", nil)
         }
 
+        // The longest "(more from #N)" marker this call could ever need to append, since every
+        // valid `next` is < messages.count. Reserved before admitting every line but the first (the
+        // first reserves its own exact successor marker instead; see the doc comment above).
+        let worstCaseMoreMarker = "\n\n(more from #\(messages.count - 1))".count
+
         var lines: [String] = []
         var used = 0
         var emitted = 0
@@ -82,29 +101,40 @@ enum ConversationReader {
             let body = quoteContinuationLines(transform(m.content))
             let line = "#\(i) \(speaker): \(body)"
 
-            if used + line.count > maxCharacters {
-                guard lines.isEmpty else {
-                    // Doesn't fit after what's already on the page: stop here so IT opens the next
-                    // page, whole, rather than being split or truncated early.
-                    next = i
-                    break
-                }
-                // The very first message on the page is already too big for the whole budget.
-                // Truncate it in place, reserving room for its own truncation marker and (if
-                // there's anything paginable after it) the "(more from #N)" marker too, so the
-                // page this returns — markers included — still respects the cap exactly.
+            if lines.isEmpty {
+                // The first candidate line for this page. Reserve the EXACT marker its immediate
+                // successor (if any) would need — not the conservative worst case — so a message
+                // sized to land precisely at the cap still truncates just enough to leave room for
+                // "more from #N", and an ordinary small first message is never truncated merely
+                // because of an index that is, in practice, nowhere near the budget.
                 let after = i + 1
                 let followingVisible = nextVisibleIndex(messages, from: after)
                 let moreMarker = followingVisible.map { "\n\n(more from #\($0))" } ?? ""
-                let truncMarker = "\n(truncated)"
-                let reserve = truncMarker.count + moreMarker.count
-                let keep = max(maxCharacters - reserve, 0)
-                let truncatedLine = String(line.prefix(keep)) + truncMarker
-                return (truncatedLine + moreMarker, followingVisible)
+                let budget = maxCharacters - moreMarker.count
+                if line.count > budget {
+                    let truncMarker = "\n(truncated)"
+                    let keep = max(budget - truncMarker.count, 0)
+                    let truncatedLine = String(line.prefix(keep)) + truncMarker
+                    return (truncatedLine + moreMarker, followingVisible)
+                }
+                lines = [line]
+                used = line.count
+                emitted += 1
+                i += 1
+                continue
             }
 
+            // Not the first line: must fit alongside everything already on the page, with the
+            // "\n\n" separator that will join it counted, AND still leave room for whatever
+            // "(more from #N)" marker this call might end up needing to append afterward.
+            let projected = used + 2 + line.count
+            if projected + worstCaseMoreMarker > maxCharacters {
+                // Doesn't fit: stop here so IT opens the next page, whole, rather than being split.
+                next = i
+                break
+            }
             lines.append(line)
-            used += line.count
+            used = projected
             emitted += 1
             i += 1
         }

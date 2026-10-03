@@ -151,6 +151,71 @@ struct ConversationReaderTests {
         #expect(next2 == nil)
     }
 
+    // MARK: Fix round 2 — `used` must count separators and reserve for the trailing marker
+
+    /// Walks every page from `from: 0` to completion, asserting EVERY page — markers included —
+    /// respects the cap, that `next` always advances, and that every raw index in `visible` (the
+    /// indices this fixture's visible messages sit at) is found on exactly one page.
+    private func pageThroughAndVerify(_ messages: [ChatMessage], visible: [Int]) {
+        var from = 0
+        var seen: [Int] = []
+        var guardCounter = 0
+        while true {
+            guardCounter += 1
+            #expect(guardCounter < 50, "should finish well under 50 calls for this fixture")
+            let (text, next) = ConversationReader.page(messages, from: from, count: 20)
+            #expect(text.count <= ConversationReader.maxCharacters,
+                   Comment(rawValue: "page starting at #\(from) must respect the cap, markers included"))
+            for idx in visible where text.contains("#\(idx) ") { seen.append(idx) }
+            guard let next else { break }
+            #expect(next > from, "next must advance past the previous starting point")
+            from = next
+        }
+        #expect(seen.sorted() == visible.sorted(), "every visible message must appear on exactly one page")
+    }
+
+    /// Fix round 2, finding 1: a message whose line lands EXACTLY at `maxCharacters`, followed by
+    /// another message. Before the fix, the first message was emitted whole (it fit on its own),
+    /// and the trailing "(more from #1)" marker was then appended on top, overflowing the cap by
+    /// the marker's length. The first message must now be truncated just enough to leave room for
+    /// that marker.
+    @Test func exactlyCapSizedMessageFollowedByAnotherStillFitsWithMarker() {
+        let prefixLen = "#0 owner: ".count
+        let content0 = String(repeating: "a", count: ConversationReader.maxCharacters - prefixLen)
+        let messages = [ChatMessage(role: .user, content: content0),
+                        ChatMessage(role: .agent, content: "short reply")]
+
+        let (page1, next1) = ConversationReader.page(messages, from: 0, count: 20)
+        #expect(page1.count <= ConversationReader.maxCharacters)
+        #expect(page1.contains("(more from #1)"))
+        #expect(next1 == 1)
+
+        let (page2, next2) = ConversationReader.page(messages, from: next1!, count: 20)
+        #expect(page2.contains("#1 iris: short reply"))
+        #expect(page2.count <= ConversationReader.maxCharacters)
+        #expect(next2 == nil)
+    }
+
+    /// Fix round 2, finding 2 — the exact numbers the review measured: two 15,990-character
+    /// messages followed by a third used to produce a page of 32,018 characters (18 over), because
+    /// `used` counted neither the "\n\n" joins nor the trailing marker. Now every page stays
+    /// within the cap and nothing is skipped across the walk.
+    @Test func twoNearHalfCapMessagesFollowedByAThirdNeverOverflows() {
+        let messages = [
+            ChatMessage(role: .user, content: String(repeating: "a", count: 15_990)),
+            ChatMessage(role: .agent, content: String(repeating: "b", count: 15_990)),
+            ChatMessage(role: .user, content: "a third, short message"),
+        ]
+        pageThroughAndVerify(messages, visible: [0, 1, 2])
+    }
+
+    /// Fix round 2, finding 3: many small messages whose "\n\n" separators alone — never any
+    /// single oversized message — push a page over the cap if the separators aren't counted.
+    @Test func manySmallMessagesWhoseSeparatorsWouldOverflowUncounted() {
+        let messages = msgs(30, size: 1_600)
+        pageThroughAndVerify(messages, visible: Array(0..<30))
+    }
+
     /// Paging forward with the returned `next` always makes progress and eventually terminates.
     @Test func nextAdvancesToCompletion() {
         let all = msgs(45)
