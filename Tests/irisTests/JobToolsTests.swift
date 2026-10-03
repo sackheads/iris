@@ -2,11 +2,11 @@ import Testing
 import Foundation
 @testable import iris
 
-/// #187 §9, invariant 6 — `list_jobs`, `get_job_run` and (§0.5) `search_conversations` cost prompt
-/// tokens on every turn they are declared, and only a pinned conversation (Iris) reads about jobs
-/// or other chats at all. The gate is a pure function so both answers can be pinned without
-/// driving a turn; one turn through a capturing client then proves the real tool list is actually
-/// assembled from it.
+/// #187 §9, invariant 6 — `list_jobs`, `get_job_run` and (§0.5) `search_conversations` and
+/// `read_conversation` cost prompt tokens on every turn they are declared, and only a pinned
+/// conversation (Iris) reads about jobs or other chats at all. The gate is a pure function so both
+/// answers can be pinned without driving a turn; one turn through a capturing client then proves
+/// the real tool list is actually assembled from it.
 @MainActor
 @Suite("job tools (#187)")
 struct JobToolsTests {
@@ -536,6 +536,46 @@ struct JobToolsTests {
         // process's local time zone — `other`'s `updatedAt` is a real, parseable timestamp, so it
         // must appear.
         #expect(result.contains(" UTC · #0"))
+    }
+
+    /// Task 5 (final review, fix wave): the join end to end, through a real
+    /// `ConversationStore.inMemory()` and the real tools — not a pure function and not the store
+    /// called directly. A system row sits between the two visible messages, so the hit's ordinal is
+    /// its raw-array index (2), with the gap `indexedRoles` leaves; `search_conversations` and
+    /// `read_conversation` must agree on that number the same way `ConversationReader`'s own tests
+    /// do.
+    @Test("searching from Iris finds the hit at its raw ordinal, and read_conversation opens on it there")
+    func searchThenReadJoinThroughRealStore() async throws {
+        let store = try ConversationStore.inMemory()
+        let app = AppState(store: store)
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        if let idx = app.conversations.firstIndex(where: { $0.id == id }) {
+            app.conversations[idx].isPinned = true
+        }
+
+        var other = Conversation(id: UUID(), title: "Falconry notes")
+        other.messages = [
+            ChatMessage(role: .user, content: "what should we name the deploy script"),
+            ChatMessage(role: .system, content: "[TOOL_CALL]\n{}"),
+            ChatMessage(role: .agent, content: "kestrel"),
+        ]
+        var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
+        try app.store.apply([ConversationWrite(id: other.id, snapshot: other, changes: s)])
+        app.conversations.append(other)
+
+        let searchResult = await runToolCall(
+            FunctionCall(name: "search_conversations", args: ["query": .string("kestrel")], id: "c1"),
+            on: app, as: id)
+        #expect(searchResult.contains("#2 iris: kestrel"),
+               "the hit's position is the raw array index, not a count that skips the system row")
+
+        let readResult = await runToolCall(
+            FunctionCall(name: "read_conversation",
+                        args: ["id": .string(other.id.uuidString), "from": .int(2)], id: "c2"),
+            on: app, as: id)
+        #expect(readResult.contains("#2 iris: kestrel"))
     }
 
     @Test("search_conversations never returns the pinned conversation's own messages")
