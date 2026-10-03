@@ -101,8 +101,8 @@ mkdir -p <worktree>/.sourcekit-lsp && echo '{"backgroundIndexing": false}' > <wo
 ```
 
 It must sit at the worktree's root: SourceKit-LSP does not read it from a parent directory (tested
-2026-10-02). `.sourcekit-lsp/` is in `.git/info/exclude`, which every worktree shares, so it does not
-make the tree look dirty. An existing `index-build` can be deleted at any time.
+2026-10-02). Add `.sourcekit-lsp/` to `.git/info/exclude` once per clone (every worktree shares that
+file) so it does not make the tree look dirty. An existing `index-build` can be deleted at any time.
 
 ## Project layout
 
