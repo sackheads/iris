@@ -444,6 +444,71 @@ struct ConversationSearchTests {
         #expect(try store.searchConversations(query: "   ").isEmpty)
         #expect(try store.searchConversations(query: "!!! ***").isEmpty)
     }
+
+    // MARK: 6 — the search_conversations filter (#187 §0.5)
+
+    @Test("includeBackground: false excludes a background conversation's message; the default includes it")
+    func includeBackgroundFilter() throws {
+        let store = try ConversationStore.inMemory()
+        var c = conversation(title: "job run", [ChatMessage(role: .agent, content: "about wrens")])
+        c.isBackground = true
+        try store.apply([created(c)])
+
+        #expect(try store.searchConversations(query: "wrens", includeBackground: false).isEmpty)
+        #expect(try store.searchConversations(query: "wrens").count == 1)
+    }
+
+    @Test("an archived conversation's message is still returned")
+    func archivedConversationsAreIncluded() throws {
+        let store = try ConversationStore.inMemory()
+        var c = conversation(title: "old chat", [ChatMessage(role: .user, content: "about swifts")])
+        c.isArchived = true
+        try store.apply([created(c)])
+
+        #expect(try store.searchConversations(query: "swifts", includeBackground: false).count == 1)
+    }
+
+    @Test("excluding: an id removes that conversation's hits")
+    func excludingFilter() throws {
+        let store = try ConversationStore.inMemory()
+        let a = conversation(title: "a", [ChatMessage(role: .user, content: "about terns")])
+        let b = conversation(title: "b", [ChatMessage(role: .user, content: "about terns too")])
+        try store.apply([created(a), created(b)])
+
+        let hits = try store.searchConversations(query: "terns", excluding: [a.id])
+        #expect(hits.count == 1)
+        #expect(hits.first?.conversationId == b.id)
+    }
+
+    @Test("each hit carries the conversation's updatedAt")
+    func hitsCarryUpdatedAt() throws {
+        let store = try ConversationStore.inMemory()
+        let c = conversation(title: "t", [ChatMessage(role: .user, content: "about shearwaters")])
+        try store.apply([created(c)])
+        try store.rawWrite("UPDATE conversations SET updatedAt = '2024-06-01 00:00:00.000' WHERE id = ?",
+                           arguments: [c.id.uuidString])
+
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let hit = try #require(try store.searchConversations(query: "shearwaters").first)
+        let updatedAt = try #require(hit.updatedAt)
+        #expect(utc.dateComponents([.year, .month, .day], from: updatedAt)
+                    == DateComponents(year: 2024, month: 6, day: 1))
+    }
+
+    /// Fix round 1 review: a fallback to `Date()` here would tell the model a stale hit was just
+    /// touched. `nil` is the honest answer when the column cannot be read as a date at all.
+    @Test("a hit whose updatedAt column cannot be parsed carries nil, not now")
+    func unparsableUpdatedAtIsNil() throws {
+        let store = try ConversationStore.inMemory()
+        let c = conversation(title: "t", [ChatMessage(role: .user, content: "about fulmars")])
+        try store.apply([created(c)])
+        try store.rawWrite("UPDATE conversations SET updatedAt = 'not-a-date' WHERE id = ?",
+                           arguments: [c.id.uuidString])
+
+        let hit = try #require(try store.searchConversations(query: "fulmars").first)
+        #expect(hit.updatedAt == nil)
+    }
 }
 
 // MARK: - tool surface

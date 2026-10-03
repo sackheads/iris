@@ -209,4 +209,68 @@ struct JobLedgerTests {
         #expect(count == 1 && bg == nil && pinned == nil)
         #expect(tables.isSuperset(of: ["jobs", "job_runs"]))
     }
+
+    @Test("recentRuns excludes running and gate-unchanged rows, newest first, honors limit")
+    func recentRunsFiltering() throws {
+        let store = try ConversationStore.inMemory()
+        let job = makeJob("j")
+        try store.ledger.upsert(job)
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        func mk(_ status: JobRun.Status, at offset: TimeInterval) -> JobRun {
+            JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                   startedAt: t0.addingTimeInterval(offset), status: status)
+        }
+        var gateUnchanged = mk(.completed, at: 1)
+        gateUnchanged.outcome = JobRunner.gateUnchangedOutcome
+        let running = mk(.running, at: 2)
+        let failed = mk(.failed, at: 3)
+        let completed1 = mk(.completed, at: 4)
+        let completed2 = mk(.completed, at: 5)
+        for r in [gateUnchanged, running, failed, completed1, completed2] { try store.ledger.begin(run: r) }
+
+        let recent = try store.ledger.recentRuns(limit: 10)
+        #expect(recent.map(\.id) == [completed2.id, completed1.id, failed.id])
+
+        let limited = try store.ledger.recentRuns(limit: 2)
+        #expect(limited.map(\.id) == [completed2.id, completed1.id])
+    }
+
+    @Test("recentRuns excludes stillborn interrupted rows (no transcript) but keeps a genuinely interrupted run")
+    func recentRunsExcludesStillbornInterrupted() throws {
+        let store = try ConversationStore.inMemory()
+        let job = makeJob("j")
+        try store.ledger.upsert(job)
+        let t0 = Date(timeIntervalSince1970: 2_000_000)
+        // No transcript: an overlap skip or a gate/admission row (`JobRunner.recordStillborn`) —
+        // begun and finished at the same instant, no turn ever happened.
+        let stillborn = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                               startedAt: t0, status: .interrupted)
+        // A real run the app quit in the middle of keeps the transcript id it was begun with.
+        let quitMidRun = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                                startedAt: t0.addingTimeInterval(1), status: .interrupted,
+                                transcriptConversationId: UUID())
+        try store.ledger.begin(run: stillborn)
+        try store.ledger.begin(run: quitMidRun)
+
+        let recent = try store.ledger.recentRuns(limit: 10)
+        #expect(recent.map(\.id) == [quitMidRun.id])
+    }
+
+    @Test("recentRuns excludes the gate-unchanged outcome even with a catch-up note folded in")
+    func recentRunsExcludesGateUnchangedWithNote() throws {
+        let store = try ConversationStore.inMemory()
+        let job = makeJob("j")
+        try store.ledger.upsert(job)
+        let t0 = Date(timeIntervalSince1970: 3_000_000)
+        var withNote = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                              startedAt: t0, status: .completed)
+        withNote.outcome = JobRunner.gateUnchangedOutcome + " (27 earlier occurrences skipped)"
+        let ordinary = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                              startedAt: t0.addingTimeInterval(1), status: .completed)
+        try store.ledger.begin(run: withNote)
+        try store.ledger.begin(run: ordinary)
+
+        let recent = try store.ledger.recentRuns(limit: 10)
+        #expect(recent.map(\.id) == [ordinary.id])
+    }
 }

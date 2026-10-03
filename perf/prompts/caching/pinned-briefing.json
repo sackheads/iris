@@ -1,0 +1,17 @@
+{ "name": "pinned-briefing", "clientMode": "real", "tier": "medium", "pinned": true,
+  "seedFacts": ["QUILLBARROW keeps bees."],
+  "turns": [
+    { "prompt": "Greet me in five words." },
+    { "prompt": "Name a prime number between 20 and 30.",
+      "ledgerRuns": [{ "name": "nightly-backup", "status": "completed" }] },
+    { "prompt": "Count the files in /tmp with a shell command and tell me the number.",
+      "ledgerRuns": [{ "name": "inbox-sweep", "status": "failed" }],
+      "eventCard": { "name": "repo-watch", "status": "completed", "outcome": "3 files changed" } },
+    { "prompt": "Reply with the single word done.",
+      "ledgerRuns": [{ "name": "nightly-backup", "status": "completed" }] } ],
+  "scriptedResponses": [
+    { "kind": "text", "text": "Hello, hope you are well." },
+    { "kind": "text", "text": "23." },
+    { "kind": "toolCalls", "calls": [ { "name": "run_command", "args": { "command": "ls /tmp | wc -l" } } ] },
+    { "kind": "text", "text": "There are some files." },
+    { "kind": "text", "text": "done" } ] }

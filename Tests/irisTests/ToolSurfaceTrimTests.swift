@@ -54,6 +54,13 @@ struct ToolSurfaceTrimTests {
         #expect(!names.contains("amend_goal_contract"))
         #expect(names.contains("run_command"))
         #expect(names.count <= 18, "expected the plain-turn surface to shrink from 30; got \(names.count): \(names)")
+        // #187 §0.5, invariant 6: search_conversations and read_conversation (like list_jobs/
+        // get_job_run before them) are declared only in the pinned conversation, so a plain,
+        // unpinned turn's count must not grow when either is added.
+        #expect(!names.contains("search_conversations"))
+        #expect(!names.contains("read_conversation"))
+        #expect(!names.contains("list_jobs"))
+        #expect(!names.contains("get_job_run"))
     }
 
     /// #168: `manage_fact` needs a fact id, and the only ids the model sees come from the facts
@@ -192,6 +199,7 @@ struct ToolSurfaceTrimTests {
         let mem = decls["search_memory"] ?? ""
         #expect(mem.contains("not present in the current context"))
         #expect(!mem.contains("JIT injection"))
+        #expect(!mem.contains("search_conversations"), "the pointer to the pinned-only tools costs every other turn's tokens for nothing (invariant 6)")
 
         // The watch declaration was two sentences (#187 deliverable 4, spec §5): what it does and
         // that its own writes are safe. The built-in ignore set, the ceiling and the
@@ -205,6 +213,26 @@ struct ToolSurfaceTrimTests {
         #expect(watch.contains("own file-tool writes"))
         #expect(watch.contains("asks the user"))
         #expect(!watch.contains(".git"))
+    }
+
+    /// Review, invariant 6: the pointer from `search_memory` to `search_conversations` and
+    /// `read_conversation` is only true in the pinned conversation — those two tools are declared
+    /// nowhere else (`jobToolDeclarations`). An unpinned model told to use them would try a tool it
+    /// does not have.
+    @Test("search_memory's description points to search_conversations only when pinned")
+    func searchMemoryPointerOnlyWhenPinned() async {
+        let capture = CapturingLLMClient(reply: "ok")
+        let app = AppState(); let id = UUID(); app.createNewConversation(id: id)
+        if let idx = app.conversations.firstIndex(where: { $0.id == id }) {
+            app.conversations[idx].isPinned = true
+        }
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: capture, retryDelays: [],
+                                sessionPeerCount: 0)
+        await engine.processInput("hello", source: "UI", conversationId: id)
+        let mem = capture.requests.first?.tools?.flatMap { $0.functionDeclarations }
+            .first { $0.name == "search_memory" }?.description ?? ""
+        #expect(mem.contains("search_conversations"))
+        #expect(mem.contains("read_conversation"))
     }
 
     @Test("the shipped steering says an explicit request to remember is stored now, not at reflection")

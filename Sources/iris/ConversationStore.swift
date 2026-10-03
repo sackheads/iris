@@ -138,6 +138,21 @@ struct ConversationHit: Sendable, Equatable {
     let role: ChatRole
     let ordinal: Int
     let snippet: String
+    /// The conversation's own `updatedAt` (#187 §0.5), so `search_conversations` can show a date
+    /// without a second query. `nil` when the stored column could not be parsed as a date — a
+    /// fallback to "now" would tell the model a stale hit was just touched (fix round 1 review).
+    /// Defaulted so existing hand-built fixtures (`SidebarSearchTests`, `SidebarSearchResultsTests`)
+    /// do not all need updating for a field they do not assert on.
+    let updatedAt: Date?
+
+    init(conversationId: UUID, title: String, role: ChatRole, ordinal: Int, snippet: String, updatedAt: Date? = nil) {
+        self.conversationId = conversationId
+        self.title = title
+        self.role = role
+        self.ordinal = ordinal
+        self.snippet = snippet
+        self.updatedAt = updatedAt
+    }
 }
 
 /// Per-conversation SQLite persistence (spec §2, §4, §5). One metadata row per conversation,
@@ -1261,7 +1276,13 @@ final class ConversationStore: Sendable {
     /// chat wins. An empty or all-punctuation query matches nothing: the fact store answers a
     /// blank query with "the most recent facts", but there is no equivalent here — "the most
     /// recent messages" are the ones already in context.
-    func searchConversations(query: String, limit: Int = 10) throws -> [ConversationHit] {
+    /// `excluding` and `includeBackground` default to today's behaviour (no filter, background
+    /// included) so `search_memory`, `/search` and the sidebar's search field — none of which pass
+    /// them — are unaffected. `search_conversations` (#187 §0.5) is the one caller that narrows
+    /// both: it excludes the calling (pinned) conversation and never surfaces a background job
+    /// run's transcript, which `get_job_run` reads instead.
+    func searchConversations(query: String, limit: Int = 10, excluding: Set<UUID> = [],
+                             includeBackground: Bool = true) throws -> [ConversationHit] {
         let sanitized = Self.sanitizeFTSQuery(query.trimmingCharacters(in: .whitespacesAndNewlines))
         // FTS5Pattern, not FTS3Pattern: the pattern is tokenized by the same unicode61 tokenizer
         // that built the index, so a query for "Café" finds the row indexed as "cafe". The FTS3
@@ -1269,26 +1290,48 @@ final class ConversationStore: Sendable {
         guard !sanitized.trimmingCharacters(in: .whitespaces).isEmpty,
               let pattern = FTS5Pattern(matchingAnyTokenIn: sanitized) else { return [] }
         return try writer.read { db in
-            let rows = try Row.fetchAll(db, sql: """
+            var sql = """
                 SELECT messages_fts.conversationId AS cid, messages_fts.ordinal AS ord,
                        messages_fts.role AS role, conversations.title AS title,
+                       conversations.updatedAt AS updatedAt,
                        snippet(messages_fts, 3, '', '', '\u{2026}', 12) AS snippet
                 FROM messages_fts
                 JOIN conversations ON conversations.id = messages_fts.conversationId
                 WHERE messages_fts MATCH ?
-                ORDER BY bm25(messages_fts), conversations.updatedAt DESC
+                """
+            var arguments: [DatabaseValueConvertible?] = [pattern]
+            if !includeBackground {
+                sql += " AND conversations.isBackground = 0"
+            }
+            if !excluding.isEmpty {
+                let placeholders = excluding.map { _ in "?" }.joined(separator: ", ")
+                sql += " AND conversations.id NOT IN (\(placeholders))"
+                arguments.append(contentsOf: excluding.map { $0.uuidString })
+            }
+            sql += """
+                 ORDER BY bm25(messages_fts), conversations.updatedAt DESC
                 LIMIT ?
-                """, arguments: [pattern, limit])
+                """
+            arguments.append(limit)
+            let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(arguments))
             return rows.compactMap { row in
                 guard let idString = Self.readText(row, "cid"), let id = UUID(uuidString: idString),
                       let ordinal: Int = row["ord"],
                       let role = Self.readText(row, "role").flatMap(ChatRole.init(rawValue:))
                 else { return nil }
+                // GRDB's typed `Date` subscript is pickier about the stored format than
+                // `fromDatabaseValue`, and a hit should not vanish over an unparsed timestamp —
+                // but unlike `loadAll`'s `?? Date()`, there is no good default to report here: a
+                // hit from 2019 falling back to "now" would tell the model it was just touched
+                // (fix round 1 review). `nil` and the caller omits the date instead.
+                let updatedAtValue: DatabaseValue = row["updatedAt"]
+                let updatedAt = Date.fromDatabaseValue(updatedAtValue)
                 return ConversationHit(conversationId: id,
                                        title: Self.readText(row, "title") ?? "Untitled",
                                        role: role,
                                        ordinal: ordinal,
-                                       snippet: Self.readText(row, "snippet") ?? "")
+                                       snippet: Self.readText(row, "snippet") ?? "",
+                                       updatedAt: updatedAt)
             }
         }
     }

@@ -91,12 +91,19 @@ other field defaults.
 | `turns` | array | — (required) | The user prompts driving the run, one entry per turn. |
 | `turns[].prompt` | string | — (required) | The prompt text for that turn. |
 | `turns[].source` | string | `"User"` | Provenance label for the turn. |
+| `turns[].ledgerRuns` | array of `{ name, status, outcome? }` | none | Finished job runs written to the run's job ledger just before this turn, so the pinned conversation's briefing sees them (5b). `status` is a `JobRun.Status` (`completed`, `failed`, `blockedOnApproval`, ...; an `interrupted` row with no transcript is never briefed). One disabled job is created per name on first use. |
+| `turns[].eventCard` | `{ name, status, outcome? }` | none | A run whose row is written and whose event card is delivered (`deliverEvent`) at the start of this turn's second model round, so its line is drained mid-turn. A turn with one round gets the card after it ends instead (logged; `ScenarioResult.midTurnEventCards` says which). |
+| `pinned` | bool | `false` | Run in the pinned conversation (`activityConversationId()`) rather than a fresh unpinned one, so the briefing and pinned-only tools apply (5b). |
 | `clientMode` | `"fake"` \| `"real"` | `"fake"` | `fake` replays `scriptedResponses`; `real` hits a provider. |
 | `tier` | `ModelTier` | `"medium"` | Model tier the engine runs at (`easy`/`medium`/`hard`). |
 | `latencyMs` | `{ "minMs", "maxMs" }` | none | Fake mode only. Simulates per-call model latency (random in range). Omit for instant (~0). |
 | `scriptedResponses` | array | `[]` | Fake mode only. The model's replies, consumed in order. |
 | `toggles` | `{ guards, hooks, sandbox }` | all `false` | **Advisory metadata only** today — see note below. |
 | `seedFacts` | array of string | none | Facts written to a fresh in-memory fact store before turn 1, so a scenario that depends on the fact-store block appearing/disappearing is deterministic (5a; see `perf/suites/caching.json`). Applies unconditionally — fake lane or real, under `iris --perf run` or `--bench` — because the store is minted fresh per run and never touches `FactStoreManager.shared` or any on-disk home. |
+
+`pinned`, `ledgerRuns` and `eventCard` give the run its own in-memory conversation store
+(`ConversationStore.inMemory()`), never the environment's default, so ledger rows cannot reach a
+real database.
 
 ### Scripted responses (fake mode)
 
