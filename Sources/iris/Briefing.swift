@@ -54,7 +54,10 @@ enum Briefing {
         if failureReason == JobRunner.gateFailingReason { return "gate error" }
         if failureReason.hasPrefix(JobRunner.gateErrorPrefix) { return "gate error" }
         if failureReason == JobRunner.skipReason { return "overlap" }
-        if failureReason == JobRunner.releasedReason { return "overlap" }
+        // NOT `releasedReason` ("app state released"): that row keeps its transcriptConversationId
+        // — a real run the app quit or tore down mid-turn, not an overlap — and does reach
+        // `recentRuns`. Nothing overlapped, so it falls back to `status.text` ("interrupted")
+        // instead of a word that would misdescribe it (re-review fix).
         return nil
     }
 

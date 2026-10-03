@@ -138,6 +138,17 @@ import Foundation
         #expect(!body.contains("fox"))
     }
 
+    /// Re-review fix: `releasedReason` ("app state released", a real run the app quit or tore
+    /// down mid-turn) must not read as "overlap" — nothing overlapped. Unlike `skipReason`, that
+    /// row keeps its transcript id and does reach `recentRuns`, so it falls back to `status.text`.
+    @Test func releasedReasonFallsBackToInterruptedNeverOverlap() {
+        var r = run("j", .interrupted, at: 1)
+        r.failureReason = JobRunner.releasedReason
+        let body = Briefing.section(failures: [], paused: [], recent: [r])!.body
+        #expect(body.contains("· interrupted ("))
+        #expect(!body.contains("overlap"))
+    }
+
     private func job(_ name: String, pausedReason: String?) -> Job {
         Job(name: name, prompt: "p", trigger: .schedule(.interval(seconds: 60)), pausedReason: pausedReason)
     }
