@@ -19,7 +19,7 @@ struct SlashCommandItem: Identifiable, Sendable, Equatable {
         SlashCommandItem(id: "facts", command: "/facts", usage: "/facts [all|search <q>|probe <e>]", description: "Inspect or search SQLite FactStore memories"),
         SlashCommandItem(id: "search", command: "/search", usage: "/search <query>", description: "Full-text search across saved conversations"),
         SlashCommandItem(id: "tokens", command: "/tokens", usage: "/tokens", description: "Show token usage breakdown for active conversation"),
-        SlashCommandItem(id: "new", command: "/new", usage: "/new", description: "Start a fresh conversation"),
+        SlashCommandItem(id: "new", command: "/new", usage: "/new", description: "Start a fresh conversation; in Iris, summarize and archive it"),
         SlashCommandItem(id: "clear", command: "/clear", usage: "/clear", description: "Clear current conversation messages"),
         SlashCommandItem(id: "archive", command: "/archive", usage: "/archive", description: "Move this conversation to the archive"),
         SlashCommandItem(id: "unarchive", command: "/unarchive", usage: "/unarchive", description: "Return this conversation to the active list"),

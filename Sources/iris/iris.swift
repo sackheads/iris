@@ -426,6 +426,8 @@ actor IrisEngine {
 
     /// Prefix of the system event that asks the model to rename the conversation.
     nonisolated static let renameTriggerPrefix = "System Event [Rename Trigger]"
+    /// 5b §0.4: the one easy-tier call that carries an old Iris into its replacement.
+    nonisolated static let rotationSummaryPrompt = "Summarize this conversation for its own continuation in at most 300 words: decisions made, open threads, and anything the owner asked to follow up. Plain prose, no preamble."
     /// Prefix of the system event `/goal` sends to have the model draft a contract.
     nonisolated static let goalDraftTriggerPrefix = "System Event [Goal Contract Draft]"
     /// Prefix of the history entry left behind when a turn ends before the model replied (Stop,
@@ -1276,6 +1278,48 @@ actor IrisEngine {
         }
         await body()
         await lifetime.release()
+    }
+
+    /// The byte cap on what `summarizeForRotation` sends. UTF-8 bytes, never `Character`s: a
+    /// grapheme cluster has no size bound, so a grapheme cap is no cap (#187 review).
+    static let rotationSummaryMaxInputBytes = 200_000
+
+    /// 5b §0.4: one easy-tier call summarising Iris for its replacement. Input is the last 200
+    /// owner/Iris messages, labelled as `ConversationReader` labels them, newest kept when the
+    /// byte cap bites. The reply is guarded like any other text no human read before it reaches
+    /// the model. nil on any failure; the caller still rotates.
+    func summarizeForRotation(messages: [ChatMessage]) async -> String? {
+        let visible = messages.filter { $0.role == .user || $0.role == .agent }.suffix(200)
+        var lines: [String] = []
+        var used = 0
+        for m in visible.reversed() {
+            let speaker = m.role == .user ? "owner" : "iris"
+            var line = "\(speaker): \(ConversationReader.quoteContinuationLines(m.content))"
+            let room = Self.rotationSummaryMaxInputBytes - used
+            if line.utf8.count + 1 > room {
+                // The newest message alone over budget is cut, not dropped; anything older stops.
+                guard lines.isEmpty else { break }
+                line = ConversationReader.utf8Prefix(line, maxBytes: room)
+            }
+            lines.append(line)
+            used += line.utf8.count + 1
+        }
+        guard !lines.isEmpty else { return nil }
+        let prompt = Self.rotationSummaryPrompt + "\n\n" + lines.reversed().joined(separator: "\n")
+        let request = GeminiRequest(contents: [Content(role: "user", parts: [Part(text: prompt)])],
+                                    systemInstruction: nil, tools: nil)
+        let reply: String
+        do {
+            let response = try await client.generateContent(request: request, tier: .easy)
+            let text = response.candidates?.first?.content?.parts.compactMap(\.text).joined() ?? ""
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            reply = trimmed
+        } catch {
+            return nil
+        }
+        return await InjectionGuard.sanitize(reply, contextTag: "rotation_summary", maxTier: .tier3_canary,
+                                             protectionEnabled: protectionEnabled)
     }
 
     /// #187 §0.5 structural ruling: no `isPeer` parameter here any more. Three rounds tried
