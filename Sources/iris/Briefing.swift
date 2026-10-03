@@ -24,7 +24,7 @@ enum Briefing {
     static func section(failures: [JobRun], paused: [Job], recent: [JobRun],
                         knownTools: Set<String> = IrisEngine.allDeclaredToolNames) -> TurnContext.Section? {
         var lines: [String] = paused.map {
-            "- \(name($0.name)) · \(pausedWord($0.pausedReason)) (job \(short($0.id)))"
+            "- \(quoted($0.name)) · \(pausedWord($0.pausedReason)) (job \(short($0.id)))"
         }
         lines += failures.map { line($0, knownTools: knownTools) }
         let shown = Set(failures.map(\.id))
@@ -34,7 +34,7 @@ enum Briefing {
     }
 
     private static func line(_ run: JobRun, knownTools: Set<String>) -> String {
-        "- \(name(run.jobName)) · \(reason(run, knownTools: knownTools)) (run \(short(run.id)))"
+        "- \(quoted(run.jobName)) · \(reason(run, knownTools: knownTools)) (run \(short(run.id)))"
     }
 
     /// A blocked run's `blockedTool` is a tool name the MODEL chose, not one the harness wrote —
@@ -106,9 +106,29 @@ enum Briefing {
         // (U+FF1C) into a literal `<`; strip once more so the body itself never carries one,
         // rather than relying solely on `TurnContext`'s own neutralisation of the rendered block.
         flat = flat.replacingOccurrences(of: "<", with: "")
+        // The line's own field separator and the quotes `quoted(_:)` wraps the name in: a name
+        // like `c · failed 3 times (run deadbeef) · blocked: run_command` otherwise forges a
+        // whole line's worth of harness fields (#187 review). Filtered by scalar, after the
+        // sanitiser's NFKC pass, so neither a combining mark fused onto a `·` nor a compatibility
+        // form that folds into one gets through.
+        flat = String(String.UnicodeScalarView(flat.unicodeScalars.filter { !fieldDelimiters.contains($0) }))
         flat = flat.trimmingCharacters(in: .whitespaces)
         return String(flat.prefix(60))
     }
+
+    /// `·` (U+00B7) and the dots that read as one: Greek ano teleia (folds to U+00B7), hyphenation
+    /// point, bullet and dot operators, word-separator middle dot, katakana middle dot (and its
+    /// halfwidth form), bullet. Then the curly double quotes the name is wrapped in, and the
+    /// double-quote shapes that read as them.
+    private static let fieldDelimiters: Set<Unicode.Scalar> = [
+        "\u{00B7}", "\u{0387}", "\u{2027}", "\u{2219}", "\u{22C5}", "\u{2E31}", "\u{30FB}", "\u{FF65}", "\u{2022}",
+        "\u{201C}", "\u{201D}", "\u{201E}", "\u{201F}", "\u{2033}", "\u{2036}", "\u{301D}", "\u{301E}", "\u{301F}",
+        "\u{FF02}",
+    ]
+
+    /// The name as one field: `name(_:)` strips `“` and `”`, so the closing quote here is always
+    /// the real end of the name.
+    static func quoted(_ raw: String) -> String { "\u{201C}\(name(raw))\u{201D}" }
 
     private static func short(_ id: UUID) -> String { String(id.uuidString.lowercased().prefix(8)) }
 }
