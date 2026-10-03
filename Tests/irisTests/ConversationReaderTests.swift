@@ -18,7 +18,7 @@ struct ConversationReaderTests {
         #expect(text.contains("(more from #20)"))
     }
 
-    @Test func characterCapCutsEarly() {
+    @Test func byteCapCutsEarly() {
         let (_, next) = ConversationReader.page(msgs(20, size: 5_000), from: 0, count: 20)
         #expect(next != nil && next! < 20)
     }
@@ -113,7 +113,7 @@ struct ConversationReaderTests {
         #expect(next == nil)
     }
 
-    // MARK: The character cap, including markers (fix round 1)
+    // MARK: The byte cap, including markers (fix round 1)
 
     /// A single message bigger than the whole per-call budget is truncated in place — never
     /// skipped — and the returned page, markers included, never exceeds the cap.
@@ -123,7 +123,7 @@ struct ConversationReaderTests {
         let (text, next) = ConversationReader.page(huge, from: 0, count: 20)
         #expect(text.contains("#0 owner:"))
         #expect(text.contains("(truncated)"))
-        #expect(text.count <= ConversationReader.maxCharacters, "the cap includes every marker, exactly")
+        #expect(text.utf8.count <= ConversationReader.maxBytes, "the cap includes every marker, exactly")
         #expect(next == 1, "truncation still advances past the oversized message")
 
         let (text2, next2) = ConversationReader.page(huge, from: next!, count: 20)
@@ -141,13 +141,13 @@ struct ConversationReaderTests {
         let (page1, next1) = ConversationReader.page(messages, from: 0, count: 20)
         #expect(page1.contains("#0 owner:"))
         #expect(!page1.contains("#1 "), "the oversized message must not share this page")
-        #expect(page1.count <= ConversationReader.maxCharacters)
+        #expect(page1.utf8.count <= ConversationReader.maxBytes)
         #expect(next1 == 1)
 
         let (page2, next2) = ConversationReader.page(messages, from: next1!, count: 20)
         #expect(page2.contains("#1 iris:"))
         #expect(page2.contains("(truncated)"))
-        #expect(page2.count <= ConversationReader.maxCharacters)
+        #expect(page2.utf8.count <= ConversationReader.maxBytes)
         #expect(next2 == nil)
     }
 
@@ -167,7 +167,7 @@ struct ConversationReaderTests {
                 break
             }
             let (text, next) = ConversationReader.page(messages, from: from, count: 20)
-            #expect(text.count <= ConversationReader.maxCharacters,
+            #expect(text.utf8.count <= ConversationReader.maxBytes,
                    Comment(rawValue: "page starting at #\(from) must respect the cap, markers included"))
             for idx in visible where text.contains("#\(idx) ") { seen.append(idx) }
             guard let next else { break }
@@ -177,25 +177,25 @@ struct ConversationReaderTests {
         #expect(seen.sorted() == visible.sorted(), "every visible message must appear on exactly one page")
     }
 
-    /// Fix round 2, finding 1: a message whose line lands EXACTLY at `maxCharacters`, followed by
+    /// Fix round 2, finding 1: a message whose line lands EXACTLY at `maxBytes`, followed by
     /// another message. Before the fix, the first message was emitted whole (it fit on its own),
     /// and the trailing "(more from #1)" marker was then appended on top, overflowing the cap by
     /// the marker's length. The first message must now be truncated just enough to leave room for
     /// that marker.
     @Test func exactlyCapSizedMessageFollowedByAnotherStillFitsWithMarker() {
-        let prefixLen = "#0 owner: ".count
-        let content0 = String(repeating: "a", count: ConversationReader.maxCharacters - prefixLen)
+        let prefixLen = "#0 owner: ".utf8.count
+        let content0 = String(repeating: "a", count: ConversationReader.maxBytes - prefixLen)
         let messages = [ChatMessage(role: .user, content: content0),
                         ChatMessage(role: .agent, content: "short reply")]
 
         let (page1, next1) = ConversationReader.page(messages, from: 0, count: 20)
-        #expect(page1.count <= ConversationReader.maxCharacters)
+        #expect(page1.utf8.count <= ConversationReader.maxBytes)
         #expect(page1.contains("(more from #1)"))
         #expect(next1 == 1)
 
         let (page2, next2) = ConversationReader.page(messages, from: next1!, count: 20)
         #expect(page2.contains("#1 iris: short reply"))
-        #expect(page2.count <= ConversationReader.maxCharacters)
+        #expect(page2.utf8.count <= ConversationReader.maxBytes)
         #expect(next2 == nil)
     }
 
@@ -238,6 +238,122 @@ struct ConversationReaderTests {
             from = next
         }
         #expect(seen == 45)
+    }
+
+    // MARK: The cap is UTF-8 bytes, not grapheme clusters (#187 review)
+
+    /// Walks every page from 0, asserting each is within the byte cap and `next` advances, and
+    /// returns the raw indices of every "#n speaker:" head seen, in page order.
+    private func walkPages(_ messages: [ChatMessage], maxCalls: Int = 200) -> [Int] {
+        var from = 0
+        var seen: [Int] = []
+        for _ in 0..<maxCalls {
+            let (text, next) = ConversationReader.page(messages, from: from, count: 20)
+            #expect(text.utf8.count <= ConversationReader.maxBytes,
+                    Comment(rawValue: "page from #\(from) is \(text.utf8.count) bytes"))
+            #expect(!text.unicodeScalars.contains("\u{FFFD}"), "no broken scalar was repaired into the page")
+            for chunk in text.components(separatedBy: "\n\n") where chunk.hasPrefix("#") {
+                if let n = Int(chunk.dropFirst().prefix { $0.isNumber }) { seen.append(n) }
+            }
+            guard let next else { return seen }
+            #expect(next > from, "next must advance past #\(from)")
+            guard next > from else { return seen }
+            from = next
+        }
+        Issue.record("paging did not finish in \(maxCalls) calls")
+        return seen
+    }
+
+    /// `work`'s reproduction: twenty messages, each one letter followed by 50,000 U+0301
+    /// combining marks. Counted in `Character`s that was a 258-Character page of 2,000,238 UTF-8
+    /// bytes, returned whole with `next` nil.
+    @Test func combiningMarkFloodIsCappedInBytesAndPagesToTheEnd() {
+        let marks = String(repeating: "\u{0301}", count: 50_000)
+        let messages = (0..<20).map { ChatMessage(role: $0 % 2 == 0 ? .user : .agent, content: "a" + marks) }
+
+        let (first, next) = ConversationReader.page(messages, from: 0, count: 20)
+        #expect(first.utf8.count <= ConversationReader.maxBytes)
+        #expect(first.contains("(truncated)"))
+        #expect(next == 1)
+
+        #expect(walkPages(messages) == Array(0..<20), "every message opens exactly one page, in order")
+    }
+
+    /// One grapheme of megabytes must still be cut — inside the cluster — not emitted whole, and
+    /// not cut to nothing (rounding down to a `Character` boundary would keep zero bytes of it).
+    @Test func oneHugeGraphemeIsTruncatedInsideTheCluster() {
+        let content = "e" + String(repeating: "\u{0301}", count: 100_000)
+        let (text, next) = ConversationReader.page([ChatMessage(role: .user, content: content)], from: 0, count: 20)
+        #expect(text.utf8.count <= ConversationReader.maxBytes)
+        #expect(text.utf8.count > ConversationReader.maxBytes - 2, "U+0301 is 2 bytes, so at most 1 byte is left unused")
+        #expect(text.hasSuffix("\n(truncated)"))
+        #expect(next == nil)
+    }
+
+    /// The cut lands on a scalar boundary for 4-byte (emoji) and 3-byte (CJK) scalars at every
+    /// alignment, keeping exactly the whole scalars that fit.
+    @Test("multibyte scalars at the boundary are never split",
+          arguments: [("😀", 4), ("中", 3)], 0..<4)
+    func multibyteBoundary(_ scalar: (String, Int), pad: Int) {
+        let (s, width) = scalar
+        let content = String(repeating: "a", count: pad) + String(repeating: s, count: 20_000)
+        let (text, next) = ConversationReader.page([ChatMessage(role: .user, content: content)], from: 0, count: 20)
+        let head = "#0 owner: ".utf8.count + pad
+        let keep = ConversationReader.maxBytes - "\n(truncated)".utf8.count
+        let expected = head + width * ((keep - head) / width) + "\n(truncated)".utf8.count
+        #expect(text.utf8.count == expected)
+        #expect(text.utf8.count <= ConversationReader.maxBytes)
+        #expect(!text.unicodeScalars.contains("\u{FFFD}"))
+        #expect(next == nil)
+    }
+
+    @Test func utf8PrefixNeverSplitsAScalar() {
+        #expect(ConversationReader.utf8Prefix("a😀", maxBytes: 4) == "a")
+        #expect(ConversationReader.utf8Prefix("a😀", maxBytes: 5) == "a😀")
+        #expect(ConversationReader.utf8Prefix("e\u{0301}\u{0301}", maxBytes: 3) == "e\u{0301}")
+        #expect(ConversationReader.utf8Prefix("😀", maxBytes: 3) == "")
+    }
+
+    /// A deterministic generator, so a failing fuzz case reproduces exactly.
+    private struct SplitMix64: RandomNumberGenerator {
+        var state: UInt64
+        mutating func next() -> UInt64 {
+            state &+= 0x9E37_79B9_7F4A_7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE5_E4B9
+            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+            return z ^ (z >> 31)
+        }
+    }
+
+    /// Boundary fuzz, fixed seed: mixed ASCII, multibyte, combining and ZWJ content at sizes that
+    /// straddle the cap. Every page is within the byte cap, `next` advances, and every visible
+    /// message is seen exactly once. No `#` in the alphabet, so a page head can't be faked.
+    @Test func boundaryFuzzWithFixedSeed() {
+        var rng = SplitMix64(state: 0x1_87_2026)
+        let pool: [String] = ["a", "z", " ", "\n", "é", "ß", "中", "語", "😀", "👨‍👩‍👧", "\u{0301}", "\u{0301}\u{0308}"]
+        for _ in 0..<12 {
+            var messages: [ChatMessage] = []
+            var visible: [Int] = []
+            for i in 0..<Int.random(in: 1...25, using: &rng) {
+                if Int.random(in: 0..<6, using: &rng) == 0 {
+                    messages.append(ChatMessage(role: .system, content: "[TOOL_CALL]\n{}"))
+                    continue
+                }
+                let length: Int
+                switch Int.random(in: 0..<4, using: &rng) {
+                case 0: length = Int.random(in: 0...50, using: &rng)
+                case 1: length = Int.random(in: 500...4_000, using: &rng)
+                case 2: length = Int.random(in: 7_000...12_000, using: &rng)
+                default: length = Int.random(in: 14_000...20_000, using: &rng)
+                }
+                var content = ""
+                for _ in 0..<length { content += pool.randomElement(using: &rng)! }
+                messages.append(ChatMessage(role: i % 2 == 0 ? .user : .agent, content: content))
+                visible.append(i)
+            }
+            #expect(walkPages(messages) == visible)
+        }
     }
 
     // MARK: transform (fix round 1: only emitted messages are processed)

@@ -12,7 +12,11 @@ import Foundation
 /// them. (The brief's draft assumed ordinals counted only user/agent messages; they don't.)
 enum ConversationReader {
     static let maxMessages = 20
-    static let maxCharacters = 32_000
+    /// The per-call cap on the returned page, in UTF-8 bytes — not `Character`s. A `Character` is a
+    /// grapheme cluster, which has no size bound: one letter followed by 50,000 combining marks is
+    /// one `Character` of ~100 KB, so a cap counted in `Character`s let a 258-`Character` page
+    /// come back as 2 MB (#187 review). Bytes bound what actually reaches the model.
+    static let maxBytes = 32_000
 
     /// Prefixes every line after a message's first with a distinct quote marker. Message bodies
     /// may be multi-line; without this, a body line that happened to read like `#12 owner: ...` or
@@ -34,6 +38,24 @@ enum ConversationReader {
         return ([lines[0]] + lines.dropFirst().map { continuationQuoteMarker + $0 }).joined(separator: "\n")
     }
 
+    /// The longest prefix of `s` that is at most `maxBytes` UTF-8 bytes and ends on a Unicode
+    /// scalar boundary. Walks the scalar view, not `Character`s (`prefix(_:)` on a `String` counts
+    /// graphemes, which is the bug this replaces), so a cut can land inside one huge grapheme.
+    /// Stops as soon as the budget is spent, so a multi-megabyte message costs only the bytes kept.
+    static func utf8Prefix(_ s: String, maxBytes: Int) -> String {
+        guard s.utf8.count > maxBytes else { return s }
+        let scalars = s.unicodeScalars
+        var used = 0
+        var end = scalars.startIndex
+        while end < scalars.endIndex {
+            let width = UTF8.width(scalars[end])
+            if used + width > maxBytes { break }
+            used += width
+            end = scalars.index(after: end)
+        }
+        return String(String.UnicodeScalarView(scalars[..<end]))
+    }
+
     /// The next raw index at or after `start` holding a `.user`/`.agent` message, or nil if none
     /// remain. Without this, a page that stops because it hit the per-call message cap could point
     /// `next` at a run of trailing `.system`/`.command`/`.event` rows with nothing paginable behind
@@ -48,27 +70,25 @@ enum ConversationReader {
     }
 
     /// Pages through `messages`, starting at raw index `from`, for at most `count` (clamped to
-    /// 1...`maxMessages`) visible (user/agent) messages, and at most `maxCharacters` of rendered
-    /// text — the "\n\n" separators between messages and a trailing "(more from #N)" marker
-    /// included, so the whole returned `text` never exceeds the cap, on any path. `from` is
-    /// clamped to >= 0. A single message that alone (or alongside a trailing marker) exceeds
-    /// `maxCharacters` is truncated in place — never skipped — but ONLY when it is the first thing
-    /// on the page: a message that doesn't fit after earlier ones already filled the page is left
-    /// whole for the next page instead of being split mid-page (fix round 1: an oversized message
-    /// right after a full-size one landed as page-size-plus-oversize instead of opening its own
-    /// page).
+    /// 1...`maxMessages`) visible (user/agent) messages, and at most `maxBytes` UTF-8 bytes of
+    /// rendered text — the "\n\n" separators between messages and a trailing "(more from #N)"
+    /// marker included, so the whole returned `text` never exceeds the cap, on any path. Every
+    /// length here (`used`, separators, marker reserves, truncation) is a UTF-8 byte count. `from`
+    /// is clamped to >= 0. A single message that alone (or alongside a trailing marker) exceeds
+    /// `maxBytes` is truncated in place — never skipped — but ONLY when it is the first thing on the
+    /// page: a message that doesn't fit after earlier ones already filled the page is left whole
+    /// for the next page instead of being split mid-page (fix round 1).
     ///
-    /// Fix round 2: `used` previously counted only `line.count` for each accepted line, leaving
-    /// out the "\n\n" joins between lines and the trailing "(more from #N)" marker's own length —
-    /// a page with several messages near the cap, or a message sized to land exactly at it, could
-    /// come back a few dozen characters over. `used` now tracks the page's real running length
-    /// (separators included), and every later line's admission reserves room for the WORST-CASE
-    /// marker this call could ever need to append — `"(more from #\(messages.count - 1))"`, the
-    /// longest index this array can produce — before accepting it. The very first line on a page
-    /// instead reserves the EXACT marker its own immediate successor would need (computed once,
-    /// since at that point nothing else is competing for the budget), which is what lets a
-    /// message sized to land precisely at the cap still leave room for its own "more" marker
-    /// rather than being emitted whole and overflowing when the marker is appended after.
+    /// Truncation cuts on a Unicode scalar boundary, never inside one, so the result is always
+    /// valid UTF-8. It may cut inside a grapheme cluster — a run of combining marks can be split —
+    /// because a grapheme has no size bound: cutting only between graphemes would leave a
+    /// one-grapheme message of megabytes either emitted whole or not at all.
+    ///
+    /// Fix round 2: `used` tracks the page's real running length, separators included, and every
+    /// later line's admission reserves room for the WORST-CASE marker this call could need —
+    /// `"(more from #\(messages.count - 1))"` — before accepting it. The very first line on a page
+    /// instead reserves the EXACT marker its own immediate successor would need, which lets a
+    /// message sized to land precisely at the cap still leave room for its own "more" marker.
     ///
     /// `transform` runs on a visible message's raw content before it is quoted and laid out — the
     /// caller's hook for sanitizing untrusted text. It is applied only to messages this call
@@ -88,7 +108,7 @@ enum ConversationReader {
         // The longest "(more from #N)" marker this call could ever need to append, since every
         // valid `next` is < messages.count. Reserved before admitting every line but the first (the
         // first reserves its own exact successor marker instead; see the doc comment above).
-        let worstCaseMoreMarker = "\n\n(more from #\(messages.count - 1))".count
+        let worstCaseMoreMarker = "\n\n(more from #\(messages.count - 1))".utf8.count
 
         var lines: [String] = []
         var used = 0
@@ -114,15 +134,15 @@ enum ConversationReader {
                 let after = i + 1
                 let followingVisible = nextVisibleIndex(messages, from: after)
                 let moreMarker = followingVisible.map { "\n\n(more from #\($0))" } ?? ""
-                let budget = maxCharacters - moreMarker.count
-                if line.count > budget {
+                let budget = maxBytes - moreMarker.utf8.count
+                if line.utf8.count > budget {
                     let truncMarker = "\n(truncated)"
-                    let keep = max(budget - truncMarker.count, 0)
-                    let truncatedLine = String(line.prefix(keep)) + truncMarker
+                    let keep = max(budget - truncMarker.utf8.count, 0)
+                    let truncatedLine = utf8Prefix(line, maxBytes: keep) + truncMarker
                     return (truncatedLine + moreMarker, followingVisible)
                 }
                 lines = [line]
-                used = line.count
+                used = line.utf8.count
                 emitted += 1
                 i += 1
                 continue
@@ -131,8 +151,8 @@ enum ConversationReader {
             // Not the first line: must fit alongside everything already on the page, with the
             // "\n\n" separator that will join it counted, AND still leave room for whatever
             // "(more from #N)" marker this call might end up needing to append afterward.
-            let projected = used + 2 + line.count
-            if projected + worstCaseMoreMarker > maxCharacters {
+            let projected = used + 2 + line.utf8.count
+            if projected + worstCaseMoreMarker > maxBytes {
                 // Doesn't fit: stop here so IT opens the next page, whole, rather than being split.
                 next = i
                 break
