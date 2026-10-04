@@ -114,23 +114,25 @@ final class VibecopService: @unchecked Sendable {
             // Parse the JSON
             if let data = cleanJson.data(using: .utf8),
                let decision = try? JSONDecoder().decode(VibecopDecision.self, from: data) {
-                await MetricsManager.shared.trackLatency(operation: .vibecop, modelName: config.modelPathOrName, durationMs: durationMs, success: true)
+                // The profiler first: the metrics call hops to the main actor, and a busy main
+                // actor must not delay the span past the turn it belongs to.
                 PerformanceProfiler.shared.record(turnID: PerformanceProfiler.currentTurnID, category: .vibecop, durationMs: durationMs)
                 PerformanceProfiler.shared.recordSpan(turnID: PerformanceProfiler.currentTurnID, name: "vibecop", durationMs: durationMs)
+                await MetricsManager.shared.trackLatency(operation: .vibecop, modelName: config.modelPathOrName, durationMs: durationMs, success: true)
                 return decision
             }
 
             // Fallback to escalation if JSON parsing fails
             print("Vibecop failed to parse JSON: \(responseJson)")
-            await MetricsManager.shared.trackLatency(operation: .vibecop, modelName: config.modelPathOrName, durationMs: durationMs, success: false)
             PerformanceProfiler.shared.record(turnID: PerformanceProfiler.currentTurnID, category: .vibecop, durationMs: durationMs)
             PerformanceProfiler.shared.recordSpan(turnID: PerformanceProfiler.currentTurnID, name: "vibecop", durationMs: durationMs)
+            await MetricsManager.shared.trackLatency(operation: .vibecop, modelName: config.modelPathOrName, durationMs: durationMs, success: false)
             return VibecopDecision(decision: "ESCALATE", reason: "Failed to parse Vibecop response. Defaulting to escalate.")
         } catch {
             let durationMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000.0
-            await MetricsManager.shared.trackLatency(operation: .vibecop, modelName: config.modelPathOrName, durationMs: durationMs, success: false)
             PerformanceProfiler.shared.record(turnID: PerformanceProfiler.currentTurnID, category: .vibecop, durationMs: durationMs)
             PerformanceProfiler.shared.recordSpan(turnID: PerformanceProfiler.currentTurnID, name: "vibecop", durationMs: durationMs)
+            await MetricsManager.shared.trackLatency(operation: .vibecop, modelName: config.modelPathOrName, durationMs: durationMs, success: false)
             throw error
         }
     }

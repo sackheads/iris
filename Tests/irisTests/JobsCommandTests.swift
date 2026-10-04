@@ -257,7 +257,7 @@ struct JobsCommandTests {
         let last = run(j, status: .completed)
         let out = JobsCommand.render(jobs: [j], lastRuns: [j.id: last], usage: .empty, unacknowledged: [],
                                      unreadableJobs: 0, now: now)
-        #expect(out.contains("| Job | Trigger | Policy | Next | Last | Tokens today | Runs/h |"))
+        #expect(out.contains("| Job | Trigger | Policy | Next | Last | Weighted tokens today | Runs/h |"))
         #expect(out.contains("| pr-sweep | every 60 s | default | in 3 m | completed | — | — |"))
     }
 
@@ -331,13 +331,13 @@ struct JobsCommandTests {
 
         // Through `render`, the line follows the table and precedes the daily footer.
         let usage = JobsCommand.UsageSnapshot(
-            perJob: [:], global: JobsCommand.GlobalUsage(tokensToday: 10, dailyBudget: 100))
+            perJob: [:], global: JobsCommand.GlobalUsage(weightedTokensToday: 10, dailyBudget: 100))
         let out = JobsCommand.render(jobs: [j], lastRuns: [:], usage: usage, unacknowledged: [],
                                      unreadableJobs: 0, now: now,
                                      lastBursts: [j.id: burst], absorbed: [j.id: absorbed])
         let table = try #require(out.range(of: "| notes |"))
         let line = try #require(out.range(of: expected))
-        let footer = try #require(out.range(of: "Tokens today, all jobs:"))
+        let footer = try #require(out.range(of: "Weighted tokens today, all jobs:"))
         #expect(table.lowerBound < line.lowerBound && line.lowerBound < footer.lowerBound)
 
         // A live coordinator that has absorbed nothing says zero; with no coordinator at all
@@ -367,14 +367,14 @@ struct JobsCommandTests {
         #expect(JobsCommand.grantLine(job: j) == expected)
         #expect(JobsCommand.grantLine(job: job()) == nil)
 
-        let usage = JobsCommand.UsageSnapshot(perJob: [:], global: JobsCommand.GlobalUsage(tokensToday: 10, dailyBudget: 100))
+        let usage = JobsCommand.UsageSnapshot(perJob: [:], global: JobsCommand.GlobalUsage(weightedTokensToday: 10, dailyBudget: 100))
         let out = JobsCommand.render(jobs: [j, granted("second", network: false)], lastRuns: [:], usage: usage,
                                      unacknowledged: [], unreadableJobs: 0, now: Date())
         let table = try #require(out.range(of: "| deploy |"))
         let line = try #require(out.range(of: expected))
         let second = try #require(out.range(of: "`second` — read-write /Users/me/proj (working directory) · read-only /Users/me/deploy-key · network off (host reachable)"),
                                   "the listing says what an isolated container can still reach (§0.7)")
-        let footer = try #require(out.range(of: "Tokens today, all jobs:"))
+        let footer = try #require(out.range(of: "Weighted tokens today, all jobs:"))
         #expect(table.lowerBound < line.lowerBound && line.lowerBound < second.lowerBound && second.lowerBound < footer.lowerBound)
         #expect(out.contains("\n\n" + expected + "\n\n"), "its own paragraph, not a run-on line")
     }
@@ -504,7 +504,7 @@ struct JobsCommandTests {
                          maxRunsPerHour: Int = 6, globalDailyTokens: Int = 3_000_000)
         -> JobsCommand.JobFigures {
         JobsCommand.JobFigures(
-            tokensToday: tokens, runsLastHour: runs,
+            weightedTokensToday: tokens, runsLastHour: runs,
             limits: JobLimits(maxRunsPerHour: maxRunsPerHour, dailyTokens: dailyTokens,
                               globalDailyTokens: globalDailyTokens, perRunTokens: 200_000,
                               runTimeoutSeconds: 600))
@@ -518,7 +518,7 @@ struct JobsCommandTests {
             jobs: [j], lastRuns: [:],
             usage: JobsCommand.UsageSnapshot(perJob: [j.id: figures()], global: nil),
             unacknowledged: [], unreadableJobs: 0, now: now)
-        #expect(out.contains("| Job | Trigger | Policy | Next | Last | Tokens today | Runs/h |"))
+        #expect(out.contains("| Job | Trigger | Policy | Next | Last | Weighted tokens today | Runs/h |"))
         #expect(out.contains("| 620k / 1M (62%) | 2 / 6 |"))
     }
 
@@ -552,9 +552,9 @@ struct JobsCommandTests {
             jobs: [j], lastRuns: [:],
             usage: JobsCommand.UsageSnapshot(
                 perJob: [j.id: figures()],
-                global: JobsCommand.GlobalUsage(tokensToday: 1_200_000, dailyBudget: 3_000_000)),
+                global: JobsCommand.GlobalUsage(weightedTokensToday: 1_200_000, dailyBudget: 3_000_000)),
             unacknowledged: [], unreadableJobs: 0, now: now)
-        #expect(out.contains("Tokens today, all jobs: 1.2M / 3M (40%)"))
+        #expect(out.contains("Weighted tokens today, all jobs: 1.2M / 3M (40%)"))
         // And no footer at all when the ledger could not answer.
         let quiet = JobsCommand.render(jobs: [j], lastRuns: [:], usage: .empty, unacknowledged: [],
                                        unreadableJobs: 0, now: now)
@@ -617,11 +617,11 @@ struct JobsCommandTests {
         let snapshot = JobsCommand.usageSnapshot(jobs: [j], ledger: store.ledger, config: config,
                                                  now: now, calendar: .current)
         let figures = try #require(snapshot.perJob[j.id])
-        #expect(figures.tokensToday == 3_500)
+        #expect(figures.weightedTokensToday == 3_500)
         #expect(figures.runsLastHour == 2)
         #expect(figures.limits.dailyTokens == 50_000)
         #expect(figures.limits.maxRunsPerHour == 9)
-        #expect(snapshot.global == JobsCommand.GlobalUsage(tokensToday: 3_500, dailyBudget: 400_000))
+        #expect(snapshot.global == JobsCommand.GlobalUsage(weightedTokensToday: 3_500, dailyBudget: 400_000))
 
         let rendered = JobsCommand.render(jobs: [j], lastRuns: [:], usage: snapshot,
                                           unacknowledged: [], unreadableJobs: 0, now: now)

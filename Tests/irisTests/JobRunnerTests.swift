@@ -545,7 +545,61 @@ struct JobRunnerTests {
         await manager.stopAll()
     }
 
-    // MARK: overlap and launch bookkeeping
+    /// 5c §0.6: the model-turn row records whose prices apply to it — the configured provider and
+    /// the engine's tier — so a weighted total is never priced with whatever is configured later.
+    @Test("a model-turn run's row carries the configured provider and the engine's tier")
+    func modelTurnRowCarriesProviderAndTier() async throws {
+        let usage = UsageMetadata(promptTokenCount: 11, candidatesTokenCount: 7, totalTokenCount: 18)
+        let (store, state, engine, _, _) = try harness([textResponse("tick", tokens: usage)])
+        let job = self.job()
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        config.primaryProvider = "OpenAI"
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
+                               now: { Date(timeIntervalSince1970: 1_700_000_000) }, config: config)
+
+        await runner.fire(job: job, origin: .schedule)
+
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.provider == "OpenAI")
+        #expect(run.tier == ModelTier.medium.rawValue)
+    }
+
+    @Test("a row that spent nothing carries no provider")
+    func skipRowCarriesNoProvider() throws {
+        let store = try ConversationStore.inMemory()
+        let job = self.job(name: "slow")
+        try store.ledger.upsert(job)
+        try JobRunner.recordSkip(job: job, ledger: store.ledger, triggerKind: "schedule",
+                                 now: Date(timeIntervalSince1970: 1_700_000_500))
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.provider == nil && run.tier == nil)
+    }
+
+    /// A run refused before its turn (here, a mutating job with no VM) spent nothing, and its
+    /// card says so in the budget's unit, not as a raw "0 tokens" (5c).
+    @Test("a run refused before its turn shows zero weighted tokens on its card")
+    func refusedRunCardSaysZeroWeighted() async throws {
+        let (store, state, engine, client, _) = try harness([textResponse("never")])
+        let job = self.job(profile: .mutating)
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
+                               now: { Date(timeIntervalSince1970: 1_700_000_000) }, config: config,
+                               sandboxAvailable: { false })
+
+        await runner.fire(job: job, origin: .schedule)
+
+        #expect(client.callCount == 0)
+        let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
+        let card = try #require(activity.messages.compactMap { EventCard.decode($0.content) }.last)
+        #expect(card.status == .failed)
+        #expect(card.weightedTokens == 0)
+        #expect(card.metadataLine.contains("0 weighted tokens"))
+    }
+
 
     @Test("a skipped overlap is recorded as an interrupted run with no transcript")
     func recordSkipWritesAnInterruptedRow() throws {

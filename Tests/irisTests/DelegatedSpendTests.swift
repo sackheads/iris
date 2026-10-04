@@ -170,6 +170,10 @@ struct DelegatedSpendTests {
         let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
         let card = try #require(activity.messages.compactMap { EventCard.decode($0.content) }.first)
         #expect(card.totalTokens == 120, "the card shows the same figure as the row")
+        // 5c: weighted at the isolated config's provider (Gemini): 117 prompt + 3 output × 5.
+        #expect(card.weightedTokens == 117 + 15)
+        #expect(card.weightedTokens == CostWeights.weighted(run.components, provider: run.provider),
+                "and the card's weighted figure is the row's, priced the same way")
     }
 
     @Test("parallel subagents in one tool batch are each charged once")
@@ -255,8 +259,39 @@ struct DelegatedSpendTests {
                 "40 + 70 is past 100, so the parent makes no second model call")
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(run.status == .failed)
-        #expect(run.failureReason == TurnBudget.tokensExceeded)
+        #expect(run.failureReason == TurnBudget.weightedTokensExceeded)
         #expect(run.totalTokens == 110)
+    }
+
+    /// 5c decision 5, end to end: a subagent's cache-heavy round costs 10_010 raw tokens but
+    /// 100 + 9_900 × 0.1 + 10 × 5 = 1_140 weighted on Anthropic, so a 5_000 budget lets the run go
+    /// on. Counted raw, the subagent's second round would have been refused.
+    @Test("a cache-heavy run is not stopped by a budget its raw total would have tripped")
+    func cacheHeavySpendIsWeighted() async throws {
+        let heavy = UsageMetadata(promptTokenCount: 10_000, candidatesTokenCount: 10, totalTokenCount: 10_010,
+                                  cacheReadTokens: 9_900, cacheWriteTokens: 0)
+        var probe = calls([("noop_probe", [:])], total: 0)
+        probe.usageMetadata = heavy
+        let client = RoutingClient([
+            RoutingClient.parent: [calls([delegate("worker")], total: 10), text("all done", total: 5)],
+            "WORKER": [probe, calls([finish("worked")], total: 1)],
+        ])
+        let (store, state, engine) = try harness(client: client)
+        let job = self.job("cache-reader", perRunBudget: 5_000)
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        config.primaryProvider = LLMProvider.anthropic.rawValue
+
+        await runner(store, state, engine, config).fire(job: job, origin: .schedule)
+
+        #expect(client.callCount("WORKER") == 2, "the subagent's second round was not refused")
+        #expect(client.callCount(RoutingClient.parent) == 2)
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.status == .completed)
+        #expect(run.provider == "Anthropic")
+        #expect(run.totalTokens > 5_000, "raw, it is over the budget")
+        #expect(CostWeights.weighted(run.components, provider: run.provider) < 5_000)
     }
 
     @Test("a subagent whose own rounds spend the run's budget is refused its next round")
@@ -277,7 +312,7 @@ struct DelegatedSpendTests {
         #expect(client.callCount(RoutingClient.parent) == 1, "and neither does the run")
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(run.status == .failed)
-        #expect(run.failureReason == TurnBudget.tokensExceeded)
+        #expect(run.failureReason == TurnBudget.weightedTokensExceeded)
         #expect(run.totalTokens == 130, "the overrun is on the row")
     }
 
@@ -324,7 +359,7 @@ struct DelegatedSpendTests {
         #expect(state.runUsage(for: attended).totalTokenCount == 15,
                 "an attended conversation is charged its own tokens only, as before")
         #expect(state.registeredRun(for: attended) == nil)
-        #expect(try store.ledger.tokensToday(jobId: nil, calendar: utc, now: Date()) == 0)
+        #expect(try store.ledger.weightedTokensToday(jobId: nil, calendar: utc, now: Date()) == 0)
     }
 
     // MARK: After the run
@@ -405,7 +440,7 @@ struct DelegatedSpendTests {
 
     // MARK: The day's budget
 
-    @Test("tokensToday counts delegated spend once: subagents have no run rows of their own")
+    @Test("the day's weighted tokens count delegated spend once: subagents have no run rows of their own")
     func noDoubleCountingInTokensToday() async throws {
         let client = RoutingClient([
             RoutingClient.parent: [calls([delegate("worker")], total: 30), text("all done", total: 20)],
@@ -419,8 +454,10 @@ struct DelegatedSpendTests {
 
         await runner(store, state, engine, config).fire(job: job, origin: .schedule)
 
-        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: utc, now: Date()) == 120)
-        #expect(try store.ledger.tokensToday(jobId: nil, calendar: utc, now: Date()) == 120,
+        // Raw 120 = prompt 29 + 69 + 19 and output 3; weighted at the isolated config's provider
+        // (Gemini, nothing cached): 117 + 3 × 5 = 132.
+        #expect(try store.ledger.weightedTokensToday(jobId: job.id, calendar: utc, now: Date()) == 132)
+        #expect(try store.ledger.weightedTokensToday(jobId: nil, calendar: utc, now: Date()) == 132,
                 "the all-jobs sum sees the subagent's tokens once, on the run's row")
         let worker = try #require(state.conversations.first { $0.title == "Subagent: worker" })
         #expect(worker.tokenUsage.totalTokenCount == 70,

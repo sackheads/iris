@@ -120,9 +120,29 @@ import Foundation
     }
 
     @Test func tokensExceededMapsToBudget() {
-        var r = run("j", .failed, at: 1); r.failureReason = TurnBudget.tokensExceeded
+        var r = run("j", .failed, at: 1); r.failureReason = TurnBudget.weightedTokensExceeded
         let body = Briefing.section(failures: [r], paused: [], recent: [])!.body
         #expect(body.contains("· budget ("))
+    }
+
+    /// Plan review focus 4: rows closed and jobs paused before 5c keep their old words, and still
+    /// read as a budget stop after the reasons were renamed.
+    @Test func legacyBudgetReasonsStillMatch() {
+        var r = JobRun(jobId: UUID(), jobName: "j", triggerKind: "schedule", startedAt: Date(), status: .failed)
+        r.failureReason = TurnBudget.legacyTokensExceeded
+        #expect(Briefing.section(failures: [r], paused: [], recent: [])!.body.contains("budget"))
+        var job = Job(name: "k", prompt: "p", trigger: .schedule(.interval(seconds: 60)))
+        job.pausedReason = "daily token budget reached (job): 1000000 / 1000000"
+        #expect(Briefing.pausedWord(job.pausedReason) == "budget")
+        job.pausedReason = JobRunner.budgetReason(scope: "job", used: 5, limit: 5)
+        #expect(job.pausedReason?.hasPrefix("daily weighted-token budget reached (job)") == true)
+        #expect(Briefing.pausedWord(job.pausedReason) == "budget")
+        var renamed = r
+        renamed.failureReason = JobRunner.budgetReason(scope: "global", used: 5, limit: 5)
+        #expect(Briefing.section(failures: [renamed], paused: [], recent: [])!.body.contains("· budget ("))
+        var legacyDaily = r
+        legacyDaily.failureReason = "daily token budget reached (global): 3000000 / 3000000"
+        #expect(Briefing.section(failures: [legacyDaily], paused: [], recent: [])!.body.contains("· budget ("))
     }
 
     @Test func dailyBudgetPauseReasonMapsToBudgetAndDropsTheFigures() {

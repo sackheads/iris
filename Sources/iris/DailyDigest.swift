@@ -54,7 +54,7 @@ struct DailyDigest: BuiltinJob {
             jobs = try ledger.jobs()
             failures = try ledger.unacknowledgedFailures()
             for id in Set(runs.map(\.jobId)) {
-                usage[id] = try ledger.usage(jobId: id, now: now, calendar: calendar).tokensToday
+                usage[id] = try ledger.usage(jobId: id, now: now, calendar: calendar).weightedTokensToday
             }
         } catch {
             // Carded: a digest that silently stopped arriving is the failure it exists to prevent.
@@ -93,7 +93,7 @@ struct DailyDigest: BuiltinJob {
                 let budget = JobLimits.resolve(job: job, config: config).dailyTokens
                 // A zero budget is "no budget" (admission skips it), not a ceiling of zero.
                 let ceiling = budget > 0 ? "\(budget)" : "unlimited"
-                line += " · \(tokensToday[id] ?? 0)/\(ceiling) tokens today"
+                line += " · \(tokensToday[id] ?? 0)/\(ceiling) weighted tokens today"
             }
             return line
         }

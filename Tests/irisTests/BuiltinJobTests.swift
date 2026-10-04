@@ -112,6 +112,9 @@ struct BuiltinJobTests {
         // Drawn as a body, so a multi-line report is not cut to its first line.
         #expect(card.builtin)
         #expect(card.outcomeIsBody)
+        // A built-in spends no tokens by construction: its card names no token figure at all.
+        #expect(!card.metadataLine.contains("tokens"))
+        #expect(!card.transcriptLine.contains("tokens"))
         #expect(state.conversations.first { $0.id == state.activityConversationId() }?
                     .messages.contains { $0.role == .event } == true, "delivered to Iris, the default destination")
     }

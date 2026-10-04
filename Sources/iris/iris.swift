@@ -20,14 +20,25 @@ struct TurnBudget: Sendable, Equatable {
     /// can end a turn that has stopped responding. `JobLimits.resolve` reads a zero timeout as the
     /// global default rather than as "unbounded" for exactly that reason.
     let deadline: Date
+    /// Whose prices the spend is weighed at (5c §0.5): the run's own provider, stamped on its
+    /// row. nil prices at the plain total, as a pre-5c row is.
+    let provider: String?
 
-    static let tokensExceeded = "budget: tokens exceeded"
+    init(maxTokens: Int, deadline: Date, provider: String? = nil) {
+        self.maxTokens = maxTokens
+        self.deadline = deadline
+        self.provider = provider
+    }
+
+    static let weightedTokensExceeded = "budget: weighted tokens exceeded"
+    /// What rows closed before 5c say; matched alongside the new reason, never written.
+    static let legacyTokensExceeded = "budget: tokens exceeded"
     static let timeExceeded = "budget: time exceeded"
 
     /// Why the turn must not make another model call, or `nil` to go ahead. Tokens are named
     /// first when both are gone: a person can act on the figure that was spent.
-    func stopReason(tokensUsed: Int, now: Date) -> String? {
-        if maxTokens > 0, tokensUsed >= maxTokens { return Self.tokensExceeded }
+    func stopReason(weightedTokens: Int, now: Date) -> String? {
+        if maxTokens > 0, weightedTokens >= maxTokens { return Self.weightedTokensExceeded }
         if now >= deadline { return Self.timeExceeded }
         return nil
     }
@@ -1962,15 +1973,16 @@ actor IrisEngine {
             // evaluator working for a job run is held to that run's registered budget, so a job
             // cannot stay under its budget by spending through them; an engine handed a budget
             // directly and working for no registered run keeps that one.
-            let (budget, spent) = await MainActor.run { () -> (TurnBudget?, Int) in
+            let (budget, usage) = await MainActor.run { () -> (TurnBudget?, TokenUsage) in
                 if let (run, accounting) = localState?.registeredRun(for: conversationId) {
-                    return (accounting.budget, localState?.runUsage(for: run).totalTokenCount ?? 0)
+                    return (accounting.budget, localState?.runUsage(for: run) ?? TokenUsage())
                 }
-                guard turnBudget != nil else { return (nil, 0) }
-                return (turnBudget, localState?.runUsage(for: conversationId).totalTokenCount ?? 0)
+                guard turnBudget != nil else { return (nil, TokenUsage()) }
+                return (turnBudget, localState?.runUsage(for: conversationId) ?? TokenUsage())
             }
             if let budget {
-                if let reason = budget.stopReason(tokensUsed: spent, now: Date()) {
+                let spent = CostWeights.weighted(usage.components, provider: budget.provider)
+                if let reason = budget.stopReason(weightedTokens: spent, now: Date()) {
                     turnFinished = true
                     // The drain consumes queued steers into history and no follow-up turn starts
                     // (R8). Both halves are deliberate. Leaving them queued would be worse than
@@ -4384,11 +4396,11 @@ extension IrisEngine {
         return [
             FunctionDeclaration(
                 name: "list_jobs",
-                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, why one is paused, and how the last run ended, plus what each has sent today (tokens sent, its runs' subagents included, not billed cost) and how hard it has been running — `tokensToday` against `dailyBudget`, `runsLastHour` against `maxRunsPerHour` (the breaker), `retryAttempt` out of three, and `policy`, `gateKind` and `profile`, `action` — `prompt` for a model turn, `builtin:<name>` for Iris's own code run with no model, such as the daily digest — and `grants` — the directories and network a mutating job was created with, null when it has none — with `tokensTodayAllJobs` against `globalDailyBudget` for every background run together, and `unreadableJobs` — how many stored jobs could not be read at all. A figure that is null could not be read, which is not the same as zero. Use it to answer what is scheduled, how much context a job has sent, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
+                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, why one is paused, and how the last run ended, plus what each has spent today in weighted tokens (an uncached input token is 1, an output token 5, cache reads and writes at the provider's ratio; its runs' subagents included) and how hard it has been running — `weightedTokensToday` against `dailyBudget`, `runsLastHour` against `maxRunsPerHour` (the breaker), `retryAttempt` out of three, and `policy`, `gateKind` and `profile`, `action` — `prompt` for a model turn, `builtin:<name>` for Iris's own code run with no model, such as the daily digest — and `grants` — the directories and network a mutating job was created with, null when it has none — with `weightedTokensTodayAllJobs` against `globalDailyBudget` for every background run together, and `unreadableJobs` — how many stored jobs could not be read at all. A figure that is null could not be read, which is not the same as zero. Use it to answer what is scheduled, how much a job has spent, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
                 parameters: Schema(type: "OBJECT", properties: [:], required: [])),
             FunctionDeclaration(
                 name: "get_job_run",
-                description: "Read back one background job run: how it ended, how many tokens it sent (tokens sent, its subagents included, not billed cost), and the last thing the run itself said. Use it when the user asks about a run an event card mentioned — the card names the run by the first eight characters of its id, which is enough.",
+                description: "Read back one background job run: how it ended, how many tokens it sent, raw and as `weightedTokens` (the unit its budget counts; its subagents included), and the last thing the run itself said. Use it when the user asks about a run an event card mentioned — the card names the run by the first eight characters of its id, which is enough.",
                 parameters: Schema(type: "OBJECT", properties: [
                     "run_id": Schema(type: "STRING", description: "The run's id, or the first eight or more characters of it as an event card shows.")
                 ], required: ["run_id"])),
@@ -4490,7 +4502,7 @@ extension IrisEngine {
                 "grants": job.effectiveGrant.map(jsonObject) ?? NSNull(),
                 // Null, never zero, when the ledger would not answer: "spent nothing today" is a
                 // claim, and an unread figure is not one.
-                "tokensToday": figures?.tokensToday ?? NSNull(),
+                "weightedTokensToday": figures?.weightedTokensToday ?? NSNull(),
                 "dailyBudget": figures?.limits.dailyTokens ?? NSNull(),
                 "runsLastHour": figures?.runsLastHour ?? NSNull(),
                 "maxRunsPerHour": figures?.limits.maxRunsPerHour ?? NSNull(),
@@ -4503,7 +4515,7 @@ extension IrisEngine {
         let body: [String: Any] = [
             "jobs": rows,
             "unreadableJobs": unreadableJobs,
-            "tokensTodayAllJobs": usage.global?.tokensToday ?? NSNull(),
+            "weightedTokensTodayAllJobs": usage.global?.weightedTokensToday ?? NSNull(),
             "globalDailyBudget": usage.global?.dailyBudget ?? NSNull(),
         ]
         return jsonString(body) ?? "{\"jobs\":[],\"unreadableJobs\":0}"
@@ -4535,6 +4547,12 @@ extension IrisEngine {
             "promptTokens": run.promptTokens,
             "candidateTokens": run.candidateTokens,
             "totalTokens": run.totalTokens,
+            "cacheReadTokens": run.cacheReadTokens,
+            "cacheWriteTokens": run.cacheWriteTokens,
+            "cacheWrite1hTokens": run.cacheWrite1hTokens,
+            "provider": run.provider ?? NSNull(),
+            // Priced at read time from the row's own components and provider (5c §0.6).
+            "weightedTokens": CostWeights.weighted(run.components, provider: run.provider),
             "costMicros": run.costMicros ?? NSNull(),
             "gateSignal": gateSignal ?? NSNull(),
             "transcriptConversationId": run.transcriptConversationId?.uuidString ?? NSNull(),

@@ -104,6 +104,7 @@ struct StreamAssembler: Sendable {
             merged.totalTokenCount = Self.maxOf(merged.totalTokenCount, incoming.totalTokenCount)
             merged.cacheReadTokens = Self.maxOf(merged.cacheReadTokens, incoming.cacheReadTokens)
             merged.cacheWriteTokens = Self.maxOf(merged.cacheWriteTokens, incoming.cacheWriteTokens)
+            merged.cacheWrite1hTokens = Self.maxOf(merged.cacheWrite1hTokens, incoming.cacheWrite1hTokens)
             usage = merged
         case .done(let finish, let block):
             finishReason = finish

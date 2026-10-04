@@ -910,7 +910,7 @@ struct JobAdmissionTests {
 
         #expect(client.callCount == 0)
         let paused = try #require(try store.ledger.job(id: job.id))
-        #expect(paused.pausedReason == "daily token budget reached (job): 500 / 500")
+        #expect(paused.pausedReason == "daily weighted-token budget reached (job): 500 / 500")
         let rows = try store.ledger.runs(jobId: job.id, limit: 10)
         #expect(rows.filter { $0.failureReason == paused.pausedReason }.count == 1)
         let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
@@ -938,7 +938,7 @@ struct JobAdmissionTests {
 
         #expect(client.callCount == 0)
         #expect(try store.ledger.job(id: job.id)?.pausedReason
-                == "daily token budget reached (global): 1000 / 1000")
+                == "daily weighted-token budget reached (global): 1000 / 1000")
     }
 
     @Test("lastRunAt is stamped by a run that happens, and untouched by a fire that is refused")
@@ -997,7 +997,7 @@ struct JobAdmissionTests {
     private struct UnreadableUsage: JobUsageReading {
         struct Failure: Error, CustomStringConvertible { var description: String { "database is locked" } }
         func usage(jobId: UUID, now: Date, calendar: Calendar) throws -> JobUsage { throw Failure() }
-        func tokensToday(jobId: UUID?, calendar: Calendar, now: Date) throws -> Int { throw Failure() }
+        func weightedTokensToday(jobId: UUID?, calendar: Calendar, now: Date) throws -> Int { throw Failure() }
     }
 
     @Test("a usage read that throws skips the fire and writes why — it does not open the breaker")

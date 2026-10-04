@@ -54,7 +54,7 @@ actor JobRunner {
     /// The ledger, except where a test needs the usage read itself to fail (`JobUsageReading`).
     private let usageSource: any JobUsageReading
     private let now: @Sendable () -> Date
-    /// Whose day "tokens today" is counted in — the user's, so the budget resets at their
+    /// Whose day "weighted tokens today" is counted in — the user's, so the budget resets at their
     /// midnight. Injectable only so a test can pin the zone.
     private let calendar: Calendar
     private let config: ConfigManager
@@ -249,8 +249,12 @@ actor JobRunner {
     /// The pause reason an exhausted daily budget writes. It names the figure that tripped it
     /// (§9): "reached its budget" without the number leaves a person with nothing to decide on.
     static func budgetReason(scope: String, used: Int, limit: Int) -> String {
-        "daily token budget reached (\(scope)): \(used) / \(limit)"
+        "daily weighted-token budget reached (\(scope)): \(used) / \(limit)"
     }
+
+    /// The prefix the reason above wrote before 5c. Never written now; still matched, because
+    /// rows and paused jobs written then keep it.
+    static let legacyBudgetReasonPrefix = "daily token budget reached"
 
     /// What an unreadable ledger writes on the row it skips a fire with. Not a pause: the read
     /// that failed is a transient database error, and pausing the job would turn one bad query
@@ -350,7 +354,7 @@ actor JobRunner {
             let tokensAll: Int
             do {
                 usage = try usageSource.usage(jobId: current.id, now: at, calendar: calendar)
-                tokensAll = try usageSource.tokensToday(jobId: nil, calendar: calendar, now: at)
+                tokensAll = try usageSource.weightedTokensToday(jobId: nil, calendar: calendar, now: at)
             } catch {
                 // Swallowed, this read used to answer zero — which opens the breaker and both
                 // budgets on a job that may be far past either, silently. Skip the fire instead,
@@ -368,7 +372,7 @@ actor JobRunner {
 
             let admission = Self.admit(job: current, inFlight: inFlight.contains(current.id),
                                        runsLastHour: usage.runsLastHour,
-                                       tokensTodayJob: usage.tokensToday,
+                                       tokensTodayJob: usage.weightedTokensToday,
                                        tokensTodayAll: tokensAll,
                                        countsTokens: current.action == .prompt, limits: limits)
             // Whether this pass is the fire the caller asked about — the first one round the loop.
@@ -872,7 +876,7 @@ actor JobRunner {
             // whichever site wrote it.
             await deliver(EventCard(runId: run.id, jobId: job.id, jobName: job.name,
                                     status: .interrupted, outcome: reason, startedAt: at,
-                                    finishedAt: at, catchUpNote: note,
+                                    finishedAt: at, weightedTokens: 0, catchUpNote: note,
                                     network: job.effectiveGrant?.network == true), for: job)
         } catch {
             print("[JobRunner] could not record the pause for \(job.name): \(error)")
@@ -935,6 +939,10 @@ actor JobRunner {
         // Nil for every fire no burst started, which is what leaves the column null on the rows
         // §6 says it should be null on.
         run.watchSummary = summary
+        // 5c §0.6: whose prices this run's spend is weighed at, for as long as the row exists.
+        // Only here: every other row (gate, built-in, stillborn, approved call) spends nothing.
+        run.provider = config.primaryProvider
+        run.tier = await engine?.modelTier.rawValue
         do {
             try ledger.begin(run: run)
         } catch {
@@ -1000,7 +1008,7 @@ actor JobRunner {
         // clock to another instant must not make every run time out before its first model call.
         let deadlineClock = self.deadlineClock
         let deadline = deadlineClock().addingTimeInterval(TimeInterval(limits.runTimeoutSeconds))
-        let budget = TurnBudget(maxTokens: limits.perRunTokens, deadline: deadline)
+        let budget = TurnBudget(maxTokens: limits.perRunTokens, deadline: deadline, provider: run.provider)
         // Stay awake for this run, and no longer: the watchdog gives the assertion back at the
         // deadline even when the turn overruns it, so a wedged run cannot hold the Mac awake for
         // the rest of the session. `ActivityHolder` ends once, whichever gets there first.
@@ -1140,6 +1148,8 @@ actor JobRunner {
                              blockedTool: blockedTool,
                              startedAt: startedAt, finishedAt: finishedAt,
                              totalTokens: turn.tokens.totalTokenCount,
+                             weightedTokens: CostWeights.weighted(turn.tokens.components,
+                                                                  provider: run.provider),
                              transcriptConversationId: conversationId,
                              // The card keeps a display copy: the ledger holds the call that
                              // gets re-dispatched, and a long body belongs in one place only.
@@ -1375,7 +1385,7 @@ actor JobRunner {
         let card = EventCard(runId: approved.id, jobId: job.id, jobName: job.name,
                              status: failed ? .failed : .completed, outcome: outcome,
                              blockedTool: nil, startedAt: startedAt, finishedAt: finishedAt,
-                             totalTokens: 0, transcriptConversationId: conversationId,
+                             totalTokens: 0, weightedTokens: 0, transcriptConversationId: conversationId,
                              network: grant?.network == true)
         await closeSession(conversationId, status: card.statusText)
         await deliver(card, for: job)
@@ -1605,6 +1615,7 @@ actor JobRunner {
                              outcome: Self.cardOutcome(reason, retry: retry, now: finishedAt),
                              blockedTool: nil,
                              startedAt: run.startedAt, finishedAt: finishedAt, totalTokens: 0,
+                             weightedTokens: 0,
                              transcriptConversationId: conversationId, catchUpNote: note,
                              network: grant?.network == true,
                              watchSummary: run.watchSummary)
@@ -1772,12 +1783,13 @@ actor JobRunner {
     }
 
     /// The budget a stop line names, if that is what stopped the turn. The reason on its own, not
-    /// the whole line: the row and the card say "budget: tokens exceeded — retrying in 1 m", and
+    /// the whole line: the row and the card say "budget: weighted tokens exceeded — retrying in 1 m", and
     /// the origin prefix and the marker sentence are for the person reading the transcript.
     static func budgetStopReason(in messages: [ChatMessage]) -> String? {
         guard let line = softStopLine(in: messages), line.contains(IrisEngine.budgetStopMarker)
         else { return nil }
-        return [TurnBudget.tokensExceeded, TurnBudget.timeExceeded].first { line.contains($0) }
+        return [TurnBudget.weightedTokensExceeded, TurnBudget.legacyTokensExceeded, TurnBudget.timeExceeded]
+            .first { line.contains($0) }
     }
 
     /// What the row records about why a run did not simply complete — and, when the run left no
@@ -1960,9 +1972,8 @@ struct JobLimits: Equatable, Sendable {
         // stepper still move every job that never asked for a timeout of its own.
         //
         // Zero (or less) takes the global default too, and deliberately does NOT mean "no timeout"
-        // the way a zero token budget does: since 5a a budget bounds tokens sent, not billed
-        // weight — billed weight is a later slice — and a person may reasonably want that
-        // unbounded, while this bounds a turn that has stopped responding — and a run nothing
+        // the way a zero token budget does: since 5c a budget bounds weighted tokens (§0.5), and a
+        // person may reasonably want that unbounded, while this bounds a turn that has stopped responding — and a run nothing
         // can end is the failure the whole deliverable is about. Nothing configurable writes one;
         // a hand-edited policy can.
         let overridden = policy.runTimeoutSeconds > 0

@@ -278,7 +278,7 @@ enum JobsCommand: Equatable {
         if jobs.isEmpty {
             blocks.append("No jobs.")
         } else {
-            var rows = ["| Job | Trigger | Policy | Next | Last | Tokens today | Runs/h |",
+            var rows = ["| Job | Trigger | Policy | Next | Last | Weighted tokens today | Runs/h |",
                         "| --- | --- | --- | --- | --- | --- | --- |"]
             for job in jobs {
                 let last = lastRuns[job.id]?.status.text ?? "never"
@@ -306,7 +306,7 @@ enum JobsCommand: Equatable {
             }
             if let global = usage.global {
                 rows.append("")
-                rows.append("Tokens today, all jobs: \(budgetText(used: global.tokensToday, budget: global.dailyBudget))")
+                rows.append("Weighted tokens today, all jobs: \(budgetText(used: global.weightedTokensToday, budget: global.dailyBudget))")
             }
             blocks.append(rows.joined(separator: "\n"))
         }
@@ -327,15 +327,15 @@ enum JobsCommand: Equatable {
     /// (`JobLedger.usage`) and the limits from `JobLimits.resolve`, so what a person reads in the
     /// table is the same arithmetic that would pause the job — not a second, drifting accounting.
     struct JobFigures: Equatable, Sendable {
-        let tokensToday: Int
+        let weightedTokensToday: Int
         let runsLastHour: Int
         let limits: JobLimits
     }
 
-    /// The whole unattended system's tokens sent for the local day, against the one ceiling no job
+    /// The whole unattended system's weighted tokens spent for the local day, against the one ceiling no job
     /// can raise for itself.
     struct GlobalUsage: Equatable, Sendable {
-        let tokensToday: Int
+        let weightedTokensToday: Int
         let dailyBudget: Int
     }
 
@@ -355,15 +355,15 @@ enum JobsCommand: Equatable {
         var snapshot = UsageSnapshot()
         for job in jobs {
             guard let usage = try? ledger.usage(jobId: job.id, now: now, calendar: calendar) else { continue }
-            snapshot.perJob[job.id] = JobFigures(tokensToday: usage.tokensToday,
+            snapshot.perJob[job.id] = JobFigures(weightedTokensToday: usage.weightedTokensToday,
                                                  runsLastHour: usage.runsLastHour,
                                                  limits: JobLimits.resolve(job: job, config: config))
         }
         // `globalDailyTokens` is deliberately not overridable per job, so the first job's
         // resolution answers for all of them; with no jobs at all there is no table to foot.
         let globalBudget = jobs.first.map { JobLimits.resolve(job: $0, config: config).globalDailyTokens }
-        if let globalBudget, let total = try? ledger.tokensToday(jobId: nil, calendar: calendar, now: now) {
-            snapshot.global = GlobalUsage(tokensToday: total, dailyBudget: globalBudget)
+        if let globalBudget, let total = try? ledger.weightedTokensToday(jobId: nil, calendar: calendar, now: now) {
+            snapshot.global = GlobalUsage(weightedTokensToday: total, dailyBudget: globalBudget)
         }
         return snapshot
     }
@@ -441,7 +441,7 @@ enum JobsCommand: Equatable {
     static let missingFigure = "—"
 
     private static func tokensCell(_ figures: JobFigures) -> String {
-        budgetText(used: figures.tokensToday, budget: figures.limits.dailyTokens)
+        budgetText(used: figures.weightedTokensToday, budget: figures.limits.dailyTokens)
     }
 
     private static func runsCell(_ figures: JobFigures) -> String {

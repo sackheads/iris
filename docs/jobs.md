@@ -682,10 +682,10 @@ straight from the run ledger, and it **never calls a model**: it costs nothing a
 anything. The card covers the runs since the previous digest that completed (the last 24 hours the
 first time):
 
-- one line per job that ran — `“sweep”: 3 completed, 1 failed · 620000/1000000 tokens today`, with
-  the name quoted so no name can pose as a count,
-  blocked or interrupted runs counted on the end of the line when there are any, and the tokens
-  sent today against that job's daily budget;
+- one line per job that ran — `“sweep”: 3 completed, 1 failed · 620000/1000000 weighted tokens today`,
+  with the name quoted so no name can pose as a count,
+  blocked or interrupted runs counted on the end of the line when there are any, and the weighted
+  tokens spent today against that job's daily budget;
 - one line per failure nobody has acknowledged, and one per paused job, named with the same fixed
   words the briefing uses (`failed`, `timeout`, `budget`, `failed 3 times`, …).
 
@@ -908,22 +908,38 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
   loop the self-write filter cannot see. The run that would be the next one does not
   happen; the job is paused instead, with the count in the reason. Refusals do not count as runs, so
   a job cannot trip its own breaker by being skipped.
-- **Daily token budget** — **1,000,000 tokens per job** per local calendar day, and **3,000,000
-  across every background run together**. The fire that finds the day's tokens sent at or over the
-  figure pauses the job rather than starting — unless it is a built-in job, which spends no tokens
-  and so is never refused by a budget. Budgets count every token sent, including tokens a
-  provider served from its prompt cache; before 5a an Anthropic run was charged nothing because
-  Anthropic reports no total. A run's tokens include what its delegated subagents (and theirs, and
+- **Daily token budget** — **1,000,000 weighted tokens per job** per local calendar day, and
+  **3,000,000 across every background run together**. The fire that finds the day's weighted tokens
+  at or over the figure pauses the job rather than starting — unless it is a built-in job, which
+  spends no tokens and so is never refused by a budget. Every budget counts **weighted tokens**
+  (since 5c), not raw ones:
+
+  weight = uncached input × 1 + cache read × r + cache write × w + output × 5
+
+  | Provider | r (cache read) | w (cache write) |
+  |---|---|---|
+  | Anthropic, direct and Vertex | 0.1 | 1.25 for a 5-minute entry, 2.0 for a 1-hour one |
+  | Gemini | 0.1 | 0 (implicit caching has no write charge) |
+  | OpenAI | 0.1 | 0 |
+
+  Output × 5 is a floor; real output prices run 4× to 8× input. Each run is priced at the
+  provider it ran on, which its row records, never at whatever is configured now, and the weights
+  are applied when the figure is read, so a changed weight re-prices history without a migration. A
+  row written before 5c records no provider and is priced at its plain total, every token at 1×, as
+  it was charged then. In practice a 20k-token prompt that is 97% cache reads with 500 output
+  tokens weighs about 5k, so a 200,000 run budget lasts about 40 such rounds instead of 10; a cold
+  first round weighs about 25k. Before 5a an Anthropic run was charged nothing because Anthropic
+  reports no total. A run's tokens include what its delegated subagents (and theirs, and
   any evaluator grading their work) spend **while the run is active**; a subagent still going after
   its run has ended spends against nobody's figure. Delegated tokens are counted once, on the run's
   row — a subagent has no row of its own. A run still in flight counts too: the run's total, its
   subagents' included, is written to its row after every model round — the run's own and every
   delegated one — so a run the app quit in the middle of, even in the middle of a delegation,
-  still counts toward the day's figure for what it had sent.
+  still counts toward the day's figure for what it had spent.
 - A refused fire writes a zero-length `interrupted` row and one card naming the figure that tripped
   it, so a pause is never silent.
 
-**During a run**, the turn itself is bounded: **200,000 tokens** and **10 minutes**. The token
+**During a run**, the turn itself is bounded: **200,000 weighted tokens** and **10 minutes**. The token
 budget is checked before every model round — the run's own, and those of every subagent and
 evaluator working for it — against the run's tokens so far, its subagents' included, so whichever
 of them would spend past the budget is refused its next round. A round already under way is not
@@ -936,7 +952,10 @@ Mac is let go back to sleep and the job is free to fire again; the turn is asked
 checks — a blocking subprocess, a stream with no timeout — it is abandoned rather than waited on.
 A subagent still working when the deadline closes the run is not stopped by it, and from then on is
 charged to nothing (#323).
-Whichever bound bit, the row and the card say `budget: tokens exceeded` or `budget: time exceeded`.
+Whichever bound bit, the row and the card say `budget: weighted tokens exceeded` or `budget: time
+exceeded`; rows written before 5c still say `budget: tokens exceeded`, and are still read as a budget
+stop. A job paused before 5c by a daily budget keeps its old reason, `daily token budget reached …`,
+which reads as `budget` too.
 The budget stop does not summarize — there is no budget left for a summary — and any message
 you steered in mid-run is written to the transcript before the turn ends, without starting another
 turn.
@@ -976,25 +995,27 @@ overrides any of them except the global daily budget.
 — is simply the default above. In a job's own `JobPolicy`, `0` is an answer rather than a gap, and
 it means two different things: for the token budgets and the breaker it means **unlimited**, and for
 `runTimeoutSeconds` it means **take the global default**. The reason for the split is what each
-number bounds: since 5a a budget bounds tokens sent, not billed weight — billed weight is a later
-slice — which a person may reasonably want unbounded, while the timeout bounds a turn that has
+number bounds: since 5c a budget bounds weighted tokens, which a person may reasonably want
+unbounded, while the timeout bounds a turn that has
 stopped responding, and a run nothing can end is the failure this whole section exists to prevent. A
 **negative** figure is not a third answer — nobody writes `-1` to mean unlimited — so it is read as
 the typo it is and takes the default, wherever it was written: a settings key, or a hand-edited
 `policy` column.
 
 **What you can see of all this.** Every one of these numbers is readable before it bites, not only
-in the pause that names it. `/jobs` prints, per job, its tokens today against its own daily
-budget (`620k / 1M (62%)`) — tokens sent, not billed cost — how many runs it has started in the
+in the pause that names it. `/jobs` prints, per job, its weighted tokens today against its own
+daily budget (`620k / 1M (62%)`, in weighted tokens) — how many runs it has started in the
 last hour against the breaker (`2 / 6`), its place on the retry ladder (`retry 1/3`) beside its next
 fire, and a policy column naming whatever it does differently from the defaults; under the table is
-the whole unattended system's tokens sent for the day against the global ceiling. `list_jobs`
-carries the same figures as fields — `tokensToday`, `dailyBudget`, `runsLastHour`, `maxRunsPerHour`,
-`retryAttempt`, `policy`, `gateKind`, `profile`, `grants`, and `tokensTodayAllJobs` against
-`globalDailyBudget` — so the model answers "how much context has this job sent today?" from the
-same arithmetic admission decides on. A figure that could not be read is a dash in the table and a
-`null` in the tool, never a zero: "nothing sent today" is a claim, and an unreadable ledger is not
-one. A pause still names the figure that caused it, in the
+the whole unattended system's weighted tokens for the day against the global ceiling. `list_jobs`
+carries the same figures as fields — `weightedTokensToday`, `dailyBudget`, `runsLastHour`,
+`maxRunsPerHour`, `retryAttempt`, `policy`, `gateKind`, `profile`, `grants`, and
+`weightedTokensTodayAllJobs` against `globalDailyBudget` — and `get_job_run` gives one run's raw
+counts, its cache reads and writes, its provider and its `weightedTokens`, so the model answers "how
+much has this job spent today?" from the same arithmetic admission decides on. A figure that could not be read is a dash in the table and a
+`null` in the tool, never a zero: "nothing spent today" is a claim, and an unreadable ledger is not
+one. One row that will not read inside an otherwise readable day is different: `weightedTokensToday`
+prices it at zero and logs it, which errs lenient, toward letting a job run. A pause still names the figure that caused it, in the
 pause reason the table prints, on the `interrupted` row and on the card.
 
 ## `/jobs`
@@ -1003,7 +1024,7 @@ pause reason the table prints, on the `interrupted` row and on the card.
 
 | Form | What it does |
 | --- | --- |
-| `/jobs` | A table of every job — name, trigger (with its gate, if it has one), its policy where it departs from the defaults, when it next fires (or why it is paused), how its last run ended, its tokens today against its daily budget and its runs in the last hour against the breaker — then one line per watch with what its last burst saw and what it has absorbed since launch (see "Watches"), one paragraph per granted job with its mounts and network (see "Grants"), then the day's tokens sent across every job, then one line per unacknowledged failure with the first eight characters of the run's id |
+| `/jobs` | A table of every job — name, trigger (with its gate, if it has one), its policy where it departs from the defaults, when it next fires (or why it is paused), how its last run ended, its weighted tokens today against its daily budget and its runs in the last hour against the breaker — then one line per watch with what its last burst saw and what it has absorbed since launch (see "Watches"), one paragraph per granted job with its mounts and network (see "Grants"), then the day's weighted tokens across every job, then one line per unacknowledged failure with the first eight characters of the run's id |
 | `/jobs ack <run id>` | Marks a failed or blocked run as seen: it leaves the failure list, and it stops being exempt from retention. Takes a full id or the first eight or more characters of one, as a card prints it; an ambiguous prefix is refused rather than guessed |
 | `/jobs pause <name>` | Stops a job firing, with "paused by user" as the reason the table shows |
 | `/jobs resume <name>` | Clears the pause *and* the retry ladder, and recomputes the next fire from the job's own schedule |

@@ -191,16 +191,16 @@ struct JobToolsTests {
                                    gate: .pathChanged(path: "/tmp/in")))
         let snapshot = JobsCommand.UsageSnapshot(
             perJob: [j.id: JobsCommand.JobFigures(
-                tokensToday: 620_000, runsLastHour: 2,
+                weightedTokensToday: 620_000, runsLastHour: 2,
                 limits: JobLimits(maxRunsPerHour: 6, dailyTokens: 1_000_000,
                                   globalDailyTokens: 3_000_000, perRunTokens: 200_000,
                                   runTimeoutSeconds: 600))],
-            global: JobsCommand.GlobalUsage(tokensToday: 1_200_000, dailyBudget: 3_000_000))
+            global: JobsCommand.GlobalUsage(weightedTokensToday: 1_200_000, dailyBudget: 3_000_000))
 
         let json = IrisEngine.jobsListJSON([j], lastStatuses: [:], usage: snapshot, unreadableJobs: 0)
         let body = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
         let row = try #require((body["jobs"] as? [[String: Any]])?.first)
-        #expect(row["tokensToday"] as? Int == 620_000)
+        #expect(row["weightedTokensToday"] as? Int == 620_000)
         #expect(row["dailyBudget"] as? Int == 1_000_000)
         #expect(row["runsLastHour"] as? Int == 2)
         #expect(row["maxRunsPerHour"] as? Int == 6)
@@ -209,7 +209,7 @@ struct JobToolsTests {
         #expect(row["gateKind"] as? String == "path")
         // The same sentence the table's policy column shows, so the two cannot drift.
         #expect(row["policy"] as? String == JobsCommand.policySummary(for: j))
-        #expect(body["tokensTodayAllJobs"] as? Int == 1_200_000)
+        #expect(body["weightedTokensTodayAllJobs"] as? Int == 1_200_000)
         #expect(body["globalDailyBudget"] as? Int == 3_000_000)
     }
 
@@ -255,13 +255,13 @@ struct JobToolsTests {
         let body = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
         let row = try #require((body["jobs"] as? [[String: Any]])?.first)
         #expect(row["name"] as? String == "pr-sweep")
-        for key in ["tokensToday", "dailyBudget", "runsLastHour", "maxRunsPerHour", "gateKind"] {
+        for key in ["weightedTokensToday", "dailyBudget", "runsLastHour", "maxRunsPerHour", "gateKind"] {
             #expect(row[key] is NSNull, "\(key) should be null, not invented")
         }
         #expect(row["retryAttempt"] as? Int == 0)
         #expect(row["profile"] as? String == "readOnly")
         #expect(row["policy"] as? String == "default")
-        #expect(body["tokensTodayAllJobs"] is NSNull)
+        #expect(body["weightedTokensTodayAllJobs"] is NSNull)
     }
 
     @Test("list_jobs carries the watch fields, null for a schedule and null absorbed without a coordinator")
@@ -394,6 +394,34 @@ struct JobToolsTests {
         #expect(message.contains("swept 3 PRs, all green"))
         #expect(!message.contains("an earlier answer"), "the LAST agent message, not the first")
         #expect(!message.contains("a system line after it"))
+    }
+
+    /// 5c §0.6-0.7: the raw figures, the cache components and the provider, and the weighted total
+    /// its budget counted, computed from them at read time.
+    @Test("get_job_run carries the cache components, the provider and the weighted total")
+    func getJobRunCarriesWeightedTokens() throws {
+        var r = JobRun(jobId: UUID(), jobName: "j", triggerKind: "schedule",
+                       startedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        r.provider = "Anthropic"
+        r.promptTokens = 20_000; r.candidateTokens = 500; r.totalTokens = 20_500
+        r.cacheReadTokens = 19_400; r.cacheWriteTokens = 400; r.cacheWrite1hTokens = 100
+        let json = IrisEngine.jobRunJSON(r, outcome: nil, failureReason: nil, gateSignal: nil, lastAgentMessage: nil)
+        let row = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        #expect(row["cacheReadTokens"] as? Int == 19_400)
+        #expect(row["cacheWriteTokens"] as? Int == 400)
+        #expect(row["cacheWrite1hTokens"] as? Int == 100)
+        #expect(row["provider"] as? String == "Anthropic")
+        #expect(row["totalTokens"] as? Int == 20_500)
+        // uncached 200 + read 1_940 + 5m 375 + 1h 200 + output 2_500
+        #expect(row["weightedTokens"] as? Int == 5_215)
+
+        var legacy = r
+        legacy.provider = nil; legacy.cacheReadTokens = 0; legacy.cacheWriteTokens = 0; legacy.cacheWrite1hTokens = 0
+        let legacyRow = try #require(JSONSerialization.jsonObject(
+            with: Data(IrisEngine.jobRunJSON(legacy, outcome: nil, failureReason: nil, gateSignal: nil,
+                                             lastAgentMessage: nil).utf8)) as? [String: Any])
+        #expect(legacyRow["provider"] is NSNull)
+        #expect(legacyRow["weightedTokens"] as? Int == 20_500, "a pre-5c row prices at its plain total")
     }
 
     @Test("a long transcript message is cut at 2,000 characters")

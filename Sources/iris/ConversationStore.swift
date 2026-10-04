@@ -498,6 +498,19 @@ final class ConversationStore: Sendable {
                 t.add(column: "action", .text)
             }
         }
+        // 5c §0.6: the raw components a weighted total is computed from, and whose prices apply.
+        // Never a weighted figure: weights are a table and history is re-priced at read time. NULL
+        // reads back as 0 (counts) or unknown (provider, tier), which prices a pre-5c row at its
+        // plain total.
+        m.registerMigration("v15_job_run_cost") { db in
+            try db.alter(table: "job_runs") { t in
+                t.add(column: "cacheReadTokens", .integer)
+                t.add(column: "cacheWriteTokens", .integer)
+                t.add(column: "cacheWrite1hTokens", .integer)
+                t.add(column: "provider", .text)
+                t.add(column: "tier", .text)
+            }
+        }
         return m
     }
 

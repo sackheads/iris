@@ -32,6 +32,10 @@ struct EventCard: Codable, Equatable, Sendable {
     let startedAt: Date
     let finishedAt: Date
     let totalTokens: Int
+    /// The run's spend in weighted tokens (5c §0.5), priced at its own provider when the card was
+    /// written. nil on every card written before 5c, which then shows its raw `totalTokens` as
+    /// "tokens" — true when it was written (plan ruling 10).
+    let weightedTokens: Int?
     /// The background conversation the run's turn happened in, if it still had one when the card
     /// was written. There is no foreign key — transcripts are pruned on their own schedule, so
     /// this can name a conversation that is already gone (the card then says "transcript pruned"
@@ -83,6 +87,7 @@ struct EventCard: Codable, Equatable, Sendable {
          startedAt: Date,
          finishedAt: Date,
          totalTokens: Int = 0,
+         weightedTokens: Int? = nil,
          transcriptConversationId: UUID? = nil,
          blockedCall: BlockedCall? = nil,
          vibecopVerdict: String? = nil,
@@ -104,6 +109,7 @@ struct EventCard: Codable, Equatable, Sendable {
         self.startedAt = startedAt
         self.finishedAt = finishedAt
         self.totalTokens = totalTokens
+        self.weightedTokens = weightedTokens
         self.transcriptConversationId = transcriptConversationId
         self.blockedCall = blockedCall
         self.vibecopVerdict = vibecopVerdict
@@ -149,6 +155,7 @@ struct EventCard: Codable, Equatable, Sendable {
         startedAt = started ?? Date(timeIntervalSince1970: 0)
         finishedAt = try container.decodeIfPresent(Date.self, forKey: .finishedAt) ?? startedAt
         totalTokens = try container.decodeIfPresent(Int.self, forKey: .totalTokens) ?? 0
+        weightedTokens = try container.decodeIfPresent(Int.self, forKey: .weightedTokens)
         transcriptConversationId = try container.decodeIfPresent(UUID.self, forKey: .transcriptConversationId)
         // A blocked call this build cannot read is no blocked call: "there is something here and I
         // do not know what it is" must never become a button. Same direction `JobLedger`'s
@@ -454,20 +461,30 @@ struct EventCard: Codable, Equatable, Sendable {
     /// ceiling)`. The card carries no quiet window, so the ceiling is named rather than numbered.
     var watchMetadataText: String? { watchSummary?.figuresText() }
 
-    /// The card's right-hand line — `1m 15s · 4.2k tokens`, then the watch figures when the burst
-    /// had any. Pure so the view can render it without owning the wording.
+    /// `1.3k weighted tokens` on a card that carries the weighted figure; `4.2k tokens`, the raw
+    /// total, on one written before 5c. nil on a built-in's card: it spends nothing by
+    /// construction, so a token figure there says nothing.
+    var tokensText: String? {
+        if builtin { return nil }
+        if let weightedTokens { return "\(SessionActivity.formatTokenCount(weightedTokens)) weighted tokens" }
+        return "\(SessionActivity.formatTokenCount(totalTokens)) tokens"
+    }
+
+    /// The card's right-hand line — `1m 15s · 1.3k weighted tokens`, then the watch figures when
+    /// the burst had any. Pure so the view can render it without owning the wording.
     var metadataLine: String {
-        var line = "\(elapsedText) · \(SessionActivity.formatTokenCount(totalTokens)) tokens"
+        var line = elapsedText
+        if let tokensText { line += " · \(tokensText)" }
         if network { line += " · network" }
         if let watchMetadataText { line += " · \(watchMetadataText)" }
         return line
     }
 
-    /// `[job pr-sweep · completed · 4.2k tokens] swept 3 PRs` — what Copy Transcript and the
+    /// `[job pr-sweep · completed · 1.3k weighted tokens] swept 3 PRs` — what Copy Transcript and the
     /// Markdown export print in place of the card's JSON (spec §8.2).
     var transcriptLine: String {
         if isReflection { return "[memory reflection in \(reflectionSourceText)] \(reflectionSummaryLine)" }
-        let head = "[job \(jobName) · \(statusText) · \(SessionActivity.formatTokenCount(totalTokens)) tokens]"
+        let head = "[job \(jobName) · \(statusText)\(tokensText.map { " · \($0)" } ?? "")]"
         var line = head
         if let outcome, !outcome.isEmpty { line += " \(outcome)" }
         // Appended rather than dropped: the view reads this out as its accessibility label, and a
