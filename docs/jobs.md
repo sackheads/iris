@@ -323,9 +323,10 @@ save uses, so the watches' ignore set and the self-write filter treat it as they
 renamed into place with `renameat` inside that directory's descriptor; a rewrite keeps the file's
 mode bits, as Foundation's atomic save does, so a script the job maintains stays executable. A symlink anywhere in the
 path is a refusal, not a resolution — `the path crosses a symlink at …; a granted run may not read
-or write through symlinks — name the real directory instead` — a directory named as a file is
-refused, and `read_file` reads regular files only: a FIFO is refused rather than parking the run
-until its deadline. A hook that rewrites the path is met by the same walk, because the walk starts
+or write through symlinks — name the real directory instead` — a directory named as a file to
+write is refused, `read_file` of a directory returns its listing (read from the walked
+descriptor, one level, symlinks not followed), and otherwise `read_file` reads regular files only:
+a FIFO is refused rather than parking the run until its deadline. A hook that rewrites the path is met by the same walk, because the walk starts
 from the path the hook returned — and the rewritten path must still be covered by the very entry
 the gate decided, so a rewrite into a nested read-only entry beneath it is refused rather than
 written from the outer root. Attended runs keep the ordinary path; nothing about a chat's

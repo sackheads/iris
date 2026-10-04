@@ -3782,6 +3782,20 @@ actor IrisEngine {
             // exactly the race the walk exists to close. nil under a grant is a refusal at the gate
             // and again in the executor, never a Foundation write.
             let grantedMount = sandboxGrant?.allowedMount(toolName: functionCall.name, details: details, cwd: workspacePath)
+            // #339: a grader read spelled inside its contract's approved workspace is walked from
+            // that root by descriptor, whatever approves it. The decision is by spelling alone, the
+            // same pure function the approval gate's pre-approval rests on, so no read the gate
+            // waves through is ever opened by path — a link swapped in after the gate is met by
+            // the walk, not followed.
+            var approvedWorkspaceRoot: String?
+            if principal == .evaluator, functionCall.name == "read_file" {
+                let contract = await MainActor.run {
+                    localState?.conversations.first(where: { $0.id == conversationId })?.goalContract
+                }
+                if let contract, contract.approvedReadComponents(of: ToolExecutor.resolvePath(details, cwd: workspacePath)) != nil {
+                    approvedWorkspaceRoot = contract.approvedWorkspace
+                }
+            }
             if needsApproval {
                 let approved = await localState?.requestApproval(
                     toolName: functionCall.name, details: details, args: functionCall.args,
@@ -3790,12 +3804,12 @@ actor IrisEngine {
                     callerRole: principal == .evaluator ? .evaluator : .agent,
                     allowedCommands: evaluatorChecks, grantedMount: grantedMount) ?? false
                 if approved {
-                    result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount)
+                    result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot)
                 } else {
                     result = Self.deniedToolResult
                 }
             } else {
-                result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount)
+                result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot)
             }
         }
         
@@ -3970,7 +3984,7 @@ actor IrisEngine {
         }
     }
 
-    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil) async -> String {
+    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil, approvedWorkspaceRoot: String? = nil) async -> String {
         var execArgs: [String: JSONValue] = args
 
         // Session strip activity (#217/#19): the detail is derived from the tool's own arguments
@@ -4015,7 +4029,8 @@ actor IrisEngine {
             }
         }
         
-        var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant, grantedMount: grantedMount)
+        var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant, grantedMount: grantedMount,
+                                              approvedWorkspaceRoot: approvedWorkspaceRoot)
 
         if name == "write_file", result.hasPrefix("Successfully wrote to "),
            let cid = conversationId, let path = execArgs["path"]?.stringValue {

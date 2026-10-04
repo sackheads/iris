@@ -136,7 +136,7 @@ final class GoalEvaluator: Sendable {
         }
         var s = base
         s += "\n\n## Workspace\nThe completed work is in this directory:\n`\(workspaceDir)`\n"
-        s += "Your `run_command` calls already execute there. Confine your inspection to this directory — start with `ls`. NEVER search the wider filesystem (no `find /`, no reading files outside this directory, no `~root`/home snooping). If an expected artifact is not present here, the relevant criterion is `not_met` or `cannot_verify` — do not go hunting for it elsewhere.\n"
+        s += "Your `run_command` calls already execute there. Confine your inspection to this directory — start by reading it with `read_file`, which lists a directory. NEVER search the wider filesystem (no `find /`, no reading files outside this directory, no `~root`/home snooping). If an expected artifact is not present here, the relevant criterion is `not_met` or `cannot_verify` — do not go hunting for it elsewhere.\n"
         s += "\n## The locked contract you are grading\nObjective: \(contract.objective)\n\nCriteria (grade each by its id):\n"
         for c in contract.criteria {
             let checkNote = (c.kind == .executable) ? " — run this check: `\(c.check ?? "")`" : ""
