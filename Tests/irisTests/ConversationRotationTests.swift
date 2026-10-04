@@ -221,7 +221,8 @@ import Foundation
         #expect(h.state.archiveRefusal(for: h.oldId) == nil)
     }
 
-    /// Review Focus 1: the pin moves before the slow summary call, so a card delivered while it
+    /// Review Focus 1: the pin moves before the slow summary call (though after the reflection
+    /// turn; see `cardDuringReflectionReachesTheSummary`), so a card delivered while it
     /// runs lands in the new Iris, never in the one about to be archived.
     @Test func cardMidRotationLandsInNewIris() async throws {
         let gate = JobSchedulerTests.Gate()
@@ -234,6 +235,9 @@ import Foundation
         let card = EventCard(runId: UUID(), jobId: UUID(), jobName: "midway", status: .completed,
                              outcome: "tick", startedAt: Date(), finishedAt: Date())
         await h.state.deliverEvent(card, to: h.state.activityConversationId())
+        // On disk before the summary arrives, so the summary's insert at 0 has to rewrite rows
+        // already written rather than ride along in the card's own pending append.
+        h.state.flushSave()
         await gate.open()
         try await finish(task)
 
@@ -246,6 +250,64 @@ import Foundation
         #expect(new.history.first?.parts.first?.text?.hasPrefix("[Summary of the previous Iris conversation") == true)
         #expect(new.history.contains { $0.parts.contains { $0.text?.contains("midway") == true } })
         try expectPinValid(h.state, "after card")
+
+        // The summary went in at index 0 through a history replace: it must survive a reload,
+        // still first, with the card's line and the card itself each exactly once.
+        h.state.flushSave()
+        let reloaded = AppState(store: h.state.store, tier2Provisioning: .provisioned,
+                                tier3Provisioning: .provisioned, createIfEmpty: false, emitLaunchNotices: false)
+        let back = try #require(reloaded.conversations.first { $0.id == newId })
+        let texts = back.history.flatMap { $0.parts.compactMap(\.text) }
+        #expect(texts.first?.hasPrefix(AppState.rotationSummaryLabel) == true)
+        #expect(texts.filter { $0.hasPrefix(AppState.rotationSummaryLabel) }.count == 1)
+        #expect(texts.filter { $0.contains("midway") }.count == 1)
+        #expect(back.messages.filter { $0.role == .event }.count == 1)
+        #expect(back.messages.filter { $0.content.hasPrefix(AppState.rotationSummaryLabel) }.count == 1)
+        #expect(back.isPinned)
+        #expect(reloaded.conversations.first { $0.id == h.oldId }?.isPinned == false)
+    }
+
+    /// The reflection is a full turn that runs BEFORE the pin moves, so a card delivered during
+    /// it lands in the old Iris. The summary's input carries event cards, so the new Iris hears.
+    @Test func cardDuringReflectionReachesTheSummary() async throws {
+        let gate = JobSchedulerTests.Gate()
+        defer { release(gate) }
+        let h = try harness(.reply("summary"), reflectionGate: gate)
+        let task = try #require(startRotation(h.state))
+        try await waitForEntry(gate)
+
+        let card = EventCard(runId: UUID(), jobId: UUID(), jobName: "duringreflection", status: .completed,
+                             outcome: "tock", startedAt: Date(), finishedAt: Date())
+        await h.state.deliverEvent(card, to: h.state.activityConversationId())
+        await gate.open()
+        try await finish(task)
+
+        #expect(h.state.conversations.first { $0.id == h.oldId }?.messages.contains { $0.role == .event } == true,
+                "the pin had not moved yet, so the card is in the old Iris")
+        let summary = try #require(h.client.requests.first { RotationClient.isSummaryRequest($0.request) })
+        let input = RotationClient.texts(summary.request).joined()
+        #expect(input.contains("event: [job duringreflection"), "got: \(input)")
+        #expect(input.contains("tock"))
+        #expect(!input.contains("\"runId\""), "the card's transcript line, not its JSON")
+    }
+
+    /// The new Iris is selected only if the owner was still looking at the old one.
+    @Test func selectionChangedDuringReflectionIsKept() async throws {
+        let gate = JobSchedulerTests.Gate()
+        defer { release(gate) }
+        let h = try harness(.reply("summary"), reflectionGate: gate)
+        let task = try #require(startRotation(h.state))
+        try await waitForEntry(gate)
+        let elsewhere = UUID()
+        h.state.createNewConversation(id: elsewhere)   // selects itself, as the owner switching would
+        #expect(h.state.selectedConversationId == elsewhere)
+
+        await gate.open()
+        try await finish(task)
+
+        #expect(h.state.selectedConversationId == elsewhere)
+        #expect(try pinnedId(h.state) != h.oldId, "the rotation still happened")
+        try expectPinValid(h.state, "selection kept")
     }
 
     @Test func summaryFailureStillRotates() async throws {
@@ -424,7 +486,7 @@ import Foundation
         #expect(h.state.conversations.count == count)
         let old = try #require(h.state.conversations.first { $0.id == h.oldId })
         #expect(old.isPinned && !old.isArchived && old.title == "Iris")
-        #expect(old.messages.contains { $0.content == "Rotation stopped; nothing changed." })
+        #expect(old.messages.contains { $0.content == "Rotation stopped; Iris was not rotated." })
         #expect(!old.messages.contains { $0.content.hasPrefix("Interrupted") }, "the rotation says what happened")
         #expect(!h.client.requests.contains { RotationClient.isSummaryRequest($0.request) })
         #expect(h.state.rotationTask == nil)

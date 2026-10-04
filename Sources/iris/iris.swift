@@ -1285,19 +1285,28 @@ actor IrisEngine {
     static let rotationSummaryMaxInputBytes = 200_000
 
     /// 5b §0.4: one easy-tier call summarising Iris for its replacement. Input is the last 200
-    /// owner/Iris messages, labelled as `ConversationReader` labels them, newest kept when the
-    /// byte cap bites. The reply is guarded like any other text no human read before it reaches
+    /// owner/Iris messages, labelled as `ConversationReader` labels them, plus event cards as
+    /// "event:" lines (a card delivered during the rotation's reflection lands in the old Iris,
+    /// and this is how the new one hears of it), newest kept when the byte cap bites. The reply is guarded like any other text no human read before it reaches
     /// the model. The guard's verdict is returned unwrapped so the caller can show the clean text
     /// and give history the wrapped form (`deliverEvent`'s split). nil on any failure; the caller
     /// still rotates.
     func summarizeForRotation(messages: [ChatMessage]) async -> InjectionGuard.GuardOutcome? {
-        let visible = messages.filter { $0.role == .user || $0.role == .agent }.suffix(200)
+        let visible = messages.filter { $0.role == .user || $0.role == .agent || $0.role == .event }.suffix(200)
         var lines: [String] = []
         var used = 0
         for m in visible.reversed() {
-            let speaker = m.role == .user ? "owner" : "iris"
+            let speaker: String, body: String
+            switch m.role {
+            case .user: (speaker, body) = ("owner", m.content)
+            case .event:
+                // A card's raw JSON is noise; its transcript line is what the owner saw.
+                guard let card = EventCard.decode(m.content) else { continue }
+                (speaker, body) = ("event", card.transcriptLine)
+            default: (speaker, body) = ("iris", m.content)
+            }
             // Neutralised before measuring: `＜` is three bytes where `<` was one.
-            var line = TurnContext.neutralised("\(speaker): \(ConversationReader.quoteContinuationLines(m.content))")
+            var line = TurnContext.neutralised("\(speaker): \(ConversationReader.quoteContinuationLines(body))")
             let room = Self.rotationSummaryMaxInputBytes - used
             if line.utf8.count + 1 > room {
                 // The newest message alone over budget is cut, not dropped; anything older stops.

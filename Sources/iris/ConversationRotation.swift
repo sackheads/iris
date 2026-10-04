@@ -3,8 +3,10 @@ import Foundation
 /// 5b §0.4: `/new` in Iris rotates it. The order is the design:
 /// 1. refuse synchronously (`rotationRefusal`, in the `/new` handler);
 /// 2. reflect in the old conversation, so durable learning reaches memory before it leaves context;
-/// 3. create the new Iris and move the pin, before anything slow, because cards are routed
-///    through `activityConversationId()` at each delivery;
+/// 3. create the new Iris and move the pin, before the summary call, because cards are routed
+///    through `activityConversationId()` at each delivery. The reflection in step 2 is a full
+///    model turn that runs BEFORE the move, so a card delivered during it lands in the old Iris;
+///    the summary's input includes event cards, so the new Iris still hears of it;
 /// 4. summarise the old conversation into the new one;
 /// 5. archive the old one last, because any turn start un-archives (`runThinkingTask`).
 /// The meta key never names an archived or missing conversation at any point in between.
@@ -49,11 +51,14 @@ extension AppState {
         releaseRotationHold()
 
         if Task.isCancelled {
-            appendMessage(role: .system, content: "Rotation stopped; nothing changed.", to: oldId)
+            appendMessage(role: .system, content: "Rotation stopped; Iris was not rotated.", to: oldId)
             return
         }
 
-        let newId = createNewConversation(title: Self.activityConversationTitle, select: true)
+        // Follow the pin only if the owner is still looking at Iris; a conversation they switched
+        // to during the reflection is theirs to keep.
+        let newId = createNewConversation(title: Self.activityConversationTitle,
+                                          select: selectedConversationId == oldId)
         // The meta write comes before the pin flags move, so a failed write leaves only an empty
         // conversation to remove, never a pin that disagrees with the meta key.
         do {
@@ -63,8 +68,9 @@ extension AppState {
                 try store.setMetaValue(newId.uuidString, forKey: Self.activityConversationMetaKey)
             }
         } catch {
+            let followedPin = selectedConversationId == newId
             deleteConversation(newId)
-            selectedConversationId = oldId
+            if followedPin { selectedConversationId = oldId }
             appendMessage(role: .command,
                           content: "Rotation stopped: the new Iris could not be recorded (\(error.localizedDescription)). Nothing was archived; this is still Iris.",
                           to: oldId)

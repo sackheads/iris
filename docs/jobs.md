@@ -693,8 +693,10 @@ When a run ends, one **event card** is delivered: job name, status, the one-line
 and a "View run" button onto the transcript. It goes to the job's destination conversation if it
 has one, and otherwise to **Iris** — the pinned conversation Iris creates on first use, keeps at
 the top of the sidebar, and treats as your main conversation. (Pinned conversations refuse
-`/clear`. `/new` in Iris archives it and starts a fresh one; the pin moves before anything slow,
-so a card delivered mid-rotation lands in the new Iris.) A run that stopped on a refused call gets a second half as well — the call in full, and
+`/clear`. `/new` in Iris archives it and starts a fresh one. The pin moves once the rotation's
+reflection turn is done, and a card delivered from then on lands in the new Iris; one delivered
+during the reflection lands in the old Iris, which is archived, and is carried into the new one's
+opening summary.) A run that stopped on a refused call gets a second half as well — the call in full, and
 what you can do about it; see "Approve and run" below.
 
 Because Iris reads every other conversation's cards and holds both job-creating tools, calling
