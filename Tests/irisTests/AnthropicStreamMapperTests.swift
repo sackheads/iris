@@ -182,4 +182,23 @@ struct AnthropicStreamMapperTests {
         catch let e as APIError { #expect(e.message == "Anthropic stream: unexpected payload") }
         catch { Issue.record("wrong error type \(error)") }
     }
+
+    @Test("message_start carries the 1-hour split")
+    func messageStartOneHourSplit() throws {
+        var m = AnthropicStreamMapper()
+        let data = #"{"type":"message_start","message":{"usage":{"input_tokens":5,"cache_creation_input_tokens":40,"cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":30}}}}"#
+        let events = try m.handle(SSEEvent(event: "message_start", data: data))
+        guard case .usage(let u)? = events.first else { Issue.record("no usage event"); return }
+        #expect(u.cacheWriteTokens == 40 && u.cacheWrite1hTokens == 30)
+    }
+
+    /// Plan review focus 3: a field the merge leaves out prices every streamed 1-hour write at 1.25.
+    @Test("the stream assembler carries the 1-hour split through the merge")
+    func streamAssemblerCarriesOneHourSplit() {
+        var a = StreamAssembler()
+        a.apply(.usage(UsageMetadata(promptTokenCount: 45, candidatesTokenCount: nil, totalTokenCount: nil,
+                                     cacheReadTokens: nil, cacheWriteTokens: 40, cacheWrite1hTokens: 30)), now: 0)
+        a.apply(.usage(UsageMetadata(promptTokenCount: nil, candidatesTokenCount: 9, totalTokenCount: nil)), now: 1)
+        #expect(a.response().usageMetadata?.cacheWrite1hTokens == 30)
+    }
 }

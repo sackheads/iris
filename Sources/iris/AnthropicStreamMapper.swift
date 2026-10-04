@@ -28,7 +28,8 @@ struct AnthropicStreamMapper: StreamMapper {
                 // when all three are absent, so it doubles as the "anything to report" check.
                 if let prompt = UsageMetadata.anthropicPromptTokenCount(input: input, cacheRead: cacheRead, cacheWrite: cacheWrite) {
                     return [.usage(UsageMetadata(promptTokenCount: prompt, candidatesTokenCount: nil, totalTokenCount: nil,
-                                                 cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite))]
+                                                 cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite,
+                                                 cacheWrite1hTokens: UsageMetadata.anthropicOneHourWrites(usage)))]
                 }
             }
         case "content_block_start":

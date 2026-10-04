@@ -242,12 +242,17 @@ struct UsageMetadata: Codable, Sendable {
     var cacheReadTokens: Int? = nil
     /// Tokens written to the cache this call (Anthropic only). nil when not reported.
     var cacheWriteTokens: Int? = nil
+    /// The 1-hour share of `cacheWriteTokens` (Anthropic only, 5c §0.6). nil when the response
+    /// had no `cache_creation` split: an unknown split is not a zero one.
+    var cacheWrite1hTokens: Int? = nil
 
     // Gemini's own key for the read count, so its usage decodes directly.
     enum CodingKeys: String, CodingKey {
         case promptTokenCount, candidatesTokenCount, totalTokenCount
         case cacheReadTokens = "cachedContentTokenCount"
         case cacheWriteTokens
+        // Ours, not Gemini's: Gemini never sends it.
+        case cacheWrite1hTokens
     }
 
     /// `totalTokenCount` as prompt + output when the provider left it out. The job budgets read
@@ -267,6 +272,12 @@ struct UsageMetadata: Codable, Sendable {
     static func anthropicPromptTokenCount(input: Int?, cacheRead: Int?, cacheWrite: Int?) -> Int? {
         guard input != nil || cacheRead != nil || cacheWrite != nil else { return nil }
         return (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0)
+    }
+
+    /// The 1-hour share of the cache writes (5c §0.6), from the nested `usage.cache_creation`
+    /// object. nil when the object is absent: an unknown split is not a zero one.
+    static func anthropicOneHourWrites(_ usage: [String: Any]) -> Int? {
+        (usage["cache_creation"] as? [String: Any])?["ephemeral_1h_input_tokens"] as? Int
     }
 }
 

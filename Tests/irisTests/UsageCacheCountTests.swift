@@ -93,4 +93,24 @@ struct UsageCacheCountTests {
         let afterNil = app.conversations.first { $0.id == id }!.tokenUsage
         #expect(afterNil.cacheReadTokenCount == 80 && afterNil.cacheWriteTokenCount == 10, "a nil incoming value leaves the field untouched")
     }
+
+    // 5c §0.6: the 1-hour share of the writes, read from the nested `cache_creation` object.
+    @Test("Anthropic non-stream: the nested cache_creation split is read")
+    func anthropicNonStreamOneHourSplit() throws {
+        let json: [String: Any] = ["content": [["type": "text", "text": "hi"]],
+                                   "usage": ["input_tokens": 10, "cache_read_input_tokens": 900,
+                                             "cache_creation_input_tokens": 300, "output_tokens": 7,
+                                             "cache_creation": ["ephemeral_5m_input_tokens": 100,
+                                                                "ephemeral_1h_input_tokens": 200]]]
+        let r = try AnthropicClient.parseResponse(json)
+        #expect(r.usageMetadata?.cacheWriteTokens == 300, "the total, as before")
+        #expect(r.usageMetadata?.cacheWrite1hTokens == 200, "the 1-hour share")
+    }
+
+    @Test("no cache_creation object: the split is unknown, not zero")
+    func noSplitIsNil() throws {
+        let json: [String: Any] = ["content": [["type": "text", "text": "hi"]],
+                                   "usage": ["input_tokens": 10, "cache_creation_input_tokens": 50, "output_tokens": 7]]
+        #expect(try AnthropicClient.parseResponse(json).usageMetadata?.cacheWrite1hTokens == nil)
+    }
 }

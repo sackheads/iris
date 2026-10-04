@@ -338,7 +338,8 @@ struct AnthropicClient {
                 candidatesTokenCount: usage["output_tokens"] as? Int,
                 totalTokenCount: nil,
                 cacheReadTokens: cacheRead,
-                cacheWriteTokens: cacheWrite
+                cacheWriteTokens: cacheWrite,
+                cacheWrite1hTokens: UsageMetadata.anthropicOneHourWrites(usage)
             ).withTotal()
         }
 
