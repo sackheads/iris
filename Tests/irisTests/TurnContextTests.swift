@@ -915,3 +915,69 @@ struct BriefingEngineTests {
         #expect(!leadText(requests[0]).contains("# Recent Activity"))
     }
 }
+
+/// 5c §0.8/§0.9 on a real engine turn: the hints every round of a turn carries. A real
+/// `JobLedger` over an in-memory store decides the background prefix's TTL; no globals.
+@MainActor
+@Suite("Cache hints on an engine turn (5c)")
+struct CacheHintsEngineTests {
+    private func run(pinned: Bool = false, background: Bool = false, jobs: [Job] = [],
+                     override: CacheTTLPolicy? = nil) async throws -> (id: UUID, requests: [GeminiRequest]) {
+        let store = try ConversationStore.inMemory()
+        for job in jobs { try store.ledger.upsert(job) }
+        let facts = try FactStoreManager(inMemory: true)
+        let app = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id, isBackground: background)
+        if pinned, let idx = app.conversations.firstIndex(where: { $0.id == id }) {
+            app.conversations[idx].isPinned = true
+        }
+        let client = TurnContextClient([toolCall("search_memory", ["query": .string("x")]), reply("done")])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], streamResponses: false, factStore: facts,
+                                protectionEnabled: false, sessionPeerCount: 0, cacheTTLOverride: override)
+        await engine.processInput("hi", source: "UI", conversationId: id)
+        return (id, client.requests)
+    }
+
+    private static let every15 = Job(name: "often", prompt: "p", trigger: .schedule(.interval(seconds: 900)))
+    private static let hourly = Job(name: "hourly", prompt: "p", trigger: .schedule(.interval(seconds: 3600)))
+
+    @Test("Iris: every round holds an hour on all markers, keyed by the conversation")
+    func pinnedHoldsAnHour() async throws {
+        let r = try await run(pinned: true)
+        try #require(r.requests.count == 2)
+        for request in r.requests {
+            #expect(request.cacheHints?.ttl == .init(prefix: .oneHour, history: .oneHour))
+            #expect(request.cacheHints?.promptCacheKey == r.id.uuidString)
+        }
+    }
+
+    @Test("a plain conversation stays at five minutes, still keyed")
+    func plainIsStandard() async throws {
+        let r = try await run(jobs: [Self.every15])
+        try #require(r.requests.count == 2)
+        for request in r.requests {
+            #expect(request.cacheHints?.ttl == .standard)
+            #expect(request.cacheHints?.promptCacheKey == r.id.uuidString)
+        }
+    }
+
+    @Test("a job run holds the prefix for an hour only when a job fires inside one")
+    func backgroundFollowsCadence() async throws {
+        let often = try await run(background: true, jobs: [Self.hourly, Self.every15])
+        try #require(!often.requests.isEmpty)
+        #expect(often.requests.allSatisfy { $0.cacheHints?.ttl == .init(prefix: .oneHour, history: .fiveMinutes) })
+        let rare = try await run(background: true, jobs: [Self.hourly])
+        try #require(!rare.requests.isEmpty)
+        #expect(rare.requests.allSatisfy { $0.cacheHints?.ttl == .standard })
+    }
+
+    @Test("cacheTTLOverride wins over the resolved policy")
+    func overrideWins() async throws {
+        let r = try await run(pinned: true, override: .standard)
+        try #require(!r.requests.isEmpty)
+        #expect(r.requests.allSatisfy { $0.cacheHints?.ttl == .standard })
+    }
+}

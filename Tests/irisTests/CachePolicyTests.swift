@@ -61,3 +61,45 @@ import Foundation
         #expect(applied.cacheHints == original.cacheHints)
     }
 }
+
+/// 5c §0.8: which conversation gets which TTL, and which jobs keep the background prefix warm.
+@Suite struct CachePolicyResolveTests {
+    @Test func policyByConversation() {
+        #expect(CacheTTLPolicy.resolve(isPinned: true, isUnattended: false, principal: .main, backgroundFiresHourly: false)
+                == .init(prefix: .oneHour, history: .oneHour))
+        #expect(CacheTTLPolicy.resolve(isPinned: false, isUnattended: true, principal: .main, backgroundFiresHourly: true)
+                == .init(prefix: .oneHour, history: .fiveMinutes))
+        #expect(CacheTTLPolicy.resolve(isPinned: false, isUnattended: true, principal: .main, backgroundFiresHourly: false)
+                == .standard)
+        #expect(CacheTTLPolicy.resolve(isPinned: false, isUnattended: false, principal: .main, backgroundFiresHourly: true)
+                == .standard)
+        // A subagent of Iris is not Iris.
+        #expect(CacheTTLPolicy.resolve(isPinned: true, isUnattended: false, principal: .subagent, backgroundFiresHourly: true)
+                == .standard)
+        #expect(CacheTTLPolicy.resolve(isPinned: false, isUnattended: true, principal: .evaluator, backgroundFiresHourly: true)
+                == .standard)
+    }
+
+    @Test func cadence() throws {
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        func job(_ t: Trigger, enabled: Bool = true, paused: String? = nil, action: JobAction = .prompt) -> Job {
+            var j = Job(name: "j", prompt: "p", trigger: t)
+            j.enabled = enabled; j.pausedReason = paused; j.action = action
+            return j
+        }
+        let every15 = Trigger.schedule(.interval(seconds: 900))
+        #expect(JobCadence.anyFiresMoreOftenThanHourly([job(every15)], now: now))
+        #expect(!JobCadence.anyFiresMoreOftenThanHourly([job(.schedule(.interval(seconds: 3600)))], now: now))
+        #expect(!JobCadence.anyFiresMoreOftenThanHourly([job(every15, enabled: false)], now: now))
+        #expect(!JobCadence.anyFiresMoreOftenThanHourly([job(every15, paused: "x")], now: now))
+        #expect(!JobCadence.anyFiresMoreOftenThanHourly([job(every15, action: .builtin("digest"))], now: now))
+        let cron = CronSchedule(expression: "*/20 9-17 * * 1-5", timeZone: "UTC")
+        #expect(JobCadence.anyFiresMoreOftenThanHourly([job(.schedule(.cron(cron)))], now: now))
+        let daily = CronSchedule(expression: "0 10 * * *", timeZone: "UTC")
+        #expect(!JobCadence.anyFiresMoreOftenThanHourly([job(.schedule(.cron(daily)))], now: now))
+        // Plan note 13: a poll ticks often but runs a model turn only on CHANGED.
+        let poll = Job(name: "p", prompt: "p", trigger: .poll(PollSpec(schedule: .interval(seconds: 60), gate: .pathChanged(path: "/tmp"))))
+        #expect(!JobCadence.anyFiresMoreOftenThanHourly([poll], now: now))
+        #expect(JobCadence.anyFiresMoreOftenThanHourly([job(.schedule(.cron(daily))), job(every15)], now: now))
+    }
+}

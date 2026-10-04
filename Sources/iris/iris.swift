@@ -403,8 +403,11 @@ actor IrisEngine {
     /// the round drains queued input, so a scenario can deliver an event card that this same
     /// round picks up — deterministically mid-turn (5b). Nil everywhere else.
     private let roundStartHook: (@Sendable (Int) async -> Void)?
+    /// Perf and tests: the Anthropic TTL policy for every request, instead of the one
+    /// `CacheTTLPolicy.resolve` picks (5c §0.8). Nil everywhere else.
+    private let cacheTTLOverride: CacheTTLPolicy?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil) {
         self.state = state
         self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
@@ -423,6 +426,7 @@ actor IrisEngine {
         self.roundStartHook = roundStartHook
         self.declareStateGatedTools = declareStateGatedTools
         self.stickyToolsEnabled = stickyTools
+        self.cacheTTLOverride = cacheTTLOverride
         systemPrompt = nil
     }
 
@@ -1937,6 +1941,14 @@ actor IrisEngine {
         var turnRequest = TurnRequest(context: turnContext, stateHistory: stateHistory, initialHistory: history)
 
         var request = GeminiRequest(contents: await requestContents(history, from: .initial, &turnRequest, conversationId: conversationId), systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
+        // 5c §0.8/§0.9. Set once: later rounds only replace `request.contents`. The jobs list is
+        // read only for an unattended turn, the one place it matters.
+        let firesHourly = isUnattended && principal == .main
+            && JobCadence.anyFiresMoreOftenThanHourly((try? ledger?.jobs()) ?? [], now: Date())
+        request.cacheHints = CacheHints(
+            ttl: cacheTTLOverride ?? CacheTTLPolicy.resolve(isPinned: isPinned, isUnattended: isUnattended,
+                                                            principal: principal, backgroundFiresHourly: firesHourly),
+            promptCacheKey: conversationId.uuidString)
         
         // Nothing from a previous turn decides this one: a turn cancelled mid-batch could leave a
         // denial behind, and finding it here would end the next turn before it started.
