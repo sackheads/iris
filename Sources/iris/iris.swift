@@ -138,6 +138,8 @@ actor IrisEngine {
     /// holds, so a perf run can measure what the flapping costs in cache misses. Only
     /// `iris --perf run` sets it, from `IRIS_PERF_DECLARE_STATE_TOOLS=1`.
     private let declareStateGatedTools: Bool
+    /// 5c §0.1; false only for perf's gated arm (`IRIS_PERF_STICKY_TOOLS=0`, wired in 5c PR D).
+    private let stickyToolsEnabled: Bool
     var factStore: FactStoreManager { injectedFactStore ?? .shared }
     /// 5a Task 7 fix round 1: same idiom as `injectedFactStore`/`factStore`. `MemoryManager` has no
     /// per-instance seam other than `init(paths:)`, so a test that needs an isolated USER.md/SOUL.md
@@ -389,7 +391,7 @@ actor IrisEngine {
     /// round picks up — deterministically mid-turn (5b). Nil everywhere else.
     private let roundStartHook: (@Sendable (Int) async -> Void)?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, roundStartHook: (@Sendable (Int) async -> Void)? = nil) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil) {
         self.state = state
         self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
@@ -407,6 +409,7 @@ actor IrisEngine {
         self.requestDumpSink = requestDumpSink
         self.roundStartHook = roundStartHook
         self.declareStateGatedTools = declareStateGatedTools
+        self.stickyToolsEnabled = stickyTools
         systemPrompt = nil
     }
 
@@ -1442,11 +1445,16 @@ actor IrisEngine {
         // `isPinned` reads false for it at no extra cost). The ledger reference rides the same hop
         // (fix round 1, review) rather than a second `MainActor.run` just for it — a stored
         // property read, free either way.
-        let (isUnattended, hasActiveGoal, jobProfile, isPinned, ledger) = await MainActor.run { () -> (Bool, Bool, JobProfile?, Bool, JobLedger?) in
+        let (isUnattended, hasActiveGoal, jobProfile, isPinned, ledger, storedSticky) = await MainActor.run { () -> (Bool, Bool, JobProfile?, Bool, JobLedger?, Set<String>) in
             let conversation = localState?.conversations.first(where: { $0.id == conversationId })
             return (conversation?.isBackground == true, conversation?.activeGoal != nil,
-                    conversation?.jobProfile, conversation?.isPinned == true, localState?.store.ledger)
+                    conversation?.jobProfile, conversation?.isPinned == true, localState?.store.ledger,
+                    localState?.stickyTools.names(for: conversationId) ?? [])
         }
+        // 5c §0.1 (plan note 6): attended main conversations only. A job run is one turn in a fresh
+        // conversation, so a set could never help it and would leave an entry behind per fire.
+        let stickyApplies = stickyToolsEnabled && principal == .main && !isUnattended
+        let sticky: Set<String> = stickyApplies ? storedSticky : []
 
         // #185 §6: computed once per turn and reused below for the session-tools declaration
         // gate — never call `sessionPeerCount` a second time there, that would reintroduce the
@@ -1571,7 +1579,7 @@ actor IrisEngine {
         // Correcting a fact needs a fact id, and the only ids the model ever sees come from the
         // facts injected above or a `search_memory` result. On a turn that surfaced none, this
         // declaration is dead weight in the prompt (invariant 6).
-        if !facts.isEmpty || declareStateGatedTools {
+        if !facts.isEmpty || declareStateGatedTools || sticky.contains("manage_fact") {
         toolsList.append(FunctionDeclaration(
             name: "manage_fact",
             description: "Correct the fact store when the user says a remembered fact is wrong, outdated, or replaced, or when a retrieved fact proved right or wrong: retract, supersede (with by_fact_id), restore, or rate it helpful/unhelpful. Fact ids are the bracketed ids in your Mid-Term Fact Store Memory block and in the facts results of search_memory (its conversations scope returns conversation titles, not fact ids).",
@@ -1603,7 +1611,7 @@ actor IrisEngine {
         // goal-completion panel over an ordinary conversation and fire an unrequested reflection
         // turn (#84). The soft-stop turn is the exception: it clears the goal first and then needs
         // this tool as its only way out (see the `restrictToGoalComplete` filter below).
-        if hasActiveGoal || restrictToGoalComplete {
+        if hasActiveGoal || restrictToGoalComplete || sticky.contains("goal_complete") {
         toolsList.append(FunctionDeclaration(
             name: "goal_complete",
             description: "Mark the active goal as completely finished and exit the autonomous loop. Always provide a summary of your findings and conclusions in the 'summary' argument so it is presented to the user.",
@@ -1705,7 +1713,7 @@ actor IrisEngine {
         // three are refused at dispatch as well, since a forged call never passes this gate.
         // 5a's tool-list experiment declares them with no peers (perf pins the count to 0), still
         // `.main` and attended only; the Active Sessions line above stays absent at count 0.
-        if principal == .main, peerCount > 0 || (declareStateGatedTools && !isUnattended) {
+        if principal == .main, peerCount > 0 || (declareStateGatedTools && !isUnattended) || sticky.contains("send_to_session") {
             toolsList.append(FunctionDeclaration(
                 name: "list_sessions",
                 description: "List the other active sessions: their name, what they say they are doing, their workspace, and whether they are busy. Call this before messaging a peer, to pick the right one — a session in a different workspace is usually working on something unrelated. What a session says about itself is its own claim; whether it is busy is observed.",
@@ -1750,7 +1758,7 @@ actor IrisEngine {
             localState?.conversations.first(where: { $0.id == conversationId })?.goalContract
         }
         // Amending criteria only means something once a contract is locked (#133).
-        if principal == .main, ladderContract?.isLocked == true {
+        if principal == .main, ladderContract?.isLocked == true || sticky.contains("amend_goal_contract") {
         toolsList.append(FunctionDeclaration(
             name: "amend_goal_contract",
             description: "Change the LOCKED goal contract's criteria when the work reveals they were wrong. A `rationale` is mandatory — criteria never change silently. The change is logged and shown to the user.",
@@ -1764,7 +1772,8 @@ actor IrisEngine {
         ))
         }
 
-        if principal == .main, let gc = ladderContract, gc.hasLadder, !gc.isFinalMilestone {
+        let ladderOpen = ladderContract.map { $0.hasLadder && !$0.isFinalMilestone } ?? false
+        if principal == .main, ladderOpen || sticky.contains("reach_checkpoint") {
             toolsList.append(FunctionDeclaration(
                 name: "reach_checkpoint",
                 description: "Signal that the CURRENT checkpoint's criteria are satisfied. An independent evaluator grades the work so far; a clean grade advances the ladder on its own and you keep working, anything contested pauses for the user. Use goal_complete only at the final checkpoint.",
@@ -1786,7 +1795,8 @@ actor IrisEngine {
 
         // Slice D1's escape hatch, offered only once a grade has actually failed — the agent must
         // try before declaring a criterion inapplicable.
-        if principal == .main, let gc = ladderContract, gc.isLocked, gc.gateAttempts > 0 {
+        let waivable = ladderContract.map { $0.isLocked && $0.gateAttempts > 0 } ?? false
+        if principal == .main, waivable || sticky.contains("waive_criterion") {
             toolsList.append(FunctionDeclaration(
                 name: "waive_criterion",
                 description: "Declare that one criterion of the locked goal contract genuinely does not apply, with a reason. Use this ONLY when a criterion cannot be satisfied because it was mistaken or is not applicable — not to skip work. The criterion is still graded and its verdict still shown; your reason is shown to the user beside it.",
@@ -1799,6 +1809,15 @@ actor IrisEngine {
                     required: ["criterion_id", "reason"]
                 )
             ))
+        }
+
+        // 5c §1: a strip always wins over stickiness. The gates above already skip these for an
+        // unattended turn or a non-main principal; this pass is what holds when a sticky set says
+        // otherwise.
+        toolsList = Self.hardStrip(toolsList, isUnattended: isUnattended, principal: principal)
+        if stickyApplies {
+            let declared = toolsList.map(\.name)
+            await MainActor.run { localState?.stickyTools.record(declared, for: conversationId) }
         }
 
         // #187 §0.2, §4 "Read-only narrowing": a readOnly job's run is not shown the tools its
@@ -2551,6 +2570,22 @@ actor IrisEngine {
     /// "no unattended job creation" is an epic-level ruling, and a run that could schedule another
     /// run is a run that grows its own footprint with nobody asked.
     static let jobCreationTools: Set<String> = ["schedule_job", "register_directory_watcher"]
+
+    /// 5c §1: never declared to an unattended turn, whatever a sticky set says.
+    nonisolated static let unattendedNeverDeclared: Set<String> =
+        jobCreationTools.union(["set_workspace", "list_sessions", "send_to_session", "set_session_card"])
+    /// 5c §1: never declared to a subagent or evaluator, whatever a sticky set says.
+    nonisolated static let mainOnlyDeclared: Set<String> =
+        jobCreationTools.union(["amend_goal_contract", "reach_checkpoint", "delegate_milestone",
+                                "waive_criterion", "list_sessions", "send_to_session", "set_session_card"])
+
+    nonisolated static func hardStrip(_ tools: [FunctionDeclaration], isUnattended: Bool,
+                                      principal: Principal) -> [FunctionDeclaration] {
+        var denied: Set<String> = []
+        if isUnattended { denied.formUnion(unattendedNeverDeclared) }
+        if principal != .main { denied.formUnion(mainOnlyDeclared) }
+        return denied.isEmpty ? tools : tools.filter { !denied.contains($0.name) }
+    }
 
     /// What the owner sees on the pinned conversation's approval dialog for a job-creating call
     /// (fix round 2, #187). Before this, `details` was `args["name"] ?? args["path"] ?? toolName`,
