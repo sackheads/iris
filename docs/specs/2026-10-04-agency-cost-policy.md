@@ -49,7 +49,7 @@ These were checked against the code and live, 2026-10-04.
    - `cacheWrite1hTokens`, which is the 1-hour **share** of that total;
    - `provider` and `tier`, written at `begin(run:)`.
 
-   Weighted totals are computed from the components and the run's own provider wherever they are needed, never from the current provider, and they are never stored. A row with no provider (written before 5c) is priced at r = w = 1, which is today's behaviour.
+   Weighted totals are computed from the components and the run's own provider wherever they are needed, never from the current provider, and they are never stored. A row with no provider (written before 5c) is priced as its plain `totalTokens`, every component at 1× and output included. That is today's behaviour, and old event cards are treated the same way.
 
    The 1-hour split arrives as a nested `usage.cache_creation` object (`ephemeral_5m_input_tokens`, `ephemeral_1h_input_tokens`). Today neither the non-streaming parse nor the SSE `message_start` path reads it. Both must.
 7. **One unit everywhere a budget is compared or shown:**
@@ -94,7 +94,7 @@ These were checked against the code and live, 2026-10-04.
   - an off-state refusal for every sticky tool;
   - the prefix-only-grows test;
   - the weights table and re-pricing;
-  - the ledger columns (pre-5c rows load as zeros, priced at r = w = 1);
+  - the ledger columns (pre-5c rows load as zeros and are priced as plain `totalTokens`);
   - the nested `cache_creation` split on both the non-streaming and the SSE parse;
   - admission and `TurnBudget` in weighted units;
   - the TTL marker policy and ordering;
