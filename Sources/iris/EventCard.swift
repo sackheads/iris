@@ -462,8 +462,10 @@ struct EventCard: Codable, Equatable, Sendable {
     var watchMetadataText: String? { watchSummary?.figuresText() }
 
     /// `1.3k weighted tokens` on a card that carries the weighted figure; `4.2k tokens`, the raw
-    /// total, on one written before 5c.
-    var tokensText: String {
+    /// total, on one written before 5c. nil on a built-in's card: it spends nothing by
+    /// construction, so a token figure there says nothing.
+    var tokensText: String? {
+        if builtin { return nil }
         if let weightedTokens { return "\(SessionActivity.formatTokenCount(weightedTokens)) weighted tokens" }
         return "\(SessionActivity.formatTokenCount(totalTokens)) tokens"
     }
@@ -471,7 +473,8 @@ struct EventCard: Codable, Equatable, Sendable {
     /// The card's right-hand line — `1m 15s · 1.3k weighted tokens`, then the watch figures when
     /// the burst had any. Pure so the view can render it without owning the wording.
     var metadataLine: String {
-        var line = "\(elapsedText) · \(tokensText)"
+        var line = elapsedText
+        if let tokensText { line += " · \(tokensText)" }
         if network { line += " · network" }
         if let watchMetadataText { line += " · \(watchMetadataText)" }
         return line
@@ -481,7 +484,7 @@ struct EventCard: Codable, Equatable, Sendable {
     /// Markdown export print in place of the card's JSON (spec §8.2).
     var transcriptLine: String {
         if isReflection { return "[memory reflection in \(reflectionSourceText)] \(reflectionSummaryLine)" }
-        let head = "[job \(jobName) · \(statusText) · \(tokensText)]"
+        let head = "[job \(jobName) · \(statusText)\(tokensText.map { " · \($0)" } ?? "")]"
         var line = head
         if let outcome, !outcome.isEmpty { line += " \(outcome)" }
         // Appended rather than dropped: the view reads this out as its accessibility label, and a

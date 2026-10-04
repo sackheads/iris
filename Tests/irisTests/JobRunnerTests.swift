@@ -577,7 +577,29 @@ struct JobRunnerTests {
         #expect(run.provider == nil && run.tier == nil)
     }
 
-    // MARK: overlap and launch bookkeeping
+    /// A run refused before its turn (here, a mutating job with no VM) spent nothing, and its
+    /// card says so in the budget's unit, not as a raw "0 tokens" (5c).
+    @Test("a run refused before its turn shows zero weighted tokens on its card")
+    func refusedRunCardSaysZeroWeighted() async throws {
+        let (store, state, engine, client, _) = try harness([textResponse("never")])
+        let job = self.job(profile: .mutating)
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
+                               now: { Date(timeIntervalSince1970: 1_700_000_000) }, config: config,
+                               sandboxAvailable: { false })
+
+        await runner.fire(job: job, origin: .schedule)
+
+        #expect(client.callCount == 0)
+        let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
+        let card = try #require(activity.messages.compactMap { EventCard.decode($0.content) }.last)
+        #expect(card.status == .failed)
+        #expect(card.weightedTokens == 0)
+        #expect(card.metadataLine.contains("0 weighted tokens"))
+    }
+
 
     @Test("a skipped overlap is recorded as an interrupted run with no transcript")
     func recordSkipWritesAnInterruptedRow() throws {

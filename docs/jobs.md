@@ -1013,7 +1013,8 @@ carries the same figures as fields — `weightedTokensToday`, `dailyBudget`, `ru
 counts, its cache reads and writes, its provider and its `weightedTokens`, so the model answers "how
 much has this job spent today?" from the same arithmetic admission decides on. A figure that could not be read is a dash in the table and a
 `null` in the tool, never a zero: "nothing spent today" is a claim, and an unreadable ledger is not
-one. A pause still names the figure that caused it, in the
+one. One row that will not read inside an otherwise readable day is different: `weightedTokensToday`
+prices it at zero and logs it, which errs lenient, toward letting a job run. A pause still names the figure that caused it, in the
 pause reason the table prints, on the `interrupted` row and on the card.
 
 ## `/jobs`

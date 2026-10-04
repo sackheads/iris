@@ -103,6 +103,14 @@ struct EventCardTests {
         #expect(roundTripped.weightedTokens == 1_300)
     }
 
+    @Test func builtinCardsNameNoTokenFigure() {
+        let card = EventCard(runId: UUID(), jobId: UUID(), jobName: "Daily digest", status: .completed,
+                             outcome: "x", startedAt: Self.started, finishedAt: Self.finished, builtin: true)
+        #expect(!card.metadataLine.contains("tokens"))
+        #expect(card.metadataLine == card.elapsedText)
+        #expect(card.transcriptLine.hasPrefix("[job Daily digest · \(card.statusText)] x"))
+    }
+
     // MARK: The outcome body (5b §0.7: the digest's later lines must be visible)
 
     private func builtinCard(outcome: String?, builtin: Bool, kind: String = "job_run") -> EventCard {

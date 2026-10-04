@@ -876,7 +876,7 @@ actor JobRunner {
             // whichever site wrote it.
             await deliver(EventCard(runId: run.id, jobId: job.id, jobName: job.name,
                                     status: .interrupted, outcome: reason, startedAt: at,
-                                    finishedAt: at, catchUpNote: note,
+                                    finishedAt: at, weightedTokens: 0, catchUpNote: note,
                                     network: job.effectiveGrant?.network == true), for: job)
         } catch {
             print("[JobRunner] could not record the pause for \(job.name): \(error)")
@@ -1385,7 +1385,7 @@ actor JobRunner {
         let card = EventCard(runId: approved.id, jobId: job.id, jobName: job.name,
                              status: failed ? .failed : .completed, outcome: outcome,
                              blockedTool: nil, startedAt: startedAt, finishedAt: finishedAt,
-                             totalTokens: 0, transcriptConversationId: conversationId,
+                             totalTokens: 0, weightedTokens: 0, transcriptConversationId: conversationId,
                              network: grant?.network == true)
         await closeSession(conversationId, status: card.statusText)
         await deliver(card, for: job)
@@ -1615,6 +1615,7 @@ actor JobRunner {
                              outcome: Self.cardOutcome(reason, retry: retry, now: finishedAt),
                              blockedTool: nil,
                              startedAt: run.startedAt, finishedAt: finishedAt, totalTokens: 0,
+                             weightedTokens: 0,
                              transcriptConversationId: conversationId, catchUpNote: note,
                              network: grant?.network == true,
                              watchSummary: run.watchSummary)

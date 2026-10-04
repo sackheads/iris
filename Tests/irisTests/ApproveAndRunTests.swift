@@ -436,6 +436,9 @@ struct ApproveAndRunTests {
         #expect(card.status == .completed)
         #expect(card.outcome?.hasPrefix("Successfully wrote to ") == true)
         #expect(card.blockedCall == nil, "the follow-up card has nothing left to approve")
+        // No model turn, so nothing spent — said in the budget's own unit (5c).
+        #expect(card.weightedTokens == 0)
+        #expect(card.metadataLine.contains("0 weighted tokens"))
     }
 
     @Test("a second click runs nothing and writes no second row")
