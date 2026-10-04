@@ -1,6 +1,15 @@
 import Foundation
 
 struct AnthropicClient {
+    /// A `cache_control` value. Five minutes is the bare `ephemeral`, byte-identical to pre-5c;
+    /// an hour adds `ttl` (no beta header: 5c spec facts).
+    static func cacheControl(_ ttl: CacheTTL) -> [String: Any] {
+        switch ttl {
+        case .fiveMinutes: return ["type": "ephemeral"]
+        case .oneHour: return ["type": "ephemeral", "ttl": "1h"]
+        }
+    }
+
     /// The full request for one call against `api.anthropic.com` (or a proxy at `baseURL`).
     static func makeURLRequest(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "", stream: Bool) throws -> URLRequest {
         try makeURLRequest(request: request, model: model, transport: .direct(apiKey: apiKey, baseURL: baseURL), stream: stream)
@@ -132,7 +141,11 @@ struct AnthropicClient {
         // input, a system event, a reprompt. A mid-turn steer that rides its own entry qualifies
         // too, which moves (b)/(c) to the steer; that costs at most one turn of reuse, and only
         // on the turn after a steer. With fewer than two entries the missing markers are skipped.
-        let ephemeral: [String: Any] = ["cache_control": ["type": "ephemeral"]]
+        // TTL (5c §0.8): (a) takes the hints' prefix TTL, (b)-(d) their history TTL; no hints is
+        // five minutes everywhere, byte-identical to pre-5c. Longer TTLs must precede shorter
+        // ones; `CacheTTLPolicy` clamps history to the prefix, so this order always holds.
+        let ttl = request.cacheHints?.ttl ?? .standard
+        let ephemeral: [String: Any] = ["cache_control": Self.cacheControl(ttl.history)]
         func markLastContentBlock(_ messages: inout [[String: Any]], at index: Int) {
             var msg = messages[index]
             if var content = msg["content"] as? [[String: Any]], !content.isEmpty {
@@ -170,7 +183,7 @@ struct AnthropicClient {
         }
         
         if !systemPrompt.isEmpty {
-            body["system"] = [["type": "text", "text": systemPrompt, "cache_control": ["type": "ephemeral"]]]
+            body["system"] = [["type": "text", "text": systemPrompt, "cache_control": Self.cacheControl(ttl.prefix)]]
         }
         
         if let tools = request.tools, let fds = tools.first?.functionDeclarations {
@@ -215,7 +228,7 @@ struct AnthropicClient {
                 // Marker (a) sits on system, which covers the tools; only without one do the
                 // tools need their own.
                 if systemPrompt.isEmpty {
-                    anthropicTools[anthropicTools.count - 1]["cache_control"] = ["type": "ephemeral"]
+                    anthropicTools[anthropicTools.count - 1]["cache_control"] = Self.cacheControl(ttl.prefix)
                 }
                 body["tools"] = anthropicTools
             }
