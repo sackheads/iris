@@ -52,12 +52,12 @@ struct ToolExecutor {
         var tools = [
             FunctionDeclaration(
             name: "run_command",
-            description: "Executes a shell command. Use this for standard operations.",
+            description: "Executes a shell command. Use this for standard operations. When the command exits on the host, any background process still holding its output pipes is killed; redirect its output (`cmd > log 2>&1 &`) to keep it running.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
                     "command": Schema(type: "STRING", description: "The command to run in bash/zsh"),
-                    "timeout_seconds": Schema(type: "INTEGER", description: "Optional timeout in seconds (default 600, max 3600). Set higher for long-running operations like docker builds or package installs.")
+                    "timeout_seconds": Schema(type: "INTEGER", description: "Optional timeout in seconds (default 600, max 3600). Set higher for long-running operations like docker builds or package installs. At the deadline the command and everything it started are killed.")
                 ],
                 required: ["command"]
             )
@@ -435,88 +435,84 @@ struct ToolExecutor {
                                                           workspace: workspace, extraMounts: extraMounts,
                                                           network: network, timeoutSeconds: deadline)
         }
-        // Hoist process/pipes so the cancellation handler can capture them.
-        let process = Process()
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
+        let executable: String
+        let arguments: [String]
+        let directory: String?
+        let environment: [String: String]?
+        // Named, so a timeout or a cancel can delete it: killing the `container run` client does
+        // not stop the container, and the command ran on in the VM (#353).
+        var ephemeralContainer: (binary: String, name: String)? = nil
         if useSandbox {
             guard let containerPath = SandboxingManager.shared.containerBinaryPath else {
                 return "Error: sandboxing is on but the container runtime isn't installed. Open Iris Settings → Sandboxing to install it, or turn sandboxing off."
             }
-            process.executableURL = URL(fileURLWithPath: containerPath)
-            var containerArgs = ["run", "--rm", ConfigManager.shared.sandboxImage, "bash", "-c", command]
+            executable = containerPath
+            let name = "iris-run-\(UUID().uuidString.lowercased())"
+            ephemeralContainer = (containerPath, name)
+            var containerArgs = ["run", "--rm", "--name", name, ConfigManager.shared.sandboxImage, "bash", "-c", command]
             if let cwd = cwd {
                 let expandedPath = (cwd as NSString).expandingTildeInPath
                 // `-v`, where the session path uses `--mount` (see `ContainerMount`). The CLI
                 // lowers both to the same virtiofs bind; this one is the ephemeral no-conversation
                 // path and is left as it was rather than changed for symmetry alone.
-                containerArgs.insert(contentsOf: ["-v", "\(expandedPath):\(expandedPath)", "--workdir", expandedPath], at: 2)
+                containerArgs.insert(contentsOf: ["-v", "\(expandedPath):\(expandedPath)", "--workdir", expandedPath], at: 4)
             }
-            process.arguments = containerArgs
+            arguments = containerArgs
+            directory = nil
+            environment = nil
         } else {
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-c", command]
-            if let cwd = cwd {
-                process.currentDirectoryURL = URL(fileURLWithPath: (cwd as NSString).expandingTildeInPath)
-            }
-            process.environment = BinaryResolver.commandEnvironment(base: ProcessInfo.processInfo.environment)
+            executable = "/bin/zsh"
+            arguments = ["-c", command]
+            directory = cwd.map { ($0 as NSString).expandingTildeInPath }
+            environment = BinaryResolver.commandEnvironment(base: ProcessInfo.processInfo.environment)
         }
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
 
+        // Its own process group, killed whole on timeout and on Stop: SIGTERM, then SIGKILL (#353).
+        // Killing the shell's pid alone orphans whatever it forked — `sleep 30; true` — and an
+        // orphan that inherited the pipes holds them open. After a normal exit, a background job
+        // still holding the pipes is killed rather than waited on, so it cannot block the answer
+        // (invariant 4); one that redirected its output is left running.
+        let runner = ProcessGroupRunner()
         do {
             return try await withTimeout(seconds: timeoutSeconds) {
                 await withTaskCancellationHandler {
-                    await withCheckedContinuation { continuation in
-                        process.terminationHandler = { proc in
-                            // Kill direct children before reading pipes. Child processes that
-                            // inherited these pipe file descriptors (e.g. a CLI plugin spawned
-                            // by the main process) keep the write end open after the parent dies,
-                            // causing readDataToEndOfFile() to block until they exit too.
-                            let killer = Process()
-                            killer.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-                            killer.arguments = ["-9", "-P", String(proc.processIdentifier)]
-                            killer.standardOutput = FileHandle.nullDevice
-                            killer.standardError = FileHandle.nullDevice
-                            try? killer.run()
-                            killer.waitUntilExit()
-
-                            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-
-                            var result = ""
-                            if let outputStr = String(data: outputData, encoding: .utf8), !outputStr.isEmpty {
-                                result += outputStr
-                            }
-                            if let errorStr = String(data: errorData, encoding: .utf8), !errorStr.isEmpty {
-                                result += "\nStderr: " + errorStr
-                            }
-
-                            // When sandboxing is on and the `container` runtime failed to start the command
-                            // (not provisioned: services down or no VM kernel), it emits opaque errors like
-                            // "unauthorized request". Rewrite those to an actionable message so the model and
-                            // user aren't left guessing (which previously led to confabulated "auth wall"
-                            // explanations).
-                            if useSandbox, proc.terminationStatus != 0,
-                               let hint = Self.sandboxSetupHint(for: result) {
-                                continuation.resume(returning: hint)
-                                return
-                            }
-
-                            continuation.resume(returning: result.isEmpty ? "Success" : result)
-                        }
-
-                        do {
-                            try process.run()
-                        } catch {
-                            continuation.resume(returning: "Error executing command: \(error.localizedDescription)")
-                        }
+                    let outcome = await runner.run(executable: executable, arguments: arguments,
+                                                   environment: environment, currentDirectory: directory)
+                    let output: ProcessGroupRunner.Output
+                    switch outcome {
+                    case .success(let o): output = o
+                    case .failure(let error): return "Error executing command: \(error.localizedDescription)"
                     }
+                    var result = ""
+                    if let outputStr = String(data: output.stdout, encoding: .utf8), !outputStr.isEmpty {
+                        result += outputStr
+                    }
+                    if let errorStr = String(data: output.stderr, encoding: .utf8), !errorStr.isEmpty {
+                        result += "\nStderr: " + errorStr
+                    }
+                    // When sandboxing is on and the `container` runtime failed to start the command
+                    // (not provisioned: services down or no VM kernel), it emits opaque errors like
+                    // "unauthorized request". Rewrite those to an actionable message so the model and
+                    // user aren't left guessing (which previously led to confabulated "auth wall"
+                    // explanations).
+                    if useSandbox, output.status != 0, let hint = Self.sandboxSetupHint(for: result) {
+                        return hint
+                    }
+                    return result.isEmpty ? "Success" : result
                 } onCancel: {
-                    process.terminate()
+                    // Safe before the launch too: the runner then never spawns. `Process.terminate()`
+                    // raised on a process that had not been launched yet.
+                    runner.terminate()
                 }
             }
         } catch {
+            if let ephemeralContainer {
+                let binary = ephemeralContainer.binary, name = ephemeralContainer.name
+                Task {
+                    _ = try? await CLIProcessRunner(executable: binary)
+                        .run(["delete", "--force", name], timeoutSeconds: CLIContainerRuntime.housekeepingTimeoutSeconds)
+                }
+            }
             return Self.commandTimedOutMessage(seconds: timeoutSeconds)
         }
     }

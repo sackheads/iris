@@ -71,6 +71,25 @@ struct VibecopTimeoutTests {
         #expect(verdict?.decision == "DENY")
     }
 
+    @Test("an Ollama warm-up probe that never answers is bounded, and taken as a cold model")
+    func wedgedOllamaProbeIsBounded() async {
+        let started = Date()
+        let budget = await AppState.ollamaVibecopBudget(configured: 7, probeSeconds: 0.2) {
+            await TimeoutTests.ignoresCancellation(seconds: 3)
+            return true
+        }
+        #expect(Date().timeIntervalSince(started) < 1.0)
+        #expect(budget == AppState.ollamaColdBudgetSeconds)
+    }
+
+    @Test("the Ollama probe's answer picks the budget")
+    func ollamaProbeAnswers() async {
+        #expect(await AppState.ollamaVibecopBudget(configured: 7, probeSeconds: 5) { true } == 7)
+        #expect(await AppState.ollamaVibecopBudget(configured: 7, probeSeconds: 5) { false } == AppState.ollamaColdBudgetSeconds)
+        // No engine to ask: the configured bound, as before.
+        #expect(await AppState.ollamaVibecopBudget(configured: 7, probeSeconds: 5) { nil } == 7)
+    }
+
     @Test("an evaluation that throws yields no verdict")
     func failingEvaluation() async {
         struct Down: Error {}

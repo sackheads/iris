@@ -577,8 +577,47 @@ struct CLIContainerRuntime: ContainerRuntime {
         return names
     }
 
+    /// The command runs under a wrapper that records its process group in the container, so a
+    /// timeout or a cancel can kill it there (#353). Killing the `container exec` client on the
+    /// host does not reach into the VM — measured 2026-10-04, CLI 1.1.0: the client fails to
+    /// forward the signal ("missing signal in xpc message"), and the command and everything it
+    /// forked run on in the container after the client is SIGKILLed.
     func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws -> (stdout: String, stderr: String, exitCode: Int32) {
-        try await launch(["exec", "-w", workdir, name, "bash", "-c", command], timeoutSeconds)
+        let pidFile = Self.execPidFile(token: UUID().uuidString)
+        do {
+            return try await launch(["exec", "-w", workdir, name, "bash", "-c", Self.recordingWrapper(pidFile), "iris-exec", command],
+                                    timeoutSeconds)
+        } catch {
+            if error is CancellationError || Self.isTimeout(error) {
+                // Unstructured: a cancelled caller's own task would refuse to launch it, and the
+                // caller hears back now rather than after the kill's grace.
+                let launch = self.launch
+                Task { _ = try? await launch(["exec", name, "bash", "-c", Self.groupKiller(pidFile)], Self.housekeepingTimeoutSeconds) }
+            }
+            throw error
+        }
+    }
+
+    private static func isTimeout(_ error: Error) -> Bool {
+        if case ContainerRuntimeError.timedOut = error { return true }
+        return false
+    }
+
+    static func execPidFile(token: String) -> String { "/tmp/.iris-exec-\(token).pid" }
+
+    /// `bash -c <this> iris-exec <command>`: notes its own pid — the group `container exec` makes
+    /// it the leader of — runs the command as `bash -c` always ran it, and passes its status on.
+    /// Not `exec`, so the note can be removed on the way out. If `/tmp` is not writable the command
+    /// runs all the same; only the kill on timeout is lost.
+    static func recordingWrapper(_ pidFile: String) -> String {
+        "printf %s \"$$\" > \(pidFile) 2>/dev/null; bash -c \"$1\"; s=$?; rm -f \(pidFile); exit $s"
+    }
+
+    /// SIGTERM to the recorded group, a grace, then SIGKILL. A group that already finished removed
+    /// its note, so there is nothing to signal.
+    static func groupKiller(_ pidFile: String) -> String {
+        "[ -s \(pidFile) ] || exit 0; p=$(cat \(pidFile)); kill -TERM -- -\"$p\" 2>/dev/null; "
+            + "sleep \(Int(CLIProcessRunner.killGraceSeconds)); kill -KILL -- -\"$p\" 2>/dev/null; rm -f \(pidFile)"
     }
 
     func remove(name: String) async {
