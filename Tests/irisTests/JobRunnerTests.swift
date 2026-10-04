@@ -427,6 +427,26 @@ struct JobRunnerTests {
         #expect(destination.messages.filter { $0.role == .event }.count == 1)
     }
 
+    @Test("an archived destination sends the card to Iris instead")
+    func archivedDestinationFallsBackToIris() async throws {
+        let (store, state, engine, _, userConversation) = try harness([textResponse("tick")])
+        let i = try #require(state.conversations.firstIndex { $0.id == userConversation })
+        state.conversations[i].isArchived = true
+        let job = self.job(destination: userConversation)
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config)
+
+        await runner.fire(job: job, origin: .schedule)
+
+        let archived = try #require(state.conversations.first { $0.id == userConversation })
+        #expect(archived.messages.filter { $0.role == .event }.isEmpty)
+        let iris = try #require(state.conversations.first { $0.id == state.activityConversationId() })
+        #expect(iris.id != userConversation)
+        #expect(iris.messages.filter { $0.role == .event }.count == 1)
+    }
+
     /// #187 deliverable 4, §7: the watched folder was deleted or unmounted, so the stream is gone
     /// and nothing will ever wake this job again. Stopping it quietly would leave a watch that
     /// looks live in `/jobs` and never fires, which is the failure mode hardest to notice.
