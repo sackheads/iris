@@ -935,6 +935,10 @@ actor JobRunner {
         // Nil for every fire no burst started, which is what leaves the column null on the rows
         // §6 says it should be null on.
         run.watchSummary = summary
+        // 5c §0.6: whose prices this run's spend is weighed at, for as long as the row exists.
+        // Only here: every other row (gate, built-in, stillborn, approved call) spends nothing.
+        run.provider = config.primaryProvider
+        run.tier = await engine?.modelTier.rawValue
         do {
             try ledger.begin(run: run)
         } catch {

@@ -545,6 +545,38 @@ struct JobRunnerTests {
         await manager.stopAll()
     }
 
+    /// 5c §0.6: the model-turn row records whose prices apply to it — the configured provider and
+    /// the engine's tier — so a weighted total is never priced with whatever is configured later.
+    @Test("a model-turn run's row carries the configured provider and the engine's tier")
+    func modelTurnRowCarriesProviderAndTier() async throws {
+        let usage = UsageMetadata(promptTokenCount: 11, candidatesTokenCount: 7, totalTokenCount: 18)
+        let (store, state, engine, _, _) = try harness([textResponse("tick", tokens: usage)])
+        let job = self.job()
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        config.primaryProvider = "OpenAI"
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
+                               now: { Date(timeIntervalSince1970: 1_700_000_000) }, config: config)
+
+        await runner.fire(job: job, origin: .schedule)
+
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.provider == "OpenAI")
+        #expect(run.tier == ModelTier.medium.rawValue)
+    }
+
+    @Test("a row that spent nothing carries no provider")
+    func skipRowCarriesNoProvider() throws {
+        let store = try ConversationStore.inMemory()
+        let job = self.job(name: "slow")
+        try store.ledger.upsert(job)
+        try JobRunner.recordSkip(job: job, ledger: store.ledger, triggerKind: "schedule",
+                                 now: Date(timeIntervalSince1970: 1_700_000_500))
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.provider == nil && run.tier == nil)
+    }
+
     // MARK: overlap and launch bookkeeping
 
     @Test("a skipped overlap is recorded as an interrupted run with no transcript")

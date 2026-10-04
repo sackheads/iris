@@ -299,8 +299,9 @@ extension JobLedger {
                     id, jobId, jobName, triggerKind, startedAt, finishedAt, status, outcome,
                     failureReason, blockedTool, promptTokens, candidateTokens, totalTokens,
                     costMicros, gateSignal, transcriptConversationId, acknowledgedAt,
-                    blockedCall, approvedAt, parentRunId, watchSummary)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    blockedCall, approvedAt, parentRunId, watchSummary, provider, tier,
+                    cacheReadTokens, cacheWriteTokens, cacheWrite1hTokens)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     run.id.uuidString, run.jobId.uuidString, run.jobName, run.triggerKind,
                     run.startedAt, run.finishedAt, run.status.rawValue, run.outcome,
@@ -308,7 +309,8 @@ extension JobLedger {
                     run.totalTokens, run.costMicros, run.gateSignal,
                     run.transcriptConversationId?.uuidString, run.acknowledgedAt,
                     blockedCallJSON, run.approvedAt, run.parentRunId?.uuidString,
-                    watchSummaryJSON,
+                    watchSummaryJSON, run.provider, run.tier,
+                    run.cacheReadTokens, run.cacheWriteTokens, run.cacheWrite1hTokens,
                 ])
         }
     }
@@ -325,11 +327,14 @@ extension JobLedger {
             try db.execute(sql: """
                 UPDATE job_runs SET
                     status = ?, outcome = ?, failureReason = ?, blockedTool = ?,
-                    promptTokens = ?, candidateTokens = ?, totalTokens = ?, finishedAt = ?
+                    promptTokens = ?, candidateTokens = ?, totalTokens = ?,
+                    cacheReadTokens = ?, cacheWriteTokens = ?, cacheWrite1hTokens = ?, finishedAt = ?
                 WHERE id = ?
                 """, arguments: [
                     status.rawValue, trimmed, failureReason, blockedTool,
                     tokens.promptTokenCount, tokens.candidatesTokenCount, tokens.totalTokenCount,
+                    tokens.cacheReadTokenCount ?? 0, tokens.cacheWriteTokenCount ?? 0,
+                    tokens.cacheWrite1hTokenCount ?? 0,
                     finishedAt, runId.uuidString,
                 ])
             guard db.changesCount > 0 else { throw JobLedgerError.unknownRun(runId) }
@@ -351,10 +356,15 @@ extension JobLedger {
         try writer.write { db in
             try db.execute(sql: """
                 UPDATE job_runs SET promptTokens = MAX(promptTokens, ?),
-                    candidateTokens = MAX(candidateTokens, ?), totalTokens = MAX(totalTokens, ?)
+                    candidateTokens = MAX(candidateTokens, ?), totalTokens = MAX(totalTokens, ?),
+                    cacheReadTokens = MAX(COALESCE(cacheReadTokens, 0), ?),
+                    cacheWriteTokens = MAX(COALESCE(cacheWriteTokens, 0), ?),
+                    cacheWrite1hTokens = MAX(COALESCE(cacheWrite1hTokens, 0), ?)
                 WHERE id = ? AND status = ?
                 """, arguments: [
                     tokens.promptTokenCount, tokens.candidatesTokenCount, tokens.totalTokenCount,
+                    tokens.cacheReadTokenCount ?? 0, tokens.cacheWriteTokenCount ?? 0,
+                    tokens.cacheWrite1hTokenCount ?? 0,
                     runId.uuidString, JobRun.Status.running.rawValue,
                 ])
         }
@@ -732,6 +742,12 @@ extension JobLedger {
         run.promptTokens = try r.read("promptTokens", Int.self) ?? 0
         run.candidateTokens = try r.read("candidateTokens", Int.self) ?? 0
         run.totalTokens = try r.read("totalTokens", Int.self) ?? 0
+        // NULL on a pre-5c row (v15): 0 and unknown, which prices it at its plain total.
+        run.cacheReadTokens = try r.read("cacheReadTokens", Int.self) ?? 0
+        run.cacheWriteTokens = try r.read("cacheWriteTokens", Int.self) ?? 0
+        run.cacheWrite1hTokens = try r.read("cacheWrite1hTokens", Int.self) ?? 0
+        run.provider = try r.read("provider", String.self)
+        run.tier = try r.read("tier", String.self)
         run.costMicros = try r.read("costMicros", Int64.self)
         run.gateSignal = try r.read("gateSignal", String.self)
         run.acknowledgedAt = try r.read("acknowledgedAt", Date.self)

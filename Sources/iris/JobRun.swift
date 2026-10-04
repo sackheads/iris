@@ -30,6 +30,16 @@ struct JobRun: Identifiable, Equatable, Sendable {
     var promptTokens: Int
     var candidateTokens: Int
     var totalTokens: Int
+    /// The run's cache components (5c §0.6), raw: `cacheWriteTokens` is every write and
+    /// `cacheWrite1hTokens` the 1-hour share of it. 0 on a row written before 5c.
+    var cacheReadTokens: Int = 0
+    var cacheWriteTokens: Int = 0
+    var cacheWrite1hTokens: Int = 0
+    /// Whose prices apply to this run: `LLMProvider.rawValue` and `ModelTier.rawValue`, stamped on
+    /// a model-turn run at `begin`. nil on a row that spent nothing, and on every pre-5c row,
+    /// which `CostWeights` then prices at its plain total.
+    var provider: String?
+    var tier: String?
     /// Reserved: nothing computes a cost yet (spec §6.3).
     var costMicros: Int64?
     /// What the run's gate saw — an ETag, an mtime, a hash (#187 deliverable 3, spec §7). Compared
@@ -69,6 +79,8 @@ struct JobRun: Identifiable, Equatable, Sendable {
         self.promptTokens = 0
         self.candidateTokens = 0
         self.totalTokens = 0
+        self.provider = nil
+        self.tier = nil
         self.costMicros = nil
         self.gateSignal = nil
         self.transcriptConversationId = transcriptConversationId
@@ -77,6 +89,15 @@ struct JobRun: Identifiable, Equatable, Sendable {
         self.approvedAt = nil
         self.parentRunId = nil
         self.watchSummary = nil
+    }
+}
+
+extension JobRun {
+    /// This row as the weight table prices it; the same split as `TokenUsage.components`.
+    var components: UsageComponents {
+        UsageComponents(prompt: promptTokens, output: max(candidateTokens, totalTokens - promptTokens),
+                        cacheRead: cacheReadTokens, cacheWrite: cacheWriteTokens,
+                        cacheWrite1h: cacheWrite1hTokens)
     }
 }
 
