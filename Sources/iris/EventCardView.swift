@@ -26,17 +26,11 @@ struct EventCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            summary
-            // What the catch-up dropped, on the first run of a replay burst (#187 §5). Its own
-            // line rather than part of the summary: it is news about the schedule, and putting it
-            // beside the outcome would push the thing the run actually did off the end.
-            if let catchUpNote = card.catchUpNote, !catchUpNote.isEmpty {
-                Text(catchUpNote)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .padding(.leading, 18)
+            if card.isReflection {
+                reflection
+            } else {
+                jobRun
             }
-            if card.blockedCall != nil { blockedCallDetail }
         }
         .padding(.vertical, 3)
         .padding(.horizontal, 8)
@@ -47,6 +41,47 @@ struct EventCardView: View {
         .help(card.headline)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(card.transcriptLine)
+    }
+
+    /// A memory reflection that ran in another conversation (5b §0.6): which one, and what it
+    /// changed. No job buttons — there is no run to open, approve or acknowledge.
+    @ViewBuilder
+    private var reflection: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "brain")
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+                .frame(width: 10, alignment: .center)
+            Text("Memory reflection")
+                .font(.system(.caption, design: .monospaced))
+            Text(card.sourceTitle ?? card.jobName)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 8)
+        }
+        Text(card.outcome ?? "")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(12)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, 18)
+    }
+
+    @ViewBuilder
+    private var jobRun: some View {
+        summary
+        // What the catch-up dropped, on the first run of a replay burst (#187 §5). Its own
+        // line rather than part of the summary: it is news about the schedule, and putting it
+        // beside the outcome would push the thing the run actually did off the end.
+        if let catchUpNote = card.catchUpNote, !catchUpNote.isEmpty {
+            Text(catchUpNote)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.leading, 18)
+        }
+        if card.blockedCall != nil { blockedCallDetail }
     }
 
     private var summary: some View {

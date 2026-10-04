@@ -949,6 +949,55 @@ class AppState {
     /// Iris (5b §0.4). `/reflect` asks for more (an OKF grooming pass) and keeps its own text.
     static let reflectionPrompt = "System Event [Reflection Trigger]: It's time to consolidate your memories. Reflect on the recent conversation. Have you learned any new user preferences, project structures, or recurring workflows? If so, use `update_soul` to evolve your persona, `update_user_profile` to update the user profile, `update_memory` to consolidate durable facts, and `create_skill`/`update_skill` for procedural skills. When you learn something durable — a lesson, recipe, decision, or reusable artifact — archive it to your permanent library at `~/.iris/memory/library/` (see your Library Management skill). Output a transparent summary of the gist of the updates for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'"
 
+    /// What a reflection says when it changed nothing (both prompts ask for exactly this). Matched
+    /// as a prefix of the trimmed reply; such a reflection posts no card.
+    static let noConsolidationReply = "No memory consolidation needed at this time."
+
+    /// What an automatic reflection outside Iris leaves in the chat in place of its report.
+    static let reflectionReportedNotice = "Memory reflection ran; its report is in Iris."
+
+    /// Runs one reflection turn in `convId` and, outside Iris, posts its report to Iris as a card
+    /// (5b §0.6). `processInput` returns nothing, so the report is the `.agent` messages the turn
+    /// appended. `moveReplyToIris` swaps them in the source chat for one pointer line — in
+    /// `messages` only: the model keeps its own reply in history. Iris's reflections stay in
+    /// place with no card; so does any whose report is the no-consolidation reply.
+    func runReflection(_ prompt: String, in convId: UUID, moveReplyToIris: Bool) async {
+        let before = conversations.first { $0.id == convId }?.messages.count ?? 0
+        await engine.processInput(prompt, source: "System", conversationId: convId)
+        // Stopped mid-turn: whatever it said so far is not a report of what it changed.
+        guard !Task.isCancelled,
+              let idx = conversations.firstIndex(where: { $0.id == convId }),
+              !conversations[idx].isPinned else { return }
+        let irisId = activityConversationId()
+        guard irisId != convId,
+              // Fewer messages than before means the chat was cleared mid-turn: nothing to take.
+              before <= conversations[idx].messages.count else { return }
+        let tail = conversations[idx].messages[before...]
+        let summary = tail.filter { $0.role == .agent }.map(\.content)
+            .joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !summary.isEmpty, !summary.hasPrefix(Self.noConsolidationReply) else { return }
+
+        if moveReplyToIris { replaceReflectionReply(in: convId, since: before) }
+        let card = EventCard.reflection(summary: summary, sourceId: convId,
+                                        sourceTitle: conversations[idx].title, at: Date())
+        await deliverEvent(card, to: irisId)
+    }
+
+    /// Swaps the `.agent` messages at or after `before` for one `reflectionReportedNotice` line,
+    /// placed where the first of them was. `messages` only; history is untouched.
+    func replaceReflectionReply(in convId: UUID, since before: Int) {
+        guard let idx = conversations.firstIndex(where: { $0.id == convId }),
+              before <= conversations[idx].messages.count else { return }
+        var messages = conversations[idx].messages
+        guard let first = messages[before...].firstIndex(where: { $0.role == .agent }) else { return }
+        let replyIds = Set(messages[before...].filter { $0.role == .agent }.map(\.id))
+        messages[first] = ChatMessage(role: .system, content: Self.reflectionReportedNotice)
+        messages.removeAll { replyIds.contains($0.id) }
+        conversations[idx].messages = messages
+        // A role change, not an append: the store must rewrite the rows it already holds.
+        markChanged(convId, .messagesReplaced)
+    }
+
     /// Returns Iris's (the pinned conversation's) id, creating it (pinned, unselected) and recording it
     /// in `meta` on first use. Stable across calls and across launches; if the recorded id names a
     /// conversation that no longer exists (deleted by hand), a fresh one is created and recorded.
@@ -1618,8 +1667,9 @@ class AppState {
             ---
             Verify that your cross-links between files are still valid, and reorganize or fix any broken links. Output a transparent summary of the gist of the updates and grooming performed for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'
             """
+            // Asked for here, so the reply stays here; outside Iris a card goes to Iris too (5b §0.6).
             runThinkingTask(conversationId: convId) { [self] in
-                await engine.processInput(reflectionPrompt, source: "System", conversationId: convId)
+                await runReflection(reflectionPrompt, in: convId, moveReplyToIris: false)
             }
             return
         } else if trimmed.hasPrefix("/vibecop init") {
@@ -1758,7 +1808,7 @@ class AppState {
                         markChanged(convId, .metadata)
                     }
                     appendMessage(role: .system, content: "Triggering automatic memory reflection...", to: convId)
-                    await engine.processInput(Self.reflectionPrompt, source: "System", conversationId: convId)
+                    await runReflection(Self.reflectionPrompt, in: convId, moveReplyToIris: true)
                 } else if shouldRename {
                     let renamePrompt = "System Event [Rename Trigger]: Evaluate the conversation history and use the `rename_conversation` tool to assign a short, descriptive title (1-4 words) that captures the true gist of this conversation."
                     appendMessage(role: .system, content: "Triggering automatic conversation rename...", to: convId)

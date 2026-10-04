@@ -699,6 +699,14 @@ during the reflection lands in the old Iris, which is archived, and is carried i
 opening summary.) A run that stopped on a refused call gets a second half as well — the call in full, and
 what you can do about it; see "Approve and run" below.
 
+One card in Iris is not a job run: when a conversation other than Iris reflects on its memory
+(every 30 messages, or `/reflect`), what the reflection changed is delivered to Iris as a
+**memory reflection** card naming that conversation. It has no ledger row, so it never appears in
+`/jobs`, the Recent Activity briefing or `get_job_run`, and it carries no buttons: there is no
+transcript to view, no call to approve and nothing for `/jobs ack` to acknowledge. Its history line
+(`[Event] memory reflection in ‹title›: ‹summary›`) is guarded like any card's. A reflection that
+changed nothing posts no card, and Iris's own reflections stay in Iris.
+
 Because Iris reads every other conversation's cards and holds both job-creating tools, calling
 `schedule_job` or `register_directory_watcher` from Iris itself is one case where creating a job or
 watch asks you first: the call pauses on an ordinary approval dialog, and declining it creates
