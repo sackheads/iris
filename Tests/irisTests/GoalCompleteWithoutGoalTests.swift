@@ -88,19 +88,15 @@ struct GoalCompleteWithoutGoalTests {
 
     /// Plain chat has no loop detector, so the reply round is granted once per turn: a model that
     /// keeps calling goal_complete is stopped after its second call, as before 5c after its first.
+    /// Self-bounded: eight goal_complete answers, then text, so a missing bound fails, not hangs.
     @Test("a model that keeps calling goal_complete gets one reply round, not a loop")
     func refusedGoalCompleteReplyIsBounded() async {
         let app = AppState()
         let id = UUID()
         app.createNewConversation(id: id)
-        let client = RecordingClient([goalCompleteWithSelfReport])   // repeats forever
+        let client = RecordingClient(Array(repeating: goalCompleteWithSelfReport, count: 8) + [response(nil)])
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
-        // Bounded, so an unbounded loop fails here rather than hanging the suite.
-        let ended = (try? await withTimeout(seconds: 10) { () -> Bool in
-            await engine.processInput("book my flights", source: "User", conversationId: id)
-            return true
-        }) ?? false
-        #expect(ended, "the turn never ended")
+        await engine.processInput("book my flights", source: "User", conversationId: id)
         #expect(client.callCount == 2)
     }
 

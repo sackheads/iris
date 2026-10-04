@@ -175,6 +175,24 @@ import Foundation
         #expect(conv?.lastGoalCompletionReport == nil)
     }
 
+    /// The reply-round bound (plain chat has no loop detector). Self-bounded: the client answers
+    /// `goal_complete` eight times and then plain text, so a missing bound fails at 9 calls
+    /// instead of spinning.
+    @Test func refusedGoalCompleteGetsOneReplyRoundOnly() async {
+        let app = AppState(); let id = UUID(); app.createNewConversation(id: id)
+        app.stickyTools.record(["goal_complete"], for: id)
+        #expect(app.conversations.first { $0.id == id }?.activeGoal == nil)
+        let call = FunctionCall(name: "goal_complete", args: ["summary": .string("done")], id: "c1")
+        let client = ScriptedClient(Array(repeating: Self.reply(Part(functionCall: call)), count: 8)
+                                    + [Self.reply(Part(text: "ok"))])
+        let engine = IrisEngine(state: app, tier: .medium, client: client, retryDelays: [],
+                                protectionEnabled: false, sessionPeerCount: 0)
+        await engine.processInput("carry on", source: "UI", conversationId: id)
+        let declared = client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? []
+        #expect(declared.contains("goal_complete"), "the sticky declaration is what this probes")
+        #expect(client.requests.count <= 2, "a refused goal_complete must not loop: \(client.requests.count) calls")
+    }
+
     /// A draft with a ladder, as `propose_goal_contract` leaves it while the user reviews.
     private func draftLadder(on app: AppState, _ id: UUID) {
         app.createNewConversation(id: id)

@@ -4,6 +4,14 @@ import Foundation
 
 /// 5c §0.1: a state-gated tool, once declared, stays declared for the conversation, and a hard
 /// strip (unattended turn, non-main principal) always wins over the sticky set.
+///
+/// Three layers keep a sticky name out of a turn that may not have it, and they overlap:
+/// 1. `stickyApplies`: the set is read only on attended `.main` turns;
+/// 2. each gate's own predicates (`principal == .main`, the unattended checks), plus the read-only
+///    allowlist after them;
+/// 3. the `hardStrip` call.
+/// Deleting any one layer leaves every test here green. Each comment below says which layer, or
+/// which combination, a test pins.
 @MainActor
 @Suite struct StickyDeclarationTests {
     /// One turn through a real engine against a capturing client. Returns the declared names.
@@ -25,6 +33,7 @@ import Foundation
         return (app, id)
     }
 
+    /// Pins the gate's `|| sticky.contains("manage_fact")` clause and the recording after the strip.
     @Test func manageFactStaysAfterFactsStopSurfacing() async throws {
         let (app, id) = try app()
         let facts = try FactStoreManager(inMemory: true)
@@ -34,6 +43,7 @@ import Foundation
         #expect(app.stickyTools.names(for: id).contains("manage_fact"))
     }
 
+    /// Pins the `stickyTools:` init seam (`stickyToolsEnabled`, part of layer 1).
     @Test func switchedOffItFlapsAsBefore() async throws {
         let (app, id) = try app()
         let facts = try FactStoreManager(inMemory: true)
@@ -42,6 +52,8 @@ import Foundation
         #expect(!(await names(app, id, prompt: "What is two plus two?", factStore: facts, sticky: false)).contains("manage_fact"))
     }
 
+    /// Pins the sticky clauses on the amend, reach_checkpoint/delegate_milestone and goal_complete
+    /// gates.
     @Test func ladderToolsStayAfterTheGoalEnds() async throws {
         let (app, id) = try app()
         let facts = try FactStoreManager(inMemory: true)
@@ -62,7 +74,13 @@ import Foundation
         }
     }
 
-    /// Review focus 1. A strip always wins over stickiness.
+    /// Review focus 1. A strip always wins over stickiness. No single layer is pinned here:
+    /// - the read-only arm is held by layer 2's allowlist alone;
+    /// - the mutating arm fails only with layers 1 and 3 both broken;
+    /// - the subagent arm fails only with layers 1 and 3 broken and a gate's `principal == .main`
+    ///   (layer 2) removed too.
+    /// So deleting the `hardStrip` call alone leaves this green; `hardStripIsPure` pins the
+    /// function, not its call site.
     @Test func stickyNeverSurvivesHardStrips() async throws {
         let all = StickyTools.eligible.union(["set_workspace", "schedule_job", "register_directory_watcher"])
         let facts = try FactStoreManager(inMemory: true)
@@ -103,6 +121,7 @@ import Foundation
         for n in IrisEngine.mainOnlyDeclared { #expect(!subNames.contains(n), Comment(rawValue: n)) }
     }
 
+    /// Pins `hardStrip` itself (layer 3's function), not that the turn builder calls it.
     @Test func hardStripIsPure() {
         let decls = ["run_command", "set_workspace", "send_to_session", "schedule_job", "manage_fact", "reach_checkpoint"]
             .map { FunctionDeclaration(name: $0, description: $0, parameters: nil) }
@@ -113,6 +132,7 @@ import Foundation
         #expect(sub == ["run_command", "set_workspace", "manage_fact"])
     }
 
+    /// Pins plan note 5: the pinned-only job tools are outside `StickyTools.eligible`.
     @Test func jobToolsAreNotStickyAfterUnpin() async throws {
         let (app, id) = try app()
         let facts = try FactStoreManager(inMemory: true)
