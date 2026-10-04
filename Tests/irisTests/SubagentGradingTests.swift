@@ -83,6 +83,63 @@ struct SubagentGradingTests {
         }
     }
 
+    /// The poll-cap deadline's clock (#355, following #335/#342), held still until the test moves
+    /// it. A real wall clock raced a busy suite's MainActor work: `runSubagent`'s cap could arrive
+    /// before the subagent's own call had even been placed, or `engineTask.cancel()`'s cancellation
+    /// of that call could win a classification race against the cap's own, depending on which
+    /// MainActor hop landed first. Holding the clock still removes both: the deadline cannot arrive
+    /// before `calls` proves the call is in flight, and it cannot arrive "late" either, since
+    /// nothing but this clock's `advance` can move it.
+    private final class ManualClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var current = Date()
+        func now() -> Date { lock.withLock { current } }
+        func advance(by seconds: TimeInterval) { lock.withLock { current += seconds } }
+    }
+
+    /// Parks every call to the model forever — the shape of a subagent genuinely mid-turn — so the
+    /// test can prove the precondition (the run is inside its one model call) before moving the
+    /// clock. Cooperative: `try await Task.sleep` throws once `engineTask.cancel()` runs, which is
+    /// deliberate — it exercises the same cancellation-triggered race `SubagentManager` now
+    /// classifies ahead of (see its `deadlineClock` doc) rather than sidestepping it.
+    private final class ParkedClient: LLMClientProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+        private var callCount = 0
+        var calls: Int { lock.withLock { callCount } }
+
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            lock.withLock { callCount += 1 }
+            while true { try await Task.sleep(nanoseconds: 50_000_000) }
+        }
+        var supportsStreaming: Bool { false }
+    }
+
+    /// Bounded wait so a regression that breaks the precondition (or the deadline) fails the test
+    /// instead of hanging the suite.
+    private func waitFor(_ description: String, timeout: TimeInterval = 10, _ condition: () -> Bool) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        Issue.record("timed out waiting for \(description)")
+    }
+
+    /// The task's value, or `nil` if it has not finished within `seconds`: turns "the deadline
+    /// never ended the run" into a failure rather than a hung suite.
+    private func finished<T: Sendable>(_ task: Task<T, Never>, within seconds: TimeInterval = 30) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask { Optional(await task.value) }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil
+            }
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
+        }
+    }
+
     private func response(_ fc: FunctionCall?) -> GeminiResponse {
         let part = Part(text: fc == nil ? "done" : nil, functionCall: fc, functionResponse: nil,
                         thought_signature: nil, thoughtSignature: nil)
@@ -138,18 +195,38 @@ struct SubagentGradingTests {
     }
 
     @Test("a contracted run that times out carries its contract but is never graded")
-    func timedOutContractedRunIsNotGraded() async {
+    func timedOutContractedRunIsNotGraded() async throws {
         let (state, parentId) = freshState()
         // Never terminates, so the contract is still observable on the conversation at the cap.
-        let client = RoutingLLMClient(subagent: [response(nil)])
+        // A real wall clock raced a busy suite here (#355): `maxIterations * 100ms` could elapse
+        // before the subagent's own call had even been placed, or `engineTask.cancel()`'s unwind of
+        // that call could beat the cap's own classification to `holder`, depending on which
+        // MainActor hop landed first under load. The manual clock removes the first race by
+        // construction (it only moves when this test calls `advance`); `SubagentManager`'s ordering
+        // fix (classify, then cancel) removes the second.
+        let client = ParkedClient()
+        let clock = ManualClock()
 
-        let rendered = await SubagentManager.shared.runSubagent(
-            role: "engineer", task: "build a widget", effort: "easy",
-            parentConversationId: parentId, unit: gradedUnit("the widget exists"),
-            maxIterations: 2, client: client, appState: state).rendered
+        let runTask = Task {
+            await SubagentManager.shared.runSubagent(
+                role: "engineer", task: "build a widget", effort: "easy",
+                parentConversationId: parentId, unit: gradedUnit("the widget exists"),
+                maxIterations: 2, client: client, appState: state, deadlineClock: clock.now)
+        }
 
-        // A run that never claimed done is never graded, even though it carried a contract.
-        #expect(client.graderCalls == 0)
+        // Hold the precondition: the deadline cannot be allowed to arrive until the subagent's own
+        // call is actually in flight.
+        await waitFor("the subagent to reach its model call") { client.calls >= 1 }
+        // Now move the clock well past the cap (maxIterations(2) * 100ms = 0.2s on this clock).
+        clock.advance(by: 60)
+
+        let result = try #require(await finished(runTask),
+                                  "the deadline ended a run parked in its model call")
+        let rendered = result.rendered
+
+        // A run that never claimed done is never graded, even though it carried a contract: the
+        // one call this client ever saw was the subagent's own, parked, never a grader's.
+        #expect(client.calls == 1)
         #expect(rendered.contains("status: timed out"))
         #expect(!rendered.contains("Independent grader verdict"))
         // The contract still reached the result: the parent is told what the run was held to.
