@@ -432,8 +432,9 @@ class AppState {
     private var pendingUserMessages: [UUID: [PendingUserMessage]] = [:]
 
     /// Reflection turns in progress (5b §0.6), keyed by conversation: the message count at the
-    /// moment the turn first took a steer, or nil while it has taken none. Everything the model
-    /// says after that point may be an answer to the user or a peer, not a report of memory edits.
+    /// moment the turn first took a steer or a second engine turn began beside it, or nil while
+    /// neither has happened. Everything said after that point may be an answer to the user, a
+    /// peer or a subagent's report, not a report of memory edits.
     /// Transient; set and removed by `runReflection`.
     @ObservationIgnored private var reflectionSteerPoints: [UUID: Int?] = [:]
 
@@ -465,6 +466,20 @@ class AppState {
             mainStartTimeByConversation[conversationId] = Date()
         }
         engineTurnCounts[conversationId, default: 0] += 1
+        // A second turn beside a reflection — a background subagent's post-back, which calls
+        // `processInput` without queueing — appends its own replies inside the capture window, so
+        // it ends the window the way a steer does (5b §0.6).
+        if (engineTurnCounts[conversationId] ?? 0) > 1 { markReflectionBoundary(for: conversationId) }
+    }
+
+    /// Ends a running reflection's capture window at the current message count, the first time
+    /// anything other than the reflection may start speaking in its conversation. A no-op when
+    /// no reflection is running there, or when the window is already closed.
+    private func markReflectionBoundary(for conversationId: UUID) {
+        guard let watched = reflectionSteerPoints[conversationId], watched == nil,
+              let count = conversations.first(where: { $0.id == conversationId })?.messages.count
+        else { return }
+        reflectionSteerPoints[conversationId] = .some(count)
     }
 
     func endEngineTurn(for conversationId: UUID) {
@@ -566,10 +581,7 @@ class AppState {
             queue.removeFirst()
         }
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
-        if !taken.isEmpty, let watched = reflectionSteerPoints[conversationId], watched == nil,
-           let count = conversations.first(where: { $0.id == conversationId })?.messages.count {
-            reflectionSteerPoints[conversationId] = .some(count)
-        }
+        if !taken.isEmpty { markReflectionBoundary(for: conversationId) }
         return taken
     }
 
@@ -976,8 +988,10 @@ class AppState {
     /// A user or peer message that arrives meanwhile steers this same turn, and the model may
     /// answer it here. The capture window therefore ends where the turn first *took* a steer — not
     /// where the arrival bubble sits, which is appended on arrival and can land before the
-    /// reflection's own reply in the same round. If any steer was taken, the card is built from
-    /// the pre-steer part and the source chat is left exactly as it is, so the answer stays visible.
+    /// reflection's own reply in the same round. A second engine turn that begins on the
+    /// conversation meanwhile (a background subagent's post-back) ends the window the same way.
+    /// If either happened, the card is built from the part before it and the source chat is left
+    /// exactly as it is, so the answer stays visible.
     func runReflection(_ prompt: String, in convId: UUID, moveReplyToIris: Bool) async {
         let before = conversations.first { $0.id == convId }?.messages.count ?? 0
         reflectionSteerPoints[convId] = .some(nil)
