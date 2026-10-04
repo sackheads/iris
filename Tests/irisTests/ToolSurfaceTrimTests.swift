@@ -241,4 +241,105 @@ struct ToolSurfaceTrimTests {
         #expect(steering.contains("asks you to remember"))
         #expect(steering.contains("store it now"))
     }
+
+    // MARK: inlineDeclaredToolNames is exhaustive (#343)
+
+    /// `IrisEngine.inlineDeclaredToolNames` is spelled out by hand (the same tradeoff as
+    /// `toolsThatWriteNoPath` beside it), and `Briefing`/`DailyDigest` trust `allDeclaredToolNames`
+    /// — which is built FROM it — to recognise a real tool name rather than reporting a model's
+    /// well-formed but nonexistent call as a genuine block. A name missing from the set only
+    /// under-reports (a real block prints as plain "blocked"), which fails safe, but it is still a
+    /// defect worth catching before it ships.
+    ///
+    /// This drives a turn through every state that unlocks an inline declaration, unions the
+    /// observed tool names, subtracts what `ToolExecutor` and `jobToolDeclarations` contribute
+    /// (neither is part of this hand-maintained set — see the comment above
+    /// `inlineDeclaredToolNames`), and asserts what's left is exactly the set. Remove any one name
+    /// from `inlineDeclaredToolNames` by hand to see this fail — that's the "forgot to add it"
+    /// case, reproduced.
+    ///
+    /// A new inline gate needs BOTH a set entry and a state line in this test that actually
+    /// drives a turn through it — this test can only catch a mismatch between the two. A
+    /// declaration added with neither (the "forgot both" case) is invisible to it: nothing here
+    /// observes the new name, so there is nothing to compare against the set.
+    @Test("inlineDeclaredToolNames covers every inline FunctionDeclaration the engine can produce")
+    func inlineDeclaredToolNamesIsExhaustive() async throws {
+        var observed: Set<String> = []
+
+        // Plain turn: every unconditionally-appended inline declaration, plus set_workspace and
+        // schedule_job (both gated on attended + main only, which a plain turn satisfies).
+        observed.formUnion(await toolNames(prompt: "hello", factStore: try FactStoreManager(inMemory: true)))
+
+        // manage_fact needs a surfaced fact.
+        let factsStore = try FactStoreManager(inMemory: true)
+        try factsStore.addFact(content: "Brian lives in Seattle", entity: "Brian")
+        observed.formUnion(await toolNames(prompt: "Where does Brian live?", factStore: factsStore))
+
+        // goal_complete needs an active goal.
+        observed.formUnion(await toolNames(prompt: "carry on") { app, id in
+            guard let idx = app.conversations.firstIndex(where: { $0.id == id }) else { return }
+            app.conversations[idx].activeGoal = "ship it"
+        })
+
+        // rename_conversation needs the rename-trigger prefix on an unpinned conversation.
+        observed.formUnion(await toolNames(prompt: IrisEngine.renameTriggerPrefix + ": title it"))
+
+        // propose_goal_contract needs the goal-draft trigger prefix.
+        observed.formUnion(await toolNames(prompt: IrisEngine.goalDraftTriggerPrefix + ": draft it"))
+
+        // amend_goal_contract needs a locked contract with no ladder.
+        observed.formUnion(await toolNames(prompt: "carry on") { app, id in
+            guard let idx = app.conversations.firstIndex(where: { $0.id == id }) else { return }
+            var contract = GoalContract(objective: "ship", criteria: [])
+            contract.lock()
+            app.conversations[idx].goalContract = contract
+        })
+
+        // reach_checkpoint / delegate_milestone need an active, non-final ladder checkpoint.
+        observed.formUnion(await toolNames(prompt: "carry on") { app, id in
+            guard let idx = app.conversations.firstIndex(where: { $0.id == id }) else { return }
+            var contract = GoalContract(objective: "ship", criteria: [])
+            contract.milestones = [Milestone(title: "one", criterionIds: []),
+                                   Milestone(title: "two", criterionIds: [])]
+            contract.currentMilestone = 0
+            contract.lock()
+            app.conversations[idx].goalContract = contract
+        })
+
+        // waive_criterion needs a locked contract with at least one failed gate attempt.
+        observed.formUnion(await toolNames(prompt: "carry on") { app, id in
+            guard let idx = app.conversations.firstIndex(where: { $0.id == id }) else { return }
+            var contract = GoalContract(objective: "ship", criteria: [])
+            contract.lock()
+            contract.gateAttempts = 1
+            app.conversations[idx].goalContract = contract
+        })
+
+        // list_sessions / send_to_session / set_session_card need a peer — the shared `toolNames`
+        // helper pins `sessionPeerCount` to 0, so this one state is built by hand.
+        do {
+            let app = AppState()
+            let id = UUID()
+            app.createNewConversation(id: id)
+            let client = CapturingLLMClient(reply: "ok")
+            let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [],
+                                    factStore: try FactStoreManager(inMemory: true), sessionPeerCount: 1)
+            await engine.processInput("hello", source: "UI", conversationId: id)
+            observed.formUnion(client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
+        }
+
+        // Subtract the two OTHER sources of declared tool names — this test is only about the
+        // hand-maintained inline set, not the whole declared surface.
+        let executorNames = Set(await ToolExecutor.shared.getTools(workspaceToolsEnabled: true).map(\.name))
+        let jobToolNames = Set(IrisEngine.jobToolDeclarations(isPinned: true).map(\.name))
+        let inlineObserved = observed.subtracting(executorNames).subtracting(jobToolNames)
+
+        let missing = inlineObserved.subtracting(IrisEngine.inlineDeclaredToolNames)
+        #expect(missing.isEmpty, "declared inline but missing from inlineDeclaredToolNames: \(missing)")
+
+        // Coverage, so a broken state-setup above (one that stops exercising a tool at all) fails
+        // loudly rather than letting the subset check above pass vacuously.
+        #expect(inlineObserved == IrisEngine.inlineDeclaredToolNames,
+                "observed \(inlineObserved.sorted()), expected \(IrisEngine.inlineDeclaredToolNames.sorted())")
+    }
 }
