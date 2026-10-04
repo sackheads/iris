@@ -2705,6 +2705,8 @@ class AppState {
     /// evaluation that never answers. Returns at the deadline even when the evaluation ignores
     /// cancellation (a native llama.cpp or MLX call); that evaluation runs on in the background
     /// and its verdict is dropped (#345). nil on timeout or error: fail open to the user prompt.
+    /// A timed-out inference is abandoned, not stopped: if the engine serves one request at a time,
+    /// the next verdict may queue behind it.
     nonisolated static func boundedVibecopVerdict(seconds: Double,
                                                   _ evaluate: @escaping @Sendable () async throws -> VibecopDecision?) async -> VibecopDecision? {
         do {

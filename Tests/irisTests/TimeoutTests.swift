@@ -132,6 +132,25 @@ struct TimeoutTests {
         #expect(throws: CancellationError.self) { try result.get() }
     }
 
+    /// A caller that has already given up must not start the work at all: for `run_command` that
+    /// would spawn a process only to terminate it.
+    @Test("a caller already cancelled never runs the operation")
+    func alreadyCancelledNeverStarts() async {
+        let runs = Counter()
+        let caller = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await withTimeout(seconds: 30) { () -> Int in
+                runs.increment()
+                return 1
+            }
+        }
+        let result = await caller.result
+        #expect(throws: CancellationError.self) { try result.get() }
+        // Bounded grace for a wrongly started body to show up before counting.
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        #expect(runs.value == 0)
+    }
+
     /// The result and the timer land within microseconds of each other; a second resume of the
     /// continuation would trap, so surviving the loop is the assertion.
     @Test("result and deadline racing never resume twice")
@@ -164,6 +183,13 @@ struct TimeoutTests {
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { c.resume() }
         }
+    }
+
+    final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func increment() { lock.lock(); n += 1; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return n }
     }
 
     final class Flag: @unchecked Sendable {

@@ -20,11 +20,13 @@ func withTimeout<T: Sendable>(seconds: Double, _ operation: @escaping @Sendable 
         // Unstructured on purpose, so nothing here waits for it; `Task {}` rather than detached
         // keeps the caller's priority and task-locals (the guard tiers' test seams ride on those).
         race.start(
-            work: Task { race.settle(await Result(awaiting: operation)) },
-            timer: Task {
-                let ns = UInt64(min(max(0, seconds.isNaN ? 0 : seconds), 1e9) * 1_000_000_000)
-                guard (try? await Task.sleep(nanoseconds: ns)) != nil else { return }
-                race.settle(.failure(TimeoutError()))
+            work: { Task { race.settle(await Result(awaiting: operation)) } },
+            timer: {
+                Task {
+                    let ns = UInt64(min(max(0, seconds.isNaN ? 0 : seconds), 1e9) * 1_000_000_000)
+                    guard (try? await Task.sleep(nanoseconds: ns)) != nil else { return }
+                    race.settle(.failure(TimeoutError()))
+                }
             })
         return try await race.wait()
     } onCancel: {
@@ -41,14 +43,16 @@ private final class TimeoutRace<T: Sendable>: @unchecked Sendable {
     private var work: Task<Void, Never>?
     private var timer: Task<Void, Never>?
 
-    /// Hands over the two tasks. If the race was already settled (the caller was cancelled before
-    /// they existed), they are cancelled on the spot.
-    func start(work: Task<Void, Never>, timer: Task<Void, Never>) {
+    /// Starts the two tasks, unless the race is already settled — a caller cancelled before this
+    /// point — in which case the operation never starts (no process spawned only to be killed).
+    /// Under the lock, so `settle` cannot slip between the check and the hand-over; creating a
+    /// `Task` does not run its body here, so the lock is never held across the operation.
+    func start(work: () -> Task<Void, Never>, timer: () -> Task<Void, Never>) {
         lock.lock()
-        let settled = outcome != nil
-        if !settled { self.work = work; self.timer = timer }
-        lock.unlock()
-        if settled { work.cancel(); timer.cancel() }
+        defer { lock.unlock() }
+        guard outcome == nil else { return }
+        self.work = work()
+        self.timer = timer()
     }
 
     func settle(_ result: Result<T, Error>) {
