@@ -922,22 +922,25 @@ struct BriefingEngineTests {
 @Suite("Cache hints on an engine turn (5c)")
 struct CacheHintsEngineTests {
     private func run(pinned: Bool = false, background: Bool = false, jobs: [Job] = [],
-                     override: CacheTTLPolicy? = nil) async throws -> (id: UUID, requests: [GeminiRequest]) {
+                     override: CacheTTLPolicy? = nil, profile: JobProfile? = nil,
+                     principal: Principal = .main, seedFact: Bool = false) async throws -> (id: UUID, requests: [GeminiRequest]) {
         let store = try ConversationStore.inMemory()
         for job in jobs { try store.ledger.upsert(job) }
         let facts = try FactStoreManager(inMemory: true)
+        if seedFact { _ = try facts.addFact(content: "Brian lives in Seattle") }
         let app = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         app.conversations.removeAll()
         let id = UUID()
         app.createNewConversation(id: id, isBackground: background)
-        if pinned, let idx = app.conversations.firstIndex(where: { $0.id == id }) {
-            app.conversations[idx].isPinned = true
+        if let idx = app.conversations.firstIndex(where: { $0.id == id }) {
+            if pinned { app.conversations[idx].isPinned = true }
+            app.conversations[idx].jobProfile = profile
         }
         let client = TurnContextClient([toolCall("search_memory", ["query": .string("x")]), reply("done")])
-        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+        let engine = IrisEngine(state: app, tier: .medium, principal: principal, client: client,
                                 retryDelays: [], streamResponses: false, factStore: facts,
                                 protectionEnabled: false, sessionPeerCount: 0, cacheTTLOverride: override)
-        await engine.processInput("hi", source: "UI", conversationId: id)
+        await engine.processInput(seedFact ? "Tell me about Seattle" : "hi", source: "UI", conversationId: id)
         return (id, client.requests)
     }
 
@@ -972,6 +975,53 @@ struct CacheHintsEngineTests {
         let rare = try await run(background: true, jobs: [Self.hourly])
         try #require(!rare.requests.isEmpty)
         #expect(rare.requests.allSatisfy { $0.cacheHints?.ttl == .standard })
+    }
+
+    // MARK: prompt_cache_key by prefix identity (#367 review)
+
+    @Test("two fires of the same job send the same key, and it is not either conversation's id")
+    func sameJobSameKey() async throws {
+        let a = try await run(background: true, profile: .mutating)
+        let b = try await run(background: true, profile: .mutating)
+        let ka = try #require(a.requests.first?.cacheHints?.promptCacheKey)
+        let kb = try #require(b.requests.first?.cacheHints?.promptCacheKey)
+        #expect(ka == kb)
+        #expect(ka != a.id.uuidString && kb != b.id.uuidString)
+        #expect(a.requests.allSatisfy { $0.cacheHints?.promptCacheKey == ka }, "every round of a run sends one key")
+    }
+
+    @Test("a read-only and a mutating job send different keys")
+    func profilesDiffer() async throws {
+        let ro = try await run(background: true, profile: .readOnly)
+        let mu = try await run(background: true, profile: .mutating)
+        let kro = try #require(ro.requests.first?.cacheHints?.promptCacheKey)
+        let kmu = try #require(mu.requests.first?.cacheHints?.promptCacheKey)
+        #expect(kro != kmu)
+    }
+
+    @Test("an attended chat and Iris send their conversation id")
+    func attendedSendsConversationId() async throws {
+        for pinned in [false, true] {
+            let r = try await run(pinned: pinned)
+            try #require(!r.requests.isEmpty)
+            #expect(r.requests.allSatisfy { $0.cacheHints?.promptCacheKey == r.id.uuidString })
+        }
+    }
+
+    @Test("two evaluator grades share a key that is not a conversation id")
+    func evaluatorsShareAKey() async throws {
+        let a = try await run(principal: .evaluator)
+        let b = try await run(principal: .evaluator)
+        let ka = try #require(a.requests.first?.cacheHints?.promptCacheKey)
+        #expect(ka == b.requests.first?.cacheHints?.promptCacheKey)
+        #expect(ka != a.id.uuidString)
+    }
+
+    @Test("the key fits OpenAI's 64-byte limit")
+    func keyFits() {
+        let key = IrisEngine.promptCacheKey(conversationId: UUID(), isUnattended: true, principal: .main,
+                                            jobProfile: .mutating, toolNames: (0..<200).map { "tool_\($0)" })
+        #expect(key.utf8.count <= 64)
     }
 
     @Test("cacheTTLOverride wins over the resolved policy")

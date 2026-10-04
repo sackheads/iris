@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import SwiftUI
 import KeyboardShortcuts
 
@@ -1948,7 +1949,9 @@ actor IrisEngine {
         request.cacheHints = CacheHints(
             ttl: cacheTTLOverride ?? CacheTTLPolicy.resolve(isPinned: isPinned, isUnattended: isUnattended,
                                                             principal: principal, backgroundFiresHourly: firesHourly),
-            promptCacheKey: conversationId.uuidString)
+            promptCacheKey: Self.promptCacheKey(conversationId: conversationId, isUnattended: isUnattended,
+                                                principal: principal, jobProfile: jobProfile,
+                                                toolNames: toolsList.map(\.name)))
         
         // Nothing from a previous turn decides this one: a turn cancelled mid-batch could leave a
         // denial behind, and finding it here would end the next turn before it started.
@@ -2645,6 +2648,19 @@ actor IrisEngine {
     /// 5c §1: never declared to an unattended turn, whatever a sticky set says.
     nonisolated static let unattendedNeverDeclared: Set<String> =
         jobCreationTools.union(["set_workspace", "list_sessions", "send_to_session", "set_session_card"])
+    /// OpenAI's `prompt_cache_key` (5c §0.9). It is a routing hint, so it names the prefix a
+    /// request shares with others, not the conversation. An attended chat (Iris included) keeps
+    /// its own history warm, so it uses its id. A job run, a subagent or an evaluator starts a
+    /// fresh conversation every time, and what it shares with its siblings is the system prompt
+    /// and tools, so it uses a short hash of who is asking, the job profile and the declared tools.
+    nonisolated static func promptCacheKey(conversationId: UUID, isUnattended: Bool, principal: Principal,
+                                           jobProfile: JobProfile?, toolNames: [String]) -> String {
+        if principal == .main && !isUnattended { return conversationId.uuidString }
+        let identity = "\(principal)|\(jobProfile?.rawValue ?? "none")|" + toolNames.sorted().joined(separator: ",")
+        let digest = SHA256.hash(data: Data(identity.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+        return "iris-prefix-\(digest)"
+    }
+
     /// A `BeforeModel` hook's rewrite, decoded; an undecodable one leaves the request as it was.
     /// The hook never sees the hints (not encoded), so its rewrite can't carry them: re-apply them,
     /// or a hooked Iris turn silently falls back to five minutes (5c review focus 5).

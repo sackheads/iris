@@ -117,7 +117,8 @@ struct OpenAIClient {
             "model": model,
             "messages": openAIMessages
         ]
-        // 5c §0.9: one request field that routes a conversation's calls to the same cache.
+        // 5c §0.9: one request field that routes calls sharing a prefix to the same cache
+        // (`IrisEngine.promptCacheKey` decides what shares one).
         if let key = request.cacheHints?.promptCacheKey, !key.isEmpty {
             body["prompt_cache_key"] = ConversationReader.utf8Prefix(key, maxBytes: 64)
         }
