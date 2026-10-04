@@ -431,6 +431,12 @@ class AppState {
     }
     private var pendingUserMessages: [UUID: [PendingUserMessage]] = [:]
 
+    /// Reflection turns in progress (5b §0.6), keyed by conversation: the message count at the
+    /// moment the turn first took a steer, or nil while it has taken none. Everything the model
+    /// says after that point may be an answer to the user or a peer, not a report of memory edits.
+    /// Transient; set and removed by `runReflection`.
+    @ObservationIgnored private var reflectionSteerPoints: [UUID: Int?] = [:]
+
     /// Turns the engine starts for itself. Arrivals — the scheduler, the watcher, subagent
     /// post-backs — call `IrisEngine.processInput` directly and never create an `activeTasks`
     /// entry, so `activeTasks` alone cannot see them and `archiveRefusal` would happily let the
@@ -560,6 +566,10 @@ class AppState {
             queue.removeFirst()
         }
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
+        if !taken.isEmpty, let watched = reflectionSteerPoints[conversationId], watched == nil,
+           let count = conversations.first(where: { $0.id == conversationId })?.messages.count {
+            reflectionSteerPoints[conversationId] = .some(count)
+        }
         return taken
     }
 
@@ -961,23 +971,37 @@ class AppState {
     /// appended. `moveReplyToIris` swaps them in the source chat for one pointer line — in
     /// `messages` only: the model keeps its own reply in history. Iris's reflections stay in
     /// place with no card; so does any whose report is the no-consolidation reply.
+    ///
+    /// A user or peer message that arrives meanwhile steers this same turn, and the model may
+    /// answer it here. The capture window therefore ends where the turn first *took* a steer — not
+    /// where the arrival bubble sits, which is appended on arrival and can land before the
+    /// reflection's own reply in the same round. If any steer was taken, the card is built from
+    /// the pre-steer part and the source chat is left exactly as it is, so the answer stays visible.
     func runReflection(_ prompt: String, in convId: UUID, moveReplyToIris: Bool) async {
         let before = conversations.first { $0.id == convId }?.messages.count ?? 0
+        reflectionSteerPoints[convId] = .some(nil)
         await engine.processInput(prompt, source: "System", conversationId: convId)
+        let steerPoint = reflectionSteerPoints.removeValue(forKey: convId) ?? nil
         // Stopped mid-turn: whatever it said so far is not a report of what it changed.
         guard !Task.isCancelled,
               let idx = conversations.firstIndex(where: { $0.id == convId }),
               !conversations[idx].isPinned else { return }
         let irisId = activityConversationId()
+        let count = conversations[idx].messages.count
         guard irisId != convId,
               // Fewer messages than before means the chat was cleared mid-turn: nothing to take.
-              before <= conversations[idx].messages.count else { return }
-        let tail = conversations[idx].messages[before...]
-        let summary = tail.filter { $0.role == .agent }.map(\.content)
-            .joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !summary.isEmpty, !summary.hasPrefix(Self.noConsolidationReply) else { return }
+              before <= count else { return }
+        let end = min(max(steerPoint ?? count, before), count)
+        let replies = conversations[idx].messages[before..<end].filter { $0.role == .agent }
+        // The no-op line is judged on the last reply alone, so narration before it is not a report.
+        guard let last = replies.last,
+              !last.content.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(Self.noConsolidationReply)
+        else { return }
+        let summary = replies.map(\.content).joined(separator: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !summary.isEmpty else { return }
 
-        if moveReplyToIris { replaceReflectionReply(in: convId, since: before) }
+        if moveReplyToIris, steerPoint == nil { replaceReflectionReply(in: convId, since: before) }
         let card = EventCard.reflection(summary: summary, sourceId: convId,
                                         sourceTitle: conversations[idx].title, at: Date())
         await deliverEvent(card, to: irisId)
