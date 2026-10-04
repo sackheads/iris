@@ -651,7 +651,7 @@ actor JobRunner {
         let card: Bool
         let builtin = BuiltinJobs.named(name)
         if let builtin {
-            let result = await builtin.run(ledger: ledger, now: startedAt, calendar: calendar)
+            let result = await builtin.run(ledger: ledger, now: startedAt, calendar: calendar, config: config)
             switch result.status {
             case .completed:
                 (status, outcome, failureReason, card) = (.completed, result.outcome, nil, result.card)

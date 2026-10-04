@@ -26,7 +26,7 @@ struct BuiltinJobTests {
             result = BuiltinResult(outcome: outcome, card: card, status: status)
         }
 
-        func run(ledger: JobLedger, now: Date, calendar: Calendar) async -> BuiltinResult {
+        func run(ledger: JobLedger, now: Date, calendar: Calendar, config: ConfigManager) async -> BuiltinResult {
             count.withLock { $0 += 1 }
             return result
         }

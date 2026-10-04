@@ -7,7 +7,8 @@ import Foundation
 protocol BuiltinJob: Sendable {
     /// The key it is registered under, and what follows `builtin:` in a job's `action` column.
     static var name: String { get }
-    func run(ledger: JobLedger, now: Date, calendar: Calendar) async -> BuiltinResult
+    /// `config` is the runner's own — the one its admission reads — never `ConfigManager.shared`.
+    func run(ledger: JobLedger, now: Date, calendar: Calendar, config: ConfigManager) async -> BuiltinResult
 }
 
 struct BuiltinResult: Equatable, Sendable {

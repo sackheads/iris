@@ -38,14 +38,9 @@ struct DailyDigest: BuiltinJob {
     /// one never reported.
     static let unreadableReason = "daily digest: ledger unreadable"
 
-    /// Where the budgets come from: the same resolution admission uses (`JobLimits.resolve`).
-    let config: ConfigManager
-
-    init(config: ConfigManager = .shared) {
-        self.config = config
-    }
-
-    func run(ledger: JobLedger, now: Date, calendar: Calendar) async -> BuiltinResult {
+    /// `config` is the runner's, so the budgets on the card are the ones admission enforces
+    /// (`JobLimits.resolve`), not the process-global ones.
+    func run(ledger: JobLedger, now: Date, calendar: Calendar, config: ConfigManager) async -> BuiltinResult {
         let jobs: [Job]
         let runs: [JobRun]
         let failures: [JobRun]

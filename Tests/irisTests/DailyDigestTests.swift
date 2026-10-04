@@ -69,7 +69,7 @@ struct DailyDigestTests {
         let failed = try seedRun(ledger, fetch, hoursAgo: 1, status: .failed,
                                  failureReason: "FAILURE-TEXT fetched from a page")
 
-        let result = await DailyDigest(config: config).run(ledger: ledger, now: now, calendar: calendar)
+        let result = await DailyDigest().run(ledger: ledger, now: now, calendar: calendar, config: config)
 
         #expect(result.card)
         let lines = result.outcome.components(separatedBy: "\n")
@@ -95,7 +95,7 @@ struct DailyDigestTests {
         // Older than the 24-hour default window, and a failure still unacknowledged.
         try seedRun(store.ledger, job, hoursAgo: 30, status: .failed, failureReason: "x")
 
-        let result = await DailyDigest(config: config).run(ledger: store.ledger, now: now, calendar: calendar)
+        let result = await DailyDigest().run(ledger: store.ledger, now: now, calendar: calendar, config: config)
 
         #expect(result == BuiltinResult(outcome: DailyDigest.quietOutcome, card: false))
     }
@@ -119,7 +119,7 @@ struct DailyDigestTests {
         // The digest's own row for this fire, already begun when the built-in runs.
         try ledger.begin(run: JobRun(jobId: digest.id, jobName: digest.name, triggerKind: "schedule", startedAt: now))
 
-        let result = await DailyDigest(config: config).run(ledger: ledger, now: now, calendar: calendar)
+        let result = await DailyDigest().run(ledger: ledger, now: now, calendar: calendar, config: config)
 
         #expect(result.card)
         #expect(result.outcome.components(separatedBy: "\n").first?.hasPrefix("\u{201C}sweep\u{201D}: 2 completed, 0 failed") == true,
@@ -135,7 +135,7 @@ struct DailyDigestTests {
         defer { teardown() }
         try store.rawWrite("DROP TABLE job_runs")
 
-        let result = await DailyDigest(config: config).run(ledger: store.ledger, now: now, calendar: calendar)
+        let result = await DailyDigest().run(ledger: store.ledger, now: now, calendar: calendar, config: config)
 
         #expect(result == BuiltinResult(outcome: DailyDigest.unreadableOutcome, card: true,
                                         status: .failed(reason: DailyDigest.unreadableReason)))
@@ -151,7 +151,7 @@ struct DailyDigestTests {
         try seedRun(store.ledger, sweep, hoursAgo: 25)
         try seedRun(store.ledger, sweep, hoursAgo: 23)
 
-        let result = await DailyDigest(config: config).run(ledger: store.ledger, now: now, calendar: calendar)
+        let result = await DailyDigest().run(ledger: store.ledger, now: now, calendar: calendar, config: config)
 
         #expect(result.outcome.hasPrefix("\u{201C}sweep\u{201D}: 1 completed, 0 failed"), "got: \(result.outcome)")
     }
@@ -170,7 +170,7 @@ struct DailyDigestTests {
         try ledger.upsert(heavy)
         try seedRun(ledger, heavy, hoursAgo: 1)
 
-        let alone = await DailyDigest(config: config).run(ledger: ledger, now: now, calendar: calendar)
+        let alone = await DailyDigest().run(ledger: ledger, now: now, calendar: calendar, config: config)
         #expect(alone.outcome.utf8.count < 300, "the name is capped by Briefing.name: \(alone.outcome.utf8.count) bytes")
 
         for i in 0..<200 {
@@ -178,7 +178,7 @@ struct DailyDigestTests {
             try ledger.upsert(job)
             try seedRun(ledger, job, hoursAgo: 1)
         }
-        let crowded = await DailyDigest(config: config).run(ledger: ledger, now: now, calendar: calendar)
+        let crowded = await DailyDigest().run(ledger: ledger, now: now, calendar: calendar, config: config)
 
         #expect(crowded.outcome.utf8.count <= DailyDigest.outcomeMaxBytes)
         let lines = crowded.outcome.components(separatedBy: "\n")
@@ -349,7 +349,9 @@ struct DailyDigestTests {
         let card = try #require(cards.first)
         #expect(cards.count == 1)
         #expect(card.jobName == DailyDigest.jobName)
-        #expect(card.outcome?.hasPrefix("\u{201C}sweep\u{201D}: 1 completed, 0 failed · 40/") == true, "got: \(card.outcome ?? "nil")")
+        // 1000 is the runner's injected budget (isolatedConfig), not the process-global default.
+        #expect(card.outcome?.hasPrefix("\u{201C}sweep\u{201D}: 1 completed, 0 failed · 40/1000 tokens today") == true,
+                "got: \(card.outcome ?? "nil")")
         #expect(card.outcome?.contains("OUTCOME-TEXT") == false)
     }
 }
