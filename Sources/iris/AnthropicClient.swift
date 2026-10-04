@@ -277,21 +277,74 @@ struct AnthropicClient {
     /// `transport` is resolved inside the stream's own task, because the Vertex transport needs
     /// an access token and fetching it is async; a failure there surfaces as the stream's error,
     /// recorded like any other failed call.
-    static func streamContent(request: GeminiRequest, model: String,
+    static func streamContent(request: GeminiRequest, model: String, session: URLSession = .shared,
                               transport: @escaping @Sendable () async throws -> AnthropicTransport) -> AsyncThrowingStream<LLMStreamEvent, Error> {
-        LLMStreaming.stream(mapper: AnthropicStreamMapper()) {
-            let resolved = try await transport()
-            return (try makeURLRequest(request: request, model: model, transport: resolved, stream: true), resolved.providerLabel)
+        @Sendable func attempt(_ request: GeminiRequest) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+            LLMStreaming.stream(mapper: AnthropicStreamMapper(), session: session) {
+                let resolved = try await transport()
+                return (try makeURLRequest(request: request, model: model, transport: resolved, stream: true), resolved.providerLabel)
+            }
         }
+        // A non-200 throws before any event, so a TTL rejection can be retried without the
+        // consumer ever seeing half a reply. Only before the first event, and only once.
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                var yielded = false
+                do {
+                    do {
+                        for try await event in attempt(request) { yielded = true; continuation.yield(event) }
+                    } catch let error where !yielded && isTTLRejection(error, request: request) {
+                        logTTLFallback(error)
+                        for try await event in attempt(withoutTTL(request)) { continuation.yield(event) }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// 5c §0.8 insurance: the API is documented to take `ttl` with no beta header, but if one ever
+    /// answers 400 naming it, every Iris turn would fail. Such a rejection is retried once with
+    /// every marker at the 5-minute default (no `ttl` at all), which is what pre-5c sent.
+    static func isTTLRejection(_ error: Error, request: GeminiRequest) -> Bool {
+        // The prefix is never shorter than history, so a request with any 1h marker has a 1h prefix.
+        guard let error = error as? APIError, error.statusCode == 400,
+              request.cacheHints?.ttl.prefix == .oneHour else { return false }
+        let text = (error.message + " " + (error.detail ?? "")).lowercased()
+        return text.contains("ttl") || text.contains("cache_control")
+    }
+
+    static func withoutTTL(_ request: GeminiRequest) -> GeminiRequest {
+        var copy = request
+        copy.cacheHints?.ttl = .standard
+        return copy
+    }
+
+    private static func logTTLFallback(_ error: Error) {
+        print("Anthropic rejected a 1-hour cache TTL; retrying once at the 5-minute default: \(error.localizedDescription)")
     }
 
     static func generateContent(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "") async throws -> GeminiResponse {
         try await generateContent(request: request, model: model, transport: .direct(apiKey: apiKey, baseURL: baseURL))
     }
 
-    static func generateContent(request: GeminiRequest, model: String, transport: AnthropicTransport) async throws -> GeminiResponse {
+    static func generateContent(request: GeminiRequest, model: String, transport: AnthropicTransport,
+                                session: URLSession = .shared) async throws -> GeminiResponse {
+        do {
+            return try await generateOnce(request: request, model: model, transport: transport, session: session)
+        } catch let error where isTTLRejection(error, request: request) {
+            logTTLFallback(error)
+            return try await generateOnce(request: withoutTTL(request), model: model, transport: transport, session: session)
+        }
+    }
+
+    private static func generateOnce(request: GeminiRequest, model: String, transport: AnthropicTransport,
+                                     session: URLSession) async throws -> GeminiResponse {
         let urlRequest = try makeURLRequest(request: request, model: model, transport: transport, stream: false)
-        let (data, response) = try await URLSession.shared.data(for: urlRequest)
+        let (data, response) = try await session.data(for: urlRequest)
         
         guard let httpResponse = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
