@@ -117,6 +117,10 @@ struct OpenAIClient {
             "model": model,
             "messages": openAIMessages
         ]
+        // 5c §0.9: one request field that routes a conversation's calls to the same cache.
+        if let key = request.cacheHints?.promptCacheKey, !key.isEmpty {
+            body["prompt_cache_key"] = ConversationReader.utf8Prefix(key, maxBytes: 64)
+        }
         
         if let tools = request.tools, let fds = tools.first?.functionDeclarations {
             var openAITools = [[String: Any]]()

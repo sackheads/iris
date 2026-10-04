@@ -103,3 +103,41 @@ import Foundation
         #expect(JobCadence.anyFiresMoreOftenThanHourly([job(.schedule(.cron(daily))), job(every15)], now: now))
     }
 }
+
+/// 5c §0.9: OpenAI's one cache-routing field.
+@Suite struct OpenAIPromptCacheKeyTests {
+    private static let plain = GeminiRequest(contents: [Content(role: "user", parts: [Part(text: "hi")])],
+                                             systemInstruction: nil, tools: nil)
+
+    private func body(_ r: GeminiRequest) throws -> [String: Any] {
+        let req = try OpenAIClient.makeURLRequest(request: r, model: "m", apiKey: "k", stream: false)
+        let data = try #require(req.httpBody)
+        return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    @Test func sendsPromptCacheKey() throws {
+        var r = Self.plain
+        let id = UUID().uuidString
+        r.cacheHints = CacheHints(promptCacheKey: id)
+        #expect(try body(r)["prompt_cache_key"] as? String == id)
+    }
+
+    @Test func noHintsNoKeyAndLongKeysAreByteCapped() throws {
+        #expect(try body(Self.plain)["prompt_cache_key"] == nil)
+        var empty = Self.plain
+        empty.cacheHints = CacheHints(promptCacheKey: "")
+        #expect(try body(empty)["prompt_cache_key"] == nil)
+        var long = Self.plain
+        long.cacheHints = CacheHints(promptCacheKey: String(repeating: "é", count: 40))   // 80 bytes
+        let key = try #require(try body(long)["prompt_cache_key"] as? String)
+        #expect(key.utf8.count <= 64)
+        #expect(key == String(repeating: "é", count: 32), "cut on a character boundary, not mid-scalar")
+    }
+
+    @Test func hintsWithoutAKeyChangeNoBytes() throws {
+        var r = Self.plain
+        let a = try OpenAIClient.makeURLRequest(request: r, model: "m", apiKey: "k", stream: false).httpBody
+        r.cacheHints = CacheHints(ttl: .init(prefix: .oneHour, history: .oneHour))
+        #expect(try OpenAIClient.makeURLRequest(request: r, model: "m", apiKey: "k", stream: false).httpBody == a)
+    }
+}
