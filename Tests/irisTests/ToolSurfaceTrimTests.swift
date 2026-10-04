@@ -257,6 +257,11 @@ struct ToolSurfaceTrimTests {
     /// `inlineDeclaredToolNames`), and asserts what's left is exactly the set. Remove any one name
     /// from `inlineDeclaredToolNames` by hand to see this fail — that's the "forgot to add it"
     /// case, reproduced.
+    ///
+    /// A new inline gate needs BOTH a set entry and a state line in this test that actually
+    /// drives a turn through it — this test can only catch a mismatch between the two. A
+    /// declaration added with neither (the "forgot both" case) is invisible to it: nothing here
+    /// observes the new name, so there is nothing to compare against the set.
     @Test("inlineDeclaredToolNames covers every inline FunctionDeclaration the engine can produce")
     func inlineDeclaredToolNamesIsExhaustive() async throws {
         var observed: Set<String> = []
