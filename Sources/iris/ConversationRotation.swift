@@ -198,3 +198,61 @@ final class OneShot<T: Sendable>: @unchecked Sendable {
         }
     }
 }
+
+/// 5b §0.4: what launch does to make the meta key and the `isPinned` flags agree, and to keep the
+/// pinned conversation out of the archive. Pure, so every case is testable without an `AppState`;
+/// `AppState.repairPinnedConversation()` applies it.
+///
+/// The meta key is written before the flags move, and the flags reach the store on a debounced
+/// flush, so a crash can leave either side behind:
+/// - the key names a live conversation: it is Iris. Pin it, un-archive it, unpin every other.
+/// - the key names a missing or archived conversation, or there is no key: a crash between the
+///   meta write and the flush named a row that was never persisted, or a legacy store predates
+///   the key. A conversation still flagged pinned is what the owner last saw as Iris, so the key
+///   is pointed back at it.
+/// - nothing is pinned either: an archived target is restored; a missing one is left to
+///   `activityConversationId()`, which creates a fresh Iris on first use.
+struct PinRepair: Equatable, Sendable {
+    struct Row: Equatable, Sendable {
+        let id: UUID
+        let isPinned: Bool
+        let isArchived: Bool
+        let updatedAt: Date
+    }
+
+    /// The new meta value to record; nil leaves the key as it is.
+    var newMetaId: UUID?
+    var pin: Set<UUID> = []
+    var unpin: Set<UUID> = []
+    var unarchive: Set<UUID> = []
+
+    var isEmpty: Bool { newMetaId == nil && pin.isEmpty && unpin.isEmpty && unarchive.isEmpty }
+
+    static func decide(metaValue: String?, rows: [Row]) -> PinRepair {
+        let target = metaValue.flatMap(UUID.init(uuidString:))
+        let targetRow = target.flatMap { t in rows.first { $0.id == t } }
+        var repair = PinRepair()
+        let keep: Row?
+        if let row = targetRow, !row.isArchived {
+            keep = row
+        } else if let best = rows.filter({ $0.isPinned && $0.id != target })
+            .max(by: { $0.updatedAt < $1.updatedAt }) {
+            // Several pins with no live key only come from a crash mid-rotation or from repeated
+            // ones; the newest is the latest Iris in that chain. The tie-break is safe because
+            // the losers are only unpinned: their messages stay in the sidebar, searchable and
+            // archivable, and nothing is deleted or merged on the strength of the guess.
+            keep = best
+            repair.newMetaId = best.id
+        } else {
+            keep = targetRow   // archived, unpinned elsewhere: restore it; missing: nil
+        }
+        if let keep {
+            if !keep.isPinned { repair.pin.insert(keep.id) }
+            if keep.isArchived { repair.unarchive.insert(keep.id) }
+        }
+        for row in rows where row.isPinned && row.id != keep?.id {
+            repair.unpin.insert(row.id)
+        }
+        return repair
+    }
+}
