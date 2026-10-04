@@ -2,6 +2,8 @@ import Foundation
 
 /// The payload of a `ChatRole.event` message (#187 deliverable 2): what a background job run did,
 /// delivered into the pinned "Iris" conversation and drawn as a one-line card by `EventCardView`.
+/// Since 5b §0.6 a card can instead be a memory reflection's report from another conversation
+/// (`isReflection`), which has no ledger row behind it.
 ///
 /// It is stored as JSON inside `ChatMessage.content` rather than as new columns on the message
 /// row: an event card is a *snapshot* of the run at the moment it was delivered, not a live view
@@ -13,7 +15,9 @@ import Foundation
 /// (`ConversationStore.indexedRoles`) — it is a UI artifact, so nothing here needs to be
 /// model-legible beyond `historyLine`.
 struct EventCard: Codable, Equatable, Sendable {
-    /// Discriminator for a future second kind of card. Only `"job_run"` exists today.
+    /// `"job_run"`, or `reflectionKind` for a memory reflection that ran in another conversation
+    /// (5b §0.6). A reflection card reuses the job fields: `jobId`/`jobName` hold the source
+    /// conversation, `outcome` the summary, and `runId` is a fresh id with no ledger row.
     let kind: String
     let runId: UUID
     let jobId: UUID
@@ -60,6 +64,14 @@ struct EventCard: Codable, Equatable, Sendable {
     /// Whether the run's commands could reach the network (#282 §5) — a granted job's
     /// `network: true`; false for every card written before grants and for every ungranted run.
     let network: Bool
+    /// The conversation a reflection card's reflection ran in, and its title at delivery. `nil`
+    /// on every job card and on every card written before 5b.
+    let sourceConversationId: UUID?
+    let sourceTitle: String?
+    /// Whether the run was a model-free built-in (5b §0.8). Its outcome is the whole report — the
+    /// digest's failure and paused lines come after the first — so the card shows it as a body,
+    /// not a one-line summary. False on every model run and every card written before built-ins.
+    let builtin: Bool
 
     init(kind: String = "job_run",
          runId: UUID,
@@ -78,7 +90,10 @@ struct EventCard: Codable, Equatable, Sendable {
          approvalBlockedReason: String? = nil,
          catchUpNote: String? = nil,
          network: Bool = false,
-         watchSummary: WatchSummary? = nil) {
+         watchSummary: WatchSummary? = nil,
+         sourceConversationId: UUID? = nil,
+         sourceTitle: String? = nil,
+         builtin: Bool = false) {
         self.kind = kind
         self.runId = runId
         self.jobId = jobId
@@ -97,6 +112,9 @@ struct EventCard: Codable, Equatable, Sendable {
         self.catchUpNote = catchUpNote
         self.network = network
         self.watchSummary = watchSummary
+        self.sourceConversationId = sourceConversationId
+        self.sourceTitle = sourceTitle
+        self.builtin = builtin
     }
 
     /// A card that fails to decode renders as raw JSON in the transcript, so every field a future
@@ -146,6 +164,59 @@ struct EventCard: Codable, Equatable, Sendable {
         // The `blockedCall` idiom (invariant 1): a summary this build cannot read costs the
         // figures, not the card — the run's outcome is the card's reason to exist.
         watchSummary = try? container.decodeIfPresent(WatchSummary.self, forKey: .watchSummary)
+        // Invariant 1: absent on every job card and every card written before 5b.
+        sourceConversationId = try container.decodeIfPresent(UUID.self, forKey: .sourceConversationId)
+        sourceTitle = try container.decodeIfPresent(String.self, forKey: .sourceTitle)
+        // Invariant 1: absent on every card written before built-in jobs.
+        builtin = try container.decodeIfPresent(Bool.self, forKey: .builtin) ?? false
+    }
+
+    /// The most lines a job card's outcome body shows. Enough for a digest's job lines plus its
+    /// failure and paused lines on an ordinary day; the outcome itself is byte-capped upstream.
+    static let outcomeBodyLineLimit = 20
+
+    /// Whether a job card's outcome is drawn as a multi-line body under the summary row rather
+    /// than truncated into it: always for a built-in, and for any outcome with more than one line,
+    /// since a one-line row would hide everything after the first.
+    var outcomeIsBody: Bool {
+        guard !isReflection, let outcome, !outcome.isEmpty else { return false }
+        return builtin || outcome.contains(where: \.isNewline)
+    }
+
+    // MARK: Reflection cards (5b §0.6)
+
+    static let reflectionKind = "reflection"
+
+    /// Byte caps, never `String.count`: one grapheme can carry tens of thousands of combining
+    /// marks. The title cap matches `search_conversations`' hit titles.
+    static let reflectionTitleMaxBytes = IrisEngine.hitTitleMaxBytes
+    static let reflectionSummaryMaxBytes = 2048
+
+    var isReflection: Bool { kind == Self.reflectionKind }
+
+    /// A reflection's report for Iris. The title is flattened to one line and both fields are
+    /// byte-capped here, so every line built from the card is bounded. The summary keeps its
+    /// newlines for the card; `historyLine` and `transcriptLine` flatten it.
+    static func reflection(summary: String, sourceId: UUID, sourceTitle: String, at date: Date) -> EventCard {
+        let title = IrisEngine.capFieldBytes(IrisEngine.flattenHitLineField(sourceTitle),
+                                             maxBytes: reflectionTitleMaxBytes)
+        let body = IrisEngine.capFieldBytes(summary.trimmingCharacters(in: .whitespacesAndNewlines),
+                                            maxBytes: reflectionSummaryMaxBytes)
+        return EventCard(kind: reflectionKind, runId: UUID(), jobId: sourceId, jobName: title,
+                         status: .completed, outcome: body, startedAt: date, finishedAt: date,
+                         sourceConversationId: sourceId, sourceTitle: title)
+    }
+
+    /// The source title as lines show it: re-flattened and re-capped on read, since a stored card
+    /// may have been written by hand or by another build.
+    private var reflectionSourceText: String {
+        IrisEngine.capFieldBytes(IrisEngine.flattenHitLineField(sourceTitle ?? jobName),
+                                 maxBytes: Self.reflectionTitleMaxBytes)
+    }
+
+    private var reflectionSummaryLine: String {
+        IrisEngine.capFieldBytes(IrisEngine.flattenHitLineField(outcome ?? ""),
+                                 maxBytes: Self.reflectionSummaryMaxBytes)
     }
 
     private static let unknownId = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
@@ -208,7 +279,10 @@ struct EventCard: Codable, Equatable, Sendable {
     }
 
     /// `pr-sweep · blocked on approval: run_command` — the card's title, also its tooltip.
-    var headline: String { "\(jobName) · \(statusDetail)" }
+    var headline: String {
+        if isReflection { return "Memory reflection · \(reflectionSourceText)" }
+        return "\(jobName) · \(statusDetail)"
+    }
 
     // MARK: The blocked call (#187 §6)
 
@@ -392,6 +466,7 @@ struct EventCard: Codable, Equatable, Sendable {
     /// `[job pr-sweep · completed · 4.2k tokens] swept 3 PRs` — what Copy Transcript and the
     /// Markdown export print in place of the card's JSON (spec §8.2).
     var transcriptLine: String {
+        if isReflection { return "[memory reflection in \(reflectionSourceText)] \(reflectionSummaryLine)" }
         let head = "[job \(jobName) · \(statusText) · \(SessionActivity.formatTokenCount(totalTokens)) tokens]"
         var line = head
         if let outcome, !outcome.isEmpty { line += " \(outcome)" }
@@ -409,6 +484,7 @@ struct EventCard: Codable, Equatable, Sendable {
     /// the line drained into a turn's history. The run is named by the first eight characters of
     /// its id, which is enough for `/jobs ack <run id>` to match on.
     var historyLine: String {
+        if isReflection { return "[Event] memory reflection in \(reflectionSourceText): \(reflectionSummaryLine)" }
         let runPrefix = runId.uuidString.lowercased().prefix(8)
         let head = "[Event] job \(jobName) \(statusText)"
         // The catch-up note rides along for the same reason the transcript carries it: this is the

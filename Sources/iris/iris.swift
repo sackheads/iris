@@ -824,6 +824,12 @@ actor IrisEngine {
         let jobLedger = await MainActor.run(resultType: JobLedger?.self, body: { schedulerState?.store.ledger })
         if let ledger = jobLedger {
             await configureJobBookkeeping(ledger: ledger)
+            // After the scheduler is up (5b §0.8). Once per store, ever: a deleted digest stays deleted.
+            let digestStore = await MainActor.run(resultType: ConversationStore?.self, body: { schedulerState?.store })
+            if let digestStore, let scheduler = jobScheduler {
+                await DailyDigest.registerDigestOnce(ledger: ledger, store: digestStore,
+                                                     scheduler: scheduler, timeZone: .current)
+            }
         }
 
         await PluginManager.shared.loadAll()
@@ -2339,6 +2345,7 @@ actor IrisEngine {
             let slug = Job.slug(from: name)
             replacing = ((try? ledger.jobs()) ?? []).first {
                 $0.name == slug && $0.createdInConversationId == conversationId && $0.trigger.kind != Trigger.fsEventKind
+                    && $0.action == .prompt   // 5b §0.8: schedule_job never turns a built-in into a prompt job
             }
             if let replacing { taken.remove(replacing.name) }
         }
@@ -4208,7 +4215,7 @@ extension IrisEngine {
         return [
             FunctionDeclaration(
                 name: "list_jobs",
-                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, why one is paused, and how the last run ended, plus what each has sent today (tokens sent, its runs' subagents included, not billed cost) and how hard it has been running — `tokensToday` against `dailyBudget`, `runsLastHour` against `maxRunsPerHour` (the breaker), `retryAttempt` out of three, and `policy`, `gateKind` and `profile`, and `grants` — the directories and network a mutating job was created with, null when it has none — with `tokensTodayAllJobs` against `globalDailyBudget` for every background run together, and `unreadableJobs` — how many stored jobs could not be read at all. A figure that is null could not be read, which is not the same as zero. Use it to answer what is scheduled, how much context a job has sent, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
+                description: "List the background jobs: their name, trigger, whether they are enabled, when each next fires, why one is paused, and how the last run ended, plus what each has sent today (tokens sent, its runs' subagents included, not billed cost) and how hard it has been running — `tokensToday` against `dailyBudget`, `runsLastHour` against `maxRunsPerHour` (the breaker), `retryAttempt` out of three, and `policy`, `gateKind` and `profile`, `action` — `prompt` for a model turn, `builtin:<name>` for Iris's own code run with no model, such as the daily digest — and `grants` — the directories and network a mutating job was created with, null when it has none — with `tokensTodayAllJobs` against `globalDailyBudget` for every background run together, and `unreadableJobs` — how many stored jobs could not be read at all. A figure that is null could not be read, which is not the same as zero. Use it to answer what is scheduled, how much context a job has sent, or to find the job behind a run you are being asked about; say so if `unreadableJobs` is not zero, because the list is then incomplete.",
                 parameters: Schema(type: "OBJECT", properties: [:], required: [])),
             FunctionDeclaration(
                 name: "get_job_run",
@@ -4305,6 +4312,9 @@ extension IrisEngine {
                 "policy": JobsCommand.policySummary(for: job),
                 "gateKind": job.trigger.gate?.summary ?? NSNull(),
                 "retryAttempt": job.retryAttempt,
+                // "prompt" or "builtin:<name>" (5b §0.8): a built-in runs Iris's own code with no
+                // model turn, so its zero tokens are not an idle or broken job.
+                "action": job.action.stored,
                 // As stored: `mounts` in the runtime's grammar (`ContainerMount.entry`), `network`
                 // as given. Null for every job with no grant, never an empty object — and null for
                 // a read-only row's grant, which the runner treats as inert (L1).
@@ -4342,7 +4352,7 @@ extension IrisEngine {
     nonisolated static func jobRunJSON(_ run: JobRun, outcome: String?, failureReason: String?,
                                        gateSignal: String?, lastAgentMessage: String?) -> String {
         let iso = ISO8601DateFormatter()
-        let row: [String: Any] = [
+        var row: [String: Any] = [
             "id": run.id.uuidString,
             "jobId": run.jobId.uuidString,
             "jobName": run.jobName,
@@ -4367,6 +4377,7 @@ extension IrisEngine {
             // Null for every run no burst started. Harness-written, so not guarded.
             "watchSummary": run.watchSummary.map(jsonObject) ?? NSNull(),
         ]
+        if run.transcriptConversationId == nil { row["transcript"] = noTranscriptNote }
         return jsonString(row) ?? "{}"
     }
 
@@ -4393,6 +4404,11 @@ extension IrisEngine {
     /// what the run actually said, before the guard sees it. `nil` when the transcript is gone
     /// (retention) or the run never spoke.
     static let jobRunTranscriptExcerpt = 2_000
+
+    /// `get_job_run`'s `transcript` field on a row that never had one — a built-in, which runs no
+    /// model turn, and a skip or pause row, which ran nothing — so the model reads "there is none"
+    /// rather than inferring a pruned transcript from a null.
+    static let noTranscriptNote = "none: this run had no model turn"
 
     private nonisolated static func jsonString(_ object: Any) -> String? {
         guard JSONSerialization.isValidJSONObject(object),

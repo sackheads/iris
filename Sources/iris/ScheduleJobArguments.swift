@@ -398,7 +398,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
         return "\(formatter.string(from: date)) \(timeZone.identifier)"
     }
 
-    private static func cronMessage(_ error: CronParseError) -> String {
+    static func cronMessage(_ error: CronParseError) -> String {
         switch error {
         case .fieldCount(let count):
             return "give five fields (minute hour day-of-month month day-of-week), not \(count)."

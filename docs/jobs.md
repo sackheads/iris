@@ -16,7 +16,8 @@ This document covers deliverables 1 to 4½ of `#187` (see `docs/agency/agency.md
 `docs/specs/2026-09-21-agency-model-and-ledger.md`, `docs/specs/2026-09-21-agency-runtime.md`,
 `docs/specs/2026-09-22-agency-watches.md` and `docs/specs/2026-09-23-agency-job-grants.md`): the
 job model, the cron subset, the schedule aliases, what happens on sleep, what a fire actually does
-— a run in a hidden conversation of its own, a row in the run ledger, and one event card — the
+— a run in a hidden conversation of its own, a row in the run ledger, and one event card (a
+built-in job has no conversation and no model turn; see "Built-in jobs" below) — the
 gates, limits and retries around it, what a directory watch does with a burst of saves, what a
 `mutating` job may be granted so that it can do its work unattended, and `iris --run-job`, which
 fires one job from a terminal and prints the row it wrote.
@@ -660,6 +661,55 @@ its own — a real conversation, so its transcript can be read back afterwards, 
 there. A run in flight shows up in the session strip under the composer as `job:<name>`; that is
 the only place a running job is visible while it runs.
 
+### Built-in jobs
+
+Not every job is a prompt. A job whose action is a **built-in** runs a piece of Iris's own code in
+place of a model turn: no background conversation is opened, no model is called, and its row in the
+run ledger has zero tokens and no transcript. It posts a card only when it has something to say. The
+token budgets do not apply to it, since it spends none; scheduling, catch-up, overlap, retries and
+`/jobs` treat it like any other job. `schedule_job` cannot create one — built-ins are registered by
+Iris itself — and a built-in name this build does not know fails its run with
+`unknown built-in: <name>` and pauses the job on that first failure, since retrying cannot make the
+name known. `get_job_run` on a built-in's run returns its outcome and says there is no transcript,
+and `list_jobs` gives every job an `action` of `prompt` or `builtin:<name>`. Built-in runs are left
+out of the briefing's recent runs.
+
+#### The daily digest
+
+The one built-in so far. Every morning at **10:00 local time** it posts one card to Iris built
+straight from the run ledger, and it **never calls a model**: it costs nothing and cannot invent
+anything. The card covers the runs since the previous digest that completed (the last 24 hours the
+first time):
+
+- one line per job that ran — `“sweep”: 3 completed, 1 failed · 620000/1000000 tokens today`, with
+  the name quoted so no name can pose as a count,
+  blocked or interrupted runs counted on the end of the line when there are any, and the tokens
+  sent today against that job's daily budget;
+- one line per failure nobody has acknowledged, and one per paused job, named with the same fixed
+  words the briefing uses (`failed`, `timeout`, `budget`, `failed 3 times`, …).
+
+It never copies a run's own outcome or failure text — those can carry words a run fetched; ask
+Iris, or use `get_job_run`, to read them. A day on which nothing ran posts nothing. A digest that
+cannot read the ledger posts a card saying so and records a **failed** run
+(`ledger unreadable`), not a completed one, so the next digest still covers the runs it missed. The card is
+capped at 4 KB, cut on a whole line with a count of what was left out. A Mac asleep through 10:00
+gets one digest when it wakes, covering everything since the last one (`catchUp: coalesce`).
+
+It is an ordinary job named `Daily digest`, created the first time Iris launches with this build
+(`Daily digest (built-in)` if you already have a job with that name), with the cron schedule
+`0 10 * * *` in the Mac's time zone at that moment — a fixed zone, so after moving to another one
+the digest keeps the old zone's 10:00 until you reschedule it. To move it,
+`/jobs reschedule "Daily digest" "0 9 * * *"` (keeps its zone) or
+`/jobs reschedule "Daily digest" "30 8 * * 1-5" Europe/Paris` (weekdays at 08:30 in Paris);
+`schedule_job` never edits a built-in. `/jobs pause Daily digest` and
+`/jobs resume Daily digest` stop and restart it, and `/jobs run Daily digest` runs it now
+(posting a card only if something ran since the last one). `/jobs delete Daily digest`
+removes it **for good** — Iris records that it registered the digest once and never recreates it,
+on this or any later launch.
+
+A build from before the digest ignores a job's action and would run its prompt as a model turn, so
+the digest's prompt only asks the model to reply that the digest was skipped.
+
 Before deliverable 2, a fire posted a system event into the conversation the job was created in
 and started a turn there. That is gone: a five-minute cadence no longer writes into the chat you
 are reading.
@@ -679,7 +729,7 @@ A run ends in one of five statuses:
 | Status | Meaning |
 | --- | --- |
 | `running` | in flight right now |
-| `completed` | the turn finished and said something — or the job's gate found nothing to do, in which case the outcome says `gate: no change` and there was no turn |
+| `completed` | the turn finished and said something — or the job's gate found nothing to do, in which case the outcome says `gate: no change` and there was no turn — or a built-in job ran, which never has a turn |
 | `failed` | the model call errored, the loop was cut short, or the turn ended having said nothing at all |
 | `blocked on approval` | the run wanted a tool it is not allowed to use unattended, and stopped (see below) |
 | `interrupted` | nothing finished it: the app quit mid-run and the next launch closed the row out, a cadence came round while the previous run of the same job was still going so this trigger was dropped rather than started twice, a gate could not answer, or a limit refused the fire before it started (the breaker, a budget, or a ledger that could not say what the job has sent) |
@@ -690,7 +740,8 @@ never got as far as a reply" must not look the same on a card.
 ## Event cards and the Iris conversation
 
 When a run ends, one **event card** is delivered: job name, status, the one-line outcome, tokens,
-and a "View run" button onto the transcript. It goes to the job's destination conversation if it
+and a "View run" button onto the transcript. (A built-in job's card has no transcript to view, and a
+built-in with nothing to report posts no card at all.) It goes to the job's destination conversation if it
 has one, and otherwise to **Iris** — the pinned conversation Iris creates on first use, keeps at
 the top of the sidebar, and treats as your main conversation. (Pinned conversations refuse
 `/clear`. `/new` in Iris archives it and starts a fresh one. The pin moves once the rotation's
@@ -698,6 +749,14 @@ reflection turn is done, and a card delivered from then on lands in the new Iris
 during the reflection lands in the old Iris, which is archived, and is carried into the new one's
 opening summary.) A run that stopped on a refused call gets a second half as well — the call in full, and
 what you can do about it; see "Approve and run" below.
+
+One card in Iris is not a job run: when a conversation other than Iris reflects on its memory
+(every 30 messages, or `/reflect`), what the reflection changed is delivered to Iris as a
+**memory reflection** card naming that conversation. It has no ledger row, so it never appears in
+`/jobs`, the Recent Activity briefing or `get_job_run`, and it carries no buttons: there is no
+transcript to view, no call to approve and nothing for `/jobs ack` to acknowledge. Its history line
+(`[Event] memory reflection in ‹title›: ‹summary›`) is guarded like any card's. A reflection that
+changed nothing posts no card, and Iris's own reflections stay in Iris.
 
 Because Iris reads every other conversation's cards and holds both job-creating tools, calling
 `schedule_job` or `register_directory_watcher` from Iris itself is one case where creating a job or
@@ -850,7 +909,8 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
   a job cannot trip its own breaker by being skipped.
 - **Daily token budget** — **1,000,000 tokens per job** per local calendar day, and **3,000,000
   across every background run together**. The fire that finds the day's tokens sent at or over the
-  figure pauses the job rather than starting. Budgets count every token sent, including tokens a
+  figure pauses the job rather than starting — unless it is a built-in job, which spends no tokens
+  and so is never refused by a budget. Budgets count every token sent, including tokens a
   provider served from its prompt cache; before 5a an Anthropic run was charged nothing because
   Anthropic reports no total. A run's tokens include what its delegated subagents (and theirs, and
   any evaluator grading their work) spend **while the run is active**; a subagent still going after
@@ -947,6 +1007,7 @@ pause reason the table prints, on the `interrupted` row and on the card.
 | `/jobs pause <name>` | Stops a job firing, with "paused by user" as the reason the table shows |
 | `/jobs resume <name>` | Clears the pause *and* the retry ladder, and recomputes the next fire from the job's own schedule |
 | `/jobs run <name>` | Fires the job now, through the same admission a scheduled fire meets. Says it is starting straight away, then reports what admission decided once the fire is over — an overlap, the breaker or an exhausted budget is named rather than reported as a run. The result itself arrives as a card. A paused or disabled job is refused up front |
+| `/jobs reschedule <name> <cron> [timezone]` | Gives a scheduled or polled job a new five-field cron (the same subset `schedule_job` takes), recomputes its next fire and says when that is. Quote a name or cron with spaces in it — `/jobs reschedule "Daily digest" "0 9 * * *"` — or leave them bare and the last five words are the cron. Without a timezone a cron job keeps its own zone and an interval job (which becomes a cron job) takes the Mac's. Works on built-ins such as the daily digest; a polled job keeps its gate; a pending retry is dropped with the old schedule; a job you or the retry ladder paused stays paused, but a job paused because its old cron could never match is resumed by a cron that can, and a new cron that can never match pauses the job with that reason. The zone is any IANA name or abbreviation the Mac knows (`Europe/Paris`, `CET`, `GMT+2`). An invalid cron, a cron of six fields, or an unknown zone (a misspelled `Europe/Pairs` included) is refused with a sentence and changes nothing, and a directory watch, which has no schedule, is refused |
 | `/jobs delete <name>` | Deletes a job and its ledger rows. Refused while a run is in flight. The transcripts are left for retention to clear, so a card you are still reading keeps working |
 
 ## Running one job from a terminal (`iris --run-job`)
@@ -1026,7 +1087,8 @@ is threading the run's own state to those call sites.
 
 Two read-only tools let the model answer questions about jobs: `list_jobs` (every job, its trigger,
 its next fire, why it is paused, how its last run ended, its policy, profile, gate kind and grant
-(`grants`, as stored; `null` when it has none or is read-only), what
+(`grants`, as stored; `null` when it has none or is read-only), its `action` (`prompt`, or
+`builtin:<name>` for a built-in such as the daily digest, which runs no model), what
 it has sent today against its budgets and the breaker, and — for a watch — its quiet window, its
 ignore globs, its last burst's figures and what it has absorbed since launch, `null` for anything
 else) and `get_job_run` (one run, by id or by the eight characters a card shows, including the

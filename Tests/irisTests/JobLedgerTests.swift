@@ -273,4 +273,83 @@ struct JobLedgerTests {
         let recent = try store.ledger.recentRuns(limit: 10)
         #expect(recent.map(\.id) == [ordinary.id])
     }
+
+    // MARK: action (5b §0.8–9, invariant 1)
+
+    @Test("a job row written before 5b, with no action, loads as a prompt job")
+    func preActionRowLoadsAsPrompt() throws {
+        let store = try ConversationStore.inMemory()
+        let id = UUID()
+        let trigger = String(decoding: try JSONEncoder().encode(Trigger.schedule(.interval(seconds: 60))),
+                             as: UTF8.self)
+        try store.writer.write { db in
+            // The pre-5b column list: no `action`, so the column is NULL.
+            try db.execute(sql: "INSERT INTO jobs (id, name, prompt, triggerKind, trigger, createdAt) VALUES (?, ?, ?, ?, ?, ?)",
+                           arguments: [id.uuidString, "legacy", "p", "schedule", trigger, Date()])
+        }
+        let back = try #require(try store.ledger.job(id: id))
+        #expect(back.action == .prompt)
+        #expect(try store.ledger.jobs().map(\.name) == ["legacy"], "and it is not skipped as unreadable")
+    }
+
+    @Test("a built-in action round-trips through upsert and reload, and back to prompt")
+    func builtinActionRoundTrips() throws {
+        let store = try ConversationStore.inMemory()
+        var job = makeJob("digest")
+        job.action = .builtin("daily_digest")
+        try store.ledger.upsert(job)
+        #expect(try store.ledger.job(id: job.id)?.action == .builtin("daily_digest"))
+        let stored = try store.writer.read { db in
+            try String.fetchOne(db, sql: "SELECT action FROM jobs WHERE id = ?", arguments: [job.id.uuidString])
+        }
+        #expect(stored == "builtin:daily_digest")
+        job.action = .prompt
+        try store.ledger.upsert(job)
+        #expect(try store.ledger.job(id: job.id)?.action == .prompt)
+    }
+
+    @Test("an action this build does not know is skipped as unreadable, never run as a prompt")
+    func unknownActionIsUnreadable() throws {
+        let store = try ConversationStore.inMemory()
+        var job = makeJob("future")
+        job.action = .builtin("x")
+        try store.ledger.upsert(job)
+        try store.writer.write { db in
+            try db.execute(sql: "UPDATE jobs SET action = 'script:tidy' WHERE id = ?", arguments: [job.id.uuidString])
+        }
+        #expect(try store.ledger.jobs().isEmpty)
+        #expect(store.ledger.unreadableJobCount == 1)
+        #expect(JobAction(stored: "prompt") == .prompt)
+        #expect(JobAction(stored: nil) == .prompt)
+        #expect(JobAction(stored: "builtin:") == nil)
+    }
+
+    @Test("Job's Codable reads a missing action as prompt and round-trips a built-in")
+    func jobCodableAction() throws {
+        var job = makeJob("c")
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(job)) as? [String: Any])
+        object.removeValue(forKey: "action")
+        let legacy = try JSONDecoder().decode(Job.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(legacy.action == .prompt)
+        job.action = .builtin("daily_digest")
+        #expect(try JSONDecoder().decode(Job.self, from: JSONEncoder().encode(job)).action == .builtin("daily_digest"))
+    }
+
+    @Test("recentRuns leaves out a built-in job's runs")
+    func recentRunsExcludesBuiltins() throws {
+        let store = try ConversationStore.inMemory()
+        let plain = makeJob("plain")
+        var builtin = makeJob("digest")
+        builtin.action = .builtin("daily_digest")
+        try store.ledger.upsert(plain)
+        try store.ledger.upsert(builtin)
+        let t0 = Date(timeIntervalSince1970: 4_000_000)
+        let plainRun = JobRun(jobId: plain.id, jobName: plain.name, triggerKind: "schedule",
+                              startedAt: t0, status: .completed, transcriptConversationId: UUID())
+        let builtinRun = JobRun(jobId: builtin.id, jobName: builtin.name, triggerKind: "schedule",
+                                startedAt: t0.addingTimeInterval(1), status: .completed)
+        try store.ledger.begin(run: plainRun)
+        try store.ledger.begin(run: builtinRun)
+        #expect(try store.ledger.recentRuns(limit: 10).map(\.id) == [plainRun.id])
+    }
 }

@@ -431,6 +431,13 @@ class AppState {
     }
     private var pendingUserMessages: [UUID: [PendingUserMessage]] = [:]
 
+    /// Reflection turns in progress (5b §0.6), keyed by conversation: the message count at the
+    /// moment the turn first took a steer or a second engine turn began beside it, or nil while
+    /// neither has happened. Everything said after that point may be an answer to the user, a
+    /// peer or a subagent's report, not a report of memory edits.
+    /// Transient; set and removed by `runReflection`.
+    @ObservationIgnored private var reflectionSteerPoints: [UUID: Int?] = [:]
+
     /// Turns the engine starts for itself. Arrivals — the scheduler, the watcher, subagent
     /// post-backs — call `IrisEngine.processInput` directly and never create an `activeTasks`
     /// entry, so `activeTasks` alone cannot see them and `archiveRefusal` would happily let the
@@ -459,6 +466,20 @@ class AppState {
             mainStartTimeByConversation[conversationId] = Date()
         }
         engineTurnCounts[conversationId, default: 0] += 1
+        // A second turn beside a reflection — a background subagent's post-back, which calls
+        // `processInput` without queueing — appends its own replies inside the capture window, so
+        // it ends the window the way a steer does (5b §0.6).
+        if (engineTurnCounts[conversationId] ?? 0) > 1 { markReflectionBoundary(for: conversationId) }
+    }
+
+    /// Ends a running reflection's capture window at the current message count, the first time
+    /// anything other than the reflection may start speaking in its conversation. A no-op when
+    /// no reflection is running there, or when the window is already closed.
+    private func markReflectionBoundary(for conversationId: UUID) {
+        guard let watched = reflectionSteerPoints[conversationId], watched == nil,
+              let count = conversations.first(where: { $0.id == conversationId })?.messages.count
+        else { return }
+        reflectionSteerPoints[conversationId] = .some(count)
     }
 
     func endEngineTurn(for conversationId: UUID) {
@@ -560,6 +581,7 @@ class AppState {
             queue.removeFirst()
         }
         pendingUserMessages[conversationId] = queue.isEmpty ? nil : queue
+        if !taken.isEmpty { markReflectionBoundary(for: conversationId) }
         return taken
     }
 
@@ -949,6 +971,71 @@ class AppState {
     /// The automatic reflection pass, shared by the 30-message trigger and `/new`'s rotation of
     /// Iris (5b §0.4). `/reflect` asks for more (an OKF grooming pass) and keeps its own text.
     static let reflectionPrompt = "System Event [Reflection Trigger]: It's time to consolidate your memories. Reflect on the recent conversation. Have you learned any new user preferences, project structures, or recurring workflows? If so, use `update_soul` to evolve your persona, `update_user_profile` to update the user profile, `update_memory` to consolidate durable facts, and `create_skill`/`update_skill` for procedural skills. When you learn something durable — a lesson, recipe, decision, or reusable artifact — archive it to your permanent library at `~/.iris/memory/library/` (see your Library Management skill). Output a transparent summary of the gist of the updates for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'"
+
+    /// What a reflection says when it changed nothing (both prompts ask for exactly this). Matched
+    /// as a prefix of the trimmed reply; such a reflection posts no card.
+    static let noConsolidationReply = "No memory consolidation needed at this time."
+
+    /// What an automatic reflection outside Iris leaves in the chat in place of its report.
+    static let reflectionReportedNotice = "Memory reflection ran; its report is in Iris."
+
+    /// Runs one reflection turn in `convId` and, outside Iris, posts its report to Iris as a card
+    /// (5b §0.6). `processInput` returns nothing, so the report is the `.agent` messages the turn
+    /// appended. `moveReplyToIris` swaps them in the source chat for one pointer line — in
+    /// `messages` only: the model keeps its own reply in history. Iris's reflections stay in
+    /// place with no card; so does any whose report is the no-consolidation reply.
+    ///
+    /// A user or peer message that arrives meanwhile steers this same turn, and the model may
+    /// answer it here. The capture window therefore ends where the turn first *took* a steer — not
+    /// where the arrival bubble sits, which is appended on arrival and can land before the
+    /// reflection's own reply in the same round. A second engine turn that begins on the
+    /// conversation meanwhile (a background subagent's post-back) ends the window the same way.
+    /// If either happened, the card is built from the part before it and the source chat is left
+    /// exactly as it is, so the answer stays visible.
+    func runReflection(_ prompt: String, in convId: UUID, moveReplyToIris: Bool) async {
+        let before = conversations.first { $0.id == convId }?.messages.count ?? 0
+        reflectionSteerPoints[convId] = .some(nil)
+        await engine.processInput(prompt, source: "System", conversationId: convId)
+        let steerPoint = reflectionSteerPoints.removeValue(forKey: convId) ?? nil
+        // Stopped mid-turn: whatever it said so far is not a report of what it changed.
+        guard !Task.isCancelled,
+              let idx = conversations.firstIndex(where: { $0.id == convId }),
+              !conversations[idx].isPinned else { return }
+        let irisId = activityConversationId()
+        let count = conversations[idx].messages.count
+        guard irisId != convId,
+              // Fewer messages than before means the chat was cleared mid-turn: nothing to take.
+              before <= count else { return }
+        let end = min(max(steerPoint ?? count, before), count)
+        let replies = conversations[idx].messages[before..<end].filter { $0.role == .agent }
+        // The no-op line is judged on the last reply alone, so narration before it is not a report.
+        guard let last = replies.last,
+              !last.content.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(Self.noConsolidationReply)
+        else { return }
+        let summary = replies.map(\.content).joined(separator: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !summary.isEmpty else { return }
+
+        if moveReplyToIris, steerPoint == nil { replaceReflectionReply(in: convId, since: before) }
+        let card = EventCard.reflection(summary: summary, sourceId: convId,
+                                        sourceTitle: conversations[idx].title, at: Date())
+        await deliverEvent(card, to: irisId)
+    }
+
+    /// Swaps the `.agent` messages at or after `before` for one `reflectionReportedNotice` line,
+    /// placed where the first of them was. `messages` only; history is untouched.
+    func replaceReflectionReply(in convId: UUID, since before: Int) {
+        guard let idx = conversations.firstIndex(where: { $0.id == convId }),
+              before <= conversations[idx].messages.count else { return }
+        var messages = conversations[idx].messages
+        guard let first = messages[before...].firstIndex(where: { $0.role == .agent }) else { return }
+        let replyIds = Set(messages[before...].filter { $0.role == .agent }.map(\.id))
+        messages[first] = ChatMessage(role: .system, content: Self.reflectionReportedNotice)
+        messages.removeAll { replyIds.contains($0.id) }
+        conversations[idx].messages = messages
+        // A role change, not an append: the store must rewrite the rows it already holds.
+        markChanged(convId, .messagesReplaced)
+    }
 
     /// Returns Iris's (the pinned conversation's) id, creating it (pinned, unselected) and recording it
     /// in `meta` on first use. Stable across calls and across launches; if the recorded id names a
@@ -1633,8 +1720,9 @@ class AppState {
             ---
             Verify that your cross-links between files are still valid, and reorganize or fix any broken links. Output a transparent summary of the gist of the updates and grooming performed for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'
             """
+            // Asked for here, so the reply stays here; outside Iris a card goes to Iris too (5b §0.6).
             runThinkingTask(conversationId: convId) { [self] in
-                await engine.processInput(reflectionPrompt, source: "System", conversationId: convId)
+                await runReflection(reflectionPrompt, in: convId, moveReplyToIris: false)
             }
             return
         } else if trimmed.hasPrefix("/vibecop init") {
@@ -1773,7 +1861,7 @@ class AppState {
                         markChanged(convId, .metadata)
                     }
                     appendMessage(role: .system, content: "Triggering automatic memory reflection...", to: convId)
-                    await engine.processInput(Self.reflectionPrompt, source: "System", conversationId: convId)
+                    await runReflection(Self.reflectionPrompt, in: convId, moveReplyToIris: true)
                 } else if shouldRename {
                     let renamePrompt = "System Event [Rename Trigger]: Evaluate the conversation history and use the `rename_conversation` tool to assign a short, descriptive title (1-4 words) that captures the true gist of this conversation."
                     appendMessage(role: .system, content: "Triggering automatic conversation rename...", to: convId)
@@ -3401,6 +3489,41 @@ class AppState {
                 }
             } catch {
                 emitCommandOutput("Could not run that job: \(error).", format: .markdown, to: convId)
+            }
+
+        case .reschedule(let name, let cron, let timeZone):
+            do {
+                guard let job = try ledger.job(named: name) else {
+                    if let six = JobsCommand.sixFieldReading(name: name, cron: cron),
+                       try ledger.job(named: six.name) != nil {
+                        emitCommandOutput(JobsCommand.sixFieldRefusal(name: six.name, cron: six.cron),
+                                          format: .markdown, to: convId)
+                    } else {
+                        emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
+                    }
+                    return
+                }
+                switch JobsCommand.rescheduledTrigger(for: job, cron: cron, timeZone: timeZone,
+                                                      defaultTimeZone: TimeZone.current.identifier) {
+                case .failure(let message):
+                    emitCommandOutput(message.text, format: .markdown, to: convId)
+                case .success(let trigger):
+                    var updated = job
+                    updated.trigger = trigger
+                    // The scheduler's own computation, as `/jobs resume` uses. A pending retry is
+                    // dropped with the old cadence: its time belonged to the schedule just replaced.
+                    updated.nextFireAt = JobScheduler.nextFire(for: trigger, after: Date())
+                    updated.retryAttempt = 0
+                    if updated.nextFireAt == nil {
+                        updated.pausedReason = JobScheduler.unmatchableReason
+                    } else if updated.pausedReason == JobScheduler.unmatchableReason {
+                        updated.pausedReason = nil
+                    }
+                    try ledger.upsert(updated)
+                    emitCommandOutput(JobsCommand.rescheduledText(updated), format: .markdown, to: convId)
+                }
+            } catch {
+                emitCommandOutput("Could not reschedule that job: \(error).", format: .markdown, to: convId)
             }
 
         case .delete(let name):

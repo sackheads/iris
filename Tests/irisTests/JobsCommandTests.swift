@@ -79,7 +79,62 @@ struct JobsCommandTests {
     @Test("the usage text names every form")
     func usageTextSpellsEveryForm() {
         #expect(JobsCommand.usageText == "Usage: /jobs · /jobs ack <run id> · /jobs pause <name> · "
-                + "/jobs resume <name> · /jobs run <name> · /jobs delete <name>")
+                + "/jobs resume <name> · /jobs run <name> · /jobs delete <name> · "
+                + "/jobs reschedule <name> <cron> [timezone]")
+    }
+
+    // MARK: reschedule
+
+    @Test("reschedule reads a quoted or bare name, a quoted or five-word cron, and an optional zone")
+    func parseReschedule() {
+        #expect(JobsCommand.parse(#"/jobs reschedule "Daily digest" "0 9 * * *""#)
+                == .reschedule(name: "Daily digest", cron: "0 9 * * *", timeZone: nil))
+        #expect(JobsCommand.parse("/jobs reschedule \u{201C}Daily digest\u{201D} \u{201C}0 9 * * *\u{201D}")
+                == .reschedule(name: "Daily digest", cron: "0 9 * * *", timeZone: nil), "the composer's curly quotes")
+        #expect(JobsCommand.parse("/jobs reschedule Daily digest 30 8 * * 1-5 Europe/Paris")
+                == .reschedule(name: "Daily digest", cron: "30 8 * * 1-5", timeZone: "Europe/Paris"))
+        #expect(JobsCommand.parse(#"/jobs reschedule pr-sweep "*/15 * * * *" UTC"#)
+                == .reschedule(name: "pr-sweep", cron: "*/15 * * * *", timeZone: "UTC"))
+        #expect(JobsCommand.parse("/jobs reschedule pr-sweep 0 9 * *") == .usage, "four fields leave no name")
+        #expect(JobsCommand.parse("/jobs reschedule 0 9 * * *") == .usage, "a cron with no name")
+        #expect(JobsCommand.parse("/jobs reschedule") == .usage)
+        // A misspelled or lower-case zone is still a zone, for the handler to refuse by name.
+        #expect(JobsCommand.parse("/jobs reschedule pr-sweep 0 9 * * * Europe/Pairs")
+                == .reschedule(name: "pr-sweep", cron: "0 9 * * *", timeZone: "Europe/Pairs"))
+        #expect(JobsCommand.parse("/jobs reschedule pr-sweep 0 9 * * * europe/paris")
+                == .reschedule(name: "pr-sweep", cron: "0 9 * * *", timeZone: "europe/paris"))
+        // A step field is a cron field, not a zone.
+        #expect(JobsCommand.parse("/jobs reschedule pr-sweep 0 9 * * */2")
+                == .reschedule(name: "pr-sweep", cron: "0 9 * * */2", timeZone: nil))
+        // A real zone without a slash is a zone; a bare number is still the last cron field.
+        for zone in ["CET", "GMT+2", "Japan", "EST5EDT"] {
+            #expect(JobsCommand.parse("/jobs reschedule nightly 0 9 * * * \(zone)")
+                    == .reschedule(name: "nightly", cron: "0 9 * * *", timeZone: zone), "\(zone)")
+        }
+        #expect(JobsCommand.parse("/jobs reschedule nightly 0 9 * * 5")
+                == .reschedule(name: "nightly", cron: "0 9 * * 5", timeZone: nil))
+    }
+
+    @Test("the new trigger: a cron job keeps its zone, an interval job becomes cron in the default zone, a poll keeps its gate, a watch is refused")
+    func rescheduledTriggers() throws {
+        let tokyo = job(trigger: .schedule(.cron(CronSchedule(expression: "0 10 * * *", timeZone: "Asia/Tokyo"))))
+        #expect(try JobsCommand.rescheduledTrigger(for: tokyo, cron: "0 9 * * *", timeZone: nil, defaultTimeZone: "UTC").get()
+                == .schedule(.cron(CronSchedule(expression: "0 9 * * *", timeZone: "Asia/Tokyo"))))
+        #expect(try JobsCommand.rescheduledTrigger(for: tokyo, cron: "0 9 * * *", timeZone: "Europe/Paris", defaultTimeZone: "UTC").get()
+                == .schedule(.cron(CronSchedule(expression: "0 9 * * *", timeZone: "Europe/Paris"))))
+        #expect(try JobsCommand.rescheduledTrigger(for: job(), cron: "0 9 * * *", timeZone: nil, defaultTimeZone: "UTC").get()
+                == .schedule(.cron(CronSchedule(expression: "0 9 * * *", timeZone: "UTC"))))
+        let polled = job(trigger: .poll(PollSpec(schedule: .interval(seconds: 300), gate: .urlChanged(url: "https://example.com"))))
+        #expect(try JobsCommand.rescheduledTrigger(for: polled, cron: "*/30 * * * *", timeZone: nil, defaultTimeZone: "UTC").get()
+                == .poll(PollSpec(schedule: .cron(CronSchedule(expression: "*/30 * * * *", timeZone: "UTC")),
+                                  gate: .urlChanged(url: "https://example.com"))))
+        let watch = job(trigger: .fsEvent(FSWatch(path: "/tmp/w")))
+        guard case .failure(let refusal) = JobsCommand.rescheduledTrigger(for: watch, cron: "0 9 * * *", timeZone: nil, defaultTimeZone: "UTC")
+        else { Issue.record("a watch has no schedule to move"); return }
+        #expect(refusal.text.contains("directory watch"))
+        guard case .failure(let zone) = JobsCommand.rescheduledTrigger(for: tokyo, cron: "0 9 * * *", timeZone: "Mars/Olympus", defaultTimeZone: "UTC")
+        else { Issue.record("an unknown zone is refused"); return }
+        #expect(zone.text.contains("Unknown time zone 'Mars/Olympus'"))
     }
 
     // MARK: matchRun
@@ -575,7 +630,7 @@ struct JobsCommandTests {
 
     @Test("the usage line names every form the command takes")
     func usageTextNamesEveryForm() {
-        for form in ["/jobs ack", "/jobs pause", "/jobs resume", "/jobs run", "/jobs delete"] {
+        for form in ["/jobs ack", "/jobs pause", "/jobs resume", "/jobs run", "/jobs delete", "/jobs reschedule"] {
             #expect(JobsCommand.usageText.contains(form), "usage text is missing \(form)")
         }
     }
@@ -727,6 +782,129 @@ struct JobsCommandTests {
 
         #expect(output(app, id).contains("No job named 'nightly'."))
         #expect(try app.store.ledger.job(named: "pr-sweep") != nil)
+    }
+
+    @Test("/jobs reschedule moves the digest's next fire, says when it is, and starts no model turn")
+    func rescheduleDigest() throws {
+        let digest = DailyDigest.job(timeZone: TimeZone(identifier: "Asia/Tokyo")!)
+        var stored = digest
+        stored.nextFireAt = JobScheduler.nextFire(for: digest.trigger, after: Date())
+        stored.retryAttempt = 2
+        let (app, id) = makeApp(with: [stored])
+
+        app.sendMessage(#"/jobs reschedule "Daily digest" "0 9 * * *" UTC"#)
+
+        let after = try #require(try app.store.ledger.job(named: "Daily digest"))
+        let trigger = Trigger.schedule(.cron(CronSchedule(expression: "0 9 * * *", timeZone: "UTC")))
+        #expect(after.trigger == trigger)
+        #expect(after.action == .builtin(DailyDigest.name), "still the built-in")
+        let next = try #require(after.nextFireAt)
+        #expect(next != stored.nextFireAt)
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        #expect(utc.component(.hour, from: next) == 9 && utc.component(.minute, from: next) == 0)
+        #expect(next > Date() && next <= Date().addingTimeInterval(86_400))
+        #expect(after.retryAttempt == 0, "a pending retry belonged to the old schedule")
+        let said = output(app, id)
+        #expect(said.contains("Rescheduled **Daily digest** to `0 9 * * *` (UTC) · next fire \(ScheduleJobArguments.formatFire(next, zone: "UTC"))."))
+        #expect(app.conversations.first { $0.id == id }?.history.isEmpty == true, "no model request")
+        #expect(app.conversations.first { $0.id == id }?.messages.contains { $0.role == .agent } == false)
+    }
+
+    @Test("an invalid cron is refused with a sentence and changes nothing")
+    func rescheduleInvalidCron() throws {
+        let j = job(trigger: .schedule(.cron(CronSchedule(expression: "0 10 * * *", timeZone: "UTC"))),
+                    nextFireAt: Date().addingTimeInterval(3_600))
+        let (app, id) = makeApp(with: [j])
+        let before = try app.store.ledger.job(named: "pr-sweep")
+
+        app.sendMessage("/jobs reschedule pr-sweep 0 25 * * *")
+
+        #expect(try app.store.ledger.job(named: "pr-sweep") == before)
+        #expect(output(app, id).contains("Cron expression rejected: 25 is out of range for hour."))
+        #expect(output(app, id).contains("'pr-sweep' is unchanged."))
+    }
+
+    @Test("a misspelled zone is refused by name, not read as part of the job's name")
+    func rescheduleMisspelledZone() throws {
+        let j = job(trigger: .schedule(.cron(CronSchedule(expression: "0 10 * * *", timeZone: "UTC"))),
+                    nextFireAt: Date().addingTimeInterval(3_600))
+        let (app, id) = makeApp(with: [j])
+        let before = try app.store.ledger.job(named: "pr-sweep")
+
+        app.sendMessage("/jobs reschedule pr-sweep 0 9 * * * Europe/Pairs")
+
+        #expect(try app.store.ledger.job(named: "pr-sweep") == before)
+        #expect(output(app, id).contains("Unknown time zone 'Europe/Pairs'. 'pr-sweep' is unchanged."))
+        #expect(!output(app, id).contains("No job named"))
+    }
+
+    @Test("a slash-less zone reschedules the job in that zone")
+    func rescheduleSlashlessZone() throws {
+        let j = job("nightly", trigger: .schedule(.cron(CronSchedule(expression: "0 10 * * *", timeZone: "UTC"))),
+                    nextFireAt: Date().addingTimeInterval(3_600))
+        let (app, id) = makeApp(with: [j])
+
+        app.sendMessage("/jobs reschedule nightly 0 9 * * * CET")
+
+        let after = try #require(try app.store.ledger.job(named: "nightly"))
+        #expect(after.trigger == .schedule(.cron(CronSchedule(expression: "0 9 * * *", timeZone: "CET"))))
+        #expect(!output(app, id).contains("No job named"))
+    }
+
+    @Test("a six-field cron is refused with a sentence, not folded into the job's name")
+    func rescheduleSixFields() throws {
+        let j = job("nightly", trigger: .schedule(.cron(CronSchedule(expression: "0 10 * * *", timeZone: "UTC"))),
+                    nextFireAt: Date().addingTimeInterval(3_600))
+        let (app, id) = makeApp(with: [j])
+        let before = try app.store.ledger.job(named: "nightly")
+
+        app.sendMessage("/jobs reschedule nightly 0 0 9 * * *")
+
+        #expect(try app.store.ledger.job(named: "nightly") == before)
+        #expect(output(app, id).contains("A cron needs exactly five fields"))
+        #expect(output(app, id).contains("`0 0 9 * * *` has six. 'nightly' is unchanged."))
+        #expect(!output(app, id).contains("No job named"))
+        #expect(JobsCommand.sixFieldReading(name: "nightly", cron: "0 9 * * *") == nil, "one word: nothing to shift")
+    }
+
+    @Test("a cron that can never match pauses the job; one that can lifts that pause and only that one")
+    func rescheduleUnmatchablePause() throws {
+        let never = job("never", trigger: .schedule(.cron(CronSchedule(expression: "0 10 * * *", timeZone: "UTC"))),
+                        nextFireAt: Date().addingTimeInterval(3_600))
+        var stuck = job("stuck", trigger: .schedule(.cron(CronSchedule(expression: "0 0 30 2 *", timeZone: "UTC"))))
+        stuck.pausedReason = JobScheduler.unmatchableReason
+        var held = job("held", trigger: .schedule(.cron(CronSchedule(expression: "0 10 * * *", timeZone: "UTC"))))
+        held.pausedReason = JobsCommand.pausedByUserReason
+        let (app, _) = makeApp(with: [never, stuck, held])
+
+        app.sendMessage("/jobs reschedule never 0 0 30 2 *")
+        app.sendMessage("/jobs reschedule stuck 0 9 * * *")
+        app.sendMessage("/jobs reschedule held 0 9 * * *")
+
+        let a = try #require(try app.store.ledger.job(named: "never"))
+        #expect(a.pausedReason == JobScheduler.unmatchableReason)
+        #expect(a.nextFireAt == nil)
+        let b = try #require(try app.store.ledger.job(named: "stuck"))
+        #expect(b.pausedReason == nil, "the unmatchable pause is lifted by a cron that matches")
+        #expect(b.nextFireAt != nil)
+        let c = try #require(try app.store.ledger.job(named: "held"))
+        #expect(c.pausedReason == JobsCommand.pausedByUserReason, "a pause of the user's stays")
+    }
+
+    @Test("a watch job is refused, and an unknown job is named")
+    func rescheduleRefusals() throws {
+        let watch = job("inbox", trigger: .fsEvent(FSWatch(path: "/tmp/w")))
+        let (app, id) = makeApp(with: [watch])
+        let before = try app.store.ledger.job(named: "inbox")
+
+        app.sendMessage("/jobs reschedule inbox 0 9 * * *")
+        app.sendMessage("/jobs reschedule nightly 0 9 * * *")
+
+        #expect(try app.store.ledger.job(named: "inbox") == before)
+        #expect(output(app, id).contains("'inbox' is a directory watch"))
+        #expect(output(app, id).contains("No job named 'nightly'."))
+        #expect(app.conversations.first { $0.id == id }?.history.isEmpty == true)
     }
 
     @Test("a malformed /jobs prints the usage line")
