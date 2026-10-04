@@ -1629,7 +1629,13 @@ actor IrisEngine {
         // facts injected above or a `search_memory` result, so this is first declared on a turn that
         // surfaced some (invariant 6), and once declared, stays declared (5c §0.1): an id from an
         // earlier turn is still valid, and the store refuses one it does not know.
-        if !facts.isEmpty || declareStateGatedTools || sticky.contains("manage_fact") {
+        // An unattended run is declared by its profile instead (5c, #367 review): facts surfacing
+        // on one fire and not the next would fork the prefix that job runs share. A mutating run
+        // always gets it; a read-only one never does, since that profile denies the write anyway.
+        let declareManageFact = isUnattended
+            ? jobProfile == .mutating
+            : (!facts.isEmpty || declareStateGatedTools || sticky.contains("manage_fact"))
+        if declareManageFact {
         toolsList.append(FunctionDeclaration(
             name: "manage_fact",
             description: "Correct the fact store when the user says a remembered fact is wrong, outdated, or replaced, or when a retrieved fact proved right or wrong: retract, supersede (with by_fact_id), restore, or rate it helpful/unhelpful. Fact ids are the bracketed ids in your Mid-Term Fact Store Memory block and in the facts results of search_memory (its conversations scope returns conversation titles, not fact ids).",

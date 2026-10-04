@@ -928,7 +928,8 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
   otherwise. Polls, watches and built-in jobs don't count toward that: a poll runs a turn only when
   its gate reports a change, a watch is bursty, and a built-in spends nothing, so none of them keeps
   a prefix warm on a predictable cadence. A run's own history stays at five minutes, because runs
-  are short. The pinned conversation holds an hour on every marker; everything else holds five
+  are short. To keep one job's prefix the same from fire to fire, a run's tools don't depend on
+  what the turn surfaced: a mutating run always declares `manage_fact`, a read-only run never does. The pinned conversation holds an hour on every marker; everything else holds five
   minutes.
 
   Output × 5 is a floor; real output prices run 4× to 8× input. Each run is priced at the

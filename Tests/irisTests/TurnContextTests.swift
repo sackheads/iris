@@ -1024,6 +1024,36 @@ struct CacheHintsEngineTests {
         #expect(key.utf8.count <= 64)
     }
 
+    // MARK: manage_fact on an unattended run is declared by profile (#367 review)
+
+    private func toolNames(_ r: GeminiRequest) -> [String] {
+        r.tools?.first?.functionDeclarations.map(\.name) ?? []
+    }
+
+    @Test("one job's declared tools are identical across a fire with surfaced facts and one without")
+    func jobPrefixIgnoresFacts() async throws {
+        for profile in [JobProfile.mutating, .readOnly] {
+            let withFacts = try await run(background: true, profile: profile, seedFact: true)
+            let without = try await run(background: true, profile: profile, seedFact: false)
+            let a = try #require(withFacts.requests.first)
+            let b = try #require(without.requests.first)
+            // Control: the seeded fire really did surface a fact.
+            #expect(a.contents.last?.parts.first?.text?.contains("Mid-Term Fact Store Memory") == true)
+            #expect(b.contents.last?.parts.first?.text?.contains("Mid-Term Fact Store Memory") != true)
+            #expect(toolNames(a) == toolNames(b), "\(profile)")
+            #expect(toolNames(a).contains("manage_fact") == (profile == .mutating), "\(profile)")
+            #expect(a.cacheHints?.promptCacheKey == b.cacheHints?.promptCacheKey)
+        }
+    }
+
+    @Test("an attended chat still declares manage_fact only on a turn that surfaced facts")
+    func attendedStillGatedOnFacts() async throws {
+        let withFacts = try await run(seedFact: true)
+        let without = try await run(seedFact: false)
+        #expect(toolNames(try #require(withFacts.requests.first)).contains("manage_fact"))
+        #expect(!toolNames(try #require(without.requests.first)).contains("manage_fact"))
+    }
+
     @Test("cacheTTLOverride wins over the resolved policy")
     func overrideWins() async throws {
         let r = try await run(pinned: true, override: .standard)
