@@ -289,10 +289,20 @@ buttons; clicking a button is the consent to the command shown beside it
 (Sign in consents to `setup_command` and the `check_command` that follows
 it). When the pane opens, `check_command` runs only if a persisted "Always
 allow" rule already permits that exact command; otherwise the row reads
-"Not checked" until the user clicks **Check**. A command containing a line
-break or another invisible character is shown with a warning and cannot be
-run from the pane. `setup_command` runs through `run_command`;
-`check_command` runs via `/bin/sh -c`.
+"Not checked" until the user clicks **Check**. An "Always allow this
+command" checkbox beside **Check**, off by default, writes that rule: when
+it is on and the user clicks **Check**, the exact command shown is granted
+a permanent rule through the same path the chat window's "Always Allow
+(Global)" button uses, and the next time the pane opens the check runs
+unasked. Unchecking the box only stops a *future* click from writing a new
+rule — it does not retract one a previous click already wrote; that needs
+the general permissions UI. The checkbox exists only for `check_command`:
+`setup_command` changes external state (it signs in), so it always needs
+its own click, with no way to make it unasked. A command containing a line
+break or another invisible character is shown with a warning, disables
+both the button and the checkbox, and cannot be run or always-allowed from
+the pane. `setup_command` runs through `run_command`; `check_command` runs
+via `/bin/sh -c`.
 
 This model covers three real cases: a plain API-key server (`secrets`
 only, no `auth`), a tool with only external browser-based sign-in (`auth`

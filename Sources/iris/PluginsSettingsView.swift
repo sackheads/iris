@@ -225,6 +225,10 @@ struct PluginDetailView: View {
     @State private var secretDrafts: [String: String] = [:]
     @State private var configDrafts: [String: String] = [:]
     @State private var authStatuses: [Int: PluginAuthStatus] = [:]
+    /// "Always allow this command" checkbox state, keyed by auth-entry index. Off by default on
+    /// every open (#338) — it does not reflect a rule an earlier click already wrote; that rule's
+    /// effect shows up instead as the row already being checked on open (`statusOnOpen`).
+    @State private var alwaysAllowChecked: [Int: Bool] = [:]
     @State private var confirmingUninstall = false
 
     var body: some View {
@@ -310,6 +314,14 @@ struct PluginDetailView: View {
                 }
                 Button("Check") { runCheck(index: index, auth: auth) }
                     .disabled(!Self.runnable(commands.check))
+                Toggle("Always allow this command", isOn: Binding(
+                    get: { alwaysAllowChecked[index] ?? false },
+                    set: { alwaysAllowChecked[index] = $0 }
+                ))
+                .toggleStyle(.checkbox)
+                .disabled(!Self.runnable(commands.check))
+                .help("When checked, clicking Check also writes a permanent \"Always allow\" rule "
+                    + "for this exact command, so the next time this pane opens it checks itself.")
                 Button("Sign In") { runSetup(index: index, auth: auth) }
                     .disabled(!Self.runnable(commands.setup))
             }
@@ -391,6 +403,10 @@ struct PluginDetailView: View {
         configDrafts = plugin.state.configValues
         let secrets = KeychainManager.shared.secrets(service: KeychainManager.pluginService(plugin.manifest.id))
         secretDrafts = secrets
+        // The checkbox always starts unchecked on open (#338) — this view's @State outlives a
+        // switch between plugins (no `.id()` on PluginDetailView), so without this reset a stale
+        // checked box from a previous plugin's auth row at the same index would carry over.
+        alwaysAllowChecked = [:]
         // Only what an "Always allow" rule already permits runs on open; the rest wait for a click (#336).
         let permissions = AppState.shared.permissions
         for (index, auth) in (plugin.manifest.auth ?? []).enumerated() {
@@ -419,8 +435,14 @@ struct PluginDetailView: View {
         }
     }
 
-    /// The click on "Check", beside the command it runs, is the consent.
+    /// The click on "Check", beside the command it runs, is the consent — and, when the
+    /// checkbox is on, the consent to remember that command with a permanent "Always allow"
+    /// rule too (#338), written through the same `permissions.allowGlobally` path the chat
+    /// window's "Always Allow (Global)" button uses.
     private func runCheck(index: Int, auth: IPFManifest.AuthDeclaration) {
+        let command = PluginAuthRunner.displayCommands(auth, config: configDrafts).check
+        PluginAuthRunner.applyAlwaysAllow(command: command, requested: alwaysAllowChecked[index] ?? false,
+                                          permissions: AppState.shared.permissions)
         Task {
             authStatuses[index] = await PluginAuthRunner.check(auth, config: configDrafts,
                                                                approve: PluginAuthRunner.userClicked)

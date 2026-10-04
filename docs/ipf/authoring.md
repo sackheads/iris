@@ -203,9 +203,14 @@ handled entirely by the `auth` block and `nlm`'s own credential store.
    `check_command`, with both commands printed in full beside the
    **Check** and **Sign in** buttons. The check runs when you click
    **Check** (or on open, if an "Always allow" rule already covers it);
-   until then the row reads "Not checked". Orange with "not signed in"
+   until then the row reads "Not checked". An "Always allow this command"
+   checkbox beside **Check**, off by default, writes that rule for you:
+   check it before clicking **Check**, and the pane checks itself unasked
+   from then on. Orange with "not signed in"
    until you click **Sign in**; the subprocess output streams into the pane while `nlm` opens
    your browser. Once `nlm login --check` exits 0, the row turns green.
+   There is no equivalent checkbox beside **Sign in** — signing in changes
+   external state, so it always asks for a click.
 6. If `notebooklm-mcp` is not on `PATH`, the plugin shows `needsConfig`
    with the `install_hint` text (`uv tool install notebooklm-mcp-cli`)
    printed verbatim so you can copy-paste it.
