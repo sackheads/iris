@@ -8,7 +8,7 @@ import os
 /// the writes that record the refusal working.
 protocol JobUsageReading: Sendable {
     func usage(jobId: UUID, now: Date, calendar: Calendar) throws -> JobUsage
-    func tokensToday(jobId: UUID?, calendar: Calendar, now: Date) throws -> Int
+    func weightedTokensToday(jobId: UUID?, calendar: Calendar, now: Date) throws -> Int
 }
 
 /// Jobs' half of the agency ledger (#187 deliverable 1): the `jobs` table, read and written
@@ -342,7 +342,7 @@ extension JobLedger {
     }
 
     /// Writes what a run has spent so far without closing it — called after every model round
-    /// (`TurnUsageSink`). `tokensToday` sums `totalTokens`, which `finish` used to be the only
+    /// (`TurnUsageSink`). `weightedTokensToday` prices these figures, which `finish` used to be the only
     /// writer of, so a run the app quit in the middle of left an `interrupted` row costed at zero
     /// and its spend counted against nobody's budget.
     ///
@@ -634,23 +634,48 @@ extension JobLedger {
     /// rather than blind until the run ends — and a run the app quit during still costs the day
     /// what it spent. A burst of concurrent runs can still overshoot the daily figure by up to one
     /// round apiece, which the per-run budget bounds (§4, "during a run").
-    func tokensToday(jobId: UUID?, calendar: Calendar, now: Date) throws -> Int {
-        try writer.read { db in try Self.tokensToday(db, jobId: jobId, calendar: calendar, now: now) }
+    ///
+    /// In **weighted tokens** (5c §0.5): each row is priced by its own provider, never the one
+    /// configured now, and in Swift rather than SQL so the weights stay a table that re-prices
+    /// history at read time. A row with no provider (pre-5c) counts its plain total.
+    func weightedTokensToday(jobId: UUID?, calendar: Calendar, now: Date) throws -> Int {
+        try writer.read { db in try Self.weightedTokensToday(db, jobId: jobId, calendar: calendar, now: now) }
     }
 
-    private static func tokensToday(_ db: Database, jobId: UUID?, calendar: Calendar, now: Date) throws -> Int {
+    private static func weightedTokensToday(_ db: Database, jobId: UUID?, calendar: Calendar, now: Date) throws -> Int {
         let dayStart = calendar.startOfDay(for: now)
         guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return 0 }
+        let columns = """
+            SELECT provider, promptTokens, candidateTokens, totalTokens,
+                   cacheReadTokens, cacheWriteTokens, cacheWrite1hTokens FROM job_runs
+            """
+        let rows: [Row]
         if let jobId {
-            return try Int.fetchOne(db, sql: """
-                SELECT COALESCE(SUM(totalTokens), 0) FROM job_runs
-                WHERE jobId = ? AND startedAt >= ? AND startedAt < ?
-                """, arguments: [jobId.uuidString, dayStart, dayEnd]) ?? 0
+            rows = try Row.fetchAll(db, sql: columns + " WHERE jobId = ? AND startedAt >= ? AND startedAt < ?",
+                                    arguments: [jobId.uuidString, dayStart, dayEnd])
+        } else {
+            rows = try Row.fetchAll(db, sql: columns + " WHERE startedAt >= ? AND startedAt < ?",
+                                    arguments: [dayStart, dayEnd])
         }
-        return try Int.fetchOne(db, sql: """
-            SELECT COALESCE(SUM(totalTokens), 0) FROM job_runs
-            WHERE startedAt >= ? AND startedAt < ?
-            """, arguments: [dayStart, dayEnd]) ?? 0
+        var skipped = 0
+        let total = rows.reduce(0) { sum, row in
+            let r = RowReader(row: row)
+            do {
+                var run = JobRun(jobId: UUID(), jobName: "", triggerKind: "", startedAt: dayStart)
+                run.promptTokens = try r.read("promptTokens", Int.self) ?? 0
+                run.candidateTokens = try r.read("candidateTokens", Int.self) ?? 0
+                run.totalTokens = try r.read("totalTokens", Int.self) ?? 0
+                run.cacheReadTokens = try r.read("cacheReadTokens", Int.self) ?? 0
+                run.cacheWriteTokens = try r.read("cacheWriteTokens", Int.self) ?? 0
+                run.cacheWrite1hTokens = try r.read("cacheWrite1hTokens", Int.self) ?? 0
+                return sum + CostWeights.weighted(run.components, provider: try r.read("provider", String.self))
+            } catch {
+                skipped += 1
+                return sum
+            }
+        }
+        if skipped > 0 { print("[JobLedger] priced \(skipped) unreadable job run row(s) at 0") }
+        return total
     }
 
     /// Both of a job's live figures in one call: what admission decides on, what a budget or
@@ -663,7 +688,7 @@ extension JobLedger {
     /// not include.
     func usage(jobId: UUID, now: Date, calendar: Calendar) throws -> JobUsage {
         try writer.read { db in
-            JobUsage(tokensToday: try Self.tokensToday(db, jobId: jobId, calendar: calendar, now: now),
+            JobUsage(weightedTokensToday: try Self.weightedTokensToday(db, jobId: jobId, calendar: calendar, now: now),
                      runsLastHour: try Self.runsStarted(db, jobId: jobId, since: now.addingTimeInterval(-3600)))
         }
     }
@@ -903,7 +928,8 @@ private struct RowReader {
 /// What one job has spent and how hard it has been running (#187 deliverable 3, spec §9): the two
 /// figures admission decides on, and the two `/jobs` and `list_jobs` print beside every job.
 struct JobUsage: Equatable, Sendable {
-    let tokensToday: Int
+    /// In weighted tokens (5c §0.5), what the daily budgets compare.
+    let weightedTokensToday: Int
     let runsLastHour: Int
 }
 

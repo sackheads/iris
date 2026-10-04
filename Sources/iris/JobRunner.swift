@@ -350,7 +350,7 @@ actor JobRunner {
             let tokensAll: Int
             do {
                 usage = try usageSource.usage(jobId: current.id, now: at, calendar: calendar)
-                tokensAll = try usageSource.tokensToday(jobId: nil, calendar: calendar, now: at)
+                tokensAll = try usageSource.weightedTokensToday(jobId: nil, calendar: calendar, now: at)
             } catch {
                 // Swallowed, this read used to answer zero — which opens the breaker and both
                 // budgets on a job that may be far past either, silently. Skip the fire instead,
@@ -368,7 +368,7 @@ actor JobRunner {
 
             let admission = Self.admit(job: current, inFlight: inFlight.contains(current.id),
                                        runsLastHour: usage.runsLastHour,
-                                       tokensTodayJob: usage.tokensToday,
+                                       tokensTodayJob: usage.weightedTokensToday,
                                        tokensTodayAll: tokensAll,
                                        countsTokens: current.action == .prompt, limits: limits)
             // Whether this pass is the fire the caller asked about — the first one round the loop.
@@ -1004,7 +1004,7 @@ actor JobRunner {
         // clock to another instant must not make every run time out before its first model call.
         let deadlineClock = self.deadlineClock
         let deadline = deadlineClock().addingTimeInterval(TimeInterval(limits.runTimeoutSeconds))
-        let budget = TurnBudget(maxTokens: limits.perRunTokens, deadline: deadline)
+        let budget = TurnBudget(maxTokens: limits.perRunTokens, deadline: deadline, provider: run.provider)
         // Stay awake for this run, and no longer: the watchdog gives the assertion back at the
         // deadline even when the turn overruns it, so a wedged run cannot hold the Mac awake for
         // the rest of the session. `ActivityHolder` ends once, whichever gets there first.
@@ -1781,7 +1781,8 @@ actor JobRunner {
     static func budgetStopReason(in messages: [ChatMessage]) -> String? {
         guard let line = softStopLine(in: messages), line.contains(IrisEngine.budgetStopMarker)
         else { return nil }
-        return [TurnBudget.tokensExceeded, TurnBudget.timeExceeded].first { line.contains($0) }
+        return [TurnBudget.weightedTokensExceeded, TurnBudget.legacyTokensExceeded, TurnBudget.timeExceeded]
+            .first { line.contains($0) }
     }
 
     /// What the row records about why a run did not simply complete — and, when the run left no

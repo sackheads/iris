@@ -24,6 +24,9 @@ struct JobLedgerPolicyTests {
     func makeRun(_ job: Job, at: Date, status: JobRun.Status = .completed, tokens: Int = 0) -> JobRun {
         var run = JobRun(jobId: job.id, jobName: job.name, triggerKind: "schedule", startedAt: at,
                          status: status, transcriptConversationId: UUID())
+        // All prompt, no provider: priced at its plain total (plan notes 7 and 8), so a figure
+        // here is the figure the day's sum sees.
+        run.promptTokens = tokens
         run.totalTokens = tokens
         return run
     }
@@ -149,12 +152,31 @@ struct JobLedgerPolicyTests {
         try store.ledger.begin(run: makeRun(job, at: dayStart, tokens: 10))
         try store.ledger.begin(run: makeRun(job, at: now, tokens: 100))
         try store.ledger.begin(run: makeRun(job, at: dayStart.addingTimeInterval(86_400), tokens: 1_000))
-        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: pacific, now: now) == 110)
+        #expect(try store.ledger.weightedTokensToday(jobId: job.id, calendar: pacific, now: now) == 110)
 
         // The same rows against UTC, whose day started seven hours *earlier*: the run a second
         // before Pacific midnight is on the same UTC day, so it counts too, and the run a Pacific
         // day later is past the UTC day's end, so it still does not.
-        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: calendar("UTC"), now: now) == 111)
+        #expect(try store.ledger.weightedTokensToday(jobId: job.id, calendar: calendar("UTC"), now: now) == 111)
+    }
+
+    @Test("weightedTokensToday prices each row by its own provider, never the current one")
+    func weightedTokensTodayPerRowProvider() throws {
+        let store = try ConversationStore.inMemory()
+        let job = try seedJob(store, "j")
+        let utc = calendar("UTC")
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        var a = makeRun(job, at: now, tokens: 0)
+        a.provider = "Anthropic"; a.promptTokens = 10_000; a.candidateTokens = 100; a.totalTokens = 10_100
+        a.cacheReadTokens = 9_000
+        var legacy = makeRun(job, at: now, tokens: 0)
+        legacy.promptTokens = 1_000; legacy.totalTokens = 1_000
+        try store.ledger.begin(run: a)
+        try store.ledger.begin(run: legacy)
+        // a: 1_000 + 900 + 500 = 2_400; legacy: 1_000 at its plain total
+        #expect(try store.ledger.weightedTokensToday(jobId: job.id, calendar: utc, now: now) == 3_400)
+        #expect(try store.ledger.weightedTokensToday(jobId: nil, calendar: utc, now: now) == 3_400)
+        #expect(try store.ledger.usage(jobId: job.id, now: now, calendar: utc).weightedTokensToday == 3_400)
     }
 
     @Test("tokensToday with a nil jobId sums every job")
@@ -167,8 +189,8 @@ struct JobLedgerPolicyTests {
         try store.ledger.begin(run: makeRun(a, at: now, tokens: 5))
         try store.ledger.begin(run: makeRun(b, at: now, tokens: 7))
         try store.ledger.begin(run: makeRun(b, at: now.addingTimeInterval(-86_400), tokens: 900))
-        #expect(try store.ledger.tokensToday(jobId: nil, calendar: utc, now: now) == 12)
-        #expect(try store.ledger.tokensToday(jobId: a.id, calendar: utc, now: now) == 5)
+        #expect(try store.ledger.weightedTokensToday(jobId: nil, calendar: utc, now: now) == 12)
+        #expect(try store.ledger.weightedTokensToday(jobId: a.id, calendar: utc, now: now) == 5)
     }
 
     @Test("a run the app quit during keeps what it reported, and the day's budget counts it")
@@ -179,7 +201,7 @@ struct JobLedgerPolicyTests {
         let now = Date(timeIntervalSince1970: 1_790_000_000)
         let run = makeRun(job, at: now, status: .running, tokens: 0)
         try store.ledger.begin(run: run)
-        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: utc, now: now) == 0)
+        #expect(try store.ledger.weightedTokensToday(jobId: job.id, calendar: utc, now: now) == 0)
 
         // Two rounds' worth: the figure is the turn's running total, not this round's, so the
         // second write replaces the first rather than adding to it.
@@ -189,7 +211,7 @@ struct JobLedgerPolicyTests {
         try store.ledger.recordUsage(runId: run.id, tokens: TokenUsage(promptTokenCount: 70,
                                                                        candidatesTokenCount: 20,
                                                                        totalTokenCount: 90))
-        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: utc, now: now) == 90,
+        #expect(try store.ledger.weightedTokensToday(jobId: job.id, calendar: utc, now: now) == 90,
                 "a run in flight counts what it has reported")
 
         // The app quits here. `finish` never runs; the next launch's sweep closes the row — and
@@ -198,8 +220,8 @@ struct JobLedgerPolicyTests {
         let back = try #require(try store.ledger.run(id: run.id))
         #expect(back.status == .interrupted)
         #expect(back.totalTokens == 90 && back.promptTokens == 70 && back.candidateTokens == 20)
-        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: utc, now: now) == 90)
-        #expect(try store.ledger.tokensToday(jobId: nil, calendar: utc, now: now) == 90,
+        #expect(try store.ledger.weightedTokensToday(jobId: job.id, calendar: utc, now: now) == 90)
+        #expect(try store.ledger.weightedTokensToday(jobId: nil, calendar: utc, now: now) == 90,
                 "and against the global ceiling too")
     }
 
@@ -246,7 +268,7 @@ struct JobLedgerPolicyTests {
         #expect(back.status == .failed)
         #expect(back.failureReason == TurnBudget.timeExceeded)
         #expect(back.totalTokens == 40)
-        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: utc, now: now) == 40)
+        #expect(try store.ledger.weightedTokensToday(jobId: job.id, calendar: utc, now: now) == 40)
     }
 
     @Test("usage reports today's tokens and the last hour's runs together")
@@ -259,7 +281,7 @@ struct JobLedgerPolicyTests {
         try store.ledger.begin(run: makeRun(job, at: now.addingTimeInterval(-3_600), tokens: 6))
         try store.ledger.begin(run: makeRun(job, at: now.addingTimeInterval(-3_601), tokens: 8))
         #expect(try store.ledger.usage(jobId: job.id, now: now, calendar: utc)
-                == JobUsage(tokensToday: 18, runsLastHour: 2))
+                == JobUsage(weightedTokensToday: 18, runsLastHour: 2))
     }
 
     // MARK: Blocked call, approval, gate signal

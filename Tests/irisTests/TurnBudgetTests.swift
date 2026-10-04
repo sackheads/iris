@@ -76,28 +76,34 @@ struct TurnBudgetTests {
     @Test("tokens are compared at the budget, not past it; a zero budget is no budget")
     func stopReasonOnTokens() {
         let budget = TurnBudget(maxTokens: 100, deadline: Date().addingTimeInterval(600))
-        #expect(budget.stopReason(tokensUsed: 99, now: Date()) == nil)
-        #expect(budget.stopReason(tokensUsed: 100, now: Date()) == TurnBudget.tokensExceeded)
-        #expect(budget.stopReason(tokensUsed: 4_000, now: Date()) == TurnBudget.tokensExceeded)
+        #expect(budget.stopReason(weightedTokens: 99, now: Date()) == nil)
+        #expect(budget.stopReason(weightedTokens: 100, now: Date()) == TurnBudget.weightedTokensExceeded)
+        #expect(budget.stopReason(weightedTokens: 4_000, now: Date()) == TurnBudget.weightedTokensExceeded)
 
         let unlimited = TurnBudget(maxTokens: 0, deadline: Date().addingTimeInterval(600))
-        #expect(unlimited.stopReason(tokensUsed: 10_000_000, now: Date()) == nil)
+        #expect(unlimited.stopReason(weightedTokens: 10_000_000, now: Date()) == nil)
+    }
+
+    @Test func stopsOnWeightedTokens() {
+        let budget = TurnBudget(maxTokens: 100, deadline: .distantFuture, provider: "Anthropic")
+        #expect(budget.stopReason(weightedTokens: 99, now: Date()) == nil)
+        #expect(budget.stopReason(weightedTokens: 100, now: Date()) == TurnBudget.weightedTokensExceeded)
     }
 
     @Test("the deadline stops the turn at the instant it arrives")
     func stopReasonOnTime() {
         let deadline = Date(timeIntervalSince1970: 1_700_000_000)
         let budget = TurnBudget(maxTokens: 0, deadline: deadline)
-        #expect(budget.stopReason(tokensUsed: 0, now: deadline.addingTimeInterval(-1)) == nil)
-        #expect(budget.stopReason(tokensUsed: 0, now: deadline) == TurnBudget.timeExceeded)
-        #expect(budget.stopReason(tokensUsed: 0, now: deadline.addingTimeInterval(1)) == TurnBudget.timeExceeded)
+        #expect(budget.stopReason(weightedTokens: 0, now: deadline.addingTimeInterval(-1)) == nil)
+        #expect(budget.stopReason(weightedTokens: 0, now: deadline) == TurnBudget.timeExceeded)
+        #expect(budget.stopReason(weightedTokens: 0, now: deadline.addingTimeInterval(1)) == TurnBudget.timeExceeded)
     }
 
     @Test("an exhausted token budget outranks a passed deadline: it is the figure that was spent")
     func tokensOutrankTime() {
         let past = Date(timeIntervalSince1970: 1)
         let budget = TurnBudget(maxTokens: 10, deadline: past)
-        #expect(budget.stopReason(tokensUsed: 10, now: Date()) == TurnBudget.tokensExceeded)
+        #expect(budget.stopReason(weightedTokens: 10, now: Date()) == TurnBudget.weightedTokensExceeded)
     }
 
     // MARK: The turn's claim on the indicator
@@ -169,7 +175,7 @@ struct TurnBudgetTests {
 
         #expect(client.callCount == 1, "round two is never asked for")
         let line = try #require(systemLines(state, conversation).last)
-        #expect(line.contains(TurnBudget.tokensExceeded))
+        #expect(line.contains(TurnBudget.weightedTokensExceeded))
         #expect(line.contains(IrisEngine.budgetStopMarker))
         #expect(!line.contains("Summarizing"))
     }
@@ -185,7 +191,7 @@ struct TurnBudgetTests {
                                                          deadline: Date().addingTimeInterval(600)))
 
         #expect(client.callCount == 2)
-        #expect(systemLines(state, conversation).allSatisfy { !$0.contains(TurnBudget.tokensExceeded) })
+        #expect(systemLines(state, conversation).allSatisfy { !$0.contains(TurnBudget.weightedTokensExceeded) })
         #expect(state.conversations.first { $0.id == conversation }?.messages
             .last { $0.role == .agent }?.content == "all done")
     }
@@ -270,7 +276,8 @@ struct TurnBudgetTests {
         #expect(midRun.totalTokens == 40, "the first round's spend is already on the row")
         #expect(midRun.promptTokens == 39 && midRun.candidateTokens == 1)
         let utc = Calendar(identifier: .gregorian)
-        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: utc, now: Date()) == 40,
+        // In weighted tokens at the isolated config's provider (Gemini): 39 prompt + 1 output × 5.
+        #expect(try store.ledger.weightedTokensToday(jobId: job.id, calendar: utc, now: Date()) == 39 + 5,
                 "and the day's budget can see it")
 
         await client.gate.open()
@@ -280,7 +287,7 @@ struct TurnBudgetTests {
         #expect(finished.totalTokens == 40, "and `finish` writes the same figure again")
     }
 
-    @Test("an Anthropic-shaped response with no total charges tokensToday as prompt + output (5a)")
+    @Test("an Anthropic-shaped response with no total charges the day's budget prompt + output (5a)")
     func anthropicShapedResponseWithNoTotalChargesPromptPlusOutput() async throws {
         // Anthropic never sends a total; before 5a `updateTokenUsage` added
         // `usage.totalTokenCount ?? 0`, so a run like this charged the day's budget nothing.
@@ -292,14 +299,17 @@ struct TurnBudgetTests {
         try store.ledger.upsert(job)
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
+        config.primaryProvider = LLMProvider.anthropic.rawValue
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
                                config: config, activity: RecordingActivity(), sandboxAvailable: { true })
 
         await runner.fire(job: job, origin: .schedule)
 
         let utc = Calendar(identifier: .gregorian)
-        #expect(try store.ledger.tokensToday(jobId: job.id, calendar: utc, now: Date()) == 967,
+        // 960 uncached prompt + 7 output × 5, weighted (5c).
+        #expect(try store.ledger.weightedTokensToday(jobId: job.id, calendar: utc, now: Date()) == 960 + 35,
                 "no total from the provider; the budget still sees prompt + output")
+        #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.totalTokens == 967)
     }
 
     @Test("a run that spends its per-run budget is a failed row and a card that says why")
@@ -324,14 +334,14 @@ struct TurnBudgetTests {
         #expect(client.callCount == 1)
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(run.status == .failed)
-        #expect(run.failureReason == TurnBudget.tokensExceeded,
+        #expect(run.failureReason == TurnBudget.weightedTokensExceeded,
                 "the reason alone, not the whole transcript line")
         #expect(run.totalTokens == 40, "what it spent is on the row")
 
         let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
         let card = try #require(activity.messages.compactMap { EventCard.decode($0.content) }.first)
         #expect(card.status == .failed)
-        #expect(card.outcome == "\(TurnBudget.tokensExceeded) — retrying in 1 m")
+        #expect(card.outcome == "\(TurnBudget.weightedTokensExceeded) — retrying in 1 m")
         #expect(card.outcome?.contains("Summarizing") != true,
                 "a budget stop does not summarize, and the card must not say it did")
     }

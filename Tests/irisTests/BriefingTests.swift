@@ -120,7 +120,7 @@ import Foundation
     }
 
     @Test func tokensExceededMapsToBudget() {
-        var r = run("j", .failed, at: 1); r.failureReason = TurnBudget.tokensExceeded
+        var r = run("j", .failed, at: 1); r.failureReason = TurnBudget.weightedTokensExceeded
         let body = Briefing.section(failures: [r], paused: [], recent: [])!.body
         #expect(body.contains("· budget ("))
     }

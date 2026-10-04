@@ -997,7 +997,7 @@ struct JobAdmissionTests {
     private struct UnreadableUsage: JobUsageReading {
         struct Failure: Error, CustomStringConvertible { var description: String { "database is locked" } }
         func usage(jobId: UUID, now: Date, calendar: Calendar) throws -> JobUsage { throw Failure() }
-        func tokensToday(jobId: UUID?, calendar: Calendar, now: Date) throws -> Int { throw Failure() }
+        func weightedTokensToday(jobId: UUID?, calendar: Calendar, now: Date) throws -> Int { throw Failure() }
     }
 
     @Test("a usage read that throws skips the fire and writes why — it does not open the breaker")

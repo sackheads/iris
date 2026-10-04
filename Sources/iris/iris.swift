@@ -20,14 +20,25 @@ struct TurnBudget: Sendable, Equatable {
     /// can end a turn that has stopped responding. `JobLimits.resolve` reads a zero timeout as the
     /// global default rather than as "unbounded" for exactly that reason.
     let deadline: Date
+    /// Whose prices the spend is weighed at (5c §0.5): the run's own provider, stamped on its
+    /// row. nil prices at the plain total, as a pre-5c row is.
+    let provider: String?
 
-    static let tokensExceeded = "budget: tokens exceeded"
+    init(maxTokens: Int, deadline: Date, provider: String? = nil) {
+        self.maxTokens = maxTokens
+        self.deadline = deadline
+        self.provider = provider
+    }
+
+    static let weightedTokensExceeded = "budget: weighted tokens exceeded"
+    /// What rows closed before 5c say; matched alongside the new reason, never written.
+    static let legacyTokensExceeded = "budget: tokens exceeded"
     static let timeExceeded = "budget: time exceeded"
 
     /// Why the turn must not make another model call, or `nil` to go ahead. Tokens are named
     /// first when both are gone: a person can act on the figure that was spent.
-    func stopReason(tokensUsed: Int, now: Date) -> String? {
-        if maxTokens > 0, tokensUsed >= maxTokens { return Self.tokensExceeded }
+    func stopReason(weightedTokens: Int, now: Date) -> String? {
+        if maxTokens > 0, weightedTokens >= maxTokens { return Self.weightedTokensExceeded }
         if now >= deadline { return Self.timeExceeded }
         return nil
     }
@@ -1909,15 +1920,16 @@ actor IrisEngine {
             // evaluator working for a job run is held to that run's registered budget, so a job
             // cannot stay under its budget by spending through them; an engine handed a budget
             // directly and working for no registered run keeps that one.
-            let (budget, spent) = await MainActor.run { () -> (TurnBudget?, Int) in
+            let (budget, usage) = await MainActor.run { () -> (TurnBudget?, TokenUsage) in
                 if let (run, accounting) = localState?.registeredRun(for: conversationId) {
-                    return (accounting.budget, localState?.runUsage(for: run).totalTokenCount ?? 0)
+                    return (accounting.budget, localState?.runUsage(for: run) ?? TokenUsage())
                 }
-                guard turnBudget != nil else { return (nil, 0) }
-                return (turnBudget, localState?.runUsage(for: conversationId).totalTokenCount ?? 0)
+                guard turnBudget != nil else { return (nil, TokenUsage()) }
+                return (turnBudget, localState?.runUsage(for: conversationId) ?? TokenUsage())
             }
             if let budget {
-                if let reason = budget.stopReason(tokensUsed: spent, now: Date()) {
+                let spent = CostWeights.weighted(usage.components, provider: budget.provider)
+                if let reason = budget.stopReason(weightedTokens: spent, now: Date()) {
                     turnFinished = true
                     // The drain consumes queued steers into history and no follow-up turn starts
                     // (R8). Both halves are deliberate. Leaving them queued would be worse than

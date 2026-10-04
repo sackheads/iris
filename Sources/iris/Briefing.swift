@@ -60,7 +60,9 @@ enum Briefing {
     private static func reasonWord(_ failureReason: String?) -> String? {
         guard let failureReason else { return nil }
         if failureReason == TurnBudget.timeExceeded { return "timeout" }
-        if failureReason == TurnBudget.tokensExceeded { return "budget" }
+        if failureReason == TurnBudget.weightedTokensExceeded || failureReason == TurnBudget.legacyTokensExceeded {
+            return "budget"
+        }
         if failureReason.hasPrefix(budgetReasonPrefix) { return "budget" }
         if failureReason == JobRunner.gateFailingReason { return "gate error" }
         if failureReason.hasPrefix(JobRunner.gateErrorPrefix) { return "gate error" }

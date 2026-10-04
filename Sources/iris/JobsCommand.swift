@@ -355,14 +355,14 @@ enum JobsCommand: Equatable {
         var snapshot = UsageSnapshot()
         for job in jobs {
             guard let usage = try? ledger.usage(jobId: job.id, now: now, calendar: calendar) else { continue }
-            snapshot.perJob[job.id] = JobFigures(tokensToday: usage.tokensToday,
+            snapshot.perJob[job.id] = JobFigures(tokensToday: usage.weightedTokensToday,
                                                  runsLastHour: usage.runsLastHour,
                                                  limits: JobLimits.resolve(job: job, config: config))
         }
         // `globalDailyTokens` is deliberately not overridable per job, so the first job's
         // resolution answers for all of them; with no jobs at all there is no table to foot.
         let globalBudget = jobs.first.map { JobLimits.resolve(job: $0, config: config).globalDailyTokens }
-        if let globalBudget, let total = try? ledger.tokensToday(jobId: nil, calendar: calendar, now: now) {
+        if let globalBudget, let total = try? ledger.weightedTokensToday(jobId: nil, calendar: calendar, now: now) {
             snapshot.global = GlobalUsage(tokensToday: total, dailyBudget: globalBudget)
         }
         return snapshot

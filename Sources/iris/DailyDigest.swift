@@ -54,7 +54,7 @@ struct DailyDigest: BuiltinJob {
             jobs = try ledger.jobs()
             failures = try ledger.unacknowledgedFailures()
             for id in Set(runs.map(\.jobId)) {
-                usage[id] = try ledger.usage(jobId: id, now: now, calendar: calendar).tokensToday
+                usage[id] = try ledger.usage(jobId: id, now: now, calendar: calendar).weightedTokensToday
             }
         } catch {
             // Carded: a digest that silently stopped arriving is the failure it exists to prevent.
