@@ -391,6 +391,43 @@ struct JobToolsTests {
         #expect(row["lastAgentMessage"] == nil || row["lastAgentMessage"] is NSNull)
     }
 
+    @Test("a built-in's run, which never had a transcript, returns its outcome and says there is none")
+    func getJobRunForABuiltin() async throws {
+        let (app, id) = pinnedApp()
+        var j = job("digest")
+        j.action = .builtin("daily_digest")
+        try app.store.ledger.upsert(j)
+        let at = Date()
+        let r = JobRun(jobId: j.id, jobName: j.name, triggerKind: j.trigger.kind, startedAt: at)
+        try app.store.ledger.begin(run: r)
+        try app.store.ledger.finish(runId: r.id, status: .completed, outcome: "2 runs yesterday",
+                                    failureReason: nil, blockedTool: nil, tokens: TokenUsage(),
+                                    finishedAt: at)
+
+        let result = await runToolCall(
+            FunctionCall(name: "get_job_run", args: ["run_id": .string(r.id.uuidString)], id: "c1"),
+            on: app, as: id)
+
+        let row = try #require(JSONSerialization.jsonObject(with: Data(result.utf8)) as? [String: Any],
+                               "a row, not an error: \(result)")
+        #expect(row["status"] as? String == "completed")
+        #expect((row["outcome"] as? String)?.contains("2 runs yesterday") == true)
+        #expect(row["transcriptConversationId"] is NSNull)
+        #expect(row["lastAgentMessage"] is NSNull)
+        #expect(row["transcript"] as? String == IrisEngine.noTranscriptNote)
+    }
+
+    @Test("schedule_job can only ever make a prompt job")
+    func scheduleJobCannotMakeABuiltin() throws {
+        // Even arguments that try to name one: the parser has no such field and makeJob never sets it.
+        let args = try ScheduleJobArguments.parse([
+            "prompt": .string("Post the digest"), "hour": .int(10),
+            "action": .string("builtin:daily_digest"), "builtin": .string("daily_digest"),
+        ]).get()
+        let made = try args.makeJob(defaultTimeZone: "UTC", createdIn: nil, existingNames: []).get()
+        #expect(made.action == .prompt)
+    }
+
     @Test("an unknown run id says so rather than returning an empty row")
     func getJobRunUnknown() async {
         let (app, id) = pinnedApp()

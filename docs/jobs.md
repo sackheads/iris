@@ -16,7 +16,8 @@ This document covers deliverables 1 to 4½ of `#187` (see `docs/agency/agency.md
 `docs/specs/2026-09-21-agency-model-and-ledger.md`, `docs/specs/2026-09-21-agency-runtime.md`,
 `docs/specs/2026-09-22-agency-watches.md` and `docs/specs/2026-09-23-agency-job-grants.md`): the
 job model, the cron subset, the schedule aliases, what happens on sleep, what a fire actually does
-— a run in a hidden conversation of its own, a row in the run ledger, and one event card — the
+— a run in a hidden conversation of its own, a row in the run ledger, and one event card (a
+built-in job has no conversation and no model turn; see "Built-in jobs" below) — the
 gates, limits and retries around it, what a directory watch does with a burst of saves, what a
 `mutating` job may be granted so that it can do its work unattended, and `iris --run-job`, which
 fires one job from a terminal and prints the row it wrote.
@@ -660,6 +661,17 @@ its own — a real conversation, so its transcript can be read back afterwards, 
 there. A run in flight shows up in the session strip under the composer as `job:<name>`; that is
 the only place a running job is visible while it runs.
 
+### Built-in jobs
+
+Not every job is a prompt. A job whose action is a **built-in** runs a piece of Iris's own code in
+place of a model turn: no background conversation is opened, no model is called, and its row in the
+run ledger has zero tokens and no transcript. It posts a card only when it has something to say. The
+token budgets do not apply to it, since it spends none; scheduling, catch-up, overlap, retries and
+`/jobs` treat it like any other job. `schedule_job` cannot create one — built-ins are registered by
+Iris itself — and a built-in name this build does not know fails its run with `unknown built-in`.
+`get_job_run` on a built-in's run returns its outcome and says there is no transcript. Built-in runs
+are left out of the briefing's recent runs.
+
 Before deliverable 2, a fire posted a system event into the conversation the job was created in
 and started a turn there. That is gone: a five-minute cadence no longer writes into the chat you
 are reading.
@@ -679,7 +691,7 @@ A run ends in one of five statuses:
 | Status | Meaning |
 | --- | --- |
 | `running` | in flight right now |
-| `completed` | the turn finished and said something — or the job's gate found nothing to do, in which case the outcome says `gate: no change` and there was no turn |
+| `completed` | the turn finished and said something — or the job's gate found nothing to do, in which case the outcome says `gate: no change` and there was no turn — or a built-in job ran, which never has a turn |
 | `failed` | the model call errored, the loop was cut short, or the turn ended having said nothing at all |
 | `blocked on approval` | the run wanted a tool it is not allowed to use unattended, and stopped (see below) |
 | `interrupted` | nothing finished it: the app quit mid-run and the next launch closed the row out, a cadence came round while the previous run of the same job was still going so this trigger was dropped rather than started twice, a gate could not answer, or a limit refused the fire before it started (the breaker, a budget, or a ledger that could not say what the job has sent) |
@@ -690,7 +702,8 @@ never got as far as a reply" must not look the same on a card.
 ## Event cards and the Iris conversation
 
 When a run ends, one **event card** is delivered: job name, status, the one-line outcome, tokens,
-and a "View run" button onto the transcript. It goes to the job's destination conversation if it
+and a "View run" button onto the transcript. (A built-in job's card has no transcript to view, and a
+built-in with nothing to report posts no card at all.) It goes to the job's destination conversation if it
 has one, and otherwise to **Iris** — the pinned conversation Iris creates on first use, keeps at
 the top of the sidebar, and treats as your main conversation. (Pinned conversations refuse
 `/clear`. `/new` in Iris archives it and starts a fresh one. The pin moves once the rotation's
@@ -858,7 +871,8 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
   a job cannot trip its own breaker by being skipped.
 - **Daily token budget** — **1,000,000 tokens per job** per local calendar day, and **3,000,000
   across every background run together**. The fire that finds the day's tokens sent at or over the
-  figure pauses the job rather than starting. Budgets count every token sent, including tokens a
+  figure pauses the job rather than starting — unless it is a built-in job, which spends no tokens
+  and so is never refused by a budget. Budgets count every token sent, including tokens a
   provider served from its prompt cache; before 5a an Anthropic run was charged nothing because
   Anthropic reports no total. A run's tokens include what its delegated subagents (and theirs, and
   any evaluator grading their work) spend **while the run is active**; a subagent still going after

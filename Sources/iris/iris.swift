@@ -2339,6 +2339,7 @@ actor IrisEngine {
             let slug = Job.slug(from: name)
             replacing = ((try? ledger.jobs()) ?? []).first {
                 $0.name == slug && $0.createdInConversationId == conversationId && $0.trigger.kind != Trigger.fsEventKind
+                    && $0.action == .prompt   // 5b §0.8: schedule_job never turns a built-in into a prompt job
             }
             if let replacing { taken.remove(replacing.name) }
         }
@@ -4342,7 +4343,7 @@ extension IrisEngine {
     nonisolated static func jobRunJSON(_ run: JobRun, outcome: String?, failureReason: String?,
                                        gateSignal: String?, lastAgentMessage: String?) -> String {
         let iso = ISO8601DateFormatter()
-        let row: [String: Any] = [
+        var row: [String: Any] = [
             "id": run.id.uuidString,
             "jobId": run.jobId.uuidString,
             "jobName": run.jobName,
@@ -4367,6 +4368,7 @@ extension IrisEngine {
             // Null for every run no burst started. Harness-written, so not guarded.
             "watchSummary": run.watchSummary.map(jsonObject) ?? NSNull(),
         ]
+        if run.transcriptConversationId == nil { row["transcript"] = noTranscriptNote }
         return jsonString(row) ?? "{}"
     }
 
@@ -4393,6 +4395,11 @@ extension IrisEngine {
     /// what the run actually said, before the guard sees it. `nil` when the transcript is gone
     /// (retention) or the run never spoke.
     static let jobRunTranscriptExcerpt = 2_000
+
+    /// `get_job_run`'s `transcript` field on a row that never had one — a built-in, which runs no
+    /// model turn, and a skip or pause row, which ran nothing — so the model reads "there is none"
+    /// rather than inferring a pruned transcript from a null.
+    static let noTranscriptNote = "none: this run had no model turn"
 
     private nonisolated static func jsonString(_ object: Any) -> String? {
         guard JSONSerialization.isValidJSONObject(object),

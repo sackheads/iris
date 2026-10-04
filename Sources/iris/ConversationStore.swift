@@ -492,6 +492,12 @@ final class ConversationStore: Sendable {
                 t.add(column: "hasUnattendedInput", .boolean)
             }
         }
+        // 5b §0.9: NULL means `.prompt`, so every existing job reads back unchanged.
+        m.registerMigration("v14_job_action") { db in
+            try db.alter(table: "jobs") { t in
+                t.add(column: "action", .text)
+            }
+        }
         return m
     }
 

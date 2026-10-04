@@ -76,8 +76,8 @@ final class JobLedger: JobUsageReading, Sendable {
                 INSERT INTO jobs (
                     id, name, prompt, triggerKind, trigger, profile, destinationConversationId,
                     createdInConversationId, createdAt, enabled, nextFireAt, lastRunAt, pausedReason,
-                    policy, retryAttempt, queuedFire)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    policy, retryAttempt, queuedFire, action)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     prompt = excluded.prompt,
@@ -93,13 +93,14 @@ final class JobLedger: JobUsageReading, Sendable {
                     pausedReason = excluded.pausedReason,
                     policy = excluded.policy,
                     retryAttempt = excluded.retryAttempt,
-                    queuedFire = excluded.queuedFire
+                    queuedFire = excluded.queuedFire,
+                    action = excluded.action
                 """, arguments: [
                     job.id.uuidString, job.name, job.prompt, job.trigger.kind, triggerJSON,
                     job.profile.rawValue, job.destinationConversationId?.uuidString,
                     job.createdInConversationId?.uuidString, job.createdAt, job.enabled,
                     job.nextFireAt, job.lastRunAt, job.pausedReason,
-                    policyJSON, job.retryAttempt, job.queuedFire,
+                    policyJSON, job.retryAttempt, job.queuedFire, job.action.stored,
                 ])
             if let storedTrigger, Self.storedGate(storedTrigger) != job.trigger.gate {
                 // A stored trigger this build cannot read decodes as "no gate", so a job that
@@ -236,6 +237,11 @@ final class JobLedger: JobUsageReading, Sendable {
         let r = RowReader(row: row)
         let trigger = try JSONDecoder().decode(
             Trigger.self, from: Data(try r.required("trigger", String.self).utf8))
+        // NULL on every row written before 5b (invariant 1): a prompt job. Unknown text is a
+        // newer build's action, skipped rather than run as a model turn (see `JobAction`).
+        guard let action = JobAction(stored: try r.read("action", String.self)) else {
+            throw JobLedgerError.unreadableRow("unknown action")
+        }
         return Job(
             id: try r.requiredUUID("id"),
             name: try r.required("name", String.self),
@@ -251,7 +257,8 @@ final class JobLedger: JobUsageReading, Sendable {
             pausedReason: try r.read("pausedReason", String.self),
             policy: Self.policy(from: row["policy"] as DatabaseValue?),
             retryAttempt: try r.read("retryAttempt", Int.self) ?? 0,
-            queuedFire: try r.read("queuedFire", Date.self))
+            queuedFire: try r.read("queuedFire", Date.self),
+            action: action)
     }
 
     /// A NULL column, a value that is not even text, and text that will not parse all read as the
@@ -544,6 +551,7 @@ extension JobLedger {
                 WHERE status != ?
                   AND NOT (status = ? AND transcriptConversationId IS NULL)
                   AND (outcome IS NULL OR outcome NOT LIKE ?)
+                  AND jobId NOT IN (SELECT id FROM jobs WHERE action LIKE 'builtin:%')
                 ORDER BY startedAt DESC, rowid DESC LIMIT ?
                 """,
             arguments: [JobRun.Status.running.rawValue, JobRun.Status.interrupted.rawValue,

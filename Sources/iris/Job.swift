@@ -369,6 +369,52 @@ enum Trigger: Codable, Equatable, Sendable {
     }
 }
 
+/// What a fire does (5b §0.8): run a model turn on the job's prompt, or run a registered built-in
+/// (`BuiltinJobs`) with no model at all. Stored as one TEXT column, `action`, and encoded as the
+/// same string in JSON: `"prompt"` or `"builtin:<name>"`. A NULL column and a missing key mean
+/// `.prompt`, which is what every job before 5b was.
+///
+/// Any other text is unreadable rather than `.prompt`: an action a newer build wrote (a script, say)
+/// read as a prompt would run a model turn on a job that was never meant to have one. The ledger
+/// skips such a row the way it skips an unknown trigger kind.
+enum JobAction: Codable, Equatable, Sendable {
+    case prompt
+    case builtin(String)
+
+    static let builtinPrefix = "builtin:"
+
+    var stored: String {
+        switch self {
+        case .prompt: return "prompt"
+        case .builtin(let name): return Self.builtinPrefix + name
+        }
+    }
+
+    /// `nil` for text this build does not recognise; the caller decides what unreadable means.
+    init?(stored: String?) {
+        guard let stored else { self = .prompt; return }
+        if stored == "prompt" { self = .prompt; return }
+        guard stored.hasPrefix(Self.builtinPrefix) else { return nil }
+        let name = String(stored.dropFirst(Self.builtinPrefix.count))
+        guard !name.isEmpty else { return nil }
+        self = .builtin(name)
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        guard let action = JobAction(stored: raw) else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "unknown job action \(raw)")
+        }
+        self = action
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(stored)
+    }
+}
+
 /// A scheduled or event-driven agent task, stored in the conversation database. Replaces the old
 /// `UserDefaults`-backed scheduled jobs and watcher rules.
 struct Job: Identifiable, Codable, Equatable, Sendable {
@@ -401,6 +447,9 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
     /// `policy.overlap == .queue` only: the one fire that came due while the previous run was
     /// still going, taken when it finishes. Never more than one.
     var queuedFire: Date?
+    /// A model turn, or a built-in with none (5b §0.8). Only harness code creates a built-in:
+    /// `schedule_job` always makes `.prompt`.
+    var action: JobAction
 
     init(
         id: UUID = UUID(),
@@ -417,7 +466,8 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
         pausedReason: String? = nil,
         policy: JobPolicy = JobPolicy(),
         retryAttempt: Int = 0,
-        queuedFire: Date? = nil
+        queuedFire: Date? = nil,
+        action: JobAction = .prompt
     ) {
         self.id = id
         self.name = name
@@ -434,13 +484,14 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
         self.policy = policy
         self.retryAttempt = retryAttempt
         self.queuedFire = queuedFire
+        self.action = action
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, prompt, trigger, profile
         case destinationConversationId, createdInConversationId, createdAt
         case enabled, nextFireAt, lastRunAt, pausedReason
-        case policy, retryAttempt, queuedFire
+        case policy, retryAttempt, queuedFire, action
     }
 
     init(from decoder: Decoder) throws {
@@ -461,6 +512,8 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
         policy = try container.decodeIfPresent(JobPolicy.self, forKey: .policy) ?? JobPolicy()
         retryAttempt = try container.decodeIfPresent(Int.self, forKey: .retryAttempt) ?? 0
         queuedFire = try container.decodeIfPresent(Date.self, forKey: .queuedFire)
+        // Invariant 1: every job written before 5b lacks it.
+        action = try container.decodeIfPresent(JobAction.self, forKey: .action) ?? .prompt
     }
 
     /// Derives a short identifier from a job's prompt for use where a display name is needed but

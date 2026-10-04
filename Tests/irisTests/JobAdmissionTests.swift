@@ -164,7 +164,7 @@ struct JobAdmissionTests {
         for c in cases {
             let decision = JobRunner.admit(job: c.job, inFlight: c.inFlight, runsLastHour: c.runs,
                                            tokensTodayJob: c.jobTokens, tokensTodayAll: c.allTokens,
-                                           limits: l)
+                                           countsTokens: true, limits: l)
             #expect(decision == c.expected, "\(c.what): got \(decision)")
         }
     }
@@ -174,7 +174,34 @@ struct JobAdmissionTests {
         let none = limits(maxRunsPerHour: 0, dailyTokens: 0, globalDailyTokens: -1)
         #expect(JobRunner.admit(job: job(), inFlight: false, runsLastHour: 1_000,
                                 tokensTodayJob: 10_000_000, tokensTodayAll: 99_000_000,
-                                limits: none) == .run)
+                                countsTokens: true, limits: none) == .run)
+    }
+
+    @Test("a run that spends no tokens skips both budgets, and nothing else (5b §0.8)")
+    func noTokenRunSkipsOnlyTheBudgets() {
+        let l = limits(maxRunsPerHour: 2, dailyTokens: 100, globalDailyTokens: 500)
+        // Both budgets spent: a prompt job is refused on the job's own, a built-in runs.
+        #expect(JobRunner.admit(job: job(), inFlight: false, runsLastHour: 0,
+                                tokensTodayJob: 100, tokensTodayAll: 500,
+                                countsTokens: true, limits: l)
+                == .pauseBudget(scope: "job", used: 100, limit: 100))
+        #expect(JobRunner.admit(job: job(), inFlight: false, runsLastHour: 0,
+                                tokensTodayJob: 0, tokensTodayAll: 500,
+                                countsTokens: true, limits: l)
+                == .pauseBudget(scope: "global", used: 500, limit: 500))
+        #expect(JobRunner.admit(job: job(), inFlight: false, runsLastHour: 0,
+                                tokensTodayJob: 100, tokensTodayAll: 500,
+                                countsTokens: false, limits: l) == .run)
+        // The rest of the order still applies to it.
+        #expect(JobRunner.admit(job: job(), inFlight: false, runsLastHour: 2,
+                                tokensTodayJob: 100, tokensTodayAll: 500,
+                                countsTokens: false, limits: l) == .pauseBreaker(count: 2))
+        #expect(JobRunner.admit(job: job(), inFlight: true, runsLastHour: 0,
+                                tokensTodayJob: 0, tokensTodayAll: 0,
+                                countsTokens: false, limits: l) == .skipInFlight)
+        #expect(JobRunner.admit(job: job(paused: "by hand"), inFlight: false, runsLastHour: 0,
+                                tokensTodayJob: 0, tokensTodayAll: 0,
+                                countsTokens: false, limits: l) == .dropPaused)
     }
 
     // MARK: JobLimits.resolve

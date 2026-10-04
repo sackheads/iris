@@ -213,8 +213,13 @@ actor JobRunner {
     /// `maxRunsPerHour: 0` than an unbounded one. Nothing configured produces one — `ConfigManager`
     /// reads 0 back as the default — but a hand-written policy can. A *negative* one never reaches
     /// here at all: `JobLimits.resolve` reads it as the typo it is and takes the default.
+    ///
+    /// `countsTokens` is false for a run that spends none — a built-in (5b §0.8) — which skips both
+    /// budgets: a spent daily budget would otherwise refuse a zero-token run on exactly the day the
+    /// digest matters. Everything else, the breaker included, still applies to it.
     static func admit(job: Job, inFlight: Bool, runsLastHour: Int,
-                      tokensTodayJob: Int, tokensTodayAll: Int, limits: JobLimits) -> Admission {
+                      tokensTodayJob: Int, tokensTodayAll: Int, countsTokens: Bool,
+                      limits: JobLimits) -> Admission {
         if job.pausedReason != nil { return .dropPaused }
         // Same shape as a pause and for the same reason: `enabled == false` is already the answer,
         // and the scheduler's query never selects one — but a watch fire and `/jobs run` do not
@@ -224,6 +229,7 @@ actor JobRunner {
         if limits.maxRunsPerHour > 0, runsLastHour >= limits.maxRunsPerHour {
             return .pauseBreaker(count: runsLastHour)
         }
+        guard countsTokens else { return .run }
         if limits.dailyTokens > 0, tokensTodayJob >= limits.dailyTokens {
             return .pauseBudget(scope: "job", used: tokensTodayJob, limit: limits.dailyTokens)
         }
@@ -361,7 +367,8 @@ actor JobRunner {
             let admission = Self.admit(job: current, inFlight: inFlight.contains(current.id),
                                        runsLastHour: usage.runsLastHour,
                                        tokensTodayJob: usage.tokensToday,
-                                       tokensTodayAll: tokensAll, limits: limits)
+                                       tokensTodayAll: tokensAll,
+                                       countsTokens: current.action == .prompt, limits: limits)
             // Whether this pass is the fire the caller asked about — the first one round the loop.
             // A held `queue` fire that follows must not overwrite the answer given for it.
             let isCallersFire = decided == nil
@@ -613,6 +620,60 @@ actor JobRunner {
                     job: job, status: status)
     }
 
+    /// What an unregistered built-in name writes on its failed row.
+    static let unknownBuiltinReason = "unknown built-in"
+
+    /// A built-in fire (5b §0.8): a row with no transcript, the built-in awaited in place of a
+    /// turn, and a card only if it asks for one. Modelled on `recordGateRow` — begin, finish, then
+    /// the retry ladder — so a built-in sits on the same ladder as every other job. Tokens are
+    /// zero by construction, which is why admission did not ask about the budgets.
+    private func runBuiltin(_ name: String, job: Job, origin: FireOrigin, note: String?) async {
+        let startedAt = now()
+        let run = JobRun(jobId: job.id, jobName: job.name, triggerKind: origin.triggerKind,
+                         startedAt: startedAt)
+        do {
+            try ledger.begin(run: run)
+        } catch {
+            print("[JobRunner] not running \(job.name): could not record the run: \(error)")
+            return
+        }
+        do { try ledger.setLastRun(jobId: job.id, at: startedAt) }
+        catch { print("[JobRunner] could not stamp the last run of \(job.name): \(error)") }
+
+        let status: JobRun.Status
+        let outcome: String?
+        let failureReason: String?
+        let card: Bool
+        if let builtin = BuiltinJobs.named(name) {
+            let result = await builtin.run(ledger: ledger, now: startedAt, calendar: calendar)
+            (status, outcome, failureReason, card) = (.completed, result.outcome, nil, result.card)
+        } else {
+            // Always carded: a scheduled job that silently does nothing is the failure the ledger
+            // and the cards exist to surface.
+            (status, outcome, failureReason, card) = (.failed, nil, Self.unknownBuiltinReason, true)
+        }
+        let finishedAt = now()
+        do {
+            try ledger.finish(runId: run.id, status: status, outcome: outcome,
+                              failureReason: failureReason, blockedTool: nil, tokens: TokenUsage(),
+                              finishedAt: finishedAt)
+        } catch {
+            print("[JobRunner] could not close the run for \(job.name): \(error)")
+        }
+        let retry = Self.retryDecision(status: status, attempt: job.retryAttempt,
+                                       retryEnabled: job.policy.retry,
+                                       watcherFire: Self.isPathDriven(origin: origin, job: job),
+                                       now: finishedAt)
+        await apply(retry, job: job, status: status)
+        guard card else { return }
+        await deliver(EventCard(kind: "job_run", runId: run.id, jobId: job.id, jobName: job.name,
+                                status: status,
+                                outcome: Self.cardOutcome(outcome ?? failureReason, retry: retry,
+                                                          now: finishedAt),
+                                startedAt: startedAt, finishedAt: finishedAt,
+                                catchUpNote: note), for: job)
+    }
+
     /// Records a gate that could not answer, and pauses the job on the third in a row (§7).
     ///
     /// The first two are quiet rows — a flaky server or a machine off the network is not worth a
@@ -826,6 +887,11 @@ actor JobRunner {
     /// Private: `fire` is the only way in, so nothing can start a run that skipped admission.
     private func run(job: Job, origin: FireOrigin, limits: JobLimits, gate: GateContext? = nil,
                      note: String? = nil, watch: WatchSummary? = nil) async {
+        // Before anything that opens a conversation: a built-in has no turn and no transcript.
+        if case .builtin(let name) = job.action {
+            await runBuiltin(name, job: job, origin: origin, note: note)
+            return
+        }
         // L1: a grant on a read-only row is inert — never stamped, never checked.
         let grant = job.effectiveGrant
         let startedAt = now()
