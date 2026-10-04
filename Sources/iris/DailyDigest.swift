@@ -146,29 +146,48 @@ extension DailyDigest {
             action: .builtin(Self.name))
     }
 
+    /// The marker's values. `pending`: claimed, the job may not exist yet. `registered`: the job
+    /// was scheduled. `adopted`: a digest job was found without a marker. Any value but `pending`
+    /// means registration is over for this store.
+    static let markerPending = "pending"
+    static let markerRegistered = "registered"
+    static let markerAdopted = "adopted"
+
     /// Registers the digest the first time it is ever called on this store, and never again
-    /// (§0.8): once the marker is set, a deleted digest stays deleted.
+    /// (§0.8): once the marker says `registered`, a deleted digest stays deleted.
     ///
-    /// The marker is *claimed* before the job is scheduled, atomically, so two launches racing
-    /// (`AppState.start` can run more than once) cannot both create one; a schedule that fails
-    /// releases it so the next launch tries again. A digest job that already exists without a
-    /// marker (one written by a build that crashed between the two steps) is adopted, not doubled.
+    /// Three steps, so no crash between them loses the digest: the marker is *claimed* as
+    /// `pending` atomically (two launches racing — `AppState.start` can run more than once — cannot
+    /// both win the claim), then the job is scheduled, then the marker is set to `registered`. A
+    /// launch that finds `pending` and no digest job — a crash before the schedule, or a schedule
+    /// that failed — schedules it then; `pending` with a digest job only finishes the marker. The
+    /// marker is never removed, so a launch whose schedule loses a race (the jobs table's unique
+    /// name lets only one digest in) cannot reopen registration. A digest job found with no marker
+    /// at all is adopted, not doubled.
     static func registerDigestOnce(ledger: JobLedger, store: ConversationStore,
                                    scheduler: JobScheduler, timeZone: TimeZone) async {
         do {
-            if try store.metaValue(forKey: digestRegisteredMetaKey) != nil { return }
+            let marker = try store.metaValue(forKey: digestRegisteredMetaKey)
+            if let marker, marker != markerPending { return }
             let existing = try ledger.jobs()
             if existing.contains(where: { $0.action == .builtin(Self.name) }) {
-                _ = try store.insertMetaValueIfAbsent("adopted", forKey: digestRegisteredMetaKey)
+                if marker == nil {
+                    _ = try store.insertMetaValueIfAbsent(markerAdopted, forKey: digestRegisteredMetaKey)
+                } else {
+                    try store.setMetaValue(markerRegistered, forKey: digestRegisteredMetaKey)
+                }
                 return
             }
-            guard try store.insertMetaValueIfAbsent("registered", forKey: digestRegisteredMetaKey) else { return }
+            if marker == nil {
+                guard try store.insertMetaValueIfAbsent(markerPending, forKey: digestRegisteredMetaKey) else { return }
+            }
             let taken = Set(existing.map(\.name))
             let name = taken.contains(jobName) ? fallbackJobName : jobName
             do {
                 try await scheduler.schedule(job(timeZone: timeZone, name: name))
+                try store.setMetaValue(markerRegistered, forKey: digestRegisteredMetaKey)
             } catch {
-                try? store.removeMetaValue(forKey: digestRegisteredMetaKey)
+                // The marker stays `pending`, so the next launch tries again.
                 print("[DailyDigest] could not register the daily digest: \(error)")
             }
         } catch {

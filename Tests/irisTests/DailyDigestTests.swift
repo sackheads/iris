@@ -213,7 +213,7 @@ struct DailyDigestTests {
         #expect(job.prompt == DailyDigest.downgradePrompt)
         // 2023-11-14 22:13 UTC is 2023-11-15 07:13 in Tokyo, so the next 10:00 there is 01:00 UTC.
         #expect(job.nextFireAt == Date(timeIntervalSince1970: 1_700_010_000))
-        #expect(try store.metaValue(forKey: DailyDigest.digestRegisteredMetaKey) != nil)
+        #expect(try store.metaValue(forKey: DailyDigest.digestRegisteredMetaKey) == DailyDigest.markerRegistered)
 
         await DailyDigest.registerDigestOnce(ledger: ledger, store: store, scheduler: scheduler, timeZone: tokyo)
         #expect(try ledger.jobs().count == 1, "the second launch creates nothing")
@@ -235,6 +235,55 @@ struct DailyDigestTests {
         _ = await (a, b)
 
         #expect(try registered(ledger).count == 1)
+        // The unique name index alone would force one job; what registration owns is the marker.
+        // It must survive the race — a loser whose schedule failed must not have removed it — and
+        // say the job was scheduled.
+        #expect(try store.metaValue(forKey: DailyDigest.digestRegisteredMetaKey) == DailyDigest.markerRegistered)
+        let job = try #require(try registered(ledger).first)
+        try ledger.delete(jobId: job.id)
+        await DailyDigest.registerDigestOnce(ledger: ledger, store: store, scheduler: scheduler, timeZone: zone)
+        #expect(try registered(ledger).isEmpty, "after the race, a deleted digest still stays deleted")
+    }
+
+    @Test("a pending marker with no digest job (a crash before the schedule) schedules it; with one, it only finishes the marker")
+    func pendingMarkerRecovers() async throws {
+        let zone = TimeZone(identifier: "UTC")!
+
+        let crashed = try ConversationStore.inMemory()
+        try crashed.setMetaValue(DailyDigest.markerPending, forKey: DailyDigest.digestRegisteredMetaKey)
+        await DailyDigest.registerDigestOnce(ledger: crashed.ledger, store: crashed,
+                                             scheduler: JobScheduler(ledger: crashed.ledger), timeZone: zone)
+        #expect(try registered(crashed.ledger).count == 1)
+        #expect(try crashed.metaValue(forKey: DailyDigest.digestRegisteredMetaKey) == DailyDigest.markerRegistered)
+
+        let scheduledThenCrashed = try ConversationStore.inMemory()
+        try scheduledThenCrashed.setMetaValue(DailyDigest.markerPending, forKey: DailyDigest.digestRegisteredMetaKey)
+        try scheduledThenCrashed.ledger.upsert(DailyDigest.job(timeZone: zone))
+        await DailyDigest.registerDigestOnce(ledger: scheduledThenCrashed.ledger, store: scheduledThenCrashed,
+                                             scheduler: JobScheduler(ledger: scheduledThenCrashed.ledger), timeZone: zone)
+        #expect(try registered(scheduledThenCrashed.ledger).count == 1, "not doubled")
+        #expect(try scheduledThenCrashed.metaValue(forKey: DailyDigest.digestRegisteredMetaKey) == DailyDigest.markerRegistered)
+    }
+
+    @Test("a schedule that fails leaves the marker pending, never removed, and the next launch schedules the digest")
+    func failedScheduleKeepsThePendingMarker() async throws {
+        let store = try ConversationStore.inMemory()
+        let ledger = store.ledger
+        let zone = TimeZone(identifier: "UTC")!
+        // Both names taken by the owner's own jobs, so the schedule hits the unique name index.
+        let first = promptJob(DailyDigest.jobName)
+        let second = promptJob(DailyDigest.fallbackJobName)
+        try ledger.upsert(first)
+        try ledger.upsert(second)
+
+        await DailyDigest.registerDigestOnce(ledger: ledger, store: store, scheduler: JobScheduler(ledger: ledger), timeZone: zone)
+        #expect(try registered(ledger).isEmpty)
+        #expect(try store.metaValue(forKey: DailyDigest.digestRegisteredMetaKey) == DailyDigest.markerPending)
+
+        try ledger.delete(jobId: first.id)
+        await DailyDigest.registerDigestOnce(ledger: ledger, store: store, scheduler: JobScheduler(ledger: ledger), timeZone: zone)
+        #expect(try registered(ledger).map(\.name) == [DailyDigest.jobName])
+        #expect(try store.metaValue(forKey: DailyDigest.digestRegisteredMetaKey) == DailyDigest.markerRegistered)
     }
 
     @Test("a digest job left without its marker is adopted, not doubled; an owner's job of the same name is not clobbered")
@@ -246,7 +295,7 @@ struct DailyDigestTests {
         await DailyDigest.registerDigestOnce(ledger: orphaned.ledger, store: orphaned,
                                              scheduler: JobScheduler(ledger: orphaned.ledger), timeZone: zone)
         #expect(try registered(orphaned.ledger).count == 1)
-        #expect(try orphaned.metaValue(forKey: DailyDigest.digestRegisteredMetaKey) != nil)
+        #expect(try orphaned.metaValue(forKey: DailyDigest.digestRegisteredMetaKey) == DailyDigest.markerAdopted)
 
         let clashing = try ConversationStore.inMemory()
         let mine = promptJob(DailyDigest.jobName)
