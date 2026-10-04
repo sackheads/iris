@@ -42,8 +42,33 @@ enum PluginAuthRunner {
                              permissions: PermissionManager) async -> PluginAuthStatus? {
         guard let command = displayCommands(auth, config: config).check,
               !command.containsHiddenCharacters,
-              permissions.isAllowed(toolName: "run_command", details: command, workspace: nil) else { return nil }
+              isAlwaysAllowed(command, permissions: permissions) else { return nil }
         return await check(auth, config: config, approve: { _ in true })
+    }
+
+    /// Whether `command` already has a global "Always allow" rule for `run_command` — the same
+    /// rule `statusOnOpen` consults to decide whether to run unasked.
+    static func isAlwaysAllowed(_ command: String, permissions: PermissionManager) -> Bool {
+        permissions.isAllowed(toolName: "run_command", details: command, workspace: nil)
+    }
+
+    /// Writes the rule the pane's "Always allow this command" checkbox grants, through the same
+    /// `permissions.allowGlobally` path the chat window's "Always Allow (Global)" button uses
+    /// (#338). Only a `check_command` gets this checkbox — `setup_command` changes state (it
+    /// signs in), so it always needs a click — and a command with hidden characters is refused
+    /// even if `requested` is true, the same rule `runnable` applies to the Check button itself
+    /// (#336). `command` is nil when nothing is declared or a reference does not resolve, in
+    /// which case there is nothing to allow. Returns whether a rule was written.
+    ///
+    /// Unchecking the box does not retract a rule written on an earlier click:
+    /// `PermissionManager` has no removal API (it only ever appends to `permissions.json`), so
+    /// there is nothing here to call. Revoking an existing "Always allow" rule is left to the
+    /// permissions UI that already owns that file, once one exists.
+    @discardableResult
+    static func applyAlwaysAllow(command: String?, requested: Bool, permissions: PermissionManager) -> Bool {
+        guard requested, let command, !command.containsHiddenCharacters else { return false }
+        permissions.allowGlobally(toolName: "run_command", details: command)
+        return true
     }
 
     /// Single-quotes a value for `/bin/sh` so it is always one literal word.
