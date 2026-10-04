@@ -49,4 +49,28 @@ struct LoopStopEnforcementTests {
         // Single round: the engine asked the model exactly once and did not reprompt itself.
         #expect(mock.callCount == 1)
     }
+
+    /// 5c §0.3: the soft-stop turn keeps every declaration (stripping them was a removal flap on
+    /// the longest history) and says in its turn context that only goal_complete will run.
+    @Test("a restricted turn keeps the previous turn's declarations and says goal_complete only")
+    func restrictedTurnKeepsDeclarations() async {
+        let appState = AppState()
+        let convId = UUID()
+        appState.createNewConversation(id: convId)
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: appState, tier: .medium, client: client, retryDelays: [],
+                                protectionEnabled: false, sessionPeerCount: 0)
+        await engine.processInput("hello", source: "UI", conversationId: convId)
+        await engine.processInput("You reached a stopping condition. Summarize and stop.",
+                                  source: "System", conversationId: convId, restrictToGoalComplete: true)
+        let requests = client.requests
+        #expect(requests.count == 2)
+        guard requests.count == 2 else { return }
+        let before = Set(requests[0].tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
+        let during = Set(requests[1].tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
+        #expect(before.isSubset(of: during), "no removal flap on the longest history (§0.3)")
+        #expect(during.contains("goal_complete") && during.contains("run_command"))
+        let lastUser = requests[1].contents.last { $0.role == "user" }?.parts.compactMap(\.text).joined() ?? ""
+        #expect(lastUser.contains(IrisEngine.goalCompleteOnlyInstruction))
+    }
 }

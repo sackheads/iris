@@ -439,6 +439,8 @@ actor IrisEngine {
     /// and finishes it unasked (#175).
     nonisolated static let turnEndedEarlyPrefix = "System Event [Turn ended early]"
     nonisolated static let stoppedByUserReason = "The user stopped this turn."
+    /// 5c §0.3: the soft-stop turn's turn-context line. The dispatcher is what enforces it.
+    nonisolated static let goalCompleteOnlyInstruction = "Only goal_complete will run on this turn; any other tool call is refused."
 
     nonisolated static func formatDelay(_ seconds: TimeInterval) -> String {
         seconds == seconds.rounded() ? "\(Int(seconds))s" : String(format: "%.1fs", seconds)
@@ -1481,6 +1483,13 @@ actor IrisEngine {
             }
         }
 
+        // 5c §0.3: the soft-stop turn keeps every declaration — stripping them was a removal flap on
+        // the longest history there is. The dispatcher refuses anything but goal_complete (below);
+        // this line tells the model so before it tries.
+        if restrictToGoalComplete {
+            turnContext.sections.append(.init(heading: "This Turn", body: Self.goalCompleteOnlyInstruction))
+        }
+
         var toolsList = await executor.getTools()
         // No unattended job creation (the agency epic's standing ruling): a background run may
         // not write itself a cadence or a watch, so the two tools that do are not declared to it
@@ -1610,7 +1619,7 @@ actor IrisEngine {
         // chat it has nothing to complete, and the model reaching for it anyway used to raise the
         // goal-completion panel over an ordinary conversation and fire an unrequested reflection
         // turn (#84). The soft-stop turn is the exception: it clears the goal first and then needs
-        // this tool as its only way out (see the `restrictToGoalComplete` filter below).
+        // this tool as its only way out (the dispatcher refuses every other tool on that turn).
         if hasActiveGoal || restrictToGoalComplete || sticky.contains("goal_complete") {
         toolsList.append(FunctionDeclaration(
             name: "goal_complete",
@@ -1885,13 +1894,6 @@ actor IrisEngine {
         // rewrites the entry instead (the UI), the byte check drops the block rather than moving it.
         var turnRequest = TurnRequest(context: turnContext, stateHistory: stateHistory, initialHistory: history)
 
-        // A soft-stop summary turn gets ONLY goal_complete: the model can summarize or finish,
-        // but physically cannot keep calling the tool it was looping on. A worded "please stop"
-        // does not bind the model (it rationalizes past it — see the loop-detection stop signal),
-        // so enforcement has to be mechanical: remove the tool from the schema.
-        if restrictToGoalComplete {
-            toolsList = toolsList.filter { $0.name == "goal_complete" }
-        }
         var request = GeminiRequest(contents: await requestContents(history, from: .initial, &turnRequest, conversationId: conversationId), systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
         
         // Nothing from a previous turn decides this one: a turn cancelled mid-batch could leave a
@@ -2116,11 +2118,11 @@ actor IrisEngine {
                         await withTaskGroup(of: (Int, String).self) { group in
                             for (index, call) in toolCalls.enumerated() {
                                 group.addTask {
-                                    // Hard enforcement for a soft-stop summary turn: the model can
-                                    // still EMIT any tool call (the restricted schema is only advisory
-                                    // to it, and this dispatcher executes any named tool), so block
-                                    // everything except goal_complete here — this is what actually
-                                    // stops the looping action from running again.
+                                    // The only enforcement for a soft-stop summary turn (5c §0.3):
+                                    // the turn keeps every declaration so its cached prefix holds,
+                                    // and a worded "please stop" does not bind the model, so this
+                                    // dispatcher refuses everything except goal_complete. This is
+                                    // what stops the looping action from running again.
                                     if restrictToGoalComplete && call.name != "goal_complete" {
                                         await self.pushToUI(role: .system, text: "[blocked] '\(call.name)' is unavailable — the goal loop was stopped. Call goal_complete.", conversationId: conversationId)
                                         return (index, "Blocked: the goal loop has been stopped after repeating an action too many times. '\(call.name)' is unavailable in this turn. Call goal_complete with a summary of what you accomplished and what is blocking you.")
