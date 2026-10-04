@@ -37,7 +37,7 @@ final class GoalEvaluator: Sendable {
         // The directory the grader inspects. Callers resolve this to the main agent's effective
         // working directory (its bound workspace, or the process cwd it actually ran in), so the
         // grader never has to guess where the work is.
-        let workspaceDir = Self.gradingDirectory(workspace)
+        let workspaceDir = Self.gradingDirectory(workspace, contract: contract)
 
         let evalId = UUID()
         await MainActor.run {
@@ -123,8 +123,17 @@ final class GoalEvaluator: Sendable {
     /// Where the grader runs: the conversation's bound workspace, or, with none bound, the process
     /// cwd its `run_command` inherits. One spelling, because the #334 pre-approval compares this
     /// directory with the one recorded when the human approved the contract.
-    nonisolated static func gradingDirectory(_ workspacePath: String?) -> String {
-        workspacePath ?? FileManager.default.currentDirectoryPath
+    ///
+    /// Given the contract, a directory that resolves to its `approvedWorkspace` is spelled as that
+    /// (#359 review): the grader's reads are pre-approved by spelling, so a workspace reached
+    /// through a symlinked prefix (`~/src` → `/Volumes/…`) would otherwise ask on every read. Same
+    /// directory, the human's approved spelling; a workspace moved elsewhere since keeps its own.
+    nonisolated static func gradingDirectory(_ workspacePath: String?, contract: GoalContract? = nil) -> String {
+        let directory = workspacePath ?? FileManager.default.currentDirectoryPath
+        if let approved = contract?.approvedWorkspace, IrisPaths.canonicalPath(directory) == approved {
+            return approved
+        }
+        return directory
     }
 
     private static func systemPrompt(for contract: GoalContract, workspaceDir: String) -> String {
@@ -136,7 +145,7 @@ final class GoalEvaluator: Sendable {
         }
         var s = base
         s += "\n\n## Workspace\nThe completed work is in this directory:\n`\(workspaceDir)`\n"
-        s += "Your `run_command` calls already execute there. Confine your inspection to this directory — start with `ls`. NEVER search the wider filesystem (no `find /`, no reading files outside this directory, no `~root`/home snooping). If an expected artifact is not present here, the relevant criterion is `not_met` or `cannot_verify` — do not go hunting for it elsewhere.\n"
+        s += "Your `run_command` calls already execute there. Confine your inspection to this directory — start by reading it with `read_file`, which lists a directory. NEVER search the wider filesystem (no `find /`, no reading files outside this directory, no `~root`/home snooping). If an expected artifact is not present here, the relevant criterion is `not_met` or `cannot_verify` — do not go hunting for it elsewhere.\n"
         s += "\n## The locked contract you are grading\nObjective: \(contract.objective)\n\nCriteria (grade each by its id):\n"
         for c in contract.criteria {
             let checkNote = (c.kind == .executable) ? " — run this check: `\(c.check ?? "")`" : ""

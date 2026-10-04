@@ -15,16 +15,26 @@ enum GrantedFileError: Error, Equatable {
     case stagingExists(String)
     case io(call: String, errno: Int32)
 
-    var message: String {
+    /// Who is walking: a granted job run (#282) or the goal grader reading its approved workspace
+    /// (#339). Same walk, same refusals; the sentence names the right directory.
+    enum Scope: Sendable { case grant, approvedWorkspace }
+
+    var message: String { message(for: .grant) }
+
+    func message(for scope: Scope) -> String {
+        let who = scope == .grant ? "a granted run" : "the grader"
+        let directory = scope == .grant ? "the granted directory" : "the approved workspace"
         switch self {
         case .emptyPath: return "a granted read or write needs a file name under the granted directory"
-        case .badComponent(let component): return "the path component `\(component)` is not allowed under a grant; name the file with plain components under the granted directory"
-        case .rootUnavailable(let root): return "the granted directory \(root) no longer exists"
-        case .symlink(let component): return "the path crosses a symlink at `\(component)`; a granted run may not read or write through symlinks — name the real directory instead"
-        case .renamed(let component): return "the granted directory has been renamed at `\(component)` since the grant was given (only its case differs); a granted run does not follow a rename — the next fire re-checks the grant"
+        case .badComponent(let component): return "the path component `\(component)` is not allowed \(scope == .grant ? "under a grant" : "in an approved-workspace read"); name the file with plain components under \(directory)"
+        case .rootUnavailable(let root): return "\(directory) \(root) no longer exists"
+        case .symlink(let component): return "the path crosses a symlink at `\(component)`; \(who) may not read \(scope == .grant ? "or write " : "")through symlinks — name the real \(scope == .grant ? "directory" : "path") instead"
+        case .renamed(let component): return scope == .grant
+            ? "the granted directory has been renamed at `\(component)` since the grant was given (only its case differs); a granted run does not follow a rename — the next fire re-checks the grant"
+            : "the approved workspace has been renamed at `\(component)` since it was approved (only its case differs); the grader does not follow a rename"
         case .notADirectory(let component): return "`\(component)` is not a directory"
         case .isADirectory(let component): return "`\(component)` is a directory, not a file"
-        case .notARegularFile(let component): return "`\(component)` is not a regular file (a pipe, socket or device); a granted run reads regular files only"
+        case .notARegularFile(let component): return "`\(component)` is not a regular file (a pipe, socket or device); \(who) reads regular files and directories only"
         case .missing(let component): return "no such file or directory: `\(component)`"
         case .stagingExists(let name): return "a staging file `\(name)` already exists; try again"
         case .io(let call, let code): return "\(call) failed: \(String(cString: strerror(code)))"
@@ -32,7 +42,8 @@ enum GrantedFileError: Error, Equatable {
     }
 }
 
-/// A granted run's file access (#282 §0.13). The allow (`JobGrant.allowedMount`) decides *whether*;
+/// A granted run's file access (#282 §0.13), and the goal grader's pre-approved reads in its
+/// approved workspace (#339, `GoalContract.approvedReadComponents`). The allow (`JobGrant.allowedMount`) decides *whether*;
 /// this decides *where* in a way nothing on the host can move between the two: the mount's root is
 /// opened once as a directory descriptor, every remaining component is walked with `openat` and
 /// `O_NOFOLLOW`, and a write is staged and renamed inside the final directory's descriptor. A
@@ -59,11 +70,12 @@ struct GrantedFileAccess: Sendable {
         "\(name).sb-\(String(UInt32.random(in: .min ... .max), radix: 16))-\(String(UInt32.random(in: .min ... .max), radix: 36))"
     }
 
+    /// A file's text, or, for a directory, its listing (#337). An empty `relative` lists the root.
     func read(relative: [String]) throws -> String {
-        guard let name = relative.last else { throw GrantedFileError.emptyPath }
         try Self.validate(relative)
         let rootFD = try openRoot()
         defer { close(rootFD) }
+        guard let name = relative.last else { return try DirectoryListing.list(directory: rootFD) }
         let dirFD = try descend(relative.dropLast(), from: rootFD)
         defer { if dirFD != rootFD { close(dirFD) } }
         // `O_NONBLOCK` so a FIFO cannot park the run before it is refused: a plain `open(O_RDONLY)`
@@ -74,7 +86,7 @@ struct GrantedFileAccess: Sendable {
         defer { close(fd) }
         var st = stat()
         guard fstat(fd, &st) == 0 else { throw GrantedFileError.io(call: "fstat", errno: errno) }
-        if (st.st_mode & S_IFMT) == S_IFDIR { throw GrantedFileError.isADirectory(component: name) }
+        if (st.st_mode & S_IFMT) == S_IFDIR { return try DirectoryListing.list(directory: fd) }
         guard (st.st_mode & S_IFMT) == S_IFREG else { throw GrantedFileError.notARegularFile(component: name) }
         _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK)
         var data = Data()

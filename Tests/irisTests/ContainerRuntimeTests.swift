@@ -208,7 +208,9 @@ struct ContainerRuntimeTests {
         let rt = CLIContainerRuntime(launch: launcher.launch)
         let r = try await rt.exec(name: "iris-f", workdir: "/ws", command: "echo hi", timeoutSeconds: 45)
         #expect(r.stdout == "hi")
-        #expect(launcher.lastArgv == ["exec", "-w", "/ws", "iris-f", "bash", "-c", "echo hi"])
+        // The command rides under the wrapper that records its process group (#353), as `$1`.
+        #expect(launcher.lastArgv.prefix(6) == ["exec", "-w", "/ws", "iris-f", "bash", "-c"])
+        #expect(launcher.lastArgv.suffix(2) == ["iris-exec", "echo hi"])
         #expect(launcher.timeouts == [45])
     }
 

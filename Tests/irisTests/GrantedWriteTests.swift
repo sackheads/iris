@@ -207,13 +207,14 @@ struct GrantedWriteTests {
         #expect(throws: GrantedFileError.missing(component: "gone.md")) { _ = try t.access.read(relative: ["sub", "gone.md"]) }
         #expect(throws: GrantedFileError.missing(component: "nodir")) { _ = try t.access.read(relative: ["nodir", "r.md"]) }
         #expect(throws: GrantedFileError.notADirectory(component: "r.md")) { _ = try t.access.read(relative: ["sub", "r.md", "deeper"]) }
-        #expect(throws: GrantedFileError.emptyPath) { _ = try t.access.read(relative: []) }
+        // #337: no components is the root itself, which reads as its listing.
+        #expect(try t.access.read(relative: []).contains("\nsub/\n"))
     }
 
-    @Test("read refuses a directory and a FIFO with their own sentences, and the FIFO answer comes back promptly")
+    @Test("read lists a directory (#337) and refuses a FIFO with its own sentence, and the FIFO answer comes back promptly")
     func readRefusesNonRegularFiles() async throws {
         let t = try tree(); defer { t.tearDown() }
-        #expect(throws: GrantedFileError.isADirectory(component: "sub")) { _ = try t.access.read(relative: ["sub"]) }
+        #expect(try t.access.read(relative: ["sub"]).hasSuffix("(empty)"))
         // Measured by review: a plain `open(O_RDONLY)` of a FIFO blocks until a writer appears, which
         // would park a job's run on the watchdog. The walk opens `O_NONBLOCK`, asks `fstat`, and refuses.
         let fifo = t.root.appendingPathComponent("sub/pipe")

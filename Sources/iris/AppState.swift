@@ -2685,23 +2685,42 @@ class AppState {
         var timeout = configuredTimeout
 
         if engineType == .ollama {
-            let engine = try? await AuxiliaryModelManager.shared.getEngine(
-                for: "vibecop", config: AuxiliaryModelConfig(
-                    role: "vibecop",
-                    engineType: .ollama,
-                    modelPathOrName: ConfigManager.shared.vibecopModel
-                )
-            )
-            if let ollamaEngine = engine, !(await ollamaEngine.isModelLoaded()) {
-                timeout = 30.0  // cold-start budget
-                print("Vibecop: Ollama model cold, using \(timeout)s timeout")
+            let model = ConfigManager.shared.vibecopModel
+            timeout = await Self.ollamaVibecopBudget(configured: configuredTimeout, probeSeconds: Self.ollamaProbeTimeoutSeconds) {
+                guard let engine = try? await AuxiliaryModelManager.shared.getEngine(
+                    for: "vibecop", config: AuxiliaryModelConfig(role: "vibecop", engineType: .ollama, modelPathOrName: model)
+                ) else { return nil }
+                return await engine.isModelLoaded()
             }
+            if timeout != configuredTimeout { print("Vibecop: Ollama model cold, using \(timeout)s timeout") }
         }
 
         return await Self.boundedVibecopVerdict(seconds: timeout) {
             try await VibecopService.shared.evaluateAction(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
                                                            callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled)
         }
+    }
+
+    /// The bound on the Ollama warm-up probe (#353). It asks the Ollama server whether the model is
+    /// loaded, and it ran outside every timeout: a wedged server held the turn before Vibecop's own
+    /// bound had even started.
+    nonisolated static let ollamaProbeTimeoutSeconds: Double = 5
+    /// What a cold Ollama model gets to load and answer in.
+    nonisolated static let ollamaColdBudgetSeconds: Double = 30
+
+    /// The Vibecop budget for an Ollama engine. `probe` answers whether the model is loaded, or nil
+    /// when there is no engine to ask. A probe that has not answered within `probeSeconds` is taken
+    /// to mean a cold model — a server too busy to say is the case the cold budget is for — so the
+    /// whole consultation is bounded by `probeSeconds` plus at most the cold budget.
+    nonisolated static func ollamaVibecopBudget(configured: Double, probeSeconds: Double,
+                                                probe: @escaping @Sendable () async -> Bool?) async -> Double {
+        let loaded: Bool?
+        do {
+            loaded = try await withTimeout(seconds: probeSeconds, probe)
+        } catch {
+            loaded = false
+        }
+        return loaded == false ? ollamaColdBudgetSeconds : configured
     }
 
     /// The bound itself, apart from the settings and the shared service so a test can hand it an
