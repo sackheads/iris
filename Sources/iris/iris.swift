@@ -3176,13 +3176,9 @@ actor IrisEngine {
             // reads the function name alone, so the invariant ("in no other conversation") is
             // enforced again here, where a forged call would otherwise have its effect — the same
             // defense in depth the session tools use.
-            // Subagent conversations are filtered out of persistence, so the store should never hold
-            // one — but `read_conversation` refuses them, so search excludes any live in-memory
-            // subagent id too rather than rely on that filter alone (#187 review).
-            let (isPinned, store, subagentIds) = await MainActor.run { () -> (Bool, ConversationStore?, Set<UUID>) in
+            let (isPinned, store) = await MainActor.run { () -> (Bool, ConversationStore?) in
                 (localState?.conversations.first(where: { $0.id == conversationId })?.isPinned == true,
-                 localState?.store,
-                 Set(localState?.conversations.filter(\.isSubagent).map(\.id) ?? []))
+                 localState?.store)
             }
             guard isPinned, let ledger = store?.ledger else {
                 result = "Refused — the job tools are only available in a pinned conversation."
@@ -3338,10 +3334,21 @@ actor IrisEngine {
             }
             // This branch returns its own result directly, so it never passes through
             // `executeToolWithHooks`'s guard — snippets are other chats' text, guarded exactly as
-            // search_memory's conversations scope is.
-            result = await InjectionGuard.sanitize(
+            // search_memory's conversations scope is. Also never through `executeToolWithHooks`'s
+            // "withheld, don't retry" note (#235), so a run of blocked hits here used to read to
+            // the model like an empty one — noted directly instead (#343). Decided from the
+            // guard's own verdict (`classify`, not `sanitize`), never by searching the rendered
+            // text for the block marker: another chat could quote that literal string in its own
+            // words and get mistaken for a block that never happened. `wrapped` then does exactly
+            // what `sanitize` would have, from the same classification, so the guard runs once.
+            let searchTag = "tool_output_search_conversations"
+            let searchOutcome = await InjectionGuard.classify(
                 PromptInjectionGuard.sanitizeUntrustedInput(body),
-                contextTag: "tool_output_search_conversations", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+                contextTag: searchTag, maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+            let guardedSearch = InjectionGuard.wrapped(searchOutcome, contextTag: searchTag)
+            let searchBlocked: Bool
+            if case .blocked = searchOutcome { searchBlocked = true } else { searchBlocked = false }
+            result = noteBlockedResult(guardedSearch, name: functionCall.name, conversationId: conversationId, blocked: searchBlocked)
         } else if functionCall.name == "read_conversation" {
             // Same defense in depth as search_conversations just above: declaration gating stops a
             // well-behaved model, dispatch reads the function name alone, so the invariant is
@@ -3401,9 +3408,20 @@ actor IrisEngine {
             }
             // This branch returns its own result directly, so it never passes through
             // `executeToolWithHooks`'s guard — another conversation's text is guarded exactly as
-            // search_conversations's hits are, once, here.
-            result = await InjectionGuard.sanitize(
-                body, contextTag: "tool_output_read_conversation", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+            // search_conversations's hits are, once, here. Also never through its "withheld, don't
+            // retry" note (#235): a page is up to `ConversationReader.maxBytes` (32,000 UTF-8
+            // bytes) scored as one blob, the aggregate false-positive shape #235 hit, and a page
+            // withheld that way used to read to the model like an empty one (#343). Decided from
+            // the guard's own verdict, never by searching the rendered page for the block marker
+            // string — a planted or quoted copy of that marker inside another chat, passed
+            // through cleanly, would otherwise be mistaken for a block that never happened.
+            let readTag = "tool_output_read_conversation"
+            let readOutcome = await InjectionGuard.classify(
+                body, contextTag: readTag, maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+            let guardedRead = InjectionGuard.wrapped(readOutcome, contextTag: readTag)
+            let readBlocked: Bool
+            if case .blocked = readOutcome { readBlocked = true } else { readBlocked = false }
+            result = noteBlockedResult(guardedRead, name: functionCall.name, conversationId: conversationId, blocked: readBlocked)
         } else if functionCall.name == "rename_conversation", let newTitle = functionCall.args["title"]?.stringValue {
             // Not declared on the pinned conversation's turns (above), but a forged or stale call
             // must still be refused rather than acted on (invariant 6's undeclared-but-safe half).
@@ -3984,6 +4002,31 @@ actor IrisEngine {
         }
     }
 
+    /// Records whether a guarded result was withheld, and appends the "don't retry" sentence once
+    /// that happens twice in a row (#235). `executeToolWithHooks` is the original call site;
+    /// `search_conversations` and `read_conversation` return before ever reaching it (#343), so
+    /// each calls this directly on its own already-guarded result instead. The tracker is keyed by
+    /// conversation, not by call site, so a block from one of these and a block from an ordinary
+    /// tool right after it still count as consecutive — the same loop-detection read at the top of
+    /// the dispatch loop (`blockedResultTrackers[conversationId]?.consecutive`) sees one counter
+    /// either way.
+    ///
+    /// `blocked` is the caller's own decision, never derived here from the rendered text: an
+    /// earlier substring search for `"[CONTENT BLOCKED BY TIER"` would also fire on a chat that
+    /// merely quotes that marker in its own words, which `read_conversation` and
+    /// `search_conversations` hand back verbatim when the guard passes it. Both now decide from
+    /// the guard's actual `InjectionGuard.GuardOutcome` instead (#343 follow-up); this method just
+    /// records what it is told. `executeToolWithHooks`'s own substring check is unchanged — it was
+    /// not part of this follow-up and is a wider refactor to fix the same way.
+    private func noteBlockedResult(_ sanitizedResult: String, name: String, conversationId: UUID,
+                                   blocked: Bool) -> String {
+        var tracker = blockedResultTrackers[conversationId] ?? BlockedResultTracker()
+        let consecutive = tracker.record(blocked: blocked)
+        blockedResultTrackers[conversationId] = tracker
+        guard blocked, consecutive >= 2 else { return sanitizedResult }
+        return sanitizedResult + "\n[Iris: the injection guard has withheld \(consecutive) consecutive results from \(name). Do not retry the same approach — use a different source or report what you have.]"
+    }
+
     private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil, approvedWorkspaceRoot: String? = nil) async -> String {
         var execArgs: [String: JSONValue] = args
 
@@ -4122,11 +4165,7 @@ actor IrisEngine {
         // because this sentence is Iris's own and must not be presented as tool output.
         guard let conversationId else { return sanitizedResult }
         let blocked = fullyBlockedSearch || sanitizedResult.contains("[CONTENT BLOCKED BY TIER")
-        var tracker = blockedResultTrackers[conversationId] ?? BlockedResultTracker()
-        let consecutive = tracker.record(blocked: blocked)
-        blockedResultTrackers[conversationId] = tracker
-        guard blocked, consecutive >= 2 else { return sanitizedResult }
-        return sanitizedResult + "\n[Iris: the injection guard has withheld \(consecutive) consecutive results from \(name). Do not retry the same approach — use a different source or report what you have.]"
+        return noteBlockedResult(sanitizedResult, name: name, conversationId: conversationId, blocked: blocked)
     }
     
     /// One model round's assembled result plus when its first token arrived (spec §4).

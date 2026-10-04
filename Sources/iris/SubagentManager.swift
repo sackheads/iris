@@ -34,11 +34,17 @@ final class SubagentManager: @unchecked Sendable {
     /// the engine: a subagent of an unattended run is unattended too, and its writes have to reach
     /// the same registry the watch coordinator consults, or a run that delegates its file writing
     /// escapes the filter (#187 §4).
+    /// `deadlineClock` is the wall clock the poll-cap deadline below is set and watched on,
+    /// injected only so a test can hold it off until the subagent is parked mid-turn, then move it
+    /// (#355, following #335/#342): a real poll cap raced a busy suite's MainActor work and
+    /// sometimes let the run's own soft-stop classify as `.failed` first. The default is the same
+    /// wall clock as before, so nothing changes outside tests.
     func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID,
                      unit: DelegatedUnit? = nil, maxIterations: Int = 3000,
                      client: (any LLMClientProtocol)? = nil,
                      appState: AppState,
-                     recentWrites: RecentWrites = .shared) async -> (rendered: String, status: SubagentTerminalStatus) {
+                     recentWrites: RecentWrites = .shared,
+                     deadlineClock: @escaping @Sendable () -> Date = Date.init) async -> (rendered: String, status: SubagentTerminalStatus) {
         let startedAt = Date()
 
         // 1. Create a new conversation for the subagent
@@ -114,8 +120,8 @@ final class SubagentManager: @unchecked Sendable {
         // Tracks the engine loop ending. A subagent that stops WITHOUT calling goal_complete — its
         // own goal loop soft-stopped on the iteration cap, the model just replied with text, the
         // turn threw — never fires `onSubagentComplete`. Without this the poll below would spin to
-        // `maxIterations` (3000 × 100ms = five minutes) waiting for a termination that can no
-        // longer arrive, stalling the parent that is awaiting the result.
+        // the deadline (3000 × 100ms = five minutes, by default) waiting for a termination that can
+        // no longer arrive, stalling the parent that is awaiting the result.
         actor EngineDone {
             var finished = false
             func set() { finished = true }
@@ -130,7 +136,10 @@ final class SubagentManager: @unchecked Sendable {
             await engineDone.set()
         }
 
-        var iterations = 0
+        // The wall clock (`deadlineClock`), not a poll count: a count of 100ms sleeps still
+        // measures *polls*, not time, when the clock behind it is injected and can be held still or
+        // jumped — see the parameter doc above.
+        let deadline = deadlineClock().addingTimeInterval(Double(maxIterations) * 0.1)
         var gracePolls = 0
         while await holder.get() == nil {
             // The engine loop is over. `goal_complete` resolves the holder from a detached Task, so
@@ -147,7 +156,18 @@ final class SubagentManager: @unchecked Sendable {
                     break
                 }
             }
-            if iterations >= maxIterations {
+            if deadlineClock() >= deadline {
+                // Classify BEFORE `engineTask.cancel()`, not after: cancelling it can itself
+                // unwind the engine's in-flight model call (the non-streaming path replays through
+                // a cancellable `AsyncThrowingStream`), which hits `processInput`'s own catch block
+                // and fires `onSubagentComplete` with `.failed` — a second, concurrent write to this
+                // same `holder`. `set` takes whichever write lands first, so under heavy MainActor
+                // contention that second writer could beat the four awaits below it and this run
+                // would misreport "failed (goal_complete not called)" instead of "timed out" (#355).
+                // Setting the verdict first makes that race harmless: the later write is a no-op.
+                await holder.set(SubagentTermination(status: .timedOut,
+                    summary: "Subagent timed out after the iteration cap and was cancelled (task, pending approvals, and sandbox container cleaned up).",
+                    calledGoalComplete: false))
                 // Hard stop: cancel the engine task, unstick any pending approval, stop the
                 // reprompt loop, free the sandbox container, and clear the goal.
                 engineTask.cancel()
@@ -155,13 +175,9 @@ final class SubagentManager: @unchecked Sendable {
                 await engine.cancelReprompt(for: subagentId)
                 await SandboxSessionManager.shared.endSession(subagentId)
                 await MainActor.run { appState.clearGoal(for: subagentId) }
-                await holder.set(SubagentTermination(status: .timedOut,
-                    summary: "Subagent timed out after the iteration cap and was cancelled (task, pending approvals, and sandbox container cleaned up).",
-                    calledGoalComplete: false))
                 break
             }
             try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
-            iterations += 1
         }
         let termination = await holder.get() ?? SubagentTermination(status: .failed, summary: "Subagent completed with no summary.", calledGoalComplete: false)
         let files = await MainActor.run { appState.drainSubagentWrites(for: subagentId) }

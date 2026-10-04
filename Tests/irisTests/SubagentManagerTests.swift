@@ -279,28 +279,80 @@ final class SubagentManagerTests: XCTestCase {
         XCTAssertEqual(usedModel, "claude-3-5-sonnet")
     }
 
+    /// The poll-cap deadline's clock (#355, following #335/#342), held still until the test moves
+    /// it. A real wall clock raced a busy suite's MainActor work: the cap could arrive before the
+    /// subagent's own call was even placed, or `engineTask.cancel()`'s cancellation of that call
+    /// could win a classification race against the cap's own (`SubagentManager` now classifies
+    /// first; see its `deadlineClock` doc). Holding the clock still removes the first race by
+    /// construction; the ordering fix removes the second.
+    private final class ManualClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var current = Date()
+        func now() -> Date { lock.withLock { current } }
+        func advance(by seconds: TimeInterval) { lock.withLock { current += seconds } }
+    }
+
+    /// Parks every call to the model forever, so the test can prove the run is actually inside its
+    /// one model call (the precondition) before moving the clock past the deadline.
+    private final class ParkedClient: LLMClientProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+        private var callCount = 0
+        var calls: Int { lock.withLock { callCount } }
+
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            lock.withLock { callCount += 1 }
+            while true { try await Task.sleep(nanoseconds: 50_000_000) }
+        }
+        var supportsStreaming: Bool { false }
+    }
+
+    private func waitFor(_ description: String, timeout: TimeInterval = 10,
+                         _ condition: () -> Bool) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTFail("timed out waiting for \(description)")
+    }
+
+    /// The task's value, or `nil` if it has not finished within `seconds`: turns "the deadline
+    /// never ended the run" into a failure rather than a hung suite.
+    private func finished<T: Sendable>(_ task: Task<T, Never>, within seconds: TimeInterval = 30) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask { Optional(await task.value) }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil
+            }
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
+        }
+    }
+
     func testNeverCompletingSubagentTimesOut() async throws {
         let state = AppState(tier3Provisioning: .provisioned)
-
-        // Always return plain text — the subagent never calls goal_complete, so it loops until the cap.
-        MockURLProtocol.handler = { request in
-            let responseJson: [String: Any] = [
-                "id": UUID().uuidString, "type": "message", "role": "assistant",
-                "model": "claude-3-5-sonnet",
-                "content": [["type": "text", "text": "Still working..."]],
-                "usage": ["input_tokens": 10, "output_tokens": 10]
-            ]
-            let data = try! JSONSerialization.data(withJSONObject: responseJson)
-            let resp = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (resp, data)
-        }
 
         let parentId = UUID()
         await MainActor.run { state.createNewConversation(id: parentId) }
 
-        let summary = await SubagentManager.shared.runSubagent(
-            role: "worker", task: "loop forever", effort: "easy",
-            parentConversationId: parentId, maxIterations: 3, client: IsolatedAnthropicClient(config: config), appState: state).rendered   // ~300ms cap
+        // A real wall clock raced a busy suite here (#355): see `ManualClock`'s doc. The manual
+        // clock and the parked client make both races impossible instead of merely unlikely.
+        let client = ParkedClient()
+        let clock = ManualClock()
+        let runTask = Task {
+            await SubagentManager.shared.runSubagent(
+                role: "worker", task: "loop forever", effort: "easy",
+                parentConversationId: parentId, maxIterations: 3, client: client, appState: state,
+                deadlineClock: clock.now)
+        }
+
+        await waitFor("the subagent to reach its model call") { client.calls >= 1 }
+        clock.advance(by: 60) // well past the cap (maxIterations(3) * 100ms = 0.3s on this clock)
+
+        let result = await finished(runTask)
+        let summary = try XCTUnwrap(result, "the deadline ended a run parked in its model call").rendered
 
         XCTAssertTrue(summary.contains("status: timed out"))
     }

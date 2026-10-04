@@ -178,6 +178,75 @@ struct PluginAuthRunnerTests {
         let shown = PluginAuthRunner.displayCommands(auth(check: "echo ${keychain:TOKEN}"), config: [:])
         #expect(shown.check == nil)
     }
+
+    // MARK: "Always allow this command" checkbox (#338)
+
+    @Test("checked at Check writes a rule that auto-checks the next open")
+    func alwaysAllowCheckedWritesRuleAndAutoChecksNextOpen() async throws {
+        let (perms, home) = permissions()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let m = marker()
+        defer { try? FileManager.default.removeItem(at: m) }
+        let command = "touch '\(m.path)'"
+
+        // Not yet allowed: the pane would show "Not checked" on open.
+        let before = await PluginAuthRunner.statusOnOpen(auth(check: command), config: [:], permissions: perms)
+        #expect(before == nil)
+
+        // The checkbox was on when the user clicked Check.
+        let wrote = PluginAuthRunner.applyAlwaysAllow(command: command, requested: true, permissions: perms)
+        #expect(wrote)
+
+        // Next time the pane opens, the rule lets the check run unasked.
+        let after = await PluginAuthRunner.statusOnOpen(auth(check: command), config: [:], permissions: perms)
+        #expect(after?.signedIn == true)
+    }
+
+    @Test("unchecked at Check writes no rule")
+    func alwaysAllowUncheckedWritesNoRule() {
+        let (perms, home) = permissions()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let command = "true"
+        let wrote = PluginAuthRunner.applyAlwaysAllow(command: command, requested: false, permissions: perms)
+        #expect(!wrote)
+        #expect(!PluginAuthRunner.isAlwaysAllowed(command, permissions: perms))
+    }
+
+    @Test("a command with hidden characters cannot be allowed even if requested")
+    func alwaysAllowRefusesHiddenCharacters() {
+        let (perms, home) = permissions()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let command = "true\ntouch '/tmp/should-not-run'"
+        let wrote = PluginAuthRunner.applyAlwaysAllow(command: command, requested: true, permissions: perms)
+        #expect(!wrote)
+        #expect(!PluginAuthRunner.isAlwaysAllowed(command, permissions: perms))
+    }
+
+    @Test("a nil command (nothing declared, or unresolvable) cannot be allowed")
+    func alwaysAllowRefusesNilCommand() {
+        let (perms, home) = permissions()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let wrote = PluginAuthRunner.applyAlwaysAllow(command: nil, requested: true, permissions: perms)
+        #expect(!wrote)
+    }
+
+    @Test("setup_command has no always-allow path: applying it to the setup command's text has no effect")
+    func setupCommandCannotBeAlwaysAllowed() async {
+        // There is no checkbox beside Sign In in the view, and PluginAuthRunner exposes no
+        // "always allow setup" entry point — `applyAlwaysAllow` is only ever called by the pane
+        // with the *check* command's text. This pins that `runSetup` itself still asks every
+        // time regardless of any rule for that same command string, so a future caller cannot
+        // smuggle setup_command through the check-only checkbox's plumbing.
+        let (perms, home) = permissions()
+        defer { try? FileManager.default.removeItem(at: home) }
+        var a = auth(check: "true")
+        a.setupCommand = "true"
+        perms.allowGlobally(toolName: "run_command", details: "true")
+        // Even with a global rule for the identical command text, runSetup still requires an
+        // explicit approve — there is no "statusOnOpen" equivalent for setup.
+        let output = await PluginAuthRunner.runSetup(a, config: [:], approve: { _ in false })
+        #expect(output.contains("not approved"))
+    }
 }
 
 /// Test-only helper: AuthDeclaration has no memberwise init exposed for `kind` alone.

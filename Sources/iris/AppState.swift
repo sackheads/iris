@@ -2677,31 +2677,41 @@ class AppState {
                                 callerRole: VibecopCallerRole, allowedCommands: [String], vibecopEnabled: Bool?) async -> VibecopDecision? {
         // Off is checked before the Ollama warm-up probe below, which would otherwise build an engine for nothing.
         guard vibecopEnabled ?? ConfigManager.shared.enableVibecop else { return nil }
-        do {
-            let configuredTimeout = Double(ConfigManager.shared.vibecopTimeoutSeconds)
-            let engineType = AuxiliaryEngineType(rawValue: ConfigManager.shared.vibecopEngine) ?? .llamaCPP
-            var timeout = configuredTimeout
-            
-            if engineType == .ollama {
-                let engine = try? await AuxiliaryModelManager.shared.getEngine(
-                    for: "vibecop", config: AuxiliaryModelConfig(
-                        role: "vibecop",
-                        engineType: .ollama,
-                        modelPathOrName: ConfigManager.shared.vibecopModel
-                    )
+        let configuredTimeout = Double(ConfigManager.shared.vibecopTimeoutSeconds)
+        let engineType = AuxiliaryEngineType(rawValue: ConfigManager.shared.vibecopEngine) ?? .llamaCPP
+        var timeout = configuredTimeout
+
+        if engineType == .ollama {
+            let engine = try? await AuxiliaryModelManager.shared.getEngine(
+                for: "vibecop", config: AuxiliaryModelConfig(
+                    role: "vibecop",
+                    engineType: .ollama,
+                    modelPathOrName: ConfigManager.shared.vibecopModel
                 )
-                if let ollamaEngine = engine, !(await ollamaEngine.isModelLoaded()) {
-                    timeout = 30.0  // cold-start budget
-                    print("Vibecop: Ollama model cold, using \(timeout)s timeout")
-                }
+            )
+            if let ollamaEngine = engine, !(await ollamaEngine.isModelLoaded()) {
+                timeout = 30.0  // cold-start budget
+                print("Vibecop: Ollama model cold, using \(timeout)s timeout")
             }
-            
-            return try await withTimeout(seconds: timeout) {
-                try await VibecopService.shared.evaluateAction(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
-                                                               callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled)
-            }
+        }
+
+        return await Self.boundedVibecopVerdict(seconds: timeout) {
+            try await VibecopService.shared.evaluateAction(toolName: toolName, details: details, workspace: workspace, inSandbox: inSandbox,
+                                                           callerRole: callerRole, allowedCommands: allowedCommands, vibecopEnabled: vibecopEnabled)
+        }
+    }
+
+    /// The bound itself, apart from the settings and the shared service so a test can hand it an
+    /// evaluation that never answers. Returns at the deadline even when the evaluation ignores
+    /// cancellation (a native llama.cpp or MLX call); that evaluation runs on in the background
+    /// and its verdict is dropped (#345). nil on timeout or error: fail open to the user prompt.
+    /// A timed-out inference is abandoned, not stopped: if the engine serves one request at a time,
+    /// the next verdict may queue behind it.
+    nonisolated static func boundedVibecopVerdict(seconds: Double,
+                                                  _ evaluate: @escaping @Sendable () async throws -> VibecopDecision?) async -> VibecopDecision? {
+        do {
+            return try await withTimeout(seconds: seconds, evaluate)
         } catch {
-            // Timeout or Vibecop error → fail open to the user prompt.
             print("Vibecop evaluation failed/timed out: \(error)")
             return nil
         }
@@ -2964,6 +2974,12 @@ class AppState {
     /// whatever task (if any) owns that thread — for a `DatabasePool` writer, never the one we
     /// cancelled (review finding, #163 round 2).
     private var writeStandDown: WriteStandDown? = nil
+    /// Test seam (#325): called at the end of a detached write's completion hop, after any
+    /// re-queue or follow-on flush, so a test can await the write instead of polling a wall
+    /// clock that a busy main actor makes meaningless. Nil in the app.
+    var onWriteSettled: (@MainActor () -> Void)? = nil
+    /// Whether a detached write is applying a batch right now.
+    var isWriteInFlight: Bool { inFlight != nil }
 
     /// The conversations that belong on disk: durable, user-facing ones only. Sub-process
     /// (subagent / drift-evaluator) scratch conversations are ephemeral and must never persist.
@@ -3127,6 +3143,7 @@ class AppState {
                 } else if !self.pendingChanges.isEmpty {
                     self.flush()
                 }
+                self.onWriteSettled?()
             }
         }
     }

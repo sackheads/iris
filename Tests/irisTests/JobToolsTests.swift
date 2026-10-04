@@ -111,6 +111,38 @@ struct JobToolsTests {
         }.last ?? ""
     }
 
+    /// Scripts `calls` in order against a pinned conversation with the tier-3 canary mocked to
+    /// hijack (`hijack: true`, the default) or pass (`false`) every classification it is asked to
+    /// judge, so each call's guarded result reads `[CONTENT BLOCKED BY TIER 3 CANARY GUARD]` or
+    /// comes back clean. `hijack: true` reproduces the aggregate false-positive shape #235 hit,
+    /// deliberately; `hijack: false` proves the opposite case — a genuine pass is never mistaken
+    /// for a block, even when the text itself quotes the marker string (#343). Protection is
+    /// explicit (`true`), never the default that reads `ConfigManager.shared` (AGENTS.md invariant
+    /// 7). Unlike `runToolCall`, which keeps only the LAST functionResponse, this returns every
+    /// call's own result in order, so a test can watch the tracker's note arrive on the SECOND
+    /// consecutive block rather than the first.
+    private func runGuardedToolCalls(_ calls: [FunctionCall], on app: AppState, as conversationId: UUID,
+                                     hijack: Bool = true) async -> [String] {
+        let responses = calls.map {
+            GeminiResponse(candidates: [Candidate(content: Content(
+                role: "model", parts: [Part(functionCall: $0)]))], usageMetadata: nil)
+        } + [GeminiResponse(candidates: [Candidate(content: Content(
+            role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil)]
+        let client = FakeLLMClient(responses: responses)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], protectionEnabled: true, sessionPeerCount: 0)
+        await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
+            await AuxiliaryModelManager.$scopedEngines.withValue(["canary": MockInferenceEngine(shouldHijack: hijack)]) {
+                await engine.processInput("go", source: "UI", conversationId: conversationId)
+            }
+        }
+        let history = app.conversations.first { $0.id == conversationId }?.history ?? []
+        return history.flatMap { $0.parts }.compactMap { part -> String? in
+            guard case .string(let s)? = part.functionResponse?.response["result"] else { return nil }
+            return s
+        }
+    }
+
     private func pinnedApp() -> (AppState, UUID) {
         let app = AppState()
         app.conversations.removeAll()
@@ -917,6 +949,28 @@ struct JobToolsTests {
         #expect(result.contains("Refused"))
     }
 
+    /// #343: `search_conversations` used to return directly, skipping `BlockedResultTracker`'s
+    /// "withheld, don't retry" note (#235) — a withheld hit read to the model like an empty one,
+    /// inviting a retry of the same query. The FIRST block carries no note (one block is not yet a
+    /// pattern); the SECOND, consecutive one does.
+    @Test("a tier-3 block on search_conversations gives the tracker's note on the second repeat")
+    func searchConversationsTrackerNotesSecondConsecutiveBlock() async throws {
+        let (app, id) = pinnedApp()
+        var other = Conversation(id: UUID(), title: "Kestrel notes")
+        other.messages = [ChatMessage(role: .user, content: "about kestrel")]
+        var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
+        try app.store.apply([ConversationWrite(id: other.id, snapshot: other, changes: s)])
+
+        let call = FunctionCall(name: "search_conversations", args: ["query": .string("kestrel")], id: "c1")
+        let results = await runGuardedToolCalls([call, call], on: app, as: id)
+
+        #expect(results.count == 2, "got: \(results)")
+        #expect(results[0].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
+        #expect(!results[0].contains("withheld"), "one block is not yet a pattern")
+        #expect(results[1].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
+        #expect(results[1].contains("the injection guard has withheld 2 consecutive results from search_conversations"))
+    }
+
     // MARK: read_conversation (#187 §0.5)
 
     /// The ruling this task turns on: `ConversationStore`'s `ordinal` column is the message's raw
@@ -1159,6 +1213,96 @@ struct JobToolsTests {
             on: app, as: id)
 
         #expect(result.contains("Refused"))
+    }
+
+    // MARK: Blocked-result tracking (#343)
+
+    /// Same reasoning as `search_conversations`'s version just above, for `read_conversation`: a
+    /// page up to `ConversationReader.maxBytes` (32,000 UTF-8 bytes) is scored by tier 3 as one
+    /// blob, the aggregate false-positive shape #235 hit, and a page withheld that way used to read
+    /// to the model like an empty one and invite a retry at the same position.
+    @Test("a tier-3 block on read_conversation gives the tracker's note on the second repeat")
+    func readConversationTrackerNotesSecondConsecutiveBlock() async throws {
+        let (app, id) = pinnedApp()
+        var other = Conversation(id: UUID(), title: "guarded chat")
+        other.messages = [ChatMessage(role: .user, content: "about kestrel")]
+        app.conversations.append(other)
+
+        let call = FunctionCall(name: "read_conversation", args: ["id": .string(other.id.uuidString)], id: "c1")
+        let results = await runGuardedToolCalls([call, call], on: app, as: id)
+
+        #expect(results.count == 2, "got: \(results)")
+        #expect(results[0].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
+        #expect(!results[0].contains("withheld"), "one block is not yet a pattern")
+        #expect(results[1].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
+        #expect(results[1].contains("the injection guard has withheld 2 consecutive results from read_conversation"))
+    }
+
+    /// The tracker is keyed by conversation, not by call site (`executeToolWithHooks`'s own call,
+    /// vs. the direct calls `search_conversations`/`read_conversation` make) or by tool name — a
+    /// block from one and a block from the other right after it are still two CONSECUTIVE blocks,
+    /// handled exactly the way two blocks from the same ordinary tool are (#343).
+    @Test("search_conversations and read_conversation share one per-conversation counter, like any other tool")
+    func trackerIsSharedAcrossSearchAndRead() async throws {
+        let (app, id) = pinnedApp()
+        var other = Conversation(id: UUID(), title: "Kestrel notes")
+        other.messages = [ChatMessage(role: .user, content: "about kestrel")]
+        var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
+        try app.store.apply([ConversationWrite(id: other.id, snapshot: other, changes: s)])
+        app.conversations.append(other)
+
+        let search = FunctionCall(name: "search_conversations", args: ["query": .string("kestrel")], id: "c1")
+        let read = FunctionCall(name: "read_conversation", args: ["id": .string(other.id.uuidString)], id: "c2")
+        let results = await runGuardedToolCalls([search, read], on: app, as: id)
+
+        #expect(results.count == 2, "got: \(results)")
+        #expect(!results[0].contains("withheld"))
+        #expect(results[1].contains("the injection guard has withheld 2 consecutive results from read_conversation"))
+    }
+
+    /// Follow-up fix (#343 review): the ORIGINAL version of this fix decided "blocked" by
+    /// searching the rendered text for `"[CONTENT BLOCKED BY TIER"`, which a conversation that
+    /// merely quotes that marker in its own words — someone asking Iris about a block they saw
+    /// earlier — would also match, even though the guard passed it cleanly. The canary here is
+    /// mocked to PASS (`hijack: false`), so two consecutive calls over text containing the literal
+    /// marker string must never add the tracker's note.
+    @Test("quoting the block marker in another chat's own words is never mistaken for a real block (read_conversation)")
+    func readConversationQuotedMarkerNeverMistakenForABlock() async throws {
+        let (app, id) = pinnedApp()
+        var other = Conversation(id: UUID(), title: "quoting chat")
+        other.messages = [ChatMessage(role: .user,
+                                      content: "earlier Iris told me \"[CONTENT BLOCKED BY TIER 3 CANARY GUARD]\" — why?")]
+        app.conversations.append(other)
+
+        let call = FunctionCall(name: "read_conversation", args: ["id": .string(other.id.uuidString)], id: "c1")
+        let results = await runGuardedToolCalls([call, call], on: app, as: id, hijack: false)
+
+        #expect(results.count == 2, "got: \(results)")
+        #expect(results[0].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"), "the quoted marker passes through untouched")
+        #expect(!results[0].contains("withheld"))
+        #expect(results[1].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
+        #expect(!results[1].contains("withheld"), "the guard passed both calls; quoting the marker must not fake a block")
+    }
+
+    /// Same case as just above, for `search_conversations`: the hit's snippet is another chat's
+    /// text, and can quote the marker just as a message body can.
+    @Test("quoting the block marker in another chat's own words is never mistaken for a real block (search_conversations)")
+    func searchConversationsQuotedMarkerNeverMistakenForABlock() async throws {
+        let (app, id) = pinnedApp()
+        var other = Conversation(id: UUID(), title: "quoting chat")
+        other.messages = [ChatMessage(role: .user,
+                                      content: "earlier Iris told me \"[CONTENT BLOCKED BY TIER 3 CANARY GUARD]\" about kestrel — why?")]
+        var s = ChangeSet(); s.add(.created); s.add(.messagesAppended(from: 0))
+        try app.store.apply([ConversationWrite(id: other.id, snapshot: other, changes: s)])
+
+        let call = FunctionCall(name: "search_conversations", args: ["query": .string("kestrel")], id: "c1")
+        let results = await runGuardedToolCalls([call, call], on: app, as: id, hijack: false)
+
+        #expect(results.count == 2, "got: \(results)")
+        #expect(results[0].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"), "the quoted marker passes through untouched")
+        #expect(!results[0].contains("withheld"))
+        #expect(results[1].contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
+        #expect(!results[1].contains("withheld"), "the guard passed both calls; quoting the marker must not fake a block")
     }
 
     // MARK: The pinned-conversation approval dialog shows what is being created (fix round 2, #187)

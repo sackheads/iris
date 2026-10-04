@@ -400,8 +400,9 @@ struct ToolExecutor {
         }
     }
 
-    private func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false,
-                            timeoutSeconds: Double = 600, grant: JobGrant? = nil) async -> String {
+    /// Internal, not private, so a test can drive a deadline below `execute`'s 10 s floor.
+    func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false,
+                    timeoutSeconds: Double = 600, grant: JobGrant? = nil) async -> String {
         // A grant is a promise about a container (#282). Off the sandboxed branch — sandboxing
         // resolved off, or no conversation to own a session — there is no container to keep it
         // in, and the host with `cwd` is not a fallback. The dispatcher refuses this upstream
