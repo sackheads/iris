@@ -440,6 +440,11 @@ actor IrisEngine {
     nonisolated static let turnEndedEarlyPrefix = "System Event [Turn ended early]"
     nonisolated static let stoppedByUserReason = "The user stopped this turn."
     /// 5c §0.3: the soft-stop turn's turn-context line. The dispatcher is what enforces it.
+    /// 5c §0.2: a sticky peer tool called with nobody to talk to.
+    nonisolated static let noPeersRefusal = "Not run: no other session is active, so there is nobody to list, message, or describe this session to."
+    /// 5c §0.2: a sticky `amend_goal_contract` called with no locked contract (the goal ended, or a
+    /// new draft is still under the user's review).
+    nonisolated static let amendUnlockedRefusal = "Amend rejected — there is no locked goal contract to amend. Criteria change through this tool only while a goal is running."
     nonisolated static let goalCompleteOnlyInstruction = "Only goal_complete will run on this turn; any other tool call is refused."
 
     nonisolated static func formatDelay(_ seconds: TimeInterval) -> String {
@@ -3104,6 +3109,11 @@ actor IrisEngine {
                 result = Self.unattendedSessionListRefusal
                 return result
             }
+            // 5c §0.2: declared stickily now; with nobody to talk to the call has no meaning.
+            guard await sessionPeerCount(excluding: conversationId) > 0 else {
+                result = Self.noPeersRefusal
+                return result
+            }
             let (peers, total) = await MainActor.run { () -> ([SessionPeer], Int) in
                 guard let s = localState else { return ([], 0) }
                 return SessionDirectory.peers(in: s.conversations, excluding: conversationId,
@@ -3127,6 +3137,11 @@ actor IrisEngine {
             // approval path. An unattended run does not get to have a peer do its gated work.
             guard !isUnattended else {
                 result = Self.unattendedSessionMessageRefusal
+                return result
+            }
+            // 5c §0.2: declared stickily now; with nobody to talk to the call has no meaning.
+            guard await sessionPeerCount(excluding: conversationId) > 0 else {
+                result = Self.noPeersRefusal
                 return result
             }
             guard !message.trimmingCharacters(in: .whitespaces).isEmpty else {
@@ -3183,6 +3198,11 @@ actor IrisEngine {
             // A run nobody can list or address has nothing to advertise to.
             guard !isUnattended else {
                 result = Self.unattendedSessionListRefusal
+                return result
+            }
+            // 5c §0.2: declared stickily now; with nobody to talk to the call has no meaning.
+            guard await sessionPeerCount(excluding: conversationId) > 0 else {
+                result = Self.noPeersRefusal
                 return result
             }
             guard !name.trimmingCharacters(in: .whitespaces).isEmpty else {
@@ -3772,6 +3792,15 @@ actor IrisEngine {
             let kind = functionCall.args["kind"]?.stringValue ?? "qualitative"
             let check = functionCall.args["check"]?.stringValue
             let rationale = functionCall.args["rationale"]?.stringValue ?? ""
+            // 5c §0.2: declared stickily now, so it can outlive its goal. Without a locked contract
+            // `applyCriteriaEdit` would edit a draft under the user's review, unlogged.
+            let locked = await MainActor.run {
+                localState?.conversations.first(where: { $0.id == conversationId })?.goalContract?.isLocked == true
+            }
+            guard locked else {
+                result = Self.amendUnlockedRefusal
+                return result
+            }
             let ok = await MainActor.run {
                 localState?.amendGoalContract(for: conversationId, action: action, criterionText: text, kind: kind, check: check, rationale: rationale) ?? false
             }
