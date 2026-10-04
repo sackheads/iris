@@ -2896,7 +2896,7 @@ class AppState {
 
     /// What a background run has spent so far:its own conversation's usage plus everything its
     /// linked descendants spent while linked (#313). This is the figure the run row, the mid-run
-    /// `TurnBudget` check and so `tokensToday` read. For a conversation that is not a run it is
+    /// `TurnBudget` check and so `weightedTokensToday` read. For a conversation that is not a run it is
     /// just that conversation's own usage.
     func runUsage(for runConversationId: UUID) -> TokenUsage {
         var usage = conversations.first(where: { $0.id == runConversationId })?.tokenUsage ?? TokenUsage()

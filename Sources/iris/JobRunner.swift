@@ -54,7 +54,7 @@ actor JobRunner {
     /// The ledger, except where a test needs the usage read itself to fail (`JobUsageReading`).
     private let usageSource: any JobUsageReading
     private let now: @Sendable () -> Date
-    /// Whose day "tokens today" is counted in — the user's, so the budget resets at their
+    /// Whose day "weighted tokens today" is counted in — the user's, so the budget resets at their
     /// midnight. Injectable only so a test can pin the zone.
     private let calendar: Calendar
     private let config: ConfigManager
@@ -1971,9 +1971,8 @@ struct JobLimits: Equatable, Sendable {
         // stepper still move every job that never asked for a timeout of its own.
         //
         // Zero (or less) takes the global default too, and deliberately does NOT mean "no timeout"
-        // the way a zero token budget does: since 5a a budget bounds tokens sent, not billed
-        // weight — billed weight is a later slice — and a person may reasonably want that
-        // unbounded, while this bounds a turn that has stopped responding — and a run nothing
+        // the way a zero token budget does: since 5c a budget bounds weighted tokens (§0.5), and a
+        // person may reasonably want that unbounded, while this bounds a turn that has stopped responding — and a run nothing
         // can end is the failure the whole deliverable is about. Nothing configurable writes one;
         // a hand-edited policy can.
         let overridden = policy.runTimeoutSeconds > 0

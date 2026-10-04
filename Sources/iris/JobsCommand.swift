@@ -332,7 +332,7 @@ enum JobsCommand: Equatable {
         let limits: JobLimits
     }
 
-    /// The whole unattended system's tokens sent for the local day, against the one ceiling no job
+    /// The whole unattended system's weighted tokens spent for the local day, against the one ceiling no job
     /// can raise for itself.
     struct GlobalUsage: Equatable, Sendable {
         let weightedTokensToday: Int
