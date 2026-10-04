@@ -399,6 +399,14 @@ class AppState {
     @ObservationIgnored private(set) var rotationTask: Task<Void, Never>?
     /// The clock the rotation's archived title reads. Injectable so tests get a fixed date.
     @ObservationIgnored var rotationNow: () -> Date = { Date() }
+    /// The old Iris, and the new one once created: Esc in either stops the rotation.
+    @ObservationIgnored var rotationConversationIds: Set<UUID> = []
+    /// The old Iris counts as busy from the `/new` handler until its reflection turn ends, so a
+    /// message typed in that window queues (and steers the reflection) instead of starting a
+    /// second turn beside it. Set in the same MainActor step as the refusal check.
+    @ObservationIgnored var rotationHold: UUID?
+    /// Test seam for the pin's meta write; nil writes through `store`.
+    @ObservationIgnored var pinnedMetaWriter: ((String) throws -> Void)?
 
     // MARK: - Mid-turn user messages (#172)
 
@@ -528,6 +536,7 @@ class AppState {
     /// archiving refuses; `list_sessions` reports busy; the session strip counts it as running.
     func hasTurnInFlight(for conversationId: UUID) -> Bool {
         if (engineTurnCounts[conversationId] ?? 0) > 0 { return true }
+        if rotationHold == conversationId { return true }
         return activeTasks.values.contains { $0.conversationId == conversationId }
     }
 
@@ -619,6 +628,13 @@ class AppState {
         let count = pendingUserMessages[conversationId]?.count ?? 0
         pendingUserMessages[conversationId] = nil
         return count
+    }
+
+    /// Ends `rotationHold` and starts whatever was queued behind it, as the end of a turn would.
+    func releaseRotationHold() {
+        guard let held = rotationHold else { return }
+        rotationHold = nil
+        drainPendingUserMessages(for: held)
     }
 
     /// Test seam: drive `sendMessage` through an engine with a scripted client.
@@ -881,6 +897,12 @@ class AppState {
     /// thinking indicator via the tracked task's completion.
     func interruptActiveConversation() {
         guard let convId = selectedConversationId, isThinking else { return }
+        // A rotation runs under no conversation id, so `cancelTasks` cannot reach it. It reports
+        // its own outcome ("Rotation stopped; …"), so no "Interrupted." unless more was running.
+        if let rotation = rotationTask, rotationConversationIds.contains(convId) {
+            rotation.cancel()
+            guard activeTasks.values.contains(where: { $0.conversationId == convId }) else { return }
+        }
         let dropped = pendingUserMessageCount(for: convId)
         cancelTasks(for: convId)
         let notice = dropped == 0 ? "Interrupted."
@@ -1548,8 +1570,13 @@ class AppState {
             // Not the old conversation's own task: `archiveRefusal` would see it as a turn in
             // flight and refuse the rotation's final archive.
             let engine = self.engine!
+            rotationHold = convId
+            rotationConversationIds = [convId]
             rotationTask = runThinkingTask(conversationId: nil) { [self] in
                 await rotatePinned(engine: engine)
+                // Every exit, cancellation included: `rotatePinned` returns on all of them.
+                releaseRotationHold()
+                rotationConversationIds = []
                 rotationTask = nil
             }
             return
