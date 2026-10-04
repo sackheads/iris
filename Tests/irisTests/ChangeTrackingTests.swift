@@ -11,24 +11,56 @@ private final class AttemptCounter: @unchecked Sendable {
     var count: Int { lock.withLock { n } }
 }
 
-/// Every mutation records what changed instead of re-encoding the whole array (spec §3).
+/// Counts detached writes that have finished their completion hop, and lets a test await them
+/// (#325). Tests wait on this instead of polling: the main actor is shared by every `@MainActor`
+/// suite in the run and was measured unavailable for up to 2.9 s at a time under parallel
+/// `swift test` runs, which turned a 3 s wall-clock poll into a coin toss. Create it before the
+/// change that triggers the write.
 @MainActor
-@Suite("Conversation change tracking (#163)")
+final class WriteSettlements {
+    private(set) var count = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(_ app: AppState) {
+        app.onWriteSettled = { [weak self] in
+            self?.count += 1
+            self?.release()
+        }
+    }
+
+    private func release() {
+        let woken = waiters
+        waiters = []
+        for w in woken { w.resume() }
+    }
+
+    /// Returns once `n` writes have settled, or the task is cancelled (the suites' time limit).
+    func wait(for n: Int) async {
+        while count < n && !Task.isCancelled {
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { waiters.append($0) }
+            } onCancel: {
+                Task { @MainActor in self.release() }
+            }
+        }
+    }
+
+    /// Returns once no write is in flight, waiting out each one that is.
+    func waitUntilIdle(_ app: AppState) async {
+        while app.isWriteInFlight && !Task.isCancelled { await wait(for: count + 1) }
+    }
+}
+
+/// Every mutation records what changed instead of re-encoding the whole array (spec §3).
+/// The time limit backstops `WriteSettlements`, which waits without a deadline.
+@MainActor
+@Suite("Conversation change tracking (#163)", .timeLimit(.minutes(1)))
 struct ChangeTrackingTests {
     private func app() -> (AppState, UUID) {
         let a = AppState(store: try! .inMemory())
         let id = UUID()
         a.createNewConversation(id: id)
         return (a, id)
-    }
-
-    /// Waits for a main-actor condition (the detached write's completion hop has run) without
-    /// pinning a fixed sleep to the debounce.
-    private func poll(_ timeout: TimeInterval = 3, until condition: () -> Bool) async throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline && !condition() {
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
     }
 
     @Test("create, append, update, history append/replace, metadata and delete map to their change kinds")
@@ -78,8 +110,10 @@ struct ChangeTrackingTests {
         let x = UUID(), y = UUID()
         a.createNewConversation(id: x); a.createNewConversation(id: y)
         a.flushSave()
+        let writes = WriteSettlements(a)
         a.appendMessage(role: .user, content: "only x", to: x)
-        try await poll { (try? a.store.counts(for: x).messages) == 1 }
+        await writes.wait(for: 1)
+        #expect(!a.isWriteInFlight)
         #expect(a.pendingChangeSet(for: x) == nil && a.pendingChangeSet(for: y) == nil)
         #expect(try a.store.counts(for: x).messages == 1)
         #expect(try a.store.counts(for: y).messages == 0)
@@ -118,6 +152,7 @@ struct ChangeTrackingTests {
         let id = UUID()
         a.createNewConversation(id: id)
         a.flushSave()
+        let writes = WriteSettlements(a)
 
         // A batch big enough that the detached write is plausibly still inside its transaction
         // when flushSave lands.
@@ -137,8 +172,9 @@ struct ChangeTrackingTests {
         #expect(reloaded.messages.map(\.content) == live.messages.map(\.content))
         #expect(reloaded.history.map { $0.parts.first?.text } == live.history.map { $0.parts.first?.text })
 
-        // Let any detached write still running finish, then check it changed nothing.
-        try await Task.sleep(nanoseconds: 300_000_000)
+        // Let a detached write still running finish, then check it changed nothing. If the
+        // debounce had not fired yet, flushSave cancelled it and there is nothing to wait for.
+        await writes.waitUntilIdle(a)
         #expect(try a.store.counts(for: id) == (live.messages.count, live.history.count))
         #expect(try a.store.loadAll().conversations.first { $0.id == id }?.messages.last?.content == "last")
     }
@@ -168,21 +204,23 @@ struct ChangeTrackingTests {
         a.flushSave()
 
         store.failInjection = { id in attempts.bump(); return id == y }
+        let writes = WriteSettlements(a)
         a.appendMessage(role: .user, content: "x1", to: x)
         a.appendMessage(role: .user, content: "y1", to: y)
-        // x clears at take-time and stays clear; y comes back only once the failure is handled.
-        try await poll { a.pendingChangeSet(for: x) == nil && a.pendingChangeSet(for: y) != nil }
+        // One batch carries both; x clears at take-time and stays clear, y is re-queued.
+        await writes.wait(for: 1)
 
+        #expect(attempts.count == 2)
         #expect(a.pendingChangeSet(for: x) == nil)
         #expect(a.pendingChangeSet(for: y)?.messagesFrom != nil)
         #expect(try store.counts(for: x).messages == 1)
         #expect(try store.counts(for: y).messages == 0)
 
-        // No self-retry: the failed set waits for the next change or flush, and the write is not
-        // attempted again in the meantime.
-        let after = attempts.count
+        // No self-retry: the completion hop that re-queued y started no write of its own. The
+        // quiet window below catches a later retry; it can only miss one, never invent one.
+        #expect(!a.isWriteInFlight, "a failed write retried itself from its own completion")
         try await Task.sleep(nanoseconds: 500_000_000)
-        #expect(attempts.count == after, "a failed write retried itself in a loop")
+        #expect(attempts.count == 2, "a failed write retried itself in a loop")
         #expect(a.pendingChangeSet(for: y)?.messagesFrom != nil)
 
         store.failInjection = nil
@@ -204,11 +242,15 @@ struct ChangeTrackingTests {
         a.flushSave()
 
         store.failInjection = { _ in attempts.bump(); return true }
+        let writes = WriteSettlements(a)
         a.appendMessage(role: .user, content: "x1", to: x)
         a.appendMessage(role: .user, content: "y1", to: y)
-        try await poll { attempts.count >= 2 }
-        try await Task.sleep(nanoseconds: 500_000_000)   // the completion hop, then quiet
+        await writes.wait(for: 1)
 
+        #expect(attempts.count == 2)
+        #expect(!a.isWriteInFlight, "the failed batch retried itself from its own completion")
+        // Quiet window: can only miss a retry, never invent one.
+        try await Task.sleep(nanoseconds: 500_000_000)
         #expect(attempts.count == 2, "the failed batch retried itself in a loop")
         #expect(a.pendingChangeSet(for: x)?.messagesFrom != nil)
         #expect(a.pendingChangeSet(for: y)?.messagesFrom != nil)

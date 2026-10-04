@@ -2964,6 +2964,12 @@ class AppState {
     /// whatever task (if any) owns that thread — for a `DatabasePool` writer, never the one we
     /// cancelled (review finding, #163 round 2).
     private var writeStandDown: WriteStandDown? = nil
+    /// Test seam (#325): called at the end of a detached write's completion hop, after any
+    /// re-queue or follow-on flush, so a test can await the write instead of polling a wall
+    /// clock that a busy main actor makes meaningless. Nil in the app.
+    var onWriteSettled: (@MainActor () -> Void)? = nil
+    /// Whether a detached write is applying a batch right now.
+    var isWriteInFlight: Bool { inFlight != nil }
 
     /// The conversations that belong on disk: durable, user-facing ones only. Sub-process
     /// (subagent / drift-evaluator) scratch conversations are ephemeral and must never persist.
@@ -3127,6 +3133,7 @@ class AppState {
                 } else if !self.pendingChanges.isEmpty {
                     self.flush()
                 }
+                self.onWriteSettled?()
             }
         }
     }
