@@ -240,11 +240,47 @@ struct GoalContract: Codable, Equatable, Sendable {
     /// Resolved by `IrisPaths.realPathForAllow`, the allow-side resolver: a `..` component, a
     /// relative path or a link it cannot resolve is nil, so it asks; a link inside the workspace
     /// that points out resolves out, so it asks too.
+    ///
+    /// And spelled inside it (#339, `approvedReadComponents`): a pre-approved read is opened by a
+    /// descriptor walk from the approved root, never by this path, so a path that only reaches the
+    /// workspace through a link from outside asks rather than being walked from somewhere else.
     func isHumanApprovedRead(_ path: String) -> Bool {
-        guard isLocked, let approvedWorkspace,
+        guard approvedReadComponents(of: path) != nil, let approvedWorkspace,
               let base = IrisPaths.realPathForAllow(approvedWorkspace),
               let real = IrisPaths.realPathForAllow(path) else { return false }
         return real == base || real.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+    }
+
+    /// The components of `path` (absolute) beneath this locked contract's approved workspace, by
+    /// spelling alone, or nil (#339). `[]` is the workspace itself. Pure — no filesystem access —
+    /// so the dispatcher, which decides whether the executor walks, and the approval gate, which
+    /// decides whether to ask, cannot disagree: every read this pre-approves is opened by
+    /// `GrantedFileAccess` from the approved root with no symlink followed.
+    func approvedReadComponents(of path: String) -> [String]? {
+        guard isLocked, let approvedWorkspace else { return nil }
+        return Self.workspaceComponents(of: path, under: approvedWorkspace)
+    }
+
+    /// `path`'s components under `root`, both absolute, `.` and empty components dropped; nil when
+    /// `path` is not spelled under `root` or has a `..` anywhere. `root` is stored in
+    /// `IrisPaths.canonicalPath` form, which strips `/private` from `/tmp`, `/var` and `/etc`, so
+    /// a path spelled through `/private` is matched too. Case-sensitive: another spelling asks.
+    static func workspaceComponents(of path: String, under root: String) -> [String]? {
+        func parts(_ p: String) -> [String] {
+            p.split(separator: "/", omittingEmptySubsequences: true).map(String.init).filter { $0 != "." }
+        }
+        let expanded = IrisEngine.expandTilde(path)
+        guard expanded.hasPrefix("/"), root.hasPrefix("/") else { return nil }
+        let components = parts(expanded)
+        guard !components.contains("..") else { return nil }
+        let base = parts(root)
+        guard !base.contains("..") else { return nil }
+        var prefixes = [base]
+        if let first = base.first, ["tmp", "var", "etc"].contains(first) { prefixes.append(["private"] + base) }
+        for prefix in prefixes where components.count >= prefix.count && Array(components.prefix(prefix.count)) == prefix {
+            return Array(components.dropFirst(prefix.count))
+        }
+        return nil
     }
 
     /// True iff `command`, trimmed, is byte for byte a check this locked contract still carries AND
