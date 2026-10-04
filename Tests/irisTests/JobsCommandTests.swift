@@ -106,6 +106,13 @@ struct JobsCommandTests {
         // A step field is a cron field, not a zone.
         #expect(JobsCommand.parse("/jobs reschedule pr-sweep 0 9 * * */2")
                 == .reschedule(name: "pr-sweep", cron: "0 9 * * */2", timeZone: nil))
+        // A real zone without a slash is a zone; a bare number is still the last cron field.
+        for zone in ["CET", "GMT+2", "Japan", "EST5EDT"] {
+            #expect(JobsCommand.parse("/jobs reschedule nightly 0 9 * * * \(zone)")
+                    == .reschedule(name: "nightly", cron: "0 9 * * *", timeZone: zone), "\(zone)")
+        }
+        #expect(JobsCommand.parse("/jobs reschedule nightly 0 9 * * 5")
+                == .reschedule(name: "nightly", cron: "0 9 * * 5", timeZone: nil))
     }
 
     @Test("the new trigger: a cron job keeps its zone, an interval job becomes cron in the default zone, a poll keeps its gate, a watch is refused")
@@ -830,6 +837,35 @@ struct JobsCommandTests {
         #expect(try app.store.ledger.job(named: "pr-sweep") == before)
         #expect(output(app, id).contains("Unknown time zone 'Europe/Pairs'. 'pr-sweep' is unchanged."))
         #expect(!output(app, id).contains("No job named"))
+    }
+
+    @Test("a slash-less zone reschedules the job in that zone")
+    func rescheduleSlashlessZone() throws {
+        let j = job("nightly", trigger: .schedule(.cron(CronSchedule(expression: "0 10 * * *", timeZone: "UTC"))),
+                    nextFireAt: Date().addingTimeInterval(3_600))
+        let (app, id) = makeApp(with: [j])
+
+        app.sendMessage("/jobs reschedule nightly 0 9 * * * CET")
+
+        let after = try #require(try app.store.ledger.job(named: "nightly"))
+        #expect(after.trigger == .schedule(.cron(CronSchedule(expression: "0 9 * * *", timeZone: "CET"))))
+        #expect(!output(app, id).contains("No job named"))
+    }
+
+    @Test("a six-field cron is refused with a sentence, not folded into the job's name")
+    func rescheduleSixFields() throws {
+        let j = job("nightly", trigger: .schedule(.cron(CronSchedule(expression: "0 10 * * *", timeZone: "UTC"))),
+                    nextFireAt: Date().addingTimeInterval(3_600))
+        let (app, id) = makeApp(with: [j])
+        let before = try app.store.ledger.job(named: "nightly")
+
+        app.sendMessage("/jobs reschedule nightly 0 0 9 * * *")
+
+        #expect(try app.store.ledger.job(named: "nightly") == before)
+        #expect(output(app, id).contains("A cron needs exactly five fields"))
+        #expect(output(app, id).contains("`0 0 9 * * *` has six. 'nightly' is unchanged."))
+        #expect(!output(app, id).contains("No job named"))
+        #expect(JobsCommand.sixFieldReading(name: "nightly", cron: "0 9 * * *") == nil, "one word: nothing to shift")
     }
 
     @Test("a cron that can never match pauses the job; one that can lifts that pause and only that one")

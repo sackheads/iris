@@ -3494,7 +3494,13 @@ class AppState {
         case .reschedule(let name, let cron, let timeZone):
             do {
                 guard let job = try ledger.job(named: name) else {
-                    emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
+                    if let six = JobsCommand.sixFieldReading(name: name, cron: cron),
+                       try ledger.job(named: six.name) != nil {
+                        emitCommandOutput(JobsCommand.sixFieldRefusal(name: six.name, cron: six.cron),
+                                          format: .markdown, to: convId)
+                    } else {
+                        emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
+                    }
                     return
                 }
                 switch JobsCommand.rescheduledTrigger(for: job, cron: cron, timeZone: timeZone,

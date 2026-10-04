@@ -73,12 +73,12 @@ enum JobsCommand: Equatable {
     static func parseReschedule(_ rest: String) -> JobsCommand {
         var tokens = quotedTokens(rest)
         var zone: String?
-        // A token with a `/` that is not a cron field (`*/15`, `0-30/5`) is taken as a zone even
-        // when it is not a real one — `Europe/Pairs`, `europe/paris` — so the handler can refuse it
-        // by name instead of folding it into the cron and the job name.
-        if let last = tokens.last,
-           (last.contains("/") && !isCronFieldLike(last))
-            || ((last == "UTC" || last == "GMT") && TimeZone(identifier: last) != nil) {
+        // Any real zone is taken, slash or not (`CET`, `GMT+2`, `Japan`). A token with a `/` that
+        // is not a cron field (`*/15`, `0-30/5`) is taken too even when it is not a real zone —
+        // `Europe/Pairs`, `europe/paris` — so the handler can refuse it by name instead of folding
+        // it into the cron and the job name. A cron field is never a zone.
+        if let last = tokens.last, !isCronFieldLike(last),
+           last.contains("/") || TimeZone(identifier: last) != nil {
             zone = last
             tokens.removeLast()
         }
@@ -94,6 +94,22 @@ enum JobsCommand: Equatable {
         let name = tokens.joined(separator: " ").trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return .usage }
         return .reschedule(name: name, cron: cron, timeZone: zone)
+    }
+
+    /// The other reading of a `/jobs reschedule` line whose job was not found: a six-field cron
+    /// read from the right leaves its first field on the end of the name (`nightly 0` for
+    /// `nightly 0 0 9 * * *`). Returns the name without that field and the six fields, or nil when
+    /// the name's last word is not a cron field. Pure; the handler asks whether that job exists.
+    static func sixFieldReading(name: String, cron: String) -> (name: String, cron: String)? {
+        var words = name.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard words.count >= 2, let last = words.last, isCronFieldLike(last) else { return nil }
+        words.removeLast()
+        return (words.joined(separator: " "), last + " " + cron)
+    }
+
+    /// What `/jobs reschedule` says to a cron of six fields.
+    static func sixFieldRefusal(name: String, cron: String) -> String {
+        "A cron needs exactly five fields (minute hour day-of-month month day-of-week); `\(cron)` has six. '\(name)' is unchanged."
     }
 
     /// Whether `token` is made only of what a numeric cron field is made of. A zone always has
