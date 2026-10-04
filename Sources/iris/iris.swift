@@ -3338,10 +3338,13 @@ actor IrisEngine {
             }
             // This branch returns its own result directly, so it never passes through
             // `executeToolWithHooks`'s guard — snippets are other chats' text, guarded exactly as
-            // search_memory's conversations scope is.
-            result = await InjectionGuard.sanitize(
+            // search_memory's conversations scope is. Also never through `executeToolWithHooks`'s
+            // "withheld, don't retry" note (#235), so a run of blocked hits here used to read to
+            // the model like an empty one — noted directly instead (#343).
+            let guardedSearch = await InjectionGuard.sanitize(
                 PromptInjectionGuard.sanitizeUntrustedInput(body),
                 contextTag: "tool_output_search_conversations", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+            result = noteBlockedResult(guardedSearch, name: functionCall.name, conversationId: conversationId)
         } else if functionCall.name == "read_conversation" {
             // Same defense in depth as search_conversations just above: declaration gating stops a
             // well-behaved model, dispatch reads the function name alone, so the invariant is
@@ -3401,9 +3404,13 @@ actor IrisEngine {
             }
             // This branch returns its own result directly, so it never passes through
             // `executeToolWithHooks`'s guard — another conversation's text is guarded exactly as
-            // search_conversations's hits are, once, here.
-            result = await InjectionGuard.sanitize(
+            // search_conversations's hits are, once, here. Also never through its "withheld, don't
+            // retry" note (#235): a page is up to `ConversationReader.maxBytes` (32,000 UTF-8
+            // bytes) scored as one blob, the aggregate false-positive shape #235 hit, and a page
+            // withheld that way used to read to the model like an empty one (#343).
+            let guardedRead = await InjectionGuard.sanitize(
                 body, contextTag: "tool_output_read_conversation", maxTier: .tier3_canary, protectionEnabled: protectionEnabled)
+            result = noteBlockedResult(guardedRead, name: functionCall.name, conversationId: conversationId)
         } else if functionCall.name == "rename_conversation", let newTitle = functionCall.args["title"]?.stringValue {
             // Not declared on the pinned conversation's turns (above), but a forged or stale call
             // must still be refused rather than acted on (invariant 6's undeclared-but-safe half).
@@ -3970,6 +3977,24 @@ actor IrisEngine {
         }
     }
 
+    /// Records whether a guarded result was withheld, and appends the "don't retry" sentence once
+    /// that happens twice in a row (#235). `executeToolWithHooks` is the original call site;
+    /// `search_conversations` and `read_conversation` return before ever reaching it (#343), so
+    /// each calls this directly on its own already-guarded result instead. The tracker is keyed by
+    /// conversation, not by call site, so a block from one of these and a block from an ordinary
+    /// tool right after it still count as consecutive — the same loop-detection read at the top of
+    /// the dispatch loop (`blockedResultTrackers[conversationId]?.consecutive`) sees one counter
+    /// either way.
+    private func noteBlockedResult(_ sanitizedResult: String, name: String, conversationId: UUID,
+                                   fullyBlocked: Bool = false) -> String {
+        let blocked = fullyBlocked || sanitizedResult.contains("[CONTENT BLOCKED BY TIER")
+        var tracker = blockedResultTrackers[conversationId] ?? BlockedResultTracker()
+        let consecutive = tracker.record(blocked: blocked)
+        blockedResultTrackers[conversationId] = tracker
+        guard blocked, consecutive >= 2 else { return sanitizedResult }
+        return sanitizedResult + "\n[Iris: the injection guard has withheld \(consecutive) consecutive results from \(name). Do not retry the same approach — use a different source or report what you have.]"
+    }
+
     private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil) async -> String {
         var execArgs: [String: JSONValue] = args
 
@@ -4106,12 +4131,7 @@ actor IrisEngine {
         // again (#235). Say plainly that the content was withheld, outside the untrusted wrapper
         // because this sentence is Iris's own and must not be presented as tool output.
         guard let conversationId else { return sanitizedResult }
-        let blocked = fullyBlockedSearch || sanitizedResult.contains("[CONTENT BLOCKED BY TIER")
-        var tracker = blockedResultTrackers[conversationId] ?? BlockedResultTracker()
-        let consecutive = tracker.record(blocked: blocked)
-        blockedResultTrackers[conversationId] = tracker
-        guard blocked, consecutive >= 2 else { return sanitizedResult }
-        return sanitizedResult + "\n[Iris: the injection guard has withheld \(consecutive) consecutive results from \(name). Do not retry the same approach — use a different source or report what you have.]"
+        return noteBlockedResult(sanitizedResult, name: name, conversationId: conversationId, fullyBlocked: fullyBlockedSearch)
     }
     
     /// One model round's assembled result plus when its first token arrived (spec §4).
