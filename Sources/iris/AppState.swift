@@ -353,6 +353,8 @@ class AppState {
         let sink: any TurnUsageSink
     }
     @ObservationIgnored private var activeRuns: [UUID: RunAccounting] = [:]
+    /// State-gated tools each conversation has declared (5c §0.1). Transient, never persisted.
+    @ObservationIgnored var stickyTools = StickyTools()
     var availableUpdate: ReleaseInfo?
     var isCheckingForUpdates = false
     var updateCheckStatusMessage: String?
@@ -1519,6 +1521,7 @@ class AppState {
         // leave a stale entry behind forever.
         mainStartTimeByConversation[id] = nil
         mainPhaseByConversation[id] = nil
+        stickyTools.forget(id)   // archive keeps it (the conversation can come back); delete cannot
         // Same reasoning for the event queue (#187 §8.3): a card delivered to a conversation that
         // is then deleted has nowhere to land, and its line must not sit in the dictionary
         // forever waiting for a turn that can never run.
