@@ -206,7 +206,11 @@ handled entirely by the `auth` block and `nlm`'s own credential store.
    until then the row reads "Not checked". An "Always allow this command"
    checkbox beside **Check**, off by default, writes that rule for you:
    check it before clicking **Check**, and the pane checks itself unasked
-   from then on. Orange with "not signed in"
+   from then on. That rule is an ordinary global `run_command` rule, not
+   scoped to this pane or to plugins, so it also lets the primary agent
+   run that exact command string unprompted in any conversation — the
+   same effect as clicking "Always Allow (Global)" on it from the chat
+   window. Orange with "not signed in"
    until you click **Sign in**; the subprocess output streams into the pane while `nlm` opens
    your browser. Once `nlm login --check` exits 0, the row turns green.
    There is no equivalent checkbox beside **Sign in** — signing in changes

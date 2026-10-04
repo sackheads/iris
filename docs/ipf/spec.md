@@ -294,9 +294,13 @@ command" checkbox beside **Check**, off by default, writes that rule: when
 it is on and the user clicks **Check**, the exact command shown is granted
 a permanent rule through the same path the chat window's "Always Allow
 (Global)" button uses, and the next time the pane opens the check runs
-unasked. Unchecking the box only stops a *future* click from writing a new
-rule — it does not retract one a previous click already wrote; that needs
-the general permissions UI. The checkbox exists only for `check_command`:
+unasked. That rule is an ordinary global `run_command` rule, with no
+awareness of plugins or this pane: once written, the primary agent may
+also run that exact command string unprompted in *any* conversation, not
+only from this pane, exactly as if the user had clicked "Always Allow
+(Global)" on it from the chat window. Unchecking the box only stops a
+*future* click from writing a new rule — it does not retract one a
+previous click already wrote; that needs the general permissions UI. The checkbox exists only for `check_command`:
 `setup_command` changes external state (it signs in), so it always needs
 its own click, with no way to make it unasked. A command containing a line
 break or another invisible character is shown with a warning, disables

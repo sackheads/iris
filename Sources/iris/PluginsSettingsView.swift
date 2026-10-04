@@ -321,7 +321,8 @@ struct PluginDetailView: View {
                 .toggleStyle(.checkbox)
                 .disabled(!Self.runnable(commands.check))
                 .help("When checked, clicking Check also writes a permanent \"Always allow\" rule "
-                    + "for this exact command, so the next time this pane opens it checks itself.")
+                    + "for this exact command, so the next time this pane opens it checks itself. "
+                    + "Also lets Iris run this exact command without asking, anywhere.")
                 Button("Sign In") { runSetup(index: index, auth: auth) }
                     .disabled(!Self.runnable(commands.setup))
             }
