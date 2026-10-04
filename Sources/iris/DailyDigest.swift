@@ -82,7 +82,8 @@ struct DailyDigest: BuiltinJob {
             let group = grouped[id] ?? []
             let job = byId[id]
             func count(_ status: JobRun.Status) -> Int { group.filter { $0.status == status }.count }
-            var line = "\(Briefing.name(job?.name ?? group.first?.jobName ?? "")): "
+            // Quoted, as the briefing does: a bare name like `x: 9 completed` could pose as a count.
+            var line = "\(Briefing.quoted(job?.name ?? group.first?.jobName ?? "")): "
                 + "\(count(.completed)) completed, \(count(.failed)) failed"
             // Only when there are any, so the common line keeps its two counts.
             let blocked = count(.blockedOnApproval), interrupted = count(.interrupted)

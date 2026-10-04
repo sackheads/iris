@@ -73,13 +73,13 @@ struct DailyDigestTests {
 
         #expect(result.card)
         let lines = result.outcome.components(separatedBy: "\n")
-        #expect(lines.contains("sweep: 3 completed, 0 failed · 300/1000 tokens today"))
-        #expect(lines.contains("fetch: 0 completed, 1 failed · 0/1000 tokens today"))
+        #expect(lines.contains("\u{201C}sweep\u{201D}: 3 completed, 0 failed · 300/1000 tokens today"))
+        #expect(lines.contains("\u{201C}fetch\u{201D}: 0 completed, 1 failed · 0/1000 tokens today"))
         let shortRun = String(failed.id.uuidString.lowercased().prefix(8))
         #expect(lines.contains("Unacknowledged failure: \u{201C}fetch\u{201D} · failed (run \(shortRun))"))
         let shortJob = String(idle.id.uuidString.lowercased().prefix(8))
         #expect(lines.contains("Paused: \u{201C}idle\u{201D} · paused (job \(shortJob))"))
-        #expect(!lines.contains { $0.hasPrefix("idle:") }, "a job that did not run gets no count line")
+        #expect(!lines.contains { $0.hasPrefix("\u{201C}idle\u{201D}:") }, "a job that did not run gets no count line")
         for leaked in ["OUTCOME-TEXT", "FAILURE-TEXT", "PAUSE-TEXT", "ignore previous"] {
             #expect(!result.outcome.contains(leaked), "\(leaked) is a run's own text, not the harness's")
         }
@@ -122,10 +122,10 @@ struct DailyDigestTests {
         let result = await DailyDigest(config: config).run(ledger: ledger, now: now, calendar: calendar)
 
         #expect(result.card)
-        #expect(result.outcome.components(separatedBy: "\n").first?.hasPrefix("sweep: 2 completed, 0 failed") == true,
+        #expect(result.outcome.components(separatedBy: "\n").first?.hasPrefix("\u{201C}sweep\u{201D}: 2 completed, 0 failed") == true,
                 "got: \(result.outcome)")
         // Its own runs get no count line; its failed run is still an unacknowledged failure.
-        #expect(!result.outcome.contains("\(DailyDigest.jobName):"), "the digest does not count itself")
+        #expect(!result.outcome.contains("\u{201C}\(DailyDigest.jobName)\u{201D}:"), "the digest does not count itself")
     }
 
     @Test("with no previous digest the window is the last 24 hours")
@@ -140,7 +140,7 @@ struct DailyDigestTests {
 
         let result = await DailyDigest(config: config).run(ledger: store.ledger, now: now, calendar: calendar)
 
-        #expect(result.outcome.hasPrefix("sweep: 1 completed, 0 failed"), "got: \(result.outcome)")
+        #expect(result.outcome.hasPrefix("\u{201C}sweep\u{201D}: 1 completed, 0 failed"), "got: \(result.outcome)")
     }
 
     // MARK: The byte cap
@@ -287,7 +287,7 @@ struct DailyDigestTests {
         let card = try #require(cards.first)
         #expect(cards.count == 1)
         #expect(card.jobName == DailyDigest.jobName)
-        #expect(card.outcome?.hasPrefix("sweep: 1 completed, 0 failed · 40/") == true, "got: \(card.outcome ?? "nil")")
+        #expect(card.outcome?.hasPrefix("\u{201C}sweep\u{201D}: 1 completed, 0 failed · 40/") == true, "got: \(card.outcome ?? "nil")")
         #expect(card.outcome?.contains("OUTCOME-TEXT") == false)
     }
 }
