@@ -394,6 +394,19 @@ class AppState {
     private var mainStartTimeByConversation: [UUID: Date] = [:]
     /// Tracked UI-initiated tasks so they can be cancelled (e.g. when a conversation is deleted).
     private var activeTasks: [UUID: (conversationId: UUID?, task: Task<Void, Never>)] = [:]
+    /// The running `/new` rotation of Iris, if any (5b §0.4). Non-nil also refuses a second `/new`:
+    /// once the pin has moved, the new Iris has no turn in flight to refuse it otherwise.
+    @ObservationIgnored private(set) var rotationTask: Task<Void, Never>?
+    /// The clock the rotation's archived title reads. Injectable so tests get a fixed date.
+    @ObservationIgnored var rotationNow: () -> Date = { Date() }
+    /// The old Iris, and the new one once created: Esc in either stops the rotation.
+    @ObservationIgnored var rotationConversationIds: Set<UUID> = []
+    /// The old Iris counts as busy from the `/new` handler until its reflection turn ends, so a
+    /// message typed in that window queues (and steers the reflection) instead of starting a
+    /// second turn beside it. Set in the same MainActor step as the refusal check.
+    @ObservationIgnored var rotationHold: UUID?
+    /// Test seam for the pin's meta write; nil writes through `store`.
+    @ObservationIgnored var pinnedMetaWriter: ((String) throws -> Void)?
 
     // MARK: - Mid-turn user messages (#172)
 
@@ -523,6 +536,7 @@ class AppState {
     /// archiving refuses; `list_sessions` reports busy; the session strip counts it as running.
     func hasTurnInFlight(for conversationId: UUID) -> Bool {
         if (engineTurnCounts[conversationId] ?? 0) > 0 { return true }
+        if rotationHold == conversationId { return true }
         return activeTasks.values.contains { $0.conversationId == conversationId }
     }
 
@@ -616,6 +630,13 @@ class AppState {
         return count
     }
 
+    /// Ends `rotationHold` and starts whatever was queued behind it, as the end of a turn would.
+    func releaseRotationHold() {
+        guard let held = rotationHold else { return }
+        rotationHold = nil
+        drainPendingUserMessages(for: held)
+    }
+
     /// Test seam: drive `sendMessage` through an engine with a scripted client.
     func installEngine(_ engine: IrisEngine) {
         self.engine = engine
@@ -651,6 +672,7 @@ class AppState {
         self.engine = IrisEngine(state: self)
         loadConversations()
         retitleLegacyPinnedConversation()
+        unpinStrayPinnedConversations()
         // `selectedConversationId == nil` covers more than an empty store: #187's background job
         // conversations are loaded but never selected, so a store holding nothing else still has
         // to open in a fresh conversation.
@@ -828,7 +850,8 @@ class AppState {
 
     /// Runs UI-initiated engine work while holding the thinking indicator and tracking the
     /// task so it can be cancelled. The `work` closure must not touch `isThinking` directly.
-    private func runThinkingTask(conversationId: UUID?, _ work: @escaping @MainActor () async -> Void) {
+    @discardableResult
+    private func runThinkingTask(conversationId: UUID?, _ work: @escaping @MainActor () async -> Void) -> Task<Void, Never> {
         // #182 §6.2: this is where a turn starts, so this is where "archived means idle" is
         // enforced for user-initiated work. Stated per command or per call site it goes stale on
         // the next one added — four already returned above `sendMessage`'s tail (`/goal`,
@@ -854,6 +877,7 @@ class AppState {
             }
         }
         activeTasks[id] = (conversationId, task)
+        return task
     }
 
     /// Cancels any tracked tasks associated with a conversation and asks the engine to stop
@@ -874,6 +898,12 @@ class AppState {
     /// thinking indicator via the tracked task's completion.
     func interruptActiveConversation() {
         guard let convId = selectedConversationId, isThinking else { return }
+        // A rotation runs under no conversation id, so `cancelTasks` cannot reach it. It reports
+        // its own outcome ("Rotation stopped; …"), so no "Interrupted." unless more was running.
+        if let rotation = rotationTask, rotationConversationIds.contains(convId) {
+            rotation.cancel()
+            guard activeTasks.values.contains(where: { $0.conversationId == convId }) else { return }
+        }
         let dropped = pendingUserMessageCount(for: convId)
         cancelTasks(for: convId)
         let notice = dropped == 0 ? "Interrupted."
@@ -915,6 +945,10 @@ class AppState {
     /// title — the id recorded here is unambiguous where a title lookup is not.
     static let activityConversationMetaKey = "activity_conversation_id"
 
+    /// The automatic reflection pass, shared by the 30-message trigger and `/new`'s rotation of
+    /// Iris (5b §0.4). `/reflect` asks for more (an OKF grooming pass) and keeps its own text.
+    static let reflectionPrompt = "System Event [Reflection Trigger]: It's time to consolidate your memories. Reflect on the recent conversation. Have you learned any new user preferences, project structures, or recurring workflows? If so, use `update_soul` to evolve your persona, `update_user_profile` to update the user profile, `update_memory` to consolidate durable facts, and `create_skill`/`update_skill` for procedural skills. When you learn something durable — a lesson, recipe, decision, or reusable artifact — archive it to your permanent library at `~/.iris/memory/library/` (see your Library Management skill). Output a transparent summary of the gist of the updates for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'"
+
     /// Returns Iris's (the pinned conversation's) id, creating it (pinned, unselected) and recording it
     /// in `meta` on first use. Stable across calls and across launches; if the recorded id names a
     /// conversation that no longer exists (deleted by hand), a fresh one is created and recorded.
@@ -931,6 +965,19 @@ class AppState {
         }
         try? store.setMetaValue(id.uuidString, forKey: Self.activityConversationMetaKey)
         return id
+    }
+
+    /// A crash mid-rotation can leave two conversations pinned (5b §0.4): the meta key decides
+    /// which is Iris, and any other is unpinned. When the key names a missing row, every pinned
+    /// conversation is stale and `activityConversationId()` makes a fresh one. With no key at all
+    /// there is nothing to reconcile against, and pins are left alone.
+    func unpinStrayPinnedConversations() {
+        guard let raw = (try? store.metaValue(forKey: Self.activityConversationMetaKey)) ?? nil else { return }
+        let pinned = UUID(uuidString: raw)
+        for idx in conversations.indices where conversations[idx].isPinned && conversations[idx].id != pinned {
+            conversations[idx].isPinned = false
+            markChanged(conversations[idx].id, .metadata)
+        }
     }
 
     /// 5b: the pinned conversation became the main one and took Iris's name. Only the exact old
@@ -1401,12 +1448,10 @@ class AppState {
         case noSuchConversation
         case turnInFlight
         case goalActive
-        /// 5b: the pinned conversation may never be archived directly (spec §0.2, §0.4). Checked
-        /// last — a pinned conversation mid-turn must still report `.turnInFlight`, which a later
-        /// task's `/new` rotation (not yet shipped: PR 3, not this one) will rely on. Fix round 2
-        /// (reviewer finding, #187): the reason string and this comment both used to describe that
-        /// future rotation — "/new starts a fresh Iris and archives the current one" — as if PR 1
-        /// already did it; `/new` here is still the plain `createNewConversation()` it always was.
+        /// 5b: the pinned conversation may never be archived directly (spec §0.2, §0.4); `/new`
+        /// rotates it instead (`rotatePinned`), unpinning it before it archives it. Checked last —
+        /// a pinned conversation mid-turn must still report `.turnInFlight`, which
+        /// `rotationRefusal` relies on to refuse a rotation while a turn is running.
         case pinned
 
         var reason: String {
@@ -1414,7 +1459,7 @@ class AppState {
             case .noSuchConversation: return "that conversation no longer exists"
             case .turnInFlight: return "a turn is still running"
             case .goalActive: return "a goal is active — /stop it first"
-            case .pinned: return "Iris can't be archived; use /new for a fresh conversation."
+            case .pinned: return "Iris can't be archived directly; /new archives it and starts a fresh Iris from a summary."
             }
         }
     }
@@ -1523,7 +1568,31 @@ class AppState {
             handleTokensCommand(convId: convId)
             return
         } else if trimmed == "/new" {
-            createNewConversation()
+            // 5b §0.4: in Iris, `/new` rotates it rather than opening a tab beside it.
+            // Read without `activityConversationId()`, which would create an Iris if none existed.
+            let pinnedRaw = (try? store.metaValue(forKey: Self.activityConversationMetaKey)) ?? nil
+            guard conversations.first(where: { $0.id == convId })?.isPinned == true,
+                  pinnedRaw.flatMap(UUID.init(uuidString:)) == convId else {
+                createNewConversation()
+                return
+            }
+            // Synchronous, before any task starts: a refused rotation moves nothing.
+            if let refusal = rotationRefusal() {
+                appendMessage(role: .system, content: refusal, to: convId)
+                return
+            }
+            // Not the old conversation's own task: `archiveRefusal` would see it as a turn in
+            // flight and refuse the rotation's final archive.
+            let engine = self.engine!
+            rotationHold = convId
+            rotationConversationIds = [convId]
+            rotationTask = runThinkingTask(conversationId: nil) { [self] in
+                await rotatePinned(engine: engine)
+                // Every exit, cancellation included: `rotatePinned` returns on all of them.
+                releaseRotationHold()
+                rotationConversationIds = []
+                rotationTask = nil
+            }
             return
         } else if trimmed == "/clear" {
             handleClearCommand(convId: convId)
@@ -1688,13 +1757,25 @@ class AppState {
                         conversations[idx].messageCountSinceReflection = 0
                         markChanged(convId, .metadata)
                     }
-                    let reflectionPrompt = "System Event [Reflection Trigger]: It's time to consolidate your memories. Reflect on the recent conversation. Have you learned any new user preferences, project structures, or recurring workflows? If so, use `update_soul` to evolve your persona, `update_user_profile` to update the user profile, `update_memory` to consolidate durable facts, and `create_skill`/`update_skill` for procedural skills. When you learn something durable — a lesson, recipe, decision, or reusable artifact — archive it to your permanent library at `~/.iris/memory/library/` (see your Library Management skill). Output a transparent summary of the gist of the updates for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'"
                     appendMessage(role: .system, content: "Triggering automatic memory reflection...", to: convId)
-                    await engine.processInput(reflectionPrompt, source: "System", conversationId: convId)
+                    await engine.processInput(Self.reflectionPrompt, source: "System", conversationId: convId)
                 } else if shouldRename {
                     let renamePrompt = "System Event [Rename Trigger]: Evaluate the conversation history and use the `rename_conversation` tool to assign a short, descriptive title (1-4 words) that captures the true gist of this conversation."
                     appendMessage(role: .system, content: "Triggering automatic conversation rename...", to: convId)
                     await engine.processInput(renamePrompt, source: "System", conversationId: convId)
+                }
+
+                // 5b §0, decision 4 (last paragraph): the pinned conversation gets a one-line
+                // suggestion to run `/new`, once per crossing, never while a rotation is already
+                // running. Re-fetch the index rather than reuse the outer `idx` — the turn above
+                // (and any reflect/rename follow-up) may have changed the conversations array.
+                // One pass over history per turn, not per message.
+                if rotationTask == nil,
+                   let idx = conversations.firstIndex(where: { $0.id == convId }),
+                   conversations[idx].isPinned,
+                   RotationSuggestion.estimatedTokens(conversations[idx].history) > RotationSuggestion.threshold,
+                   !conversations[idx].messages.contains(where: { $0.role == .command && $0.content == RotationSuggestion.text }) {
+                    appendMessage(role: .command, content: RotationSuggestion.text, to: convId)
                 }
             }
         } else {
