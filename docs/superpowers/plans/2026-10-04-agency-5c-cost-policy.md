@@ -57,25 +57,24 @@
    - the read-only allowlist runs at `:1808`, the evaluator restriction at `:1826`, and the goal-complete filter at `:1873`.
 
    *Ruling:* stickiness is `|| sticky.contains(name)` on each existing gate, so a tool keeps its position. Then one new `hardStrip` pass, placed immediately before the read-only strip at `:1808`, removes again everything an unattended turn or a non-main principal may never have. The spec's "union before strips, strip wins" holds, at the point the code actually has.
-2. **`reach_checkpoint` already has a final-milestone guard.** `iris.swift:3651-3654` refuses at the final milestone, and `:3647-3650` refuses with no ladder. `delegate_milestone` has both (`:3662-3671`), and `DelegateMilestoneTests.finalMilestoneIsRefused` (`:265`) pins one. *Ruling:* no new code for either; Task 4 adds the missing tests. New guards are needed only for `manage_fact` and the three peer tools.
-3. **What "`manage_fact` with no facts" means.** The gate is "this turn surfaced facts" (`:1574`), and ids reach the model from the injected block or a `search_memory` result. *Ruling:* `manage_fact` acts only on a `fact_id` that this turn has shown the model. That covers ids injected at turn start or returned by a `search_memory` call earlier in this turn. Anything else is refused with a sentence telling the model to search first. This keeps exactly the pre-5c capability. Before 5c the tool wasn't declared on a turn with no surfaced facts, so a stale id from an old turn could never be acted on.
-4. **`set_workspace` isn't state-gated.** Its only gate is `!isUnattended`, and `isBackground` is fixed for a conversation's life, so it can't flap. *Ruling:* it isn't sticky-eligible. Its off-state refusal (`:2992`) and test (`UnattendedWorkspaceTests`) already exist. Task 2's hard-strip test still seeds it, to prove that a seeded name can't get past the strip.
-5. **`goal_complete` is state-gated, and the spec doesn't list it.** It's declared on `hasActiveGoal || restrictToGoalComplete` (`:1606`) and flaps off when a goal ends: the same removal flap on the longest history that decision 3 is about. *Ruling:* it's sticky-eligible. Its off-state guard already exists (`:3548-3551`, "No goal is active …"), and Task 4 tests it.
-6. **The pinned-only job tools aren't sticky.** `isPinned` is identity, not state. It changes only when `/new` rotates, and the old conversation is archived then. A sticky job tool in an unarchived former Iris would widen the pinned-only surface. Dispatch refuses it, but undeclared is the half that holds without a refusal.
-7. **Stickiness applies only to attended main conversations.** The spec says the main principal only. A job run is also `.main`, but it's a fresh conversation with one turn, so a sticky set can't help it, and recording one would add a map entry per fire forever. *Ruling:* record and apply only when `principal == .main && !isUnattended`.
-8. **"A row with no provider is priced at r = w = 1, which is today's behaviour."** That's only half true. The ×5 output weight applies to every provider, so a pre-5c row's weighted total is `prompt + 5 × output`, not today's `totalTokens`. This only touches the upgrade day's figures, because budgets are daily. *Ruling:* apply ×5, so there's one unit with no exceptions. The alternative (price a provider-less row at plain `totalTokens`) is a one-line change in `CostWeights.weighted` if the owner prefers it.
-9. **"Uncached input" and "output" aren't stored directly.** Every provider's prompt count already folds in cache reads and writes (5a). Gemini's `totalTokenCount` also includes thinking tokens, which `candidatesTokenCount` doesn't. *Ruling:*
+2. **`reach_checkpoint` already has a final-milestone guard.** `iris.swift:3651-3654` refuses at the final milestone, and `:3647-3650` refuses with no ladder. `delegate_milestone` has both (`:3662-3671`), and `DelegateMilestoneTests.finalMilestoneIsRefused` (`:265`) pins one. *Ruling:* no new code for either; Task 4 adds the missing tests. New guards are needed only for the three peer tools. `manage_fact` has no dangerous off state: see below.
+3. **`set_workspace` isn't state-gated.** Its only gate is `!isUnattended`, and `isBackground` is fixed for a conversation's life, so it can't flap. *Ruling:* it isn't sticky-eligible. Its off-state refusal (`:2992`) and test (`UnattendedWorkspaceTests`) already exist. Task 2's hard-strip test still seeds it, to prove that a seeded name can't get past the strip.
+4. **`goal_complete` is state-gated, and the spec doesn't list it.** It's declared on `hasActiveGoal || restrictToGoalComplete` (`:1606`) and flaps off when a goal ends: the same removal flap on the longest history that decision 3 is about. *Ruling:* it's sticky-eligible. Its off-state guard already exists (`:3548-3551`, "No goal is active …"), and Task 4 tests it.
+5. **The pinned-only job tools aren't sticky.** `isPinned` is identity, not state. It changes only when `/new` rotates, and the old conversation is archived then. A sticky job tool in an unarchived former Iris would widen the pinned-only surface. Dispatch refuses it, but undeclared is the half that holds without a refusal.
+6. **Stickiness applies only to attended main conversations.** The spec says the main principal only. A job run is also `.main`, but it's a fresh conversation with one turn, so a sticky set can't help it, and recording one would add a map entry per fire forever. *Ruling:* record and apply only when `principal == .main && !isUnattended`.
+7. **"A row with no provider is priced at r = w = 1, which is today's behaviour."** That's exactly right: a provider-less (pre-5c) row is priced at its plain `totalTokens` — every component at weight 1, output included, which is today's behaviour. There's no ×5 output weight to apply because there's no `outputTokens` component on the row to weight; `totalTokens` is the whole figure, already folding output in. *Ruling:* price a provider-less row at plain `totalTokens`, with no exceptions. Ruling 10 (below) treats an old event card's frozen `totalTokens` the same way, for the same reason.
+8. **"Uncached input" and "output" aren't stored directly.** Every provider's prompt count already folds in cache reads and writes (5a). Gemini's `totalTokenCount` also includes thinking tokens, which `candidatesTokenCount` doesn't. *Ruling:*
    - uncached = `prompt − cacheRead − cacheWrite`, floored at 0;
    - output = `max(candidates, total − prompt)`, so Gemini thinking is charged as output.
 
    `JobLedgerPolicyTests.makeRun` sets only `totalTokens`. Under this ruling that row reads as all output, so the helper must also set `promptTokens = tokens` (Task 11).
-10. **Persisted budget-reason strings are matched by text.** `Briefing.reasonWord` (`Briefing.swift:63-64`), `Briefing.pausedWord` (`:84`) and `JobRunner.budgetStopReason` (`JobRunner.swift:1777-1781`) match `daily token budget reached` (prefix) and `budget: tokens exceeded` (exact) on rows and paused jobs written before 5c. *Ruling:* rename both to the weighted unit, and keep `legacy…` constants that the three matchers also accept.
-11. **An event card stores a frozen `totalTokens`** (`EventCard.swift:34`), persisted as message JSON. *Ruling:* add `weightedTokens: Int?`, decoded with `decodeIfPresent`. A new card shows "4.2k weighted tokens"; an old card keeps "4.2k tokens", which was true when it was written.
-12. **`GeminiRequest` has synthesized `Codable` and is encoded verbatim.** Gemini's body (`LLMClient.encodeGeminiBody`) and the hook payload (`HookManager.fireBeforeModel`) both encode it, and a hook's rewrite is decoded back (`iris.swift:1952-1955`). *Ruling:* `cacheHints` is excluded through `CodingKeys` and re-applied after a hook rewrite.
-13. **The spec's r for Gemini and OpenAI is per provider, but the real ratio is per model.** *Ruling:* pin the ratio of each provider's default medium model (`gemini-3.5-flash`, `gpt-5.6-terra`, `ConfigManager.swift:429,437`), and check it against the published pricing page on the day, as Task 9 says. A per-model table is a follow-up only if the cost column (Task 19) shows the error matters.
-14. **Which jobs count as firing "more often than hourly"?** Only `.schedule` triggers with `action == .prompt`, enabled and not paused. A `.poll` job ticks on its cadence but runs a model turn only when its gate says CHANGED. A watch is bursty. A built-in spends no tokens. None of those three would keep a prefix warm on a predictable cadence.
-15. **`list_jobs` key names.** The model reads `tokensToday` / `tokensTodayAllJobs`. *Ruling:* rename them to `weightedTokensToday` / `weightedTokensTodayAllJobs`. A key named "tokens" holding a weighted figure is the stale agent-facing string invariant 9 is about. `JobToolsTests:171,180,226,232` move with them.
-16. **AGENTS.md invariant 6 says "gate declaration on that state".** Stickiness changes that rule ("…and once declared, keep it declared for the conversation"). Task 6 updates the invariant. Flag it in the PR, because it changes a standing project rule.
+9. **Persisted budget-reason strings are matched by text.** `Briefing.reasonWord` (`Briefing.swift:63-64`), `Briefing.pausedWord` (`:84`) and `JobRunner.budgetStopReason` (`JobRunner.swift:1777-1781`) match `daily token budget reached` (prefix) and `budget: tokens exceeded` (exact) on rows and paused jobs written before 5c. *Ruling:* rename both to the weighted unit, and keep `legacy…` constants that the three matchers also accept.
+10. **An event card stores a frozen `totalTokens`** (`EventCard.swift:34`), persisted as message JSON. *Ruling:* add `weightedTokens: Int?`, decoded with `decodeIfPresent`. A new card shows "4.2k weighted tokens"; an old card keeps "4.2k tokens", which was true when it was written — the same plain-`totalTokens` pricing as ruling 7, for the same legacy rows.
+11. **`GeminiRequest` has synthesized `Codable` and is encoded verbatim.** Gemini's body (`LLMClient.encodeGeminiBody`) and the hook payload (`HookManager.fireBeforeModel`) both encode it, and a hook's rewrite is decoded back (`iris.swift:1952-1955`). *Ruling:* `cacheHints` is excluded through `CodingKeys` and re-applied after a hook rewrite.
+12. **The spec's r for Gemini and OpenAI is per provider, but the real ratio is per model.** *Ruling:* pin the ratio of each provider's default medium model (`gemini-3.5-flash`, `gpt-5.6-terra`, `ConfigManager.swift:429,437`), and check it against the published pricing page on the day, as Task 9 says. A per-model table is a follow-up only if the cost column (Task 19) shows the error matters.
+13. **Which jobs count as firing "more often than hourly"?** Only `.schedule` triggers with `action == .prompt`, enabled and not paused. A `.poll` job ticks on its cadence but runs a model turn only when its gate says CHANGED. A watch is bursty. A built-in spends no tokens. None of those three would keep a prefix warm on a predictable cadence.
+14. **`list_jobs` key names.** The model reads `tokensToday` / `tokensTodayAllJobs`. *Ruling:* rename them to `weightedTokensToday` / `weightedTokensTodayAllJobs`. A key named "tokens" holding a weighted figure is the stale agent-facing string invariant 9 is about. `JobToolsTests:171,180,226,232` move with them.
+15. **AGENTS.md invariant 6 says "gate declaration on that state".** Stickiness changes that rule ("…and once declared, keep it declared for the conversation"). Task 6 updates the invariant. Flag it in the PR, because it changes a standing project rule.
 
 ---
 
@@ -136,8 +135,8 @@ import Foundation
         #expect(StickyTools.eligible == ["manage_fact", "list_sessions", "send_to_session", "set_session_card",
                                          "amend_goal_contract", "reach_checkpoint", "delegate_milestone",
                                          "waive_criterion", "goal_complete"])
-        // Never the workflow triggers (decision 1), the pinned-only job tools (plan note 6) or
-        // set_workspace (plan note 4).
+        // Never the workflow triggers (decision 1), the pinned-only job tools (plan note 5) or
+        // set_workspace (plan note 3).
         for name in ["rename_conversation", "propose_goal_contract", "schedule_job", "list_jobs", "set_workspace"] {
             #expect(!StickyTools.eligible.contains(name), Comment(rawValue: name))
         }
@@ -322,6 +321,7 @@ import Foundation
         let unattended = IrisEngine.hardStrip(decls, isUnattended: true, principal: .main).map(\.name)
         #expect(unattended == ["run_command", "manage_fact", "reach_checkpoint"])
         let sub = IrisEngine.hardStrip(decls, isUnattended: false, principal: .subagent).map(\.name)
+        // A subagent keeps set_workspace: that's today's behaviour, unchanged by hardStrip.
         #expect(sub == ["run_command", "set_workspace", "manage_fact"])
     }
 
@@ -349,7 +349,7 @@ Adjust the calls, not the assertions. The read-only arm holds because the `readO
   1. **Init:** `stickyTools: Bool = true` becomes `self.stickyToolsEnabled = stickyTools`. Doc comment: "5c §0.1; false only for perf's gated arm (`IRIS_PERF_STICKY_TOOLS=0`)."
   2. **Preamble tuple (`:1445`):** add `localState?.stickyTools.names(for: conversationId) ?? []` as a sixth element `storedSticky`. Then:
      ```swift
-     // 5c §0.1 (plan note 7): attended main conversations only. A job run is one turn in a fresh
+     // 5c §0.1 (plan note 6): attended main conversations only. A job run is one turn in a fresh
      // conversation, so a set could never help it and would leave an entry behind per fire.
      let stickyApplies = stickyToolsEnabled && principal == .main && !isUnattended
      let sticky: Set<String> = stickyApplies ? storedSticky : []
@@ -459,14 +459,12 @@ Rewrite the dispatch comment at `:2100-2104`. It says the schema is "only adviso
 
 **Files:**
 - Modify `Sources/iris/iris.swift`:
-  - a new engine-actor property `private var surfacedFactIds: [UUID: Set<String>] = [:]`, set at the facts block (`:1429-1435`) and extended in the `search_memory` branch (`:3449-3465`);
-  - the `manage_fact` branch (`:3446`);
   - the `list_sessions` (`:3054`), `send_to_session` (`:3076`) and `set_session_card` (`:3139`) branches.
+  - `manage_fact` itself is untouched (plan note 2): it has no dangerous off state. Before 5c, `manageFact` (`:2843-2855`) already acted on any existing `fact_id`, whatever turn surfaced it, and the fact store already refuses an id it doesn't recognize (`FactStoreError.notFound`). Sticky declaration changes nothing for it to guard.
 - Test: `Tests/irisTests/StickyOffStateTests.swift` (new).
 
 **Interfaces:**
 - Produces:
-  - `nonisolated static let manageFactUnseenRefusal = "Not run: manage_fact acts only on a fact this turn has shown you. Call search_memory to find it first, then use the id it returns."`
   - `nonisolated static let noPeersRefusal = "Not run: no other session is active, so there is nobody to list, message, or describe this session to."`
 
 - [ ] **Step 1: Write the failing tests**, one per sticky tool. Use `SessionToolsTests.runToolCall`'s shape (`:256`, with `peerCount:`) and `DelegateMilestoneTests.ladder(on:_:currentMilestone:)` (`:100`). Copy both helpers into the new suite as private functions. Don't call across suites.
@@ -477,21 +475,22 @@ Rewrite the dispatch comment at `:2100-2104`. It says the schema is "only adviso
     // runToolCall(_:on:as:peerCount:factStore:) — SessionToolsTests' shape, plus a factStore
     // parameter passed to IrisEngine(factStore:). Returns the last functionResponse "result".
 
-    @Test func manageFactRefusesAnIdThisTurnDidNotShow() async throws {
+    @Test func manageFactRefusesANonexistentId() async throws {
         let app = AppState(); let id = UUID(); app.createNewConversation(id: id)
         let facts = try FactStoreManager(inMemory: true)
-        let fact = try facts.addFact(content: "Brian lives in Seattle", entity: "Brian")
+        let staleId = UUID().uuidString
         let call = FunctionCall(name: "manage_fact",
-                                args: ["action": .string("retract"), "fact_id": .string(fact.id)], id: "c1")
-        // "go" surfaces nothing, so the id was never shown this turn.
+                                args: ["action": .string("retract"), "fact_id": .string(staleId)], id: "c1")
+        // No new guard here (plan note 2): the store's own id validation is the only boundary,
+        // exactly as it was pre-5c. A sticky manage_fact declaration has no dangerous off state.
         let result = await runToolCall(call, on: app, as: id, peerCount: 0, factStore: facts)
-        #expect(result == IrisEngine.manageFactUnseenRefusal)
-        #expect(try facts.search(query: "Seattle").contains { $0.id == fact.id }, "the fact is untouched")
+        #expect(result.contains("unknown fact id"), result)
     }
 
-    @Test func manageFactActsOnAnIdThisTurnInjected() async throws {
-        // Same, but the turn's prompt is "Where does Brian live?", so the fact is injected and
-        // the retract succeeds ("is now retracted").
+    @Test func manageFactActsOnAnIdFromHistory() async throws {
+        // The id was surfaced on an earlier turn, not this one ("carry on" surfaces nothing new).
+        // A turn-scoped guard would refuse this and break "retract what you have about X" when
+        // the fact isn't restated — manage_fact must still act on it. Expect "is now retracted".
     }
 
     @Test func peerToolsRefuseWithNoPeers() async {
@@ -537,30 +536,10 @@ Rewrite the dispatch comment at `:2100-2104`. It says the schema is "only adviso
 
 Write every body in full. The comments above say what each asserts; they are not the test. Read each existing refusal sentence from the source before asserting it. If the amend sentence blames the rationale when the real cause is an unlocked contract, that's a misleading agent-facing string (invariant 9). Fix it in this task, in the same commit.
 
-- [ ] **Step 2: Run them and watch them fail.** `timeout 300 scripts/test-filter.sh StickyOffStateTests`. Expected: the `manage_fact` and peer cases fail; the rest pass. That's plan note 2: the guards already exist.
+- [ ] **Step 2: Run them and watch them fail.** `timeout 300 scripts/test-filter.sh StickyOffStateTests`. Expected: only the peer cases fail. The two `manage_fact` cases and `reach_checkpoint`/`delegate_milestone`/`amend`/`waive`/`goal_complete` already pass — that's plan note 2: the guards already exist, and `manage_fact` needed none to begin with.
 
 - [ ] **Step 3: Implement.**
-  - **Facts block (`:1429-1435`):** `surfacedFactIds[conversationId] = Set(facts.map(\.id))`. Set it even when `facts` is empty, so a previous turn's ids don't carry over.
-  - **`search_memory` branch:** after `let facts = …`, add `surfacedFactIds[conversationId, default: []].formUnion(facts.map(\.id))`.
-  - **`manage_fact` branch:**
-    ```swift
-    } else if functionCall.name == "manage_fact", let action = functionCall.args["action"]?.stringValue {
-        // 5c §0.2 (plan note 3): declared stickily now, so the off state is enforced here. Only
-        // an id this turn has shown the model, which is exactly what the gate allowed before 5c.
-        // An empty or missing id falls through to manageFact's own "needs a fact_id" answer.
-        let factId = functionCall.args["fact_id"]?.stringValue
-        let byFactId = functionCall.args["by_fact_id"]?.stringValue
-        let seen = surfacedFactIds[conversationId] ?? []
-        if let factId, !factId.isEmpty {
-            let byOK = byFactId.map { $0.isEmpty || seen.contains($0) } ?? true
-            guard seen.contains(factId), byOK else {
-                result = Self.manageFactUnseenRefusal
-                return result
-            }
-        }
-        result = manageFact(action: action, factId: factId, byFactId: byFactId)
-    ```
-    Tool calls in one batch run concurrently on the actor in no fixed order, so a `search_memory` and a `manage_fact` in the *same* batch may be refused. The refusal sentence tells the model to search first, which is the order that works.
+  - **`manage_fact`:** no change. Leave the branch (`:3446`) exactly as it is; `manageFact` already refuses an unrecognized `fact_id` with "unknown fact id …", and a sticky declaration doesn't change what ids are valid.
   - **Peer tools:** in each of the three branches, after the existing `!isUnattended` guard:
     ```swift
     // 5c §0.2: declared stickily now; with nobody to talk to the call has no meaning.
@@ -571,7 +550,7 @@ Write every body in full. The comments above say what each asserts; they are not
     ```
     `sessionPeerCount` honours the test override, the same value the declaration gate reads.
 
-- [ ] **Step 4: Run the tests and confirm they pass.** Quote the counts for `StickyOffStateTests`, `SessionToolsTests`, `PeerDeliveryTests`, `FactStoreToolTests` (or whatever suite holds the `manage_fact` handler tests; find it with `grep -rln '"manage_fact"' Tests`), `DelegateMilestoneTests` and `DoneGateScopeTests`. Existing `manage_fact` handler tests that call it on a turn that surfaced nothing will now be refused. Make them surface the fact through their prompt, so the test still checks the handler, not the refusal.
+- [ ] **Step 4: Run the tests and confirm they pass.** Quote the counts for `StickyOffStateTests`, `SessionToolsTests`, `PeerDeliveryTests`, `FactStoreToolTests` (or whatever suite holds the `manage_fact` handler tests; find it with `grep -rln '"manage_fact"' Tests`), `DelegateMilestoneTests` and `DoneGateScopeTests`. No existing `manage_fact` handler test changes behavior: nothing about dispatch changed for it.
 
 - [ ] **Step 5: Commit** with `feat(agency): sticky tools refuse at dispatch when their state is off (#187)`.
 
@@ -657,13 +636,13 @@ If the round-trip reply "ok" leaves the soft-stop turn without a request (it sho
   - `grep -rn "offered only\|only when there\|declared only\|on a turn that surfaced\|dead weight" Sources/iris/iris.swift`. Each gate comment you touched in Task 2 now has to say "…and once declared, stays declared (5c §0.1)", or it's untrue.
   - `grep -rn "restrictToGoalComplete\|ONLY goal_complete\|remove the tool from the schema\|only advisory" Sources Tests`. Covers the `:1869` comment (deleted), the `:2100` comment, the `processInput` doc near `:1345`, and the `LoopStopEnforcementTests` doc comment ("Removing the tool from the schema is NOT enough").
   - `grep -n "declareStateGatedTools" Sources/iris/iris.swift`. The `:136-140` doc says the flag declares state-gated tools "instead of only when their state holds". Add that 5c makes sticky the default and this flag remains perf's "declared every turn" arm.
-  - `AGENTS.md` invariant 6, "Lifecycle state" bullet: add "A state-gated tool, once declared in a conversation, stays declared for the rest of it (`StickyTools`, 5c), and its dispatcher refuses the call when the state is off. Workflow-trigger tools stay one-turn-only." Flag this in the PR body (plan note 16).
+  - `AGENTS.md` invariant 6, "Lifecycle state" bullet: add "A state-gated tool, once declared in a conversation, stays declared for the rest of it (`StickyTools`, 5c), and its dispatcher refuses the call when the state is off. Workflow-trigger tools stay one-turn-only." Flag this in the PR body (plan note 15).
   - `grep -n "manage_fact\|list_sessions\|send_to_session" README.md docs/*.md`, for any sentence that says these appear "only when …".
 - [ ] **Step 2: Fix what you found.** Run the full suite (`timeout 900 swift test`); green means all three signals. Commit with `docs(agency): sticky declarations, swept (#187)`.
 - [ ] **Step 3: Open PR A.** The body lists:
   - the Review Focus items it owns (1, 2);
   - the AGENTS.md invariant change;
-  - plan notes 1-7.
+  - plan notes 1-6.
 
 ---
 
@@ -1103,7 +1082,7 @@ Add a `DelegatedSpendTests` case where a run whose spend is cache-heavy is *not*
   - **`weightedTokensToday`:** the same `WHERE` clauses. `SELECT provider, promptTokens, candidateTokens, totalTokens, cacheReadTokens, cacheWriteTokens, cacheWrite1hTokens`, then `rows.reduce(0) { sum, row in sum + CostWeights.weighted(components(row), provider: provider(row)) }`. Read each column with `RowReader`; a row that won't read counts as 0 and is logged, like `decodeRuns`.
   - **`TurnBudget`:** `static let weightedTokensExceeded = "budget: weighted tokens exceeded"`, and `static let legacyTokensExceeded = "budget: tokens exceeded"` for matching rows written before 5c (Task 12). `func stopReason(weightedTokens: Int, now: Date) -> String?`.
   - **Engine (`:1912`):** the tuple becomes `(TurnBudget?, TokenUsage)`. Then `let spent = budget.map { CostWeights.weighted(usage.components, provider: $0.provider) } ?? 0` and `budget.stopReason(weightedTokens: spent, now: Date())`.
-  - **Update `JobLedgerPolicyTests.makeRun`:** set `run.promptTokens = tokens` alongside `totalTokens` (plan note 9), so existing expectations hold at 1× with no provider. In `DelegatedSpendTests`, where a stop threshold moves because output now weighs 5, recompute the expected figure from the formula in a comment. Don't widen the assertion.
+  - **Update `JobLedgerPolicyTests.makeRun`:** set `run.promptTokens = tokens` alongside `totalTokens` (plan note 8), so existing expectations hold at 1× with no provider. In `DelegatedSpendTests`, where a stop threshold moves because output now weighs 5, recompute the expected figure from the formula in a comment. Don't widen the assertion.
 
 - [ ] **Step 4: Run them and confirm they pass.** Quote the counts for `JobLedgerPolicyTests`, `TurnBudgetTests`, `DelegatedSpendTests`, `JobAdmissionTests`, `JobRunnerTests`, `JobsCommandTests`, `DailyDigestTests` and `JobToolsTests`.
 
@@ -1193,7 +1172,7 @@ Write every body in full.
   - `docs/jobs.md:991-993`: the `list_jobs` field names.
   - `README.md:26` (Token Tracking): add one sentence. The job budgets count weighted tokens. An easy-tier prompt under 4,096 tokens on Haiku, or under 1,024 on OpenAI, never caches, so it is always charged as uncached (decision 10).
   - `grep -rn "tokens today\|Tokens today\|tokensToday\|token budget\|tokens sent" Sources README.md docs`: read every hit, and fix any that still names raw tokens as the budget unit.
-- [ ] **Step 3: Run the full suite** (`timeout 900 swift test`, all three signals). Commit with `docs(budget): weighted tokens, swept (#187)`. Open PR B; the body names Review Focus 3 and 4 and plan notes 8-11, 13 and 15.
+- [ ] **Step 3: Run the full suite** (`timeout 900 swift test`, all three signals). Commit with `docs(budget): weighted tokens, swept (#187)`. Open PR B; the body names Review Focus 3 and 4 and plan notes 7-10, 12 and 14.
 
 ---
 
@@ -1423,7 +1402,7 @@ extension CacheTTLPolicy {
 }
 
 /// Whether any job that runs a model turn on a predictable cadence comes round more often than
-/// hourly (plan note 14: schedules only; polls, watches and built-ins don't keep a prefix warm).
+/// hourly (plan note 13: schedules only; polls, watches and built-ins don't keep a prefix warm).
 enum JobCadence {
     static let samples = 48
 
@@ -1520,9 +1499,9 @@ if let key = request.cacheHints?.promptCacheKey, !key.isEmpty {
 - [ ] **Step 1: Run the greps and read every hit.**
   - `grep -rn "ephemeral\|5-minute\|five minutes\|5 minutes\|TTL\|ttl" Sources/iris/AnthropicClient.swift README.md docs/`. The marker comment at `AnthropicClient.swift:116-133` describes markers without TTLs; add the TTL rule.
   - `grep -rn "cache" README.md`. Line 26 (Token Tracking) gains one sentence: "Iris's own conversation, and job runs when a job fires more often than hourly, hold the Anthropic prompt cache for an hour instead of five minutes."
-  - `docs/jobs.md`: wherever a job run's caching is described. Grep `cache`. Add the shared-prefix TTL rule, and the exclusion of polls, watches and built-ins (plan note 14).
+  - `docs/jobs.md`: wherever a job run's caching is described. Grep `cache`. Add the shared-prefix TTL rule, and the exclusion of polls, watches and built-ins (plan note 13).
   - `docs/specs/2026-09-30-agency-cacheable-prompts.md`: don't edit a merged spec. If it states "5 minutes" as current behaviour, note in the PR body that 5c §0.8 supersedes it.
-- [ ] **Step 2: Fix what you found.** Run the full suite (`timeout 900 swift test`, all three signals). Commit with `docs(cache): TTL policy, swept (#187)`. Open PR C; the body names Review Focus 5 and plan notes 12 and 14.
+- [ ] **Step 2: Fix what you found.** Run the full suite (`timeout 900 swift test`, all three signals). Commit with `docs(cache): TTL policy, swept (#187)`. Open PR C; the body names Review Focus 5 and plan notes 11 and 13.
 
 ---
 
@@ -1609,6 +1588,7 @@ struct PerfExperiments: Sendable, Equatable {
   Anything else is ignored with a printed warning.
 - `ScenarioRunner` passes `stickyTools: experiments.stickyTools` and `cacheTTLOverride: experiments.ttlOverride` to `IrisEngine`.
 - PerfEnvironment gains `var experiments: [String]? = nil`, the active switch names, and records them.
+- Telling the TTL arms apart after the fact: `RequestDump` won't carry it. `cacheHints` is excluded from `GeminiRequest`'s `Codable` (ruling 11), so a dumped request body has no field saying which arm built it. Don't add a sidecar field to the dump for this — the response already says which TTL actually got used, per call: Task 19's `cacheWrite1hTokens` (parsed from `cache_creation.ephemeral_5m/1h_input_tokens`) is recorded on `ModelCallRecord` in the run, so a `1h` or `1h-prefix` arm's cache writes show a nonzero `cacheWrite1hTokens` and a `5m` arm's don't. That split is sufficient on its own: it's keyed per call, already captured, and answers the only question that matters (which TTL did the provider actually apply), so this plan adds nothing further.
 
 - [ ] **Step 1: Write the failing tests.**
   - `Scenario` decodes `pauseBeforeSeconds`, `background` and `freshConversationPerTurn`. Absent means nil, false and false; an old scenario file decodes unchanged.
@@ -1724,14 +1704,14 @@ Nothing in this task runs until the owner says yes, in this session, to the arm 
 
 | Spec item | Where |
 |---|---|
-| §0.1 sticky, per conversation, in memory, every provider, triggers excluded, not persisted | Tasks 1-2; plan notes 4-7 |
-| §0.2 off-state refusal for every sticky tool | Task 4; plan notes 2-3 |
+| §0.1 sticky, per conversation, in memory, every provider, triggers excluded, not persisted | Tasks 1-2; plan notes 3-6 |
+| §0.2 off-state refusal for every sticky tool | Task 4; plan note 2 |
 | §0.3 goal_complete-only by dispatch | Task 3 |
 | §0.4 prefix-only-grows test | Task 5 (also order) |
-| §0.5 weighted unit, table, output ×5, defaults unchanged | Tasks 9, 11; plan notes 8, 13 |
+| §0.5 weighted unit, table, output ×5, defaults unchanged | Tasks 9, 11; plan notes 7, 12 |
 | §0.6 ledger components, provider, tier, read-time weighting, both parse paths | Tasks 7, 8, 10, 11 |
 | §0.7 one unit on every listed surface, the nine strings | Tasks 11-13 |
-| §0.8 TTL policy, ordering, no beta header | Tasks 14-16; plan note 14 |
+| §0.8 TTL policy, ordering, no beta header | Tasks 14-16; plan note 13 |
 | §0.9 OpenAI key; Gemini `cachedContent` excluded | Task 17; §3 (#351) untouched |
 | §0.10 uncacheable prompts in docs | Task 13 Step 2 |
 | §1 components (`StickyTools`, `CostWeights`, ledger, clients, docs) | Tasks 1, 9, 10, 14-17, 13 |
