@@ -417,6 +417,17 @@ actor IrisEngine {
 
     /// Peers this session could reach right now, excluding itself (#185 §6). Falls back to
     /// `SessionDirectory`'s own active-conversation count when no override was injected.
+    /// The `goal_complete` off-state refusal, or nil when the call may run. Main principal only,
+    /// never on a soft-stop turn (which clears its goal first and needs this as its way out).
+    private func goalCompleteRefusal(conversationId: UUID, restrictToGoalComplete: Bool) async -> String? {
+        guard principal == .main, !restrictToGoalComplete else { return nil }
+        let localState = state
+        let hasGoal = await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId })?.activeGoal != nil
+        }
+        return hasGoal ? nil : Self.noGoalRefusal
+    }
+
     private func sessionPeerCount(excluding conversationId: UUID) async -> Int {
         if let override = sessionPeerCountOverride { return override }
         guard let s = state else { return 0 }
@@ -447,6 +458,11 @@ actor IrisEngine {
     /// 5c §0.2: a sticky `amend_goal_contract` called with no locked contract (the goal ended, or a
     /// new draft is still under the user's review).
     nonisolated static let amendUnlockedRefusal = "Amend rejected — there is no locked goal contract to amend. Criteria change through this tool only while a goal is running."
+    /// 5c §0.2: a sticky `goal_complete` with no goal running. Refused before the tool-call pill,
+    /// so it leaves nothing in the transcript but this result; the model says its summary itself.
+    nonisolated static let noGoalRefusal = "Not run: no goal is active, so there is nothing to complete and nothing was shown to the user. Reply normally with your summary instead of calling goal_complete."
+    /// 5c §0.2: a sticky `reach_checkpoint` / `delegate_milestone` on a contract nobody approved.
+    nonisolated static let ladderUnlockedRefusal = "Not run: the goal contract is not locked, so its checkpoint ladder is not running. A draft's milestones start only once the user approves the contract."
     nonisolated static let goalCompleteOnlyInstruction = "Only goal_complete will run on this turn; any other tool call is refused."
 
     nonisolated static func formatDelay(_ seconds: TimeInterval) -> String {
@@ -1627,8 +1643,8 @@ actor IrisEngine {
         // `goal_complete` terminates a goal loop, so it is first offered only when there IS one, and
         // once declared, stays declared (5c §0.1). In a plain chat it has nothing to complete, and
         // the model reaching for it anyway used to raise the goal-completion panel over an ordinary
-        // conversation and fire an unrequested reflection turn (#84); the dispatcher's "No goal is
-        // active" refusal is what holds that once the goal has ended. The soft-stop turn is the
+        // conversation and fire an unrequested reflection turn (#84); the dispatcher's
+        // `noGoalRefusal`, before the tool-call pill, is what holds that once the goal has ended. The soft-stop turn is the
         // exception: it clears the goal first and then needs this tool as its only way out (the
         // dispatcher refuses every other tool on that turn).
         if hasActiveGoal || restrictToGoalComplete || sticky.contains("goal_complete") {
@@ -1917,6 +1933,7 @@ actor IrisEngine {
 
         var modelRound = 0
         var turnFinished = false
+        var goalCompleteReplyGranted = false   // see the terminal-tool check below
         // Why the loop stopped before the model replied, if it did; recorded in history below.
         var earlyEnd: String? = nil
         while !turnFinished {
@@ -2142,6 +2159,13 @@ actor IrisEngine {
                                         await self.pushToUI(role: .system, text: "[blocked] '\(call.name)' is unavailable — the goal loop was stopped. Call goal_complete.", conversationId: conversationId)
                                         return (index, "Blocked: the goal loop has been stopped after repeating an action too many times. '\(call.name)' is unavailable in this turn. Call goal_complete with a summary of what you accomplished and what is blocking you.")
                                     }
+                                    // 5c §0.2: a sticky goal_complete with no goal leaves no trace —
+                                    // refused before the pill, the panel and the summary push (#84).
+                                    if call.name == "goal_complete",
+                                       let refusal = await self.goalCompleteRefusal(conversationId: conversationId,
+                                                                                    restrictToGoalComplete: restrictToGoalComplete) {
+                                        return (index, refusal)
+                                    }
                                     let toolCallDict: [String: Any] = [
                                         "name": call.name,
                                         "args": call.args.mapValues { $0.anyValue }
@@ -2230,12 +2254,20 @@ actor IrisEngine {
                     // turn MUST end (the run is now paused). On its failure path ending the turn is
                     // also correct: the auto-reprompt re-arms the loop, so the main agent continues
                     // on the same milestone at the cost of one extra model call.
-                    if toolCalls.contains(where: {
-                        $0.name == "goal_complete" ||
-                        $0.name == "reach_checkpoint" ||
-                        $0.name == "delegate_milestone" ||
-                        $0.name == "submit_evaluation"
-                    }) {
+                    // 5c §0.2: a refused `goal_complete` (no goal) ended nothing, and its summary was
+                    // not shown, so the model gets one round to reply with it. Once per turn: plain
+                    // chat has no loop detector to stop a model that keeps re-issuing it.
+                    let refusedGoalComplete = toolCalls.indices.contains {
+                        toolCalls[$0].name == "goal_complete" && results[$0] == Self.noGoalRefusal
+                    }
+                    let terminal = toolCalls.indices.contains { i in
+                        let name = toolCalls[i].name
+                        if name == "goal_complete", results[i] == Self.noGoalRefusal, !goalCompleteReplyGranted { return false }
+                        return name == "goal_complete" || name == "reach_checkpoint" ||
+                            name == "delegate_milestone" || name == "submit_evaluation"
+                    }
+                    if refusedGoalComplete { goalCompleteReplyGranted = true }
+                    if terminal {
                         turnFinished = true
                     }
 
@@ -3623,16 +3655,14 @@ actor IrisEngine {
             }
         } else if functionCall.name == "goal_complete", let summary = functionCall.args["summary"]?.stringValue {
             // No goal to complete. The tool can still be declared in this state (it is sticky once
-            // declared, 5c §0.1), and a model can reach for it from stale context — and every effect below is goal machinery: the
-            // completion self-report is exactly what raises the panel in ChatView, and the
-            // skill-check reflection spends an extra autonomous turn the user never asked for.
-            // Surface what the model said and stop there (#84).
-            let hasGoalToComplete = await MainActor.run {
-                localState?.conversations.first(where: { $0.id == conversationId })?.activeGoal != nil
-            }
-            if principal == .main, !hasGoalToComplete, !restrictToGoalComplete {
-                await pushToUI(role: .agent, text: summary, conversationId: conversationId)
-                return "No goal is active, so there was nothing to complete — your summary was shown to the user. In an ordinary conversation, just reply normally instead of calling goal_complete."
+            // declared, 5c §0.1), and a model can reach for it from stale context — and every
+            // effect below is goal machinery: the completion self-report is exactly what raises the
+            // panel in ChatView, and the skill-check reflection spends an extra autonomous turn the
+            // user never asked for (#84). The dispatcher already refused this before the tool-call
+            // pill; this repeats it for any path that reaches the handler directly.
+            if let refusal = await goalCompleteRefusal(conversationId: conversationId,
+                                                       restrictToGoalComplete: restrictToGoalComplete) {
+                return refusal
             }
             // Ladder gate: with an active checkpoint ladder, `goal_complete` is valid ONLY at the
             // final checkpoint — before then the model must advance through checkpoints via
@@ -3733,6 +3763,11 @@ actor IrisEngine {
                 result = "No checkpoint ladder is active. Call goal_complete when the goal is finished."
                 return result
             }
+            // 5c §0.2: sticky, so it can outlive its goal into a later unapproved draft.
+            guard contract.isLocked else {
+                result = Self.ladderUnlockedRefusal
+                return result
+            }
             if contract.isFinalMilestone {
                 result = "This is the final checkpoint — call `goal_complete` to finish, not `reach_checkpoint`."
                 return result
@@ -3746,6 +3781,10 @@ actor IrisEngine {
             }
             guard let contract, contract.hasLadder else {
                 result = "No checkpoint ladder is active, so there is no milestone to delegate. Use `invoke_subagent` for ad-hoc delegation, or `goal_complete` when the goal is finished."
+                return result
+            }
+            guard contract.isLocked else {   // 5c §0.2, as reach_checkpoint above
+                result = Self.ladderUnlockedRefusal
                 return result
             }
             if contract.isFinalMilestone {

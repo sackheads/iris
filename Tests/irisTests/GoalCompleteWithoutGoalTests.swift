@@ -62,8 +62,11 @@ struct GoalCompleteWithoutGoalTests {
         #expect(conv?.lastGoalEvaluation == nil)
     }
 
-    @Test("the summary still reaches the user")
-    func summaryIsStillShown() async {
+    /// 5c §0.2 reverses #84's summary push: `goal_complete` is sticky now, so a refused call
+    /// leaves no trace beyond its result. What the model reported reaches the user through the
+    /// model's own next reply, which the refusal asks for and the turn gives it room to send.
+    @Test("the refusal asks the model to reply with its summary, and the turn lets it")
+    func summaryIsLeftToTheModel() async {
         let app = AppState()
         let id = UUID()
         app.createNewConversation(id: id)
@@ -72,8 +75,33 @@ struct GoalCompleteWithoutGoalTests {
         await engine.processInput("book my flights", source: "User", conversationId: id)
 
         let conv = app.conversations.first { $0.id == id }
-        #expect(conv?.messages.contains { $0.content.contains("Registered 3 flights") } == true,
-                "suppressing the panel must not swallow what the model reported")
+        #expect(conv?.messages.contains { $0.content.contains("Registered 3 flights") } == false,
+                "the harness must not push a refused call's summary")
+        #expect(client.callCount == 2, "the model got a round to reply after the refusal")
+        let results = conv?.history.flatMap(\.parts).compactMap { part -> String? in
+            guard case .string(let r)? = part.functionResponse?.response["result"] else { return nil }
+            return r
+        } ?? []
+        #expect(results == [IrisEngine.noGoalRefusal])
+        #expect(conv?.messages.contains { $0.content.contains("All done.") } == true)
+    }
+
+    /// Plain chat has no loop detector, so the reply round is granted once per turn: a model that
+    /// keeps calling goal_complete is stopped after its second call, as before 5c after its first.
+    @Test("a model that keeps calling goal_complete gets one reply round, not a loop")
+    func refusedGoalCompleteReplyIsBounded() async {
+        let app = AppState()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let client = RecordingClient([goalCompleteWithSelfReport])   // repeats forever
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        // Bounded, so an unbounded loop fails here rather than hanging the suite.
+        let ended = (try? await withTimeout(seconds: 10) { () -> Bool in
+            await engine.processInput("book my flights", source: "User", conversationId: id)
+            return true
+        }) ?? false
+        #expect(ended, "the turn never ended")
+        #expect(client.callCount == 2)
     }
 
     @Test("no skill-check reflection turn is fired in a plain chat")

@@ -162,8 +162,45 @@ import Foundation
 
     @Test func goalCompleteRefusesWithNoActiveGoal() async {
         let app = AppState(); let id = UUID(); app.createNewConversation(id: id)
-        let call = FunctionCall(name: "goal_complete", args: ["summary": .string("all done")], id: "c1")
+        let call = FunctionCall(name: "goal_complete", args: ["summary": .string("Registered 3 flights")], id: "c1")
         let result = await runToolCall(call, on: app, as: id, peerCount: 0)
-        #expect(result.hasPrefix("No goal is active, so there was nothing to complete"), Comment(rawValue: result))
+        #expect(result == IrisEngine.noGoalRefusal, Comment(rawValue: result))
+        // No trace beyond the refusal result: no summary push, no tool-call pill, no panel.
+        let conv = app.conversations.first { $0.id == id }
+        let messages = conv?.messages ?? []
+        #expect(!messages.contains { $0.content.contains("Registered 3 flights") }, "the summary was pushed")
+        #expect(!messages.contains { $0.content.contains("[TOOL_CALL]") || $0.content.contains("Running tool:") },
+                "the refused call left a pill")
+        #expect(messages.filter { $0.role == .system }.isEmpty, Comment(rawValue: messages.map(\.content).joined(separator: " | ")))
+        #expect(conv?.lastGoalCompletionReport == nil)
+    }
+
+    /// A draft with a ladder, as `propose_goal_contract` leaves it while the user reviews.
+    private func draftLadder(on app: AppState, _ id: UUID) {
+        app.createNewConversation(id: id)
+        let a = Criterion(text: "parser works", kind: .qualitative, check: nil)
+        let b = Criterion(text: "wired up", kind: .qualitative, check: nil)
+        var c = GoalContract(objective: "Ship the parser", criteria: [a, b])
+        c.milestones = [Milestone(title: "Parser", criterionIds: [a.id]),
+                        Milestone(title: "Integration", criterionIds: [b.id])]
+        app.setDraftContract(for: id, c)
+    }
+
+    @Test func reachCheckpointRefusesOnAnUnlockedDraft() async {
+        let app = AppState(); let id = UUID(); draftLadder(on: app, id)
+        #expect(app.conversations.first { $0.id == id }?.goalContract?.isLocked == false)
+        let call = FunctionCall(name: "reach_checkpoint", args: ["milestone_summary": .string("done")], id: "c1")
+        #expect(await runToolCall(call, on: app, as: id, peerCount: 0) == IrisEngine.ladderUnlockedRefusal)
+        let contract = app.conversations.first { $0.id == id }?.goalContract
+        #expect(contract?.currentMilestone == 0 && contract?.checkpointStatus == .running && contract?.isLocked == false)
+    }
+
+    @Test func delegateMilestoneRefusesOnAnUnlockedDraft() async {
+        let app = AppState(); let id = UUID(); draftLadder(on: app, id)
+        let before = app.conversations.count
+        let call = FunctionCall(name: "delegate_milestone",
+                                args: ["role": .string("engineer"), "effort": .string("low")], id: "c1")
+        #expect(await runToolCall(call, on: app, as: id, peerCount: 0) == IrisEngine.ladderUnlockedRefusal)
+        #expect(app.conversations.count == before, "no subagent conversation was spawned")
     }
 }
