@@ -68,6 +68,10 @@ struct EventCard: Codable, Equatable, Sendable {
     /// on every job card and on every card written before 5b.
     let sourceConversationId: UUID?
     let sourceTitle: String?
+    /// Whether the run was a model-free built-in (5b §0.8). Its outcome is the whole report — the
+    /// digest's failure and paused lines come after the first — so the card shows it as a body,
+    /// not a one-line summary. False on every model run and every card written before built-ins.
+    let builtin: Bool
 
     init(kind: String = "job_run",
          runId: UUID,
@@ -88,7 +92,8 @@ struct EventCard: Codable, Equatable, Sendable {
          network: Bool = false,
          watchSummary: WatchSummary? = nil,
          sourceConversationId: UUID? = nil,
-         sourceTitle: String? = nil) {
+         sourceTitle: String? = nil,
+         builtin: Bool = false) {
         self.kind = kind
         self.runId = runId
         self.jobId = jobId
@@ -109,6 +114,7 @@ struct EventCard: Codable, Equatable, Sendable {
         self.watchSummary = watchSummary
         self.sourceConversationId = sourceConversationId
         self.sourceTitle = sourceTitle
+        self.builtin = builtin
     }
 
     /// A card that fails to decode renders as raw JSON in the transcript, so every field a future
@@ -161,6 +167,20 @@ struct EventCard: Codable, Equatable, Sendable {
         // Invariant 1: absent on every job card and every card written before 5b.
         sourceConversationId = try container.decodeIfPresent(UUID.self, forKey: .sourceConversationId)
         sourceTitle = try container.decodeIfPresent(String.self, forKey: .sourceTitle)
+        // Invariant 1: absent on every card written before built-in jobs.
+        builtin = try container.decodeIfPresent(Bool.self, forKey: .builtin) ?? false
+    }
+
+    /// The most lines a job card's outcome body shows. Enough for a digest's job lines plus its
+    /// failure and paused lines on an ordinary day; the outcome itself is byte-capped upstream.
+    static let outcomeBodyLineLimit = 20
+
+    /// Whether a job card's outcome is drawn as a multi-line body under the summary row rather
+    /// than truncated into it: always for a built-in, and for any outcome with more than one line,
+    /// since a one-line row would hide everything after the first.
+    var outcomeIsBody: Bool {
+        guard !isReflection, let outcome, !outcome.isEmpty else { return false }
+        return builtin || outcome.contains(where: \.isNewline)
     }
 
     // MARK: Reflection cards (5b §0.6)

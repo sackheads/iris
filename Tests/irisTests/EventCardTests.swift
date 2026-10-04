@@ -79,6 +79,46 @@ struct EventCardTests {
         #expect(decoded?.totalTokens == 4_200)
     }
 
+    // MARK: The outcome body (5b §0.7: the digest's later lines must be visible)
+
+    private func builtinCard(outcome: String?, builtin: Bool, kind: String = "job_run") -> EventCard {
+        EventCard(kind: kind, runId: UUID(), jobId: UUID(), jobName: "Daily digest", status: .completed,
+                  outcome: outcome, startedAt: Self.started, finishedAt: Self.finished, builtin: builtin)
+    }
+
+    @Test("a built-in's outcome is a body, even on one line; a model run's one-line outcome is not")
+    func builtinOutcomeIsABody() {
+        #expect(builtinCard(outcome: "\"a\": 1 completed, 0 failed", builtin: true).outcomeIsBody)
+        #expect(!builtinCard(outcome: "swept 3 PRs", builtin: false).outcomeIsBody)
+    }
+
+    @Test("any multi-line outcome is a body, so the paused line after the first is not clipped")
+    func multiLineOutcomeIsABody() {
+        let digest = "\"a\": 1 completed, 0 failed\nPaused: \"b\" · paused (job 12345678)"
+        #expect(builtinCard(outcome: digest, builtin: false).outcomeIsBody)
+        #expect(builtinCard(outcome: digest, builtin: true).outcomeIsBody)
+    }
+
+    @Test("no outcome, an empty one, or a reflection card is never a job body")
+    func noBodyWithoutAnOutcome() {
+        #expect(!builtinCard(outcome: nil, builtin: true).outcomeIsBody)
+        #expect(!builtinCard(outcome: "", builtin: true).outcomeIsBody)
+        // A reflection draws its own body.
+        #expect(!builtinCard(outcome: "a\nb", builtin: false, kind: EventCard.reflectionKind).outcomeIsBody)
+        #expect(EventCard.outcomeBodyLineLimit > 1)
+    }
+
+    @Test("builtin survives the round trip, and a card without it decodes false")
+    func builtinDecodes() {
+        let original = builtinCard(outcome: "x", builtin: true)
+        #expect(EventCard.decode(original.encodedContent())?.builtin == true)
+        let older = """
+        {"runId":"\(UUID().uuidString)","jobId":"\(UUID().uuidString)","jobName":"pr-sweep",\
+        "startedAt":"2023-11-14T22:13:20Z","finishedAt":"2023-11-14T22:14:35Z","totalTokens":4200}
+        """
+        #expect(EventCard.decode(older)?.builtin == false)
+    }
+
     // MARK: The watch figures (#187 deliverable 4, spec §6)
 
     @Test("a card without a watch summary, or with one this build cannot read, decodes with nil")

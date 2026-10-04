@@ -108,6 +108,9 @@ struct BuiltinJobTests {
         #expect(card.outcome == "3 jobs ran yesterday")
         #expect(card.totalTokens == 0)
         #expect(card.transcriptConversationId == nil)
+        // Drawn as a body, so a multi-line report is not cut to its first line.
+        #expect(card.builtin)
+        #expect(card.outcomeIsBody)
         #expect(state.conversations.first { $0.id == state.activityConversationId() }?
                     .messages.contains { $0.role == .event } == true, "delivered to Iris, the default destination")
     }

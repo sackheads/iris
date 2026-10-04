@@ -4,7 +4,11 @@ import SwiftUI
 /// a notification, not a conversation turn, so it gets a status dot and one row of text rather
 /// than a labelled "Iris" bubble.
 ///
-/// A run that stopped on a call it was not allowed to make is the exception, and grows a second
+/// A built-in job's card, or any outcome of more than one line, is the first exception: its outcome
+/// is drawn as a body under the row (`EventCard.outcomeIsBody`), since the digest's failure and
+/// paused lines come after its first line and a one-line row would hide them.
+///
+/// A run that stopped on a call it was not allowed to make is the other exception, and grows a second
 /// half (§6): the whole call — tool, every argument, a preview of a long body — with Vibecop's
 /// opinion of it and the two things a person can do about it. An approval given without sight of
 /// the payload is worse than no button.
@@ -72,6 +76,14 @@ struct EventCardView: View {
     @ViewBuilder
     private var jobRun: some View {
         summary
+        if card.outcomeIsBody {
+            Text(card.outcome ?? "")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(EventCard.outcomeBodyLineLimit)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 18)
+        }
         // What the catch-up dropped, on the first run of a replay burst (#187 §5). Its own
         // line rather than part of the summary: it is news about the schedule, and putting it
         // beside the outcome would push the thing the run actually did off the end.
@@ -95,7 +107,9 @@ struct EventCardView: View {
                 .lineLimit(1)
             // The outcome is the interesting half of the line; the status word only takes its
             // place when there is no outcome, since the dot already carries the status.
-            Text(card.outcome.flatMap { $0.isEmpty ? nil : $0 } ?? card.statusDetail)
+            // A body outcome is drawn below, so the row keeps the status word instead.
+            Text(card.outcomeIsBody ? card.statusDetail
+                 : card.outcome.flatMap { $0.isEmpty ? nil : $0 } ?? card.statusDetail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

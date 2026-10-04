@@ -682,7 +682,7 @@ actor JobRunner {
                                 outcome: Self.cardOutcome(builtin == nil ? "paused" : outcome,
                                                           retry: retry, now: finishedAt),
                                 startedAt: startedAt, finishedAt: finishedAt,
-                                catchUpNote: note), for: job)
+                                catchUpNote: note, builtin: true), for: job)
     }
 
     /// Records a gate that could not answer, and pauses the job on the third in a row (§7).
