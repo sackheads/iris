@@ -4372,7 +4372,7 @@ extension IrisEngine {
                 "grants": job.effectiveGrant.map(jsonObject) ?? NSNull(),
                 // Null, never zero, when the ledger would not answer: "spent nothing today" is a
                 // claim, and an unread figure is not one.
-                "tokensToday": figures?.tokensToday ?? NSNull(),
+                "weightedTokensToday": figures?.weightedTokensToday ?? NSNull(),
                 "dailyBudget": figures?.limits.dailyTokens ?? NSNull(),
                 "runsLastHour": figures?.runsLastHour ?? NSNull(),
                 "maxRunsPerHour": figures?.limits.maxRunsPerHour ?? NSNull(),
@@ -4385,7 +4385,7 @@ extension IrisEngine {
         let body: [String: Any] = [
             "jobs": rows,
             "unreadableJobs": unreadableJobs,
-            "tokensTodayAllJobs": usage.global?.tokensToday ?? NSNull(),
+            "weightedTokensTodayAllJobs": usage.global?.weightedTokensToday ?? NSNull(),
             "globalDailyBudget": usage.global?.dailyBudget ?? NSNull(),
         ]
         return jsonString(body) ?? "{\"jobs\":[],\"unreadableJobs\":0}"
@@ -4417,6 +4417,12 @@ extension IrisEngine {
             "promptTokens": run.promptTokens,
             "candidateTokens": run.candidateTokens,
             "totalTokens": run.totalTokens,
+            "cacheReadTokens": run.cacheReadTokens,
+            "cacheWriteTokens": run.cacheWriteTokens,
+            "cacheWrite1hTokens": run.cacheWrite1hTokens,
+            "provider": run.provider ?? NSNull(),
+            // Priced at read time from the row's own components and provider (5c §0.6).
+            "weightedTokens": CostWeights.weighted(run.components, provider: run.provider),
             "costMicros": run.costMicros ?? NSNull(),
             "gateSignal": gateSignal ?? NSNull(),
             "transcriptConversationId": run.transcriptConversationId?.uuidString ?? NSNull(),

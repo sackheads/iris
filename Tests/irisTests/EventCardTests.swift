@@ -79,6 +79,30 @@ struct EventCardTests {
         #expect(decoded?.totalTokens == 4_200)
     }
 
+    /// Plan ruling 10: a card written before 5c froze a raw `totalTokens`, which was true when it
+    /// was written, so it keeps saying "tokens". A new card carries the run's weighted total and
+    /// says "weighted tokens".
+    @Test func newCardsSayWeightedOldCardsDoNot() throws {
+        let base = """
+        {"runId":"\(UUID().uuidString)","jobId":"\(UUID().uuidString)","jobName":"pr-sweep",\
+        "startedAt":"2023-11-14T22:13:20Z","finishedAt":"2023-11-14T22:14:35Z","totalTokens":4200
+        """
+        let old = try #require(EventCard.decode(base + "}"))
+        #expect(old.weightedTokens == nil)
+        #expect(old.metadataLine.hasSuffix("4.2k tokens"))
+        #expect(old.transcriptLine.contains("· 4.2k tokens]"))
+        #expect(!old.metadataLine.contains("weighted"))
+
+        let new = try #require(EventCard.decode(base + ",\"weightedTokens\":1300}"))
+        #expect(new.weightedTokens == 1_300)
+        #expect(new.totalTokens == 4_200, "the raw figure is kept")
+        #expect(new.metadataLine.hasSuffix("1.3k weighted tokens"))
+        #expect(new.transcriptLine.contains("· 1.3k weighted tokens]"))
+
+        let roundTripped = try #require(EventCard.decode(new.encodedContent()))
+        #expect(roundTripped.weightedTokens == 1_300)
+    }
+
     // MARK: The outcome body (5b §0.7: the digest's later lines must be visible)
 
     private func builtinCard(outcome: String?, builtin: Bool, kind: String = "job_run") -> EventCard {

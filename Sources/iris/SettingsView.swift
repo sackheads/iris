@@ -25,9 +25,9 @@ enum JobLimitSetting: String, CaseIterable, Sendable {
 
     var title: String {
         switch self {
-        case .perRunTokens: return "Tokens one run may spend"
-        case .dailyTokens: return "Tokens one job may spend a day"
-        case .globalDailyTokens: return "Tokens all jobs may spend a day"
+        case .perRunTokens: return "Weighted tokens one run may spend"
+        case .dailyTokens: return "Weighted tokens one job may spend a day"
+        case .globalDailyTokens: return "Weighted tokens all jobs may spend a day"
         case .maxRunsPerHour: return "Runs per scheduled job per hour"
         case .maxRunsPerHourForWatch: return "Runs per watch per hour"
         case .runTimeoutSeconds: return "Wall clock one run may take"
@@ -37,7 +37,7 @@ enum JobLimitSetting: String, CaseIterable, Sendable {
     var help: String {
         switch self {
         case .perRunTokens:
-            return "A run that reaches this is stopped between model rounds and its card says so."
+            return "A run that reaches this is stopped between model rounds and its card says so. Weighted tokens count an uncached input token as 1, an output token as 5, and cache reads and writes at the provider's own ratio, so a run that mostly reads its cache spends far less than its raw token count."
         case .dailyTokens:
             return "A job whose spend for the local day has reached this pauses instead of firing."
         case .globalDailyTokens:
@@ -1001,7 +1001,7 @@ struct SettingsView: View {
                                 in: limit.range, step: limit.step)
                             .help(limit.help)
                     }
-                    Text("A stepper at its default uses the figure Iris ships with, and steps up or down from it; wind one down to zero to go back to the default. `/jobs` shows what each job has sent today against these numbers.")
+                    Text("A stepper at its default uses the figure Iris ships with, and steps up or down from it; wind one down to zero to go back to the default. `/jobs` shows what each job has spent today in weighted tokens against these numbers.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

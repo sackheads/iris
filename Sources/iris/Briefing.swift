@@ -14,10 +14,16 @@ enum Briefing {
     static let heading = "Recent Activity"
     static let recentCap = 5
 
-    /// The literal prefix `JobRunner.budgetReason` writes before its numbers ("daily token budget
-    /// reached (job): 620000 / 1000000"). Matched by prefix because the figures vary; spelled once
-    /// here rather than reaching into `JobRunner`'s formatter.
-    private static let budgetReasonPrefix = "daily token budget reached"
+    /// The literal prefix `JobRunner.budgetReason` writes before its numbers ("daily weighted-token
+    /// budget reached (job): 620000 / 1000000"). Matched by prefix because the figures vary; spelled
+    /// once here rather than reaching into `JobRunner`'s formatter.
+    private static let budgetReasonPrefix = "daily weighted-token budget reached"
+
+    /// Either spelling of a daily-budget pause: the current one, or the one rows and paused jobs
+    /// written before 5c still carry (`JobRunner.legacyBudgetReasonPrefix`).
+    private static func isBudgetReason(_ reason: String) -> Bool {
+        reason.hasPrefix(budgetReasonPrefix) || reason.hasPrefix(JobRunner.legacyBudgetReasonPrefix)
+    }
 
     /// `knownTools` defaults to the live declared surface so production call sites get it for
     /// free; tests pass their own set to keep this function pure and dependency-free.
@@ -63,7 +69,7 @@ enum Briefing {
         if failureReason == TurnBudget.weightedTokensExceeded || failureReason == TurnBudget.legacyTokensExceeded {
             return "budget"
         }
-        if failureReason.hasPrefix(budgetReasonPrefix) { return "budget" }
+        if isBudgetReason(failureReason) { return "budget" }
         if failureReason == JobRunner.gateFailingReason { return "gate error" }
         if failureReason.hasPrefix(JobRunner.gateErrorPrefix) { return "gate error" }
         if failureReason == JobRunner.skipReason { return "overlap" }
@@ -83,7 +89,7 @@ enum Briefing {
         guard let pausedReason else { return "paused" }
         if pausedReason.hasPrefix(JobRunner.unknownBuiltinReason) { return JobRunner.unknownBuiltinReason }
         if pausedReason == JobRunner.retriesExhaustedReason { return "failed 3 times" }
-        if pausedReason.hasPrefix(budgetReasonPrefix) { return "budget" }
+        if isBudgetReason(pausedReason) { return "budget" }
         if pausedReason == JobRunner.gateFailingReason { return "gate" }
         return "paused"
     }

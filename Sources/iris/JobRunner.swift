@@ -249,8 +249,12 @@ actor JobRunner {
     /// The pause reason an exhausted daily budget writes. It names the figure that tripped it
     /// (§9): "reached its budget" without the number leaves a person with nothing to decide on.
     static func budgetReason(scope: String, used: Int, limit: Int) -> String {
-        "daily token budget reached (\(scope)): \(used) / \(limit)"
+        "daily weighted-token budget reached (\(scope)): \(used) / \(limit)"
     }
+
+    /// The prefix the reason above wrote before 5c. Never written now; still matched, because
+    /// rows and paused jobs written then keep it.
+    static let legacyBudgetReasonPrefix = "daily token budget reached"
 
     /// What an unreadable ledger writes on the row it skips a fire with. Not a pause: the read
     /// that failed is a transient database error, and pausing the job would turn one bad query
@@ -1144,6 +1148,8 @@ actor JobRunner {
                              blockedTool: blockedTool,
                              startedAt: startedAt, finishedAt: finishedAt,
                              totalTokens: turn.tokens.totalTokenCount,
+                             weightedTokens: CostWeights.weighted(turn.tokens.components,
+                                                                  provider: run.provider),
                              transcriptConversationId: conversationId,
                              // The card keeps a display copy: the ledger holds the call that
                              // gets re-dispatched, and a long body belongs in one place only.
@@ -1776,7 +1782,7 @@ actor JobRunner {
     }
 
     /// The budget a stop line names, if that is what stopped the turn. The reason on its own, not
-    /// the whole line: the row and the card say "budget: tokens exceeded — retrying in 1 m", and
+    /// the whole line: the row and the card say "budget: weighted tokens exceeded — retrying in 1 m", and
     /// the origin prefix and the marker sentence are for the person reading the transcript.
     static func budgetStopReason(in messages: [ChatMessage]) -> String? {
         guard let line = softStopLine(in: messages), line.contains(IrisEngine.budgetStopMarker)

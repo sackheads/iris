@@ -170,6 +170,10 @@ struct DelegatedSpendTests {
         let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
         let card = try #require(activity.messages.compactMap { EventCard.decode($0.content) }.first)
         #expect(card.totalTokens == 120, "the card shows the same figure as the row")
+        // 5c: weighted at the isolated config's provider (Gemini): 117 prompt + 3 output × 5.
+        #expect(card.weightedTokens == 117 + 15)
+        #expect(card.weightedTokens == CostWeights.weighted(run.components, provider: run.provider),
+                "and the card's weighted figure is the row's, priced the same way")
     }
 
     @Test("parallel subagents in one tool batch are each charged once")

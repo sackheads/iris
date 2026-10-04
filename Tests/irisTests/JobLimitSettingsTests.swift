@@ -113,6 +113,16 @@ struct JobLimitSettingsTests {
         }
     }
 
+    /// 5c §0.7: the three token rows name the unit they are compared in.
+    @Test("each token row's title says weighted tokens, and one help line says what that means")
+    func tokenRowsSayWeighted() {
+        let tokenRows: [JobLimitSetting] = [.perRunTokens, .dailyTokens, .globalDailyTokens]
+        for limit in tokenRows {
+            #expect(limit.title.contains("Weighted tokens"), "\(limit.configKey): \(limit.title)")
+        }
+        #expect(JobLimitSetting.perRunTokens.help.contains("an output token as 5"))
+    }
+
     @Test("a zero on the stepper reads as the default it will actually use")
     func labelsSayWhatZeroMeans() {
         for limit in JobLimitSetting.allCases {

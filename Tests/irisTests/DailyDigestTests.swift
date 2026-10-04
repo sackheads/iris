@@ -73,8 +73,8 @@ struct DailyDigestTests {
 
         #expect(result.card)
         let lines = result.outcome.components(separatedBy: "\n")
-        #expect(lines.contains("\u{201C}sweep\u{201D}: 3 completed, 0 failed · 300/1000 tokens today"))
-        #expect(lines.contains("\u{201C}fetch\u{201D}: 0 completed, 1 failed · 0/1000 tokens today"))
+        #expect(lines.contains("\u{201C}sweep\u{201D}: 3 completed, 0 failed · 300/1000 weighted tokens today"))
+        #expect(lines.contains("\u{201C}fetch\u{201D}: 0 completed, 1 failed · 0/1000 weighted tokens today"))
         let shortRun = String(failed.id.uuidString.lowercased().prefix(8))
         #expect(lines.contains("Unacknowledged failure: \u{201C}fetch\u{201D} · failed (run \(shortRun))"))
         let shortJob = String(idle.id.uuidString.lowercased().prefix(8))
@@ -184,7 +184,7 @@ struct DailyDigestTests {
         let lines = crowded.outcome.components(separatedBy: "\n")
         let last = try #require(lines.last)
         #expect(last.hasPrefix("… and ") && last.hasSuffix(" more lines"), "got: \(last)")
-        #expect(lines.dropLast().allSatisfy { $0.contains(" tokens today") }, "no half lines")
+        #expect(lines.dropLast().allSatisfy { $0.contains(" weighted tokens today") }, "no half lines")
     }
 
     // MARK: Registration
@@ -350,7 +350,7 @@ struct DailyDigestTests {
         #expect(cards.count == 1)
         #expect(card.jobName == DailyDigest.jobName)
         // 1000 is the runner's injected budget (isolatedConfig), not the process-global default.
-        #expect(card.outcome?.hasPrefix("\u{201C}sweep\u{201D}: 1 completed, 0 failed · 40/1000 tokens today") == true,
+        #expect(card.outcome?.hasPrefix("\u{201C}sweep\u{201D}: 1 completed, 0 failed · 40/1000 weighted tokens today") == true,
                 "got: \(card.outcome ?? "nil")")
         #expect(card.outcome?.contains("OUTCOME-TEXT") == false)
     }
