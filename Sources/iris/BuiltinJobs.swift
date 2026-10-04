@@ -20,8 +20,8 @@ struct BuiltinResult: Equatable, Sendable {
 /// The registry of built-ins, keyed by name, so the next model-free job is one entry rather than a
 /// schema change.
 enum BuiltinJobs {
-    /// What production runs. Empty until the daily digest registers itself (Task 12).
-    static let registry: [String: any BuiltinJob] = [:]
+    /// What production runs.
+    static let registry: [String: any BuiltinJob] = [DailyDigest.name: DailyDigest()]
 
     /// A test's own registry, in place of `registry` for the task that sets it — never a mutation
     /// of a shared table (invariant 7).

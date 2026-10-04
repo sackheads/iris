@@ -42,7 +42,10 @@ enum Briefing {
     /// harness-authority turn context as `blocked: <name>` (#187 review). Checked against the real
     /// declared surface rather than a character-shape check: a plausible-looking fake tool name
     /// passes any character check that a real one would.
-    private static func reason(_ run: JobRun, knownTools: Set<String>) -> String {
+    ///
+    /// Internal rather than private: the daily digest (5b §0.7) names failures with the same
+    /// harness-owned words, so a card and the briefing cannot describe one run differently.
+    static func reason(_ run: JobRun, knownTools: Set<String> = IrisEngine.allDeclaredToolNames) -> String {
         if run.status == .blockedOnApproval, let tool = run.blockedTool, knownTools.contains(tool) {
             return "blocked: \(tool)"
         }
@@ -62,6 +65,7 @@ enum Briefing {
         if failureReason == JobRunner.gateFailingReason { return "gate error" }
         if failureReason.hasPrefix(JobRunner.gateErrorPrefix) { return "gate error" }
         if failureReason == JobRunner.skipReason { return "overlap" }
+        if failureReason.hasPrefix(JobRunner.unknownBuiltinReason) { return JobRunner.unknownBuiltinReason }
         // NOT `releasedReason` ("app state released"): that row keeps its transcriptConversationId
         // — a real run the app quit or tore down mid-turn, not an overlap — and does reach
         // `recentRuns`. Nothing overlapped, so it falls back to `status.text` ("interrupted")
@@ -72,8 +76,9 @@ enum Briefing {
     /// Same idea for `Job.pausedReason`: budget, three failed retries, or a failing gate map to a
     /// word; anything else — a breaker trip, an operator's own note typed at `/jobs pause` — is
     /// just "paused".
-    private static func pausedWord(_ pausedReason: String?) -> String {
+    static func pausedWord(_ pausedReason: String?) -> String {
         guard let pausedReason else { return "paused" }
+        if pausedReason.hasPrefix(JobRunner.unknownBuiltinReason) { return JobRunner.unknownBuiltinReason }
         if pausedReason == JobRunner.retriesExhaustedReason { return "failed 3 times" }
         if pausedReason.hasPrefix(budgetReasonPrefix) { return "budget" }
         if pausedReason == JobRunner.gateFailingReason { return "gate" }
@@ -136,5 +141,5 @@ enum Briefing {
     /// the real end of the name.
     static func quoted(_ raw: String) -> String { "\u{201C}\(name(raw))\u{201D}" }
 
-    private static func short(_ id: UUID) -> String { String(id.uuidString.lowercased().prefix(8)) }
+    static func short(_ id: UUID) -> String { String(id.uuidString.lowercased().prefix(8)) }
 }

@@ -1408,6 +1408,23 @@ extension ConversationStore {
         }
     }
 
+    /// Sets `key` only if it has never been set, in one statement, and says whether this call set
+    /// it — a claim two concurrent callers cannot both win (`DailyDigest.registerDigestOnce`).
+    func insertMetaValueIfAbsent(_ value: String, forKey key: String) throws -> Bool {
+        try writer.write { db in
+            try db.execute(sql: "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+                           arguments: [key, value])
+            return db.changesCount > 0
+        }
+    }
+
+    /// Removes `key`; a no-op when it was never set.
+    func removeMetaValue(forKey key: String) throws {
+        try writer.write { db in
+            try db.execute(sql: "DELETE FROM meta WHERE key = ?", arguments: [key])
+        }
+    }
+
     /// Generic `meta` set by key, overwriting any previous value.
     func setMetaValue(_ value: String, forKey key: String) throws {
         try writer.write { db in

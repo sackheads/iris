@@ -132,8 +132,8 @@ struct BuiltinJobTests {
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).map(\.status) == [.completed])
     }
 
-    @Test("a built-in name nothing registered fails its row with \"unknown built-in\"")
-    func unknownBuiltinFails() async throws {
+    @Test("a built-in name nothing registered fails its row and pauses the job on the first failure")
+    func unknownBuiltinFailsAndPauses() async throws {
         let (store, state, engine, client) = try harness()
         let job = builtinJob(action: "no_such_thing")
         try store.ledger.upsert(job)
@@ -148,11 +148,19 @@ struct BuiltinJobTests {
 
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 10).first)
         #expect(run.status == .failed)
-        #expect(run.failureReason == JobRunner.unknownBuiltinReason)
-        #expect(JobRunner.unknownBuiltinReason == "unknown built-in")
+        #expect(run.failureReason == "unknown built-in: no_such_thing")
         #expect(run.transcriptConversationId == nil)
         #expect(client.callCount == 0)
         #expect(state.conversations.filter(\.isBackground).isEmpty)
+        // Not the retry ladder: retrying cannot register the name.
+        let stored = try #require(try store.ledger.job(id: job.id))
+        #expect(stored.pausedReason == "unknown built-in: no_such_thing")
+        #expect(stored.retryAttempt == 0)
+        let card = try #require(eventCards(state).first)
+        #expect(card.outcome == "paused — unknown built-in: no_such_thing")
+        // The briefing names it with its fixed word rather than echoing the stored text.
+        #expect(Briefing.pausedWord(stored.pausedReason) == "unknown built-in")
+        #expect(Briefing.reason(run, knownTools: []) == "unknown built-in")
     }
 
     @Test("with the global daily budget spent, a built-in still runs and a prompt job is refused")

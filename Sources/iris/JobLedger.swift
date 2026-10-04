@@ -558,6 +558,40 @@ extension JobLedger {
                        JobRunner.gateUnchangedOutcome + "%", limit])
     }
 
+    /// The daily digest's window (5b §0.7): runs that started in `[since, until)`, oldest first,
+    /// with `recentRuns`' exclusions — no running rows, no gate-unchanged completions, no stillborn
+    /// skip rows and no built-in runs (the digest's own included). Unbounded on purpose: the digest
+    /// counts, and a count over a capped listing is a wrong count. It reads rows, not text, and
+    /// the card it builds is capped in bytes.
+    func digestRuns(since: Date, until: Date) throws -> [JobRun] {
+        try decodeRuns(
+            sql: """
+                SELECT * FROM job_runs
+                WHERE startedAt >= ? AND startedAt < ?
+                  AND status != ?
+                  AND NOT (status = ? AND transcriptConversationId IS NULL)
+                  AND (outcome IS NULL OR outcome NOT LIKE ?)
+                  AND jobId NOT IN (SELECT id FROM jobs WHERE action LIKE 'builtin:%')
+                ORDER BY startedAt, rowid
+                """,
+            arguments: [since, until, JobRun.Status.running.rawValue, JobRun.Status.interrupted.rawValue,
+                       JobRunner.gateUnchangedOutcome + "%"])
+    }
+
+    /// When the newest *completed* run of any job whose action is `action` started, strictly
+    /// before `before` — the previous digest, from inside the digest's own run (whose row is
+    /// already `running` at `before`). A failed run posted nothing, so it does not close a window.
+    func lastCompletedRunStart(action: JobAction, before: Date) throws -> Date? {
+        try writer.read { db in
+            try Date.fetchOne(db, sql: """
+                SELECT startedAt FROM job_runs
+                WHERE status = ? AND startedAt < ?
+                  AND jobId IN (SELECT id FROM jobs WHERE action = ?)
+                ORDER BY startedAt DESC, rowid DESC LIMIT 1
+                """, arguments: [JobRun.Status.completed.rawValue, before, action.stored])
+        }
+    }
+
     /// How many of this job's runs started a turn at or after `since` — the breaker's question,
     /// asked with `since = now - 1h`. Inclusive at the boundary, like `dueJobs`.
     ///

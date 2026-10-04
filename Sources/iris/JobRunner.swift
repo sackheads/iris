@@ -216,7 +216,9 @@ actor JobRunner {
     ///
     /// `countsTokens` is false for a run that spends none — a built-in (5b §0.8) — which skips both
     /// budgets: a spent daily budget would otherwise refuse a zero-token run on exactly the day the
-    /// digest matters. Everything else, the breaker included, still applies to it.
+    /// digest matters. The pause and overlap checks still apply to it. The breaker is asked too but
+    /// cannot trip for one: `runsStarted` counts only rows with a transcript, and a built-in's row
+    /// never has one, so its `runsLastHour` is always zero.
     static func admit(job: Job, inFlight: Bool, runsLastHour: Int,
                       tokensTodayJob: Int, tokensTodayAll: Int, countsTokens: Bool,
                       limits: JobLimits) -> Admission {
@@ -620,8 +622,11 @@ actor JobRunner {
                     job: job, status: status)
     }
 
-    /// What an unregistered built-in name writes on its failed row.
+    /// The prefix of what an unregistered built-in name writes on its failed row and its pause:
+    /// `"unknown built-in: <name>"`.
     static let unknownBuiltinReason = "unknown built-in"
+
+    static func unknownBuiltinReason(_ name: String) -> String { "\(unknownBuiltinReason): \(name)" }
 
     /// A built-in fire (5b §0.8): a row with no transcript, the built-in awaited in place of a
     /// turn, and a card only if it asks for one. Modelled on `recordGateRow` — begin, finish, then
@@ -644,13 +649,14 @@ actor JobRunner {
         let outcome: String?
         let failureReason: String?
         let card: Bool
-        if let builtin = BuiltinJobs.named(name) {
+        let builtin = BuiltinJobs.named(name)
+        if let builtin {
             let result = await builtin.run(ledger: ledger, now: startedAt, calendar: calendar)
             (status, outcome, failureReason, card) = (.completed, result.outcome, nil, result.card)
         } else {
             // Always carded: a scheduled job that silently does nothing is the failure the ledger
             // and the cards exist to surface.
-            (status, outcome, failureReason, card) = (.failed, nil, Self.unknownBuiltinReason, true)
+            (status, outcome, failureReason, card) = (.failed, nil, Self.unknownBuiltinReason(name), true)
         }
         let finishedAt = now()
         do {
@@ -660,16 +666,21 @@ actor JobRunner {
         } catch {
             print("[JobRunner] could not close the run for \(job.name): \(error)")
         }
-        let retry = Self.retryDecision(status: status, attempt: job.retryAttempt,
-                                       retryEnabled: job.policy.retry,
-                                       watcherFire: Self.isPathDriven(origin: origin, job: job),
-                                       now: finishedAt)
+        // An unknown name pauses on the first failure: retrying cannot register it, so the
+        // ladder would only post three more identical cards before pausing anyway.
+        let retry: RetryDecision = builtin == nil
+            ? .pause(reason: Self.unknownBuiltinReason(name))
+            : Self.retryDecision(status: status, attempt: job.retryAttempt,
+                                 retryEnabled: job.policy.retry,
+                                 watcherFire: Self.isPathDriven(origin: origin, job: job),
+                                 now: finishedAt)
         await apply(retry, job: job, status: status)
         guard card else { return }
         await deliver(EventCard(kind: "job_run", runId: run.id, jobId: job.id, jobName: job.name,
                                 status: status,
-                                outcome: Self.cardOutcome(outcome ?? failureReason, retry: retry,
-                                                          now: finishedAt),
+                                // The unknown-name pause reason already says what failed.
+                                outcome: Self.cardOutcome(builtin == nil ? "paused" : outcome,
+                                                          retry: retry, now: finishedAt),
                                 startedAt: startedAt, finishedAt: finishedAt,
                                 catchUpNote: note), for: job)
     }

@@ -203,6 +203,19 @@ struct JobToolsTests {
         #expect((rows2[0]["policy"] as? String)?.contains("grant") == false)
     }
 
+    @Test("list_jobs says whether a job is a model turn or a built-in, and the description explains it")
+    func listJobsCarriesAction() throws {
+        let builtin = Job(name: "Daily digest", prompt: "", trigger: .schedule(.interval(seconds: 60)),
+                          action: .builtin("daily_digest"))
+        let json = IrisEngine.jobsListJSON([job(), builtin], lastStatuses: [:], usage: .empty, unreadableJobs: 0)
+        let body = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let rows = try #require(body["jobs"] as? [[String: Any]])
+        #expect(rows.map { $0["action"] as? String } == ["prompt", "builtin:daily_digest"])
+        let description = IrisEngine.jobToolDeclarations(isPinned: true).first { $0.name == "list_jobs" }?.description ?? ""
+        #expect(description.contains("`action`"))
+        #expect(description.contains("builtin:<name>"))
+    }
+
     @Test("a job whose figures could not be read still lists, with nulls rather than zeros")
     func listJobsFiguresLenient() throws {
         let j = job()

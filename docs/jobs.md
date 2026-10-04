@@ -668,9 +668,41 @@ place of a model turn: no background conversation is opened, no model is called,
 run ledger has zero tokens and no transcript. It posts a card only when it has something to say. The
 token budgets do not apply to it, since it spends none; scheduling, catch-up, overlap, retries and
 `/jobs` treat it like any other job. `schedule_job` cannot create one — built-ins are registered by
-Iris itself — and a built-in name this build does not know fails its run with `unknown built-in`.
-`get_job_run` on a built-in's run returns its outcome and says there is no transcript. Built-in runs
-are left out of the briefing's recent runs.
+Iris itself — and a built-in name this build does not know fails its run with
+`unknown built-in: <name>` and pauses the job on that first failure, since retrying cannot make the
+name known. `get_job_run` on a built-in's run returns its outcome and says there is no transcript,
+and `list_jobs` gives every job an `action` of `prompt` or `builtin:<name>`. Built-in runs are left
+out of the briefing's recent runs.
+
+#### The daily digest
+
+The one built-in so far. Every morning at **10:00 local time** it posts one card to Iris built
+straight from the run ledger, and it **never calls a model**: it costs nothing and cannot invent
+anything. The card covers the runs since the previous digest (the last 24 hours the first time):
+
+- one line per job that ran — `sweep: 3 completed, 1 failed · 620000/1000000 tokens today`, with
+  blocked or interrupted runs counted on the end of the line when there are any, and the tokens
+  sent today against that job's daily budget;
+- one line per failure nobody has acknowledged, and one per paused job, named with the same fixed
+  words the briefing uses (`failed`, `timeout`, `budget`, `failed 3 times`, …).
+
+It never copies a run's own outcome or failure text — those can carry words a run fetched; ask
+Iris, or use `get_job_run`, to read them. A day on which nothing ran posts nothing. The card is
+capped at 4 KB, cut on a whole line with a count of what was left out. A Mac asleep through 10:00
+gets one digest when it wakes, covering everything since the last one (`catchUp: coalesce`).
+
+It is an ordinary job named `Daily digest`, created the first time Iris launches with this build
+(`Daily digest (built-in)` if you already have a job with that name), with the cron schedule
+`0 10 * * *` in the Mac's time zone at that moment. `/jobs pause Daily digest` and
+`/jobs resume Daily digest` stop and restart it, and `/jobs run Daily digest` runs it now
+(posting a card only if something ran since the last one).
+**This build has no way to move it off 10:00**: `schedule_job` never edits a built-in and `/jobs`
+has no reschedule verb, so the choices are its time, paused, or gone. `/jobs delete Daily digest`
+removes it **for good** — Iris records that it registered the digest once and never recreates it,
+on this or any later launch.
+
+A build from before the digest ignores a job's action and would run its prompt as a model turn, so
+the digest's prompt only asks the model to reply that the digest was skipped.
 
 Before deliverable 2, a fire posted a system event into the conversation the job was created in
 and started a turn there. That is gone: a five-minute cadence no longer writes into the chat you
@@ -1048,7 +1080,8 @@ is threading the run's own state to those call sites.
 
 Two read-only tools let the model answer questions about jobs: `list_jobs` (every job, its trigger,
 its next fire, why it is paused, how its last run ended, its policy, profile, gate kind and grant
-(`grants`, as stored; `null` when it has none or is read-only), what
+(`grants`, as stored; `null` when it has none or is read-only), its `action` (`prompt`, or
+`builtin:<name>` for a built-in such as the daily digest, which runs no model), what
 it has sent today against its budgets and the breaker, and — for a watch — its quiet window, its
 ignore globs, its last burst's figures and what it has absorbed since launch, `null` for anything
 else) and `get_job_run` (one run, by id or by the eight characters a card shows, including the
