@@ -95,4 +95,19 @@ struct RequestByteStabilityTests {
         let b = try LLMClient.encodeGeminiBody(Self.request(order: .reversed))
         #expect(a == b)
     }
+
+    /// 5c: hints change what a body says (a TTL, a cache key), never whether it is stable.
+    @Test("with cache hints, every client still encodes two equal requests identically")
+    func stableWithHints() throws {
+        func hinted(_ order: Order) -> GeminiRequest {
+            var r = Self.request(order: order)
+            r.cacheHints = CacheHints(ttl: .init(prefix: .oneHour, history: .oneHour), promptCacheKey: "conv")
+            return r
+        }
+        #expect(try AnthropicClient.makeURLRequest(request: hinted(.forward), model: "m", apiKey: "k", stream: false).httpBody
+                == AnthropicClient.makeURLRequest(request: hinted(.reversed), model: "m", apiKey: "k", stream: false).httpBody)
+        #expect(try OpenAIClient.makeURLRequest(request: hinted(.forward), model: "m", apiKey: "k", stream: false).httpBody
+                == OpenAIClient.makeURLRequest(request: hinted(.reversed), model: "m", apiKey: "k", stream: false).httpBody)
+        #expect(try LLMClient.encodeGeminiBody(hinted(.forward)) == LLMClient.encodeGeminiBody(hinted(.reversed)))
+    }
 }

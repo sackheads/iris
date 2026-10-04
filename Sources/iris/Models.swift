@@ -10,6 +10,11 @@ struct GeminiRequest: Codable {
     var contents: [Content]
     var systemInstruction: Content?
     var tools: [Tool]?
+    /// 5c: provider-side cache hints (TTL by position, OpenAI's cache key). Never encoded: this
+    /// type's JSON is Gemini's request body and the hook payload, and neither knows the field.
+    var cacheHints: CacheHints? = nil
+
+    private enum CodingKeys: String, CodingKey { case contents, systemInstruction, tools }
 }
 
 struct Content: Codable, Sendable {

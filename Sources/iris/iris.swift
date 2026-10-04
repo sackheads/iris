@@ -2015,9 +2015,7 @@ actor IrisEngine {
                 
                 var activeRequest = request
                 if case .proceed(let modifiedData) = beforeModelDecision, let data = modifiedData {
-                    if let modifiedReq = try? JSONDecoder().decode(GeminiRequest.self, from: data) {
-                        activeRequest = modifiedReq
-                    }
+                    activeRequest = Self.applyHookRewrite(data, to: request)
                 }
                 
                 await MainActor.run {
@@ -2635,6 +2633,15 @@ actor IrisEngine {
     /// 5c §1: never declared to an unattended turn, whatever a sticky set says.
     nonisolated static let unattendedNeverDeclared: Set<String> =
         jobCreationTools.union(["set_workspace", "list_sessions", "send_to_session", "set_session_card"])
+    /// A `BeforeModel` hook's rewrite, decoded; an undecodable one leaves the request as it was.
+    /// The hook never sees the hints (not encoded), so its rewrite can't carry them: re-apply them,
+    /// or a hooked Iris turn silently falls back to five minutes (5c review focus 5).
+    nonisolated static func applyHookRewrite(_ data: Data, to request: GeminiRequest) -> GeminiRequest {
+        guard var rewritten = try? JSONDecoder().decode(GeminiRequest.self, from: data) else { return request }
+        rewritten.cacheHints = request.cacheHints
+        return rewritten
+    }
+
     /// 5c §1: never declared to a subagent or evaluator, whatever a sticky set says.
     nonisolated static let mainOnlyDeclared: Set<String> =
         jobCreationTools.union(["amend_goal_contract", "reach_checkpoint", "delegate_milestone",
