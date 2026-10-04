@@ -680,7 +680,8 @@ The one built-in so far. Every morning at **10:00 local time** it posts one card
 straight from the run ledger, and it **never calls a model**: it costs nothing and cannot invent
 anything. The card covers the runs since the previous digest (the last 24 hours the first time):
 
-- one line per job that ran — `sweep: 3 completed, 1 failed · 620000/1000000 tokens today`, with
+- one line per job that ran — `“sweep”: 3 completed, 1 failed · 620000/1000000 tokens today`, with
+  the name quoted so no name can pose as a count,
   blocked or interrupted runs counted on the end of the line when there are any, and the tokens
   sent today against that job's daily budget;
 - one line per failure nobody has acknowledged, and one per paused job, named with the same fixed
@@ -693,11 +694,13 @@ gets one digest when it wakes, covering everything since the last one (`catchUp:
 
 It is an ordinary job named `Daily digest`, created the first time Iris launches with this build
 (`Daily digest (built-in)` if you already have a job with that name), with the cron schedule
-`0 10 * * *` in the Mac's time zone at that moment. `/jobs pause Daily digest` and
+`0 10 * * *` in the Mac's time zone at that moment — a fixed zone, so after moving to another one
+the digest keeps the old zone's 10:00 until you reschedule it. To move it,
+`/jobs reschedule "Daily digest" "0 9 * * *"` (keeps its zone) or
+`/jobs reschedule "Daily digest" "30 8 * * 1-5" Europe/Paris` (weekdays at 08:30 in Paris);
+`schedule_job` never edits a built-in. `/jobs pause Daily digest` and
 `/jobs resume Daily digest` stop and restart it, and `/jobs run Daily digest` runs it now
-(posting a card only if something ran since the last one).
-**This build has no way to move it off 10:00**: `schedule_job` never edits a built-in and `/jobs`
-has no reschedule verb, so the choices are its time, paused, or gone. `/jobs delete Daily digest`
+(posting a card only if something ran since the last one). `/jobs delete Daily digest`
 removes it **for good** — Iris records that it registered the digest once and never recreates it,
 on this or any later launch.
 
@@ -1001,6 +1004,7 @@ pause reason the table prints, on the `interrupted` row and on the card.
 | `/jobs pause <name>` | Stops a job firing, with "paused by user" as the reason the table shows |
 | `/jobs resume <name>` | Clears the pause *and* the retry ladder, and recomputes the next fire from the job's own schedule |
 | `/jobs run <name>` | Fires the job now, through the same admission a scheduled fire meets. Says it is starting straight away, then reports what admission decided once the fire is over — an overlap, the breaker or an exhausted budget is named rather than reported as a run. The result itself arrives as a card. A paused or disabled job is refused up front |
+| `/jobs reschedule <name> <cron> [timezone]` | Gives a scheduled or polled job a new five-field cron (the same subset `schedule_job` takes), recomputes its next fire and says when that is. Quote a name or cron with spaces in it — `/jobs reschedule "Daily digest" "0 9 * * *"` — or leave them bare and the last five words are the cron. Without a timezone a cron job keeps its own zone and an interval job (which becomes a cron job) takes the Mac's. Works on built-ins such as the daily digest; a polled job keeps its gate; a pending retry is dropped with the old schedule; a paused job stays paused. An invalid cron or unknown zone is refused with a sentence and changes nothing, and a directory watch, which has no schedule, is refused |
 | `/jobs delete <name>` | Deletes a job and its ledger rows. Refused while a run is in flight. The transcripts are left for retention to clear, so a card you are still reading keeps working |
 
 ## Running one job from a terminal (`iris --run-job`)

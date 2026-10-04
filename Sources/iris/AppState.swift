@@ -3462,6 +3462,35 @@ class AppState {
                 emitCommandOutput("Could not run that job: \(error).", format: .markdown, to: convId)
             }
 
+        case .reschedule(let name, let cron, let timeZone):
+            do {
+                guard let job = try ledger.job(named: name) else {
+                    emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
+                    return
+                }
+                switch JobsCommand.rescheduledTrigger(for: job, cron: cron, timeZone: timeZone,
+                                                      defaultTimeZone: TimeZone.current.identifier) {
+                case .failure(let message):
+                    emitCommandOutput(message.text, format: .markdown, to: convId)
+                case .success(let trigger):
+                    var updated = job
+                    updated.trigger = trigger
+                    // The scheduler's own computation, as `/jobs resume` uses. A pending retry is
+                    // dropped with the old cadence: its time belonged to the schedule just replaced.
+                    updated.nextFireAt = JobScheduler.nextFire(for: trigger, after: Date())
+                    updated.retryAttempt = 0
+                    if updated.nextFireAt == nil {
+                        updated.pausedReason = JobScheduler.unmatchableReason
+                    } else if updated.pausedReason == JobScheduler.unmatchableReason {
+                        updated.pausedReason = nil
+                    }
+                    try ledger.upsert(updated)
+                    emitCommandOutput(JobsCommand.rescheduledText(updated), format: .markdown, to: convId)
+                }
+            } catch {
+                emitCommandOutput("Could not reschedule that job: \(error).", format: .markdown, to: convId)
+            }
+
         case .delete(let name):
             do {
                 guard let job = try ledger.job(named: name) else {

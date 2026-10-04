@@ -16,10 +16,13 @@ enum JobsCommand: Equatable {
     case resume(name: String)
     case run(name: String)
     case delete(name: String)
+    /// A new cron for a scheduled or polled job; `timeZone` nil keeps the job's own.
+    case reschedule(name: String, cron: String, timeZone: String?)
     case usage
 
     static let usageText = "Usage: /jobs · /jobs ack <run id> · /jobs pause <name> · "
-        + "/jobs resume <name> · /jobs run <name> · /jobs delete <name>"
+        + "/jobs resume <name> · /jobs run <name> · /jobs delete <name> · "
+        + "/jobs reschedule <name> <cron> [timezone]"
 
     /// What `/jobs pause` writes, and what `/jobs` then prints in the Next column. Spelled once so
     /// the command that clears it and the table that shows it cannot drift.
@@ -49,12 +52,117 @@ enum JobsCommand: Equatable {
             guard tokens.count == 1 else { return .usage }
             return .ack(runId: String(tokens[0]))
         }
+        if args == "reschedule" || args.hasPrefix("reschedule ") {
+            return parseReschedule(String(args.dropFirst("reschedule".count)))
+        }
         for (verb, form) in named {
             guard args == verb || args.hasPrefix(verb + " ") else { continue }
             let rest = args.dropFirst(verb.count).trimmingCharacters(in: .whitespacesAndNewlines)
             return rest.isEmpty ? .usage : form(rest)
         }
         return .usage
+    }
+
+    /// `<name> <cron> [timezone]`. Unlike the other verbs the name cannot simply be the rest of the
+    /// line, so the line is read from the right: an optional IANA zone, then the cron — one quoted
+    /// token or the last five words — and whatever is left is the name, quoted or not. So
+    /// `"Daily digest" "0 9 * * *"` and `Daily digest 0 9 * * * Europe/Paris` both read. Straight
+    /// and curly quotes both count: the composer may turn one into the other. Too few words to
+    /// hold a name and five cron fields is `.usage`; a cron that has five fields but is wrong is
+    /// for the handler to refuse, in a sentence naming the field.
+    static func parseReschedule(_ rest: String) -> JobsCommand {
+        var tokens = quotedTokens(rest)
+        var zone: String?
+        if let last = tokens.last, last.contains("/") || last == "UTC" || last == "GMT",
+           TimeZone(identifier: last) != nil {
+            zone = last
+            tokens.removeLast()
+        }
+        let cron: String
+        if let last = tokens.last, last.contains(where: \.isWhitespace) {
+            cron = last
+            tokens.removeLast()
+        } else {
+            guard tokens.count >= 6 else { return .usage }
+            cron = tokens.suffix(5).joined(separator: " ")
+            tokens.removeLast(5)
+        }
+        let name = tokens.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return .usage }
+        return .reschedule(name: name, cron: cron, timeZone: zone)
+    }
+
+    /// Whitespace-separated words, with a quoted run — `"…"` or `“…”` — kept as one word.
+    static func quotedTokens(_ text: String) -> [String] {
+        var tokens: [String] = []
+        var current = ""
+        var inQuote = false
+        var quoted = false
+        for ch in text {
+            if ch == "\"" || ch == "\u{201C}" || ch == "\u{201D}" {
+                inQuote.toggle()
+                quoted = true
+            } else if ch.isWhitespace && !inQuote {
+                if !current.isEmpty || quoted { tokens.append(current) }
+                current = ""
+                quoted = false
+            } else {
+                current.append(ch)
+            }
+        }
+        if !current.isEmpty || quoted { tokens.append(current) }
+        return tokens.map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// The trigger `/jobs reschedule` would store, or the sentence saying why not. Pure. A watch
+    /// has no cadence to move; an interval job becomes a cron job; a polled job keeps its gate.
+    /// With no zone given, a cron job keeps its own and anything else takes `defaultTimeZone`.
+    static func rescheduledTrigger(for job: Job, cron: String, timeZone: String?,
+                                   defaultTimeZone: String) -> Result<Trigger, ToolMessage> {
+        let existing: Schedule
+        switch job.trigger {
+        case .fsEvent:
+            return .failure("'\(job.name)' is a directory watch, which runs when its folder changes rather than on a schedule; there is nothing to reschedule.")
+        case .schedule(let schedule): existing = schedule
+        case .poll(let spec): existing = spec.schedule
+        }
+        if case .failure(let error) = CronSchedule.parse(cron) {
+            return .failure("Cron expression rejected: \(ScheduleJobArguments.cronMessage(error)) '\(job.name)' is unchanged.")
+        }
+        if let timeZone, TimeZone(identifier: timeZone) == nil {
+            return .failure("Unknown time zone '\(timeZone)'. '\(job.name)' is unchanged.")
+        }
+        let zone: String
+        if let timeZone { zone = timeZone }
+        else if case .cron(let old) = existing { zone = old.timeZone }
+        else { zone = defaultTimeZone }
+        let schedule = Schedule.cron(CronSchedule(expression: cron, timeZone: zone))
+        if case .poll(var spec) = job.trigger {
+            spec.schedule = schedule
+            return .success(.poll(spec))
+        }
+        return .success(.schedule(schedule))
+    }
+
+    /// What `/jobs reschedule` answers once the job is stored.
+    static func rescheduledText(_ job: Job) -> String {
+        let schedule: Schedule?
+        switch job.trigger {
+        case .schedule(let s): schedule = s
+        case .poll(let spec): schedule = spec.schedule
+        case .fsEvent: schedule = nil
+        }
+        guard case .cron(let cron)? = schedule else { return "Rescheduled **\(job.name)**." }
+        var text = "Rescheduled **\(job.name)** to `\(cron.expression)` (\(cron.timeZone))"
+        if let next = job.nextFireAt {
+            text += " · next fire \(ScheduleJobArguments.formatFire(next, zone: cron.timeZone))."
+        } else {
+            text += "."
+        }
+        if let reason = job.pausedReason {
+            text += " It is paused (\(reason)); `/jobs resume \(job.name)` starts it on the new schedule."
+        }
+        return text
     }
 
     /// The forms that take a job name. A table rather than four near-identical branches, since the
