@@ -64,11 +64,11 @@ struct ToolExecutor {
         ),
         FunctionDeclaration(
             name: "read_file",
-            description: "Reads the contents of a file.",
+            description: "Reads the contents of a file. Given a directory, lists its entries instead: one level, sorted, one per line, directories ending in `/`, capped in size.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
-                    "path": Schema(type: "STRING", description: "Absolute, tilde (~), or workspace-relative path to the file. A relative path resolves against the conversation's bound workspace, not the app's directory.")
+                    "path": Schema(type: "STRING", description: "Absolute, tilde (~), or workspace-relative path to the file or directory. A relative path resolves against the conversation's bound workspace, not the app's directory.")
                 ],
                 required: ["path"]
             )
@@ -172,8 +172,13 @@ struct ToolExecutor {
     /// walked from that mount's root; a nil decision is refused (`notDecidedInsideGrant`). They
     /// reach Foundation on no branch. `grant == nil` (every attended call, every ungranted run) is
     /// today's path.
+    ///
+    /// `approvedWorkspaceRoot` is set by the dispatcher for a grader `read_file` spelled inside its
+    /// contract's approved workspace (#339): that read is walked from the root by descriptor, with
+    /// no symlink followed, whatever approved it — never opened by path.
     func execute(name: String, args: [String: JSONValue], cwd: String? = nil, conversationId: UUID? = nil,
-                 useSandbox: Bool = false, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil) async -> String {
+                 useSandbox: Bool = false, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil,
+                 approvedWorkspaceRoot: String? = nil) async -> String {
         switch name {
         case "run_command":
             guard let command = args["command"]?.stringValue else { return "Error: Missing command" }
@@ -195,6 +200,15 @@ struct ToolExecutor {
                     return Self.notUnderGrantedDirectory(grantedMount.source)
                 }
                 return await readFile(grantRoot: grantedMount.source, relative: relative)
+            }
+            if let approvedWorkspaceRoot {
+                // The post-hook path: a `BeforeTool` rewrite out of the workspace is refused, not
+                // opened by path on the strength of an approval given to another one.
+                guard let relative = GoalContract.workspaceComponents(of: Self.resolvePath(path, cwd: cwd),
+                                                                      under: approvedWorkspaceRoot) else {
+                    return "Error: the path is not inside the approved workspace \(approvedWorkspaceRoot); nothing was read."
+                }
+                return await readFile(approvedWorkspace: approvedWorkspaceRoot, relative: relative)
             }
             return await readFile(path, cwd: cwd)
         case "write_file":
@@ -558,6 +572,15 @@ struct ToolExecutor {
     private func readFile(_ path: String, cwd: String? = nil) async -> String {
         let expandedPath = Self.resolvePath(path, cwd: cwd)
         return await Task.detached {
+            // A directory gets its listing (#337). `O_NONBLOCK` so a FIFO is not opened blocking
+            // here; it fails `O_DIRECTORY` and falls through to the read, as before.
+            let dirFD = open(expandedPath, O_RDONLY | O_DIRECTORY | O_NONBLOCK | O_CLOEXEC)
+            if dirFD >= 0 {
+                defer { close(dirFD) }
+                do { return try DirectoryListing.list(directory: dirFD) }
+                catch let error as GrantedFileError { return "Error reading directory: \(error.message)" }
+                catch { return "Error reading directory: \(error.localizedDescription)" }
+            }
             do {
                 return try String(contentsOfFile: expandedPath, encoding: .utf8)
             } catch {
@@ -583,6 +606,16 @@ struct ToolExecutor {
         await Task.detached {
             do { return try GrantedFileAccess(root: grantRoot).read(relative: relative) }
             catch let error as GrantedFileError { return "Error reading file: \(error.message)" }
+            catch { return "Error reading file: \(error.localizedDescription)" }
+        }.value
+    }
+
+    /// A grader's pre-approved read in its approved workspace (#339): the granted-run walk, from
+    /// the approved root.
+    func readFile(approvedWorkspace root: String, relative: [String]) async -> String {
+        await Task.detached {
+            do { return try GrantedFileAccess(root: root).read(relative: relative) }
+            catch let error as GrantedFileError { return "Error reading file: \(error.message(for: .approvedWorkspace))" }
             catch { return "Error reading file: \(error.localizedDescription)" }
         }.value
     }
