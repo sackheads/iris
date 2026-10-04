@@ -197,23 +197,147 @@ import Foundation
         #expect(c.conversations.filter(\.isPinned).map(\.id) == [keep], "the unpin was persisted")
     }
 
-    /// The meta key names a row that is gone: every pinned conversation is stale, and the one
-    /// `activityConversationId()` recreates is the only pin.
-    @Test func reloadWithMissingMetaRowLeavesOnlyTheRecreatedPin() throws {
+    // MARK: - Load repair, both directions
+
+    private func reload(_ store: ConversationStore) -> AppState {
+        AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+    }
+
+    private func set(_ state: AppState, _ id: UUID, pinned: Bool? = nil, archived: Bool? = nil) {
+        let i = state.conversations.firstIndex { $0.id == id }!
+        if let pinned { state.conversations[i].isPinned = pinned }
+        if let archived { state.conversations[i].isArchived = archived }
+        state.markChanged(id, .metadata)
+    }
+
+    private func meta(_ store: ConversationStore) throws -> UUID? {
+        try store.metaValue(forKey: AppState.activityConversationMetaKey).flatMap(UUID.init(uuidString:))
+    }
+
+    /// A crash between the meta write and the flush: the key names a row that was never
+    /// persisted, and the old Iris is still flagged pinned. It stays Iris rather than being
+    /// unpinned in favour of a brand-new conversation.
+    @Test func reloadWithMissingMetaRowPointsTheKeyBackAtThePinned() throws {
         let store = try ConversationStore.inMemory()
-        let a = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
-        let stray = UUID()
-        a.createNewConversation(id: stray)
-        let i = a.conversations.firstIndex { $0.id == stray }!
-        a.conversations[i].isPinned = true
-        a.markChanged(stray, .metadata)
+        let a = reload(store)
+        let oldIris = UUID()
+        a.createNewConversation(id: oldIris)
+        set(a, oldIris, pinned: true)
         try store.setMetaValue(UUID().uuidString, forKey: AppState.activityConversationMetaKey)
         a.flushSave()
 
-        let b = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
-        #expect(b.conversations.first { $0.id == stray }?.isPinned == false)
-        let iris = b.activityConversationId()
-        #expect(iris != stray)
-        #expect(b.conversations.filter(\.isPinned).map(\.id) == [iris])
+        let b = reload(store)
+        #expect(try meta(store) == oldIris)
+        #expect(b.conversations.filter(\.isPinned).map(\.id) == [oldIris])
+        #expect(b.activityConversationId() == oldIris, "no fresh Iris is created")
+        b.flushSave()
+        #expect(reload(store).conversations.filter(\.isPinned).map(\.id) == [oldIris], "persisted")
+    }
+
+    /// Finding 1's repro: the target's pin flag was lost. Reload pins it again, so `/archive`
+    /// is refused on it.
+    @Test func reloadPinsAnUnpinnedMetaTarget() throws {
+        let store = try ConversationStore.inMemory()
+        let a = reload(store)
+        let iris = a.activityConversationId()
+        set(a, iris, pinned: false)
+        a.flushSave()
+
+        let b = reload(store)
+        #expect(b.conversations.first { $0.id == iris }?.isPinned == true)
+        #expect(b.archiveConversation(iris) == .pinned)
+        b.flushSave()
+        #expect(reload(store).conversations.first { $0.id == iris }?.isPinned == true, "persisted")
+    }
+
+    /// The target lost its pin and was then archived. Reload restores it, and the next card
+    /// lands in it rather than in the archive or in a second Iris.
+    @Test func reloadUnarchivesAndPinsAnArchivedMetaTarget() async throws {
+        let store = try ConversationStore.inMemory()
+        let a = reload(store)
+        let iris = a.activityConversationId()
+        set(a, iris, pinned: false, archived: true)
+        a.flushSave()
+
+        let b = reload(store)
+        let back = try #require(b.conversations.first { $0.id == iris })
+        #expect(back.isPinned && !back.isArchived)
+        #expect(try meta(store) == iris)
+        let card = EventCard(runId: UUID(), jobId: UUID(), jobName: "sweep", status: .completed,
+                             startedAt: Date(), finishedAt: Date())
+        await b.deliverEvent(card, to: b.activityConversationId())
+        let cards = b.conversations.first { $0.id == iris }?.messages.filter { $0.role == .event }
+        #expect(cards?.count == 1)
+        #expect(b.conversations.filter(\.isPinned).count == 1)
+    }
+
+    /// No key at all (a store from before it existed) and two pins: one survives, the newest,
+    /// and the key is recorded for it.
+    @Test func reloadWithNoMetaAndTwoPinsKeepsExactlyOne() throws {
+        let store = try ConversationStore.inMemory()
+        let a = reload(store)
+        let older = UUID(), newer = UUID()
+        a.createNewConversation(id: older)
+        a.createNewConversation(id: newer)
+        set(a, older, pinned: true)
+        set(a, newer, pinned: true)
+        // Explicit, so the tie-break never rests on two `Date()` calls differing.
+        a.conversations[a.conversations.firstIndex { $0.id == older }!].updatedAt = Date(timeIntervalSince1970: 1_000)
+        a.conversations[a.conversations.firstIndex { $0.id == newer }!].updatedAt = Date(timeIntervalSince1970: 2_000)
+        #expect(try meta(store) == nil)
+        a.flushSave()
+
+        let b = reload(store)
+        let pinned = b.conversations.filter(\.isPinned).map(\.id)
+        #expect(pinned.count == 1)
+        #expect(pinned == [newer])
+        #expect(try meta(store) == newer)
+    }
+
+    /// At runtime too: an archived target is never handed out as Iris.
+    @Test func activityConversationIdNeverReturnsAnArchivedTarget() throws {
+        let (store, state) = try app()
+        let iris = state.activityConversationId()
+        let i = state.conversations.firstIndex { $0.id == iris }!
+        state.conversations[i].isArchived = true
+        let fresh = state.activityConversationId()
+        #expect(fresh != iris)
+        #expect(try meta(store) == fresh)
+        #expect(state.conversations.filter(\.isPinned).map(\.id) == [fresh], "the flags follow the key")
+        #expect(state.activityConversationId() == fresh, "stable once recovered")
+    }
+
+    // MARK: - PinRepair.decide
+
+    private func row(_ id: UUID, pinned: Bool = false, archived: Bool = false, at t: TimeInterval = 0) -> PinRepair.Row {
+        PinRepair.Row(id: id, isPinned: pinned, isArchived: archived, updatedAt: Date(timeIntervalSince1970: t))
+    }
+
+    @Test func decideAgreeingStateChangesNothing() {
+        let iris = UUID()
+        #expect(PinRepair.decide(metaValue: iris.uuidString, rows: [row(iris, pinned: true), row(UUID())]).isEmpty)
+        #expect(PinRepair.decide(metaValue: nil, rows: [row(UUID())]).isEmpty)
+        #expect(PinRepair.decide(metaValue: UUID().uuidString, rows: [row(UUID())]).isEmpty,
+                "missing target, nothing pinned: left to activityConversationId()")
+    }
+
+    @Test func decideLiveTargetWinsOverOtherPins() {
+        let iris = UUID(), other = UUID()
+        let r = PinRepair.decide(metaValue: iris.uuidString, rows: [row(iris), row(other, pinned: true, at: 99)])
+        #expect(r == PinRepair(newMetaId: nil, pin: [iris], unpin: [other], unarchive: []))
+    }
+
+    @Test func decideArchivedTargetDefersToALivePin() {
+        let iris = UUID(), pinned = UUID()
+        let r = PinRepair.decide(metaValue: iris.uuidString, rows: [row(iris, archived: true), row(pinned, pinned: true)])
+        #expect(r == PinRepair(newMetaId: pinned, pin: [], unpin: [], unarchive: []))
+    }
+
+    @Test func decideMissingTargetKeepsTheNewestOfSeveralPins() {
+        let a = UUID(), b = UUID(), c = UUID()
+        let r = PinRepair.decide(metaValue: UUID().uuidString,
+                                 rows: [row(a, pinned: true, at: 1), row(b, pinned: true, archived: true, at: 3),
+                                        row(c, pinned: true, at: 2)])
+        #expect(r == PinRepair(newMetaId: b, pin: [], unpin: [a, c], unarchive: [b]))
     }
 }

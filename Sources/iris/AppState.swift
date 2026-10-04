@@ -671,8 +671,9 @@ class AppState {
         self.store = store
         self.engine = IrisEngine(state: self)
         loadConversations()
+        // Before the retitle, which reads `isPinned`.
+        repairPinnedConversation()
         retitleLegacyPinnedConversation()
-        unpinStrayPinnedConversations()
         // `selectedConversationId == nil` covers more than an empty store: #187's background job
         // conversations are loaded but never selected, so a store holding nothing else still has
         // to open in a fresh conversation.
@@ -951,12 +952,17 @@ class AppState {
 
     /// Returns Iris's (the pinned conversation's) id, creating it (pinned, unselected) and recording it
     /// in `meta` on first use. Stable across calls and across launches; if the recorded id names a
-    /// conversation that no longer exists (deleted by hand), a fresh one is created and recorded.
+    /// conversation that no longer exists (deleted by hand) or one that is archived, a fresh one is
+    /// created and recorded, and any other pin is cleared so the flags still agree with the key.
     func activityConversationId() -> UUID {
         if let raw = try? store.metaValue(forKey: Self.activityConversationMetaKey),
            let existing = UUID(uuidString: raw),
-           conversations.contains(where: { $0.id == existing }) {
+           conversations.contains(where: { $0.id == existing && !$0.isArchived }) {
             return existing
+        }
+        for idx in conversations.indices where conversations[idx].isPinned {
+            conversations[idx].isPinned = false
+            markChanged(conversations[idx].id, .metadata)
         }
         let id = createNewConversation(title: Self.activityConversationTitle, select: false)
         if let idx = conversations.firstIndex(where: { $0.id == id }) {
@@ -967,16 +973,25 @@ class AppState {
         return id
     }
 
-    /// A crash mid-rotation can leave two conversations pinned (5b §0.4): the meta key decides
-    /// which is Iris, and any other is unpinned. When the key names a missing row, every pinned
-    /// conversation is stale and `activityConversationId()` makes a fresh one. With no key at all
-    /// there is nothing to reconcile against, and pins are left alone.
-    func unpinStrayPinnedConversations() {
-        guard let raw = (try? store.metaValue(forKey: Self.activityConversationMetaKey)) ?? nil else { return }
-        let pinned = UUID(uuidString: raw)
-        for idx in conversations.indices where conversations[idx].isPinned && conversations[idx].id != pinned {
-            conversations[idx].isPinned = false
-            markChanged(conversations[idx].id, .metadata)
+    /// Launch repair (5b §0.4): makes the meta key and the `isPinned` flags agree in both
+    /// directions and takes the pinned conversation out of the archive. `PinRepair.decide` says
+    /// what to change and why.
+    func repairPinnedConversation() {
+        let raw = (try? store.metaValue(forKey: Self.activityConversationMetaKey)) ?? nil
+        let repair = PinRepair.decide(metaValue: raw, rows: conversations.map {
+            PinRepair.Row(id: $0.id, isPinned: $0.isPinned, isArchived: $0.isArchived, updatedAt: $0.updatedAt)
+        })
+        guard !repair.isEmpty else { return }
+        if let id = repair.newMetaId {
+            try? store.setMetaValue(id.uuidString, forKey: Self.activityConversationMetaKey)
+        }
+        for idx in conversations.indices {
+            let id = conversations[idx].id
+            var changed = false
+            if repair.unpin.contains(id) { conversations[idx].isPinned = false; changed = true }
+            if repair.pin.contains(id) { conversations[idx].isPinned = true; changed = true }
+            if repair.unarchive.contains(id) { conversations[idx].isArchived = false; changed = true }
+            if changed { markChanged(id, .metadata) }
         }
     }
 
