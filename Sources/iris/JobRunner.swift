@@ -652,7 +652,12 @@ actor JobRunner {
         let builtin = BuiltinJobs.named(name)
         if let builtin {
             let result = await builtin.run(ledger: ledger, now: startedAt, calendar: calendar)
-            (status, outcome, failureReason, card) = (.completed, result.outcome, nil, result.card)
+            switch result.status {
+            case .completed:
+                (status, outcome, failureReason, card) = (.completed, result.outcome, nil, result.card)
+            case .failed(let reason):
+                (status, outcome, failureReason, card) = (.failed, result.outcome, reason, result.card)
+            }
         } else {
             // Always carded: a scheduled job that silently does nothing is the failure the ledger
             // and the cards exist to surface.

@@ -33,6 +33,10 @@ struct DailyDigest: BuiltinJob {
 
     static let quietOutcome = "quiet: no job ran since the last digest"
     static let unreadableOutcome = "the daily digest could not read the run ledger"
+    /// The failed row's `failureReason` when the ledger could not be read. A failure, not a
+    /// completion: recording it as completed would close the next digest's window over runs this
+    /// one never reported.
+    static let unreadableReason = "daily digest: ledger unreadable"
 
     /// Where the budgets come from: the same resolution admission uses (`JobLimits.resolve`).
     let config: ConfigManager
@@ -59,7 +63,8 @@ struct DailyDigest: BuiltinJob {
             }
         } catch {
             // Carded: a digest that silently stopped arriving is the failure it exists to prevent.
-            return BuiltinResult(outcome: Self.unreadableOutcome, card: true)
+            return BuiltinResult(outcome: Self.unreadableOutcome, card: true,
+                                 status: .failed(reason: Self.unreadableReason))
         }
         return BuiltinResult(outcome: Self.outcome(jobs: jobs, runs: runs, failures: failures,
                                                    tokensToday: usage, config: config),

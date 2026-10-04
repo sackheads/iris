@@ -21,8 +21,9 @@ struct BuiltinJobTests {
         private let count = OSAllocatedUnfairLock(initialState: 0)
         var runs: Int { count.withLock { $0 } }
 
-        init(outcome: String = "3 jobs ran yesterday", card: Bool = true) {
-            result = BuiltinResult(outcome: outcome, card: card)
+        init(outcome: String = "3 jobs ran yesterday", card: Bool = true,
+             status: BuiltinResult.Status = .completed) {
+            result = BuiltinResult(outcome: outcome, card: card, status: status)
         }
 
         func run(ledger: JobLedger, now: Date, calendar: Calendar) async -> BuiltinResult {
@@ -133,6 +134,35 @@ struct BuiltinJobTests {
         #expect(stub.runs == 1)
         #expect(eventCards(state).isEmpty)
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).map(\.status) == [.completed])
+    }
+
+    @Test("a built-in that reports failure writes a failed row with its fixed reason, which never counts as completed")
+    func failedResultIsRecordedAsFailed() async throws {
+        let (store, state, engine, client) = try harness()
+        let job = builtinJob()
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger,
+                               endSandboxSession: { _ in }, config: config)
+        let stub = StubBuiltin(outcome: DailyDigest.unreadableOutcome,
+                               status: .failed(reason: DailyDigest.unreadableReason))
+
+        await BuiltinJobs.$scopedRegistry.withValue([StubBuiltin.name: stub]) {
+            await runner.fire(job: job, origin: .schedule)
+        }
+
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 10).first)
+        #expect(run.status == .failed)
+        #expect(run.failureReason == DailyDigest.unreadableReason)
+        #expect(run.outcome == DailyDigest.unreadableOutcome)
+        #expect(client.callCount == 0)
+        // The digest's window asks this, so a failed digest cannot close it.
+        #expect(try store.ledger.lastCompletedRunStart(action: .builtin(StubBuiltin.name),
+                                                       before: Date().addingTimeInterval(60)) == nil)
+        let card = try #require(eventCards(state).first)
+        #expect(card.status == .failed)
+        #expect(Briefing.reason(run) == "ledger unreadable")
     }
 
     @Test("a built-in name nothing registered fails its row and pauses the job on the first failure")

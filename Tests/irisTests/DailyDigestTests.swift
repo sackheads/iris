@@ -128,6 +128,19 @@ struct DailyDigestTests {
         #expect(!result.outcome.contains("\u{201C}\(DailyDigest.jobName)\u{201D}:"), "the digest does not count itself")
     }
 
+    @Test("an unreadable ledger is a failed digest with a fixed reason, carded, never a completed one")
+    func unreadableLedgerFails() async throws {
+        let store = try ConversationStore.inMemory()
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        try store.rawWrite("DROP TABLE job_runs")
+
+        let result = await DailyDigest(config: config).run(ledger: store.ledger, now: now, calendar: calendar)
+
+        #expect(result == BuiltinResult(outcome: DailyDigest.unreadableOutcome, card: true,
+                                        status: .failed(reason: DailyDigest.unreadableReason)))
+    }
+
     @Test("with no previous digest the window is the last 24 hours")
     func defaultWindow() async throws {
         let store = try ConversationStore.inMemory()

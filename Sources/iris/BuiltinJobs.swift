@@ -11,10 +11,21 @@ protocol BuiltinJob: Sendable {
 }
 
 struct BuiltinResult: Equatable, Sendable {
-    /// The run's one line: the row's outcome and, when `card` is set, the card's.
+    /// How the run ended, as its ledger row records it.
+    enum Status: Equatable, Sendable {
+        case completed
+        /// `reason` is the row's `failureReason`: a fixed harness constant, never fetched text,
+        /// so `Briefing.reason` can map it to a word.
+        case failed(reason: String)
+    }
+
+    /// The run's outcome text: the row's outcome and, when `card` is set, the card's.
     var outcome: String
     /// `false` posts nothing — the row is still written.
     var card: Bool
+    /// Completed unless the built-in says otherwise. A failed run does not count as a completed
+    /// one anywhere that asks — the digest's window, notably, only closes on a completed digest.
+    var status: Status = .completed
 }
 
 /// The registry of built-ins, keyed by name, so the next model-free job is one entry rather than a

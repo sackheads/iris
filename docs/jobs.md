@@ -678,7 +678,8 @@ out of the briefing's recent runs.
 
 The one built-in so far. Every morning at **10:00 local time** it posts one card to Iris built
 straight from the run ledger, and it **never calls a model**: it costs nothing and cannot invent
-anything. The card covers the runs since the previous digest (the last 24 hours the first time):
+anything. The card covers the runs since the previous digest that completed (the last 24 hours the
+first time):
 
 - one line per job that ran — `“sweep”: 3 completed, 1 failed · 620000/1000000 tokens today`, with
   the name quoted so no name can pose as a count,
@@ -688,7 +689,9 @@ anything. The card covers the runs since the previous digest (the last 24 hours 
   words the briefing uses (`failed`, `timeout`, `budget`, `failed 3 times`, …).
 
 It never copies a run's own outcome or failure text — those can carry words a run fetched; ask
-Iris, or use `get_job_run`, to read them. A day on which nothing ran posts nothing. The card is
+Iris, or use `get_job_run`, to read them. A day on which nothing ran posts nothing. A digest that
+cannot read the ledger posts a card saying so and records a **failed** run
+(`ledger unreadable`), not a completed one, so the next digest still covers the runs it missed. The card is
 capped at 4 KB, cut on a whole line with a count of what was left out. A Mac asleep through 10:00
 gets one digest when it wakes, covering everything since the last one (`catchUp: coalesce`).
 
