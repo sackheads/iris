@@ -124,10 +124,10 @@ import Foundation
         return state.rotationTask
     }
 
-    /// Fails, and returns, after `seconds` whether or not `operation` ever does. Not
-    /// `withTimeout`: a task group waits for every child before it returns, and neither
+    /// Fails, and returns, after `seconds` whether or not `operation` ever does. Neither
     /// `Task.value` nor a checked continuation answers cancellation, so a rotation that never
-    /// finished hung the suite for hours behind a "bounded" wait (fix round 1).
+    /// finished hung the suite for hours behind a task-group "bounded" wait (fix round 1) — the
+    /// same flaw `withTimeout` had until #345 rebuilt it on this shape.
     private func bounded(_ what: String, seconds: Double = 10,
                          _ operation: @escaping @Sendable () async -> Void) async throws {
         let box = OneShot<Bool>()

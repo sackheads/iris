@@ -125,7 +125,7 @@ Sources/iris/
   MemoryManager.swift     # SOUL.md, USER.md, memory.md read/write
   MCPManager.swift        # MCP client: tool discovery and call forwarding
   HookManager.swift       # before/after agent hooks (shell scripts)
-  Timeout.swift           # withTimeout(seconds:) — used by run_command
+  Timeout.swift           # withTimeout(seconds:) — returns at the deadline; used by run_command and Vibecop
 
 Tests/irisTests/          # Swift Testing suite; one file per subsystem
 docs/                     # design specs, plans, reviews, roadmaps
