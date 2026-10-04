@@ -135,8 +135,10 @@ actor IrisEngine {
     private let injectedFactStore: FactStoreManager?
     /// 5a's tool-list experiment (spec §0.6): declare the state-gated tools (`manage_fact` and,
     /// on an attended `.main` turn, the peer tools) on every turn instead of only when their state
-    /// holds, so a perf run can measure what the flapping costs in cache misses. Only
-    /// `iris --perf run` sets it, from `IRIS_PERF_DECLARE_STATE_TOOLS=1`.
+    /// holds, so a perf run can measure what the flapping costs in cache misses. Since 5c sticky
+    /// declarations are the default (`stickyToolsEnabled`): a tool, once its state has held, stays
+    /// declared. This flag remains perf's "declared every turn" arm. Only `iris --perf run` sets
+    /// it, from `IRIS_PERF_DECLARE_STATE_TOOLS=1`.
     private let declareStateGatedTools: Bool
     /// 5c §0.1; false only for perf's gated arm (`IRIS_PERF_STICKY_TOOLS=0`, wired in 5c PR D).
     private let stickyToolsEnabled: Bool
@@ -1439,7 +1441,8 @@ actor IrisEngine {
         // cached prefix (tools, system, older history) stays byte-stable across turns (5a §0.2).
         var turnContext = TurnContext(sections: [])
         if !facts.isEmpty {
-            // The ids go in so `manage_fact` — offered only on these turns — has something to name.
+            // The ids go in so `manage_fact` — first offered on these turns, then kept declared
+            // (5c §0.1) — has something to name.
             let factString = facts.map { "- [\($0.id)] \($0.content)" }.joined(separator: "\n")
             turnContext.sections.append(.init(heading: "Mid-Term Fact Store Memory (JIT Context)", body: factString))
         }
@@ -1591,8 +1594,9 @@ actor IrisEngine {
             )
         ))
         // Correcting a fact needs a fact id, and the only ids the model ever sees come from the
-        // facts injected above or a `search_memory` result. On a turn that surfaced none, this
-        // declaration is dead weight in the prompt (invariant 6).
+        // facts injected above or a `search_memory` result, so this is first declared on a turn that
+        // surfaced some (invariant 6), and once declared, stays declared (5c §0.1): an id from an
+        // earlier turn is still valid, and the store refuses one it does not know.
         if !facts.isEmpty || declareStateGatedTools || sticky.contains("manage_fact") {
         toolsList.append(FunctionDeclaration(
             name: "manage_fact",
@@ -1620,11 +1624,13 @@ actor IrisEngine {
             )
         ))
         
-        // `goal_complete` terminates a goal loop, so offer it only when there IS one. In a plain
-        // chat it has nothing to complete, and the model reaching for it anyway used to raise the
-        // goal-completion panel over an ordinary conversation and fire an unrequested reflection
-        // turn (#84). The soft-stop turn is the exception: it clears the goal first and then needs
-        // this tool as its only way out (the dispatcher refuses every other tool on that turn).
+        // `goal_complete` terminates a goal loop, so it is first offered only when there IS one, and
+        // once declared, stays declared (5c §0.1). In a plain chat it has nothing to complete, and
+        // the model reaching for it anyway used to raise the goal-completion panel over an ordinary
+        // conversation and fire an unrequested reflection turn (#84); the dispatcher's "No goal is
+        // active" refusal is what holds that once the goal has ended. The soft-stop turn is the
+        // exception: it clears the goal first and then needs this tool as its only way out (the
+        // dispatcher refuses every other tool on that turn).
         if hasActiveGoal || restrictToGoalComplete || sticky.contains("goal_complete") {
         toolsList.append(FunctionDeclaration(
             name: "goal_complete",
@@ -1714,8 +1720,10 @@ actor IrisEngine {
             ))
         }
 
-        // #185 §6: only when there is somebody to talk to. With one conversation open the surface
-        // is byte-identical to today, so #144/#155's reduction is untouched. `.main` only —
+        // #185 §6: first declared only when there is somebody to talk to, and once declared, kept
+        // declared for the conversation (5c §0.1; the three are one gate, recorded together). With
+        // one conversation open and no peer ever seen, the surface is unchanged, so #144/#155's
+        // reduction is untouched; a sticky call with no peers is refused at dispatch. `.main` only —
         // a subagent is not a session. `peerCount` was already computed once above (and gated the
         // same way) for the system-prompt count line — reusing it here, rather than calling
         // `sessionPeerCount` again, is what keeps a subagent/evaluator turn from paying the
@@ -1771,7 +1779,8 @@ actor IrisEngine {
         let ladderContract = await MainActor.run {
             localState?.conversations.first(where: { $0.id == conversationId })?.goalContract
         }
-        // Amending criteria only means something once a contract is locked (#133).
+        // Amending criteria only means something once a contract is locked (#133). Once declared,
+        // stays declared (5c §0.1); the dispatcher refuses it without a locked contract.
         if principal == .main, ladderContract?.isLocked == true || sticky.contains("amend_goal_contract") {
         toolsList.append(FunctionDeclaration(
             name: "amend_goal_contract",
@@ -1807,8 +1816,9 @@ actor IrisEngine {
             toolsList.append(SubagentManager.milestoneDelegationDeclaration())
         }
 
-        // Slice D1's escape hatch, offered only once a grade has actually failed — the agent must
-        // try before declaring a criterion inapplicable.
+        // Slice D1's escape hatch, first offered only once a grade has actually failed — the agent
+        // must try before declaring a criterion inapplicable. Once declared, stays declared (5c
+        // §0.1); the dispatcher refuses a waiver without a failed grade.
         let waivable = ladderContract.map { $0.isLocked && $0.gateAttempts > 0 } ?? false
         if principal == .main, waivable || sticky.contains("waive_criterion") {
             toolsList.append(FunctionDeclaration(
@@ -3612,8 +3622,8 @@ actor IrisEngine {
                 result = "Error: AppState not available for subagent execution."
             }
         } else if functionCall.name == "goal_complete", let summary = functionCall.args["summary"]?.stringValue {
-            // No goal to complete. The tool is not offered in this state, but a model can still
-            // reach for it from stale context — and every effect below is goal machinery: the
+            // No goal to complete. The tool can still be declared in this state (it is sticky once
+            // declared, 5c §0.1), and a model can reach for it from stale context — and every effect below is goal machinery: the
             // completion self-report is exactly what raises the panel in ChatView, and the
             // skill-check reflection spends an extra autonomous turn the user never asked for.
             // Surface what the model said and stop there (#84).
@@ -3629,7 +3639,7 @@ actor IrisEngine {
             // `reach_checkpoint`, so the terminal tool can't silently skip the ladder. Bypassed under
             // a soft-stop (`restrictToGoalComplete`): that is an emergency termination (iteration cap
             // / loop detection) which must be allowed to end the goal regardless of ladder position,
-            // and `reach_checkpoint` isn't even offered in that restricted turn.
+            // and the dispatcher refuses `reach_checkpoint` on that restricted turn.
             if principal == .main, !restrictToGoalComplete {
                 let ladder = await MainActor.run {
                     localState?.conversations.first(where: { $0.id == conversationId })?.goalContract

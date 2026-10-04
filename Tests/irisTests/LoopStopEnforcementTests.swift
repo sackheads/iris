@@ -16,9 +16,9 @@ private func runCommandResponse(_ command: String) -> GeminiResponse {
 struct LoopStopEnforcementTests {
 
     /// Regression guard for #16: when loop detection stops a goal, the follow-up summary turn
-    /// runs with `restrictToGoalComplete`. Removing the tool from the schema is NOT enough — the
-    /// model can still emit the call and the dispatcher would execute any named tool — so the
-    /// execution layer must block anything but `goal_complete`. Here the model keeps trying to
+    /// runs with `restrictToGoalComplete`. Since 5c §0.3 that turn keeps every declaration (so
+    /// its cached prefix holds), which makes the execution layer the only enforcement: it must
+    /// block anything but `goal_complete`. Here the model keeps trying to
     /// call `run_command`; the block must fire and the turn must not spin.
     @Test("restricted turn blocks a non-goal_complete tool and runs a single round")
     func restrictedTurnBlocksTool() async {
