@@ -47,18 +47,33 @@ struct TokenUsage: Codable, Equatable, Sendable {
     /// could never later be told apart from a real zero.
     var cacheReadTokenCount: Int? = nil
     var cacheWriteTokenCount: Int? = nil
+    /// The 1-hour share of `cacheWriteTokenCount` (5c §0.6). nil until a provider reports a split.
+    /// Persists inside the existing `conversations.tokenUsage` JSON column.
+    var cacheWrite1hTokenCount: Int? = nil
 
     enum CodingKeys: String, CodingKey {
         case promptTokenCount, candidatesTokenCount, totalTokenCount, cacheReadTokenCount, cacheWriteTokenCount
+        case cacheWrite1hTokenCount
     }
 
     init(promptTokenCount: Int = 0, candidatesTokenCount: Int = 0, totalTokenCount: Int = 0,
-         cacheReadTokenCount: Int? = nil, cacheWriteTokenCount: Int? = nil) {
+         cacheReadTokenCount: Int? = nil, cacheWriteTokenCount: Int? = nil, cacheWrite1hTokenCount: Int? = nil) {
         self.promptTokenCount = promptTokenCount
         self.candidatesTokenCount = candidatesTokenCount
         self.totalTokenCount = totalTokenCount
         self.cacheReadTokenCount = cacheReadTokenCount
         self.cacheWriteTokenCount = cacheWriteTokenCount
+        self.cacheWrite1hTokenCount = cacheWrite1hTokenCount
+    }
+
+    /// This usage as the weight table prices it (5c §0.5). Output is `total - prompt` when that
+    /// is larger than `candidates`: Gemini's total includes thinking tokens, billed as output.
+    var components: UsageComponents {
+        UsageComponents(prompt: promptTokenCount,
+                        output: max(candidatesTokenCount, totalTokenCount - promptTokenCount),
+                        cacheRead: cacheReadTokenCount ?? 0,
+                        cacheWrite: cacheWriteTokenCount ?? 0,
+                        cacheWrite1h: cacheWrite1hTokenCount ?? 0)
     }
 
     /// Lenient decoder (invariant 1): the synthesized `Decodable` ignores these defaults for
@@ -74,6 +89,7 @@ struct TokenUsage: Codable, Equatable, Sendable {
         totalTokenCount = try c.decodeIfPresent(Int.self, forKey: .totalTokenCount) ?? 0
         cacheReadTokenCount = try c.decodeIfPresent(Int.self, forKey: .cacheReadTokenCount)
         cacheWriteTokenCount = try c.decodeIfPresent(Int.self, forKey: .cacheWriteTokenCount)
+        cacheWrite1hTokenCount = try c.decodeIfPresent(Int.self, forKey: .cacheWrite1hTokenCount)
     }
 }
 
@@ -2040,6 +2056,9 @@ class AppState {
             if let write = usage.cacheWriteTokens {
                 conversations[idx].tokenUsage.cacheWriteTokenCount = (conversations[idx].tokenUsage.cacheWriteTokenCount ?? 0) + write
             }
+            if let write1h = usage.cacheWrite1hTokens {
+                conversations[idx].tokenUsage.cacheWrite1hTokenCount = (conversations[idx].tokenUsage.cacheWrite1hTokenCount ?? 0) + write1h
+            }
             markChanged(conversationId, .metadata)
         }
         // A descendant of an active background run is also charged to that run (#313). Keyed by
@@ -2053,6 +2072,7 @@ class AppState {
             delegated.totalTokenCount += usage.totalTokenCount ?? 0
             if let read = usage.cacheReadTokens { delegated.cacheReadTokenCount = (delegated.cacheReadTokenCount ?? 0) + read }
             if let write = usage.cacheWriteTokens { delegated.cacheWriteTokenCount = (delegated.cacheWriteTokenCount ?? 0) + write }
+            if let write1h = usage.cacheWrite1hTokens { delegated.cacheWrite1hTokenCount = (delegated.cacheWrite1hTokenCount ?? 0) + write1h }
             backgroundRunDelegatedUsage[run] = delegated
         }
     }
@@ -2889,6 +2909,9 @@ class AppState {
             }
             if let write = delegated.cacheWriteTokenCount {
                 usage.cacheWriteTokenCount = (usage.cacheWriteTokenCount ?? 0) + write
+            }
+            if let write1h = delegated.cacheWrite1hTokenCount {
+                usage.cacheWrite1hTokenCount = (usage.cacheWrite1hTokenCount ?? 0) + write1h
             }
         }
         return usage
