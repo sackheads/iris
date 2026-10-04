@@ -52,12 +52,12 @@ struct ToolExecutor {
         var tools = [
             FunctionDeclaration(
             name: "run_command",
-            description: "Executes a shell command. Use this for standard operations.",
+            description: "Executes a shell command. Use this for standard operations. When the command exits on the host, any background process still holding its output pipes is killed; redirect its output (`cmd > log 2>&1 &`) to keep it running.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
                     "command": Schema(type: "STRING", description: "The command to run in bash/zsh"),
-                    "timeout_seconds": Schema(type: "INTEGER", description: "Optional timeout in seconds (default 600, max 3600). Set higher for long-running operations like docker builds or package installs. At the deadline the command and everything it started are killed. A background process still writing to the command's output may be killed when the command exits; redirect its output (`cmd > log 2>&1 &`) to keep it running.")
+                    "timeout_seconds": Schema(type: "INTEGER", description: "Optional timeout in seconds (default 600, max 3600). Set higher for long-running operations like docker builds or package installs. At the deadline the command and everything it started are killed.")
                 ],
                 required: ["command"]
             )
