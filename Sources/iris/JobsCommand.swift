@@ -73,8 +73,12 @@ enum JobsCommand: Equatable {
     static func parseReschedule(_ rest: String) -> JobsCommand {
         var tokens = quotedTokens(rest)
         var zone: String?
-        if let last = tokens.last, last.contains("/") || last == "UTC" || last == "GMT",
-           TimeZone(identifier: last) != nil {
+        // A token with a `/` that is not a cron field (`*/15`, `0-30/5`) is taken as a zone even
+        // when it is not a real one — `Europe/Pairs`, `europe/paris` — so the handler can refuse it
+        // by name instead of folding it into the cron and the job name.
+        if let last = tokens.last,
+           (last.contains("/") && !isCronFieldLike(last))
+            || ((last == "UTC" || last == "GMT") && TimeZone(identifier: last) != nil) {
             zone = last
             tokens.removeLast()
         }
@@ -90,6 +94,12 @@ enum JobsCommand: Equatable {
         let name = tokens.joined(separator: " ").trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return .usage }
         return .reschedule(name: name, cron: cron, timeZone: zone)
+    }
+
+    /// Whether `token` is made only of what a numeric cron field is made of. A zone always has
+    /// letters in it, so this tells `*/15` from `Europe/Paris` without knowing either.
+    static func isCronFieldLike(_ token: String) -> Bool {
+        !token.isEmpty && token.allSatisfy { "0123456789*/,-?".contains($0) }
     }
 
     /// Whitespace-separated words, with a quoted run — `"…"` or `“…”` — kept as one word.

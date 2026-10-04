@@ -98,6 +98,14 @@ struct JobsCommandTests {
         #expect(JobsCommand.parse("/jobs reschedule pr-sweep 0 9 * *") == .usage, "four fields leave no name")
         #expect(JobsCommand.parse("/jobs reschedule 0 9 * * *") == .usage, "a cron with no name")
         #expect(JobsCommand.parse("/jobs reschedule") == .usage)
+        // A misspelled or lower-case zone is still a zone, for the handler to refuse by name.
+        #expect(JobsCommand.parse("/jobs reschedule pr-sweep 0 9 * * * Europe/Pairs")
+                == .reschedule(name: "pr-sweep", cron: "0 9 * * *", timeZone: "Europe/Pairs"))
+        #expect(JobsCommand.parse("/jobs reschedule pr-sweep 0 9 * * * europe/paris")
+                == .reschedule(name: "pr-sweep", cron: "0 9 * * *", timeZone: "europe/paris"))
+        // A step field is a cron field, not a zone.
+        #expect(JobsCommand.parse("/jobs reschedule pr-sweep 0 9 * * */2")
+                == .reschedule(name: "pr-sweep", cron: "0 9 * * */2", timeZone: nil))
     }
 
     @Test("the new trigger: a cron job keeps its zone, an interval job becomes cron in the default zone, a poll keeps its gate, a watch is refused")
@@ -808,6 +816,44 @@ struct JobsCommandTests {
         #expect(try app.store.ledger.job(named: "pr-sweep") == before)
         #expect(output(app, id).contains("Cron expression rejected: 25 is out of range for hour."))
         #expect(output(app, id).contains("'pr-sweep' is unchanged."))
+    }
+
+    @Test("a misspelled zone is refused by name, not read as part of the job's name")
+    func rescheduleMisspelledZone() throws {
+        let j = job(trigger: .schedule(.cron(CronSchedule(expression: "0 10 * * *", timeZone: "UTC"))),
+                    nextFireAt: Date().addingTimeInterval(3_600))
+        let (app, id) = makeApp(with: [j])
+        let before = try app.store.ledger.job(named: "pr-sweep")
+
+        app.sendMessage("/jobs reschedule pr-sweep 0 9 * * * Europe/Pairs")
+
+        #expect(try app.store.ledger.job(named: "pr-sweep") == before)
+        #expect(output(app, id).contains("Unknown time zone 'Europe/Pairs'. 'pr-sweep' is unchanged."))
+        #expect(!output(app, id).contains("No job named"))
+    }
+
+    @Test("a cron that can never match pauses the job; one that can lifts that pause and only that one")
+    func rescheduleUnmatchablePause() throws {
+        let never = job("never", trigger: .schedule(.cron(CronSchedule(expression: "0 10 * * *", timeZone: "UTC"))),
+                        nextFireAt: Date().addingTimeInterval(3_600))
+        var stuck = job("stuck", trigger: .schedule(.cron(CronSchedule(expression: "0 0 30 2 *", timeZone: "UTC"))))
+        stuck.pausedReason = JobScheduler.unmatchableReason
+        var held = job("held", trigger: .schedule(.cron(CronSchedule(expression: "0 10 * * *", timeZone: "UTC"))))
+        held.pausedReason = JobsCommand.pausedByUserReason
+        let (app, _) = makeApp(with: [never, stuck, held])
+
+        app.sendMessage("/jobs reschedule never 0 0 30 2 *")
+        app.sendMessage("/jobs reschedule stuck 0 9 * * *")
+        app.sendMessage("/jobs reschedule held 0 9 * * *")
+
+        let a = try #require(try app.store.ledger.job(named: "never"))
+        #expect(a.pausedReason == JobScheduler.unmatchableReason)
+        #expect(a.nextFireAt == nil)
+        let b = try #require(try app.store.ledger.job(named: "stuck"))
+        #expect(b.pausedReason == nil, "the unmatchable pause is lifted by a cron that matches")
+        #expect(b.nextFireAt != nil)
+        let c = try #require(try app.store.ledger.job(named: "held"))
+        #expect(c.pausedReason == JobsCommand.pausedByUserReason, "a pause of the user's stays")
     }
 
     @Test("a watch job is refused, and an unknown job is named")
