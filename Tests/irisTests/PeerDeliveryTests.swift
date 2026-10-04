@@ -30,18 +30,10 @@ private func eventually(_ timeoutMs: Int = 3000, _ condition: @MainActor @Sendab
 
 /// Races `op` against a timer so a test can prove "returns promptly" without risking an actual
 /// hang when the thing under test genuinely never completes (pre-fix, M3: `op` would await the
-/// gated target's whole turn forever, since this test never releases the gate).
+/// gated target's whole turn forever, since this test never releases the gate). nil on timeout.
+/// The app's `withTimeout`, not a task group: a group waits for the op it was meant to bound (#345).
 private func withTimeout<T: Sendable>(_ ms: Int, _ op: @Sendable @escaping () async -> T) async -> T? {
-    await withTaskGroup(of: T?.self) { group in
-        group.addTask { await op() }
-        group.addTask {
-            try? await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
-            return nil
-        }
-        let first = await group.next() ?? nil
-        group.cancelAll()
-        return first
-    }
+    try? await withTimeout(seconds: Double(ms) / 1000) { await op() }
 }
 
 /// #185 §5.0/§5.2. A peer message is untrusted input crossing an agent boundary: the sender does
