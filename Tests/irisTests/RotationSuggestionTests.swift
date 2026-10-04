@@ -33,12 +33,20 @@ import Foundation
 
     /// Only text parts count. A function call's arguments and inline image data are skipped, as
     /// documented on `estimatedTokens`.
-    @Test func estimatedTokensSkipsNonTextParts() {
+    /// Tool output reaches history as a `functionResponse` with no text; it must still count, or a
+    /// tool-heavy Iris overflows before the suggestion fires. Inline image data stays uncounted.
+    @Test func estimatedTokensCountsToolCallsAndResults() {
+        let output = String(repeating: "y", count: 40_000)
         let history = [
             Content(role: "model", parts: [Part(functionCall: FunctionCall(name: "run_command", args: ["command": .string(String(repeating: "x", count: 4000))]))]),
+            Content(role: "user", parts: [Part(functionResponse: FunctionResponse(name: "run_command",
+                response: ["output": .object(["stdout": .string(output), "lines": .array([.string("é")])])]))]),
             Content(role: "user", parts: [Part(inlineData: InlineData(mimeType: "image/png", data: String(repeating: "A", count: 4000)))]),
         ]
-        #expect(RotationSuggestion.estimatedTokens(history) == 0)
+        // call: "run_command"(11) + "command"(7) + 4000; response: "run_command"(11) + "output"(6)
+        // + "stdout"(6) + 40000 + "lines"(5) + "é"(2 bytes)
+        let bytes = 11 + 7 + 4000 + 11 + 6 + 6 + 40_000 + 5 + 2
+        #expect(RotationSuggestion.estimatedTokens(history) == bytes / 4)
     }
 
     @Test func estimatedTokensOfEmptyHistoryIsZero() {
