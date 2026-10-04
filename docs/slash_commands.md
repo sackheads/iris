@@ -26,7 +26,7 @@ Iris supports in-app slash commands (`/-commands`) typed into the chat composer 
 | `/search` | `/search <query>` | Full-text search across every saved conversation; lists up to 10 matching messages with their conversation title. |
 | `/tokens` | `/tokens` (or `/stats`) | View prompt, candidate, total, cache read, and cache write token usage breakdown (5a; a cache figure never reported by the provider shows as `—`, not zero). |
 | `/sandbox` | `/sandbox [status\|enable\|disable]` | Inspect or configure the subagent `apple/container` Linux VM runtime. |
-| `/new` | `/new` | Create a fresh conversation tab. In Iris (the pinned conversation) it rotates instead: a reflection pass, then a fresh pinned Iris opening with a summary of the old one, which is archived as "Iris — until ‹date›". Refused there while a turn is running or a goal is active. |
+| `/new` | `/new` | Create a fresh conversation tab. In Iris (the pinned conversation) it rotates instead: a reflection pass, then a fresh pinned Iris opening with a summary of the old one, which is archived as "Iris — until ‹date›". Refused there while a turn is running or a goal is active. Rotation is never automatic — once Iris's history passes about 150k estimated tokens, it posts a one-line suggestion to run `/new`, once per crossing, and not while a rotation is already running. |
 | `/clear` | `/clear` | Clear message history in the current active conversation. Refused in a pinned conversation (Iris). |
 | `/archive` | `/archive` | Move this conversation to the archive. Refused while a turn is running or a goal is active on it, and refused on Iris itself — `/new` archives Iris by rotating it. |
 | `/unarchive` | `/unarchive` | Return this conversation to the active list. |

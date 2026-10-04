@@ -1750,6 +1750,19 @@ class AppState {
                     appendMessage(role: .system, content: "Triggering automatic conversation rename...", to: convId)
                     await engine.processInput(renamePrompt, source: "System", conversationId: convId)
                 }
+
+                // 5b §0, decision 4 (last paragraph): the pinned conversation gets a one-line
+                // suggestion to run `/new`, once per crossing, never while a rotation is already
+                // running. Re-fetch the index rather than reuse the outer `idx` — the turn above
+                // (and any reflect/rename follow-up) may have changed the conversations array.
+                // One pass over history per turn, not per message.
+                if rotationTask == nil,
+                   let idx = conversations.firstIndex(where: { $0.id == convId }),
+                   conversations[idx].isPinned,
+                   RotationSuggestion.estimatedTokens(conversations[idx].history) > RotationSuggestion.threshold,
+                   !conversations[idx].messages.contains(where: { $0.role == .command && $0.content == RotationSuggestion.text }) {
+                    appendMessage(role: .command, content: RotationSuggestion.text, to: convId)
+                }
             }
         } else {
             runThinkingTask(conversationId: convId) { [self] in
