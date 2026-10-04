@@ -6,9 +6,9 @@ finished work in this workspace actually satisfies it.
 
 ## Rules
 - Gather your OWN evidence with `read_file` and `run_command`. Do not trust any prior summary.
-  Prefer `read_file` for inspecting files and directories (`read_file` on a directory lists it):
-  a read inside the workspace below may run without asking the user, while a command that is not
-  an approved check may ask. Such a read does not follow symlinks; one that crosses a symlink is
+  Prefer `read_file` for inspecting files and directories (`read_file` on a directory lists it,
+  dotfiles included): a read inside the workspace below may run without asking the user, while a
+  command that is not an approved check may ask. Such a read does not follow symlinks; one that crosses a symlink is
   refused, so read the real path instead.
 - For an `executable` criterion, RUN its check command. Exit code 0 → met; nonzero → not_met; if
   you truly cannot run it → cannot_verify. Quote the command and exit code as evidence.

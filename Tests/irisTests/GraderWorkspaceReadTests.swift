@@ -272,6 +272,54 @@ struct GraderWorkspaceReadTests {
         }
     }
 
+    @Test("a workspace reached through a symlinked prefix: approve, then grade, and the grader's reads ask nothing (#359 review)")
+    func symlinkedPrefixWorkspaceReadsUnasked() async throws {
+        let f = try fixture(); defer { f.tearDown() }
+        // `src` → `home`, as `~/src` → `/Volumes/…`: the owner's workspace is `src/proj`.
+        let src = f.home.appendingPathComponent("src")
+        try FileManager.default.createSymbolicLink(at: src, withDestinationURL: f.home)
+        let spelled = src.appendingPathComponent("proj").path
+        try ".".write(to: f.proj.appendingPathComponent(".hidden"), atomically: true, encoding: .utf8)
+        let state = try app(f)
+        let originId = state.createNewConversation(isBackground: false, select: false)
+        var contract = GoalContract(objective: "o", criteria: [Criterion(text: "c", kind: .executable, check: Self.check)])
+            .humanApproved(workspace: spelled)
+        contract.lock()
+        #expect(contract.approvedWorkspace == IrisPaths.canonicalPath(f.proj.path))
+        #expect(GoalEvaluator.gradingDirectory(spelled, contract: contract) == contract.approvedWorkspace)
+        #expect(GoalEvaluator.gradingDirectory(f.other.path, contract: contract) == f.other.path,
+                "a workspace moved elsewhere keeps its own spelling, and so still asks")
+        let qualitative = Criterion(text: "reads well", kind: .qualitative)
+        contract.criteria.append(qualitative)
+        // Every prompt is denied and counted: a read that asks fails here instead of hanging.
+        let asked = Locked(0)
+        let done = Locked(false)
+        let watcher = Task { @MainActor in
+            while !done.value {
+                if let pending = state.pendingApprovals.first {
+                    asked.mutate { $0 += 1 }
+                    state.resolveApproval(id: pending.id, .deny)
+                }
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+        }
+        // The third read spells the directory as the grader is now told it (the approved spelling);
+        // an absolute path through the link still asks, as any path reaching in through a link does.
+        let told = try #require(contract.approvedWorkspace)
+        let grader = ReadingGrader(paths: [".", "notes.txt", told + "/sub/inner.txt"], criterionId: qualitative.id)
+        _ = await GoalEvaluator.shared.evaluate(contract: contract, workspace: spelled,
+                                                originatingConversationId: originId, app: state, client: grader)
+        done.mutate { $0 = true }
+        await watcher.value
+        #expect(asked.value == 0, "a read of the approved workspace asked")
+        let results = grader.results
+        #expect(results.count == 3, "\(results)")
+        guard results.count == 3 else { return }
+        #expect(results[0].contains("Directory listing: 4 entries") && results[0].contains(".hidden"), "\(results[0])")
+        #expect(results[1].contains("notes"))
+        #expect(results[2].contains("inner") && !results[2].contains("Error"), "\(results[2])")
+    }
+
     @Test("the grader's dispatcher walks its workspace reads: a listing comes back, and a swapped link is not followed")
     func dispatcherWalksGraderReads() async throws {
         let f = try fixture(); defer { f.tearDown() }
