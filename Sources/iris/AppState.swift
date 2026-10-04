@@ -672,6 +672,7 @@ class AppState {
         self.engine = IrisEngine(state: self)
         loadConversations()
         retitleLegacyPinnedConversation()
+        unpinStrayPinnedConversations()
         // `selectedConversationId == nil` covers more than an empty store: #187's background job
         // conversations are loaded but never selected, so a store holding nothing else still has
         // to open in a fresh conversation.
@@ -964,6 +965,19 @@ class AppState {
         }
         try? store.setMetaValue(id.uuidString, forKey: Self.activityConversationMetaKey)
         return id
+    }
+
+    /// A crash mid-rotation can leave two conversations pinned (5b §0.4): the meta key decides
+    /// which is Iris, and any other is unpinned. When the key names a missing row, every pinned
+    /// conversation is stale and `activityConversationId()` makes a fresh one. With no key at all
+    /// there is nothing to reconcile against, and pins are left alone.
+    func unpinStrayPinnedConversations() {
+        guard let raw = (try? store.metaValue(forKey: Self.activityConversationMetaKey)) ?? nil else { return }
+        let pinned = UUID(uuidString: raw)
+        for idx in conversations.indices where conversations[idx].isPinned && conversations[idx].id != pinned {
+            conversations[idx].isPinned = false
+            markChanged(conversations[idx].id, .metadata)
+        }
     }
 
     /// 5b: the pinned conversation became the main one and took Iris's name. Only the exact old

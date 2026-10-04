@@ -171,4 +171,49 @@ import Foundation
         }
         #expect(fired, "expected the rename trigger to fire on the third turn of a non-pinned conversation")
     }
+
+    // MARK: - Crash window (5b §0.4)
+
+    /// A crash between pinning the new Iris and unpinning the old one leaves two pins; the meta
+    /// key decides which is Iris on the next load.
+    @Test func reloadUnpinsAllButTheMetaKeysConversation() throws {
+        let store = try ConversationStore.inMemory()
+        let a = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        let keep = UUID(), stray = UUID()
+        a.createNewConversation(id: keep)
+        a.createNewConversation(id: stray)
+        for id in [keep, stray] {
+            let i = a.conversations.firstIndex { $0.id == id }!
+            a.conversations[i].isPinned = true
+            a.markChanged(id, .metadata)
+        }
+        try store.setMetaValue(keep.uuidString, forKey: AppState.activityConversationMetaKey)
+        a.flushSave()
+
+        let b = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        #expect(b.conversations.filter(\.isPinned).map(\.id) == [keep])
+        b.flushSave()
+        let c = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        #expect(c.conversations.filter(\.isPinned).map(\.id) == [keep], "the unpin was persisted")
+    }
+
+    /// The meta key names a row that is gone: every pinned conversation is stale, and the one
+    /// `activityConversationId()` recreates is the only pin.
+    @Test func reloadWithMissingMetaRowLeavesOnlyTheRecreatedPin() throws {
+        let store = try ConversationStore.inMemory()
+        let a = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        let stray = UUID()
+        a.createNewConversation(id: stray)
+        let i = a.conversations.firstIndex { $0.id == stray }!
+        a.conversations[i].isPinned = true
+        a.markChanged(stray, .metadata)
+        try store.setMetaValue(UUID().uuidString, forKey: AppState.activityConversationMetaKey)
+        a.flushSave()
+
+        let b = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        #expect(b.conversations.first { $0.id == stray }?.isPinned == false)
+        let iris = b.activityConversationId()
+        #expect(iris != stray)
+        #expect(b.conversations.filter(\.isPinned).map(\.id) == [iris])
+    }
 }
