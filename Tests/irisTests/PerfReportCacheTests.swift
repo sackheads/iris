@@ -45,11 +45,18 @@ struct PerfReportCacheTests {
     @Test("the report carries a per-round cache table for a multi-turn scenario")
     func perRoundCacheTable() {
         let text = PerfReport.render(Self.cachingRecord())
-        #expect(text.contains("| turn | round | prompt | cache read | cache write | uncached |"))
+        #expect(text.contains("| turn | round | prompt | cache read | cache write | 1h write | uncached |"))
         // An unknown cache read (fake/older records) counts as fully uncached, shown as "—".
-        #expect(text.contains("| 1 | 0 | 1000 | — | — | 1000 |"))
+        #expect(text.contains("| 1 | 0 | 1000 | — | — | — | 1000 |"))
         // uncached = prompt - read - write.
-        #expect(text.contains("| 2 | 1 | 1400 | 1150 | 200 | 50 |"))
+        #expect(text.contains("| 2 | 1 | 1400 | 1150 | 200 | — | 50 |"))
+    }
+
+    @Test("the cache table shows the 1-hour share of each write (5c)")
+    func oneHourWriteColumn() {
+        var record = Self.cachingRecord()
+        record.scenarios[0].rungs[0].repetitions[0].turns[2].modelCalls[0].cacheWrite1hTokens = 300
+        #expect(PerfReport.render(record).contains("| 3 | 0 | 1500 | 1100 | 300 | 300 | 100 |"))
     }
 
     @Test("cacheTable is empty for a scenario with no per-turn model calls")
@@ -94,7 +101,7 @@ struct PerfReportCacheTests {
 
         let table = PerfReport.cacheTable(record.scenarios[0])
         #expect(!table.contains { $0.contains("77777") }, "the errored repetition's rows must not appear")
-        #expect(table.contains("| 1 | 0 | 1000 | — | — | 1000 |"), "repetition 1's (index 1) rows, not the errored repetition 0's")
+        #expect(table.contains("| 1 | 0 | 1000 | — | — | — | 1000 |"), "repetition 1's (index 1) rows, not the errored repetition 0's")
 
         let text = PerfReport.render(record)
         #expect(text.contains("repetition 2"), "the label names the repetition actually used (1-indexed)")

@@ -107,6 +107,9 @@ struct PerfEnvironment: Codable {
     /// 5a's tool-list experiment ran: the state-gated tools (`manage_fact` and the peer tools)
     /// were declared on every turn. nil on records written before 5a and on ordinary runs.
     var stateGatedToolsAlwaysDeclared: Bool? = nil
+    /// `IRIS_PERF_BASE_PRICE_PER_MTOK`: the medium model's uncached-input price, which turns the
+    /// report's weighted tokens into dollars. A check against a real bill, never a budget (5c §3).
+    var basePricePerMTok: Double? = nil
 }
 
 struct PerfScenarioResult: Codable {

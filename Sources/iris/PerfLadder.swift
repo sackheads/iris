@@ -56,7 +56,8 @@ enum PerfLadder {
                                        outputTokens: response.usageMetadata?.candidatesTokenCount,
                                        returnedToolCalls: response.candidates?.first?.content?.parts.contains { $0.functionCall != nil } ?? false,
                                        cacheReadTokens: response.usageMetadata?.cacheReadTokens,
-                                       cacheWriteTokens: response.usageMetadata?.cacheWriteTokens)
+                                       cacheWriteTokens: response.usageMetadata?.cacheWriteTokens,
+                                       cacheWrite1hTokens: response.usageMetadata?.cacheWrite1hTokens)
             return LadderSample(wallClockMs: ms, modelCall: call, error: nil)
         } catch {
             let ms = (MonotonicClock.nowMs() - start)
