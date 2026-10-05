@@ -35,7 +35,11 @@ enum IrisDefaults {
         let suiteName = "iris-tests-\(ProcessInfo.processInfo.processIdentifier)"
         guard let suite = UserDefaults(suiteName: suiteName) else { return .standard }
         suite.removePersistentDomain(forName: suiteName)   // every test process starts from defaults
-        sweepStaleTestSuites()   // ...and takes out the plists earlier test processes left behind
+        // ...and takes out the plists earlier test processes left behind. Off this initializer:
+        // the folder holds hundreds of per-test plists inside the hour, and listing and stat-ing
+        // them under `swift_once` parked every thread that touched the store, the main actor
+        // included, for ~200 ms at the start of a run (#366). Nothing here depends on the sweep.
+        DispatchQueue.global(qos: .utility).async { sweepStaleTestSuites() }
 
         // Point the model-backed guard tiers at a path that cannot exist. `promptGuardCoreMLModel`
         // falls back to a real DeBERTa ONNX URL when unset. Before #304 that resolved the ~704MB

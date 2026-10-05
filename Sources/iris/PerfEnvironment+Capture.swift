@@ -2,7 +2,14 @@ import Foundation
 
 extension PerfEnvironment {
     @MainActor
-    static func capture(headless: Bool, toolDeclarationCount: Int?, repoRoot: URL, toolSandbox: String? = nil) -> PerfEnvironment {
+    static func capture(headless: Bool, toolDeclarationCount: Int?, repoRoot: URL, toolSandbox: String? = nil) async -> PerfEnvironment {
+        // Each git call blocks until its subprocess exits, so run them off the main actor (#366).
+        // Exclude perf/baselines: --promote writes an untracked baseline file earlier in the
+        // same run, and that alone must not flag later suites in the run as dirty.
+        let sha = Task.detached { git(["rev-parse", "--short", "HEAD"], in: repoRoot) }
+        let status = Task.detached { git(["status", "--porcelain", "--", ".", ":(exclude)perf/baselines"], in: repoRoot) }
+        let gitSha = await sha.value ?? "unknown"
+        let gitDirty = !(await status.value ?? "").isEmpty
         let config = ConfigManager.shared
         #if DEBUG
         let build = "debug"
@@ -10,10 +17,8 @@ extension PerfEnvironment {
         let build = "release"
         #endif
         return PerfEnvironment(
-            gitSha: git(["rev-parse", "--short", "HEAD"], in: repoRoot) ?? "unknown",
-            // Exclude perf/baselines: --promote writes an untracked baseline file earlier in the
-            // same run, and that alone must not flag later suites in the run as dirty.
-            gitDirty: !(git(["status", "--porcelain", "--", ".", ":(exclude)perf/baselines"], in: repoRoot) ?? "").isEmpty,
+            gitSha: gitSha,
+            gitDirty: gitDirty,
             machineModel: machineModel(),
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             cpuCount: ProcessInfo.processInfo.activeProcessorCount,

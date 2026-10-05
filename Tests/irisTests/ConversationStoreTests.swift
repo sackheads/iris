@@ -823,4 +823,24 @@ struct ConversationStoreTests {
         let decoded = try JSONDecoder().decode(Conversation.self, from: legacy)
         #expect(decoded.isArchived == false)
     }
+
+    @Test("an in-memory store copied from the template has the migrated schema and its own data (#366)")
+    func inMemoryTemplateCopy() throws {
+        let fresh = try DatabaseQueue()
+        try ConversationStore.migrator.migrate(fresh)
+        let schemaSQL = "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+        let expected = try fresh.read { try Row.fetchAll($0, sql: schemaSQL) }
+
+        let a = try ConversationStore.inMemory()
+        let b = try ConversationStore.inMemory()
+        #expect(try a.writer.read { try Row.fetchAll($0, sql: schemaSQL) } == expected)
+        #expect(try a.writer.read { try ConversationStore.migrator.hasCompletedMigrations($0) })
+        // The copy gets the store's own connection configuration, not the template's.
+        #expect(try a.writer.read { try Bool.fetchOne($0, sql: "PRAGMA foreign_keys") } == true)
+
+        try a.setMetaValue("x", forKey: "k")
+        #expect(try a.metaValue(forKey: "k") == "x")
+        #expect(try b.metaValue(forKey: "k") == nil)
+        #expect(try ConversationStore.inMemory().metaValue(forKey: "k") == nil)
+    }
 }

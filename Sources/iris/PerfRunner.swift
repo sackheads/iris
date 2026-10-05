@@ -87,7 +87,7 @@ enum PerfRunner {
                                               rungs: rungResults, summary: PerfSummarizer.summarize(rungResults, expectedTools: scenario.expectedTools)))
         }
 
-        var environment = PerfEnvironment.capture(headless: headless, toolDeclarationCount: toolCount, repoRoot: repoRoot,
+        var environment = await PerfEnvironment.capture(headless: headless, toolDeclarationCount: toolCount, repoRoot: repoRoot,
                                                   toolSandbox: anySandboxed ? "sandboxed" : "host")
         if declareStateGatedTools { environment.stateGatedToolsAlwaysDeclared = true }
         return PerfRunRecord(schemaVersion: PerfRunRecord.currentSchemaVersion, suite: suite.name,
