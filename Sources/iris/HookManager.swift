@@ -69,7 +69,12 @@ struct HookManager {
     }
 
     func fireBeforeModel(request: GeminiRequest, useSandbox: Bool = false) async -> HookDecision {
-        return await fireEvent(eventName: "BeforeModel", targetMatcher: "BeforeModel", payload: try? JSONEncoder().encode(request), useSandbox: useSandbox)
+        return await fireEvent(eventName: "BeforeModel", targetMatcher: "BeforeModel", payload: Self.beforeModelPayload(request), useSandbox: useSandbox)
+    }
+
+    /// What a `BeforeModel` hook reads on stdin. Split out so a test can pin it without a hook.
+    static func beforeModelPayload(_ request: GeminiRequest) -> Data? {
+        try? JSONEncoder().encode(request)
     }
 
     func fireAfterModel(response: GeminiResponse, useSandbox: Bool = false) async -> HookDecision {

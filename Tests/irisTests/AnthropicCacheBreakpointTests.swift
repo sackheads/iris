@@ -161,6 +161,117 @@ struct AnthropicCacheBreakpointTests {
         #expect(m.messages == [1, 3, 4])
         #expect(m.total == 4)
     }
+
+    // MARK: - TTL from the hints (5c §0.8)
+
+    /// Every marker's `ttl` ("5m" when absent), in the order the API renders the prompt:
+    /// tools, then system, then messages.
+    private func ttlsInPromptOrder(_ b: [String: Any]) -> [String] {
+        func ttl(_ block: [String: Any]) -> String? {
+            guard let cc = block["cache_control"] as? [String: Any] else { return nil }
+            return cc["ttl"] as? String ?? "5m"
+        }
+        var out: [String] = []
+        for t in (b["tools"] as? [[String: Any]]) ?? [] { if let v = ttl(t) { out.append(v) } }
+        for s in (b["system"] as? [[String: Any]]) ?? [] { if let v = ttl(s) { out.append(v) } }
+        for m in (b["messages"] as? [[String: Any]]) ?? [] {
+            for block in (m["content"] as? [[String: Any]]) ?? [] { if let v = ttl(block) { out.append(v) } }
+        }
+        return out
+    }
+
+    @Test("no hints: every marker is exactly today's ephemeral")
+    func noHintsIsToday() throws {
+        let text = String(data: try JSONSerialization.data(withJSONObject: try body(toolRoundRequest())), encoding: .utf8)!
+        #expect(!text.contains("\"ttl\""))
+        #expect(text.contains("\"cache_control\""))
+    }
+
+    @Test("the standard policy is byte-identical to no hints")
+    func standardIsToday() throws {
+        var r = toolRoundRequest(); r.tools = Self.tools
+        let plain = try AnthropicClient.makeURLRequest(request: r, model: "m", apiKey: "k", stream: false).httpBody
+        r.cacheHints = CacheHints(ttl: .standard, promptCacheKey: "conv")
+        #expect(try AnthropicClient.makeURLRequest(request: r, model: "m", apiKey: "k", stream: false).httpBody == plain)
+    }
+
+    @Test("prefix 1h, history 5m: system carries ttl 1h, messages carry none")
+    func prefixLongHistoryShort() throws {
+        var r = toolRoundRequest()
+        r.cacheHints = CacheHints(ttl: .init(prefix: .oneHour, history: .fiveMinutes))
+        let b = try body(r)
+        let system = try #require(b["system"] as? [[String: Any]])
+        #expect((system.last?["cache_control"] as? [String: Any])?["ttl"] as? String == "1h")
+        let messages = try #require(b["messages"] as? [[String: Any]])
+        for m in messages {
+            for block in (m["content"] as? [[String: Any]]) ?? [] {
+                #expect((block["cache_control"] as? [String: Any])?["ttl"] == nil)
+            }
+        }
+    }
+
+    @Test("without a system prompt the tools-only marker takes the prefix TTL")
+    func toolsOnlyMarkerTakesPrefix() throws {
+        var r = request([user("turn 1"), model("answer 1"), user("turn 2")])
+        r.systemInstruction = nil
+        r.cacheHints = CacheHints(ttl: .init(prefix: .oneHour, history: .fiveMinutes))
+        let b = try body(r)
+        let tools = try #require(b["tools"] as? [[String: Any]])
+        #expect((tools.last?["cache_control"] as? [String: Any])?["ttl"] as? String == "1h")
+        #expect(ttlsInPromptOrder(b).first == "1h")
+    }
+
+    @Test("Iris: all four markers 1h, still at most four")
+    func allOneHour() throws {
+        var r = toolRoundRequest(); r.tools = Self.tools
+        r.cacheHints = CacheHints(ttl: .init(prefix: .oneHour, history: .oneHour))
+        let text = String(data: try JSONSerialization.data(withJSONObject: try body(r)), encoding: .utf8)!
+        let markers = text.components(separatedBy: "\"cache_control\"").count - 1
+        #expect(markers >= 2)
+        #expect(markers <= 4 && text.components(separatedBy: "\"1h\"").count - 1 == markers)
+    }
+
+    /// The API rejects a longer-TTL breakpoint after a shorter one. Every policy, including one
+    /// asking for a longer history than prefix, renders its markers in non-increasing TTL order.
+    @Test("a 1h marker never follows a 5m marker, for every policy and shape")
+    func longerTTLsComeFirst() throws {
+        let shapes: [GeminiRequest] = {
+            var noSystem = request([user("turn 1"), model("answer 1"), user("turn 2")])
+            noSystem.systemInstruction = nil
+            var withTools = toolRoundRequest(); withTools.tools = Self.tools
+            return [toolRoundRequest(), withTools, noSystem,
+                    request([user("turn 1"), model("answer 1"), user("turn 2")] + toolRound(1) + [user("turn 3")])]
+        }()
+        let ttls: [CacheTTL] = [.fiveMinutes, .oneHour]
+        for shape in shapes {
+            for prefix in ttls {
+                for history in ttls {
+                    var r = shape
+                    r.cacheHints = CacheHints(ttl: .init(prefix: prefix, history: history))
+                    let order = ttlsInPromptOrder(try body(r))
+                    #expect(!order.isEmpty)
+                    if let firstShort = order.firstIndex(of: "5m") {
+                        #expect(!order[firstShort...].contains("1h"), "1h after 5m: \(order) for prefix \(prefix) history \(history)")
+                    }
+                }
+            }
+        }
+    }
+
+    @Test("the direct API sends no extended-cache-ttl beta header")
+    func noBetaHeader() throws {
+        var r = toolRoundRequest()
+        r.cacheHints = CacheHints(ttl: .init(prefix: .oneHour, history: .oneHour))
+        let req = try AnthropicClient.makeURLRequest(request: r, model: "m", apiKey: "k", stream: false)
+        #expect(req.value(forHTTPHeaderField: "anthropic-beta") == nil)
+        #expect(String(data: try #require(req.httpBody), encoding: .utf8)?.contains("\"1h\"") == true)
+    }
+
+    @Test("cacheControl: five minutes is today's bare ephemeral, an hour adds ttl 1h")
+    func cacheControlShape() {
+        #expect(AnthropicClient.cacheControl(.fiveMinutes) as NSDictionary == ["type": "ephemeral"])
+        #expect(AnthropicClient.cacheControl(.oneHour) as NSDictionary == ["type": "ephemeral", "ttl": "1h"])
+    }
 }
 
 /// The whole request, end to end: consecutive engine turns with no fact match and no peers,

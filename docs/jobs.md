@@ -922,6 +922,16 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
   | Gemini | 0.1 | 0 (implicit caching has no write charge) |
   | OpenAI | 0.1 | 0 |
 
+  Which Anthropic writes are 1-hour ones (since 5c): a job run's shared prefix (the system prompt
+  and the tools, common to every run) is cached for an hour whenever some enabled, unpaused
+  scheduled job that runs a model turn fires more often than hourly, and for five minutes
+  otherwise. Polls, watches and built-in jobs don't count toward that: a poll runs a turn only when
+  its gate reports a change, a watch is bursty, and a built-in spends nothing, so none of them keeps
+  a prefix warm on a predictable cadence. A run's own history stays at five minutes, because runs
+  are short. To keep one job's prefix the same from fire to fire, a run's tools don't depend on
+  what the turn surfaced: a mutating run always declares `manage_fact`, a read-only run never does. The pinned conversation holds an hour on every marker; everything else holds five
+  minutes.
+
   Output × 5 is a floor; real output prices run 4× to 8× input. Each run is priced at the
   provider it ran on, which its row records, never at whatever is configured now, and the weights
   are applied when the figure is read, so a changed weight re-prices history without a migration. A

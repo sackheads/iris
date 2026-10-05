@@ -98,6 +98,21 @@ struct AnthropicVertexTransportTests {
         #expect(tools.last?["cache_control"] == nil, "marker (a) sits on system when there is one (5a), on Vertex as on the API")
     }
 
+    /// 5c §0.8 and the spec's facts: Vertex accepts `ttl: "1h"` with no beta header.
+    @Test("a 1h policy reaches the Vertex body, with no beta header")
+    func oneHourOnVertex() throws {
+        var r = Self.request
+        r.cacheHints = CacheHints(ttl: .init(prefix: .oneHour, history: .oneHour))
+        let req = try AnthropicClient.makeURLRequest(request: r, model: "claude-sonnet-5", transport: Self.vertex, stream: false)
+        #expect(req.value(forHTTPHeaderField: "anthropic-beta") == nil)
+        let b = try body(req)
+        let system = try #require(b["system"] as? [[String: Any]])
+        #expect((system.first?["cache_control"] as? [String: Any])?["ttl"] as? String == "1h")
+        let messages = try #require(b["messages"] as? [[String: Any]])
+        let last = try #require(messages.last?["content"] as? [[String: Any]])
+        #expect((last.last?["cache_control"] as? [String: Any])?["ttl"] as? String == "1h")
+    }
+
     @Test("an empty project or token is refused before anything is sent")
     func refusals() {
         #expect(throws: (any Error).self) {

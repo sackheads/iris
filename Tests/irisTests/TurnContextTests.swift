@@ -915,3 +915,149 @@ struct BriefingEngineTests {
         #expect(!leadText(requests[0]).contains("# Recent Activity"))
     }
 }
+
+/// 5c §0.8/§0.9 on a real engine turn: the hints every round of a turn carries. A real
+/// `JobLedger` over an in-memory store decides the background prefix's TTL; no globals.
+@MainActor
+@Suite("Cache hints on an engine turn (5c)")
+struct CacheHintsEngineTests {
+    private func run(pinned: Bool = false, background: Bool = false, jobs: [Job] = [],
+                     override: CacheTTLPolicy? = nil, profile: JobProfile? = nil,
+                     principal: Principal = .main, seedFact: Bool = false) async throws -> (id: UUID, requests: [GeminiRequest]) {
+        let store = try ConversationStore.inMemory()
+        for job in jobs { try store.ledger.upsert(job) }
+        let facts = try FactStoreManager(inMemory: true)
+        if seedFact { _ = try facts.addFact(content: "Brian lives in Seattle") }
+        let app = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id, isBackground: background)
+        if let idx = app.conversations.firstIndex(where: { $0.id == id }) {
+            if pinned { app.conversations[idx].isPinned = true }
+            app.conversations[idx].jobProfile = profile
+        }
+        let client = TurnContextClient([toolCall("search_memory", ["query": .string("x")]), reply("done")])
+        let engine = IrisEngine(state: app, tier: .medium, principal: principal, client: client,
+                                retryDelays: [], streamResponses: false, factStore: facts,
+                                protectionEnabled: false, sessionPeerCount: 0, cacheTTLOverride: override)
+        await engine.processInput(seedFact ? "Tell me about Seattle" : "hi", source: "UI", conversationId: id)
+        return (id, client.requests)
+    }
+
+    private static let every15 = Job(name: "often", prompt: "p", trigger: .schedule(.interval(seconds: 900)))
+    private static let hourly = Job(name: "hourly", prompt: "p", trigger: .schedule(.interval(seconds: 3600)))
+
+    @Test("Iris: every round holds an hour on all markers, keyed by the conversation")
+    func pinnedHoldsAnHour() async throws {
+        let r = try await run(pinned: true)
+        try #require(r.requests.count == 2)
+        for request in r.requests {
+            #expect(request.cacheHints?.ttl == .init(prefix: .oneHour, history: .oneHour))
+            #expect(request.cacheHints?.promptCacheKey == r.id.uuidString)
+        }
+    }
+
+    @Test("a plain conversation stays at five minutes, still keyed")
+    func plainIsStandard() async throws {
+        let r = try await run(jobs: [Self.every15])
+        try #require(r.requests.count == 2)
+        for request in r.requests {
+            #expect(request.cacheHints?.ttl == .standard)
+            #expect(request.cacheHints?.promptCacheKey == r.id.uuidString)
+        }
+    }
+
+    @Test("a job run holds the prefix for an hour only when a job fires inside one")
+    func backgroundFollowsCadence() async throws {
+        let often = try await run(background: true, jobs: [Self.hourly, Self.every15])
+        try #require(!often.requests.isEmpty)
+        #expect(often.requests.allSatisfy { $0.cacheHints?.ttl == .init(prefix: .oneHour, history: .fiveMinutes) })
+        let rare = try await run(background: true, jobs: [Self.hourly])
+        try #require(!rare.requests.isEmpty)
+        #expect(rare.requests.allSatisfy { $0.cacheHints?.ttl == .standard })
+    }
+
+    // MARK: prompt_cache_key by prefix identity (#367 review)
+
+    @Test("two fires of the same job send the same key, and it is not either conversation's id")
+    func sameJobSameKey() async throws {
+        let a = try await run(background: true, profile: .mutating)
+        let b = try await run(background: true, profile: .mutating)
+        let ka = try #require(a.requests.first?.cacheHints?.promptCacheKey)
+        let kb = try #require(b.requests.first?.cacheHints?.promptCacheKey)
+        #expect(ka == kb)
+        #expect(ka != a.id.uuidString && kb != b.id.uuidString)
+        #expect(a.requests.allSatisfy { $0.cacheHints?.promptCacheKey == ka }, "every round of a run sends one key")
+    }
+
+    @Test("a read-only and a mutating job send different keys")
+    func profilesDiffer() async throws {
+        let ro = try await run(background: true, profile: .readOnly)
+        let mu = try await run(background: true, profile: .mutating)
+        let kro = try #require(ro.requests.first?.cacheHints?.promptCacheKey)
+        let kmu = try #require(mu.requests.first?.cacheHints?.promptCacheKey)
+        #expect(kro != kmu)
+    }
+
+    @Test("an attended chat and Iris send their conversation id")
+    func attendedSendsConversationId() async throws {
+        for pinned in [false, true] {
+            let r = try await run(pinned: pinned)
+            try #require(!r.requests.isEmpty)
+            #expect(r.requests.allSatisfy { $0.cacheHints?.promptCacheKey == r.id.uuidString })
+        }
+    }
+
+    @Test("two evaluator grades share a key that is not a conversation id")
+    func evaluatorsShareAKey() async throws {
+        let a = try await run(principal: .evaluator)
+        let b = try await run(principal: .evaluator)
+        let ka = try #require(a.requests.first?.cacheHints?.promptCacheKey)
+        #expect(ka == b.requests.first?.cacheHints?.promptCacheKey)
+        #expect(ka != a.id.uuidString)
+    }
+
+    @Test("the key fits OpenAI's 64-byte limit")
+    func keyFits() {
+        let key = IrisEngine.promptCacheKey(conversationId: UUID(), isUnattended: true, principal: .main,
+                                            jobProfile: .mutating, toolNames: (0..<200).map { "tool_\($0)" })
+        #expect(key.utf8.count <= 64)
+    }
+
+    // MARK: manage_fact on an unattended run is declared by profile (#367 review)
+
+    private func toolNames(_ r: GeminiRequest) -> [String] {
+        r.tools?.first?.functionDeclarations.map(\.name) ?? []
+    }
+
+    @Test("one job's declared tools are identical across a fire with surfaced facts and one without")
+    func jobPrefixIgnoresFacts() async throws {
+        for profile in [JobProfile.mutating, .readOnly] {
+            let withFacts = try await run(background: true, profile: profile, seedFact: true)
+            let without = try await run(background: true, profile: profile, seedFact: false)
+            let a = try #require(withFacts.requests.first)
+            let b = try #require(without.requests.first)
+            // Control: the seeded fire really did surface a fact.
+            #expect(a.contents.last?.parts.first?.text?.contains("Mid-Term Fact Store Memory") == true)
+            #expect(b.contents.last?.parts.first?.text?.contains("Mid-Term Fact Store Memory") != true)
+            #expect(toolNames(a) == toolNames(b), "\(profile)")
+            #expect(toolNames(a).contains("manage_fact") == (profile == .mutating), "\(profile)")
+            #expect(a.cacheHints?.promptCacheKey == b.cacheHints?.promptCacheKey)
+        }
+    }
+
+    @Test("an attended chat still declares manage_fact only on a turn that surfaced facts")
+    func attendedStillGatedOnFacts() async throws {
+        let withFacts = try await run(seedFact: true)
+        let without = try await run(seedFact: false)
+        #expect(toolNames(try #require(withFacts.requests.first)).contains("manage_fact"))
+        #expect(!toolNames(try #require(without.requests.first)).contains("manage_fact"))
+    }
+
+    @Test("cacheTTLOverride wins over the resolved policy")
+    func overrideWins() async throws {
+        let r = try await run(pinned: true, override: .standard)
+        try #require(!r.requests.isEmpty)
+        #expect(r.requests.allSatisfy { $0.cacheHints?.ttl == .standard })
+    }
+}

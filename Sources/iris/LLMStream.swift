@@ -230,13 +230,13 @@ enum LLMStreaming {
 
     /// The form where the request builder also names the provider, for a client whose label is
     /// only known once its transport is resolved (#181: "Anthropic (Vertex AI, us-east5)").
-    static func stream<M: StreamMapper>(mapper: M,
+    static func stream<M: StreamMapper>(mapper: M, session: URLSession = .shared,
                                         makeRequest: @escaping @Sendable () async throws -> (URLRequest, String)) -> AsyncThrowingStream<LLMStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
                     let (urlRequest, provider) = try await makeRequest()
-                    let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
+                    let (bytes, response) = try await session.bytes(for: urlRequest)
                     guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
                     if http.statusCode != 200 {
                         var body = Data()

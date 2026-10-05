@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import SwiftUI
 import KeyboardShortcuts
 
@@ -403,8 +404,11 @@ actor IrisEngine {
     /// the round drains queued input, so a scenario can deliver an event card that this same
     /// round picks up — deterministically mid-turn (5b). Nil everywhere else.
     private let roundStartHook: (@Sendable (Int) async -> Void)?
+    /// Perf and tests: the Anthropic TTL policy for every request, instead of the one
+    /// `CacheTTLPolicy.resolve` picks (5c §0.8). Nil everywhere else.
+    private let cacheTTLOverride: CacheTTLPolicy?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil) {
         self.state = state
         self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
@@ -423,6 +427,7 @@ actor IrisEngine {
         self.roundStartHook = roundStartHook
         self.declareStateGatedTools = declareStateGatedTools
         self.stickyToolsEnabled = stickyTools
+        self.cacheTTLOverride = cacheTTLOverride
         systemPrompt = nil
     }
 
@@ -1624,7 +1629,13 @@ actor IrisEngine {
         // facts injected above or a `search_memory` result, so this is first declared on a turn that
         // surfaced some (invariant 6), and once declared, stays declared (5c §0.1): an id from an
         // earlier turn is still valid, and the store refuses one it does not know.
-        if !facts.isEmpty || declareStateGatedTools || sticky.contains("manage_fact") {
+        // An unattended run is declared by its profile instead (5c, #367 review): facts surfacing
+        // on one fire and not the next would fork the prefix that job runs share. A mutating run
+        // always gets it; a read-only one never does, since that profile denies the write anyway.
+        let declareManageFact = isUnattended
+            ? jobProfile == .mutating
+            : (!facts.isEmpty || declareStateGatedTools || sticky.contains("manage_fact"))
+        if declareManageFact {
         toolsList.append(FunctionDeclaration(
             name: "manage_fact",
             description: "Correct the fact store when the user says a remembered fact is wrong, outdated, or replaced, or when a retrieved fact proved right or wrong: retract, supersede (with by_fact_id), restore, or rate it helpful/unhelpful. Fact ids are the bracketed ids in your Mid-Term Fact Store Memory block and in the facts results of search_memory (its conversations scope returns conversation titles, not fact ids).",
@@ -1937,6 +1948,16 @@ actor IrisEngine {
         var turnRequest = TurnRequest(context: turnContext, stateHistory: stateHistory, initialHistory: history)
 
         var request = GeminiRequest(contents: await requestContents(history, from: .initial, &turnRequest, conversationId: conversationId), systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
+        // 5c §0.8/§0.9. Set once: later rounds only replace `request.contents`. The jobs list is
+        // read only for an unattended turn, the one place it matters.
+        let firesHourly = isUnattended && principal == .main
+            && JobCadence.anyFiresMoreOftenThanHourly((try? ledger?.jobs()) ?? [], now: Date())
+        request.cacheHints = CacheHints(
+            ttl: cacheTTLOverride ?? CacheTTLPolicy.resolve(isPinned: isPinned, isUnattended: isUnattended,
+                                                            principal: principal, backgroundFiresHourly: firesHourly),
+            promptCacheKey: Self.promptCacheKey(conversationId: conversationId, isUnattended: isUnattended,
+                                                principal: principal, jobProfile: jobProfile,
+                                                toolNames: toolsList.map(\.name)))
         
         // Nothing from a previous turn decides this one: a turn cancelled mid-batch could leave a
         // denial behind, and finding it here would end the next turn before it started.
@@ -2015,9 +2036,7 @@ actor IrisEngine {
                 
                 var activeRequest = request
                 if case .proceed(let modifiedData) = beforeModelDecision, let data = modifiedData {
-                    if let modifiedReq = try? JSONDecoder().decode(GeminiRequest.self, from: data) {
-                        activeRequest = modifiedReq
-                    }
+                    activeRequest = Self.applyHookRewrite(data, to: request)
                 }
                 
                 await MainActor.run {
@@ -2635,6 +2654,28 @@ actor IrisEngine {
     /// 5c §1: never declared to an unattended turn, whatever a sticky set says.
     nonisolated static let unattendedNeverDeclared: Set<String> =
         jobCreationTools.union(["set_workspace", "list_sessions", "send_to_session", "set_session_card"])
+    /// OpenAI's `prompt_cache_key` (5c §0.9). It is a routing hint, so it names the prefix a
+    /// request shares with others, not the conversation. An attended chat (Iris included) keeps
+    /// its own history warm, so it uses its id. A job run, a subagent or an evaluator starts a
+    /// fresh conversation every time, and what it shares with its siblings is the system prompt
+    /// and tools, so it uses a short hash of who is asking, the job profile and the declared tools.
+    nonisolated static func promptCacheKey(conversationId: UUID, isUnattended: Bool, principal: Principal,
+                                           jobProfile: JobProfile?, toolNames: [String]) -> String {
+        if principal == .main && !isUnattended { return conversationId.uuidString }
+        let identity = "\(principal)|\(jobProfile?.rawValue ?? "none")|" + toolNames.sorted().joined(separator: ",")
+        let digest = SHA256.hash(data: Data(identity.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+        return "iris-prefix-\(digest)"
+    }
+
+    /// A `BeforeModel` hook's rewrite, decoded; an undecodable one leaves the request as it was.
+    /// The hook never sees the hints (not encoded), so its rewrite can't carry them: re-apply them,
+    /// or a hooked Iris turn silently falls back to five minutes (5c review focus 5).
+    nonisolated static func applyHookRewrite(_ data: Data, to request: GeminiRequest) -> GeminiRequest {
+        guard var rewritten = try? JSONDecoder().decode(GeminiRequest.self, from: data) else { return request }
+        rewritten.cacheHints = request.cacheHints
+        return rewritten
+    }
+
     /// 5c §1: never declared to a subagent or evaluator, whatever a sticky set says.
     nonisolated static let mainOnlyDeclared: Set<String> =
         jobCreationTools.union(["amend_goal_contract", "reach_checkpoint", "delegate_milestone",
