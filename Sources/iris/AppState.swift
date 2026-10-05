@@ -3433,6 +3433,10 @@ class AppState {
     /// ledger calls are synchronous, so the answer is in the transcript before this returns —
     /// except the listing, which first awaits the watch coordinator for the absorbed totals (§6) —
     /// only the watcher reload after a delete is deferred.
+    /// Test seam (#366): the most recent `/jobs` listing hop, so a test can await the listing
+    /// instead of polling a wall clock that a busy main actor makes meaningless.
+    @ObservationIgnored private(set) var jobsListingTask: Task<Void, Never>? = nil
+
     private func handleJobsCommand(_ trimmed: String, convId: UUID) {
         let ledger = store.ledger
         switch JobsCommand.parse(trimmed) {
@@ -3444,7 +3448,7 @@ class AppState {
             // since launch — lives in the coordinator's memory (§6), so the listing is a hop away.
             // `nil` when this process has no coordinator, and the watch line prints `—`.
             let engine = self.engine
-            Task { [weak self] in
+            jobsListingTask = Task { [weak self] in
                 let absorbed = await engine?.watchCoordinator()?.absorbedSinceLaunch()
                 self?.emitJobsListing(ledger: ledger, absorbed: absorbed, to: convId)
             }

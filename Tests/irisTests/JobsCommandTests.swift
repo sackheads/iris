@@ -660,20 +660,11 @@ struct JobsCommandTests {
         app.sendMessage("/jobs")
 
         // The listing is one hop away: it awaits the watch coordinator for the absorbed totals
-        // before it renders (spec §6), so the transcript fills in a moment after the send.
-        #expect(await eventually { output(app, id).contains("pr-sweep") })
+        // before it renders (spec §6). Await that hop rather than a wall clock (#366).
+        await app.jobsListingTask?.value
+        #expect(output(app, id).contains("pr-sweep"))
         #expect(app.conversations.first { $0.id == id }?.history.isEmpty == true,
                 "a deterministic command never enters the model's history")
-    }
-
-    /// Polls the main actor until `condition` holds or `timeoutMs` passes.
-    private func eventually(_ timeoutMs: Int = 3000, _ condition: @MainActor () -> Bool) async -> Bool {
-        let deadline = ContinuousClock.now.advanced(by: .milliseconds(timeoutMs))
-        while ContinuousClock.now < deadline {
-            if await condition() { return true }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-        return await condition()
     }
 
     @Test("/jobs ack clears the failure from the unacknowledged list")
