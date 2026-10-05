@@ -1,4 +1,5 @@
-{ "name": "pinned-briefing", "clientMode": "real", "tier": "medium", "pinned": true,
+{ "name": "pinned-briefing", "clientMode": "real", "tier": "medium",
+  "expectedTools": ["run_command"], "pinned": true,
   "seedFacts": ["QUILLBARROW keeps bees."],
   "turns": [
     { "prompt": "Greet me in five words." },

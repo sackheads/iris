@@ -188,4 +188,15 @@ struct PerfSummarizerTests {
         #expect(unscored.unexpectedToolCallsByName == nil)
         #expect(unscored.missedExpectedToolRate == nil)
     }
+
+    @Test("a rung-4-only suite scores its unexpected calls from rung 4; rung 5 wins when both ran (5c)")
+    func unexpectedCallsFromRung4() {
+        let only4 = PerfSummarizer.summarize([rung(4, [1, 2], tools: [["run_command", "manage_fact"], []])],
+                                             expectedTools: ["run_command"])
+        #expect(only4.unexpectedToolCallsByName == ["manage_fact": 1])
+        #expect(only4.unexpectedToolCallRate == 0.5)
+        let both = PerfSummarizer.summarize([rung(4, [1], tools: [["manage_fact"]]), rung(5, [1], tools: [["run_command"]])],
+                                            expectedTools: ["run_command"])
+        #expect(both.unexpectedToolCallsByName == [:])
+    }
 }

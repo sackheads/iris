@@ -1,0 +1,6 @@
+{ "name": "job-cadence", "clientMode": "real", "tier": "medium",
+  "background": true, "freshConversationPerTurn": true,
+  "expectedTools": [],
+  "turns": [
+    { "prompt": "System check: reply with the single word ok.", "source": "job:cadence" },
+    { "prompt": "System check: reply with the single word ok.", "source": "job:cadence", "pauseBeforeSeconds": 900 } ] }
