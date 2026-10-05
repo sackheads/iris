@@ -79,10 +79,15 @@ struct Scenario: Codable, Sendable {
         /// second model round, so the line is drained into the turn's own history mid-turn. A turn
         /// with only one round gets the card right after it ends instead. Nil means none.
         var eventCard: LedgerRun?
+        /// Seconds to wait before this turn starts (5c), so a cache entry can age past a TTL. Only a
+        /// real-client scenario waits; the fake lane skips it. Nil means none.
+        var pauseBeforeSeconds: Int?
 
-        init(prompt: String, source: String = "User", ledgerRuns: [LedgerRun]? = nil, eventCard: LedgerRun? = nil) {
+        init(prompt: String, source: String = "User", ledgerRuns: [LedgerRun]? = nil, eventCard: LedgerRun? = nil,
+             pauseBeforeSeconds: Int? = nil) {
             self.prompt = prompt; self.source = source
             self.ledgerRuns = ledgerRuns; self.eventCard = eventCard
+            self.pauseBeforeSeconds = pauseBeforeSeconds
         }
 
         init(from decoder: Decoder) throws {
@@ -91,6 +96,7 @@ struct Scenario: Codable, Sendable {
             source = try c.decodeIfPresent(String.self, forKey: .source) ?? "User"
             ledgerRuns = try c.decodeIfPresent([LedgerRun].self, forKey: .ledgerRuns)
             eventCard = try c.decodeIfPresent(LedgerRun.self, forKey: .eventCard)
+            pauseBeforeSeconds = try c.decodeIfPresent(Int.self, forKey: .pauseBeforeSeconds)
         }
     }
 
@@ -110,6 +116,12 @@ struct Scenario: Codable, Sendable {
     /// Run the turns in the pinned conversation (`AppState.activityConversationId()`) instead of
     /// a fresh unpinned one, so pinned-only turn context and tools apply (5b).
     var pinned: Bool
+    /// Run as a background job run (5c): an unattended conversation with the `readOnly` profile,
+    /// so the request has a real job run's tool surface and TTL policy.
+    var background: Bool
+    /// Open a new conversation for every turn (5c), each made the same way as the first, so
+    /// consecutive turns share only the prefix — the shape of a job firing on a cadence.
+    var freshConversationPerTurn: Bool
 
     /// True when the run writes to its `AppState`'s store (the ledger, the pin's meta key), which
     /// must then be an explicit in-memory one.
@@ -120,12 +132,15 @@ struct Scenario: Codable, Sendable {
     init(name: String, clientMode: ClientMode = .fake, tier: ModelTier = .medium,
          toggles: Toggles = Toggles(), latencyMs: FakeLLMClient.Latency? = nil,
          turns: [Turn], scriptedResponses: [ScriptedResponse] = [], expectedTools: [String]? = nil,
-         seedFacts: [String]? = nil, pinned: Bool = false) {
+         seedFacts: [String]? = nil, pinned: Bool = false, background: Bool = false,
+         freshConversationPerTurn: Bool = false) {
         self.name = name; self.clientMode = clientMode; self.tier = tier
         self.toggles = toggles; self.latencyMs = latencyMs
         self.turns = turns; self.scriptedResponses = scriptedResponses; self.expectedTools = expectedTools
         self.seedFacts = seedFacts
         self.pinned = pinned
+        self.background = background
+        self.freshConversationPerTurn = freshConversationPerTurn
     }
 
     init(from decoder: Decoder) throws {
@@ -140,6 +155,8 @@ struct Scenario: Codable, Sendable {
         expectedTools = try c.decodeIfPresent([String].self, forKey: .expectedTools)
         seedFacts = try c.decodeIfPresent([String].self, forKey: .seedFacts)
         pinned = try c.decodeIfPresent(Bool.self, forKey: .pinned) ?? false
+        background = try c.decodeIfPresent(Bool.self, forKey: .background) ?? false
+        freshConversationPerTurn = try c.decodeIfPresent(Bool.self, forKey: .freshConversationPerTurn) ?? false
     }
 
     static func decode(from data: Data) throws -> Scenario {

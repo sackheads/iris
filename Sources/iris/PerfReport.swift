@@ -16,6 +16,7 @@ enum PerfReport {
         if let streaming = env.streaming { out.append("- streaming: \(streaming ? "on" : "off")") }
         if let price = env.basePricePerMTok { out.append("- cost: weighted × $\(String(format: "%.2f", price)) / MTok (IRIS_PERF_BASE_PRICE_PER_MTOK); a check against a real bill, not a budget") }
         if env.stateGatedToolsAlwaysDeclared == true { out.append("- EXPERIMENT: state-gated tools (manage_fact, peer tools) declared on every turn (IRIS_PERF_DECLARE_STATE_TOOLS)") }
+        for name in env.experiments ?? [] { if let line = PerfExperiments.describe(name) { out.append("- \(line)") } }
         if env.buildConfiguration == "debug" { out.append("- WARNING: debug build; timings are not comparable to release runs") }
         if env.gitDirty { out.append("- WARNING: dirty tree; the sha does not describe this code") }
         out.append("")

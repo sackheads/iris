@@ -110,6 +110,9 @@ struct PerfEnvironment: Codable {
     /// `IRIS_PERF_BASE_PRICE_PER_MTOK`: the medium model's uncached-input price, which turns the
     /// report's weighted tokens into dollars. A check against a real bill, never a budget (5c §3).
     var basePricePerMTok: Double? = nil
+    /// The perf experiment switches that were on (5c), as `KEY=value`. Nil on ordinary runs and
+    /// on records written before 5c.
+    var experiments: [String]? = nil
 }
 
 struct PerfScenarioResult: Codable {

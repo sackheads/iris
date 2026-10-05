@@ -19,16 +19,18 @@ struct LadderSample: Sendable {
 enum PerfLadder {
     /// Run one engine turn against a capturing client with guards off, and keep the request it
     /// built. This is exactly the system prompt and tool list a real turn sends; under the
-    /// tool-list experiment (`declareStateGatedTools`) that is the experiment's list, so the
+    /// tool-list experiment (`experiments.declareStateGatedTools`) that is the experiment's list, so the
     /// recorded `toolDeclarationCount` and rung 3 match what the scenario turns sent.
     @MainActor
     static func capture(for scenario: Scenario, workspacePath: String? = nil,
-                        declareStateGatedTools: Bool = false) async -> LadderCapture {
+                        experiments: PerfExperiments = .init()) async -> LadderCapture {
         let client = CapturingLLMClient(reply: "ok")
         var one = scenario
         one.turns = Array(scenario.turns.prefix(1))
+        // The capture never waits: it only needs the request, not an aged cache.
+        for i in one.turns.indices { one.turns[i].pauseBeforeSeconds = nil }
         _ = await ScenarioRunner.run(one, guards: .off, clientOverride: client, workspacePath: workspacePath,
-                                     declareStateGatedTools: declareStateGatedTools)
+                                     experiments: experiments)
         let request = client.requests.first
         let count = request?.tools?.reduce(0) { $0 + $1.functionDeclarations.count } ?? 0
         return LadderCapture(systemInstruction: request?.systemInstruction, tools: request?.tools, toolCount: count)
