@@ -21,7 +21,7 @@ final class RecordingLauncher: @unchecked Sendable {
     }
 
     var launch: CLIContainerRuntime.Launch {
-        { [self] args, timeout in
+        { [self] args, timeout, _ in
             lock.withLock {
                 calls.append((args, timeout))
                 if queue.count > 1 { return queue.removeFirst() }
@@ -53,7 +53,7 @@ struct ContainerRuntimeTests {
             "type=virtiofs,source=/ws,target=/ws",
             "type=virtiofs,source=/data,target=/mnt/data,readonly",
         ])
-        #expect(launcher.lastArgv.prefix(4) == ["run", "-d", "--name", "iris-a"])
+        #expect(launcher.lastArgv.prefix(5) == ["run", "-d", "--init", "--name", "iris-a"])
         #expect(launcher.lastArgv.suffix(5) == ["-w", "/ws", "ubuntu:latest", "sleep", "infinity"])
     }
 
@@ -71,7 +71,7 @@ struct ContainerRuntimeTests {
         try await CLIContainerRuntime(launch: launcher.launch)
             .createDetached(name: "iris-c", image: "img", mounts: [], workdir: "/")
         #expect(!launcher.lastArgv.contains("--mount"))
-        #expect(launcher.lastArgv == ["run", "-d", "--name", "iris-c", "-w", "/", "img", "sleep", "infinity"])
+        #expect(launcher.lastArgv == ["run", "-d", "--init", "--name", "iris-c", "-w", "/", "img", "sleep", "infinity"])
     }
 
     /// A path with a space is safe: each mount is one argv element handed to `Process`, which
@@ -94,7 +94,7 @@ struct ContainerRuntimeTests {
             mounts: ["/Users/me/proj", "/Users/me/deploy-key:ro"], workdir: "/Users/me/proj",
             network: .isolated)
         #expect(launcher.lastArgv == [
-            "run", "-d", "--name", "iris-g",
+            "run", "-d", "--init", "--name", "iris-g",
             "--mount", "type=virtiofs,source=/Users/me/proj,target=/Users/me/proj",
             "--mount", "type=virtiofs,source=/Users/me/deploy-key,target=/Users/me/deploy-key,readonly",
             "--network", "iris-isolated", "--no-dns",

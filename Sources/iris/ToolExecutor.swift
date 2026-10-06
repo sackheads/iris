@@ -51,6 +51,10 @@ struct ToolExecutor {
     /// nil — the case everywhere in the app — means `SandboxingManager.shared.containerBinaryPath`.
     var containerBinaryPath: (@Sendable () -> String?)?
 
+    /// Where a one-off container's name is held while it runs, so the launch sweep spares it.
+    /// Injectable so a test can read only its own names.
+    var ephemeralRegistry: EphemeralContainerRegistry = .shared
+
     /// `workspaceToolsEnabled` defaults to "a Google refresh token is configured". Without one every
     /// Google Tasks / Workspace call fails, so the ten declarations were pure prompt weight (#133).
     /// Injectable so tests never mutate `ConfigManager.shared`.
@@ -481,14 +485,33 @@ struct ToolExecutor {
         // still holding the pipes is killed rather than waited on, so it cannot block the answer
         // (invariant 4); one that redirected its output is left running.
         let runner = ProcessGroupRunner()
-        // Its name carries `SandboxSessionManager.namePrefix`: registered for its whole life so the
-        // launch sweep does not take it for an orphan (#364).
-        if let ephemeralContainer { await EphemeralContainerRegistry.shared.register(ephemeralContainer.name) }
+        let registry = ephemeralRegistry
+        // Killing the client leaves the container running, so the runner's ladder deletes it once
+        // the client is dead — on the runner's queue, not in a `Task` here, which would wait for
+        // a pool thread while the command ran on in the VM (#377).
+        let ephemeralName = ephemeralContainer?.name
+        let onKilled: (@Sendable () -> Void)?
+        if let binary = ephemeralContainer?.binary, let name = ephemeralName {
+            onKilled = { EphemeralContainerRegistry.deleteNow(binary: binary, name: name, registry: registry) }
+        } else {
+            onKilled = nil
+        }
         do {
-            let result = try await withTimeout(seconds: timeoutSeconds) {
+            return try await withTimeout(seconds: timeoutSeconds) {
                 await withTaskCancellationHandler {
+                    // Its name carries `SandboxSessionManager.namePrefix`: registered for its whole
+                    // life so the launch sweep does not take it for an orphan (#364). Here, inside
+                    // the work, not before `withTimeout`: a caller already cancelled never starts
+                    // the work, and a name registered outside it was never given back.
+                    if let ephemeralName { await registry.register(ephemeralName) }
                     let outcome = await runner.run(executable: executable, arguments: arguments,
-                                                   environment: environment, currentDirectory: directory)
+                                                   environment: environment, currentDirectory: directory,
+                                                   onKilled: onKilled)
+                    // A killed run's hook gives the name back once the delete is done; any other
+                    // ending left nothing in the VM (`--rm`, or no spawn at all).
+                    if let ephemeralName, (try? outcome.get())?.killed != true {
+                        await registry.unregister(ephemeralName)
+                    }
                     let output: ProcessGroupRunner.Output
                     switch outcome {
                     case .success(let o): output = o
@@ -516,28 +539,8 @@ struct ToolExecutor {
                     runner.terminate()
                 }
             }
-            if let ephemeralContainer {
-                if Task.isCancelled {
-                    Self.deleteEphemeral(ephemeralContainer)
-                } else {
-                    await EphemeralContainerRegistry.shared.unregister(ephemeralContainer.name)
-                }
-            }
-            return result
         } catch {
-            if let ephemeralContainer { Self.deleteEphemeral(ephemeralContainer) }
             return Self.commandTimedOutMessage(seconds: timeoutSeconds)
-        }
-    }
-
-    /// Deletes a one-off `container run` after a timeout or cancel, then lets the sweep have the
-    /// name back. Unstructured, so the caller's cancellation does not stop the cleanup.
-    static func deleteEphemeral(_ container: (binary: String, name: String)) {
-        let binary = container.binary, name = container.name
-        Task {
-            _ = try? await CLIProcessRunner(executable: binary)
-                .run(["delete", "--force", name], timeoutSeconds: CLIContainerRuntime.housekeepingTimeoutSeconds)
-            await EphemeralContainerRegistry.shared.unregister(name)
         }
     }
 

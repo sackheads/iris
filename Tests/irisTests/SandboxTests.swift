@@ -72,6 +72,59 @@ struct SandboxTests {
         #expect(!result.contains("hello"))
     }
 
+    /// #377: the one-off container is deleted by the runner's kill ladder, once the client is dead,
+    /// and its name is then given back to the sweep. The stub's `run` stands in for a client that
+    /// never returns.
+    @Test("a timed-out one-off container is deleted by the kill ladder, then released", .timeLimit(.minutes(1)))
+    func ephemeralDeletedOnTimeout() async throws {
+        let nap = "30.\(Int.random(in: 100_000...999_999))"
+        let stub = try stubContainer("echo \"$*\" >> \"$(dirname \"$0\")/calls\"\n[ \"$1\" = run ] && exec sleep \(nap)\nexit 0")
+        defer {
+            try? FileManager.default.removeItem(at: stub.dir)
+            RunCommandProcessGroupTests.killAll(nap)
+        }
+        var executor = ToolExecutor()
+        executor.containerBinaryPath = { stub.binary }
+        let result = await executor.runCommand("true", cwd: stub.dir.path, useSandbox: true, timeoutSeconds: 1)
+        #expect(result == ToolExecutor.commandTimedOutMessage(seconds: 1))
+
+        let log = stub.dir.appendingPathComponent("calls")
+        func calls() -> [String] {
+            ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+        }
+        let name = try #require(calls().first?.split(separator: " ").dropFirst(3).first.map(String.init))
+        #expect(name.hasPrefix("iris-run-"))
+        let deadline = Date().addingTimeInterval(1 + ProcessGroupRunner.terminateGraceSeconds + 5)
+        while Date() < deadline {
+            let registered = await EphemeralContainerRegistry.shared.current().contains(name)
+            if calls().contains("delete --force \(name)"), !registered { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        #expect(calls().contains("delete --force \(name)"), "got: \(calls())")
+        #expect(!(await EphemeralContainerRegistry.shared.current().contains(name)))
+    }
+
+    /// #377 review: a caller already cancelled never starts `withTimeout`'s work, so a name
+    /// registered before it was never given back, and the sweep spared a container that did not
+    /// exist for the rest of the process. Read through a registry of the test's own.
+    @Test("a call cancelled before it starts leaves no name registered and spawns nothing")
+    func cancelledCallLeavesNoName() async throws {
+        let stub = try stubContainer("echo \"$*\" >> \"$(dirname \"$0\")/calls\"")
+        defer { try? FileManager.default.removeItem(at: stub.dir) }
+        let registry = EphemeralContainerRegistry()
+        var executor = ToolExecutor()
+        executor.containerBinaryPath = { stub.binary }
+        executor.ephemeralRegistry = registry
+        let call = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await executor.runCommand("true", cwd: stub.dir.path, useSandbox: true, timeoutSeconds: 5)
+        }
+        _ = await call.value
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(await registry.current().isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: stub.dir.appendingPathComponent("calls").path))
+    }
+
     @Test("a runtime that is installed but not started gets the setup hint, not its raw error")
     func testSandboxBranchRuntimeNotReady() async throws {
         let stub = try stubContainer("echo 'Error: unauthorized request' >&2\nexit 1")

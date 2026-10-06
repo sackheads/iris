@@ -45,6 +45,16 @@ struct KillEscalationPoolStarvationTests {
             await Starvation.containerRunnerCancel()
         }
     }
+
+    /// #377: the one-off `container run`'s delete is started by the runner's ladder, not by a
+    /// `Task` after `run_command` returns. A stub stands in for the `container` binary, so no VM
+    /// is involved; the in-VM group kill on a real VM is `SandboxRealVMTests`.
+    @Test("a timed-out one-off container is deleted while the pool is held")
+    func ephemeralDeleteOffPool() async {
+        await #expect(processExitsWith: .success) {
+            await Starvation.ephemeralDelete()
+        }
+    }
 }
 
 /// The scenarios, run inside the exit-test child. Each exits the process itself: 0 when the
@@ -102,6 +112,32 @@ enum Starvation {
         }
     }
 
+    static func ephemeralDelete() async {
+        let nap = marker()
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-377-\(UUID().uuidString)")
+        let log = dir.appendingPathComponent("calls").path
+        let stub = dir.appendingPathComponent("container").path
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try "#!/bin/sh\necho \"$*\" >> '\(log)'\n[ \"$1\" = run ] && exec sleep \(nap)\nexit 0\n"
+                .write(toFile: stub, atomically: true, encoding: .utf8)
+            guard chmod(stub, 0o755) == 0 else { throw POSIXError(.EPERM) }
+        } catch {
+            finish(1, nap, "could not write the stub: \(error)")
+        }
+        let started = Date()
+        let call = Task.detached {
+            var executor = ToolExecutor()
+            executor.containerBinaryPath = { stub }
+            return await executor.runCommand("true", cwd: nil, useSandbox: true, timeoutSeconds: timeout)
+        }
+        // The deadline, the runner's SIGTERM grace, then the delete's own spawn.
+        await watch(nap: nap, deadline: started.addingTimeInterval(timeout + ProcessGroupRunner.terminateGraceSeconds + 2),
+                    done: { ((try? String(contentsOfFile: log, encoding: .utf8)) ?? "").contains("delete --force iris-run-") },
+                    what: "the one-off container's delete")
+        _ = call
+    }
+
     /// The container runner's ladder kills direct children, then the process, as it always has, so
     /// a loop in the shell can fork one more `sleep` in between and orphan it; the in-VM group
     /// killer is what reaches that one in production. What the ladder owns is the shell, so that is
@@ -112,8 +148,10 @@ enum Starvation {
     /// Waits for `sleep <nap>` to start, holds the pool, runs `act` (which may set the deadline),
     /// then polls for `target` (the sleep by default) from this blocked thread until it is gone or
     /// the deadline passes.
+    /// With `done`, polls for that to hold instead of for `target` to be gone.
     private static func watch(nap: String, target: String? = nil, deadline: Date?,
-                              act: () -> Date = { .distantFuture }) async {
+                              act: () -> Date = { .distantFuture },
+                              done: (() -> Bool)? = nil, what: String? = nil) async {
         let started = "^sleep \(nap)"
         let appeared = Date().addingTimeInterval(5)
         while !exists(started), Date() < appeared { usleep(20_000) }
@@ -128,10 +166,11 @@ enum Starvation {
         }
         let acted = act()
         let until = deadline ?? acted
-        while exists(needle), Date() < until { usleep(50_000) }
-        let survived = exists(needle)
+        let pending = done.map { d in { !d() } } ?? { exists(needle) }
+        while pending(), Date() < until { usleep(50_000) }
+        let survived = pending()
         hold.release()
-        finish(survived ? 1 : 0, nap, survived ? "\(needle) outlived its kill deadline with the pool held" : "")
+        finish(survived ? 1 : 0, nap, survived ? "\(what ?? needle) outlived its kill deadline with the pool held" : "")
     }
 
     private static func finish(_ code: Int32, _ nap: String, _ message: String) -> Never {
@@ -145,21 +184,10 @@ enum Starvation {
 
     static func exists(_ pattern: String) -> Bool { spawnAndWait("/usr/bin/pgrep", ["-f", pattern]) == 0 }
 
-    /// `posix_spawn` and `waitpid` rather than `Process`, so the check owes nothing to a run loop
-    /// or a queue: it is the blocked thread itself that waits.
+    /// `BlockingSpawn` rather than `Process`, so the check owes nothing to a run loop or a queue:
+    /// it is the blocked thread itself that waits.
     static func spawnAndWait(_ path: String, _ arguments: [String]) -> Int32 {
-        var actions: posix_spawn_file_actions_t?
-        posix_spawn_file_actions_init(&actions)
-        defer { posix_spawn_file_actions_destroy(&actions) }
-        posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0)
-        posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
-        let argv = ([path] + arguments).map { strdup($0) } + [nil]
-        defer { argv.forEach { free($0) } }
-        var pid: pid_t = 0
-        guard posix_spawn(&pid, path, &actions, nil, argv, environ) == 0 else { return -1 }
-        var status: Int32 = 0
-        while waitpid(pid, &status, 0) == -1, errno == EINTR {}
-        return (status & 0x7f) == 0 ? (status >> 8) & 0xff : -1
+        BlockingSpawn.run(path, arguments) ?? -1
     }
 }
 

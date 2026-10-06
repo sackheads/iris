@@ -145,7 +145,7 @@ enum NetworkMode: Equatable, Sendable {
 
 /// Seam over the `container` CLI so `SandboxSessionManager` is unit-testable without a real VM.
 protocol ContainerRuntime: Sendable {
-    /// `container run -d --name <name> [--mount <spec>]… [--network <name> --no-dns] -w <workdir> <image> sleep infinity`
+    /// `container run -d --init --name <name> [--mount <spec>]… [--network <name> --no-dns] -w <workdir> <image> sleep infinity`
     func createDetached(name: String, image: String, mounts: [String], workdir: String, network: NetworkMode) async throws
     /// Makes sure the host-only network `name` exists: `container network ls`, then
     /// `container network create --internal <name>` when it is missing. Throws `networkFailed`.
@@ -244,10 +244,13 @@ struct CLIProcessRunner: Sendable {
         private var status: Int32?
         private let outHandle: FileHandle
         private let errHandle: FileHandle
+        private let queue: DispatchQueue
 
-        init(stdout: Pipe, stderr: Pipe) {
+        /// `queue` is the call's ladder queue, which times the post-exit grace.
+        init(stdout: Pipe, stderr: Pipe, queue: DispatchQueue) {
             outHandle = stdout.fileHandleForReading
             errHandle = stderr.fileHandleForReading
+            self.queue = queue
         }
 
         /// Call inside the continuation body, before the process is launched: both the drain and
@@ -267,9 +270,11 @@ struct CLIProcessRunner: Sendable {
             // is waiting on a process this call does not own — which is how a call with no
             // deadline (a cold `createDetached`, `reapOrphans` at launch) wedges forever. After
             // the grace, whatever is in hand is the answer.
-            // A dispatch timer, not a `Task.sleep`, which waits for a free pool thread (#372).
-            DispatchQueue.global().asyncAfter(deadline: .now() + CLIProcessRunner.postExitEOFGraceSeconds) {
-                self.deliverAfterExit()
+            // A dispatch timer, not a `Task.sleep`, which waits for a free pool thread (#372). On
+            // the ladder's queue rather than `global()`, which does not overcommit (#377). Weak:
+            // an unanswered call is still suspended in `run`, which holds this collector.
+            queue.asyncAfter(deadline: .now() + CLIProcessRunner.postExitEOFGraceSeconds) { [weak self] in
+                self?.deliverAfterExit()
             }
         }
 
@@ -334,18 +339,7 @@ struct CLIProcessRunner: Sendable {
     /// on a cooperative-pool thread: the ladder does not run there (#372).
     private static func killChildren(of pid: pid_t) {
         guard pid > 0 else { return }
-        var actions: posix_spawn_file_actions_t?
-        posix_spawn_file_actions_init(&actions)
-        defer { posix_spawn_file_actions_destroy(&actions) }
-        posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0)
-        posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
-        let arguments: [String] = ["/usr/bin/pkill", "-9", "-P", String(pid)]
-        let argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) } + [nil]
-        defer { argv.forEach { free($0) } }
-        var killer: pid_t = 0
-        guard posix_spawn(&killer, "/usr/bin/pkill", &actions, nil, argv, environ) == 0 else { return }
-        var status: Int32 = 0
-        while waitpid(killer, &status, 0) == -1, errno == EINTR {}
+        BlockingSpawn.run("/usr/bin/pkill", ["-9", "-P", String(pid)])
     }
 
     /// What the kill ladder needs of the child, and the only things it does to it.
@@ -378,11 +372,28 @@ struct CLIProcessRunner: Sendable {
     /// Synchronous, and run on a dispatch queue of its own: it blocks its thread for the grace,
     /// which must never be a cooperative-pool thread, and its timing must not depend on one being
     /// free: a pool held by blocking work held the old, `Task.sleep`-paced ladder with it (#372).
+    ///
+    /// `onKill` runs on this same queue, first, and only when the ladder finds the child running:
+    /// it is how a caller acts beyond the child's reach — `CLIContainerRuntime.exec` kills the
+    /// command's group inside the VM, which killing the client never does (#377). Here rather
+    /// than after `run` throws, because that is a pool thread, and a held pool held the in-VM kill
+    /// with it. First, because the caller can be answered the moment SIGTERM lands, and the hook
+    /// must have run by then. It must not block: the ladder waits for it.
+    ///
+    /// And again at the end of the ladder, no sooner than `killGraceSeconds` after the first call,
+    /// on a queue of its own so the answer does not wait for it. A cancel can land before the
+    /// command has recorded its group in the VM, and the first kill then finds nothing; a group
+    /// recorded in the meantime is still killed. So the hook runs twice and must be idempotent,
+    /// as the group killer is: a group that already ended removed its note.
     static func enforce(_ reason: @escaping @Sendable () -> Error, on child: Child,
                         hasAnswered: @escaping @Sendable () -> Bool,
-                        fail: @escaping @Sendable (Error) -> Void) {
+                        fail: @escaping @Sendable (Error) -> Void,
+                        onKill: (@Sendable () -> Void)? = nil) {
         let launched = child.pid()
+        var firstKill: Date?
         if child.isRunning(), launched > 0 {
+            firstKill = Date()
+            onKill?()
             child.killChildren(launched)
             child.terminate()                                           // SIGTERM
         }
@@ -391,6 +402,10 @@ struct CLIProcessRunner: Sendable {
         if child.isRunning(), pid > 0 {
             child.killChildren(pid)                                     // anything it spawned since
             child.signal(pid, SIGKILL)
+        }
+        if let firstKill, let onKill {
+            let wait = max(0, Self.killGraceSeconds - Date().timeIntervalSince(firstKill))
+            DispatchQueue(label: "iris.cli-process.refire").asyncAfter(deadline: .now() + wait, execute: onKill)
         }
         // A moment for the ordinary path to land with the real output, then the ladder answers.
         // Load bearing on the cancellation path, where a promptly-exiting child's real result is
@@ -409,7 +424,15 @@ struct CLIProcessRunner: Sendable {
         }
     }
 
-    func run(_ arguments: [String], timeoutSeconds: Int? = nil) async throws -> (stdout: String, stderr: String, exitCode: Int32) {
+    /// `onKill`: see `enforce`. Runs when a deadline or a cancel had to kill a running child —
+    /// twice, on the ladder's queue and then at the end of the ladder — and never otherwise.
+    ///
+    /// The kill does not need the cooperative pool; the answer does. Resuming the caller takes a
+    /// pool thread, so with the pool held the child dies on time and the result arrives when the
+    /// pool frees (#377). That is accepted rather than engineered around: whatever reads the
+    /// result — the engine's tool dispatch — runs on the same pool, so it could not act sooner.
+    func run(_ arguments: [String], timeoutSeconds: Int? = nil,
+             onKill: (@Sendable () -> Void)? = nil) async throws -> (stdout: String, stderr: String, exitCode: Int32) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -421,8 +444,13 @@ struct CLIProcessRunner: Sendable {
         // inheriting the app's and blocking until its deadline.
         process.standardInput = FileHandle.nullDevice
 
+        // The deadline and the cancel both run the ladder here, off the cooperative pool: a
+        // `Task.sleep` deadline fires only when a pool thread is free, and a pool held by blocking
+        // work held the kill with it (#372). The post-exit grace is timed here too.
+        let ladder = DispatchQueue(label: "iris.cli-process.ladder")
+
         let box = Box(process)
-        let collector = Collector(stdout: out, stderr: err)
+        let collector = Collector(stdout: out, stderr: err, queue: ladder)
         let deadline = Deadline()
         let started = Date()
         let child = Child(pid: { box.process.processIdentifier },
@@ -430,11 +458,6 @@ struct CLIProcessRunner: Sendable {
                           terminate: { box.process.terminate() },
                           killChildren: { Self.killChildren(of: $0) },
                           signal: { kill($0, $1) })
-
-        // The deadline and the cancel both run the ladder here, off the cooperative pool: a
-        // `Task.sleep` deadline fires only when a pool thread is free, and a pool held by blocking
-        // work held the kill with it (#372).
-        let ladder = DispatchQueue(label: "iris.cli-process.ladder")
 
         // The watchdog kills; it never abandons. Racing the wait with a `withTimeout` and walking
         // away would leave the child running and unreaped — a zombie holding a pid and, for
@@ -451,7 +474,7 @@ struct CLIProcessRunner: Sendable {
                 deadline.fire()
                 Self.enforce({ ContainerRuntimeError.timedOut(elapsedSeconds: Date().timeIntervalSince(started)) },
                              on: child, hasAnswered: { collector.hasAnswered },
-                             fail: { collector.fail($0) })
+                             fail: { collector.fail($0) }, onKill: onKill)
             }
             timer.resume()
             return timer
@@ -487,7 +510,7 @@ struct CLIProcessRunner: Sendable {
             ladder.async {
                 Self.enforce({ CancellationError() }, on: child,
                              hasAnswered: { collector.hasAnswered },
-                             fail: { collector.fail($0) })
+                             fail: { collector.fail($0) }, onKill: onKill)
             }
         }
 
@@ -502,15 +525,27 @@ struct CLIProcessRunner: Sendable {
 }
 
 struct CLIContainerRuntime: ContainerRuntime {
-    /// One spawn of the `container` CLI: the argv, and the deadline the command is allowed.
+    /// One spawn of the `container` CLI: the argv, the deadline the command is allowed, and what
+    /// to run when a deadline or a cancel had to kill it (`CLIProcessRunner.run`'s `onKill`).
     /// Injectable so a test can assert what a call renders without a binary, a daemon or a VM.
-    typealias Launch = @Sendable (_ arguments: [String], _ timeoutSeconds: Int?) async throws -> (stdout: String, stderr: String, exitCode: Int32)
+    typealias Launch = @Sendable (_ arguments: [String], _ timeoutSeconds: Int?,
+                                  _ onKill: (@Sendable () -> Void)?) async throws -> (stdout: String, stderr: String, exitCode: Int32)
 
-    /// The real thing: the installed `container` binary, resolved per call because it can be
-    /// installed while the app is running.
-    static let spawnCLI: Launch = { arguments, timeoutSeconds in
-        let binary = SandboxingManager.shared.containerBinaryPath ?? "/usr/local/bin/container"
-        return try await CLIProcessRunner(executable: binary).run(arguments, timeoutSeconds: timeoutSeconds)
+    /// A `container` call nobody waits for, started from a kill ladder's own thread: it must not
+    /// block that thread and must not need the cooperative pool (#377). Injectable for the same
+    /// reason as `Launch`.
+    typealias Fire = @Sendable (_ arguments: [String], _ timeoutSeconds: Int) -> Void
+
+    /// The installed `container` binary, resolved per call because it can be installed while the
+    /// app is running.
+    static var binary: String { SandboxingManager.shared.containerBinaryPath ?? "/usr/local/bin/container" }
+
+    static let spawnCLI: Launch = { arguments, timeoutSeconds, onKill in
+        try await CLIProcessRunner(executable: binary).run(arguments, timeoutSeconds: timeoutSeconds, onKill: onKill)
+    }
+
+    static let fireCLI: Fire = { arguments, timeoutSeconds in
+        BlockingSpawn.detached(binary, arguments, timeoutSeconds: Double(timeoutSeconds))
     }
 
     /// The deadline on the calls that are not the user's command. Generous — `container stop`
@@ -526,14 +561,25 @@ struct CLIContainerRuntime: ContainerRuntime {
     /// because nobody is watching a gate.
     static let createTimeoutSeconds = 1_200
 
-    private let launch: Launch
+    private let launchKillable: Launch
+    private let fire: Fire
 
-    init(launch: @escaping Launch = CLIContainerRuntime.spawnCLI) {
-        self.launch = launch
+    init(launch: @escaping Launch = CLIContainerRuntime.spawnCLI, fire: @escaping Fire = CLIContainerRuntime.fireCLI) {
+        self.launchKillable = launch
+        self.fire = fire
+    }
+
+    /// Every call but `exec`'s command: nothing beyond the client to kill.
+    private func launch(_ arguments: [String], _ timeoutSeconds: Int?) async throws -> (stdout: String, stderr: String, exitCode: Int32) {
+        try await launchKillable(arguments, timeoutSeconds, nil)
     }
 
     func createDetached(name: String, image: String, mounts: [String], workdir: String, network: NetworkMode) async throws {
-        var args = ["run", "-d", "--name", name]
+        // `--init`: the CLI's init process is PID 1 and reaps. `sleep infinity` as PID 1 reaps
+        // nothing, so every command the in-VM group killer ended left its processes as zombies
+        // for the life of the session (#365). The init also forwards signals, so `container stop`
+        // no longer waits out its timeout on a PID 1 that ignores SIGTERM.
+        var args = ["run", "-d", "--init", "--name", name]
         // Rendered before anything is spawned, so a mount the CLI could not read refuses the
         // container rather than producing one with a mount missing.
         for entry in mounts {
@@ -590,25 +636,20 @@ struct CLIContainerRuntime: ContainerRuntime {
     /// host does not reach into the VM — measured 2026-10-04, CLI 1.1.0: the client fails to
     /// forward the signal ("missing signal in xpc message"), and the command and everything it
     /// forked run on in the container after the client is SIGKILLed.
+    ///
+    /// The killer is started by the client's kill ladder, on the ladder's queue, as the ladder
+    /// starts on a client that is still running (#377). It used to start from here, in a `Task`
+    /// after `launch` threw — which needs a free pool thread, so a held pool held the in-VM kill
+    /// with it, while the host-side kill (#372) went ahead. Fired, not awaited: the caller hears
+    /// back without waiting out the killer's own grace, and a cancelled caller cannot stop it. A
+    /// cancel whose client died on SIGTERM and so came back as an ordinary result used to start no
+    /// killer at all; the ladder fires it either way.
     func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws -> (stdout: String, stderr: String, exitCode: Int32) {
         let pidFile = Self.execPidFile(token: UUID().uuidString)
-        do {
-            return try await launch(["exec", "-w", workdir, name, "bash", "-c", Self.recordingWrapper(pidFile), "iris-exec", command],
-                                    timeoutSeconds)
-        } catch {
-            if error is CancellationError || Self.isTimeout(error) {
-                // Unstructured: a cancelled caller's own task would refuse to launch it, and the
-                // caller hears back now rather than after the kill's grace.
-                let launch = self.launch
-                Task { _ = try? await launch(["exec", name, "bash", "-c", Self.groupKiller(pidFile)], Self.housekeepingTimeoutSeconds) }
-            }
-            throw error
-        }
-    }
-
-    private static func isTimeout(_ error: Error) -> Bool {
-        if case ContainerRuntimeError.timedOut = error { return true }
-        return false
+        let fire = self.fire
+        return try await launchKillable(["exec", "-w", workdir, name, "bash", "-c", Self.recordingWrapper(pidFile), "iris-exec", command],
+                                        timeoutSeconds,
+                                        { fire(["exec", name, "bash", "-c", Self.groupKiller(pidFile)], Self.housekeepingTimeoutSeconds) })
     }
 
     static func execPidFile(token: String) -> String { "/tmp/.iris-exec-\(token).pid" }
@@ -623,9 +664,16 @@ struct CLIContainerRuntime: ContainerRuntime {
 
     /// SIGTERM to the recorded group, a grace, then SIGKILL. A group that already finished removed
     /// its note, so there is nothing to signal.
+    ///
+    /// The note is taken — read and removed — before anything is signalled. The ladder fires this
+    /// twice (`CLIProcessRunner.enforce`), the second time about a grace after the first; with the
+    /// note still there, the second would signal a group the first had already ended, and in a
+    /// shared session container that id may by then be somebody else's (#377). Only the killer
+    /// that took the note signals it.
     static func groupKiller(_ pidFile: String) -> String {
-        "[ -s \(pidFile) ] || exit 0; p=$(cat \(pidFile)); kill -TERM -- -\"$p\" 2>/dev/null; "
-            + "sleep \(Int(CLIProcessRunner.killGraceSeconds)); kill -KILL -- -\"$p\" 2>/dev/null; rm -f \(pidFile)"
+        "[ -s \(pidFile) ] || exit 0; p=$(cat \(pidFile)); rm -f \(pidFile); [ -n \"$p\" ] || exit 0; "
+            + "kill -TERM -- -\"$p\" 2>/dev/null; "
+            + "sleep \(Int(CLIProcessRunner.killGraceSeconds)); kill -KILL -- -\"$p\" 2>/dev/null; exit 0"
     }
 
     func remove(name: String) async {

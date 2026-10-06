@@ -261,7 +261,7 @@ struct SandboxSessionManagerTests {
         let name = "iris-run-\(UUID().uuidString.lowercased())"
         await EphemeralContainerRegistry.shared.register(name)
         #expect(await EphemeralContainerRegistry.shared.current().contains(name))
-        ToolExecutor.deleteEphemeral((binary: "/usr/bin/true", name: name))
+        EphemeralContainerRegistry.deleteNow(binary: "/usr/bin/true", name: name)
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline, await EphemeralContainerRegistry.shared.current().contains(name) {
             try? await Task.sleep(nanoseconds: 50_000_000)
@@ -385,7 +385,7 @@ struct SandboxSessionManagerTests {
         #expect(launcher.argv.prefix(3).map { Array($0) } == [
             ["network", "ls", "--format", "json"],
             ["network", "create", "--internal", "iris-isolated"],
-            ["run", "-d", "--name", "\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())",
+            ["run", "-d", "--init", "--name", "\(SandboxSessionManager.namePrefix)\(id.uuidString.lowercased())",
              "--mount", "type=virtiofs,source=/ws,target=/ws",
              "--network", "iris-isolated", "--no-dns",
              "-w", "/ws", "img", "sleep", "infinity"],
