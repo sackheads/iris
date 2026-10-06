@@ -45,6 +45,12 @@ struct ToolExecutor {
     var sandboxSession: (@Sendable (_ command: String, _ conversationId: UUID, _ workspace: ContainerMount?,
                                     _ extraMounts: [String], _ network: NetworkMode, _ timeoutSeconds: Int) async -> String)?
 
+    /// Where the no-conversation sandboxed branch of `run_command` finds the `container` CLI, or
+    /// nil for "not installed". Injectable so a test can drive that branch against a stub binary
+    /// instead of booting a real VM, whose failures under load have nothing to do with Iris (#374).
+    /// nil — the case everywhere in the app — means `SandboxingManager.shared.containerBinaryPath`.
+    var containerBinaryPath: (@Sendable () -> String?)?
+
     /// `workspaceToolsEnabled` defaults to "a Google refresh token is configured". Without one every
     /// Google Tasks / Workspace call fails, so the ten declarations were pure prompt weight (#133).
     /// Injectable so tests never mutate `ConfigManager.shared`.
@@ -443,7 +449,9 @@ struct ToolExecutor {
         // not stop the container, and the command ran on in the VM (#353).
         var ephemeralContainer: (binary: String, name: String)? = nil
         if useSandbox {
-            guard let containerPath = SandboxingManager.shared.containerBinaryPath else {
+            let resolvedContainerPath = if let containerBinaryPath { containerBinaryPath() }
+                                        else { SandboxingManager.shared.containerBinaryPath }
+            guard let containerPath = resolvedContainerPath else {
                 return "Error: sandboxing is on but the container runtime isn't installed. Open Iris Settings → Sandboxing to install it, or turn sandboxing off."
             }
             executable = containerPath
