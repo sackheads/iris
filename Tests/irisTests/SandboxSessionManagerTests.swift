@@ -206,6 +206,31 @@ struct SandboxSessionManagerTests {
         #expect(await m.hasSession(id), "the live conversation still has its container")
     }
 
+    /// #364: a sandboxed hook's container carries the `iris-` prefix too, so one in flight is spared
+    /// while one a crash left behind (registered by nobody in this process) is still swept.
+    @Test("reapOrphans spares an in-flight hook container and sweeps an orphaned one")
+    func reapOrphansSparesInFlightHook() async {
+        let rt = MockRuntime()
+        let m = mgr(rt)
+        let live = "\(SandboxSessionManager.namePrefix)hook-\(UUID().uuidString.lowercased())"
+        let orphan = "\(SandboxSessionManager.namePrefix)hook-\(UUID().uuidString.lowercased())"
+        rt.existing = [live, orphan]
+
+        await m.reapOrphans(inFlightGates: [], inFlightHooks: [live])
+
+        #expect(rt.removedNames == [orphan])
+    }
+
+    @Test("the hook registry holds a name only while it is registered")
+    func hookRegistryLifetime() async {
+        let registry = HookContainerRegistry()
+        let name = "iris-hook-\(UUID().uuidString.lowercased())"
+        await registry.register(name)
+        #expect(await registry.current() == [name])
+        await registry.unregister(name)
+        #expect(await registry.current().isEmpty)
+    }
+
     /// R34: cleanup must survive the caller's cancellation, because that is exactly when a
     /// container is left behind — `CLIProcessRunner` will not launch a child for a task that has
     /// already given up, so `stop` and `delete` never spawn. Asserted on the mechanism itself:

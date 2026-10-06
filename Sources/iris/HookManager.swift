@@ -171,13 +171,21 @@ struct HookManager {
             arguments = ["-c", hook.command]
         }
         let timeout = hook.timeout ?? Self.defaultTimeoutSeconds
+        // It carries `SandboxSessionManager.namePrefix`, so the launch sweep would take it for an
+        // orphan; registered for its whole life, and one a crash left behind is still swept.
+        if let ephemeralContainer { await HookContainerRegistry.shared.register(ephemeralContainer.name) }
         let outcome = await Self.runHookProcess(executable: executable, arguments: arguments,
                                                 payload: payload, timeoutSeconds: Double(timeout))
-        if let ephemeralContainer, Task.isCancelled || (try? outcome.get())?.timedOut == true {
+        if let ephemeralContainer {
             let binary = ephemeralContainer.binary, name = ephemeralContainer.name
-            Task {
-                _ = try? await CLIProcessRunner(executable: binary)
-                    .run(["delete", "--force", name], timeoutSeconds: CLIContainerRuntime.housekeepingTimeoutSeconds)
+            if Task.isCancelled || (try? outcome.get())?.timedOut == true {
+                Task {
+                    _ = try? await CLIProcessRunner(executable: binary)
+                        .run(["delete", "--force", name], timeoutSeconds: CLIContainerRuntime.housekeepingTimeoutSeconds)
+                    await HookContainerRegistry.shared.unregister(name)
+                }
+            } else {
+                await HookContainerRegistry.shared.unregister(name)
             }
         }
         // A cancel kills the hook, so its verdict never arrived: fail closed, or a hook that would
@@ -234,4 +242,16 @@ struct HookManager {
             return .warning(message: "Hook exited with status \(output.status)")
         }
     }
+}
+
+/// The sandboxed hook containers in flight, which `SandboxSessionManager.reapOrphans` spares the
+/// way it spares live sessions and gates (`GateContainerRegistry`). A snapshot, like that one.
+actor HookContainerRegistry {
+    static let shared = HookContainerRegistry()
+
+    private var names: Set<String> = []
+
+    func register(_ name: String) { names.insert(name) }
+    func unregister(_ name: String) { names.remove(name) }
+    func current() -> Set<String> { names }
 }
