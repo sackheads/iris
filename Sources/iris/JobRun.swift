@@ -35,11 +35,16 @@ struct JobRun: Identifiable, Equatable, Sendable {
     var cacheReadTokens: Int = 0
     var cacheWriteTokens: Int = 0
     var cacheWrite1hTokens: Int = 0
+    /// The share of `cacheReadTokens` its delegated subagents read (#370, v17). 0 on earlier rows.
+    var delegatedCacheReadTokens: Int = 0
     /// Whose prices apply to this run: `LLMProvider.rawValue` and `ModelTier.rawValue`, stamped on
     /// a model-turn run at `begin`. nil on a row that spent nothing, and on every pre-5c row,
     /// which `CostWeights` then prices at its plain total.
     var provider: String?
     var tier: String?
+    /// The model id `tier` resolved to when the run began (#370): cache reads price at its ratio.
+    /// nil on every row written before v16, which reads at the provider's ratio.
+    var model: String?
     /// Reserved: nothing computes a cost yet (spec §6.3).
     var costMicros: Int64?
     /// What the run's gate saw — an ETag, an mtime, a hash (#187 deliverable 3, spec §7). Compared
@@ -81,6 +86,7 @@ struct JobRun: Identifiable, Equatable, Sendable {
         self.totalTokens = 0
         self.provider = nil
         self.tier = nil
+        self.model = nil
         self.costMicros = nil
         self.gateSignal = nil
         self.transcriptConversationId = transcriptConversationId
@@ -97,7 +103,7 @@ extension JobRun {
     var components: UsageComponents {
         UsageComponents(prompt: promptTokens, output: max(candidateTokens, totalTokens - promptTokens),
                         cacheRead: cacheReadTokens, cacheWrite: cacheWriteTokens,
-                        cacheWrite1h: cacheWrite1hTokens)
+                        cacheWrite1h: cacheWrite1hTokens, delegatedCacheRead: delegatedCacheReadTokens)
     }
 }
 

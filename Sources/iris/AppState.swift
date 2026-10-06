@@ -50,6 +50,9 @@ struct TokenUsage: Codable, Equatable, Sendable {
     /// The 1-hour share of `cacheWriteTokenCount` (5c §0.6). nil until a provider reports a split.
     /// Persists inside the existing `conversations.tokenUsage` JSON column.
     var cacheWrite1hTokenCount: Int? = nil
+    /// The share of `cacheReadTokenCount` a run's delegated subagents read (#370), set only by
+    /// `runUsage(for:)`. Transient: left out of `CodingKeys`, so it is never persisted.
+    var delegatedCacheReadTokenCount: Int = 0
 
     enum CodingKeys: String, CodingKey {
         case promptTokenCount, candidatesTokenCount, totalTokenCount, cacheReadTokenCount, cacheWriteTokenCount
@@ -73,7 +76,8 @@ struct TokenUsage: Codable, Equatable, Sendable {
                         output: max(candidatesTokenCount, totalTokenCount - promptTokenCount),
                         cacheRead: cacheReadTokenCount ?? 0,
                         cacheWrite: cacheWriteTokenCount ?? 0,
-                        cacheWrite1h: cacheWrite1hTokenCount ?? 0)
+                        cacheWrite1h: cacheWrite1hTokenCount ?? 0,
+                        delegatedCacheRead: delegatedCacheReadTokenCount)
     }
 
     /// Lenient decoder (invariant 1): the synthesized `Decodable` ignores these defaults for
@@ -2928,6 +2932,7 @@ class AppState {
             usage.totalTokenCount += delegated.totalTokenCount
             if let read = delegated.cacheReadTokenCount {
                 usage.cacheReadTokenCount = (usage.cacheReadTokenCount ?? 0) + read
+                usage.delegatedCacheReadTokenCount = read
             }
             if let write = delegated.cacheWriteTokenCount {
                 usage.cacheWriteTokenCount = (usage.cacheWriteTokenCount ?? 0) + write

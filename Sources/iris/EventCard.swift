@@ -32,8 +32,8 @@ struct EventCard: Codable, Equatable, Sendable {
     let startedAt: Date
     let finishedAt: Date
     let totalTokens: Int
-    /// The run's spend in weighted tokens (5c §0.5), priced at its own provider when the card was
-    /// written. nil on every card written before 5c, which then shows its raw `totalTokens` as
+    /// The run's spend in weighted tokens (5c §0.5), priced at its own provider and model when the card
+    /// was written. nil on every card written before 5c, which then shows its raw `totalTokens` as
     /// "tokens" — true when it was written (plan ruling 10).
     let weightedTokens: Int?
     /// The background conversation the run's turn happened in, if it still had one when the card

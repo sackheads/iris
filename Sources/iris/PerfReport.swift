@@ -98,13 +98,15 @@ enum PerfReport {
         return Double(prompt - read - write)
     }
 
-    /// One round's weight in **weighted tokens** (5c §0.5), priced by the run's own provider. An
-    /// unknown count is 0: a pre-5a record with no cache counts weighs as all uncached input.
+    /// One round's weight in **weighted tokens** (5c §0.5), priced by the run's own provider and
+    /// the round's own model (#370), whose read ratio replaces the provider's where
+    /// `CostWeights.modelReadRatios` lists it. An unknown count is 0: a pre-5a record with no cache
+    /// counts weighs as all uncached input.
     static func weightedTokens(_ call: ModelCallRecord, provider: String) -> Int {
         CostWeights.weighted(UsageComponents(prompt: call.promptTokens ?? 0, output: call.outputTokens ?? 0,
                                              cacheRead: call.cacheReadTokens ?? 0, cacheWrite: call.cacheWriteTokens ?? 0,
                                              cacheWrite1h: call.cacheWrite1hTokens ?? 0),
-                             provider: provider)
+                             provider: provider, model: call.model)
     }
 
     /// Weighted tokens in dollars at `basePricePerMTok` (the uncached-input price). Nil without a price.

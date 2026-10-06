@@ -126,6 +126,16 @@ struct PerfReportTests {
                                    outputTokens: 500, returnedToolCalls: false,
                                    cacheReadTokens: 19_400, cacheWriteTokens: 400, cacheWrite1hTokens: 100)
         #expect(PerfReport.weightedTokens(call, provider: "Anthropic") == 200 + 1_940 + 375 + 200 + 2_500)
+        // #370: the cost column reads at the record's own model. Opus 5.5 reads at 0.05; an
+        // unlisted model (or a record with none) at the provider's 0.1.
+        let opus = ModelCallRecord(round: 0, model: "claude-opus-5-5", latencyMs: 1, promptTokens: 20_000,
+                                   outputTokens: 500, returnedToolCalls: false,
+                                   cacheReadTokens: 19_400, cacheWriteTokens: 400, cacheWrite1hTokens: 100)
+        #expect(PerfReport.weightedTokens(opus, provider: "Anthropic") == 200 + 970 + 375 + 200 + 2_500)
+        let unlisted = ModelCallRecord(round: 0, model: "", latencyMs: 1, promptTokens: 20_000,
+                                       outputTokens: 500, returnedToolCalls: false,
+                                       cacheReadTokens: 19_400, cacheWriteTokens: 400, cacheWrite1hTokens: 100)
+        #expect(PerfReport.weightedTokens(unlisted, provider: "Anthropic") == 200 + 1_940 + 375 + 200 + 2_500)
         #expect(PerfReport.dollars(weighted: 1_000_000, basePricePerMTok: 3) == 3)
         #expect(PerfReport.dollars(weighted: 1_000_000, basePricePerMTok: nil) == nil)
     }

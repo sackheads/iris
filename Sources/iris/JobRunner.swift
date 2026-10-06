@@ -942,7 +942,11 @@ actor JobRunner {
         // 5c §0.6: whose prices this run's spend is weighed at, for as long as the row exists.
         // Only here: every other row (gate, built-in, stillborn, approved call) spends nothing.
         run.provider = config.primaryProvider
-        run.tier = await engine?.modelTier.rawValue
+        let tier = await engine?.modelTier
+        run.tier = tier?.rawValue
+        // #370: the id the client resolves for this tier, through the same config, so cache reads
+        // price at this model's ratio rather than the provider's.
+        run.model = tier.map { config.getModel(for: $0) }
         do {
             try ledger.begin(run: run)
         } catch {
@@ -1008,7 +1012,8 @@ actor JobRunner {
         // clock to another instant must not make every run time out before its first model call.
         let deadlineClock = self.deadlineClock
         let deadline = deadlineClock().addingTimeInterval(TimeInterval(limits.runTimeoutSeconds))
-        let budget = TurnBudget(maxTokens: limits.perRunTokens, deadline: deadline, provider: run.provider)
+        let budget = TurnBudget(maxTokens: limits.perRunTokens, deadline: deadline, provider: run.provider,
+                                model: run.model)
         // Stay awake for this run, and no longer: the watchdog gives the assertion back at the
         // deadline even when the turn overruns it, so a wedged run cannot hold the Mac awake for
         // the rest of the session. `ActivityHolder` ends once, whichever gets there first.
@@ -1149,7 +1154,8 @@ actor JobRunner {
                              startedAt: startedAt, finishedAt: finishedAt,
                              totalTokens: turn.tokens.totalTokenCount,
                              weightedTokens: CostWeights.weighted(turn.tokens.components,
-                                                                  provider: run.provider),
+                                                                  provider: run.provider,
+                                                                  model: run.model),
                              transcriptConversationId: conversationId,
                              // The card keeps a display copy: the ledger holds the call that
                              // gets re-dispatched, and a long body belongs in one place only.

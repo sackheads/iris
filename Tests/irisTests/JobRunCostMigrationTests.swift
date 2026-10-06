@@ -32,11 +32,68 @@ import GRDB
         let run = try #require(try ledger.run(id: runId))
         #expect(run.provider == nil && run.tier == nil)
         #expect(run.cacheReadTokens == 0 && run.cacheWriteTokens == 0 && run.cacheWrite1hTokens == 0)
-        #expect(CostWeights.weighted(run.components, provider: run.provider) == run.totalTokens)
+        #expect(CostWeights.weighted(run.components, provider: run.provider, model: run.model) == run.totalTokens)
         let columns = try queue.read { db in try db.columns(in: "job_runs").map(\.name) }
         for c in ["cacheReadTokens", "cacheWriteTokens", "cacheWrite1hTokens", "provider", "tier"] {
             #expect(columns.contains(c), Comment(rawValue: c))
         }
+    }
+
+    /// #370: `v16_job_run_model` adds a nullable `model`. A v15 row loads with model nil and
+    /// prices exactly as before: its provider's read ratio.
+    @Test func v16KeepsRowsWithNoModel() throws {
+        let queue = try DatabaseQueue()
+        try ConversationStore.migrator.migrate(queue, upTo: "v15_job_run_cost")
+        let jobId = UUID(), runId = UUID()
+        try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO jobs (id, name, prompt, triggerKind, trigger, profile, createdAt, enabled)
+                VALUES (?, 'nightly', 'p', 'schedule', ?, 'readOnly', ?, 1)
+                """, arguments: [jobId.uuidString,
+                                 #"{"kind":"schedule","schedule":{"kind":"interval","seconds":60}}"#, t0])
+            try db.execute(sql: """
+                INSERT INTO job_runs (id, jobId, jobName, triggerKind, startedAt, status,
+                                      promptTokens, candidateTokens, totalTokens,
+                                      cacheReadTokens, provider, tier)
+                VALUES (?, ?, 'nightly', 'schedule', ?, 'completed', 10000, 0, 10000, 10000, 'Anthropic', 'medium')
+                """, arguments: [runId.uuidString, jobId.uuidString, t0])
+        }
+        try ConversationStore.migrator.migrate(queue)
+
+        let run = try #require(try JobLedger(writer: queue).run(id: runId))
+        #expect(run.model == nil)
+        #expect(run.provider == "Anthropic" && run.tier == "medium")
+        #expect(CostWeights.weighted(run.components, provider: run.provider, model: run.model) == 1_000)
+        let columns = try queue.read { db in try db.columns(in: "job_runs").map(\.name) }
+        #expect(columns.contains("model") && columns.contains("delegatedCacheReadTokens"))
+        #expect(run.delegatedCacheReadTokens == 0, "v17: every earlier read is the run's own")
+    }
+
+    @Test func modelRoundTrips() throws {
+        let store = try ConversationStore.inMemory()
+        let job = Job(name: "j", prompt: "p", trigger: .schedule(.interval(seconds: 60)))
+        try store.ledger.upsert(job)
+        var run = JobRun(jobId: job.id, jobName: "j", triggerKind: "schedule", startedAt: t0)
+        run.provider = "Anthropic"; run.tier = "hard"; run.model = "claude-opus-5-5"
+        try store.ledger.begin(run: run)
+        try store.ledger.finish(runId: run.id, status: .completed, outcome: nil, failureReason: nil,
+                                blockedTool: nil, tokens: TokenUsage(), finishedAt: t0)
+        #expect(try store.ledger.run(id: run.id)?.model == "claude-opus-5-5")
+        #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.model == "claude-opus-5-5")
+
+        // v17: the delegated share round-trips through recordUsage (never lowered) and finish.
+        var run2 = JobRun(jobId: job.id, jobName: "j", triggerKind: "schedule", startedAt: t0)
+        run2.provider = "Anthropic"
+        try store.ledger.begin(run: run2)
+        var mid = TokenUsage(promptTokenCount: 500, totalTokenCount: 500, cacheReadTokenCount: 400)
+        mid.delegatedCacheReadTokenCount = 300
+        try store.ledger.recordUsage(runId: run2.id, tokens: mid)
+        var lower = mid; lower.delegatedCacheReadTokenCount = 1
+        try store.ledger.recordUsage(runId: run2.id, tokens: lower)
+        #expect(try store.ledger.run(id: run2.id)?.delegatedCacheReadTokens == 300)
+        try store.ledger.finish(runId: run2.id, status: .completed, outcome: nil, failureReason: nil,
+                                blockedTool: nil, tokens: mid, finishedAt: t0)
+        #expect(try store.ledger.run(id: run2.id)?.delegatedCacheReadTokens == 300)
     }
 
     @Test func beginFinishAndRecordUsageRoundTrip() throws {
