@@ -3,7 +3,9 @@ import Foundation
 @testable import iris
 
 @Test func testHookManagerProceed() async throws {
-    let tempDir = FileManager.default.temporaryDirectory
+    let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
     let configURL = tempDir.appendingPathComponent("test_settings_proceed.json")
     
     // Command that returns modified JSON payload successfully
@@ -38,12 +40,12 @@ import Foundation
     } else {
         Issue.record("Expected proceed with data")
     }
-    
-    try? FileManager.default.removeItem(at: configURL)
 }
 
 @Test func testHookManagerBlock() async throws {
-    let tempDir = FileManager.default.temporaryDirectory
+    let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
     let configURL = tempDir.appendingPathComponent("test_settings_block.json")
     
     // Command that exits with 2 to trigger a hard block
@@ -76,12 +78,12 @@ import Foundation
     } else {
         Issue.record("Expected block")
     }
-    
-    try? FileManager.default.removeItem(at: configURL)
 }
 
 @Test func testHookManagerWarning() async throws {
-    let tempDir = FileManager.default.temporaryDirectory
+    let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
     let configURL = tempDir.appendingPathComponent("test_settings_warning.json")
     
     // Command that exits with non-zero (but not 2)
@@ -117,12 +119,12 @@ import Foundation
     } else {
         Issue.record("Expected proceed")
     }
-    
-    try? FileManager.default.removeItem(at: configURL)
 }
 
 @Test func testHookManagerBeforeToolSelection() async throws {
-    let tempDir = FileManager.default.temporaryDirectory
+    let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
     let configURL = tempDir.appendingPathComponent("test_settings_tool_selection.json")
     
     let hookConfig = """
@@ -157,12 +159,12 @@ import Foundation
     } else {
         Issue.record("Expected proceed with modified data")
     }
-    
-    try? FileManager.default.removeItem(at: configURL)
 }
 
 @Test func testHookManagerPreCompress() async throws {
-    let tempDir = FileManager.default.temporaryDirectory
+    let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
     let configURL = tempDir.appendingPathComponent("test_settings_pre_compress.json")
     
     let hookConfig = """
@@ -199,18 +201,15 @@ import Foundation
     } else {
         Issue.record("Expected proceed with modified data")
     }
-    
-    try? FileManager.default.removeItem(at: configURL)
 }
 
 @Test func testHookManagerNotification() async throws {
-    let tempDir = FileManager.default.temporaryDirectory
+    let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
     let configURL = tempDir.appendingPathComponent("test_settings_notification.json")
     let testOutputURL = tempDir.appendingPathComponent("notification_output.txt")
-    
-    // Make sure we start clean
-    try? FileManager.default.removeItem(at: testOutputURL)
-    
+
     let hookConfig = """
     {
       "hooks": {
@@ -247,13 +246,12 @@ import Foundation
     
     #expect(output.contains("Alert"))
     #expect(output.contains("Something happened"))
-    
-    try? FileManager.default.removeItem(at: configURL)
-    try? FileManager.default.removeItem(at: testOutputURL)
 }
 
 @Test func testHookManagerChaining() async throws {
-    let tempDir = FileManager.default.temporaryDirectory
+    let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
     let configURL = tempDir.appendingPathComponent("test_settings_chaining.json")
     
     // Command 1 adds a field, Command 2 adds another field to the modified output of Command 1
@@ -294,12 +292,12 @@ import Foundation
     } else {
         Issue.record("Expected proceed with chained data")
     }
-    
-    try? FileManager.default.removeItem(at: configURL)
 }
 
 @Test func testHookManagerMissingEventTypes() async throws {
-    let tempDir = FileManager.default.temporaryDirectory
+    let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
     let configURL = tempDir.appendingPathComponent("test_settings_missing_events.json")
     
     let hookConfig = """
@@ -374,12 +372,12 @@ import Foundation
     if case .proceed(let data) = afterAgentDecision, let json = try? JSONSerialization.jsonObject(with: data!, options: []) as? [String: String] {
         #expect(json["hooked"] == "AfterAgent")
     } else { Issue.record("AfterAgent failed") }
-    
-    try? FileManager.default.removeItem(at: configURL)
 }
 
 @Test func testHookManagerLoginPathEnv() async throws {
-    let tempDir = FileManager.default.temporaryDirectory
+    let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
     let configURL = tempDir.appendingPathComponent("test_settings_path.json")
     let markerURL = tempDir.appendingPathComponent("hook_path_\(UUID().uuidString).txt")
 
@@ -430,7 +428,4 @@ import Foundation
         }
     }
     #expect(remaining.isEmpty, "expected login search dirs \(loginDirs) to appear in order within hook PATH \(hookPathDirs)")
-
-    try? FileManager.default.removeItem(at: configURL)
-    try? FileManager.default.removeItem(at: markerURL)
 }
