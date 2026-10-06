@@ -11,11 +11,12 @@ import Foundation
 /// These pin the replacement: a model or engine set with `withValue` is visible to the real
 /// sanitize path inside that scope — including across a MainActor hop and into a child task,
 /// which is what an engine turn actually does — and invisible outside it.
-// `.serialized` because `scopedNone` is the one test left that writes the process-global model
-// (deliberately, to prove a nil scope beats an installed one) and `scopedNilDoesNotLoad` asserts
-// that global is clean. Ordering within this suite is enough: after the migration no OTHER suite
-// writes it, which is the whole point of the PR.
-@Suite("guard test isolation (#237)", .serialized)
+// Nothing here writes `CoreMLEvaluator.shared`. `scopedNone` used to, to prove a nil scope beats
+// an installed model, and `.serialized` only ordered it against this suite: every other suite's
+// unscoped tier-2 call could see the model appear and vanish between `executeTier2CoreML`'s two
+// `hasModelLoaded` checks, which fails closed and blocks benign content (#375). The two tests that
+// need an installed model now install it on an evaluator of their own.
+@Suite("guard test isolation (#237)")
 struct GuardTestIsolationTests {
     @Test("a scoped model is visible through the real sanitize path")
     func scopedVisible() async {
@@ -61,13 +62,11 @@ struct GuardTestIsolationTests {
     /// that distinction is why the override is wrapped rather than a bare optional.
     @Test("a scope can assert no model at all, even with one installed")
     func scopedNone() async {
-        // Probability 0.0 deliberately: this is the one place that still writes the global, and
-        // a safe model leaking for those two statements blocks nothing. A 0.99 here would make
-        // this test a source of exactly the flake it exists to prevent.
-        CoreMLEvaluator.shared.setModel(MockCoreMLModel(probability: 0.0))
-        defer { CoreMLEvaluator.shared.setModel(nil) }
+        let evaluator = CoreMLEvaluator()
+        evaluator.setModel(MockCoreMLModel(probability: 0.99))
+        #expect(evaluator.hasModelLoaded)
         await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
-            #expect(!CoreMLEvaluator.shared.hasModelLoaded)
+            #expect(!evaluator.hasModelLoaded)
         }
     }
 
@@ -82,9 +81,10 @@ struct GuardTestIsolationTests {
     /// regression guard on a provisioned machine, which is where the leak was found.
     @Test("a scoped-nil body never installs a model into the global slot")
     func scopedNilDoesNotLoad() async {
+        let evaluator = CoreMLEvaluator()
         await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
-            try? await CoreMLEvaluator.shared.loadModelIfNeeded()
+            try? await evaluator.loadModelIfNeeded()
         }
-        #expect(!CoreMLEvaluator.shared.hasModelLoaded, "a scoped-nil load leaked into the process-global model")
+        #expect(!evaluator.hasModelLoaded, "a scoped-nil load leaked into the evaluator's installed model")
     }
 }

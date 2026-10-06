@@ -404,12 +404,12 @@ struct InjectionGuardTests {
                 #expect(text.contains("Cacheability probe"))
                 #expect(cacheable, "a real passed verdict must be reported as cacheable")
             }
-            // Third call: the second call cached the verdict inside InjectionGuard itself, so this
-            // is a cache hit — also reported as cacheable (the earlier outcome genuinely was cached).
+            // Third call: a genuine block is a verdict too, so it is cacheable. It is this scope's
+            // own verdict: the pass the second scope reached is never served to it (#375).
             await AuxiliaryModelManager.$scopedEngines.withValue(["canary": MockInferenceEngine(shouldHijack: true)]) {
                 let (text, cacheable) = await InjectionGuard.sanitizeCacheable(payload, maxTier: .tier3_canary, protectionEnabled: true, tier3ModelsDir: modelsDir)
-                #expect(text.contains("Cacheability probe"), "served from InjectionGuard's own cache, not the hijacking mock")
-                #expect(cacheable)
+                #expect(text.contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"), "another scope's cached pass was served")
+                #expect(cacheable, "a real malicious verdict must be reported as cacheable")
             }
         }
     }

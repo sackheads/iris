@@ -51,6 +51,11 @@ public struct InjectionGuard {
     public static let sanitizationCacheCapacity = 128
     private static let cache = SanitizationCache(capacity: sanitizationCacheCapacity)
 
+    /// Whether a test has scoped a tier-2 model or a tier-3 canary for this task tree.
+    private static var guardTierScopeActive: Bool {
+        CoreMLEvaluator.scopedModel != nil || AuxiliaryModelManager.scopedEngines?["canary"] != nil
+    }
+
     private final class SanitizationCache: @unchecked Sendable {
         private let lock = NSLock()
         private var entries: [String: GuardOutcome] = [:]
@@ -338,8 +343,13 @@ public struct InjectionGuard {
             return (.passed(clean: clean), true)
         }
 
+        // A verdict reached under a task-scoped model or engine (#237) is that scope's, not the
+        // process's: it neither reads nor writes the shared cache. Otherwise one suite's hijacking
+        // canary cached a block on shared text (the default empty USER.md) and every later engine
+        // in the process was served it (#375). Production never sets a scope.
+        let cache: SanitizationCache? = Self.guardTierScopeActive ? nil : Self.cache
         let key = cacheKey(clean: clean, source: source, maxTier: maxTier, fingerprint: fingerprint)
-        if let cached = cache.get(key) {
+        if let cached = cache?.get(key) {
             return (cached, true)
         }
 
@@ -350,7 +360,7 @@ public struct InjectionGuard {
             return (.blocked(marker: "[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]"), false)
         case .malicious:
             let blocked = GuardOutcome.blocked(marker: "[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]")
-            cache.set(key, blocked)
+            cache?.set(key, blocked)
             return (blocked, true)
         case .safe, .skipped:
             // A tier-2 skip (unprovisioned/notConfigured) IS cached, exactly like `.safe` — same
@@ -362,7 +372,7 @@ public struct InjectionGuard {
 
         if maxTier == .tier2_coreML {
             let passed = GuardOutcome.passed(clean: clean)
-            cache.set(key, passed)
+            cache?.set(key, passed)
             return (passed, true)
         }
 
@@ -373,7 +383,7 @@ public struct InjectionGuard {
             return (.blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"), false)
         case .malicious:
             let blocked = GuardOutcome.blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]")
-            cache.set(key, blocked)
+            cache?.set(key, blocked)
             return (blocked, true)
         case .safe, .skipped:
             // #202 fix round 2 (reversing fix round 1): a skip IS cached, exactly like `.safe`.
@@ -383,7 +393,7 @@ public struct InjectionGuard {
             // `provisioning` (computed once above) is now part of the cache key: the moment the
             // model file appears on disk, the key changes and the stale skip can never be served.
             let passed = GuardOutcome.passed(clean: clean)
-            cache.set(key, passed)
+            cache?.set(key, passed)
             return (passed, true)
         }
     }

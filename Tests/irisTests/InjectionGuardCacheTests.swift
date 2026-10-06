@@ -64,4 +64,62 @@ struct InjectionGuardCacheTests {
         let again = await spans(for: oldest)
         #expect(again.tier3 == 1)
     }
+
+    /// The cache is process-wide, but a verdict reached under a task-scoped mock is that scope's
+    /// verdict, not the process's (#375). Before this, a suite whose hijacking canary judged the
+    /// default "User profile is currently empty." cached a block that every later engine with an
+    /// empty USER.md then served, so a test passed alone and failed in the full run.
+    private func scopedSanitize(_ content: String, hijack: Bool) async -> String {
+        await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
+            await AuxiliaryModelManager.$scopedEngines.withValue(["canary": MockInferenceEngine(shouldHijack: hijack)]) {
+                await InjectionGuard.sanitize(content, contextTag: "user_profile", maxTier: .tier3_canary, protectionEnabled: true)
+            }
+        }
+    }
+
+    @Test("a verdict reached under one scoped canary is never served to another scope (#375)")
+    func scopedVerdictStaysInItsScope() async {
+        let content = unique("shared profile text")
+        let blocked = await scopedSanitize(content, hijack: true)
+        #expect(blocked.contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
+        let clean = await scopedSanitize(content, hijack: false)
+        #expect(clean.contains(content), "got: \(clean)")
+        #expect(!clean.contains("[CONTENT BLOCKED"))
+    }
+
+    @Test("nor to a caller with no scope (#375)")
+    func scopedVerdictNeverReachesTheProcess() async {
+        let content = unique("shared profile text")
+        _ = await scopedSanitize(content, hijack: true)
+        // Unscoped, tier 2 and tier 3 are unprovisioned under the per-process test home and skip.
+        let unscoped = await InjectionGuard.sanitize(content, contextTag: "user_profile",
+                                                     maxTier: .tier3_canary, protectionEnabled: true)
+        #expect(unscoped.contains(content), "got: \(unscoped)")
+    }
+
+    @Test("and a scope never reads a verdict the process cached (#375)")
+    func scopeIgnoresTheProcessCache() async {
+        let content = unique("shared profile text")
+        _ = await InjectionGuard.sanitize(content, contextTag: "user_profile",
+                                          maxTier: .tier3_canary, protectionEnabled: true)
+        let blocked = await scopedSanitize(content, hijack: true)
+        #expect(blocked.contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"), "got: \(blocked)")
+    }
+
+    @Test("a cache hit is reported cacheable: the verdict it serves was a real one")
+    func hitIsCacheable() async {
+        let content = unique("cacheable hit")
+        let first = await InjectionGuard.sanitizeCacheable(content, contextTag: "cache_test",
+                                                           maxTier: .tier3_canary, protectionEnabled: true)
+        let id = PerformanceProfiler.shared.beginTurn(label: "cache", source: "test")
+        defer { PerformanceProfiler.shared.endTurn(id, totalMs: 0) }
+        let second = await PerformanceProfiler.$currentTurnID.withValue(id) {
+            await InjectionGuard.sanitizeCacheable(content, contextTag: "cache_test",
+                                                   maxTier: .tier3_canary, protectionEnabled: true)
+        }
+        let profile = PerformanceProfiler.shared.activeProfileForTesting(id)
+        #expect((profile?.spans["guard.tier3"]?.count ?? 0) == 0, "the second call was not a cache hit")
+        #expect(first.cacheable && second.cacheable)
+        #expect(second.text == first.text)
+    }
 }
