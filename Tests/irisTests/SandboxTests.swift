@@ -104,6 +104,27 @@ struct SandboxTests {
         #expect(!(await EphemeralContainerRegistry.shared.current().contains(name)))
     }
 
+    /// #377 review: a caller already cancelled never starts `withTimeout`'s work, so a name
+    /// registered before it was never given back, and the sweep spared a container that did not
+    /// exist for the rest of the process. Read through a registry of the test's own.
+    @Test("a call cancelled before it starts leaves no name registered and spawns nothing")
+    func cancelledCallLeavesNoName() async throws {
+        let stub = try stubContainer("echo \"$*\" >> \"$(dirname \"$0\")/calls\"")
+        defer { try? FileManager.default.removeItem(at: stub.dir) }
+        let registry = EphemeralContainerRegistry()
+        var executor = ToolExecutor()
+        executor.containerBinaryPath = { stub.binary }
+        executor.ephemeralRegistry = registry
+        let call = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await executor.runCommand("true", cwd: stub.dir.path, useSandbox: true, timeoutSeconds: 5)
+        }
+        _ = await call.value
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(await registry.current().isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: stub.dir.appendingPathComponent("calls").path))
+    }
+
     @Test("a runtime that is installed but not started gets the setup hint, not its raw error")
     func testSandboxBranchRuntimeNotReady() async throws {
         let stub = try stubContainer("echo 'Error: unauthorized request' >&2\nexit 1")

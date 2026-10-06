@@ -81,6 +81,26 @@ struct SandboxRealVMTests {
         #expect(!rows.contains(where: { $0.hasPrefix("Z") }), "zombies in the VM:\n\(table)")
     }
 
+    /// #365 review: `--init` puts the CLI's init between the container and the command's
+    /// processes. An `exec`'s status must be unchanged by it: an exit code passes through, and a
+    /// command killed by SIGTERM still reads as 143.
+    @Test("exit codes pass through the session container's init")
+    func exitCodesUnderInit() async throws {
+        let name = RealContainer.uniqueName(365)
+        defer { RealContainer.delete(name) }
+        let rt = RealContainer.runtime()
+        try await rt.createDetached(name: name, image: RealContainer.image, mounts: [], workdir: "/")
+        let pid1 = try await rt.exec(name: name, workdir: "/", command: "cat /proc/1/cmdline | tr '\\0' ' '", timeoutSeconds: 30)
+        #expect(pid1.stdout.contains("init"), "PID 1 is not the CLI's init: \(pid1.stdout)")
+        let seven = try await rt.exec(name: name, workdir: "/", command: "echo out; exit 7", timeoutSeconds: 30)
+        #expect(seven.exitCode == 7)
+        #expect(seven.stdout == "out\n")
+        let term = try await rt.exec(name: name, workdir: "/", command: "kill -TERM $$", timeoutSeconds: 30)
+        #expect(term.exitCode == 143)
+        let termChild = try await rt.exec(name: name, workdir: "/", command: "sleep 30 & p=$!; kill -TERM $p; wait $p", timeoutSeconds: 30)
+        #expect(termChild.exitCode == 143)
+    }
+
     /// #377: with every pool thread held, the in-VM group killer still fires on time. It used to
     /// start in a `Task` after `exec` threw, so it waited for the pool while the command ran on in
     /// the VM. Run in an exit-test child, like `KillEscalationPoolStarvationTests`, so the hold

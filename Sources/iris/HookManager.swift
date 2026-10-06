@@ -259,10 +259,10 @@ actor EphemeralContainerRegistry {
     /// Deletes a one-off container whose client a kill ladder has just ended, then gives the name
     /// back to the sweep. Called from the ladder's own queue: the delete runs on a queue of its
     /// own, so it needs no pool thread, and only the bookkeeping after it waits for one (#377).
-    nonisolated static func deleteNow(binary: String, name: String) {
+    nonisolated static func deleteNow(binary: String, name: String, registry: EphemeralContainerRegistry = .shared) {
         BlockingSpawn.detached(binary, ["delete", "--force", name],
                                timeoutSeconds: Double(CLIContainerRuntime.housekeepingTimeoutSeconds)) { _ in
-            Task { await EphemeralContainerRegistry.shared.unregister(name) }
+            Task { await registry.unregister(name) }
         }
     }
 }

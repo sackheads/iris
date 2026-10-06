@@ -102,13 +102,18 @@ struct ContainerExecGroupKillTests {
         #expect(hooks.lock.withLock { hooks.seen } == [false, false, false, false, true])
     }
 
-    /// A cancel that lands before the command has recorded its group: the first kill, at the start
-    /// of the ladder, finds no note, and the second, at its end, must still reach the group. A stub
-    /// `container` stands in for the CLI: for the command's `exec` it starts the wrapper one second
-    /// late, detached from the client and as a group leader (`set -m`), the way the VM runs it apart
-    /// from the client; for the killer's `exec` it runs the killer on the host.
-    @Test("a group recorded after the first kill is killed by the second", .timeLimit(.minutes(1)))
-    func secondKillReachesLateGroup() async throws {
+    /// The ladder fires the killer twice (#377). `late`: the cancel lands before the command has
+    /// recorded its group, so the first kill finds no note and the second must still reach the
+    /// group. Not `late`: the group is recorded first, the first kill takes the note and ends it,
+    /// and the second must find no note, so it signals nothing — the id may be reused by then.
+    ///
+    /// A stub `container` stands in for the CLI: for the command's `exec` it starts the wrapper
+    /// (a second late when `late`) detached from the client and as a group leader (`set -m`), the
+    /// way the VM runs it apart from the client; for the killer's `exec` it logs whether the note
+    /// is there, then runs the killer on the host.
+    @Test("each of the ladder's two kills signals the group only if it holds the note", .timeLimit(.minutes(1)),
+          arguments: [true, false])
+    func twoKillsOneNote(late: Bool) async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-377-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -116,14 +121,17 @@ struct ContainerExecGroupKillTests {
         let clientNap = "30.\(Int.random(in: 100_000...999_999))"
         defer { RunCommandProcessGroupTests.killAll(nap); RunCommandProcessGroupTests.killAll(clientNap) }
         let stub = dir.appendingPathComponent("container").path
+        let log = dir.appendingPathComponent("killers").path
         try """
         #!/bin/bash
         [ "$1" = exec ] || exit 0
         shift; [ "$1" = -w ] && shift 2; shift
         if [ "$4" = iris-exec ]; then
-            ( ( trap '' TERM; sleep 1; trap - TERM; set -m; "$@" & ) & ) </dev/null >/dev/null 2>&1
+            ( ( trap '' TERM; sleep \(late ? 1 : 0); trap - TERM; set -m; "$@" & ) & ) </dev/null >/dev/null 2>&1
             sleep \(clientNap)
         else
+            pf=$(printf %s "$3" | grep -o '/tmp/[.]iris-exec-[A-Za-z0-9-]*[.]pid' | head -1)
+            if [ -s "$pf" ]; then echo note >> '\(log)'; else echo none >> '\(log)'; fi
             exec "$@"
         fi
         """.write(toFile: stub, atomically: true, encoding: .utf8)
@@ -143,16 +151,54 @@ struct ContainerExecGroupKillTests {
             })
         let call = Task { try await rt.exec(name: "iris-a", workdir: "/", command: "sleep \(nap); true", timeoutSeconds: 60) }
         #expect(await RunCommandProcessGroupTests.appears("sleep \(clientNap)", within: 5))
+        if !late { #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5)) }
         call.cancel()
         _ = try? await call.value
-        // The wrapper records its group about a second after the launch, after the first kill.
-        #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5), "the late group never started")
+        // Late, the wrapper records its group about a second after the launch, after the first kill.
+        if late { #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5), "the late group never started") }
         let deadline = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds * 2 + 3)
         while RunCommandProcessGroupTests.exists("^sleep \(nap)"), Date() < deadline {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        #expect(!RunCommandProcessGroupTests.exists("^sleep \(nap)"), "the late group outlived both kills")
+        #expect(!RunCommandProcessGroupTests.exists("^sleep \(nap)"), "the group outlived both kills")
+        // The second fire comes a grace after the first, however soon the group died.
+        let killersDeadline = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds + 3)
+        func killers() -> [String] {
+            ((try? String(contentsOfFile: log, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+        }
+        while killers().count < 2, Date() < killersDeadline { try await Task.sleep(nanoseconds: 50_000_000) }
         #expect(fires.lock.withLock { fires.count } == 2)
+        #expect(killers() == (late ? ["none", "note"] : ["note", "none"]))
+    }
+
+    /// The pgid-reuse half of #377, without the race of the two fires: a killer in its grace has
+    /// already taken the note, so a second killer exits at once and signals nothing.
+    @Test("a killer takes the note before its grace, so a second killer signals nothing")
+    func killerTakesNote() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-377-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pidFile = dir.appendingPathComponent("g.pid").path
+        let nap = "30.\(Int.random(in: 100_000...999_999))"
+        defer { RunCommandProcessGroupTests.killAll(nap) }
+        // Ignores SIGTERM, so the first killer is still in its grace when the second runs.
+        let command = Task {
+            await ProcessGroupRunner().run(
+                executable: "/bin/bash",
+                arguments: ["-c", CLIContainerRuntime.recordingWrapper(pidFile), "iris-exec", "trap '' TERM; sleep \(nap); true"],
+                environment: nil, currentDirectory: nil)
+        }
+        #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5))
+        BlockingSpawn.detached("/bin/bash", ["-c", CLIContainerRuntime.groupKiller(pidFile)], timeoutSeconds: 30)
+        let taken = Date().addingTimeInterval(1)
+        while FileManager.default.fileExists(atPath: pidFile), Date() < taken { try await Task.sleep(nanoseconds: 20_000_000) }
+        #expect(!FileManager.default.fileExists(atPath: pidFile), "the note was still there during the grace")
+        #expect(RunCommandProcessGroupTests.exists("^sleep \(nap)"), "the first killer's grace should not be over yet")
+        let started = Date()
+        #expect(BlockingSpawn.run("/bin/bash", ["-c", CLIContainerRuntime.groupKiller(pidFile)], timeoutSeconds: 10) == 0)
+        #expect(Date().timeIntervalSince(started) < 1, "the second killer waited out a grace: it signalled something")
+        _ = await command.value
+        #expect(!RunCommandProcessGroupTests.exists("^sleep \(nap)"))
     }
 
     @Test("the wrapper passes output and status through, and clears its note")

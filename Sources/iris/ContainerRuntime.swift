@@ -664,9 +664,16 @@ struct CLIContainerRuntime: ContainerRuntime {
 
     /// SIGTERM to the recorded group, a grace, then SIGKILL. A group that already finished removed
     /// its note, so there is nothing to signal.
+    ///
+    /// The note is taken — read and removed — before anything is signalled. The ladder fires this
+    /// twice (`CLIProcessRunner.enforce`), the second time about a grace after the first; with the
+    /// note still there, the second would signal a group the first had already ended, and in a
+    /// shared session container that id may by then be somebody else's (#377). Only the killer
+    /// that took the note signals it.
     static func groupKiller(_ pidFile: String) -> String {
-        "[ -s \(pidFile) ] || exit 0; p=$(cat \(pidFile)); kill -TERM -- -\"$p\" 2>/dev/null; "
-            + "sleep \(Int(CLIProcessRunner.killGraceSeconds)); kill -KILL -- -\"$p\" 2>/dev/null; rm -f \(pidFile)"
+        "[ -s \(pidFile) ] || exit 0; p=$(cat \(pidFile)); rm -f \(pidFile); [ -n \"$p\" ] || exit 0; "
+            + "kill -TERM -- -\"$p\" 2>/dev/null; "
+            + "sleep \(Int(CLIProcessRunner.killGraceSeconds)); kill -KILL -- -\"$p\" 2>/dev/null; exit 0"
     }
 
     func remove(name: String) async {
