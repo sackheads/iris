@@ -174,19 +174,19 @@ struct HookManager {
         // It carries `SandboxSessionManager.namePrefix`, so the launch sweep would take it for an
         // orphan; registered for its whole life, and one a crash left behind is still swept.
         if let ephemeralContainer { await EphemeralContainerRegistry.shared.register(ephemeralContainer.name) }
+        // Deleted by the runner's ladder once the client is dead, off the cooperative pool (#377);
+        // the hook also gives the name back. Any other ending left nothing in the VM.
+        let ephemeralName = ephemeralContainer?.name
+        let onKilled: (@Sendable () -> Void)?
+        if let binary = ephemeralContainer?.binary, let name = ephemeralName {
+            onKilled = { EphemeralContainerRegistry.deleteNow(binary: binary, name: name) }
+        } else {
+            onKilled = nil
+        }
         let outcome = await Self.runHookProcess(executable: executable, arguments: arguments,
-                                                payload: payload, timeoutSeconds: Double(timeout))
-        if let ephemeralContainer {
-            let binary = ephemeralContainer.binary, name = ephemeralContainer.name
-            if Task.isCancelled || (try? outcome.get())?.timedOut == true {
-                Task {
-                    _ = try? await CLIProcessRunner(executable: binary)
-                        .run(["delete", "--force", name], timeoutSeconds: CLIContainerRuntime.housekeepingTimeoutSeconds)
-                    await EphemeralContainerRegistry.shared.unregister(name)
-                }
-            } else {
-                await EphemeralContainerRegistry.shared.unregister(name)
-            }
+                                                payload: payload, timeoutSeconds: Double(timeout), onKilled: onKilled)
+        if let ephemeralContainer, (try? outcome.get())?.killed != true {
+            await EphemeralContainerRegistry.shared.unregister(ephemeralContainer.name)
         }
         // A cancel kills the hook, so its verdict never arrived: fail closed, or a hook that would
         // have blocked lets the tool through as a warning (#364 review).
@@ -200,8 +200,8 @@ struct HookManager {
     /// stdout and stderr drain, so neither side can fill a pipe and stall; on timeout or cancel
     /// the whole group gets SIGTERM, then SIGKILL; and a background job the hook left holding its
     /// pipes cannot keep the turn waiting. Secrets are scrubbed and the login-shell PATH applied.
-    static func runHookProcess(executable: String, arguments: [String], payload: Data?,
-                               timeoutSeconds: Double) async -> Result<ProcessGroupRunner.Output, Error> {
+    static func runHookProcess(executable: String, arguments: [String], payload: Data?, timeoutSeconds: Double,
+                               onKilled: (@Sendable () -> Void)? = nil) async -> Result<ProcessGroupRunner.Output, Error> {
         var env = ProcessInfo.processInfo.environment
         for key in sensitiveEnvKeys {
             env.removeValue(forKey: key)
@@ -209,7 +209,7 @@ struct HookManager {
         env["GEMINI_CWD"] = FileManager.default.currentDirectoryPath
         env = BinaryResolver.commandEnvironment(base: env)
         return await ProcessGroupRunner.capture(executable: executable, arguments: arguments, environment: env,
-                                                stdin: payload, timeoutSeconds: timeoutSeconds)
+                                                stdin: payload, timeoutSeconds: timeoutSeconds, onKilled: onKilled)
     }
 
     /// Exit 2 blocks with stderr as the reason; exit 0 proceeds, with stdout as the new payload
@@ -255,4 +255,14 @@ actor EphemeralContainerRegistry {
     func register(_ name: String) { names.insert(name) }
     func unregister(_ name: String) { names.remove(name) }
     func current() -> Set<String> { names }
+
+    /// Deletes a one-off container whose client a kill ladder has just ended, then gives the name
+    /// back to the sweep. Called from the ladder's own queue: the delete runs on a queue of its
+    /// own, so it needs no pool thread, and only the bookkeeping after it waits for one (#377).
+    nonisolated static func deleteNow(binary: String, name: String) {
+        BlockingSpawn.detached(binary, ["delete", "--force", name],
+                               timeoutSeconds: Double(CLIContainerRuntime.housekeepingTimeoutSeconds)) { _ in
+            Task { await EphemeralContainerRegistry.shared.unregister(name) }
+        }
+    }
 }

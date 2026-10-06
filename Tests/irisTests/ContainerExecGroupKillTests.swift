@@ -4,25 +4,39 @@ import Foundation
 
 /// #353, inside the VM: killing the `container exec` client on the host leaves the command running
 /// in the container, so `exec` records the command's process group there and, on a timeout or a
-/// cancel, kills it with a second `exec`. Nothing here goes near the `container` binary
-/// (invariant 7): the argv is recorded, and the two scripts are run by the host's own bash.
+/// cancel, kills it with a second `exec`. Since #377 that second `exec` is fired by the client's
+/// kill ladder (`Launch`'s `onKill`), not by `exec` after the launch throws. Nothing here goes
+/// near the `container` binary (invariant 7): the argv is recorded, and the two scripts are run
+/// by the host's own bash.
 @Suite("container exec kills its group in the VM", .timeLimit(.minutes(1)))
 struct ContainerExecGroupKillTests {
 
-    /// Records every call; the first answers with `first`, the rest succeed.
+    /// Records every launch and every fire. The first launch answers with `first`, after running
+    /// its `onKill` when `ladderKills` — what `CLIProcessRunner` does when its ladder had to kill
+    /// the client; the rest succeed.
     final class Launcher: @unchecked Sendable {
         private let lock = NSLock()
         private var calls: [[String]] = []
+        private var fired: [(args: [String], timeout: Int)] = []
         private let first: Error?
-        init(first: Error?) { self.first = first }
+        private let ladderKills: Bool
+        init(first: Error?, ladderKills: Bool = true) { self.first = first; self.ladderKills = ladderKills }
         var launch: CLIContainerRuntime.Launch {
-            { [self] args, _ in
+            { [self] args, _, onKill in
                 let fail: Error? = lock.withLock { calls.append(args); return calls.count == 1 ? first : nil }
-                if let fail { throw fail }
+                if let fail {
+                    if ladderKills { onKill?() }
+                    throw fail
+                }
                 return ("", "", 0)
             }
         }
+        var fire: CLIContainerRuntime.Fire {
+            { [self] args, timeout in lock.withLock { fired.append((args, timeout)) } }
+        }
         var argv: [[String]] { lock.withLock { calls } }
+        var fires: [(args: [String], timeout: Int)] { lock.withLock { fired } }
+        func runtime() -> CLIContainerRuntime { CLIContainerRuntime(launch: launch, fire: fire) }
     }
 
     private static func pidFile(in argv: [String]) -> String? {
@@ -35,28 +49,57 @@ struct ContainerExecGroupKillTests {
     @Test("the command runs under the recording wrapper, as its first argument")
     func execArgv() async throws {
         let launcher = Launcher(first: nil)
-        _ = try await CLIContainerRuntime(launch: launcher.launch).exec(name: "iris-a", workdir: "/ws", command: "echo hi", timeoutSeconds: 5)
+        _ = try await launcher.runtime().exec(name: "iris-a", workdir: "/ws", command: "echo hi", timeoutSeconds: 5)
         let argv = try #require(launcher.argv.first)
         let pidFile = try #require(Self.pidFile(in: argv))
         #expect(argv == ["exec", "-w", "/ws", "iris-a", "bash", "-c", CLIContainerRuntime.recordingWrapper(pidFile), "iris-exec", "echo hi"])
         // An ordinary exit kills nothing.
-        try await Task.sleep(nanoseconds: 200_000_000)
         #expect(launcher.argv.count == 1)
+        #expect(launcher.fires.isEmpty)
     }
 
-    @Test("a timeout or a cancel sends the group killer for the same note", arguments: [true, false])
-    func killerFollowsTimeout(timedOut: Bool) async throws {
+    @Test("a ladder kill on a timeout or a cancel fires the group killer for the same note", arguments: [true, false])
+    func killerFollowsLadder(timedOut: Bool) async throws {
         let error: Error = timedOut ? ContainerRuntimeError.timedOut(elapsedSeconds: 1) : CancellationError()
         let launcher = Launcher(first: error)
         await #expect(throws: Error.self) {
-            _ = try await CLIContainerRuntime(launch: launcher.launch).exec(name: "iris-a", workdir: "/ws", command: "sleep 99", timeoutSeconds: 1)
+            _ = try await launcher.runtime().exec(name: "iris-a", workdir: "/ws", command: "sleep 99", timeoutSeconds: 1)
         }
-        let deadline = Date().addingTimeInterval(5)
-        while launcher.argv.count < 2, Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
-        let calls = launcher.argv
-        try #require(calls.count == 2, "no kill followed the \(timedOut ? "timeout" : "cancel")")
-        let pidFile = try #require(Self.pidFile(in: calls[0]))
-        #expect(calls[1] == ["exec", "iris-a", "bash", "-c", CLIContainerRuntime.groupKiller(pidFile)])
+        // Fired by the ladder before the launch threw: nothing for a pool thread to start later.
+        let fires = launcher.fires
+        try #require(fires.count == 1, "no kill followed the \(timedOut ? "timeout" : "cancel")")
+        let pidFile = try #require(Self.pidFile(in: launcher.argv[0]))
+        #expect(fires[0].args == ["exec", "iris-a", "bash", "-c", CLIContainerRuntime.groupKiller(pidFile)])
+        #expect(fires[0].timeout == CLIContainerRuntime.housekeepingTimeoutSeconds)
+        // Fired, not launched: the killer is not awaited through the pool-bound path.
+        #expect(launcher.argv.count == 1)
+    }
+
+    @Test("an error the ladder did not kill for fires no killer")
+    func noKillerWithoutLadder() async throws {
+        let launcher = Launcher(first: ContainerRuntimeError.timedOut(elapsedSeconds: 1), ladderKills: false)
+        await #expect(throws: Error.self) {
+            _ = try await launcher.runtime().exec(name: "iris-a", workdir: "/ws", command: "sleep 99", timeoutSeconds: 1)
+        }
+        #expect(launcher.fires.isEmpty)
+        #expect(launcher.argv.count == 1)
+    }
+
+    @Test("housekeeping calls pass no kill hook")
+    func housekeepingHasNoHook() async throws {
+        final class Hooks: @unchecked Sendable {
+            let lock = NSLock(); var seen: [Bool] = []
+        }
+        let hooks = Hooks()
+        let rt = CLIContainerRuntime(launch: { _, _, onKill in
+            hooks.lock.withLock { hooks.seen.append(onKill != nil) }
+            return ("[]", "", 0)
+        }, fire: { _, _ in })
+        try await rt.createDetached(name: "iris-a", image: "img", mounts: [], workdir: "/")
+        _ = await rt.list(prefix: "iris-")
+        await rt.remove(name: "iris-a")
+        _ = try await rt.exec(name: "iris-a", workdir: "/", command: "true", timeoutSeconds: 1)
+        #expect(hooks.lock.withLock { hooks.seen } == [false, false, false, false, true])
     }
 
     @Test("the wrapper passes output and status through, and clears its note")

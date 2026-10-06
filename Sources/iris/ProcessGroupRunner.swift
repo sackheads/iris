@@ -26,6 +26,8 @@ final class ProcessGroupRunner: @unchecked Sendable {
         var status: Int32
         /// The `timeoutSeconds` deadline passed and the group was killed.
         var timedOut = false
+        /// The kill ladder ran — `terminate()` or `timeoutSeconds` — and `onKilled` was called.
+        var killed = false
     }
 
     /// How long SIGTERM gets before SIGKILL, once `terminate()` is called.
@@ -56,6 +58,7 @@ final class ProcessGroupRunner: @unchecked Sendable {
     private var outSource: DispatchSourceRead?
     private var errSource: DispatchSourceRead?
     private var continuation: CheckedContinuation<Result<Output, Error>, Never>?
+    private var onKilled: (@Sendable () -> Void)?
 
     /// The leader's pid once spawned, 0 before. For tests.
     var processIdentifier: pid_t { queue.sync { pid } }
@@ -70,12 +73,17 @@ final class ProcessGroupRunner: @unchecked Sendable {
     /// - `timeoutSeconds`: when it passes, the same ladder as `terminate()`, and `timedOut` is set.
     ///   Timed on this runner's own queue, not the cooperative pool, so a starved pool cannot
     ///   hold the kill back (#372).
+    /// - `onKilled`: called on this runner's queue when the kill ladder has finished with a group
+    ///   it spawned, just before the answer. For what lies beyond the group's reach — a one-off
+    ///   `container run` whose container outlives its killed client — so that cleanup does not
+    ///   wait for a pool thread either (#377). It must not block.
     func run(executable: String, arguments: [String], environment: [String: String]?,
              currentDirectory: String?, stdin: Data? = nil, mergeStderr: Bool = false,
-             timeoutSeconds: Double? = nil) async -> Result<Output, Error> {
+             timeoutSeconds: Double? = nil, onKilled: (@Sendable () -> Void)? = nil) async -> Result<Output, Error> {
         await withCheckedContinuation { continuation in
             queue.async {
                 self.continuation = continuation
+                self.onKilled = onKilled
                 self.launch(executable: executable, arguments: arguments,
                             environment: environment, currentDirectory: currentDirectory,
                             stdin: stdin, mergeStderr: mergeStderr)
@@ -94,12 +102,12 @@ final class ProcessGroupRunner: @unchecked Sendable {
     /// is not `run_command` (which layers its own `withTimeout` on top) wants (#364).
     static func capture(executable: String, arguments: [String], environment: [String: String]?,
                         currentDirectory: String? = nil, stdin: Data? = nil, mergeStderr: Bool = false,
-                        timeoutSeconds: Double?) async -> Result<Output, Error> {
+                        timeoutSeconds: Double?, onKilled: (@Sendable () -> Void)? = nil) async -> Result<Output, Error> {
         let runner = ProcessGroupRunner()
         return await withTaskCancellationHandler {
             await runner.run(executable: executable, arguments: arguments, environment: environment,
                              currentDirectory: currentDirectory, stdin: stdin, mergeStderr: mergeStderr,
-                             timeoutSeconds: timeoutSeconds)
+                             timeoutSeconds: timeoutSeconds, onKilled: onKilled)
         } onCancel: {
             runner.terminate()
         }
@@ -320,10 +328,13 @@ final class ProcessGroupRunner: @unchecked Sendable {
         while waitpid(pid, &raw, 0) == -1, errno == EINTR {}
         let signal = raw & 0x7f
         let status = signal == 0 ? (raw >> 8) & 0xff : 128 + signal
-        resume(.success(Output(stdout: out, stderr: err, status: status, timedOut: timedOut)))
+        if terminating { onKilled?() }
+        onKilled = nil
+        resume(.success(Output(stdout: out, stderr: err, status: status, timedOut: timedOut, killed: terminating)))
     }
 
     private func resume(_ result: Result<Output, Error>) {
+        onKilled = nil
         continuation?.resume(returning: result)
         continuation = nil
     }
