@@ -404,11 +404,14 @@ actor IrisEngine {
     /// the round drains queued input, so a scenario can deliver an event card that this same
     /// round picks up — deterministically mid-turn (5b). Nil everywhere else.
     private let roundStartHook: (@Sendable (Int) async -> Void)?
+    /// The command-hook runner. `.shared` reads the real settings file; a test injects one over a
+    /// config of its own (invariant 7).
+    private let hooks: HookManager
     /// Perf and tests: the Anthropic TTL policy for every request, instead of the one
     /// `CacheTTLPolicy.resolve` picks (5c §0.8). Nil everywhere else.
     private let cacheTTLOverride: CacheTTLPolicy?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared) {
         self.state = state
         self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
@@ -428,6 +431,7 @@ actor IrisEngine {
         self.declareStateGatedTools = declareStateGatedTools
         self.stickyToolsEnabled = stickyTools
         self.cacheTTLOverride = cacheTTLOverride
+        self.hooks = hooks
         systemPrompt = nil
     }
 
@@ -1178,7 +1182,7 @@ actor IrisEngine {
 
         let steers = await MainActor.run { localState?.takePendingSteers(for: conversationId) ?? [] }
         for steer in steers {
-            let decision = await HookManager.shared.fireBeforeAgent(input: steer.text, useSandbox: hooksSandbox)
+            let decision = await hooks.fireBeforeAgent(input: steer.text, useSandbox: hooksSandbox)
             var steerText = steer.text
             if case .block(let reason) = decision {
                 await pushToUI(role: .system, text: "Hook blocked message: \(reason)", conversationId: conversationId)
@@ -1435,7 +1439,7 @@ actor IrisEngine {
         let hooksSandbox = await isSandboxed(conversationId: conversationId, workspacePath: hookWorkspace)
 
         // BeforeAgent Hook
-        let beforeAgentDecision = await HookManager.shared.fireBeforeAgent(input: text, useSandbox: hooksSandbox)
+        let beforeAgentDecision = await hooks.fireBeforeAgent(input: text, useSandbox: hooksSandbox)
         var finalText = text
         if case .block(let reason) = beforeAgentDecision {
             await pushToUI(role: .system, text: "Hook blocked turn: \(reason)", conversationId: conversationId)
@@ -1914,7 +1918,7 @@ actor IrisEngine {
         assert(toolsList.arrayItemsViolations().isEmpty,
                "Tool ARRAY schema(s) missing `items` (Gemini will reject): \(toolsList.arrayItemsViolations())")
 
-        let toolSelectionDecision = await HookManager.shared.fireBeforeToolSelection(tools: toolsList, useSandbox: hooksSandbox)
+        let toolSelectionDecision = await hooks.fireBeforeToolSelection(tools: toolsList, useSandbox: hooksSandbox)
         if case .block(let reason) = toolSelectionDecision {
             await pushToUI(role: .system, text: "Hook blocked tool selection: \(reason)", conversationId: conversationId)
             return
@@ -1926,7 +1930,7 @@ actor IrisEngine {
         
         // AppState's own list, before the hook may rewrite the copy round one sends (see the anchor).
         let stateHistory = history
-        let preCompressDecision = await HookManager.shared.firePreCompress(history: history, useSandbox: hooksSandbox)
+        let preCompressDecision = await hooks.firePreCompress(history: history, useSandbox: hooksSandbox)
         if case .block(let reason) = preCompressDecision {
             await pushToUI(role: .system, text: "Hook PreCompress blocked execution: \(reason)", conversationId: conversationId)
             return
@@ -2028,7 +2032,7 @@ actor IrisEngine {
                     request.contents = await requestContents(history, from: .state, &turnRequest, conversationId: conversationId)
                 }
 
-                let beforeModelDecision = await HookManager.shared.fireBeforeModel(request: request, useSandbox: hooksSandbox)
+                let beforeModelDecision = await hooks.fireBeforeModel(request: request, useSandbox: hooksSandbox)
                 if case .block(let reason) = beforeModelDecision {
                     await pushToUI(role: .system, text: "Hook BeforeModel blocked execution: \(reason)", conversationId: conversationId)
                     break
@@ -2091,7 +2095,7 @@ actor IrisEngine {
                 // phase (with the tool name + detail) is now set at the point a tool call is
                 // actually about to run, in `executeToolWithHooks` below.
 
-                let afterModelDecision = await HookManager.shared.fireAfterModel(response: response, useSandbox: hooksSandbox)
+                let afterModelDecision = await hooks.fireAfterModel(response: response, useSandbox: hooksSandbox)
                 if case .block(let reason) = afterModelDecision {
                     _ = await streamer.settle()
                     await pushToUI(role: .system, text: "Hook AfterModel blocked execution: \(reason)", conversationId: conversationId)
@@ -2153,7 +2157,7 @@ actor IrisEngine {
                     if let responseText = part.text {
                         responseTexts.append(responseText)
 
-                        let afterAgentDecision = await HookManager.shared.fireAfterAgent(output: responseText, useSandbox: hooksSandbox)
+                        let afterAgentDecision = await hooks.fireAfterAgent(output: responseText, useSandbox: hooksSandbox)
                         if case .block(let reason) = afterAgentDecision {
                             await pushToUI(role: .system, text: "Hook AfterAgent blocked execution: \(reason)", conversationId: conversationId)
                         }
@@ -2336,7 +2340,7 @@ actor IrisEngine {
                 let display = LLMErrorMessage.display(for: error)
                 earlyEnd = cancelled ? Self.stoppedByUserReason : "The model call failed (\(display.headline))."
                 if !cancelled {
-                    await HookManager.shared.fireNotification(title: "LLM Error", body: display.headline, useSandbox: hooksSandbox)
+                    await hooks.fireNotification(title: "LLM Error", body: display.headline, useSandbox: hooksSandbox)
                     await pushToUI(role: .system, text: LLMErrorMessage.encode(display), conversationId: conversationId)
                 }
                 turnFinished = true
@@ -4003,6 +4007,11 @@ actor IrisEngine {
         return result
     }
     
+    /// What a tool call returns when its turn was cancelled before it was dispatched.
+    static func cancelledToolResult(_ tool: String) -> String {
+        "Cancelled: \(tool) did not run."
+    }
+
     /// Runs the one call a person clicked "Approve and run" for, and nothing else (#187 §6).
     ///
     /// `executeToolWithHooks`, not `executeFunctionCall`: the approval is already given, there is
@@ -4212,7 +4221,7 @@ actor IrisEngine {
         // specific tool's own host/sandbox routing.
         let hooksSandbox = conversationId == nil ? false : await isSandboxed(conversationId: conversationId!, workspacePath: cwd)
 
-        let beforeDecision = await HookManager.shared.fireBeforeTool(toolName: name, args: execArgs, useSandbox: hooksSandbox)
+        let beforeDecision = await hooks.fireBeforeTool(toolName: name, args: execArgs, useSandbox: hooksSandbox)
         if case .block(let reason) = beforeDecision {
             return "System Hook blocked execution: \(reason)"
         }
@@ -4241,6 +4250,12 @@ actor IrisEngine {
             }
         }
         
+        // A cancelled turn starts no tool: `ToolExecutor` never checks, so a cancelled
+        // `write_file` would still write (#364 review).
+        if Task.isCancelled {
+            return Self.cancelledToolResult(name)
+        }
+
         var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant, grantedMount: grantedMount,
                                               approvedWorkspaceRoot: approvedWorkspaceRoot)
 
@@ -4266,7 +4281,7 @@ actor IrisEngine {
             }
         }
 
-        let afterDecision = await HookManager.shared.fireAfterTool(toolName: name, result: result, useSandbox: hooksSandbox)
+        let afterDecision = await hooks.fireAfterTool(toolName: name, result: result, useSandbox: hooksSandbox)
         if case .block(let reason) = afterDecision {
             return "System Hook blocked result: \(reason)"
         } else if case .proceed(let modifiedData) = afterDecision, let data = modifiedData, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let newResult = json["result"] as? String {

@@ -79,3 +79,7 @@ The shell script's exit status code dictates how Iris proceeds:
 *   **Exit `0`**: Proceed normally. If the hook outputs valid JSON to `stdout`, it acts as a **mutation**, and the payload is replaced with the modified data for the rest of the pipeline.
 *   **Exit `2`**: Block execution immediately. The `stderr` output is used as the blocking reason presented to the user.
 *   **Any other exit code**: Handled as a warning (logged, but execution proceeds).
+*   **Killed by a signal**: Also a warning. A hook killed by SIGINT does not count as exit `2`.
+
+### Timeouts and background jobs
+Each hook runs as the leader of its own process group. It gets `timeout` seconds (60 when unset). After that the whole group gets SIGTERM, then SIGKILL 2 seconds later. The exit status then decides as above: a hook that traps SIGTERM and exits `2` still blocks, one that exits `0` still proceeds, and one killed by either signal is a warning. If the turn is cancelled while a hook runs, the hook is killed the same way and the call is blocked, since the hook never gave its verdict. A hook that exits while something it started still holds its stdout or stderr has that group SIGKILLed after 1 second, so a stray background job cannot stall the turn. To leave a job running, redirect its output (`long_job > /tmp/log 2>&1 &`).

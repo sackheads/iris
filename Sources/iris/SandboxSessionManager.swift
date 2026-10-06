@@ -200,18 +200,28 @@ actor SandboxSessionManager {
     /// Everything Iris creates carries `namePrefix`, a gate's per-evaluation container included —
     /// that is deliberate, and it is what makes a gate container a crash left behind sweepable at
     /// all. The price is that the prefix alone no longer means "an orphan", so two sets of names
-    /// are spared: this manager's live sessions, and the gate containers
-    /// `GateContainerRegistry` says are mid-evaluation. Nothing schedules this today; both
+    /// are spared: this manager's live sessions, the gate containers `GateContainerRegistry` says
+    /// are mid-evaluation, and the one-off hook and `run_command` containers
+    /// `EphemeralContainerRegistry` says are running. Nothing schedules this today; the
     /// exclusions are what keep it from killing live work if anything ever does.
     func reapOrphans() async {
-        await reapOrphans(inFlightGates: await GateContainerRegistry.shared.current())
+        await reapOrphans(inFlight: {
+            await GateContainerRegistry.shared.current()
+                .union(await EphemeralContainerRegistry.shared.current())
+        })
     }
 
-    /// The sweep itself, with the in-flight gate names handed in — a test has no way to park a
-    /// real gate inside its own evaluation.
-    func reapOrphans(inFlightGates: Set<String>) async {
+    /// The sweep with the in-flight names handed in — a test has no way to park a real gate or
+    /// hook mid-run.
+    func reapOrphans(inFlightGates: Set<String>, inFlightEphemeral: Set<String> = []) async {
+        await reapOrphans(inFlight: { inFlightGates.union(inFlightEphemeral) })
+    }
+
+    /// The sweep itself. `inFlight` is asked after the listing, never before: a container
+    /// registered and created between the two would otherwise be listed and not spared.
+    func reapOrphans(inFlight: @Sendable () async -> Set<String>) async {
         let found = await runtime.list(prefix: Self.namePrefix)
-        let spared = Set(sessions.values.map(\.name)).union(inFlightGates)
+        let spared = Set(sessions.values.map(\.name)).union(await inFlight())
         for n in found where !spared.contains(n) { await runtime.remove(name: n) }
     }
 

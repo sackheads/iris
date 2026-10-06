@@ -149,77 +149,110 @@ struct HookManager {
         return .proceed(modifiedData: currentData)
     }
     
-    private func executeCommandHook(hook: HookDefinition, payload: Data?, useSandbox: Bool = false) async -> HookDecision {
-        return await withCheckedContinuation { continuation in
-            let process = Process()
-            let inputPipe = Pipe()
-            let outputPipe = Pipe()
-            let errorPipe = Pipe()
+    /// How long a hook gets when its definition sets no `timeout`.
+    static let defaultTimeoutSeconds = 60
 
-            if useSandbox {
-                guard let containerPath = SandboxingManager.shared.containerBinaryPath else {
-                    continuation.resume(returning: .block(reason: "Sandboxing enabled but container missing for hook execution."))
-                    return
+    private func executeCommandHook(hook: HookDefinition, payload: Data?, useSandbox: Bool = false) async -> HookDecision {
+        let executable: String
+        let arguments: [String]
+        // Named, so a timeout or a cancel can delete it: killing the `container run` client does
+        // not stop the container (#353).
+        var ephemeralContainer: (binary: String, name: String)? = nil
+        if useSandbox {
+            guard let containerPath = SandboxingManager.shared.containerBinaryPath else {
+                return .block(reason: "Sandboxing enabled but container missing for hook execution.")
+            }
+            let name = "iris-hook-\(UUID().uuidString.lowercased())"
+            ephemeralContainer = (containerPath, name)
+            executable = containerPath
+            arguments = ["run", "--rm", "--name", name, ConfigManager.shared.sandboxImage, "bash", "-c", hook.command]
+        } else {
+            executable = "/bin/zsh"
+            arguments = ["-c", hook.command]
+        }
+        let timeout = hook.timeout ?? Self.defaultTimeoutSeconds
+        // It carries `SandboxSessionManager.namePrefix`, so the launch sweep would take it for an
+        // orphan; registered for its whole life, and one a crash left behind is still swept.
+        if let ephemeralContainer { await EphemeralContainerRegistry.shared.register(ephemeralContainer.name) }
+        let outcome = await Self.runHookProcess(executable: executable, arguments: arguments,
+                                                payload: payload, timeoutSeconds: Double(timeout))
+        if let ephemeralContainer {
+            let binary = ephemeralContainer.binary, name = ephemeralContainer.name
+            if Task.isCancelled || (try? outcome.get())?.timedOut == true {
+                Task {
+                    _ = try? await CLIProcessRunner(executable: binary)
+                        .run(["delete", "--force", name], timeoutSeconds: CLIContainerRuntime.housekeepingTimeoutSeconds)
+                    await EphemeralContainerRegistry.shared.unregister(name)
                 }
-                process.executableURL = URL(fileURLWithPath: containerPath)
-                process.arguments = ["run", "--rm", ConfigManager.shared.sandboxImage, "bash", "-c", hook.command]
             } else {
-                process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-                process.arguments = ["-c", hook.command]
-            }
-            
-            process.standardInput = inputPipe
-            process.standardOutput = outputPipe
-            process.standardError = errorPipe
-            
-            var env = ProcessInfo.processInfo.environment
-            for key in HookManager.sensitiveEnvKeys {
-                env.removeValue(forKey: key)
-            }
-            env["GEMINI_CWD"] = FileManager.default.currentDirectoryPath
-            env = BinaryResolver.commandEnvironment(base: env)
-            process.environment = env
-            
-            if let data = payload {
-                inputPipe.fileHandleForWriting.write(data)
-                try? inputPipe.fileHandleForWriting.close()
-            }
-            
-            let timeoutTask = Task {
-                try? await Task.sleep(nanoseconds: UInt64(hook.timeout ?? 60) * 1_000_000_000)
-                if process.isRunning {
-                    process.terminate()
-                }
-            }
-            
-            process.terminationHandler = { proc in
-                timeoutTask.cancel()
-                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                
-                if proc.terminationStatus == 2 {
-                    let reason = String(data: errorData, encoding: .utf8) ?? "Unknown hook error"
-                    continuation.resume(returning: .block(reason: reason.trimmingCharacters(in: .whitespacesAndNewlines)))
-                } else if proc.terminationStatus == 0 {
-                    // Try parsing output as JSON to enforce the rule
-                    if outputData.isEmpty {
-                        continuation.resume(returning: .proceed(modifiedData: nil))
-                    } else if (try? JSONSerialization.jsonObject(with: outputData)) != nil {
-                        continuation.resume(returning: .proceed(modifiedData: outputData))
-                    } else {
-                        // Pollution = Warning/Failure, treated as proceed for now
-                        continuation.resume(returning: .warning(message: "Hook output was not valid JSON"))
-                    }
-                } else {
-                    continuation.resume(returning: .warning(message: "Hook exited with status \(proc.terminationStatus)"))
-                }
-            }
-            
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(returning: .warning(message: "Failed to spawn hook: \(error.localizedDescription)"))
+                await EphemeralContainerRegistry.shared.unregister(name)
             }
         }
+        // A cancel kills the hook, so its verdict never arrived: fail closed, or a hook that would
+        // have blocked lets the tool through as a warning (#364 review).
+        if Task.isCancelled { return Self.cancelledDecision }
+        return Self.decision(for: outcome, timeoutSeconds: timeout)
     }
+
+    static let cancelledDecision = HookDecision.block(reason: "cancelled before the hook decided")
+
+    /// Spawns one hook in a process group of its own (#364): the payload goes in on stdin while
+    /// stdout and stderr drain, so neither side can fill a pipe and stall; on timeout or cancel
+    /// the whole group gets SIGTERM, then SIGKILL; and a background job the hook left holding its
+    /// pipes cannot keep the turn waiting. Secrets are scrubbed and the login-shell PATH applied.
+    static func runHookProcess(executable: String, arguments: [String], payload: Data?,
+                               timeoutSeconds: Double) async -> Result<ProcessGroupRunner.Output, Error> {
+        var env = ProcessInfo.processInfo.environment
+        for key in sensitiveEnvKeys {
+            env.removeValue(forKey: key)
+        }
+        env["GEMINI_CWD"] = FileManager.default.currentDirectoryPath
+        env = BinaryResolver.commandEnvironment(base: env)
+        return await ProcessGroupRunner.capture(executable: executable, arguments: arguments, environment: env,
+                                                stdin: payload, timeoutSeconds: timeoutSeconds)
+    }
+
+    /// Exit 2 blocks with stderr as the reason; exit 0 proceeds, with stdout as the new payload
+    /// when it is JSON; anything else is a warning.
+    static func decision(for outcome: Result<ProcessGroupRunner.Output, Error>, timeoutSeconds: Int) -> HookDecision {
+        let output: ProcessGroupRunner.Output
+        switch outcome {
+        case .success(let o): output = o
+        case .failure(is CancellationError):
+            return cancelledDecision
+        case .failure(let error):
+            return .warning(message: "Failed to spawn hook: \(error.localizedDescription)")
+        }
+        if output.status == 2 {
+            let reason = String(data: output.stderr, encoding: .utf8) ?? "Unknown hook error"
+            return .block(reason: reason.trimmingCharacters(in: .whitespacesAndNewlines))
+        } else if output.status == 0 {
+            // Try parsing output as JSON to enforce the rule
+            if output.stdout.isEmpty {
+                return .proceed(modifiedData: nil)
+            } else if (try? JSONSerialization.jsonObject(with: output.stdout)) != nil {
+                return .proceed(modifiedData: output.stdout)
+            } else {
+                // Pollution = Warning/Failure, treated as proceed for now
+                return .warning(message: "Hook output was not valid JSON")
+            }
+        } else if output.timedOut {
+            return .warning(message: "Hook timed out after \(timeoutSeconds) seconds")
+        } else {
+            return .warning(message: "Hook exited with status \(output.status)")
+        }
+    }
+}
+
+/// The one-off containers in flight — a sandboxed hook's `iris-hook-*` and a session-less
+/// `run_command`'s `iris-run-*` — which `SandboxSessionManager.reapOrphans` spares the way it
+/// spares live sessions and gates (`GateContainerRegistry`). A snapshot, like that one.
+actor EphemeralContainerRegistry {
+    static let shared = EphemeralContainerRegistry()
+
+    private var names: Set<String> = []
+
+    func register(_ name: String) { names.insert(name) }
+    func unregister(_ name: String) { names.remove(name) }
+    func current() -> Set<String> { names }
 }

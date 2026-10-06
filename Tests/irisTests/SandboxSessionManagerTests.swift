@@ -65,7 +65,11 @@ final class MockRuntime: ContainerRuntime, @unchecked Sendable {
         guard !Task.isCancelled else { return }
         lock.withLock { removed.append(name) }
     }
-    func list(prefix: String) async -> [String] { lock.withLock { existing.filter { $0.hasPrefix(prefix) } } }
+    private var listCalls = 0
+    func list(prefix: String) async -> [String] {
+        lock.withLock { listCalls += 1; return existing.filter { $0.hasPrefix(prefix) } }
+    }
+    var listCount: Int { lock.withLock { listCalls } }
 
     var createdCount: Int { lock.withLock { created.count } }
     var removedNames: [String] { lock.withLock { removed } }
@@ -204,6 +208,75 @@ struct SandboxSessionManagerTests {
 
         #expect(rt.removedNames == ["iris-orphan"], "only what nobody is using")
         #expect(await m.hasSession(id), "the live conversation still has its container")
+    }
+
+    /// #364: a sandboxed hook's container carries the `iris-` prefix too, so one in flight is spared
+    /// while one a crash left behind (registered by nobody in this process) is still swept.
+    @Test("reapOrphans spares an in-flight hook container and sweeps an orphaned one")
+    func reapOrphansSparesInFlightHook() async {
+        let rt = MockRuntime()
+        let m = mgr(rt)
+        let live = "\(SandboxSessionManager.namePrefix)hook-\(UUID().uuidString.lowercased())"
+        let orphan = "\(SandboxSessionManager.namePrefix)hook-\(UUID().uuidString.lowercased())"
+        rt.existing = [live, orphan]
+
+        await m.reapOrphans(inFlightGates: [], inFlightEphemeral: [live])
+
+        #expect(rt.removedNames == [orphan])
+    }
+
+    /// #364: a session-less `run_command`'s `iris-run-*` container is the same case as a hook's.
+    @Test("reapOrphans spares an in-flight run_command container and sweeps an orphaned one")
+    func reapOrphansSparesInFlightRun() async {
+        let rt = MockRuntime()
+        let m = mgr(rt)
+        let live = "\(SandboxSessionManager.namePrefix)run-\(UUID().uuidString.lowercased())"
+        let orphan = "\(SandboxSessionManager.namePrefix)run-\(UUID().uuidString.lowercased())"
+        rt.existing = [live, orphan]
+
+        await m.reapOrphans(inFlightGates: [], inFlightEphemeral: [live])
+
+        #expect(rt.removedNames == [orphan])
+    }
+
+    /// A container registered and created while the listing runs is listed, so the spare set
+    /// must be read after the listing. Here the name is in flight only once `list` has been called.
+    @Test("reapOrphans reads the in-flight names after listing, not before")
+    func reapOrphansSnapshotsAfterListing() async {
+        let rt = MockRuntime()
+        let m = mgr(rt)
+        let late = "\(SandboxSessionManager.namePrefix)run-\(UUID().uuidString.lowercased())"
+        rt.existing = [late, "iris-orphan"]
+
+        await m.reapOrphans(inFlight: { rt.listCount > 0 ? [late] : [] })
+
+        #expect(rt.removedNames == ["iris-orphan"], "the late registration was swept")
+    }
+
+    /// The name stays registered until the delete after a timeout or cancel has run, then is
+    /// released. `/usr/bin/true` stands in for the `container` binary. Reads only its own name from
+    /// the shared registry, so a concurrent suite cannot change the answer.
+    @Test("a run_command container stays registered through its delete, then is released")
+    func ephemeralDeleteReleasesName() async {
+        let name = "iris-run-\(UUID().uuidString.lowercased())"
+        await EphemeralContainerRegistry.shared.register(name)
+        #expect(await EphemeralContainerRegistry.shared.current().contains(name))
+        ToolExecutor.deleteEphemeral((binary: "/usr/bin/true", name: name))
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, await EphemeralContainerRegistry.shared.current().contains(name) {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        #expect(!(await EphemeralContainerRegistry.shared.current().contains(name)))
+    }
+
+    @Test("the ephemeral registry holds a name only while it is registered")
+    func hookRegistryLifetime() async {
+        let registry = EphemeralContainerRegistry()
+        let name = "iris-hook-\(UUID().uuidString.lowercased())"
+        await registry.register(name)
+        #expect(await registry.current() == [name])
+        await registry.unregister(name)
+        #expect(await registry.current().isEmpty)
     }
 
     /// R34: cleanup must survive the caller's cancellation, because that is exactly when a

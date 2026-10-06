@@ -473,8 +473,11 @@ struct ToolExecutor {
         // still holding the pipes is killed rather than waited on, so it cannot block the answer
         // (invariant 4); one that redirected its output is left running.
         let runner = ProcessGroupRunner()
+        // Its name carries `SandboxSessionManager.namePrefix`: registered for its whole life so the
+        // launch sweep does not take it for an orphan (#364).
+        if let ephemeralContainer { await EphemeralContainerRegistry.shared.register(ephemeralContainer.name) }
         do {
-            return try await withTimeout(seconds: timeoutSeconds) {
+            let result = try await withTimeout(seconds: timeoutSeconds) {
                 await withTaskCancellationHandler {
                     let outcome = await runner.run(executable: executable, arguments: arguments,
                                                    environment: environment, currentDirectory: directory)
@@ -505,15 +508,28 @@ struct ToolExecutor {
                     runner.terminate()
                 }
             }
-        } catch {
             if let ephemeralContainer {
-                let binary = ephemeralContainer.binary, name = ephemeralContainer.name
-                Task {
-                    _ = try? await CLIProcessRunner(executable: binary)
-                        .run(["delete", "--force", name], timeoutSeconds: CLIContainerRuntime.housekeepingTimeoutSeconds)
+                if Task.isCancelled {
+                    Self.deleteEphemeral(ephemeralContainer)
+                } else {
+                    await EphemeralContainerRegistry.shared.unregister(ephemeralContainer.name)
                 }
             }
+            return result
+        } catch {
+            if let ephemeralContainer { Self.deleteEphemeral(ephemeralContainer) }
             return Self.commandTimedOutMessage(seconds: timeoutSeconds)
+        }
+    }
+
+    /// Deletes a one-off `container run` after a timeout or cancel, then lets the sweep have the
+    /// name back. Unstructured, so the caller's cancellation does not stop the cleanup.
+    static func deleteEphemeral(_ container: (binary: String, name: String)) {
+        let binary = container.binary, name = container.name
+        Task {
+            _ = try? await CLIProcessRunner(executable: binary)
+                .run(["delete", "--force", name], timeoutSeconds: CLIContainerRuntime.housekeepingTimeoutSeconds)
+            await EphemeralContainerRegistry.shared.unregister(name)
         }
     }
 
