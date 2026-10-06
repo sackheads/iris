@@ -940,9 +940,11 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
   Output × 5 is a floor; real output prices run 4× to 8× input. Each run is priced at the
   provider and model it ran on, which its row records, never at whatever is configured now, and the
   weights are applied when the figure is read, so a changed weight re-prices history without a
-  migration. The model is the one the run's tier resolved to when it began; a delegated subagent
-  on another tier is priced at the run's model too. A row written before #370 records no model and
-  reads at its provider's ratio. A row written before 5c records no provider and is priced at its
+  migration. The model is the one the run's tier resolved to when it began. A row records only
+  that model, not its subagents', so what delegated subagents read is priced at the higher of the
+  run's model's r and the provider's, never at the subagent's own model: under an Opus 5.5 run a
+  Haiku subagent's reads count 0.1, not 0.05. A row written before #370 records no model and reads
+  at its provider's ratio. A row written before 5c records no provider and is priced at its
   plain total, every token at 1×, as it was charged then. In practice a 20k-token prompt that is 97% cache reads with 500 output
   tokens weighs about 5k, so a 200,000 run budget lasts about 40 such rounds instead of 10; a cold
   first round weighs about 25k. Before 5a an Anthropic run was charged nothing because Anthropic

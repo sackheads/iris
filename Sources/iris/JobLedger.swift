@@ -300,8 +300,8 @@ extension JobLedger {
                     failureReason, blockedTool, promptTokens, candidateTokens, totalTokens,
                     costMicros, gateSignal, transcriptConversationId, acknowledgedAt,
                     blockedCall, approvedAt, parentRunId, watchSummary, provider, tier,
-                    cacheReadTokens, cacheWriteTokens, cacheWrite1hTokens, model)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    cacheReadTokens, cacheWriteTokens, cacheWrite1hTokens, model, delegatedCacheReadTokens)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     run.id.uuidString, run.jobId.uuidString, run.jobName, run.triggerKind,
                     run.startedAt, run.finishedAt, run.status.rawValue, run.outcome,
@@ -311,6 +311,7 @@ extension JobLedger {
                     blockedCallJSON, run.approvedAt, run.parentRunId?.uuidString,
                     watchSummaryJSON, run.provider, run.tier,
                     run.cacheReadTokens, run.cacheWriteTokens, run.cacheWrite1hTokens, run.model,
+                    run.delegatedCacheReadTokens,
                 ])
         }
     }
@@ -328,13 +329,14 @@ extension JobLedger {
                 UPDATE job_runs SET
                     status = ?, outcome = ?, failureReason = ?, blockedTool = ?,
                     promptTokens = ?, candidateTokens = ?, totalTokens = ?,
-                    cacheReadTokens = ?, cacheWriteTokens = ?, cacheWrite1hTokens = ?, finishedAt = ?
+                    cacheReadTokens = ?, cacheWriteTokens = ?, cacheWrite1hTokens = ?,
+                    delegatedCacheReadTokens = ?, finishedAt = ?
                 WHERE id = ?
                 """, arguments: [
                     status.rawValue, trimmed, failureReason, blockedTool,
                     tokens.promptTokenCount, tokens.candidatesTokenCount, tokens.totalTokenCount,
                     tokens.cacheReadTokenCount ?? 0, tokens.cacheWriteTokenCount ?? 0,
-                    tokens.cacheWrite1hTokenCount ?? 0,
+                    tokens.cacheWrite1hTokenCount ?? 0, tokens.delegatedCacheReadTokenCount,
                     finishedAt, runId.uuidString,
                 ])
             guard db.changesCount > 0 else { throw JobLedgerError.unknownRun(runId) }
@@ -359,12 +361,13 @@ extension JobLedger {
                     candidateTokens = MAX(candidateTokens, ?), totalTokens = MAX(totalTokens, ?),
                     cacheReadTokens = MAX(COALESCE(cacheReadTokens, 0), ?),
                     cacheWriteTokens = MAX(COALESCE(cacheWriteTokens, 0), ?),
-                    cacheWrite1hTokens = MAX(COALESCE(cacheWrite1hTokens, 0), ?)
+                    cacheWrite1hTokens = MAX(COALESCE(cacheWrite1hTokens, 0), ?),
+                    delegatedCacheReadTokens = MAX(COALESCE(delegatedCacheReadTokens, 0), ?)
                 WHERE id = ? AND status = ?
                 """, arguments: [
                     tokens.promptTokenCount, tokens.candidatesTokenCount, tokens.totalTokenCount,
                     tokens.cacheReadTokenCount ?? 0, tokens.cacheWriteTokenCount ?? 0,
-                    tokens.cacheWrite1hTokenCount ?? 0,
+                    tokens.cacheWrite1hTokenCount ?? 0, tokens.delegatedCacheReadTokenCount,
                     runId.uuidString, JobRun.Status.running.rawValue,
                 ])
         }
@@ -648,7 +651,7 @@ extension JobLedger {
         guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return 0 }
         let columns = """
             SELECT provider, model, promptTokens, candidateTokens, totalTokens,
-                   cacheReadTokens, cacheWriteTokens, cacheWrite1hTokens FROM job_runs
+                   cacheReadTokens, cacheWriteTokens, cacheWrite1hTokens, delegatedCacheReadTokens FROM job_runs
             """
         let rows: [Row]
         if let jobId {
@@ -669,6 +672,7 @@ extension JobLedger {
                 run.cacheReadTokens = try r.read("cacheReadTokens", Int.self) ?? 0
                 run.cacheWriteTokens = try r.read("cacheWriteTokens", Int.self) ?? 0
                 run.cacheWrite1hTokens = try r.read("cacheWrite1hTokens", Int.self) ?? 0
+                run.delegatedCacheReadTokens = try r.read("delegatedCacheReadTokens", Int.self) ?? 0
                 return sum + CostWeights.weighted(run.components, provider: try r.read("provider", String.self),
                                                   model: try r.read("model", String.self))
             } catch {
@@ -776,6 +780,7 @@ extension JobLedger {
         run.provider = try r.read("provider", String.self)
         run.tier = try r.read("tier", String.self)
         run.model = try r.read("model", String.self)
+        run.delegatedCacheReadTokens = try r.read("delegatedCacheReadTokens", Int.self) ?? 0
         run.costMicros = try r.read("costMicros", Int64.self)
         run.gateSignal = try r.read("gateSignal", String.self)
         run.acknowledgedAt = try r.read("acknowledgedAt", Date.self)

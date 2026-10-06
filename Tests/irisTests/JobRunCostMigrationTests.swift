@@ -65,7 +65,8 @@ import GRDB
         #expect(run.provider == "Anthropic" && run.tier == "medium")
         #expect(CostWeights.weighted(run.components, provider: run.provider, model: run.model) == 1_000)
         let columns = try queue.read { db in try db.columns(in: "job_runs").map(\.name) }
-        #expect(columns.contains("model"))
+        #expect(columns.contains("model") && columns.contains("delegatedCacheReadTokens"))
+        #expect(run.delegatedCacheReadTokens == 0, "v17: every earlier read is the run's own")
     }
 
     @Test func modelRoundTrips() throws {
@@ -79,6 +80,20 @@ import GRDB
                                 blockedTool: nil, tokens: TokenUsage(), finishedAt: t0)
         #expect(try store.ledger.run(id: run.id)?.model == "claude-opus-5-5")
         #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.model == "claude-opus-5-5")
+
+        // v17: the delegated share round-trips through recordUsage (never lowered) and finish.
+        var run2 = JobRun(jobId: job.id, jobName: "j", triggerKind: "schedule", startedAt: t0)
+        run2.provider = "Anthropic"
+        try store.ledger.begin(run: run2)
+        var mid = TokenUsage(promptTokenCount: 500, totalTokenCount: 500, cacheReadTokenCount: 400)
+        mid.delegatedCacheReadTokenCount = 300
+        try store.ledger.recordUsage(runId: run2.id, tokens: mid)
+        var lower = mid; lower.delegatedCacheReadTokenCount = 1
+        try store.ledger.recordUsage(runId: run2.id, tokens: lower)
+        #expect(try store.ledger.run(id: run2.id)?.delegatedCacheReadTokens == 300)
+        try store.ledger.finish(runId: run2.id, status: .completed, outcome: nil, failureReason: nil,
+                                blockedTool: nil, tokens: mid, finishedAt: t0)
+        #expect(try store.ledger.run(id: run2.id)?.delegatedCacheReadTokens == 300)
     }
 
     @Test func beginFinishAndRecordUsageRoundTrip() throws {

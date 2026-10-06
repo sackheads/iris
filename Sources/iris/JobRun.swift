@@ -35,6 +35,8 @@ struct JobRun: Identifiable, Equatable, Sendable {
     var cacheReadTokens: Int = 0
     var cacheWriteTokens: Int = 0
     var cacheWrite1hTokens: Int = 0
+    /// The share of `cacheReadTokens` its delegated subagents read (#370, v17). 0 on earlier rows.
+    var delegatedCacheReadTokens: Int = 0
     /// Whose prices apply to this run: `LLMProvider.rawValue` and `ModelTier.rawValue`, stamped on
     /// a model-turn run at `begin`. nil on a row that spent nothing, and on every pre-5c row,
     /// which `CostWeights` then prices at its plain total.
@@ -101,7 +103,7 @@ extension JobRun {
     var components: UsageComponents {
         UsageComponents(prompt: promptTokens, output: max(candidateTokens, totalTokens - promptTokens),
                         cacheRead: cacheReadTokens, cacheWrite: cacheWriteTokens,
-                        cacheWrite1h: cacheWrite1hTokens)
+                        cacheWrite1h: cacheWrite1hTokens, delegatedCacheRead: delegatedCacheReadTokens)
     }
 }
 

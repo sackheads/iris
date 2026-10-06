@@ -51,8 +51,9 @@ import Foundation
 
     // MARK: Per-model read ratio (#370)
 
-    /// Pinned on 2026-10-06 from Anthropic's published pricing (platform.claude.com pricing and
-    /// prompt-caching pages): cache reads cost 0.1× base input on every Claude model except
+    /// First-party Anthropic API ratios, pinned on 2026-10-06 from Anthropic's published pricing
+    /// (platform.claude.com pricing and prompt-caching pages). The Vertex route also records
+    /// provider "Anthropic", and partner pricing may differ: unverified there. cache reads cost 0.1× base input on every Claude model except
     /// claude-opus-5-5 ($0.20 against $4 per MTok, 0.05×) and claude-fable-5-1 / claude-mythos-5-1
     /// ($0.25 against $10, 0.025×). claude-opus-5 ($0.50 against $5) and claude-fable-5 ($1 against
     /// $10) are 0.1×. Revisit when a model ships or a price changes.
@@ -110,6 +111,21 @@ import Foundation
         #expect(r == .init(read: 0.05, write5m: 1.25, write1h: 2.0))
         #expect(CostWeights.rates(provider: "Mistral", model: "claude-opus-5-5")
                 == .init(read: 0.05, write5m: 1, write1h: 1))
+    }
+
+    /// Delegated reads price at the higher of the model's and the provider's ratio; the run's own
+    /// reads stay at the model's. Never below the provider for a cheaper-reading model, and
+    /// never below the model for a dearer one.
+    @Test func delegatedReadsNeverReadBelowTheProvider() {
+        let u = UsageComponents(prompt: 10_000, cacheRead: 10_000, delegatedCacheRead: 4_000)
+        // own 6_000 × 0.05 + delegated 4_000 × 0.1
+        #expect(CostWeights.weighted(u, provider: "Anthropic", model: "claude-opus-5-5") == 300 + 400)
+        #expect(CostWeights.weighted(u, provider: "Anthropic", model: "claude-fable-5-1") == 150 + 400)
+        #expect(CostWeights.weighted(u, provider: "Anthropic", model: "claude-haiku-4-5") == 1_000)
+        // More delegated than read is clamped, and a legacy row is still its plain total.
+        let odd = UsageComponents(prompt: 1_000, cacheRead: 100, delegatedCacheRead: 900)
+        #expect(CostWeights.weighted(odd, provider: "Anthropic", model: "claude-opus-5-5") == 900 + 10)
+        #expect(CostWeights.weighted(u, provider: nil, model: "claude-opus-5-5") == 10_000)
     }
 
     /// A legacy row (no provider) is a plain total whatever its model says.

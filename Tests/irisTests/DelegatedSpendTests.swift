@@ -176,6 +176,45 @@ struct DelegatedSpendTests {
                 "and the card's weighted figure is the row's, priced the same way")
     }
 
+    /// #370: the row records only the run's model, and a subagent may be on a tier that reads
+    /// dearer (Haiku at 0.1 under an Opus 5.5 run at 0.05). So the run's own reads price at its
+    /// model's ratio and its subagents' at no less than the provider's: 1_000 own reads weigh 50,
+    /// 9_900 delegated reads weigh 990, not 495.
+    @Test("an Opus 5.5 run prices its own reads at 0.05 and its subagent's at 0.1")
+    func delegatedReadsNeverPriceBelowTheProvider() async throws {
+        var parentRound = calls([delegate("worker")], total: 0)
+        parentRound.usageMetadata = UsageMetadata(promptTokenCount: 1_000, candidatesTokenCount: 0,
+                                                  totalTokenCount: 1_000, cacheReadTokens: 1_000)
+        var workerRound = calls([finish("worked")], total: 0)
+        workerRound.usageMetadata = UsageMetadata(promptTokenCount: 9_900, candidatesTokenCount: 0,
+                                                  totalTokenCount: 9_900, cacheReadTokens: 9_900)
+        let client = RoutingClient([
+            RoutingClient.parent: [parentRound, text("all done", total: 0)],
+            "WORKER": [workerRound],
+        ])
+        let (store, state, engine) = try harness(client: client)
+        let job = self.job("opus-delegator")
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        config.primaryProvider = LLMProvider.anthropic.rawValue
+        config.anthropicModelMedium = "claude-opus-5-5"
+
+        await runner(store, state, engine, config).fire(job: job, origin: .schedule)
+
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.status == .completed)
+        #expect(run.model == "claude-opus-5-5")
+        #expect(run.cacheReadTokens == 10_900)
+        #expect(run.delegatedCacheReadTokens == 9_900)
+        #expect(CostWeights.weighted(run.components, provider: run.provider, model: run.model) == 50 + 990)
+        let utc = Calendar(identifier: .gregorian)
+        #expect(try store.ledger.weightedTokensToday(jobId: job.id, calendar: utc, now: Date()) == 50 + 990)
+        let activity = try #require(state.conversations.first { $0.id == state.activityConversationId() })
+        let card = try #require(activity.messages.compactMap { EventCard.decode($0.content) }.first)
+        #expect(card.weightedTokens == 50 + 990, "the card prices the split the same way")
+    }
+
     @Test("parallel subagents in one tool batch are each charged once")
     func parallelSubagentsAllCount() async throws {
         let client = RoutingClient([
