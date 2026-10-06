@@ -33,6 +33,19 @@ conclusion drawn from it — "not a race" — is the opposite of the truth. `scr
 wraps `swift test --filter` and fails when the filter matched no tests; use it, and when citing a
 filtered run as evidence, quote the test count (#271).
 
+**Opt-in tests.** Two kinds of test are skipped unless an environment variable asks for them,
+because they need something the default suite must not depend on:
+
+- `IRIS_REAL_VM=1` runs `SandboxRealVMTests` against the installed `container` runtime (zombies in
+  the session container, the in-VM kill with the pool held). It still skips without a started
+  runtime and a local `ubuntu:latest`; it never pulls one. Containers are named `iristest-*` and
+  deleted by the test. The stub-binary sandbox tests run by default.
+- `IRIS_ONNX_TEST_BUNDLE=<dir>` runs the on-device ONNX prompt-guard tests against that bundle.
+
+```sh
+IRIS_REAL_VM=1 scripts/test-filter.sh SandboxRealVMTests
+```
+
 **Never mutate `ConfigManager.shared` in a test.** It is process-global and suites run in
 parallel, so mutating it races — and its setters persist, so a bad value used to outlive the process
 and poison the *next* run (#109). Two seams exist so you don't have to: construct your own

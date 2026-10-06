@@ -379,12 +379,20 @@ struct CLIProcessRunner: Sendable {
     /// than after `run` throws, because that is a pool thread, and a held pool held the in-VM kill
     /// with it. First, because the caller can be answered the moment SIGTERM lands, and the hook
     /// must have run by then. It must not block: the ladder waits for it.
+    ///
+    /// And again at the end of the ladder, no sooner than `killGraceSeconds` after the first call,
+    /// on a queue of its own so the answer does not wait for it. A cancel can land before the
+    /// command has recorded its group in the VM, and the first kill then finds nothing; a group
+    /// recorded in the meantime is still killed. So the hook runs twice and must be idempotent,
+    /// as the group killer is: a group that already ended removed its note.
     static func enforce(_ reason: @escaping @Sendable () -> Error, on child: Child,
                         hasAnswered: @escaping @Sendable () -> Bool,
                         fail: @escaping @Sendable (Error) -> Void,
                         onKill: (@Sendable () -> Void)? = nil) {
         let launched = child.pid()
+        var firstKill: Date?
         if child.isRunning(), launched > 0 {
+            firstKill = Date()
             onKill?()
             child.killChildren(launched)
             child.terminate()                                           // SIGTERM
@@ -394,6 +402,10 @@ struct CLIProcessRunner: Sendable {
         if child.isRunning(), pid > 0 {
             child.killChildren(pid)                                     // anything it spawned since
             child.signal(pid, SIGKILL)
+        }
+        if let firstKill, let onKill {
+            let wait = max(0, Self.killGraceSeconds - Date().timeIntervalSince(firstKill))
+            DispatchQueue(label: "iris.cli-process.refire").asyncAfter(deadline: .now() + wait, execute: onKill)
         }
         // A moment for the ordinary path to land with the real output, then the ladder answers.
         // Load bearing on the cancellation path, where a promptly-exiting child's real result is
@@ -412,8 +424,8 @@ struct CLIProcessRunner: Sendable {
         }
     }
 
-    /// `onKill`: see `enforce`. Runs on the ladder's queue when a deadline or a cancel had to kill
-    /// a running child, and never otherwise.
+    /// `onKill`: see `enforce`. Runs when a deadline or a cancel had to kill a running child —
+    /// twice, on the ladder's queue and then at the end of the ladder — and never otherwise.
     ///
     /// The kill does not need the cooperative pool; the answer does. Resuming the caller takes a
     /// pool thread, so with the pool held the child dies on time and the result arrives when the

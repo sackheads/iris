@@ -20,13 +20,20 @@ struct KillHookTests {
             }
         }
         var all: [String] { lock.withLock { labels } }
+
+        /// Waits out the second, end-of-ladder call, and checks both calls and their queues.
+        func refired() async -> Bool {
+            let deadline = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds + 2)
+            while all.count < 2, Date() < deadline { try? await Task.sleep(nanoseconds: 50_000_000) }
+            return all == ["iris.cli-process.ladder", "iris.cli-process.refire"]
+        }
     }
 
     private static func marker() -> String { "30.\(Int.random(in: 100_000...999_999))" }
 
     // MARK: - CLIProcessRunner
 
-    @Test("a deadline that kills the child runs onKill once, on the ladder queue, before the throw")
+    @Test("a deadline that kills the child runs onKill on the ladder queue before the throw, then again at the ladder's end")
     func cliDeadline() async {
         let nap = Self.marker()
         defer { RunCommandProcessGroupTests.killAll(nap) }
@@ -35,9 +42,10 @@ struct KillHookTests {
             _ = try await CLIProcessRunner(executable: "/bin/sh").run(["-c", "sleep \(nap)"], timeoutSeconds: 1, onKill: calls.hook)
         }
         #expect(calls.all == ["iris.cli-process.ladder"])
+        #expect(await calls.refired(), "got: \(calls.all)")
     }
 
-    @Test("a cancel that kills the child runs onKill once, on the ladder queue")
+    @Test("a cancel that kills the child runs onKill on the ladder queue, then again at the ladder's end")
     func cliCancel() async {
         let nap = Self.marker()
         defer { RunCommandProcessGroupTests.killAll(nap) }
@@ -48,7 +56,7 @@ struct KillHookTests {
         #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5))
         call.cancel()
         _ = try? await call.value
-        #expect(calls.all == ["iris.cli-process.ladder"])
+        #expect(await calls.refired(), "got: \(calls.all)")
     }
 
     @Test("an ordinary exit runs no onKill")

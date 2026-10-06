@@ -102,6 +102,59 @@ struct ContainerExecGroupKillTests {
         #expect(hooks.lock.withLock { hooks.seen } == [false, false, false, false, true])
     }
 
+    /// A cancel that lands before the command has recorded its group: the first kill, at the start
+    /// of the ladder, finds no note, and the second, at its end, must still reach the group. A stub
+    /// `container` stands in for the CLI: for the command's `exec` it starts the wrapper one second
+    /// late, detached from the client and as a group leader (`set -m`), the way the VM runs it apart
+    /// from the client; for the killer's `exec` it runs the killer on the host.
+    @Test("a group recorded after the first kill is killed by the second", .timeLimit(.minutes(1)))
+    func secondKillReachesLateGroup() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-377-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let nap = "30.\(Int.random(in: 100_000...999_999))"
+        let clientNap = "30.\(Int.random(in: 100_000...999_999))"
+        defer { RunCommandProcessGroupTests.killAll(nap); RunCommandProcessGroupTests.killAll(clientNap) }
+        let stub = dir.appendingPathComponent("container").path
+        try """
+        #!/bin/bash
+        [ "$1" = exec ] || exit 0
+        shift; [ "$1" = -w ] && shift 2; shift
+        if [ "$4" = iris-exec ]; then
+            ( ( trap '' TERM; sleep 1; trap - TERM; set -m; "$@" & ) & ) </dev/null >/dev/null 2>&1
+            sleep \(clientNap)
+        else
+            exec "$@"
+        fi
+        """.write(toFile: stub, atomically: true, encoding: .utf8)
+        #expect(chmod(stub, 0o755) == 0)
+
+        final class Fires: @unchecked Sendable {
+            let lock = NSLock(); var count = 0
+        }
+        let fires = Fires()
+        let rt = CLIContainerRuntime(
+            launch: { args, timeout, onKill in
+                try await CLIProcessRunner(executable: stub).run(args, timeoutSeconds: timeout, onKill: onKill)
+            },
+            fire: { args, timeout in
+                fires.lock.withLock { fires.count += 1 }
+                BlockingSpawn.detached(stub, args, timeoutSeconds: Double(timeout))
+            })
+        let call = Task { try await rt.exec(name: "iris-a", workdir: "/", command: "sleep \(nap); true", timeoutSeconds: 60) }
+        #expect(await RunCommandProcessGroupTests.appears("sleep \(clientNap)", within: 5))
+        call.cancel()
+        _ = try? await call.value
+        // The wrapper records its group about a second after the launch, after the first kill.
+        #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5), "the late group never started")
+        let deadline = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds * 2 + 3)
+        while RunCommandProcessGroupTests.exists("^sleep \(nap)"), Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        #expect(!RunCommandProcessGroupTests.exists("^sleep \(nap)"), "the late group outlived both kills")
+        #expect(fires.lock.withLock { fires.count } == 2)
+    }
+
     @Test("the wrapper passes output and status through, and clears its note")
     func wrapperIsTransparent() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-353-\(UUID().uuidString)")

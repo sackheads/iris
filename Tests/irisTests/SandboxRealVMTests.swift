@@ -4,8 +4,10 @@ import Darwin
 @testable import iris
 
 /// The installed `container` runtime, for the few tests that can only be answered by a real VM.
-/// They are skipped, not failed, on a machine without it: no binary, services not started, or no
-/// local copy of the image (nothing here pulls one). `IRIS_SKIP_REAL_VM=1` skips them anyway.
+/// Opt-in: they run only with `IRIS_REAL_VM=1`, so the default suite never depends on a booted
+/// runtime or a local image (#374 was that dependency). Opted in, they are still skipped, not
+/// failed, on a machine without the binary, the services started, or a local copy of the image
+/// (nothing here pulls one).
 ///
 /// Their containers are named `iristest-…`, which `SandboxSessionManager.namePrefix` (`iris-`) does
 /// not match, so a running Iris never sweeps one, and each test deletes its own.
@@ -14,7 +16,7 @@ enum RealContainer {
     static let image = "ubuntu:latest"
 
     static let isAvailable: Bool = {
-        guard ProcessInfo.processInfo.environment["IRIS_SKIP_REAL_VM"] == nil,
+        guard ProcessInfo.processInfo.environment["IRIS_REAL_VM"] == "1",
               FileManager.default.isExecutableFile(atPath: binary) else { return false }
         return BlockingSpawn.run(binary, ["system", "status"], timeoutSeconds: 15) == 0
             && BlockingSpawn.run(binary, ["image", "inspect", image], timeoutSeconds: 15) == 0
@@ -44,7 +46,7 @@ enum RealContainer {
     }
 }
 
-@Suite("Sandbox kills on a real VM", .enabled(if: RealContainer.isAvailable, "needs the container runtime, started, with \(RealContainer.image) local"),
+@Suite("Sandbox kills on a real VM", .enabled(if: RealContainer.isAvailable, "opt-in: IRIS_REAL_VM=1, with the container runtime started and \(RealContainer.image) local"),
        .timeLimit(.minutes(2)))
 struct SandboxRealVMTests {
 
