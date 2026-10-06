@@ -741,9 +741,12 @@ struct GuardedFileCacheTests {
                                 retryDelays: [], streamResponses: false, factStore: facts,
                                 protectionEnabled: true, sessionPeerCount: 0, memory: manager)
 
-        await AuxiliaryModelManager.$scopedEngines.withValue(["canary": FlakyThenHealthyInferenceEngine()]) {
-            await engine.processInput("one", source: "UI", conversationId: id)
-            await engine.processInput("two", source: "UI", conversationId: id)
+        // Tier 2 pinned to "no model" so the verdict is this test's alone, whatever is installed (#375).
+        await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
+            await AuxiliaryModelManager.$scopedEngines.withValue(["canary": FlakyThenHealthyInferenceEngine()]) {
+                await engine.processInput("one", source: "UI", conversationId: id)
+                await engine.processInput("two", source: "UI", conversationId: id)
+            }
         }
 
         let requests = client.requests
@@ -779,9 +782,12 @@ struct GuardedFileCacheTests {
                                 protectionEnabled: true, sessionPeerCount: 0, memory: manager)
 
         let canary = FlakyOnceForMarkerInferenceEngine(marker: unique)
-        await AuxiliaryModelManager.$scopedEngines.withValue(["canary": canary]) {
-            await engine.processInput("one", source: "UI", conversationId: id)
-            await engine.processInput("two", source: "UI", conversationId: id)
+        // Tier 2 pinned to "no model" so the verdict is this test's alone, whatever is installed (#375).
+        await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
+            await AuxiliaryModelManager.$scopedEngines.withValue(["canary": canary]) {
+                await engine.processInput("one", source: "UI", conversationId: id)
+                await engine.processInput("two", source: "UI", conversationId: id)
+            }
         }
 
         let requests = client.requests
@@ -792,6 +798,43 @@ struct GuardedFileCacheTests {
         #expect(systemText(requests[1]).contains(unique),
                 "turn 2: the engine is healthy again and the error was never cached as a permanent block")
         #expect(!systemText(requests[1]).contains("[CONTENT BLOCKED"))
+    }
+
+    /// #375, the full-run failure of the test above: turn 2 carried the AGENTS.md probe AND a tier-3
+    /// block. Neither file's own verdict was cached wrong. This engine's USER.md is absent, so it
+    /// guards the default "User profile is currently empty." — the same text, tag and fingerprint
+    /// as any other suite's engine with no USER.md, and `JobToolsTests` judges that text with a
+    /// hijacking canary. Its block landed in `InjectionGuard`'s process-wide cache and was served
+    /// here. Poisoning the cache first makes that ordering deterministic.
+    @Test("a verdict another scope cached for the same USER.md text never reaches this engine")
+    func anotherScopesVerdictNeverReachesThisEngine() async throws {
+        let (manager, paths) = tempMemory()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        let profile = manager.getUserProfile()
+        await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
+            await AuxiliaryModelManager.$scopedEngines.withValue(["canary": MockInferenceEngine(shouldHijack: true)]) {
+                let poisoned = await InjectionGuard.sanitize(PromptInjectionGuard.sanitizeUntrustedInput(profile),
+                                                             contextTag: "user_profile", maxTier: .tier3_canary,
+                                                             protectionEnabled: true)
+                #expect(poisoned.contains("[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"))
+            }
+        }
+
+        let facts = try FactStoreManager(inMemory: true)
+        let app = AppState()
+        let id = newConversation(app)
+        let client = CapturingLLMClient(reply: "ok")
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], streamResponses: false, factStore: facts,
+                                protectionEnabled: true, sessionPeerCount: 0, memory: manager)
+        await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
+            await AuxiliaryModelManager.$scopedEngines.withValue(["canary": CountingInferenceEngine()]) {
+                await engine.processInput("one", source: "UI", conversationId: id)
+            }
+        }
+        let request = try #require(client.requests.first)
+        #expect(systemText(request).contains(profile))
+        #expect(!systemText(request).contains("[CONTENT BLOCKED"), "got: \(systemText(request))")
     }
 
     /// Fix round 1, item 4: the signal that distinguishes old from new for USER.md, independent of

@@ -35,7 +35,11 @@ public final class CoreMLEvaluator: @unchecked Sendable {
         return lock.withLock { model }
     }
 
-    private init() {}
+    /// Internal, not private, so a test can hold an evaluator of its own: the one test that needs
+    /// an installed model writing that model into `shared` made every unscoped tier-2 call in the
+    /// process see it appear and vanish mid-check, which fails closed (#375). Production uses only
+    /// `shared`.
+    init() {}
     
     /// `nil` clears the loaded model (#210 fix round 1) — the test seam for forcing
     /// `hasModelLoaded` back to `false` regardless of what an earlier test in the process
