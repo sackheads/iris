@@ -163,9 +163,9 @@ struct RunCommandProcessGroupTests {
 
     // MARK: - Helpers
 
-    private static func marker() -> String { "30.\(Int.random(in: 100_000...999_999))" }
+    static func marker() -> String { "30.\(Int.random(in: 100_000...999_999))" }
 
-    private static func gone(_ needle: String, within seconds: Double) async -> Bool {
+    static func gone(_ needle: String, within seconds: Double) async -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
             if !exists(needle) { return true }

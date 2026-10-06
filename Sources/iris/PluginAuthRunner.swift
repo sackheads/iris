@@ -1,5 +1,4 @@
 import Foundation
-import os
 
 struct PluginAuthStatus: Sendable, Equatable {
     let signedIn: Bool
@@ -83,63 +82,31 @@ enum PluginAuthRunner {
     }
 
     static func check(_ auth: IPFManifest.AuthDeclaration, config: [String: String],
-                      approve: Approver) async -> PluginAuthStatus {
+                      approve: Approver, timeoutSeconds: Double = checkTimeoutSeconds) async -> PluginAuthStatus {
         guard let raw = auth.checkCommand, let command = expandForShell(raw, config: config) else {
             return PluginAuthStatus(signedIn: false, output: "No check_command declared or reference unresolvable")
         }
         guard await approve(command) else {
             return PluginAuthStatus(signedIn: false, output: "check_command not approved: \(command)")
         }
-        return await withCheckedContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/sh")
-            process.arguments = ["-c", command]
-            process.environment = BinaryResolver.commandEnvironment(base: ProcessInfo.processInfo.environment)
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-
-            // Drain the pipe concurrently as data arrives. Without this, a check_command
-            // writing more than the pipe buffer (64KB) blocks on write before exiting,
-            // and since we only read after termination, the process never terminates —
-            // deadlock until the 30s timeout fires.
-            let collected = OSAllocatedUnfairLock(initialState: Data())
-            pipe.fileHandleForReading.readabilityHandler = { handle in
-                let chunk = handle.availableData
-                if chunk.isEmpty {
-                    handle.readabilityHandler = nil
-                    return
-                }
-                collected.withLock { $0.append(chunk) }
-            }
-
-            // Safe: DispatchWorkItem.cancel() and Process.terminate() are thread-safe under
-            // Foundation; cancel/execute are mutually exclusive here.
-            nonisolated(unsafe) let timeout = DispatchWorkItem { process.terminate() }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 30, execute: timeout)
-
-            process.terminationHandler = { p in
-                timeout.cancel()
-                let handle = pipe.fileHandleForReading
-                handle.readabilityHandler = nil
-                let trailing = (try? handle.readToEnd()) ?? nil
-                var data = collected.withLock { $0 }
-                if let trailing {
-                    data.append(trailing)
-                }
-                let output = String(data: data, encoding: .utf8) ?? ""
-                continuation.resume(returning: PluginAuthStatus(
-                    signedIn: p.terminationStatus == 0, output: output))
-            }
-            do {
-                try process.run()
-            } catch {
-                timeout.cancel()
-                continuation.resume(returning: PluginAuthStatus(
-                    signedIn: false, output: "Failed to run check: \(error)"))
-            }
+        // A process group of its own (#364): output drains as it is written and is read only after
+        // the reap, so nothing written right before exit can be lost (#368); on timeout the group
+        // gets SIGTERM, then SIGKILL; a background job left holding the pipe cannot hang the pane.
+        let outcome = await ProcessGroupRunner.capture(
+            executable: "/bin/sh", arguments: ["-c", command],
+            environment: BinaryResolver.commandEnvironment(base: ProcessInfo.processInfo.environment),
+            mergeStderr: true, timeoutSeconds: timeoutSeconds)
+        switch outcome {
+        case .success(let output):
+            return PluginAuthStatus(signedIn: output.status == 0,
+                                    output: String(data: output.stdout, encoding: .utf8) ?? "")
+        case .failure(let error):
+            return PluginAuthStatus(signedIn: false, output: "Failed to run check: \(error)")
         }
     }
+
+    /// How long a `check_command` gets before its group is killed and the status is signed out.
+    static let checkTimeoutSeconds: Double = 30
 
     static func runSetup(_ auth: IPFManifest.AuthDeclaration, config: [String: String],
                          approve: Approver) async -> String {
