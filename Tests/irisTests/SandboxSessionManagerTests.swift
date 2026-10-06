@@ -216,14 +216,44 @@ struct SandboxSessionManagerTests {
         let orphan = "\(SandboxSessionManager.namePrefix)hook-\(UUID().uuidString.lowercased())"
         rt.existing = [live, orphan]
 
-        await m.reapOrphans(inFlightGates: [], inFlightHooks: [live])
+        await m.reapOrphans(inFlightGates: [], inFlightEphemeral: [live])
 
         #expect(rt.removedNames == [orphan])
     }
 
-    @Test("the hook registry holds a name only while it is registered")
+    /// #364: a session-less `run_command`'s `iris-run-*` container is the same case as a hook's.
+    @Test("reapOrphans spares an in-flight run_command container and sweeps an orphaned one")
+    func reapOrphansSparesInFlightRun() async {
+        let rt = MockRuntime()
+        let m = mgr(rt)
+        let live = "\(SandboxSessionManager.namePrefix)run-\(UUID().uuidString.lowercased())"
+        let orphan = "\(SandboxSessionManager.namePrefix)run-\(UUID().uuidString.lowercased())"
+        rt.existing = [live, orphan]
+
+        await m.reapOrphans(inFlightGates: [], inFlightEphemeral: [live])
+
+        #expect(rt.removedNames == [orphan])
+    }
+
+    /// The name stays registered until the delete after a timeout or cancel has run, then is
+    /// released. `/usr/bin/true` stands in for the `container` binary. Reads only its own name from
+    /// the shared registry, so a concurrent suite cannot change the answer.
+    @Test("a run_command container stays registered through its delete, then is released")
+    func ephemeralDeleteReleasesName() async {
+        let name = "iris-run-\(UUID().uuidString.lowercased())"
+        await EphemeralContainerRegistry.shared.register(name)
+        #expect(await EphemeralContainerRegistry.shared.current().contains(name))
+        ToolExecutor.deleteEphemeral((binary: "/usr/bin/true", name: name))
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, await EphemeralContainerRegistry.shared.current().contains(name) {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        #expect(!(await EphemeralContainerRegistry.shared.current().contains(name)))
+    }
+
+    @Test("the ephemeral registry holds a name only while it is registered")
     func hookRegistryLifetime() async {
-        let registry = HookContainerRegistry()
+        let registry = EphemeralContainerRegistry()
         let name = "iris-hook-\(UUID().uuidString.lowercased())"
         await registry.register(name)
         #expect(await registry.current() == [name])

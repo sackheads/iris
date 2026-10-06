@@ -173,7 +173,7 @@ struct HookManager {
         let timeout = hook.timeout ?? Self.defaultTimeoutSeconds
         // It carries `SandboxSessionManager.namePrefix`, so the launch sweep would take it for an
         // orphan; registered for its whole life, and one a crash left behind is still swept.
-        if let ephemeralContainer { await HookContainerRegistry.shared.register(ephemeralContainer.name) }
+        if let ephemeralContainer { await EphemeralContainerRegistry.shared.register(ephemeralContainer.name) }
         let outcome = await Self.runHookProcess(executable: executable, arguments: arguments,
                                                 payload: payload, timeoutSeconds: Double(timeout))
         if let ephemeralContainer {
@@ -182,10 +182,10 @@ struct HookManager {
                 Task {
                     _ = try? await CLIProcessRunner(executable: binary)
                         .run(["delete", "--force", name], timeoutSeconds: CLIContainerRuntime.housekeepingTimeoutSeconds)
-                    await HookContainerRegistry.shared.unregister(name)
+                    await EphemeralContainerRegistry.shared.unregister(name)
                 }
             } else {
-                await HookContainerRegistry.shared.unregister(name)
+                await EphemeralContainerRegistry.shared.unregister(name)
             }
         }
         // A cancel kills the hook, so its verdict never arrived: fail closed, or a hook that would
@@ -244,10 +244,11 @@ struct HookManager {
     }
 }
 
-/// The sandboxed hook containers in flight, which `SandboxSessionManager.reapOrphans` spares the
-/// way it spares live sessions and gates (`GateContainerRegistry`). A snapshot, like that one.
-actor HookContainerRegistry {
-    static let shared = HookContainerRegistry()
+/// The one-off containers in flight — a sandboxed hook's `iris-hook-*` and a session-less
+/// `run_command`'s `iris-run-*` — which `SandboxSessionManager.reapOrphans` spares the way it
+/// spares live sessions and gates (`GateContainerRegistry`). A snapshot, like that one.
+actor EphemeralContainerRegistry {
+    static let shared = EphemeralContainerRegistry()
 
     private var names: Set<String> = []
 
