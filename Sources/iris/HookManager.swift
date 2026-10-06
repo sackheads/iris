@@ -180,8 +180,13 @@ struct HookManager {
                     .run(["delete", "--force", name], timeoutSeconds: CLIContainerRuntime.housekeepingTimeoutSeconds)
             }
         }
+        // A cancel kills the hook, so its verdict never arrived: fail closed, or a hook that would
+        // have blocked lets the tool through as a warning (#364 review).
+        if Task.isCancelled { return Self.cancelledDecision }
         return Self.decision(for: outcome, timeoutSeconds: timeout)
     }
+
+    static let cancelledDecision = HookDecision.block(reason: "cancelled before the hook decided")
 
     /// Spawns one hook in a process group of its own (#364): the payload goes in on stdin while
     /// stdout and stderr drain, so neither side can fill a pipe and stall; on timeout or cancel
@@ -205,8 +210,8 @@ struct HookManager {
         let output: ProcessGroupRunner.Output
         switch outcome {
         case .success(let o): output = o
-        case .failure(let error as CancellationError):
-            return .warning(message: "Hook cancelled: \(error)")
+        case .failure(is CancellationError):
+            return cancelledDecision
         case .failure(let error):
             return .warning(message: "Failed to spawn hook: \(error.localizedDescription)")
         }

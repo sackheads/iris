@@ -190,3 +190,89 @@ struct PluginAuthRunnerProcessGroupTests {
         #expect(lost.isEmpty, "\(lost.count) of \(runs) checks lost their output: \(lost.prefix(10))")
     }
 }
+
+/// #364 review: a cancel kills the hook process, so its verdict never arrives. Before the fix, the
+/// killed hook read as a warning, `fireEvent` treats a warning as proceed, and the tool ran: a
+/// cancelled turn got past a `BeforeTool` hook that would have blocked it.
+@MainActor
+@Suite("Cancelled turn runs no gated tool", .timeLimit(.minutes(1)))
+struct CancelledTurnHookTests {
+    private func engine(hookCommand: String?) throws -> (AppState, IrisEngine, UUID, URL) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-cancel-hook-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var hooks = HookManager()
+        if let hookCommand {
+            let config: [String: Any] = ["hooks": ["BeforeTool": [["matcher": "write_file",
+                                         "hooks": [["type": "command", "command": hookCommand]]]]]]
+            let url = dir.appendingPathComponent("settings.json")
+            try JSONSerialization.data(withJSONObject: config).write(to: url)
+            hooks.configPathOverride = url.path
+        } else {
+            hooks.configPathOverride = dir.appendingPathComponent("none.json").path
+        }
+        let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
+                             tier3Provisioning: .provisioned)
+        state.conversations.removeAll()
+        state.permissions = PermissionManager(paths: IrisPaths(root: dir.appendingPathComponent("home")))
+        let engine = IrisEngine(state: state, tier: .medium, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false, sessionPeerCount: 0, hooks: hooks)
+        let id = state.createNewConversation(title: "cancel")
+        return (state, engine, id, dir)
+    }
+
+    private func write(_ target: URL, in dir: URL) -> BlockedCall {
+        BlockedCall(toolName: "write_file", args: ["path": .string(target.path), "content": .string("x")], cwd: dir.path)
+    }
+
+    @Test("the harness's hook runs on the host and the write lands when nothing is cancelled")
+    func control() async throws {
+        let (_, engine, id, dir) = try engine(hookCommand: "sleep 1; exit 0")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = dir.appendingPathComponent("control.txt")
+        let result = await engine.executeApprovedCall(write(target, in: dir), conversationId: id)
+        #expect(result.hasPrefix("Successfully wrote to "), "\(result)")
+        #expect(FileManager.default.fileExists(atPath: target.path))
+    }
+
+    @Test("a turn cancelled while a blocking BeforeTool hook decides does not run the tool")
+    func cancelDuringBlockingHook() async throws {
+        let (_, engine, id, dir) = try engine(hookCommand: "sleep 3; echo denied >&2; exit 2")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = dir.appendingPathComponent("blocked.txt")
+        let call = write(target, in: dir)
+        let task = Task { await engine.executeApprovedCall(call, conversationId: id) }
+        try await Task.sleep(nanoseconds: 500_000_000)
+        task.cancel()
+        let result = await task.value
+        #expect(result.hasPrefix("System Hook blocked execution"), "\(result)")
+        #expect(!FileManager.default.fileExists(atPath: target.path), "the cancelled write still landed")
+    }
+
+    @Test("a turn cancelled while a permissive hook runs does not run the tool either")
+    func cancelDuringPermissiveHook() async throws {
+        let (_, engine, id, dir) = try engine(hookCommand: "sleep 3; exit 0")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = dir.appendingPathComponent("permissive.txt")
+        let call = write(target, in: dir)
+        let task = Task { await engine.executeApprovedCall(call, conversationId: id) }
+        try await Task.sleep(nanoseconds: 500_000_000)
+        task.cancel()
+        _ = await task.value
+        #expect(!FileManager.default.fileExists(atPath: target.path))
+    }
+
+    @Test("with no hook, a turn cancelled before dispatch writes nothing")
+    func cancelBeforeDispatchNoHook() async throws {
+        let (_, engine, id, dir) = try engine(hookCommand: nil)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = dir.appendingPathComponent("nohook.txt")
+        let call = write(target, in: dir)
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await engine.executeApprovedCall(call, conversationId: id)
+        }
+        let result = await task.value
+        #expect(result == IrisEngine.cancelledToolResult("write_file"))
+        #expect(!FileManager.default.fileExists(atPath: target.path))
+    }
+}
