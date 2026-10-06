@@ -1,4 +1,5 @@
 { "name": "tool-heavy", "clientMode": "real", "tier": "medium",
+  "expectedTools": ["run_command"],
   "seedFacts": ["GRANITEWREN collects agates.", "TIDEMARTEN catalogs ferns.", "OSPREYLARK restores harpsichords."],
   "turns": [
     { "prompt": "Greet GRANITEWREN in five words." },

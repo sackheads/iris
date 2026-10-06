@@ -52,9 +52,9 @@ struct PerfRunnerTests {
     func experimentToolCount() async throws {
         let suite = PerfSuite(name: "x", lane: .fake, repetitions: 1, rungs: [5], scenarios: ["perf/prompts/fake/text-only.json"])
         let gated = try await PerfRunner.run(suite: suite, repoRoot: root, headless: true)
-        let declared = try await PerfRunner.run(suite: suite, repoRoot: root, headless: true, declareStateGatedTools: true)
+        let declared = try await PerfRunner.run(suite: suite, repoRoot: root, headless: true, experiments: PerfExperiments(declareStateGatedTools: true))
         let scenario = Scenario(name: "cap", clientMode: .real, turns: [Scenario.Turn(prompt: "hello")])
-        let capture = await PerfLadder.capture(for: scenario, declareStateGatedTools: true)
+        let capture = await PerfLadder.capture(for: scenario, experiments: PerfExperiments(declareStateGatedTools: true))
         let names = capture.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? []
         #expect(names.contains("manage_fact"))
         #expect(declared.environment.stateGatedToolsAlwaysDeclared == true)
@@ -187,5 +187,16 @@ struct PerfSummarizerTests {
         #expect(unscored.unexpectedToolCallRate == nil)
         #expect(unscored.unexpectedToolCallsByName == nil)
         #expect(unscored.missedExpectedToolRate == nil)
+    }
+
+    @Test("a rung-4-only suite scores its unexpected calls from rung 4; rung 5 wins when both ran (5c)")
+    func unexpectedCallsFromRung4() {
+        let only4 = PerfSummarizer.summarize([rung(4, [1, 2], tools: [["run_command", "manage_fact"], []])],
+                                             expectedTools: ["run_command"])
+        #expect(only4.unexpectedToolCallsByName == ["manage_fact": 1])
+        #expect(only4.unexpectedToolCallRate == 0.5)
+        let both = PerfSummarizer.summarize([rung(4, [1], tools: [["manage_fact"]]), rung(5, [1], tools: [["run_command"]])],
+                                            expectedTools: ["run_command"])
+        #expect(both.unexpectedToolCallsByName == [:])
     }
 }

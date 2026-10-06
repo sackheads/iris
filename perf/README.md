@@ -132,6 +132,50 @@ These are what a byte-prefix diff reads to find exactly where two rounds' reques
 every request-path encoder now sorts keys, so a divergence it finds is real content or prefix
 drift, never key reordering.
 
+## The 5c experiments
+
+`perf/suites/cost-policy.json` (5c, spec `docs/specs/2026-10-04-agency-cost-policy.md` §2) runs three
+real-lane, rung-4 scenarios, two repetitions each:
+
+- `pinned-pause.json`: two turns in the pinned conversation with a 6-minute pause before the
+  second (`turns[].pauseBeforeSeconds: 360`), so a 5-minute cache entry has expired and a 1-hour one
+  has not.
+- `job-cadence.json`: two background job runs (`background: true`: unattended, `readOnly`
+  profile), each in its own fresh conversation (`freshConversationPerTurn: true`), 15 minutes apart.
+  They share only the background prefix (tools and system).
+- `tool-heavy.json`, now with `expectedTools: ["run_command"]`, so any `manage_fact` or peer-tool
+  call shows up in its unexpected-call line: the unprompted-call count stickiness is judged on.
+  `pinned-briefing.json` carries the same list. Its "missed expected tool" line counts the four
+  turns that don't ask for a command, and means nothing here.
+
+`cost-policy-pinned-pause.json`, `cost-policy-job-cadence.json` and `cost-policy-tool-heavy.json`
+each run one of those scenarios alone, so an arm that varies one scenario doesn't pay for the
+other two again.
+
+The pauses set the wall clock: 6 + 15 minutes per repetition, so the full suite takes about
+45-50 minutes, almost all of it waiting. The pause is real time on purpose: it is what ages
+the provider's cache entries. A pause runs only on a real-client scenario, and the fake lane and
+the tests never wait.
+
+Three environment switches, read once at `iris --perf run` and recorded in the record's
+`experiments` field and as an `EXPERIMENT` line in the report:
+
+| Variable | Values | Effect |
+|---|---|---|
+| `IRIS_PERF_DECLARE_STATE_TOOLS` | `1` | 5a's "declared" arm: `manage_fact` and the peer tools on every turn (see above) |
+| `IRIS_PERF_STICKY_TOOLS` | `0` | 5a's "gated" arm: state-gated tools come and go with their state instead of staying declared once seen (5c §0.1) |
+| `IRIS_PERF_TTL` | `5m`, `1h`, `1h-prefix` | Overrides the Anthropic cache TTL policy for every turn: all markers at 5 minutes, all at 1 hour, or tools and system at 1 hour with history at 5 minutes. Anything else is ignored with a warning. Without it, the shipped policy applies (§0.8: the pinned conversation at 1 hour, a job run's prefix at 1 hour only when some job fires more often than hourly, everything else at 5 minutes) |
+
+The request dump can't show which TTL arm built a request, because the cache hints are never
+encoded. The response shows it: each round's `cacheWrite1hTokens` in the record (the report's
+`1h write` column) is nonzero only where the provider applied a 1-hour TTL.
+
+`IRIS_PERF_BASE_PRICE_PER_MTOK=<dollars>` sets the price of one million uncached input tokens for
+the run's model. The report then prices weighted tokens in dollars and names the price in its
+header. It is a check against a real bill, never a budget (spec §3). The weights are
+`CostWeights`' table (Anthropic reads at 0.1, so the column overstates Opus 5.5's reads, which
+bill at 0.05).
+
 ## Reading a record
 
 `iris --perf report <run.json>` renders the Markdown summary. Per scenario: a row per rung with
@@ -141,11 +185,16 @@ read counts the whole prompt as uncached), the two ratios, the top five named sp
 (`guard.tier3`, `vibecop`, `assembly.userProfile`, ...), and the tool-call rate with a histogram, and, for prompts that declare `expectedTools`, the
 **unexpected tool-call rate**: turns that called any tool outside that list (bait prompts declare
 `[]`, controls declare their one tool, so an extra `read_file` next to a `set_workspace` counts).
+The tool-call and unexpected-call rates read rung 5's turns, or rung 4's when the suite ran no rung 5
+(`caching`, `cost-policy`). Each rung row also carries median **weighted tokens** per round (5c §0.5,
+priced by the record's provider) and their **cost** in dollars when the run had a base price (below);
+the cost cell is `—` without one.
 
-For a multi-turn scenario (only `caching` today), the report also carries a per-round cache table
-— turn, round, prompt, cache read, cache write, uncached — built from the top rung's first
-repetition only; a table per repetition would be noise; the rung table's medians already cover
-that.
+For a multi-turn scenario (`caching`, `cost-policy`), the report also carries a per-round cache
+table — turn, round, prompt, cache read, cache write, the 1-hour share of that write, uncached —
+built from the top rung's first repetition only; a table per repetition would be noise; the rung
+table's medians already cover that. Below it, one line per successful repetition gives the whole
+conversation's weight: `weighted total (rung N, repetition M): W ≈ $X`.
 
 `first token ms` is the median time from request start to the first streamed token for rungs that
 streamed (4 and 5 when the streaming setting is on); it is `-` for the bare-call rungs and for

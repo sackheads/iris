@@ -1,0 +1,2 @@
+{ "name": "cost-policy-tool-heavy", "lane": "real", "repetitions": 2, "pauseMs": 2000, "rungs": [4],
+  "scenarios": ["perf/prompts/caching/tool-heavy.json"] }

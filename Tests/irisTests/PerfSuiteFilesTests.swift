@@ -149,4 +149,50 @@ struct PerfSuiteFilesTests {
         #expect(categories.filter { $0 == "tool-use" }.count == 3)
         #expect(suite.rungs == [5])
     }
+
+    @Test("every scenario file in perf/prompts/caching decodes (5c)")
+    func everyCachingScenarioDecodes() throws {
+        let dir = root.appendingPathComponent("perf/prompts/caching")
+        let files = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }
+        #expect(files.count >= 6)
+        for url in files {
+            let scenario = try Scenario.load(at: url.path)
+            #expect(scenario.clientMode == .real, Comment(rawValue: url.lastPathComponent))
+        }
+    }
+
+    @Test("the cost-policy suite: real lane, rung 4, two repetitions, the three 5c scenarios (5c)")
+    func costPolicySuiteLoads() throws {
+        let suite = try PerfSuite.load(at: root.appendingPathComponent("perf/suites/cost-policy.json").path)
+        #expect(suite.name == "cost-policy")
+        #expect(suite.lane == .real && suite.rungs == [4] && suite.repetitions == 2 && suite.pauseMs >= 1000)
+        let names = try suite.scenarioURLs(relativeTo: root).map { try Scenario.load(at: $0.path).name }
+        #expect(names == ["pinned-pause", "job-cadence", "tool-heavy"])
+        // One-scenario suites, so an arm that needs one scenario pays for no other.
+        for name in names {
+            let one = try PerfSuite.load(at: root.appendingPathComponent("perf/suites/cost-policy-\(name).json").path)
+            #expect(one.name == "cost-policy-\(name)")
+            #expect(one.lane == .real && one.rungs == [4] && one.repetitions == 2)
+            #expect(try one.scenarioURLs(relativeTo: root).map { try Scenario.load(at: $0.path).name } == [name])
+        }
+    }
+
+    @Test("pinned-pause waits six minutes before turn 2; job-cadence is two fresh background runs fifteen minutes apart (5c)")
+    func costPolicyScenarioShapes() throws {
+        let pinned = try Scenario.load(at: root.appendingPathComponent("perf/prompts/caching/pinned-pause.json").path)
+        #expect(pinned.pinned && !pinned.background)
+        #expect(pinned.turns.map(\.pauseBeforeSeconds) == [nil, 360])
+        #expect(pinned.expectedTools == [])
+        let cadence = try Scenario.load(at: root.appendingPathComponent("perf/prompts/caching/job-cadence.json").path)
+        #expect(cadence.background && cadence.freshConversationPerTurn && !cadence.pinned)
+        #expect(cadence.turns.map(\.pauseBeforeSeconds) == [nil, 900])
+        #expect(cadence.turns.allSatisfy { $0.source == "job:cadence" })
+        // tool-heavy and pinned-briefing score every call but run_command as unexpected, which is
+        // the spec's unprompted-call count for manage_fact and the peer tools.
+        for name in ["tool-heavy", "pinned-briefing"] {
+            let s = try Scenario.load(at: root.appendingPathComponent("perf/prompts/caching/\(name).json").path)
+            #expect(s.expectedTools == ["run_command"], Comment(rawValue: name))
+        }
+    }
 }

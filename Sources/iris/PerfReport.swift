@@ -14,7 +14,9 @@ enum PerfReport {
         out.append("- guards: vibecop \(env.vibecopEnabled ? "on (\(env.vibecopEngine))" : "off"), injection guard \(env.injectionGuardEnabled ? "on (\(env.promptGuardEngine))" : "off"), sandbox \(env.sandboxEnabled ? "on" : "off"), headless \(env.headless)")
         if let n = env.toolDeclarationCount { out.append("- tool declarations sent per call: \(n)") }
         if let streaming = env.streaming { out.append("- streaming: \(streaming ? "on" : "off")") }
+        if let price = env.basePricePerMTok { out.append("- cost: weighted × $\(String(format: "%.2f", price)) / MTok (IRIS_PERF_BASE_PRICE_PER_MTOK); a check against a real bill, not a budget") }
         if env.stateGatedToolsAlwaysDeclared == true { out.append("- EXPERIMENT: state-gated tools (manage_fact, peer tools) declared on every turn (IRIS_PERF_DECLARE_STATE_TOOLS)") }
+        for name in env.experiments ?? [] { if let line = PerfExperiments.describe(name) { out.append("- \(line)") } }
         if env.buildConfiguration == "debug" { out.append("- WARNING: debug build; timings are not comparable to release runs") }
         if env.gitDirty { out.append("- WARNING: dirty tree; the sha does not describe this code") }
         out.append("")
@@ -22,8 +24,8 @@ enum PerfReport {
         for s in r.scenarios {
             out.append("## \(s.name)  (\(s.category), \(s.lane))")
             out.append("")
-            out.append("| rung | n | median ms | p90 ms | first token ms | prompt tokens | cache read | cache write | uncached | failed |")
-            out.append("|---|---|---|---|---|---|---|---|---|---|")
+            out.append("| rung | n | median ms | p90 ms | first token ms | prompt tokens | cache read | cache write | uncached | weighted | cost | failed |")
+            out.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
             for rung in s.rungs {
                 let ok = rung.repetitions.filter { $0.error == nil }
                 let failed = rung.repetitions.count - ok.count
@@ -33,9 +35,14 @@ enum PerfReport {
                 let cacheRead = PerfStats.median(calls.compactMap { $0.cacheReadTokens }.map(Double.init))
                 let cacheWrite = PerfStats.median(calls.compactMap { $0.cacheWriteTokens }.map(Double.init))
                 let uncached = PerfStats.median(calls.compactMap(uncachedTokens))
+                // Per call, like the token columns: a call with no prompt count has no weight.
+                let weighted = PerfStats.median(calls.filter { $0.promptTokens != nil }
+                    .map { Double(weightedTokens($0, provider: env.provider)) })
+                let weightedCell = weighted.map { String(Int($0)) } ?? "—"
+                let costCell = weighted.flatMap { dollars(weighted: Int($0), basePricePerMTok: env.basePricePerMTok) }.map(money) ?? "—"
                 // "—" for the three cache columns specifically (spec §0.4: unknown cache is not
                 // zero and is never conflated with "-", which the pre-existing columns keep).
-                out.append("| \(rung.rung) | \(ok.count) | \(fmt(rung.medianMs)) | \(fmt(rung.p90Ms)) | \(firstToken.map { String(Int($0)) } ?? "-") | \(tokens.map { String(Int($0)) } ?? "-") | \(cacheRead.map { String(Int($0)) } ?? "—") | \(cacheWrite.map { String(Int($0)) } ?? "—") | \(uncached.map { String(Int($0)) } ?? "—") | \(failed > 0 ? "\(failed) failed" : "-") |")
+                out.append("| \(rung.rung) | \(ok.count) | \(fmt(rung.medianMs)) | \(fmt(rung.p90Ms)) | \(firstToken.map { String(Int($0)) } ?? "-") | \(tokens.map { String(Int($0)) } ?? "-") | \(cacheRead.map { String(Int($0)) } ?? "—") | \(cacheWrite.map { String(Int($0)) } ?? "—") | \(uncached.map { String(Int($0)) } ?? "—") | \(weightedCell) | \(costCell) | \(failed > 0 ? "\(failed) failed" : "-") |")
             }
             out.append("")
             let cache = cacheTable(s)
@@ -47,6 +54,7 @@ enum PerfReport {
                 out.append(contentsOf: cache)
                 out.append("")
             }
+            out.append(contentsOf: weightedTotals(s, provider: env.provider, basePricePerMTok: env.basePricePerMTok))
             var ratios: [String] = []
             if let o = s.summary.overheadRatio { ratios.append("overhead \(String(format: "%.2f", o))x") }
             if let h = s.summary.harnessRatio { ratios.append("harness \(String(format: "%.2f", h))x") }
@@ -90,6 +98,38 @@ enum PerfReport {
         return Double(prompt - read - write)
     }
 
+    /// One round's weight in **weighted tokens** (5c §0.5), priced by the run's own provider. An
+    /// unknown count is 0: a pre-5a record with no cache counts weighs as all uncached input.
+    static func weightedTokens(_ call: ModelCallRecord, provider: String) -> Int {
+        CostWeights.weighted(UsageComponents(prompt: call.promptTokens ?? 0, output: call.outputTokens ?? 0,
+                                             cacheRead: call.cacheReadTokens ?? 0, cacheWrite: call.cacheWriteTokens ?? 0,
+                                             cacheWrite1h: call.cacheWrite1hTokens ?? 0),
+                             provider: provider)
+    }
+
+    /// Weighted tokens in dollars at `basePricePerMTok` (the uncached-input price). Nil without a price.
+    static func dollars(weighted: Int, basePricePerMTok: Double?) -> Double? {
+        basePricePerMTok.map { Double(weighted) * $0 / 1_000_000 }
+    }
+
+    /// "weighted total (rung N, repetition M): W ≈ $X", one line per successful repetition of the
+    /// top rung that ran full turns: the whole conversation's weight, every round of every turn.
+    static func weightedTotals(_ s: PerfScenarioResult, provider: String, basePricePerMTok: Double?) -> [String] {
+        guard let top = s.rungs.max(by: { $0.rung < $1.rung }) else { return [] }
+        var lines: [String] = []
+        for (idx, rep) in top.repetitions.enumerated() where rep.error == nil {
+            let calls = rep.turns.flatMap(\.modelCalls).filter { $0.promptTokens != nil }
+            guard !calls.isEmpty else { continue }
+            let total = calls.reduce(0) { $0 + weightedTokens($1, provider: provider) }
+            let cost = dollars(weighted: total, basePricePerMTok: basePricePerMTok).map(money) ?? "—"
+            lines.append("- weighted total (rung \(top.rung), repetition \(idx + 1)): \(total) ≈ \(cost)")
+        }
+        if !lines.isEmpty { lines.append("") }
+        return lines
+    }
+
+    private static func money(_ d: Double) -> String { String(format: "$%.4f", d) }
+
     /// Index of the first repetition in `rung` that did not error, or nil if every repetition
     /// failed. The rung table above already excludes errored repetitions from its medians;
     /// `cacheTable` must do the same rather than always taking index 0, which used to print a
@@ -108,15 +148,16 @@ enum PerfReport {
               let idx = firstOkRepetitionIndex(top) else { return [] }
         let first = top.repetitions[idx]
         guard first.turns.contains(where: { !$0.modelCalls.isEmpty }) else { return [] }
-        var lines = ["| turn | round | prompt | cache read | cache write | uncached |",
-                     "|---|---|---|---|---|---|"]
+        var lines = ["| turn | round | prompt | cache read | cache write | 1h write | uncached |",
+                     "|---|---|---|---|---|---|---|"]
         for (turnIndex, turn) in first.turns.enumerated() {
             for call in turn.modelCalls {
                 let prompt = call.promptTokens.map(String.init) ?? "—"
                 let read = call.cacheReadTokens.map(String.init) ?? "—"
                 let write = call.cacheWriteTokens.map(String.init) ?? "—"
+                let write1h = call.cacheWrite1hTokens.map(String.init) ?? "—"
                 let uncached = uncachedTokens(call).map { String(Int($0)) } ?? "—"
-                lines.append("| \(turnIndex + 1) | \(call.round) | \(prompt) | \(read) | \(write) | \(uncached) |")
+                lines.append("| \(turnIndex + 1) | \(call.round) | \(prompt) | \(read) | \(write) | \(write1h) | \(uncached) |")
             }
         }
         return lines

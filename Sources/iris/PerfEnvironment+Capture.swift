@@ -2,7 +2,8 @@ import Foundation
 
 extension PerfEnvironment {
     @MainActor
-    static func capture(headless: Bool, toolDeclarationCount: Int?, repoRoot: URL, toolSandbox: String? = nil) -> PerfEnvironment {
+    static func capture(headless: Bool, toolDeclarationCount: Int?, repoRoot: URL, toolSandbox: String? = nil,
+                        processEnvironment: [String: String] = ProcessInfo.processInfo.environment) -> PerfEnvironment {
         let config = ConfigManager.shared
         #if DEBUG
         let build = "debug"
@@ -28,7 +29,15 @@ extension PerfEnvironment {
             headless: headless,
             toolDeclarationCount: toolDeclarationCount,
             toolSandbox: toolSandbox,
-            streaming: config.streamResponses)
+            streaming: config.streamResponses,
+            basePricePerMTok: basePrice(from: processEnvironment))
+    }
+
+    /// `IRIS_PERF_BASE_PRICE_PER_MTOK`, when it is a positive number; anything else is no price.
+    static func basePrice(from env: [String: String]) -> Double? {
+        guard let raw = env["IRIS_PERF_BASE_PRICE_PER_MTOK"]?.trimmingCharacters(in: .whitespaces),
+              let price = Double(raw), price > 0, price.isFinite else { return nil }
+        return price
     }
 
     /// Run git in `root` and return trimmed stdout; nil if git is missing or exits non-zero.

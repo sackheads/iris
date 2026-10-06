@@ -66,7 +66,7 @@ struct PerfLadderTests {
     func captureUnderExperiment() async throws {
         let scenario = Scenario(name: "cap", clientMode: .real, turns: [Scenario.Turn(prompt: "hello")])
         let gated = await PerfLadder.capture(for: scenario)
-        let declared = await PerfLadder.capture(for: scenario, declareStateGatedTools: true)
+        let declared = await PerfLadder.capture(for: scenario, experiments: PerfExperiments(declareStateGatedTools: true))
         let names = declared.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? []
         #expect(names.contains("manage_fact"))
         #expect(names.contains("list_sessions"))

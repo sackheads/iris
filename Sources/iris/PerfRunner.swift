@@ -12,7 +12,7 @@ enum PerfRunner {
     static func run(suite: PerfSuite, repetitionsOverride: Int? = nil, repoRoot: URL,
                     client: (any LLMClientProtocol)? = nil, headless: Bool,
                     workspacePath: String? = nil, dumpRequestsDir: URL? = nil,
-                    declareStateGatedTools: Bool = false) async throws -> PerfRunRecord {
+                    experiments: PerfExperiments = .init()) async throws -> PerfRunRecord {
         try suite.validate()
         let reps = repetitionsOverride ?? suite.repetitions
         let startedAt = Date()
@@ -34,7 +34,7 @@ enum PerfRunner {
                     if rung <= 3 {
                         if capture == nil {
                             capture = await PerfLadder.capture(for: scenario, workspacePath: workspacePath,
-                                                                    declareStateGatedTools: declareStateGatedTools)
+                                                                    experiments: experiments)
                             toolCount = capture?.toolCount
                         }
                         let s = await PerfLadder.sample(rung: rung, prompt: prompt, tier: scenario.tier,
@@ -54,7 +54,7 @@ enum PerfRunner {
                             .appendingPathComponent("rung-\(rung)").appendingPathComponent("\(i)")
                         let result = await ScenarioRunner.run(effective, guards: guards, toolExecution: toolExecution, clientOverride: client,
                                                               workspacePath: workspacePath, dumpRequestsTo: dumpDir,
-                                                              declareStateGatedTools: declareStateGatedTools)
+                                                              experiments: experiments)
                         if result.toolsSandboxed { anySandboxed = true }
                         let turns = zip(result.turnProfiles, result.finalTexts + Array(repeating: "", count: max(0, result.turnProfiles.count - result.finalTexts.count)))
                             .map { PerfTurn($0, finalText: $1) }
@@ -79,7 +79,7 @@ enum PerfRunner {
             if capture == nil, toolCount == nil {
                 // No ladder rung ran; still record the tool surface a real turn would send.
                 let c = await PerfLadder.capture(for: scenario, workspacePath: workspacePath,
-                                                 declareStateGatedTools: declareStateGatedTools)
+                                                 experiments: experiments)
                 toolCount = c.toolCount
             }
             results.append(PerfScenarioResult(name: scenario.name, path: relativePath(url, root: repoRoot),
@@ -89,7 +89,8 @@ enum PerfRunner {
 
         var environment = PerfEnvironment.capture(headless: headless, toolDeclarationCount: toolCount, repoRoot: repoRoot,
                                                   toolSandbox: anySandboxed ? "sandboxed" : "host")
-        if declareStateGatedTools { environment.stateGatedToolsAlwaysDeclared = true }
+        if experiments.declareStateGatedTools { environment.stateGatedToolsAlwaysDeclared = true }
+        if !experiments.activeNames.isEmpty { environment.experiments = experiments.activeNames }
         return PerfRunRecord(schemaVersion: PerfRunRecord.currentSchemaVersion, suite: suite.name,
                              startedAt: startedAt, finishedAt: Date(),
                              environment: environment,
@@ -122,8 +123,10 @@ enum PerfSummarizer {
             return n / d
         }
         // Successful repetitions only, consistent with the medians: a turn that then timed out
-        // must not count toward the eagerness rate (#137).
-        let fullTurns = rungs.first { $0.rung == 5 }?.repetitions.filter { $0.error == nil }.flatMap(\.turns) ?? []
+        // must not count toward the eagerness rate (#137). Rung 5 when it ran; otherwise rung 4,
+        // so a rung-4-only suite (caching, cost-policy) still counts its unexpected calls (5c).
+        let fullRung = rungs.first { $0.rung == 5 } ?? rungs.first { $0.rung == 4 }
+        let fullTurns = fullRung?.repetitions.filter { $0.error == nil }.flatMap(\.turns) ?? []
         let firstTokens = fullTurns.flatMap(\.modelCalls).compactMap(\.firstTokenMs)
         let withTools = fullTurns.filter { !$0.toolCalls.isEmpty }.count
         var byName: [String: Int] = [:]
