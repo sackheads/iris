@@ -90,7 +90,7 @@ struct RunCommandProcessGroupTests {
         } else {
             Issue.record("expected the killed leader's status, got \(result)")
         }
-        #expect(!Self.exists("sleep \(nap)"))
+        #expect(await Self.gone("sleep \(nap)", within: 2))
     }
 
     @Test("terminate before the launch means no launch, and no crash")
@@ -106,7 +106,7 @@ struct RunCommandProcessGroupTests {
         }
         #expect(error is CancellationError)
         #expect(runner.processIdentifier == 0)
-        #expect(!Self.exists("sleep \(nap)"))
+        #expect(await Self.gone("sleep \(nap)", within: 2))
     }
 
     @Test("a normal command's output is unchanged")
@@ -149,7 +149,9 @@ struct RunCommandProcessGroupTests {
         let out = await ToolExecutor().runCommand("(sleep \(nap) >/dev/null 2>&1 &); echo started", cwd: nil, timeoutSeconds: 20)
         #expect(out == "started\n")
         #expect(Date().timeIntervalSince(started) < ProcessGroupRunner.strayGraceSeconds)
-        #expect(Self.exists("sleep \(nap)"), "a server started with its output redirected must outlive the call")
+        // Polled: the call returns once the shell has forked the job, which may not have exec'd
+        // `sleep` yet. Appearing a moment after the return still proves it outlived the call.
+        #expect(await Self.appears("sleep \(nap)", within: 3), "a server started with its output redirected must outlive the call")
     }
 
     @Test("a plain command leaves no process behind")
@@ -158,7 +160,7 @@ struct RunCommandProcessGroupTests {
         defer { Self.killAll(nap) }
         let out = await ToolExecutor().runCommand("sleep \(nap); echo ok", cwd: nil, timeoutSeconds: 10)
         #expect(out == "ok\n")
-        #expect(!Self.exists("sleep \(nap)"))
+        #expect(await Self.gone("sleep \(nap)", within: 2))
     }
 
     // MARK: - Helpers

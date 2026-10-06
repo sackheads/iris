@@ -59,7 +59,7 @@ struct HookManagerProcessGroupTests {
         // `fireEvent` treats a hook's warning as proceed, with the payload untouched.
         guard case .proceed = decision else { Issue.record("got \(decision)"); return }
         #expect(wall < 1 + ProcessGroupRunner.terminateGraceSeconds + 2, "returned after \(wall)s")
-        #expect(!P.exists("sleep \(nap)"), "sleep \(nap) outlived the SIGKILL")
+        #expect(await P.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the SIGKILL")
     }
 
     @Test("a backgrounded grandchild holding the pipe does not hang the hook")
@@ -151,7 +151,7 @@ struct PluginAuthRunnerProcessGroupTests {
         let wall = Date().timeIntervalSince(started)
         #expect(!status.signedIn)
         #expect(wall < 1 + ProcessGroupRunner.terminateGraceSeconds + 2, "returned after \(wall)s")
-        #expect(!P.exists("sleep \(nap)"), "sleep \(nap) outlived the SIGKILL")
+        #expect(await P.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the SIGKILL")
     }
 
     @Test("a backgrounded grandchild holding the pipe does not hang the check")
