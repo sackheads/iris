@@ -306,7 +306,9 @@ its own click, with no way to make it unasked. A command containing a line
 break or another invisible character is shown with a warning, disables
 both the button and the checkbox, and cannot be run or always-allowed from
 the pane. `setup_command` runs through `run_command`; `check_command` runs
-via `/bin/sh -c`.
+via `/bin/sh -c`, with stdout and stderr captured together. A check that
+runs past 30 seconds has its process group killed (SIGTERM, then SIGKILL)
+and reads as not signed in.
 
 This model covers three real cases: a plain API-key server (`secrets`
 only, no `auth`), a tool with only external browser-based sign-in (`auth`
