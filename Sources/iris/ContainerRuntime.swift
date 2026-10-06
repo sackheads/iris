@@ -267,9 +267,9 @@ struct CLIProcessRunner: Sendable {
             // is waiting on a process this call does not own — which is how a call with no
             // deadline (a cold `createDetached`, `reapOrphans` at launch) wedges forever. After
             // the grace, whatever is in hand is the answer.
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(CLIProcessRunner.postExitEOFGraceSeconds * 1_000_000_000))
-                self?.deliverAfterExit()
+            // A dispatch timer, not a `Task.sleep`, which waits for a free pool thread (#372).
+            DispatchQueue.global().asyncAfter(deadline: .now() + CLIProcessRunner.postExitEOFGraceSeconds) {
+                self.deliverAfterExit()
             }
         }
 
@@ -330,24 +330,22 @@ struct CLIProcessRunner: Sendable {
     /// reused, and this would then signal a stranger's children). Direct children only — the same
     /// reach the host `run_command` path has.
     ///
-    /// Awaited rather than waited on: `pkill` takes milliseconds, but they are milliseconds of a
-    /// cooperative-pool thread, and the SIGKILL that follows must not overtake it.
-    private static func killChildren(of pid: pid_t) async {
+    /// Waited on, on the ladder's own queue, so the SIGKILL that follows cannot overtake it. Never
+    /// on a cooperative-pool thread: the ladder does not run there (#372).
+    private static func killChildren(of pid: pid_t) {
         guard pid > 0 else { return }
-        let killer = Process()
-        killer.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        killer.arguments = ["-9", "-P", String(pid)]
-        killer.standardOutput = FileHandle.nullDevice
-        killer.standardError = FileHandle.nullDevice
-        await withCheckedContinuation { cont in
-            killer.terminationHandler = { _ in cont.resume() }
-            do {
-                try killer.run()
-            } catch {
-                killer.terminationHandler = nil
-                cont.resume()
-            }
-        }
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0)
+        posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
+        let arguments: [String] = ["/usr/bin/pkill", "-9", "-P", String(pid)]
+        let argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) } + [nil]
+        defer { argv.forEach { free($0) } }
+        var killer: pid_t = 0
+        guard posix_spawn(&killer, "/usr/bin/pkill", &actions, nil, argv, environ) == 0 else { return }
+        var status: Int32 = 0
+        while waitpid(killer, &status, 0) == -1, errno == EINTR {}
     }
 
     /// What the kill ladder needs of the child, and the only things it does to it.
@@ -364,7 +362,7 @@ struct CLIProcessRunner: Sendable {
         let pid: @Sendable () -> pid_t
         let isRunning: @Sendable () -> Bool
         let terminate: @Sendable () -> Void
-        let killChildren: @Sendable (pid_t) async -> Void
+        let killChildren: @Sendable (pid_t) -> Void
         let signal: @Sendable (pid_t, Int32) -> Void
     }
 
@@ -376,36 +374,38 @@ struct CLIProcessRunner: Sendable {
     /// Nothing is signalled while the pid is not a pid. A rung needs both a running process *and* a
     /// positive pid, and the pid is re-read between the rungs, because the two reads are seconds
     /// apart and the first one can predate the launch entirely.
+    ///
+    /// Synchronous, and run on a dispatch queue of its own: it blocks its thread for the grace,
+    /// which must never be a cooperative-pool thread, and its timing must not depend on one being
+    /// free: a pool held by blocking work held the old, `Task.sleep`-paced ladder with it (#372).
     static func enforce(_ reason: @escaping @Sendable () -> Error, on child: Child,
                         hasAnswered: @escaping @Sendable () -> Bool,
-                        fail: @escaping @Sendable (Error) -> Void) async {
+                        fail: @escaping @Sendable (Error) -> Void) {
         let launched = child.pid()
         if child.isRunning(), launched > 0 {
-            await child.killChildren(launched)
+            child.killChildren(launched)
             child.terminate()                                           // SIGTERM
         }
-        await waitUntil(Self.killGraceSeconds) { !child.isRunning() }
+        waitUntil(Self.killGraceSeconds) { !child.isRunning() }
         let pid = child.pid()
         if child.isRunning(), pid > 0 {
-            await child.killChildren(pid)                               // anything it spawned since
+            child.killChildren(pid)                                     // anything it spawned since
             child.signal(pid, SIGKILL)
         }
         // A moment for the ordinary path to land with the real output, then the ladder answers.
         // Load bearing on the cancellation path, where a promptly-exiting child's real result is
         // what the caller gets. On the deadline path it only costs latency: `run` throws
         // `.timedOut` below whether or not the result landed, because the deadline did fire.
-        await waitUntil(Self.postKillSettleSeconds) { hasAnswered() }
+        waitUntil(Self.postKillSettleSeconds) { hasAnswered() }
         fail(reason())
     }
 
-    /// Polls `condition` until it holds or `seconds` elapse. Sleeping in slices rather than for
-    /// the whole grace so a child that dies promptly is not waited out — and giving up when the
-    /// task is cancelled, because `Task.sleep` returns at once from then on and the loop would
-    /// otherwise spin a cooperative thread for the rest of the grace.
-    private static func waitUntil(_ seconds: Double, _ condition: @Sendable () -> Bool) async {
+    /// Polls `condition` until it holds or `seconds` elapse, blocking the ladder's thread. In
+    /// slices rather than for the whole grace, so a child that dies promptly is not waited out.
+    private static func waitUntil(_ seconds: Double, _ condition: @Sendable () -> Bool) {
         let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline, !condition(), !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 50_000_000)
+        while Date() < deadline, !condition() {
+            usleep(50_000)
         }
     }
 
@@ -428,25 +428,33 @@ struct CLIProcessRunner: Sendable {
         let child = Child(pid: { box.process.processIdentifier },
                           isRunning: { box.process.isRunning },
                           terminate: { box.process.terminate() },
-                          killChildren: { await Self.killChildren(of: $0) },
+                          killChildren: { Self.killChildren(of: $0) },
                           signal: { kill($0, $1) })
+
+        // The deadline and the cancel both run the ladder here, off the cooperative pool: a
+        // `Task.sleep` deadline fires only when a pool thread is free, and a pool held by blocking
+        // work held the kill with it (#372).
+        let ladder = DispatchQueue(label: "iris.cli-process.ladder")
 
         // The watchdog kills; it never abandons. Racing the wait with a `withTimeout` and walking
         // away would leave the child running and unreaped — a zombie holding a pid and, for
         // `container exec`, a live connection to the VM.
-        let watchdog: Task<Void, Never>? = timeoutSeconds.map { seconds in
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64(max(1, seconds)) * 1_000_000_000)
+        let watchdog: DispatchSourceTimer? = timeoutSeconds.map { seconds in
+            let timer = DispatchSource.makeTimerSource(queue: ladder)
+            timer.schedule(deadline: .now() + .seconds(max(1, seconds)))
+            timer.setEventHandler {
                 // Not "is the child still running?": a child can exit in milliseconds and leave
                 // something it spawned holding the inherited pipes, in which case end-of-file
                 // never comes, the collector never publishes, and the only condition that means
                 // "nobody has been told yet" is the collector's own.
-                guard !Task.isCancelled, !collector.hasAnswered else { return }
+                guard !collector.hasAnswered else { return }
                 deadline.fire()
-                await Self.enforce({ ContainerRuntimeError.timedOut(elapsedSeconds: Date().timeIntervalSince(started)) },
-                                   on: child, hasAnswered: { collector.hasAnswered },
-                                   fail: { collector.fail($0) })
+                Self.enforce({ ContainerRuntimeError.timedOut(elapsedSeconds: Date().timeIntervalSince(started)) },
+                             on: child, hasAnswered: { collector.hasAnswered },
+                             fail: { collector.fail($0) })
             }
+            timer.resume()
+            return timer
         }
         defer { watchdog?.cancel() }
 
@@ -476,10 +484,10 @@ struct CLIProcessRunner: Sendable {
         } onCancel: {
             // The same ladder the deadline uses, for the same reason: a cancelled call that waits
             // on a survivor is a cancelled call that never returns.
-            Task {
-                await Self.enforce({ CancellationError() }, on: child,
-                                   hasAnswered: { collector.hasAnswered },
-                                   fail: { collector.fail($0) })
+            ladder.async {
+                Self.enforce({ CancellationError() }, on: child,
+                             hasAnswered: { collector.hasAnswered },
+                             fail: { collector.fail($0) })
             }
         }
 

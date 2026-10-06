@@ -191,9 +191,15 @@ struct SandboxTimeoutTests {
             signal: { _, sig in signalled.mutate { $0.append(sig) } })
         let answered = Locked<Error?>(nil)
 
-        await CLIProcessRunner.enforce({ CancellationError() }, on: child,
-                                       hasAnswered: { false },
-                                       fail: { error in answered.mutate { $0 = error } })
+        // On a dispatch thread, as in production: the ladder blocks its thread for the grace.
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                CLIProcessRunner.enforce({ CancellationError() }, on: child,
+                                         hasAnswered: { false },
+                                         fail: { error in answered.mutate { $0 = error } })
+                done.resume()
+            }
+        }
 
         #expect(children.value.isEmpty, "no pkill -P 0")
         #expect(signalled.value.isEmpty, "and no kill(0, SIGKILL)")
