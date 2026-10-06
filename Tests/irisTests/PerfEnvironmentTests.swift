@@ -18,8 +18,8 @@ struct PerfEnvironmentTests {
 
     @MainActor
     @Test("capture reflects the running configuration without mutating it")
-    func capture() {
-        let env = PerfEnvironment.capture(headless: true, toolDeclarationCount: 3, repoRoot: PerfPaths.repoRoot())
+    func capture() async {
+        let env = await PerfEnvironment.capture(headless: true, toolDeclarationCount: 3, repoRoot: PerfPaths.repoRoot())
         #expect(env.provider == ConfigManager.shared.primaryProvider)
         #expect(env.models["medium"] == ConfigManager.shared.getModel(for: .medium))
         #expect(env.headless == true)

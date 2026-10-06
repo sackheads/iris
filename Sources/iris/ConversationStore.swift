@@ -189,15 +189,27 @@ final class ConversationStore: Sendable {
     /// Scheduled and event-driven jobs (#187), on this store's writer and this store's schema.
     let ledger: JobLedger
 
-    private init(writer: any DatabaseWriter, path: URL?) throws {
+    private init(writer: any DatabaseWriter, path: URL?, alreadyMigrated: Bool = false) throws {
         self.writer = writer
         self.path = path
-        try Self.migrator.migrate(writer)
+        if !alreadyMigrated { try Self.migrator.migrate(writer) }
         self.ledger = JobLedger(writer: writer)
     }
 
     static func inMemory() throws -> ConversationStore {
-        try ConversationStore(writer: DatabaseQueue(configuration: Self.configuration), path: nil)
+        let queue = try DatabaseQueue(configuration: Self.configuration)
+        try migratedTemplate.get().backup(to: queue)
+        return try ConversationStore(writer: queue, path: nil, alreadyMigrated: true)
+    }
+
+    /// An empty in-memory database with every migration applied, built once per process. Each
+    /// in-memory store starts as a page copy of it, so it skips the migrator entirely. Running
+    /// every migration per store cost a few ms of SQL each on the caller's thread; in the test
+    /// suite that was every `AppState()`, and about 4.8 s of main-actor time per run (#366).
+    private static let migratedTemplate = Result<DatabaseQueue, any Error> {
+        let queue = try DatabaseQueue(configuration: ConversationStore.configuration)
+        try ConversationStore.migrator.migrate(queue)
+        return queue
     }
 
     static func onDisk(at url: URL) throws -> ConversationStore {
