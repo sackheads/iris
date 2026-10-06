@@ -4007,6 +4007,11 @@ actor IrisEngine {
         return result
     }
     
+    /// What a tool call returns when its turn was cancelled before it was dispatched.
+    static func cancelledToolResult(_ tool: String) -> String {
+        "Cancelled: \(tool) did not run."
+    }
+
     /// Runs the one call a person clicked "Approve and run" for, and nothing else (#187 §6).
     ///
     /// `executeToolWithHooks`, not `executeFunctionCall`: the approval is already given, there is
@@ -4020,10 +4025,6 @@ actor IrisEngine {
     /// sanitized by `AppState.deliverEvent`, and `get_job_run` guards the row when it reads it
     /// back. Guarding here as well would put an `<untrusted_context>` wrapper in the outcome the
     /// card shows a human.
-    static func cancelledToolResult(_ tool: String) -> String {
-        "Cancelled: \(tool) did not run."
-    }
-
     func executeApprovedCall(_ call: BlockedCall, conversationId: UUID) async -> String {
         // R13 as a backstop. A `.profile` denial was not refused for want of a human — the job is
         // `readOnly` — so no click widens it: the card hides the button, `JobRunner.runApproved`
