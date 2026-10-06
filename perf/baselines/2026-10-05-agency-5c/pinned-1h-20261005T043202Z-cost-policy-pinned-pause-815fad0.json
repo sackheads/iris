@@ -1,0 +1,265 @@
+{
+  "cacheCountsVersion" : 1,
+  "environment" : {
+    "basePricePerMTok" : 4,
+    "buildConfiguration" : "release",
+    "cpuCount" : 16,
+    "gitDirty" : false,
+    "gitSha" : "815fad0",
+    "headless" : false,
+    "injectionGuardEnabled" : true,
+    "machineModel" : "Mac16,5",
+    "models" : {
+      "easy" : "claude-sonnet-5-5",
+      "hard" : "claude-fable-5-1",
+      "medium" : "claude-opus-5-5"
+    },
+    "osVersion" : "Version 26.3.1 (a) (Build 25D771280a)",
+    "promptGuardEngine" : "ollama",
+    "provider" : "Anthropic",
+    "sandboxEnabled" : true,
+    "streaming" : true,
+    "toolDeclarationCount" : 31,
+    "toolSandbox" : "sandboxed",
+    "vibecopEnabled" : true,
+    "vibecopEngine" : "ollama"
+  },
+  "finishedAt" : "2026-10-05T04:45:05Z",
+  "scenarios" : [
+    {
+      "category" : "caching",
+      "lane" : "real",
+      "name" : "pinned-pause",
+      "path" : "perf\/prompts\/caching\/pinned-pause.json",
+      "rungs" : [
+        {
+          "medianMs" : 389392.442125082,
+          "p90Ms" : 389961.93066716194,
+          "repetitions" : [
+            {
+              "coldStart" : true,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 4.113250017166138
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.7871670722961426
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 1885.3908751010895
+                    }
+                  },
+                  "finalText" : "Morning, Brian. What's on deck?",
+                  "finalTextLength" : 31,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 0,
+                      "cacheWrite1hTokens" : 20709,
+                      "cacheWriteTokens" : 20709,
+                      "firstTokenMs" : 962.7908751964569,
+                      "latencyMs" : 1885.4140043258667,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 16,
+                      "promptTokens" : 20713,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.4537498950958252
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 4.103500127792358
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.7914588451385498
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.06641697883605957
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 0.00033402442932128906
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 0.00029206275939941406
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 1894.5130109786987
+                },
+                {
+                  "categories" : {
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 2928.9872500896454
+                    }
+                  },
+                  "finalText" : "23. 29 also qualifies, if you want a spare.",
+                  "finalTextLength" : 43,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 20709,
+                      "cacheWrite1hTokens" : 80,
+                      "cacheWriteTokens" : 80,
+                      "firstTokenMs" : 1827.8174998760223,
+                      "latencyMs" : 2929.0289878845215,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 20,
+                      "promptTokens" : 20793,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 2.6096248626708984
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 2939.018964767456
+                }
+              ],
+              "wallClockMs" : 388822.9535830021
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 5.165249824523926
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.424332857131958
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 4398.987459182739
+                    }
+                  },
+                  "finalText" : "Morning, Brian. What's on deck?",
+                  "finalTextLength" : 31,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 20709,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 0,
+                      "firstTokenMs" : 3397.0341250896454,
+                      "latencyMs" : 4399.0219831466675,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 16,
+                      "promptTokens" : 20713,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.6192080974578857
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 5.157874822616577
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.4302079677581787
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.06800007820129395
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 4408.561944961548
+                },
+                {
+                  "categories" : {
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 1909.8709170818329
+                    }
+                  },
+                  "finalText" : "23. Or 29, if you like them bigger.",
+                  "finalTextLength" : 35,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 20789,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 0,
+                      "firstTokenMs" : 905.0382499694824,
+                      "latencyMs" : 1909.9100828170776,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 17,
+                      "promptTokens" : 20793,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.2815420627593994
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 1916.6820049285889
+                }
+              ],
+              "wallClockMs" : 389961.93066716194
+            }
+          ],
+          "rung" : 4
+        }
+      ],
+      "summary" : {
+        "medianFirstTokenMs" : 1395.3041875362396,
+        "medianMs" : 389392.442125082,
+        "p90Ms" : 389961.93066716194,
+        "toolCallRate" : 0,
+        "toolCallsByName" : {
+
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    }
+  ],
+  "schemaVersion" : 1,
+  "startedAt" : "2026-10-05T04:32:02Z",
+  "suite" : "cost-policy-pinned-pause"
+}

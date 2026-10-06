@@ -93,6 +93,9 @@ other field defaults.
 | `turns[].source` | string | `"User"` | Provenance label for the turn. |
 | `turns[].ledgerRuns` | array of `{ name, status, outcome? }` | none | Finished job runs written to the run's job ledger just before this turn, so the pinned conversation's briefing sees them (5b). `status` is a `JobRun.Status` (`completed`, `failed`, `blockedOnApproval`, ...; an `interrupted` row with no transcript is never briefed). One disabled job is created per name on first use. |
 | `turns[].eventCard` | `{ name, status, outcome? }` | none | A run whose row is written and whose event card is delivered (`deliverEvent`) at the start of this turn's second model round, so its line is drained mid-turn. A turn with one round gets the card after it ends instead (logged; `ScenarioResult.midTurnEventCards` says which). |
+| `turns[].pauseBeforeSeconds` | int | none | Seconds to wait before this turn starts, so a cache entry can age past a TTL (5c). Only a `real`-client scenario waits; the fake lane (which runs every scenario as `fake`) skips it. |
+| `background` | bool | `false` | Run as a background job run: an unattended conversation stamped with the `readOnly` profile, as `JobRunner` opens one, so the request has a job run's tool surface and cache TTL policy (5c). |
+| `freshConversationPerTurn` | bool | `false` | Open a new conversation (made the same way) for every turn, so consecutive turns share only the prefix — a job firing on a cadence (5c). |
 | `pinned` | bool | `false` | Run in the pinned conversation (`activityConversationId()`) rather than a fresh unpinned one, so the briefing and pinned-only tools apply (5b). |
 | `clientMode` | `"fake"` \| `"real"` | `"fake"` | `fake` replays `scriptedResponses`; `real` hits a provider. |
 | `tier` | `ModelTier` | `"medium"` | Model tier the engine runs at (`easy`/`medium`/`hard`). |

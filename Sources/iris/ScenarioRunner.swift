@@ -22,8 +22,10 @@ struct ScenarioResult: Sendable {
     var vibecopMeasured: Bool
     /// True when the run forced `run_command` through the sandbox.
     var toolsSandboxed: Bool
-    /// The throwaway conversation the run used.
+    /// The throwaway conversation the run used (its first, under `freshConversationPerTurn`).
     var conversationId: UUID
+    /// Every conversation the run used, in turn order: one, or one per turn.
+    var conversationIds: [UUID] = []
     /// The first `[LLM_ERROR]` headline posted during each turn, in turn order (nil when the
     /// turn had none). The engine catches provider failures and posts a tagged system message
     /// instead of throwing, so a failed turn still produces a `CommandProfile` — this is how a
@@ -58,7 +60,8 @@ enum ScenarioRunner {
                     dumpRequestsTo: URL? = nil,
                     factStore: FactStoreManager? = nil,
                     retryDelays: [TimeInterval] = [2, 4, 8],
-                    declareStateGatedTools: Bool = false) async -> ScenarioResult {
+                    experiments: PerfExperiments = .init(),
+                    sleep: @Sendable (Int) async -> Void = { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000_000) }) async -> ScenarioResult {
         // A scenario that writes ledger rows or pins gets an explicit in-memory store, never one
         // resolved from the environment: those writes must not be able to reach a real database.
         let ownStore: ConversationStore? = scenario.usesOwnStore ? (try? ConversationStore.inMemory()) : nil
@@ -70,18 +73,26 @@ enum ScenarioRunner {
         // Pay the Vibecop cost a real run_command pays, unless this run is measuring guards off.
         state.vibecopUnderAutoApprove = guards != .off
         let ledger = ownStore?.ledger
-        let conversationId: UUID
-        if scenario.pinned, ownStore != nil {
-            // The real pinned conversation, made the way the app makes it, so every pinned-only
-            // gate (briefing, tools, rename exemptions) reads it exactly as in production.
-            conversationId = state.activityConversationId()
-        } else {
-            conversationId = UUID()
-            state.createNewConversation(id: conversationId)
+        func openConversation() -> UUID {
+            let id: UUID
+            if scenario.pinned, ownStore != nil {
+                // The real pinned conversation, made the way the app makes it, so every pinned-only
+                // gate (briefing, tools, rename exemptions) reads it exactly as in production.
+                id = state.activityConversationId()
+            } else {
+                id = UUID()
+                state.createNewConversation(id: id, isBackground: scenario.background)
+                // A job run's surface (5c): unattended, narrowed to the readOnly profile, as
+                // `JobRunner.openConversation` stamps it.
+                if scenario.background { state.setJobProfile(for: id, .readOnly) }
+            }
+            // Headless real-lane runs bind a scratch directory so workspace-relative file tools land
+            // there rather than in the process cwd (#151). Only run_command is sandboxed.
+            if let workspacePath { state.setWorkspace(for: id, path: workspacePath) }
+            return id
         }
-        // Headless real-lane runs bind a scratch directory so workspace-relative file tools land
-        // there rather than in the process cwd (#151). Only run_command is sandboxed.
-        if let workspacePath { state.setWorkspace(for: conversationId, path: workspacePath) }
+        let conversationId = openConversation()
+        let current = CurrentConversation(conversationId)
 
         let client: any LLMClientProtocol
         if let clientOverride {
@@ -154,7 +165,7 @@ enum ScenarioRunner {
 
         // Safety net for exit paths that skip the awaited teardown below (`defer` cannot await,
         // so this detaches; endSession is idempotent).
-        defer { Task { await SandboxSessionManager.shared.endSession(conversationId) } }
+        defer { Task { @MainActor in for id in current.all { await SandboxSessionManager.shared.endSession(id) } } }
 
         // Seed the fact store before turn 1 so a scenario like `caching` gets a deterministic
         // fact-store block: turns after this can rely on exactly these facts being present.
@@ -194,7 +205,7 @@ enum ScenarioRunner {
         if let ledger, scenario.turns.contains(where: { $0.eventCard != nil }) {
             roundStartHook = { @MainActor round in
                 guard round == 1, let (turn, run) = cards.take() else { return }
-                await ScenarioLedgerSeed.deliver(run, ledger: ledger, state: state, to: conversationId)
+                await ScenarioLedgerSeed.deliver(run, ledger: ledger, state: state, to: current.id)
                 cards.midTurn.append(turn)
             }
         } else {
@@ -203,7 +214,9 @@ enum ScenarioRunner {
 
         let engine = IrisEngine(state: state, tier: scenario.tier, client: client, retryDelays: retryDelays,
                                factStore: effectiveFactStore, sessionPeerCount: 0, requestDumpSink: requestDumpSink,
-                               declareStateGatedTools: declareStateGatedTools, roundStartHook: roundStartHook)
+                               declareStateGatedTools: experiments.declareStateGatedTools,
+                               stickyTools: experiments.stickyTools, roundStartHook: roundStartHook,
+                               cacheTTLOverride: experiments.ttlOverride)
 
         // Collect this run's finished turn profiles via a task-local sink scoped to the turn loop.
         let collector = TurnCollector()
@@ -212,6 +225,14 @@ enum ScenarioRunner {
         let start = MonotonicClock.nowMs()
         await PerformanceProfiler.$runSink.withValue({ collector.append($0) }) {
             for (turnIndex, turn) in scenario.turns.enumerated() {
+                // A pause lets a cache entry age past its TTL (5c). Only a real-client scenario
+                // waits, so the fake lane (which rewrites clientMode to .fake) stays fast.
+                if let pause = turn.pauseBeforeSeconds, pause > 0, scenario.clientMode == .real {
+                    print("[ScenarioRunner] turn \(turnIndex + 1): pausing \(pause) s before it starts")
+                    await sleep(pause)
+                }
+                if turnIndex > 0, scenario.freshConversationPerTurn { current.move(to: openConversation()) }
+                let conversationId = current.id
                 if let ledger {
                     for run in turn.ledgerRuns ?? [] {
                         do { try ScenarioLedgerSeed.write(run, to: ledger) }
@@ -250,11 +271,12 @@ enum ScenarioRunner {
         // unless it is ended here; the CLI process has no idle reaper. No-op without a session.
         // Awaited here so callers (and tests) observe the teardown; the defer above is the net
         // for any exit path a future change adds, since a defer body cannot await.
-        await SandboxSessionManager.shared.endSession(conversationId)
+        for id in current.all { await SandboxSessionManager.shared.endSession(id) }
 
         return ScenarioResult(turnProfiles: collector.all, wallClockMs: wallClockMs,
                               finalTexts: finalTexts, guardsWereOff: guardsOff, vibecopMeasured: state.vibecopUnderAutoApprove,
-                              toolsSandboxed: sandboxed, conversationId: conversationId, turnErrors: turnErrors,
+                              toolsSandboxed: sandboxed, conversationId: conversationId,
+                              conversationIds: current.all, turnErrors: turnErrors,
                               midTurnEventCards: cards.midTurn)
     }
 
@@ -327,6 +349,15 @@ enum ScenarioLedgerSeed {
             print("[ScenarioRunner] could not seed event card row \(run.name): \(error)")
         }
     }
+}
+
+/// The conversation the current turn runs in, and every one the run has used.
+@MainActor
+private final class CurrentConversation {
+    private(set) var id: UUID
+    private(set) var all: [UUID]
+    init(_ id: UUID) { self.id = id; all = [id] }
+    func move(to next: UUID) { id = next; all.append(next) }
 }
 
 /// The one event card waiting to be delivered during the current turn.

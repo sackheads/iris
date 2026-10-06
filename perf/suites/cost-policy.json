@@ -1,0 +1,3 @@
+{ "name": "cost-policy", "lane": "real", "repetitions": 2, "pauseMs": 2000, "rungs": [4],
+  "scenarios": ["perf/prompts/caching/pinned-pause.json", "perf/prompts/caching/job-cadence.json",
+                "perf/prompts/caching/tool-heavy.json"] }

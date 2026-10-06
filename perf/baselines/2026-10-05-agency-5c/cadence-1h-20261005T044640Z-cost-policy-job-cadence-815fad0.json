@@ -1,0 +1,268 @@
+{
+  "cacheCountsVersion" : 1,
+  "environment" : {
+    "basePricePerMTok" : 4,
+    "buildConfiguration" : "release",
+    "cpuCount" : 16,
+    "experiments" : [
+      "IRIS_PERF_TTL=1h-prefix"
+    ],
+    "gitDirty" : false,
+    "gitSha" : "815fad0",
+    "headless" : false,
+    "injectionGuardEnabled" : true,
+    "machineModel" : "Mac16,5",
+    "models" : {
+      "easy" : "claude-sonnet-5-5",
+      "hard" : "claude-fable-5-1",
+      "medium" : "claude-opus-5-5"
+    },
+    "osVersion" : "Version 26.3.1 (a) (Build 25D771280a)",
+    "promptGuardEngine" : "ollama",
+    "provider" : "Anthropic",
+    "sandboxEnabled" : true,
+    "streaming" : true,
+    "toolDeclarationCount" : 11,
+    "toolSandbox" : "sandboxed",
+    "vibecopEnabled" : true,
+    "vibecopEngine" : "ollama"
+  },
+  "finishedAt" : "2026-10-05T05:18:52Z",
+  "scenarios" : [
+    {
+      "category" : "caching",
+      "lane" : "real",
+      "name" : "job-cadence",
+      "path" : "perf\/prompts\/caching\/job-cadence.json",
+      "rungs" : [
+        {
+          "medianMs" : 963542.8424794674,
+          "p90Ms" : 963734.5278749466,
+          "repetitions" : [
+            {
+              "coldStart" : true,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 4.134083032608032
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.7542080879211426
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 1685.7274589538574
+                    }
+                  },
+                  "finalText" : "ok",
+                  "finalTextLength" : 2,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 0,
+                      "cacheWrite1hTokens" : 12620,
+                      "cacheWriteTokens" : 13254,
+                      "firstTokenMs" : 1673.5700409412384,
+                      "latencyMs" : 1685.763955116272,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 4,
+                      "promptTokens" : 13258,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 4.525166034698486
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 4.125082969665527
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.7588751316070557
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.06604194641113281
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 0.0005409717559814453
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 0.00025010108947753906
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 1698.4529495239258
+                },
+                {
+                  "categories" : {
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 1773.5693328380585
+                    }
+                  },
+                  "finalText" : "ok",
+                  "finalTextLength" : 2,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 12620,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 634,
+                      "firstTokenMs" : 1763.5715000629425,
+                      "latencyMs" : 1773.6040353775024,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 4,
+                      "promptTokens" : 13258,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 7.362166881561279
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 1788.9329195022583
+                }
+              ],
+              "wallClockMs" : 963351.1570839882
+            },
+            {
+              "coldStart" : false,
+              "index" : 1,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 6.865916013717651
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 1.051542043685913
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 1723.1009168624878
+                    }
+                  },
+                  "finalText" : "ok",
+                  "finalTextLength" : 2,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13254,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 0,
+                      "firstTokenMs" : 1722.3473749160767,
+                      "latencyMs" : 1723.134994506836,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 4,
+                      "promptTokens" : 13258,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 2.3299171924591064
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 6.851332902908325
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 1.074833869934082
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.15458297729492188
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 1739.0849590301514
+                },
+                {
+                  "categories" : {
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 2123.5855832099915
+                    }
+                  },
+                  "finalText" : "ok",
+                  "finalTextLength" : 2,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 12620,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 634,
+                      "firstTokenMs" : 2110.440999984741,
+                      "latencyMs" : 2123.6259937286377,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 4,
+                      "promptTokens" : 13258,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 2.900207996368408
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 2131.8440437316895
+                }
+              ],
+              "wallClockMs" : 963734.5278749466
+            }
+          ],
+          "rung" : 4
+        }
+      ],
+      "summary" : {
+        "medianFirstTokenMs" : 1742.9594374895096,
+        "medianMs" : 963542.8424794674,
+        "p90Ms" : 963734.5278749466,
+        "toolCallRate" : 0,
+        "toolCallsByName" : {
+
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    }
+  ],
+  "schemaVersion" : 1,
+  "startedAt" : "2026-10-05T04:46:40Z",
+  "suite" : "cost-policy-job-cadence"
+}

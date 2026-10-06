@@ -1,0 +1,6 @@
+{ "name": "pinned-pause", "clientMode": "real", "tier": "medium", "pinned": true,
+  "seedFacts": ["QUILLBARROW keeps bees."],
+  "expectedTools": [],
+  "turns": [
+    { "prompt": "Greet me in five words." },
+    { "prompt": "Name a prime number between 20 and 30.", "pauseBeforeSeconds": 360 } ] }
