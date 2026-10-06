@@ -179,6 +179,33 @@ struct JobLedgerPolicyTests {
         #expect(try store.ledger.usage(jobId: job.id, now: now, calendar: utc).weightedTokensToday == 3_400)
     }
 
+    @Test("weightedTokensToday reads each row's cache at its own model's ratio (#370)")
+    func weightedTokensTodayPerRowModel() throws {
+        let store = try ConversationStore.inMemory()
+        let job = try seedJob(store, "j")
+        let utc = calendar("UTC")
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        func anthropicRun(model: String?) -> JobRun {
+            var r = makeRun(job, at: now, tokens: 0)
+            r.provider = "Anthropic"; r.model = model
+            r.promptTokens = 10_000; r.totalTokens = 10_000; r.cacheReadTokens = 10_000
+            return r
+        }
+        let opus = anthropicRun(model: "claude-opus-5-5")
+        let haiku = anthropicRun(model: "claude-haiku-4-5-20251001")
+        let unlisted = anthropicRun(model: "claude-opus-4-8")
+        let noModel = anthropicRun(model: nil)
+        var legacy = makeRun(job, at: now, tokens: 0)
+        legacy.model = "claude-opus-5-5"; legacy.promptTokens = 1_000; legacy.totalTokens = 1_000
+        for r in [opus, haiku, unlisted, noModel, legacy] { try store.ledger.begin(run: r) }
+        #expect(try store.ledger.run(id: opus.id)?.model == "claude-opus-5-5")
+        #expect(try store.ledger.run(id: noModel.id)?.model == nil)
+        // opus 500 + haiku 1_000 + unlisted 1_000 + no model 1_000 (the provider's 0.1) + legacy
+        // 1_000 at its plain total: no provider means no weights, whatever the model says.
+        #expect(try store.ledger.weightedTokensToday(jobId: job.id, calendar: utc, now: now) == 4_500)
+        #expect(try store.ledger.usage(jobId: job.id, now: now, calendar: utc).weightedTokensToday == 4_500)
+    }
+
     @Test("tokensToday with a nil jobId sums every job")
     func tokensTodayGlobal() throws {
         let store = try ConversationStore.inMemory()

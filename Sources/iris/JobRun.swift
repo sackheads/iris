@@ -40,6 +40,9 @@ struct JobRun: Identifiable, Equatable, Sendable {
     /// which `CostWeights` then prices at its plain total.
     var provider: String?
     var tier: String?
+    /// The model id `tier` resolved to when the run began (#370): cache reads price at its ratio.
+    /// nil on every row written before v16, which reads at the provider's ratio.
+    var model: String?
     /// Reserved: nothing computes a cost yet (spec §6.3).
     var costMicros: Int64?
     /// What the run's gate saw — an ETag, an mtime, a hash (#187 deliverable 3, spec §7). Compared
@@ -81,6 +84,7 @@ struct JobRun: Identifiable, Equatable, Sendable {
         self.totalTokens = 0
         self.provider = nil
         self.tier = nil
+        self.model = nil
         self.costMicros = nil
         self.gateSignal = nil
         self.transcriptConversationId = transcriptConversationId

@@ -300,8 +300,8 @@ extension JobLedger {
                     failureReason, blockedTool, promptTokens, candidateTokens, totalTokens,
                     costMicros, gateSignal, transcriptConversationId, acknowledgedAt,
                     blockedCall, approvedAt, parentRunId, watchSummary, provider, tier,
-                    cacheReadTokens, cacheWriteTokens, cacheWrite1hTokens)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    cacheReadTokens, cacheWriteTokens, cacheWrite1hTokens, model)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     run.id.uuidString, run.jobId.uuidString, run.jobName, run.triggerKind,
                     run.startedAt, run.finishedAt, run.status.rawValue, run.outcome,
@@ -310,7 +310,7 @@ extension JobLedger {
                     run.transcriptConversationId?.uuidString, run.acknowledgedAt,
                     blockedCallJSON, run.approvedAt, run.parentRunId?.uuidString,
                     watchSummaryJSON, run.provider, run.tier,
-                    run.cacheReadTokens, run.cacheWriteTokens, run.cacheWrite1hTokens,
+                    run.cacheReadTokens, run.cacheWriteTokens, run.cacheWrite1hTokens, run.model,
                 ])
         }
     }
@@ -635,9 +635,10 @@ extension JobLedger {
     /// what it spent. A burst of concurrent runs can still overshoot the daily figure by up to one
     /// round apiece, which the per-run budget bounds (§4, "during a run").
     ///
-    /// In **weighted tokens** (5c §0.5): each row is priced by its own provider, never the one
-    /// configured now, and in Swift rather than SQL so the weights stay a table that re-prices
-    /// history at read time. A row with no provider (pre-5c) counts its plain total.
+    /// In **weighted tokens** (5c §0.5): each row is priced by its own provider and model (#370),
+    /// never the ones configured now, and in Swift rather than SQL so the weights stay a table that
+    /// re-prices history at read time. A row with no provider (pre-5c) counts its plain total; one
+    /// with no model (pre-v16) reads at its provider's ratio.
     func weightedTokensToday(jobId: UUID?, calendar: Calendar, now: Date) throws -> Int {
         try writer.read { db in try Self.weightedTokensToday(db, jobId: jobId, calendar: calendar, now: now) }
     }
@@ -646,7 +647,7 @@ extension JobLedger {
         let dayStart = calendar.startOfDay(for: now)
         guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return 0 }
         let columns = """
-            SELECT provider, promptTokens, candidateTokens, totalTokens,
+            SELECT provider, model, promptTokens, candidateTokens, totalTokens,
                    cacheReadTokens, cacheWriteTokens, cacheWrite1hTokens FROM job_runs
             """
         let rows: [Row]
@@ -668,7 +669,8 @@ extension JobLedger {
                 run.cacheReadTokens = try r.read("cacheReadTokens", Int.self) ?? 0
                 run.cacheWriteTokens = try r.read("cacheWriteTokens", Int.self) ?? 0
                 run.cacheWrite1hTokens = try r.read("cacheWrite1hTokens", Int.self) ?? 0
-                return sum + CostWeights.weighted(run.components, provider: try r.read("provider", String.self))
+                return sum + CostWeights.weighted(run.components, provider: try r.read("provider", String.self),
+                                                  model: try r.read("model", String.self))
             } catch {
                 skipped += 1
                 return sum
@@ -773,6 +775,7 @@ extension JobLedger {
         run.cacheWrite1hTokens = try r.read("cacheWrite1hTokens", Int.self) ?? 0
         run.provider = try r.read("provider", String.self)
         run.tier = try r.read("tier", String.self)
+        run.model = try r.read("model", String.self)
         run.costMicros = try r.read("costMicros", Int64.self)
         run.gateSignal = try r.read("gateSignal", String.self)
         run.acknowledgedAt = try r.read("acknowledgedAt", Date.self)

@@ -43,13 +43,15 @@ These were checked against the code and live, 2026-10-04.
    - Output × 5 is a floor across providers; actual output prices range from 4× to 8× input. On an 8× provider this under-charges output-heavy runs by up to 1.6×. That's accepted, because the budget guards against runaway spend, not billing precision.
    - The 200k per run, 1M per job per day and 3M global defaults stay. At a 20k prompt that is 97% cache reads with 500 output tokens, a round costs about 5k weighted, so a run gets about 40 rounds instead of 10. A cold first round costs about 25k.
    - *Cost if wrong:* weights are a table, and history is re-priced at read time (decision 6), so changing a weight needs no migration.
+   - **Amended by #370:** r is now the run's model's published ratio where `CostWeights.modelReadRatios` lists it (`claude-opus-5-5` 0.05; `claude-fable-5-1` and `claude-mythos-5-1` 0.025; `claude-opus-5`, `claude-fable-5`, Sonnet and Haiku 0.1), and the provider's r above for any other model or a row with no model. w stays per provider.
 6. **The ledger stores the raw usage components.** `job_runs` gains these columns, each with NULL meaning 0 or unknown (invariant 1):
    - `cacheReadTokens`;
    - `cacheWriteTokens`, which is the **total** of cache writes;
    - `cacheWrite1hTokens`, which is the 1-hour **share** of that total;
-   - `provider` and `tier`, written at `begin(run:)`.
+   - `provider` and `tier`, written at `begin(run:)`;
+   - `model`, the id the run's tier resolved to, also written at `begin(run:)` (#370, migration `v16_job_run_model`). NULL reads at the provider's ratio.
 
-   Weighted totals are computed from the components and the run's own provider wherever they are needed, never from the current provider, and they are never stored. A row with no provider (written before 5c) is priced as its plain `totalTokens`, every component at 1× and output included. That is today's behaviour, and old event cards are treated the same way.
+   Weighted totals are computed from the components and the run's own provider (and, since #370, model) wherever they are needed, never from the current ones, and they are never stored. A row with no provider (written before 5c) is priced as its plain `totalTokens`, every component at 1× and output included. That is today's behaviour, and old event cards are treated the same way.
 
    The 1-hour split arrives as a nested `usage.cache_creation` object (`ephemeral_5m_input_tokens`, `ephemeral_1h_input_tokens`). Today neither the non-streaming parse nor the SSE `message_start` path reads it. Both must.
 7. **One unit everywhere a budget is compared or shown:**
@@ -113,7 +115,7 @@ These were checked against the code and live, 2026-10-04.
 - Persisting the sticky set across restarts (decision 1; only on evidence).
 - Billing in dollars. Rejected: price tables go stale, and one owner runs an unlimited Vertex budget. The perf cost column is a check, not a budget.
 - Anthropic thinking replay (#314).
-- A per-model cache-read weight. `CostWeights` prices Anthropic reads at 0.1 per provider, and Opus 5.5 reads at 0.05; on the 5c runs that overstates Opus by about 1.22× (§4.3). The fix stores the model id on `job_runs` and keys the read weight per model: #370.
+- A per-model cache-read weight. `CostWeights` priced Anthropic reads at 0.1 per provider, and Opus 5.5 reads at 0.05; on the 5c runs that overstated Opus by about 1.22× (§4.3). Done since in #370: `job_runs` stores the model id and the read weight is keyed per model.
 
 ## 4. Measured
 
@@ -153,7 +155,7 @@ The unexpected-call counts for `manage_fact`, `list_sessions`, `send_to_session`
 
 ### 4.3 The bill check
 
-The cost column sums to $2.4513 over all seven arms. The same tokens at Opus 5.5's published rates come to **$2.0121**, which is what the runs cost. The column is 1.22× high overall and up to 1.54× high on the read-heavy tool-heavy repetitions. All of the gap is the read weight: `CostWeights` reads Anthropic at 0.1 (§0.5, conservative on purpose), and Opus 5.5 bills reads at 0.05. Write and output weights match the published ratios exactly, and the pinned and cadence 5-minute arms, which barely read, agree within half a cent. That is inside the 2× tolerance, so no weight changes here; keying the read weight per model is #370. **Not done:** a comparison with the provider's billing console for the same window, which needs the owner's console access. Until someone makes it, the $2.01 is a published-rate computation, not a bill.
+The cost column sums to $2.4513 over all seven arms. The same tokens at Opus 5.5's published rates come to **$2.0121**, which is what the runs cost. The column is 1.22× high overall and up to 1.54× high on the read-heavy tool-heavy repetitions. All of the gap is the read weight: `CostWeights` reads Anthropic at 0.1 (§0.5, conservative on purpose), and Opus 5.5 bills reads at 0.05. Write and output weights match the published ratios exactly, and the pinned and cadence 5-minute arms, which barely read, agree within half a cent. That is inside the 2× tolerance, so no weight changes here. **Since #370** the cost column prices each round's reads at its own model's ratio, Opus 5.5 at 0.05, and re-reporting the seven records with `iris --perf report` (2026-10-06) sums the weighted-total lines to $2.0123 against the $2.0121 above, the difference being per-line rounding. The 1.22× gap is closed. **Not done:** a comparison with the provider's billing console for the same window, which needs the owner's console access. Until someone makes it, the $2.01 is a published-rate computation, not a bill.
 
 ### 4.4 Decisions
 

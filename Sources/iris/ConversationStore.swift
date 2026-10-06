@@ -523,6 +523,13 @@ final class ConversationStore: Sendable {
                 t.add(column: "tier", .text)
             }
         }
+        // #370: the model the run's tier resolved to at `begin`, so cache reads price at that
+        // model's ratio. NULL (every earlier row) prices at the provider's, as before.
+        m.registerMigration("v16_job_run_model") { db in
+            try db.alter(table: "job_runs") { t in
+                t.add(column: "model", .text)
+            }
+        }
         return m
     }
 

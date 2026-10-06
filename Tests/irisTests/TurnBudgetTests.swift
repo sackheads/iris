@@ -312,6 +312,41 @@ struct TurnBudgetTests {
         #expect(try store.ledger.runs(jobId: job.id, limit: 1).first?.totalTokens == 967)
     }
 
+    /// A probe round whose whole prompt came from the cache: 1,000 reads, nothing else.
+    private func cachedProbeRound() -> GeminiResponse {
+        GeminiResponse(candidates: [Candidate(content: Content(
+            role: "model", parts: [Part(functionCall: FunctionCall(name: "noop_probe", args: [:]))]))],
+                       usageMetadata: UsageMetadata(promptTokenCount: 1_000, candidatesTokenCount: 0,
+                                                    totalTokenCount: 1_000, cacheReadTokens: 1_000))
+    }
+
+    /// #370: the per-round check prices reads at the model the run's tier resolves to, which the
+    /// runner stamps on the row and hands the budget. 1,000 reads weigh 50 on Opus 5.5 and 100 on
+    /// Haiku, so a 75 budget lets Opus take a second round and stops Haiku after its first.
+    @Test(arguments: [("claude-opus-5-5", 2), ("claude-haiku-4-5-20251001", 1)])
+    func theRoundBudgetReadsAtTheTiersModel(model: String, rounds: Int) async throws {
+        let (store, state, engine, client, _) = try harness([
+            cachedProbeRound(), cachedProbeRound(), cachedProbeRound(), textRound("all done"),
+        ])
+        var job = Job(name: "reader", prompt: "Work.", trigger: .schedule(.interval(seconds: 60)),
+                      profile: .mutating)
+        job.policy.perRunTokenBudget = 75
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        config.primaryProvider = LLMProvider.anthropic.rawValue
+        config.anthropicModelMedium = model   // the harness engine runs .medium
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in },
+                               config: config, activity: RecordingActivity(), sandboxAvailable: { true })
+
+        await runner.fire(job: job, origin: .schedule)
+
+        #expect(client.callCount == rounds)
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.model == model && run.tier == "medium" && run.provider == "Anthropic")
+        #expect(run.failureReason == TurnBudget.weightedTokensExceeded)
+    }
+
     @Test("a run that spends its per-run budget is a failed row and a card that says why")
     func budgetStopIsAFailedRun() async throws {
         let (store, state, engine, client, _) = try harness([

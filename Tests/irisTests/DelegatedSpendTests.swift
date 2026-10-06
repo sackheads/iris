@@ -172,7 +172,7 @@ struct DelegatedSpendTests {
         #expect(card.totalTokens == 120, "the card shows the same figure as the row")
         // 5c: weighted at the isolated config's provider (Gemini): 117 prompt + 3 output × 5.
         #expect(card.weightedTokens == 117 + 15)
-        #expect(card.weightedTokens == CostWeights.weighted(run.components, provider: run.provider),
+        #expect(card.weightedTokens == CostWeights.weighted(run.components, provider: run.provider, model: run.model),
                 "and the card's weighted figure is the row's, priced the same way")
     }
 
@@ -291,7 +291,7 @@ struct DelegatedSpendTests {
         #expect(run.status == .completed)
         #expect(run.provider == "Anthropic")
         #expect(run.totalTokens > 5_000, "raw, it is over the budget")
-        #expect(CostWeights.weighted(run.components, provider: run.provider) < 5_000)
+        #expect(CostWeights.weighted(run.components, provider: run.provider, model: run.model) < 5_000)
     }
 
     @Test("a subagent whose own rounds spend the run's budget is refused its next round")

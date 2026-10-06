@@ -922,6 +922,11 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
   | Gemini | 0.1 | 0 (implicit caching has no write charge) |
   | OpenAI | 0.1 | 0 |
 
+  The read ratio r is the run's model's where Iris has a published figure for it (since #370):
+  `claude-opus-5-5` reads at 0.05, `claude-fable-5-1` and `claude-mythos-5-1` at 0.025, and
+  `claude-opus-5`, `claude-fable-5`, every Sonnet and every Haiku at 0.1. Any other model reads
+  at its provider's r above. The model never changes w.
+
   Which Anthropic writes are 1-hour ones (since 5c): a job run's shared prefix (the system prompt
   and the tools, common to every run) is cached for an hour whenever some enabled, unpaused
   scheduled job that runs a model turn fires more often than hourly, and for five minutes
@@ -933,10 +938,12 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
   minutes.
 
   Output × 5 is a floor; real output prices run 4× to 8× input. Each run is priced at the
-  provider it ran on, which its row records, never at whatever is configured now, and the weights
-  are applied when the figure is read, so a changed weight re-prices history without a migration. A
-  row written before 5c records no provider and is priced at its plain total, every token at 1×, as
-  it was charged then. In practice a 20k-token prompt that is 97% cache reads with 500 output
+  provider and model it ran on, which its row records, never at whatever is configured now, and the
+  weights are applied when the figure is read, so a changed weight re-prices history without a
+  migration. The model is the one the run's tier resolved to when it began; a delegated subagent
+  on another tier is priced at the run's model too. A row written before #370 records no model and
+  reads at its provider's ratio. A row written before 5c records no provider and is priced at its
+  plain total, every token at 1×, as it was charged then. In practice a 20k-token prompt that is 97% cache reads with 500 output
   tokens weighs about 5k, so a 200,000 run budget lasts about 40 such rounds instead of 10; a cold
   first round weighs about 25k. Before 5a an Anthropic run was charged nothing because Anthropic
   reports no total. A run's tokens include what its delegated subagents (and theirs, and
@@ -1021,7 +1028,7 @@ the whole unattended system's weighted tokens for the day against the global cei
 carries the same figures as fields — `weightedTokensToday`, `dailyBudget`, `runsLastHour`,
 `maxRunsPerHour`, `retryAttempt`, `policy`, `gateKind`, `profile`, `grants`, and
 `weightedTokensTodayAllJobs` against `globalDailyBudget` — and `get_job_run` gives one run's raw
-counts, its cache reads and writes, its provider and its `weightedTokens`, so the model answers "how
+counts, its cache reads and writes, its provider and model and its `weightedTokens`, so the model answers "how
 much has this job spent today?" from the same arithmetic admission decides on. A figure that could not be read is a dash in the table and a
 `null` in the tool, never a zero: "nothing spent today" is a claim, and an unreadable ledger is not
 one. One row that will not read inside an otherwise readable day is different: `weightedTokensToday`
