@@ -22,11 +22,15 @@ func withTimeout<T: Sendable>(seconds: Double, _ operation: @escaping @Sendable 
         race.start(
             work: { Task { race.settle(await Result(awaiting: operation)) } },
             timer: {
-                Task {
-                    let ns = UInt64(min(max(0, seconds.isNaN ? 0 : seconds), 1e9) * 1_000_000_000)
-                    guard (try? await Task.sleep(nanoseconds: ns)) != nil else { return }
-                    race.settle(.failure(TimeoutError()))
-                }
+                // A dispatch timer, not a `Task.sleep`: a sleeping task wakes only when a pool
+                // thread is free, so a pool held by blocking work held the deadline with it, and
+                // `run_command`'s kill with that (#372). This fires on a thread of its own, and
+                // `settle` cancels the work from there — which runs its `onCancel` synchronously.
+                let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "iris.timeout"))
+                timer.schedule(deadline: .now() + min(max(0, seconds.isNaN ? 0 : seconds), 1e9))
+                timer.setEventHandler { race.settle(.failure(TimeoutError())) }
+                timer.resume()
+                return timer
             })
         return try await race.wait()
     } onCancel: {
@@ -41,13 +45,14 @@ private final class TimeoutRace<T: Sendable>: @unchecked Sendable {
     private var outcome: Result<T, Error>?
     private var waiter: CheckedContinuation<T, Error>?
     private var work: Task<Void, Never>?
-    private var timer: Task<Void, Never>?
+    private var timer: DispatchSourceTimer?
 
-    /// Starts the two tasks, unless the race is already settled — a caller cancelled before this
-    /// point — in which case the operation never starts (no process spawned only to be killed).
-    /// Under the lock, so `settle` cannot slip between the check and the hand-over; creating a
-    /// `Task` does not run its body here, so the lock is never held across the operation.
-    func start(work: () -> Task<Void, Never>, timer: () -> Task<Void, Never>) {
+    /// Starts the work and the timer, unless the race is already settled — a caller cancelled
+    /// before this point — in which case the operation never starts (no process spawned only to
+    /// be killed). Under the lock, so `settle` cannot slip between the check and the hand-over;
+    /// creating a `Task` does not run its body here, so the lock is never held across the
+    /// operation, and a timer that fires at once waits in `settle` until the hand-over is done.
+    func start(work: () -> Task<Void, Never>, timer: () -> DispatchSourceTimer) {
         lock.lock()
         defer { lock.unlock() }
         guard outcome == nil else { return }
