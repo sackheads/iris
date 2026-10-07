@@ -405,7 +405,7 @@ struct AnthropicClient {
         }
         
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        return try parseResponse(json)
+        return try parseResponse(json, raw: data)
     }
 
     /// Anthropic's non-stream Messages response back to `GeminiResponse`. `usage.input_tokens`
@@ -416,7 +416,8 @@ struct AnthropicClient {
     /// The stop reasons that can cut a block off partway.
     static let truncatingStopReasons: Set<String> = ["max_tokens", GeminiResponse.contextWindowReason]
 
-    static func parseResponse(_ json: [String: Any]) throws -> GeminiResponse {
+    /// `raw` is the response's bytes; without it no blocks are stored (#314).
+    static func parseResponse(_ json: [String: Any], raw: Data? = nil) throws -> GeminiResponse {
         var geminiResponse = GeminiResponse()
         geminiResponse.candidates = []
 
@@ -442,6 +443,12 @@ struct AnthropicClient {
                         content.parts.append(Part(text: nil, functionCall: FunctionCall(name: name, args: jsonArgs, id: id, thought_signature: nil, thoughtSignature: nil), functionResponse: nil, thought_signature: nil, thoughtSignature: nil))
                     }
                 }
+            }
+
+            // #314: the array as it arrived, cut from the response bytes, never re-serialised.
+            if let raw, let array = RawJSON.topLevelValue("content", in: raw),
+               let stored = AnthropicBlocks.storable(array) {
+                content.anthropicBlocks = stored
             }
 
             // `stop_reason` rides on the candidate as the stream's does, so a non-streamed

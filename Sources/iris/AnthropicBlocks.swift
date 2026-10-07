@@ -133,3 +133,76 @@ enum AnthropicBlocks {
         return trimmed.map { Substring($0) }
     }
 }
+
+/// One top-level member of a JSON object, cut out as bytes without parsing the value, so the
+/// non-stream path stores a reply's blocks exactly as they arrived (#314 decision 1).
+enum RawJSON {
+    /// The bytes of `key`'s value in the top-level object `data`, or nil when `data` is not an
+    /// object or has no such member. Strings are skipped escape-aware, so a brace or a quoted key
+    /// inside a string is never taken for structure.
+    static func topLevelValue(_ key: String, in data: Data) -> String? {
+        let b = [UInt8](data)
+        var i = 0
+        func skipSpace() {
+            while i < b.count, b[i] == 0x20 || b[i] == 0x09 || b[i] == 0x0A || b[i] == 0x0D { i += 1 }
+        }
+        func skipString() -> Bool {               // at `"`; ends just past the closing quote
+            guard i < b.count, b[i] == 0x22 else { return false }
+            i += 1
+            while i < b.count {
+                switch b[i] {
+                case 0x5C: i += 2                     // a backslash escapes the next byte
+                case 0x22: i += 1; return true
+                default: i += 1
+                }
+            }
+            return false
+        }
+        func skipValue() -> Bool {
+            skipSpace()
+            guard i < b.count else { return false }
+            if b[i] == 0x22 { return skipString() }
+            if b[i] == 0x7B || b[i] == 0x5B {
+                var depth = 0
+                while i < b.count {
+                    switch b[i] {
+                    case 0x22:
+                        guard skipString() else { return false }
+                        continue
+                    case 0x7B, 0x5B:
+                        depth += 1
+                    case 0x7D, 0x5D:
+                        depth -= 1
+                        if depth == 0 { i += 1; return true }
+                    default:
+                        break
+                    }
+                    i += 1
+                }
+                return false
+            }
+            let start = i
+            while i < b.count, ![0x2C, 0x7D, 0x5D, 0x20, 0x09, 0x0A, 0x0D].contains(b[i]) { i += 1 }
+            return i > start
+        }
+        skipSpace()
+        guard i < b.count, b[i] == 0x7B else { return nil }
+        i += 1
+        while true {
+            skipSpace()
+            let keyStart = i
+            guard skipString() else { return nil }
+            let name = try? JSONDecoder().decode(String.self, from: Data(b[keyStart..<i]))
+            skipSpace()
+            guard i < b.count, b[i] == 0x3A else { return nil }
+            i += 1
+            skipSpace()
+            let valueStart = i
+            guard skipValue() else { return nil }
+            if name == key { return String(decoding: b[valueStart..<i], as: UTF8.self) }
+            skipSpace()
+            guard i < b.count, b[i] == 0x2C else { return nil }
+            i += 1
+        }
+    }
+}

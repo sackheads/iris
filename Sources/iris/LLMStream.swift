@@ -88,6 +88,8 @@ struct StreamAssembler: Sendable {
     private(set) var blockReason: String?
     /// `now` of the first text delta or function call; nil until then.
     private(set) var firstTokenAt: Double?
+    /// #314: the reply's content array, when the stream ended a complete reply that thought.
+    private(set) var anthropicBlocks: String?
 
     mutating func apply(_ event: LLMStreamEvent, now: Double) {
         switch event {
@@ -112,8 +114,8 @@ struct StreamAssembler: Sendable {
         case .done(let finish, let block):
             finishReason = finish
             blockReason = block
-        case .anthropicBlocks:
-            break
+        case .anthropicBlocks(let raw):
+            anthropicBlocks = raw
         }
     }
 
@@ -139,7 +141,8 @@ struct StreamAssembler: Sendable {
             bare.thought_signature = nil
             parts.append(Part(functionCall: bare, thoughtSignature: signature))
         }
-        let content = parts.isEmpty ? nil : Content(role: "model", parts: parts)
+        var content = parts.isEmpty ? nil : Content(role: "model", parts: parts)
+        content?.anthropicBlocks = anthropicBlocks
         var response = GeminiResponse(candidates: [Candidate(content: content, finishReason: finishReason)], usageMetadata: usage?.withTotal())
         if let blockReason { response.promptFeedback = PromptFeedback(blockReason: blockReason) }
         return response
@@ -171,6 +174,7 @@ extension LLMStreamEvent {
                 out.append(.functionCall(call))
             }
         }
+        if let raw = candidate?.content?.anthropicBlocks { out.append(.anthropicBlocks(raw)) }
         if let usage = response.usageMetadata { out.append(.usage(usage)) }
         out.append(.done(finishReason: candidate?.finishReason, blockReason: response.promptFeedback?.blockReason))
         return out
