@@ -2575,7 +2575,7 @@ struct AnthropicBindingRetryTests {
         #expect(rec.all[1].value(forHTTPHeaderField: "anthropic-beta") == AnthropicCapabilities.bindingBeta)
     }
 
-    @Test("streaming: the same retry, before any event, with the fallback event first")
+    @Test("streaming: the same retry, before any event, with the fallback event last")
     func streamRetriesOnce() async throws {
         let rec = Recorder()
         let (session, remove) = Self.session(rejections: [Self.bindingRejection], stream: true, recorder: rec)
@@ -2583,7 +2583,7 @@ struct AnthropicBindingRetryTests {
         var events: [LLMStreamEvent] = []
         for try await e in AnthropicClient.streamContent(request: Self.request(), model: "claude-opus-5-5", session: session,
                                                          transport: { Self.direct }) { events.append(e) }
-        #expect(events.first == .prefixMismatchFallback)
+        #expect(events.last == .prefixMismatchFallback)
         #expect(events.contains(.textDelta("ok")))
         #expect(rec.all.count == 2)
         #expect(rec.bodies[1].contains("drop_block"))
@@ -2671,7 +2671,7 @@ In `LLMStreamEvent`:
     case prefixMismatchFallback
 ```
 
-Assembler: add `private(set) var bindingFallback = false`, `case .prefixMismatchFallback: bindingFallback = true`, and in `response()` `response.anthropicBindingFallback = bindingFallback`. In `events(from:)`, put `if response.anthropicBindingFallback { out.append(.prefixMismatchFallback) }` first.
+Assembler: add `private(set) var bindingFallback = false`, `case .prefixMismatchFallback: bindingFallback = true`, and in `response()` `response.anthropicBindingFallback = bindingFallback`. In `events(from:)`, put `if response.anthropicBindingFallback { out.append(.prefixMismatchFallback) }` last, after `.done`, matching the stream path.
 
 In `APIError`, add `var prefixMismatchDiagnosis: String? = nil` after `retryAfter`, and in `http(...)` pass `prefixMismatchDiagnosis: InputTransformation.diagnosis(in: headers)`.
 
@@ -2719,9 +2719,9 @@ In `streamContent`, add a third `catch` after the TTL one:
 ```swift
                     } catch let error where !yielded && isBindingRejection(error, request: request) {
                         logBindingFallback(error)
-                        // First, so the assembled reply tells the engine to keep drop_block.
-                        continuation.yield(.prefixMismatchFallback)
                         for try await event in attempt(withDropBlock(request)) { continuation.yield(event) }
+                        // Last, once the retry has finished: the event means the retry succeeded.
+                        continuation.yield(.prefixMismatchFallback)
                     }
 ```
 

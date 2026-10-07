@@ -22,7 +22,8 @@ enum LLMStreamEvent: Sendable, Equatable {
     case inputTransformations([InputTransformation])
     /// #314: the `anthropic-thinking-prefix-mismatch` response header, when present.
     case prefixMismatchDiagnosis(String)
-    /// #314: the client retried with drop_block after a binding 400. Not a token.
+    /// #314: the client retried with drop_block after a binding 400, and the retry completed.
+    /// Yielded last, after the retry's own events; a failed retry never yields it. Not a token.
     case prefixMismatchFallback
 }
 
@@ -184,7 +185,6 @@ extension LLMStreamEvent {
     /// A finished response as the events a stream would have produced.
     static func events(from response: GeminiResponse) -> [LLMStreamEvent] {
         var out: [LLMStreamEvent] = []
-        if response.anthropicBindingFallback { out.append(.prefixMismatchFallback) }
         let candidate = response.candidates?.first
         for part in candidate?.content?.parts ?? [] {
             if let text = part.text {
@@ -202,6 +202,8 @@ extension LLMStreamEvent {
         if let entries = response.anthropicInputTransformations { out.append(.inputTransformations(entries)) }
         if let diagnosis = response.anthropicPrefixDiagnosis { out.append(.prefixMismatchDiagnosis(diagnosis)) }
         out.append(.done(finishReason: candidate?.finishReason, blockReason: response.promptFeedback?.blockReason))
+        // Last, as the stream path yields it: only a retry that completed sets it.
+        if response.anthropicBindingFallback { out.append(.prefixMismatchFallback) }
         return out
     }
 

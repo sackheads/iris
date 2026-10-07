@@ -409,9 +409,10 @@ struct AnthropicClient {
                         for try await event in attempt(withoutTTL(request)) { continuation.yield(event) }
                     } catch let error where !yielded && isBindingRejection(error, request: request) {
                         logBindingFallback(error)
-                        // First, so the assembled reply tells the engine to raise the floor.
-                        continuation.yield(.prefixMismatchFallback)
                         for try await event in attempt(withDropBlock(request)) { continuation.yield(event) }
+                        // Last, once the retry has finished: the event means the retry succeeded,
+                        // and the engine raises the floor (and, from Task 13, persists) on it.
+                        continuation.yield(.prefixMismatchFallback)
                     }
                     continuation.finish()
                 } catch {

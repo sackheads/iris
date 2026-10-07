@@ -103,7 +103,7 @@ struct AnthropicBindingRetryTests {
         #expect(rec.all[1].value(forHTTPHeaderField: "anthropic-beta") == AnthropicCapabilities.bindingBeta)
     }
 
-    @Test("streaming: the same retry, before any event, with the fallback event first")
+    @Test("streaming: the same retry, before any event, with the fallback event last")
     func streamRetriesOnce() async throws {
         let rec = Recorder()
         let (session, remove) = Self.session(rejections: [Self.bindingRejection], stream: true, recorder: rec)
@@ -111,7 +111,7 @@ struct AnthropicBindingRetryTests {
         var events: [LLMStreamEvent] = []
         for try await e in AnthropicClient.streamContent(request: Self.request(), model: "claude-opus-5-5", session: session,
                                                          transport: { Self.direct }) { events.append(e) }
-        #expect(events.first == .prefixMismatchFallback)
+        #expect(events.last == .prefixMismatchFallback)
         #expect(events.contains(.textDelta("ok")))
         #expect(rec.all.count == 2)
         #expect(rec.bodies[1].contains("drop_block"))
@@ -139,6 +139,20 @@ struct AnthropicBindingRetryTests {
                                                           transport: Self.direct, session: session)
         }
         #expect(rec.all.count == 2)
+    }
+
+    @Test("streaming: a retry that fails again yields no fallback event")
+    func failedRetryYieldsNoFallback() async throws {
+        let rec = Recorder()
+        let (session, remove) = Self.session(rejections: [Self.bindingRejection, Self.bindingRejection], stream: true, recorder: rec)
+        defer { remove() }
+        var events: [LLMStreamEvent] = []
+        await #expect(throws: APIError.self) {
+            for try await e in AnthropicClient.streamContent(request: Self.request(), model: "claude-opus-5-5", session: session,
+                                                             transport: { Self.direct }) { events.append(e) }
+        }
+        #expect(rec.all.count == 2, "precondition: the retry ran")
+        #expect(!events.contains(.prefixMismatchFallback))
     }
 
     @Test("a tampered signature (no 'bound to a different conversation') is not retried")
@@ -207,7 +221,7 @@ struct AnthropicBindingRetryTests {
         a.apply(.textDelta("ok"), now: 0)
         let response = a.response()
         #expect(response.anthropicBindingFallback)
-        #expect(LLMStreamEvent.events(from: response).first == .prefixMismatchFallback)
+        #expect(LLMStreamEvent.events(from: response).last == .prefixMismatchFallback)
         #expect(!LLMStreamEvent.events(from: GeminiResponse(candidates: [], usageMetadata: nil)).contains(.prefixMismatchFallback))
     }
 
