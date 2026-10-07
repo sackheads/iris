@@ -45,6 +45,28 @@ struct SandboxTimeoutTests {
 
     @Test("a child that ignores SIGTERM is SIGKILLed after the grace period", .timeLimit(.minutes(1)))
     func childKilledAfterGrace() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-kill-grace-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // The deadline counts from the spawn, and nothing outside the runner can move it, so the
+        // shell's readiness cannot gate the clock. It gates the attempt instead: an attempt whose
+        // SIGTERM beat the `trap` killed an ordinary shell, which is right but tests nothing here,
+        // and is run again (#386).
+        for attempt in 1...3 {
+            let ready = dir.appendingPathComponent("ready-\(attempt)").path
+            let wall = try await Self.runTrappedShell(signalling: ready)
+            guard FileManager.default.fileExists(atPath: ready) else { continue }
+            // SIGTERM was ignored, so it took the grace period plus SIGKILL — but not the full sleep.
+            #expect(wall >= 1 + CLIProcessRunner.killGraceSeconds, "attempt \(attempt)")
+            #expect(wall < 9)
+            return
+        }
+        Issue.record("in 3 attempts the deadline's SIGTERM always reached the shell before its trap did")
+    }
+
+    /// One run of a shell that ignores SIGTERM and then touches `ready`, under a 1 s deadline.
+    /// Returns the wall time, once the runner has answered `.timedOut` and the shell is gone.
+    private static func runTrappedShell(signalling ready: String) async throws -> Double {
         let marker = "iris-kill-\(UUID().uuidString)"
         // `/bin/sh`, and nothing outside the base system: the shell traps SIGTERM so the ladder's
         // second rung is the only way out of it. The sleep is inside a loop on purpose — the rung
@@ -53,9 +75,10 @@ struct SandboxTimeoutTests {
         // a duration nothing else would be sleeping for, so the teardown below can find any child
         // orphaned between the last `pkill -P` and the SIGKILL, and reaches nothing of anyone
         // else's. The marker is in the shell's own argv alone, so the assertion is about the shell.
+        // `ready` is touched after the trap, so it exists only if the trap was in place first.
         let nap = "9.\(Int.random(in: 100_000...999_999))"
-        let script = "trap '' TERM; while :; do sleep \(nap); done   # \(marker)"
-        defer { Self.killAll(matching: "sleep \(nap)") }
+        let script = "trap '' TERM; : > '\(ready)'; while :; do sleep \(nap); done   # \(marker)"
+        defer { killAll(matching: "sleep \(nap)") }
         let started = Date()
         var thrown: Error?
         do {
@@ -68,12 +91,10 @@ struct SandboxTimeoutTests {
         let error = try #require(thrown as? ContainerRuntimeError)
         guard case .timedOut = error else {
             Issue.record("expected .timedOut, got \(error)")
-            return
+            throw error
         }
-        // SIGTERM was ignored, so it took the grace period plus SIGKILL — but not the full sleep.
-        #expect(wall >= 1 + CLIProcessRunner.killGraceSeconds)
-        #expect(wall < 9)
-        #expect(!Self.processExists(matching: marker), "the shell that would not take SIGTERM is gone")
+        #expect(!processExists(matching: marker), "the shell is gone, whichever rung ended it")
+        return wall
     }
 
     /// R26: the deadline wins the wait. An orphan that inherited the child's stdout keeps the
