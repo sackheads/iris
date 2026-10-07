@@ -82,7 +82,15 @@ struct SandboxTimeoutTests {
         // `ready` is touched after the trap, so it exists only if the trap was in place first.
         let nap = "9.\(Int.random(in: 100_000...999_999))"
         let script = "trap '' TERM; : > '\(ready)'; while :; do sleep \(nap); done   # \(marker)"
-        defer { killAll(matching: "sleep \(nap)") }
+        // Kills the current `sleep` child, and — by the unique marker, independent of that
+        // substring match — the shell loop itself. When the product's kill ladder is broken (a
+        // mutation run), the SIGTERM-ignoring shell is this test's own process, and only this
+        // defer ever reaches it; leaving it to the `sleep` match alone let four of them survive a
+        // mutation run for 8 hours, ppid 1.
+        defer {
+            killAll(matching: "sleep \(nap)")
+            killAll(matching: marker)
+        }
         let started = Date()
         var thrown: Error?
         do {
