@@ -83,6 +83,10 @@ struct SandboxTests {
             try? FileManager.default.removeItem(at: stub.dir)
             RunCommandProcessGroupTests.killAll(nap)
         }
+        // Exec'd once before the 1 s deadline starts: a new file's first exec can wait seconds on
+        // the host's check of new executables, and the deadline then killed the stub before it had
+        // logged its `run` (#387, as in `KillEscalationPoolStarvationTests`).
+        #expect(BlockingSpawn.run(stub.binary, ["warm-up"], timeoutSeconds: 30) == 0)
         var executor = ToolExecutor()
         executor.containerBinaryPath = { stub.binary }
         let result = await executor.runCommand("true", cwd: stub.dir.path, useSandbox: true, timeoutSeconds: 1)
@@ -92,7 +96,7 @@ struct SandboxTests {
         func calls() -> [String] {
             ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
         }
-        let name = try #require(calls().first?.split(separator: " ").dropFirst(3).first.map(String.init))
+        let name = try #require(calls().first { $0.hasPrefix("run ") }?.split(separator: " ").dropFirst(3).first.map(String.init))
         #expect(name.hasPrefix("iris-run-"))
         let deadline = Date().addingTimeInterval(1 + ProcessGroupRunner.terminateGraceSeconds + 5)
         while Date() < deadline {

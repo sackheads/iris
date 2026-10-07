@@ -125,6 +125,14 @@ enum Starvation {
         } catch {
             finish(1, nap, "could not write the stub: \(error)")
         }
+        // Run once before the clock starts. The first exec of a file this new waits on the host's
+        // check of new executables, which takes about 0.1 s alone and handles one file at a time:
+        // with other new binaries queued for it, the stub did not start for 3 s, the 1 s deadline
+        // killed it before `sleep` ran, and this exited "the command never started" (#387). Once
+        // checked, the stub execs in milliseconds.
+        guard BlockingSpawn.run(stub, ["warm-up"], timeoutSeconds: 30) == 0 else {
+            finish(1, nap, "the stub would not run")
+        }
         let started = Date()
         let call = Task.detached {
             var executor = ToolExecutor()
