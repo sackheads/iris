@@ -74,7 +74,13 @@ Each decision names its default, why, and the cost if wrong. **[P1]** lands in P
 14. **Rotation and subagents. [P2]** Rotation is simple compaction (MM:1665), but `ConversationRotation.swift:150-163` prepends the summary at index 0; when the history holds a replayable block it appends instead. Subagent and evaluator engines run the same `processInputBody` over their own conversations, so they inherit decisions 1-12 and persist and replay their own system and `tool_addition` messages (CAUSES:46).
 
 **Open.**
-- Vertex (probe pending): whether enforcement applies on Google Cloud at all ("not confirmed"), whether Fable 5.1 keeps Opus 5.5's blocks there ("open at launch", MM:1940), and whether the diagnosis header is forwarded.
+- Vertex enforcement: the probe project is an old, unenforced account, so whether new Vertex accounts are enforced is still unconfirmed ("not confirmed", MM:2144 (292)).
+- *Settled by `work`'s Vertex probe (comments on #384 and #388):*
+  - **Betas:** accepted on opus-5-5, fable-5-1 and sonnet-5-5.
+  - **Header validation:** Vertex validates `anthropic-beta`, so an unknown beta is a 400. The field without its header is also a 400.
+  - **Diagnostics:** `input_transformations` arrives in `message_start` when streaming and at the top level otherwise. The diagnosis header is forwarded.
+  - **`clear_at`:** accepted, and a cleared message costs 0 tokens.
+  - **Model switches:** blocks sent from opus to fable are kept; blocks sent from fable to opus are dropped, unbilled.
 - How Iris learns that an account lacks the `clear_at` limited beta, so decision 8 can take the fallback. The self-test should detect it.
 - Unknown ids have no system messages, so decision 9's delta has no form there. This spec does not freeze the prompt on them; a re-render is a logged break.
 - An MCP reconnect that changes a description has no append-only form without `inline-tools`. Accepted as a logged break unless measurement says otherwise.
