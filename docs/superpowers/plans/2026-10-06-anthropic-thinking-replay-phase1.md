@@ -4,7 +4,7 @@
 
 **Goal:** Keep every Anthropic reply's content blocks as they arrived, and send this turn's thinking blocks back within the turn, so Opus 5.5, Fable 5.1 and Sonnet 5.5 stop losing their reasoning each time a tool result comes back.
 - PR 1 stores the blocks and shapes the request (the binding beta header, `input_transformations` logging), and sends no block back.
-- PR 2 replays this turn's blocks after the turn's latest prefix edit. A `drop_block` retry, persisted per conversation, is the backstop for edits nobody predicted.
+- PR 2 replays this turn's blocks after the turn's latest divergence from what the server last saw. A `drop_block` retry, persisted per conversation, is the backstop for edits nobody predicted.
 
 **Architecture:**
 - `Content.anthropicBlocks` holds the reply's content array as JSON text.
@@ -13,7 +13,7 @@
   - `parts` stays the source for the UI, hooks and other providers.
 - A new `AnthropicCapabilities` table decides who gets the beta header. A new `LLMStreamEvent` case carries the blocks through `StreamAssembler`, so the replay path keeps them too.
 - In PR 2, `AnthropicClient` splices stored blocks into the body after serialisation. It never re-encodes them, and a reply it cannot echo takes every earlier reply's blocks with it.
-- A per-turn `ThinkingReplay` value in `processInputBody` keeps a floor below which no block is sent. Prefix edits raise it, so what is left out is always a front run.
+- A per-turn `ThinkingReplay` value in `processInputBody` keeps a floor below which no block is sent. Before each send it runs one check, the prefix-continuity check: system, tools and messages (ignoring `cache_control`) must extend the last request sent plus the reply that came back. Any divergence raises the floor past it and past every block produced since. What is left out is therefore always a front run. The spec's prefix-editing events are named test cases for this check, not separate mechanisms (amends spec decision 2).
 - A 400 that names "bound to a different conversation" is retried once with `drop_block`. The conversation then keeps that setting (`v18_prefix_mismatch_behavior`).
 
 **Tech Stack:** Swift 6, SwiftUI, GRDB (`ConversationStore`), Swift Testing. No new dependencies.
@@ -31,8 +31,9 @@
   - The diagnosis header `anthropic-thinking-prefix-mismatch`: "Use it if present; never depend on it" (PTM:146). The probe saw it forwarded on Vertex.
 - **The header and the field travel together.** The field without the header is a 400 (`block_binding: Extra inputs are not permitted`), on the API and on Vertex. No code path may send the field without the header.
 - **Vertex validates `anthropic-beta`.** An unknown beta is a 400 "Unexpected value(s)". Send a beta only where it is known to be accepted for the route and the model.
-  - Direct API: the binding beta goes to `claude-opus-5-5`, `claude-fable-5-1` and `claude-sonnet-5-5`.
-  - Vertex: only to `claude-opus-5-5` and `claude-fable-5-1`, the two the probe saw accept it.
+  - The binding beta goes to `claude-opus-5-5`, `claude-fable-5-1` and `claude-sonnet-5-5`, on the API and on Vertex.
+  - On Vertex the probe saw all three accept the header. Sonnet 5.5 also took adaptive thinking and `drop_block` there, and ran the prefix check.
+  - The direct API is unprobed. It is treated the same as Vertex, because the docs list Sonnet 5.5 as enforced on the Claude API.
   - Never to an unknown id, except on the retry after a binding 400 (decision 4).
 - **`input_transformations`:** parse it from `message_start` on streams and from the top level on non-stream responses. Also parse the final `message_delta`: the docs say it carries the array after a mid-stream fallback, though the probe never saw one. Ignore unknown types and reasons (PTM:145).
 - **No paid calls.** Every test runs on a scripted client (`RecordingClient`, `FakeLLMClient`) or a scoped mock session (`MockURLProtocol.scopedSession`), and bodies are built with `AnthropicClient.makeURLRequest`, the `RequestDump` path. The probe's `"error"` mode and the paid self-test (spec §2.3) are not part of this plan.
@@ -54,7 +55,7 @@
   - Run focused tests as `timeout 300 scripts/test-filter.sh <TypeName>`, with the suite's *type* name (it fails on zero matches), and quote the count it ran.
   - Run the full suite as `timeout 900 swift test`. It is green only on all three: exit 0, the Swift Testing line `Test run with N tests … passed`, and XCTest's `Executed N tests, with 0 failures`.
   - If a `timeout` fires, sweep any orphaned `swiftpm-testing-helper`.
-- **`max_tokens` is not this plan's.** It is being fixed on `fix/anthropic-max-tokens`, which edits `AnthropicClient.parseResponse`, `makeURLRequest`'s body and `GeminiRequest`. Whichever lands second rebases.
+- **`max_tokens` is not this plan's.** It is being fixed in PR #385 (`fix/anthropic-max-tokens`), which edits `AnthropicClient.parseResponse`, `makeURLRequest`'s body and `GeminiRequest`. Whichever lands second rebases.
   - Keep that branch's `maxTokensKey(_:)` and this plan's `AnthropicCapabilities.key(_:)` as one function: the second to land makes one call the other.
   - Never touch the `max_tokens` value.
 - **Branches.**
@@ -70,28 +71,42 @@
    - Tests: Task 4, `passThroughAfterModelKeepsBlocks`. Task 11, `passThroughHooksKeepReplay`.
 3. **A cache marker on a thinking block.** Marker (b), (c) or (d) can land on an echoed reply. If that reply's last block is a thinking block, merging `cache_control` into it is rejected. The marker is skipped for that message.
    - Test: Task 9, `markerSkipsAThinkingBlock`.
-4. **A persisted `drop_block` reaching a model or route that cannot take it.** A tier or provider change can move the conversation to Haiku 4.5, Sonnet 5, or Sonnet 5.5 on Vertex. Sending the field there would be a 400 on every request, for good. The persisted field is sent only where the table says the beta is accepted.
+4. **A persisted `drop_block` reaching a model or route that cannot take it.** A tier or provider change can move the conversation to Haiku 4.5, Sonnet 5, or an unknown id. Sending the field there would be a 400 on every request, for good. The persisted field is sent only where the table says the beta is accepted.
    - Tests: Task 12, `persistedFieldOnlyWhereTheBetaIsTaken`. Task 13, `persistedValueFollowsTheModel`.
 5. **A PreCompress hook that prepends.** A hook that inserts a summary at the front shifts an older turn's reply to an index at or above the turn's floor. Round one would then replay a block from another turn. Round one sends no block at all.
    - Test: Task 11, `preCompressPrependSendsNoOldBlocks`.
 
+## Amends spec decision 2 (coordinator ruling, 2026-10-06)
+
+Phase 1's mechanism is one prefix-continuity check, not a list of events. Before each send, `ThinkingReplay` compares the outgoing request with what the server last saw:
+- the system instruction and the tools;
+- the messages, ignoring `cache_control`, against the turn's last sent messages plus the reply that came back, as received and before any hook.
+
+Both sides are compared with the current floor applied. If the outgoing request does not extend that exactly, the floor rises past the first divergence. It also rises past every block produced since the divergence, because those blocks were bound to the diverged prefix too. A floor set just past the divergence would keep later replies' blocks, and those are a 400.
+
+The spec's events become named test cases for the check in Task 11 (`work`'s required change on #388 added the system and tools halves). They are an AfterModel rewrite, a UI edit (5a's `firstDrop`), a modifying PreCompress, a BeforeModel rewrite, and a BeforeModel that drops `anthropicBlocks`. The tests also cover the one-off BeforeModel rewrite, where request k+1 restores the prefix that request k's hook replaced.
+
+Why it replaces the event list:
+- 5a's `firstDrop` never reports on a turn with an empty context (`TurnContext.swift:92`), and it checks only the turn's entry.
+- The event list also misses the one-off rewrite. Round k's reply is bound to the hook's prefix, and request k+1 brings the original back.
+
+Two kinds of edit stay outside the check. Both go through the backstop, and §4 of the spec already lists them:
+- edits that happen across turns, which the per-turn floor excludes anyway;
+- edits that nothing in the request shows.
+
 ## Plan notes: where the spec and the code disagree (proposed rulings)
 
-1. **5a's `firstDrop` does not see every mid-turn edit.** `TurnRequest.contents(for:from:)` returns early when the turn context is empty (`TurnContext.swift:92`), so `firstDrop` is never reported on such a turn. It also only checks the turn's entry, so an edit to any other message goes unreported.
-   - *Ruling:* `ThinkingReplay.continues(_:)` compares each request with the last request the turn sent, message by message, with the blocks left out. A request that does not extend the last one raises the floor.
-   - This one check covers `firstDrop`, any other UI edit, and PreCompress (its list gives way to AppState's at round two, spec decision 2).
-2. **The request after a one-off BeforeModel rewrite also edits the prefix.** Say the hook rewrites request k only. Round k's reply was bound to the rewritten prefix, and request k+1, unrewritten, restores the original. The spec's event list strips only the blocks before request k, so round k's blocks would be replayed against a prefix they don't match. That is a 400 on an enforced account.
-   - *Ruling:* plan note 1's check catches it, because request k+1 does not extend request k. Task 11 pins it.
-3. **Decisions 4 and 6 conflict for unknown ids.** Decision 6 says to persist `drop_block` so every later request sends it. Decision 4 says never to send the beta to an unknown id, and the field cannot go without the beta.
-   - *Ruling:* the persisted field is sent only where `AnthropicCapabilities.takesBindingBeta` holds. On an unknown id each later break pays one 400 and one retry instead.
+1. **Ruled: the continuity check is the mechanism.** See **Amends spec decision 2** above.
+2. **Ruled: the one-off BeforeModel rewrite is tested explicitly.** It has its own test, `beforeModelRewriteOnce`, in Task 11.
+3. **Ruled: decisions 4 and 6 conflict for unknown ids.** Decision 6 says to persist `drop_block` so every later request sends it. Decision 4 says never to send the beta to an unknown id, and the field cannot go without the beta.
+   - *Ruling:* the persisted field is sent only where `AnthropicCapabilities.takesBindingBeta` holds. On an unknown id, each later break costs one 400 and one retry instead.
    - The same rule protects Review Focus 4.
 4. **The table gains a route fact in PR 1.** Decision 3 says PR 1 ships only `runsPrefixCheck`, but the probe found that Vertex rejects betas it does not accept for a model.
-   - *Ruling:* add `AnthropicCapabilities.takesBindingBeta(model:transport:)`, with the Vertex set limited to what the probe saw. It is the header's first reader, so it lands with the header.
-5. **Sonnet 5.5's thinking type is unverified.** The retry sends `thinking: {"type": "adaptive", …}`, the only form decision 4 allows. Version 2.1.292 of the skill says Sonnet 5.5's `between_tools` rejects `block_binding`. Nothing on this machine says whether Sonnet 5.5 accepts `adaptive`.
-   - If it does not, the retry fails, and the turn shows the original error as it does today. Nothing is persisted, because the setting is recorded only on a successful retry.
-   - Flag it for the next probe.
+   - *Ruling:* add `AnthropicCapabilities.takesBindingBeta(model:transport:)` over `bindingBetaModels`, which holds Opus 5.5, Fable 5.1 and Sonnet 5.5 on both routes. It is the header's first reader, so it lands with the header.
+   - The `transport` parameter stays, because the routes may diverge as more models are probed.
+5. **Ruled: Sonnet 5.5 takes the beta, adaptive thinking and `drop_block`.** The Vertex probe showed all three. The coordinator reversed the earlier hold, and the direct API follows Vertex.
 6. **After a `drop_block` retry, the floor rises too.** The API dropped blocks from that request, and spec decision 2 says "once a strip is recorded, keep it stripped". PTM also says to leave a removed block out.
-   - *Ruling:* the engine raises the floor past everything the failed request carried. The retry's own reply keeps its blocks. `drop_block` stays persisted as well (decision 6).
+   - *Ruling:* the engine raises the floor to the whole history, the retry's own reply included. Every floor rise goes there, so a message that switches from echoed to rebuilt-from-parts never sits under a block that is still sent (`work`'s review on #388). That costs one round's reasoning on a rare event. `drop_block` stays persisted as well (decision 6).
 7. **A reply stores blocks only when it has a thinking or `redacted_thinking` block.**
    - With nothing to replay, `parts` already says everything, and storing would only grow the row.
    - A reply holding a block type Iris does not fold stores nothing too. That covers citations and server tools. The cost is losing that one reply's thinking.
@@ -102,7 +117,10 @@
 11. **The diagnosis header needs a hook into the stream pump.** `LLMStreaming.stream` owns the `HTTPURLResponse`, and mappers see only SSE events.
     - *Ruling:* `StreamMapper` gains `headers(_:)`, which defaults to no events, and the pump calls it once after a 200.
     - On a 400, `APIError` keeps the header.
-12. **Spec §2.1 asks for "one case per decision 2 event".** Plan note 1 adds two more cases: a UI edit on a turn with no context, and the request after a one-off rewrite.
+12. **Spec §2.1 asks for "one case per decision 2 event".** Task 11 keeps those cases as tests of the check. It adds five more:
+    - a UI edit on a turn with no context;
+    - a one-off BeforeModel rewrite of the messages, of the system, and of the tools, each undone by the next request;
+    - a steady rewrite, which keeps replay. That reverses the spec's "a hook that rewrites every round therefore means no replay for that turn".
 
 ---
 
@@ -119,6 +137,13 @@ Branch: `feat/314-thinking-storage`, based on `main`.
 
 **Interfaces:**
 - Produces: `Content.anthropicBlocks: String?`, defaulting to `nil`. The memberwise init becomes `Content(role:parts:anthropicBlocks:)`, so every existing `Content(role:parts:)` call still compiles.
+
+**Rebase dependency on PR #385** (`fix/anthropic-max-tokens`). Before starting, check whether #385 has merged (`gh pr view 385 --json state`), and branch PR 1 from `main` after it if it has. It touches the same code as Tasks 3 and 5:
+- `AnthropicClient.parseResponse`, where it adds a `max_tokens` refusal and a candidate `finishReason`;
+- the model-key normaliser `maxTokensKey(_:)`, which `AnthropicCapabilities.key(_:)` duplicates;
+- `GeminiRequest` (`maxOutputTokens`).
+
+If #385 is still open when PR 1 opens, say so in the PR body. Whichever lands second rebases and makes one normaliser call the other.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -1092,7 +1117,7 @@ Replace `:2131`:
 **Interfaces:**
 - Produces:
   - `struct AnthropicCapabilities`, with `init(model:)`, `var runsPrefixCheck: Bool`, `static func key(_:) -> String` and `static func takesBindingBeta(model: String, transport: AnthropicTransport) -> Bool`.
-  - Its constants: `static let bindingBeta = "thinking-binding-controls-2026-08-01"`, `static let prefixCheckModels` and `static let vertexBindingBetaModels`.
+  - Its constants: `static let bindingBeta = "thinking-binding-controls-2026-08-01"`, `static let prefixCheckModels` and `static let bindingBetaModels`.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -1126,18 +1151,18 @@ struct AnthropicCapabilitiesTests {
         #expect(!AnthropicCapabilities(model: model).runsPrefixCheck)
     }
 
-    @Test("the API gets the header for the three check models")
-    func directHeader() throws {
-        for model in ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"] {
+    @Test("Opus 5.5 and Fable 5.1 get the header on both routes")
+    func headerWhereProbed() throws {
+        for model in ["claude-opus-5-5", "claude-fable-5-1"] {
             #expect(try header(model, Self.direct) == "thinking-binding-controls-2026-08-01", Comment(rawValue: model))
+            #expect(try header(model, Self.vertex) == AnthropicCapabilities.bindingBeta, Comment(rawValue: model))
         }
     }
 
-    @Test("Vertex gets it only where the probe saw it accepted: never Sonnet 5.5")
-    func vertexHeader() throws {
-        #expect(try header("claude-opus-5-5", Self.vertex) == AnthropicCapabilities.bindingBeta)
-        #expect(try header("claude-fable-5-1", Self.vertex) == AnthropicCapabilities.bindingBeta)
-        #expect(try header("claude-sonnet-5-5", Self.vertex) == nil)
+    @Test("Sonnet 5.5 gets the header on both routes (Vertex probe; the API follows it)")
+    func sonnet55Header() throws {
+        #expect(try header("claude-sonnet-5-5", Self.direct) == AnthropicCapabilities.bindingBeta)
+        #expect(try header("claude-sonnet-5-5", Self.vertex) == AnthropicCapabilities.bindingBeta)
     }
 
     @Test("no beta header reaches an unknown id or a model without the check")
@@ -1174,10 +1199,11 @@ struct AnthropicCapabilities: Equatable, Sendable {
     var runsPrefixCheck: Bool
 
     static let prefixCheckModels: Set<String> = ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"]
-    /// Vertex validates `anthropic-beta` and answers 400 "Unexpected value(s)" for a beta it does
-    /// not accept for the model. These two were seen to accept the binding beta there (work's
-    /// probe, 2026-10-06); Sonnet 5.5 was not probed.
-    static let vertexBindingBetaModels: Set<String> = ["claude-opus-5-5", "claude-fable-5-1"]
+    /// Where the binding beta (and so the field) may go, on the API and Vertex alike. Vertex
+    /// validates `anthropic-beta` and answers 400 "Unexpected value(s)" for a beta it does not
+    /// accept; all three took it there, and Sonnet 5.5 took adaptive thinking and drop_block too
+    /// (work's probe, 2026-10-06). The API is unprobed and follows Vertex.
+    static let bindingBetaModels: Set<String> = ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"]
 
     static let bindingBeta = "thinking-binding-controls-2026-08-01"
 
@@ -1186,7 +1212,7 @@ struct AnthropicCapabilities: Equatable, Sendable {
     }
 
     /// The Vertex spelling with its `@date` dropped, so the API's dated id, Vertex's and the bare
-    /// alias find the same row. One normaliser with `fix/anthropic-max-tokens`'s `maxTokensKey`:
+    /// alias find the same row. One normaliser with #385's `maxTokensKey`:
     /// whichever lands second makes one call the other.
     static func key(_ model: String) -> String {
         let vertex = AnthropicClient.vertexModelID(model.trimmingCharacters(in: .whitespaces))
@@ -1196,10 +1222,11 @@ struct AnthropicCapabilities: Equatable, Sendable {
 
     /// Whether the binding beta may go to this model on this route (decision 4, plan note 4). A
     /// beta a route rejects is a 400 on every request, so unknown ids never get it.
+    /// `transport` stays in the signature: the two routes are expected to diverge once more
+    /// models are probed.
     static func takesBindingBeta(model: String, transport: AnthropicTransport) -> Bool {
         switch transport {
-        case .direct: return prefixCheckModels.contains(key(model))
-        case .vertex: return vertexBindingBetaModels.contains(key(model))
+        case .direct, .vertex: return bindingBetaModels.contains(key(model))
         }
     }
 }
@@ -1220,7 +1247,7 @@ In `makeURLRequest`, right after `urlRequest.addValue("application/json", forHTT
 
 - [ ] **Step 5: Mutation checks.**
   - Return `true` from `takesBindingBeta` for every model: `noHeaderElsewhere` fails.
-  - Use `prefixCheckModels` for `.vertex` too: `vertexHeader` fails.
+  - Drop `claude-sonnet-5-5` from `bindingBetaModels`: `sonnet55Header` fails.
 
 - [ ] **Step 6: Commit.** `feat(anthropic): send the thinking-binding beta to models known to take it (#314)`.
 
@@ -1638,7 +1665,7 @@ struct AppendOnlyRequestTests {
   - `grep -rn "anthropic-beta\|no beta\|sends no" Sources docs/*.md README.md`. `AnthropicClient.cacheControl`'s comment ("no beta header: 5c spec facts") is about `ttl`, and is still true. Any sentence saying Iris sends no beta is now false.
   - `grep -n "Anthropic" README.md`. Read the "LLM Engine" bullet (`:19`) and the "Token Tracking & Diagnostics" bullet (`:26`).
   - `grep -rn "thinking" Sources/iris/assets/SYSTEM.md AGENTS.md`. Expect nothing to change: no agent-facing behaviour changed in PR 1.
-- [ ] **Step 2: Fix what you found.** Append this sentence to README's "Token Tracking & Diagnostics" bullet: "On Claude Opus 5.5, Fable 5.1 and Sonnet 5.5 (on Vertex AI, Opus 5.5 and Fable 5.1), Iris sends Anthropic's thinking-binding beta header and records the response's `input_transformations` on each model call, with a console line whenever thinking was dropped or would have been." Then run the full suite (`timeout 900 swift test`); green means all three signals. Commit with `docs: thinking storage and the binding beta, swept (#314)`.
+- [ ] **Step 2: Fix what you found.** Append this sentence to README's "Token Tracking & Diagnostics" bullet: "On Claude Opus 5.5, Fable 5.1 and Sonnet 5.5, directly or on Vertex AI, Iris sends Anthropic's thinking-binding beta header and records the response's `input_transformations` on each model call, with a console line whenever thinking was dropped or would have been." Then run the full suite (`timeout 900 swift test`); green means all three signals. Commit with `docs: thinking storage and the binding beta, swept (#314)`.
 - [ ] **Step 3: Open PR 1.** Title: `feat(anthropic): keep each reply's blocks; binding beta and input_transformations (#314)`. The body lists:
   - that it depends on the spec, PR #384;
   - the Review Focus items it owns (1, 2);
@@ -1790,6 +1817,9 @@ In `makeURLRequest`, replace `:64-123` (from `var callIdCounter` to the end of t
         // #314 decision 2: a reply's stored blocks go out exactly as received. Only a front run is
         // ever dropped: a reply whose blocks cannot be echoed takes every earlier reply's with it,
         // so no gap opens in the middle (PTM §3).
+        // Keep this builder a pure function of `request.contents` (cache markers aside):
+        // `ThinkingReplay` compares contents, not bytes, and is only sound while equal contents
+        // encode to equal messages.
         let lastUnechoable = request.contents.indices.last {
             request.contents[$0].anthropicBlocks != nil && !AnthropicBlocks.echoable(request.contents[$0])
         }
@@ -1865,21 +1895,22 @@ Replace `:266`:
 
 - [ ] **Step 6: Commit.** `feat(anthropic): echo stored blocks verbatim, dropping only a front run (#314)`.
 
-### Task 10: `ThinkingReplay`, the per-turn floor
+### Task 10: `ThinkingReplay`, the floor and the prefix-continuity check
 
 **Files:**
 - Create: `Sources/iris/ThinkingReplay.swift`
 - Test: `Tests/irisTests/ThinkingReplayTests.swift` (new)
 
 **Interfaces:**
-- Produces: `struct ThinkingReplay: Sendable`, with:
+- Produces: `struct ThinkingReplay: Sendable`, which implements **Amends spec decision 2**. Its API:
   - `init(floor: Int)` and `private(set) var floor: Int`;
   - `mutating func raiseFloor(to: Int)`;
   - `func applyingFloor(_: [Content]) -> [Content]`;
   - `static func withoutBlocks(_: [Content]) -> [Content]`;
-  - `func continues(_: [Content]) -> Bool`;
-  - `mutating func recordSent(_: [Content])`;
-  - `static func fingerprint(_: Content) -> Data`.
+  - `mutating func prepare(_ request: inout GeminiRequest, historyCount: Int) -> Int?`, which applies the floor, runs the check and records the request. It returns nil when the request extends what the server last saw, and otherwise the first differing message (0 for system or tools);
+  - `mutating func recordReceived(_ reply: Content?)`;
+  - `struct Fingerprint: Equatable` (`bare: Data`, `blocks: String?`) and `static func fingerprint(_: Content) -> Fingerprint`.
+- Cost choice (`work`'s review on #388): each send's fingerprints are carried forward and compared on the next send, so no message is encoded twice. That beat storing the blockless `[Content]` and comparing with `==`, which needs `Equatable` on `Content`, `Part`, `InlineData` and `FunctionResponse`, and would compare image bytes in full.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -1888,17 +1919,31 @@ import Testing
 import Foundation
 @testable import iris
 
-@Suite("ThinkingReplay (#314 decision 2)")
+@Suite("ThinkingReplay: the floor and the prefix-continuity check (#314)")
 struct ThinkingReplayTests {
     private func user(_ t: String) -> Content { Content(role: "user", parts: [Part(text: t)]) }
-    private func model(_ t: String, _ sig: String?) -> Content {
+    private func model(_ t: String, _ n: Int?) -> Content {
         Content(role: "model", parts: [Part(text: t)],
-                anthropicBlocks: sig.map { "[\(ThinkingFixtures.thinkingBlock(Int($0.dropFirst(4))!)),{\"type\":\"text\",\"text\":\"\(t)\"}]" })
+                anthropicBlocks: n.map { "[\(ThinkingFixtures.thinkingBlock($0)),{\"type\":\"text\",\"text\":\"\(t)\"}]" })
+    }
+    private func request(_ contents: [Content], system: String = "sys", tools: [String] = ["a"]) -> GeminiRequest {
+        GeminiRequest(contents: contents, systemInstruction: Content(role: "system", parts: [Part(text: system)]),
+                      tools: [Tool(functionDeclarations: tools.map { FunctionDeclaration(name: $0, description: "d", parameters: nil) })])
+    }
+    private func blocks(_ r: GeminiRequest) -> [Bool] { r.contents.map { $0.anthropicBlocks != nil } }
+
+    /// Request one, then reply one as received; the state every case below starts from.
+    private func afterRoundOne() -> ThinkingReplay {
+        var r = ThinkingReplay(floor: 1)
+        var first = request([user("q")])
+        _ = r.prepare(&first, historyCount: 1)
+        r.recordReceived(model("r1", 1))
+        return r
     }
 
     @Test("blocks below the floor are removed; at and above it they stay")
     func floorStrips() {
-        let contents = [user("a"), model("b", "sig-0"), user("c"), model("d", "sig-1")]
+        let contents = [user("a"), model("b", 0), user("c"), model("d", 1)]
         let out = ThinkingReplay(floor: 3).applyingFloor(contents)
         #expect(out.map { $0.anthropicBlocks != nil } == [false, false, false, true])
         #expect(out.map(\.parts.first?.text) == contents.map(\.parts.first?.text))
@@ -1912,36 +1957,90 @@ struct ThinkingReplayTests {
         #expect(r.floor == 6)
     }
 
-    @Test("an appended request continues the last one; the first request of a turn always does")
+    @Test("an append (last request + the reply as received + new messages) continues, and keeps its blocks")
     func appendContinues() {
-        var r = ThinkingReplay(floor: 0)
-        #expect(r.continues([user("a")]))
-        r.recordSent([user("a")])
-        #expect(r.continues([user("a"), model("b", "sig-1"), user("c")]))
+        var r = afterRoundOne()
+        var next = request([user("q"), model("r1", 1), user("tool result")])
+        #expect(r.prepare(&next, historyCount: 3) == nil)
+        #expect(blocks(next) == [false, true, false])
+        #expect(r.floor == 1)
     }
 
-    @Test("an edited, removed or reordered earlier message does not continue it")
-    func editBreaks() {
-        var r = ThinkingReplay(floor: 0)
-        r.recordSent([user("a"), model("b", "sig-1"), user("c")])
-        #expect(!r.continues([user("A"), model("b", "sig-1"), user("c")]))
-        #expect(!r.continues([user("a"), user("c")]))
-        #expect(!r.continues([user("c"), model("b", "sig-1"), user("a")]))
+    @Test("an edited earlier message diverges there, and the floor rises past everything produced since")
+    func editDiverges() {
+        var r = afterRoundOne()
+        var next = request([user("Q, edited"), model("r1", 1), user("tool result")])
+        #expect(r.prepare(&next, historyCount: 3) == 0)
+        #expect(r.floor == 3, "past the divergence and past reply one, which was bound to it")
+        #expect(blocks(next) == [false, false, false])
     }
 
-    @Test("stripping blocks from the front is not an edit")
-    func stripIsNotAnEdit() {
-        var r = ThinkingReplay(floor: 0)
-        r.recordSent([user("a"), model("b", "sig-1"), user("c")])
-        #expect(r.continues(ThinkingReplay.withoutBlocks([user("a"), model("b", "sig-1"), user("c"), user("d")])))
+    @Test("a reply stored differently from how it arrived (an AfterModel rewrite) diverges at the reply")
+    func rewrittenReplyDiverges() {
+        var r = afterRoundOne()
+        var next = request([user("q"), Content(role: "model", parts: [Part(text: "r1, rewritten")]), user("tool result")])
+        #expect(r.prepare(&next, historyCount: 3) == 1)
+        #expect(blocks(next) == [false, false, false])
     }
 
-    @Test("the fingerprint ignores image bytes of the same type and length, never text")
+    @Test("a block removed above the floor (a hook dropping anthropicBlocks) diverges; it stays out after")
+    func removedBlockDiverges() {
+        var r = afterRoundOne()
+        var next = request([user("q"), model("r1", nil), user("tool result")])
+        #expect(r.prepare(&next, historyCount: 3) == 1)
+        r.recordReceived(model("r2", 2))
+        var later = request([user("q"), model("r1", 1), user("tool result"), model("r2", 2), user("tool result 2")])
+        #expect(r.prepare(&later, historyCount: 5) == nil, "the floor is applied to both sides, so the strip is no edit")
+        #expect(blocks(later) == [false, false, false, true, false], "reply one's block never comes back")
+    }
+
+    @Test("a floor raised between sends (the drop_block retry, Task 13) is not an edit")
+    func externalRaiseIsNoEdit() {
+        var r = afterRoundOne()
+        var next = request([user("q"), model("r1", 1), user("tool result")])
+        #expect(r.prepare(&next, historyCount: 3) == nil)
+        r.recordReceived(model("r2", 2))
+        r.raiseFloor(to: 4)
+        var later = request([user("q"), model("r1", 1), user("tool result"), model("r2", 2), user("tool result 2")])
+        #expect(r.prepare(&later, historyCount: 5) == nil)
+        #expect(blocks(later) == [false, false, false, false, false])
+    }
+
+    @Test("a changed system instruction or tool set diverges at 0")
+    func systemAndToolsDiverge() {
+        var a = afterRoundOne()
+        var system = request([user("q"), model("r1", 1)], system: "sys, rebuilt")
+        #expect(a.prepare(&system, historyCount: 2) == 0)
+        var b = afterRoundOne()
+        var tools = request([user("q"), model("r1", 1)], tools: ["a", "b"])
+        #expect(b.prepare(&tools, historyCount: 2) == 0)
+    }
+
+    @Test("a removed or reordered message diverges")
+    func removeAndReorderDiverge() {
+        var a = afterRoundOne()
+        var removed = request([model("r1", 1)])
+        #expect(a.prepare(&removed, historyCount: 1) != nil)
+        var b = afterRoundOne()
+        var reordered = request([model("r1", 1), user("q")])
+        #expect(b.prepare(&reordered, historyCount: 2) != nil)
+    }
+
+    @Test("no block is sent from beyond AppState's history (a hook-appended reply)")
+    func nothingBeyondHistory() {
+        var r = afterRoundOne()
+        var next = request([user("q"), model("r1", 1), user("tool result"), model("forged", 9)])
+        _ = r.prepare(&next, historyCount: 3)
+        #expect(blocks(next) == [false, true, false, false])
+    }
+
+    @Test("the fingerprint ignores image bytes of the same type and length, never text or blocks")
     func fingerprintCheapButExact() {
         let a = Content(role: "user", parts: [Part(text: "x"), Part(inlineData: InlineData(mimeType: "image/png", data: "AAAA"))])
         let b = Content(role: "user", parts: [Part(text: "x"), Part(inlineData: InlineData(mimeType: "image/png", data: "BBBB"))])
         #expect(ThinkingReplay.fingerprint(a) == ThinkingReplay.fingerprint(b))
         #expect(ThinkingReplay.fingerprint(a) != ThinkingReplay.fingerprint(user("y")))
+        #expect(ThinkingReplay.fingerprint(model("r", 1)) != ThinkingReplay.fingerprint(model("r", nil)))
     }
 }
 ```
@@ -1953,16 +2052,49 @@ struct ThinkingReplayTests {
 ```swift
 import Foundation
 
-/// #314 Phase 1 (spec decision 2): which thinking blocks one turn sends back. Only this turn's
-/// replies, and only those after the turn's latest prefix edit, so whatever is left out is always
-/// a run dropped from the front, the one drop the API accepts (PTM §3). One value per turn, a
-/// local of `processInputBody`: never on the engine or `AppState`, where another turn or a
-/// subagent would share it (invariant 3).
+/// #314 Phase 1: which thinking blocks one turn sends back. Only this turn's replies, and only
+/// those after the turn's last divergence, so whatever is left out is always a run dropped from
+/// the front, the one drop the API accepts (PTM §3).
+///
+/// The mechanism is one prefix-continuity check (amends spec decision 2): before each send, the
+/// outgoing system, tools and messages must extend exactly what the server last saw, which is
+/// the last request plus the reply as it came back. `cache_control` is not part of `Content`, so it
+/// is ignored by construction. Blocks below the floor are ignored on both sides, so a front strip is
+/// never an edit. Anything else (a UI edit, a PreCompress list giving way to AppState's, a
+/// BeforeModel rewrite of messages, system or tools, or its undoing, an AfterModel rewrite of the
+/// stored reply, a hook dropping blocks) diverges, and every block produced so far stays out from
+/// then on. A hook that rewrites identically every round does not diverge, and keeps replay.
+///
+/// Comparing `Content` instead of wire bytes is sound only because `AnthropicClient`'s encoding
+/// is a pure function of the contents: the same contents give the same messages, `cache_control`
+/// aside. Keep it so. Any merge of adjacent user messages (the API's, or a future client's) only
+/// touches the tail after the newest reply, so it never moves a byte before a replayed block.
+///
+/// Accepted gap: an image is fingerprinted by its MIME type and length (5a's anchor bytes), so a
+/// mid-turn swap for a same-type, same-length image is not seen. That takes a UI edit replacing an
+/// image while the turn runs, and the backstop retry covers it.
+///
+/// One value per turn, a local of `processInputBody`: never on the engine or `AppState`, where
+/// another turn or a subagent would share it (invariant 3).
 struct ThinkingReplay: Sendable {
+    /// One message as the check sees it: its blockless 5a anchor bytes, and its blocks as text.
+    /// Each outgoing message is encoded once per send, and that fingerprint is what the next send
+    /// compares against. Nothing is encoded twice.
+    struct Fingerprint: Equatable, Sendable {
+        let bare: Data
+        let blocks: String?
+    }
+
     /// History index (AppState's list) below which no blocks are sent. Only ever rises.
+    ///
+    /// A message below the floor is rebuilt from `parts` (Task 9). One that was echoed verbatim
+    /// before the rise therefore changes bytes, which is safe because every rise goes to AppState's
+    /// whole history length: no block produced before the switch is ever sent after it, and every
+    /// later block is bound to the rebuilt form, which then never changes again.
     private(set) var floor: Int
-    /// The last request this turn sent, one fingerprint per message, blocks excluded.
-    private var lastSent: [Data]?
+    private var lastSystemAndTools: Data?
+    /// The last request's messages, then the reply as received: what the next request must extend.
+    private var expected: [Fingerprint]?
 
     init(floor: Int) { self.floor = floor }
 
@@ -1978,53 +2110,95 @@ struct ThinkingReplay: Sendable {
         contents.map { var c = $0; c.anthropicBlocks = nil; return c }
     }
 
-    /// Whether the last request this turn sent is still a prefix of `contents`. The check behind
-    /// plan notes 1-2: it sees a UI edit (5a's `firstDrop` and the rest), the PreCompress list
-    /// giving way to AppState's, and a hook that stopped rewriting. Blocks are left out of the
-    /// comparison, because dropping them from the front is not an edit.
-    func continues(_ contents: [Content]) -> Bool {
-        guard let lastSent else { return true }
-        guard contents.count >= lastSent.count else { return false }
-        for i in lastSent.indices where Self.fingerprint(contents[i]) != lastSent[i] { return false }
-        return true
-    }
-
-    mutating func recordSent(_ contents: [Content]) { lastSent = contents.map(Self.fingerprint) }
-
-    /// 5a's anchor bytes with the blocks removed: sorted keys, images stood in for by type and length.
-    static func fingerprint(_ content: Content) -> Data {
+    static func fingerprint(_ content: Content) -> Fingerprint {
         var bare = content
         bare.anthropicBlocks = nil
-        return TurnContext.anchorBytes(of: bare) ?? Data()
+        return Fingerprint(bare: TurnContext.anchorBytes(of: bare) ?? Data(), blocks: content.anthropicBlocks)
+    }
+
+    /// nil when `outgoing` extends what the server last saw; otherwise the first message that
+    /// differs, or 0 when the system instruction or the tools changed.
+    private func divergence(systemAndTools: Data?, outgoing: [Fingerprint]) -> Int? {
+        guard let expected else { return nil }
+        if systemAndTools != lastSystemAndTools { return 0 }
+        for i in expected.indices {
+            guard i < outgoing.count else { return i }
+            if outgoing[i].bare != expected[i].bare { return i }
+            // Below the floor the outgoing side has no blocks by construction; compare above it.
+            if i >= floor, outgoing[i].blocks != expected[i].blocks { return i }
+        }
+        return nil
+    }
+
+    /// Run once per send, on the request exactly as it will go out (after the BeforeModel hook).
+    /// `historyCount` is AppState's history length now. Nothing at or past it is a reply this turn
+    /// received. On a divergence the floor rises to it, past every block produced so far, since
+    /// each was bound to the prefix that changed. Returns the divergence.
+    @discardableResult
+    mutating func prepare(_ request: inout GeminiRequest, historyCount: Int) -> Int? {
+        request.contents = applyingFloor(request.contents)
+        for i in request.contents.indices where i >= historyCount { request.contents[i].anthropicBlocks = nil }
+        let systemAndTools = Self.systemAndTools(request)
+        var fingerprints = request.contents.map(Self.fingerprint)
+        let diverged = divergence(systemAndTools: systemAndTools, outgoing: fingerprints)
+        if diverged != nil {
+            raiseFloor(to: historyCount)
+            request.contents = Self.withoutBlocks(request.contents)
+            fingerprints = fingerprints.map { Fingerprint(bare: $0.bare, blocks: nil) }
+        }
+        lastSystemAndTools = systemAndTools
+        expected = fingerprints
+        return diverged
+    }
+
+    /// The reply as the model returned it, before any hook: what the server will expect next.
+    mutating func recordReceived(_ reply: Content?) {
+        if let reply { expected?.append(Self.fingerprint(reply)) }
+    }
+
+    private static func systemAndTools(_ request: GeminiRequest) -> Data? {
+        struct Bound: Encodable { let system: Content?; let tools: [Tool]? }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try? encoder.encode(Bound(system: request.systemInstruction, tools: request.tools))
     }
 }
 ```
 
-- [ ] **Step 4: Run them and watch them pass.** Run the same filter. Expected: 6 passed. Quote the count.
+`Tool`, `FunctionDeclaration` and `Schema` are `Codable` already, so `Bound` encodes. System and tools are encoded once per send, and the messages once per send too.
+
+Tools compare in order here, which is stricter than the API's name-keyed set. Within one turn Iris never reorders them (`iris.swift:1958`). Only a hook could, and a hook that does is treated as an edit.
+
+- [ ] **Step 4: Run them and watch them pass.** Run the same filter. Expected: 12 passed. Quote the count.
 
 - [ ] **Step 5: Mutation checks.**
   - Make `raiseFloor` assign (`floor = index`): `floorIsMonotonic` fails.
-  - Keep `anthropicBlocks` in `fingerprint`: `stripIsNotAnEdit` fails.
+  - Raise the floor to `diverged + 1` instead of `historyCount`: `editDiverges` fails, because reply one keeps its block.
+  - Make `recordReceived` a no-op: `rewrittenReplyDiverges` fails.
+  - Compare blocks below the floor too (drop `i >= floor`): `externalRaiseIsNoEdit` fails.
+  - Skip the system and tools comparison: `systemAndToolsDiverge` fails.
+  - Delete the `historyCount` strip line: `nothingBeyondHistory` fails.
 
-- [ ] **Step 6: Commit.** `feat: ThinkingReplay, the per-turn replay floor (#314)`.
+- [ ] **Step 6: Commit.** `feat: ThinkingReplay, the per-turn floor and prefix-continuity check (#314)`.
 
-### Task 11: The engine replays this turn's blocks, and raises the floor on every event
+### Task 11: The engine replays this turn's blocks, behind the continuity check
 
 **Files:**
 - Modify: `Sources/iris/iris.swift`:
   - `:1956-1958`: the floor, and round one with no blocks;
-  - `:2035-2057`: before and after the BeforeModel hook;
-  - `:2131-2137`: the AfterModel event;
+  - `:2035-2057`: before and after the BeforeModel hook (`prepare`);
+  - `:2083`: right after the response (`recordReceived`, before any AfterModel hook);
   - a new `stateHistoryCount(_:)` helper beside `requestContents` (`:1160`).
 - Test: `Tests/irisTests/AppendOnlyRequestTests.swift`. Replace `noThinkingOnTheWire` and add the cases below.
 
 **Interfaces:**
-- Consumes: `ThinkingReplay` (Task 10), `HookRewrite` (PR 1), and the client's echo (Task 9).
+- Consumes: `ThinkingReplay.prepare` and `recordReceived` (Task 10), and the client's echo (Task 9). `HookRewrite` stays PR 1's storage rule only; it plays no part in replay.
 - Produces: `IrisEngine.stateHistoryCount(_ conversationId: UUID) async -> Int` (private).
 
 - [ ] **Step 1: Write the failing tests.** In `AppendOnlyRequestTests`, delete `noThinkingOnTheWire` and add the cases below.
   - Request 1 never carries a block. Request N can carry blocks from replies 1 to N-1.
   - A UI edit in `roundStart(1)` is first read when request 3 is built: request 2's contents were taken from history before round two started.
+  - The spec's events are named cases of the one check (**Amends spec decision 2**), labelled "check case" below.
 
 ```swift
     private static let produced: [String?] = ["sig-1", "sig-2", "sig-3", "sig-4"]
@@ -2076,7 +2250,7 @@ struct ThinkingReplay: Sendable {
         #expect(try h.sentSignatures() == [[], ["sig-1"], ["sig-1", "sig-2"], ["sig-1", "sig-2", "sig-3"]])
     }
 
-    @Test("event: an AfterModel rewrite of round two stops replay through round two")
+    @Test("check case: an AfterModel rewrite of round two stops replay through round two")
     func afterModelRewrite() async throws {
         let h = try await run("aftermodel", hooks: ["AfterModel": { dir in
             ThinkingFixtures.onCall(2, sed: "s/Seattle 2/Seattle two/g", counter: dir.appendingPathComponent("n")) }])
@@ -2085,7 +2259,7 @@ struct ThinkingReplay: Sendable {
         ThinkingFixtures.expectFrontDroppedWindows(sent, produced: ["sig-1", nil, "sig-3", "sig-4"])
     }
 
-    @Test("event: a UI edit of the turn's entry (5a's firstDrop) stops replay of everything before it")
+    @Test("check case: a UI edit of the turn's entry (5a's firstDrop) stops replay of everything before it")
     func uiEditOfTheEntry() async throws {
         let h = try await run("firstdrop", seedFact: true, earlierTurn: false, roundStart: { edit in
             { round in if round == 1 { await edit.replaceText(of: 0, with: "Tell me about Portland") } } })
@@ -2094,7 +2268,7 @@ struct ThinkingReplay: Sendable {
         ThinkingFixtures.expectFrontDroppedWindows(sent, produced: Self.produced)
     }
 
-    @Test("event: a UI edit of an older message on a turn with no context (plan note 1)")
+    @Test("check case: a UI edit of an older message on a turn with no context (5a misses it)")
     func uiEditWithoutContext() async throws {
         let h = try await run("edit-nocontext", roundStart: { edit in
             { round in if round == 1 { await edit.replaceText(of: 0, with: "earlier question, edited") } } })
@@ -2103,7 +2277,7 @@ struct ThinkingReplay: Sendable {
         ThinkingFixtures.expectFrontDroppedWindows(sent, produced: Self.produced)
     }
 
-    @Test("event: a PreCompress hook that modified history; the break falls at round two")
+    @Test("check case: a PreCompress hook that modified history; the break falls at round two")
     func preCompressModified() async throws {
         let h = try await run("precompress", hooks: ["PreCompress": { _ in "sed 's/earlier question/EARLIER question/'" }])
         let sent = try h.sentSignatures()
@@ -2119,7 +2293,7 @@ struct ThinkingReplay: Sendable {
         #expect(h.client.requests[0].contents.count == 5, "precondition: the hook's list reached round one")
     }
 
-    @Test("event: a BeforeModel rewrite of request two strips its blocks from the hook's output, and the next request too")
+    @Test("check case: a BeforeModel rewrite of request two strips its blocks from the hook's output, and the next request too")
     func beforeModelRewriteOnce() async throws {
         let h = try await run("beforemodel-once", hooks: ["BeforeModel": { dir in
             ThinkingFixtures.onCall(2, sed: "s/Tell me about Seattle/TELL me about Seattle/", counter: dir.appendingPathComponent("n")) }])
@@ -2129,16 +2303,48 @@ struct ThinkingReplay: Sendable {
         #expect(try !ThinkingFixtures.bodyText(h.client.requests[2]).contains("TELL me"),
                 "precondition: request three is not")
         #expect(sent[1].isEmpty, "request two itself carries no block (work's note on #384)")
-        #expect(sent[2].isEmpty, "request three restores the prefix request two's reply was bound to (plan note 2)")
+        #expect(sent[2].isEmpty, "request three restores the prefix request two's reply was bound to")
         #expect(sent == [[], [], [], ["sig-3"]])
         ThinkingFixtures.expectFrontDroppedWindows(sent, produced: Self.produced)
     }
 
-    @Test("event: a BeforeModel hook that returns JSON without anthropicBlocks means no replay that turn")
+    @Test("check case: a BeforeModel hook that returns JSON without anthropicBlocks means no replay that turn")
     func beforeModelDropsBlocks() async throws {
         let strip = #"sed -E -e 's/,"anthropicBlocks":"([^"\\]|\\.)*"//g' -e 's/"anthropicBlocks":"([^"\\]|\\.)*",//g'"#
         let h = try await run("beforemodel-strip", hooks: ["BeforeModel": { _ in strip }])
         #expect(try h.sentSignatures() == [[], [], [], []])
+    }
+
+    // `[^}]*` cannot cross the system Content's own fields whatever their key order: no `}` comes
+    // before its first text.
+    private static let systemExpr = #"s/("systemInstruction":\{[^}]*"text":")/\1HOOKED /"#
+    private static let toolsExpr = #"s/("functionDeclarations":\[)/\1{"name":"hook_added","description":"x"},/"#
+
+    @Test("check case: a one-off BeforeModel rewrite of the system instruction, then its undoing (work's review on #388)")
+    func beforeModelSystemOnce() async throws {
+        let h = try await run("system-once", hooks: ["BeforeModel": { dir in
+            ThinkingFixtures.onCall(3, sed: Self.systemExpr, counter: dir.appendingPathComponent("n")) }])
+        #expect(try ThinkingFixtures.bodyText(h.client.requests[2]).contains("HOOKED "), "precondition: request three's system is the hook's")
+        #expect(try !ThinkingFixtures.bodyText(h.client.requests[3]).contains("HOOKED "), "precondition: request four's is not")
+        let sent = try h.sentSignatures()
+        #expect(sent == [[], ["sig-1"], [], []], "request four restores the system reply three was bound to")
+        ThinkingFixtures.expectFrontDroppedWindows(sent, produced: Self.produced)
+    }
+
+    @Test("check case: a one-off BeforeModel rewrite of the tools, then its undoing")
+    func beforeModelToolsOnce() async throws {
+        let h = try await run("tools-once", hooks: ["BeforeModel": { dir in
+            ThinkingFixtures.onCall(3, sed: Self.toolsExpr, counter: dir.appendingPathComponent("n")) }])
+        #expect(try ThinkingFixtures.bodyText(h.client.requests[2]).contains("hook_added"), "precondition: request three's tools are the hook's")
+        #expect(try !ThinkingFixtures.bodyText(h.client.requests[3]).contains("hook_added"))
+        #expect(try h.sentSignatures() == [[], ["sig-1"], [], []])
+    }
+
+    @Test("a hook that rewrites the system identically every round keeps replay (amends decision 2)")
+    func steadyRewriteKeepsReplay() async throws {
+        let h = try await run("system-steady", hooks: ["BeforeModel": { _ in "sed -E '\(Self.systemExpr)'" }])
+        #expect(try h.client.requests.allSatisfy { try ThinkingFixtures.bodyText($0).contains("HOOKED ") })
+        #expect(try h.sentSignatures() == [[], ["sig-1"], ["sig-1", "sig-2"], ["sig-1", "sig-2", "sig-3"]])
     }
 
     @Test("the next turn starts again from its own replies")
@@ -2173,12 +2379,12 @@ extension ThinkingHarness {
 }
 ```
 
-- [ ] **Step 2: Run them and watch them fail.** Run `timeout 300 scripts/test-filter.sh AppendOnlyRequestTests`. Expected: `baselineReplay` fails, because the engine still hands every stored block to the client, `sig-0` included. Every event case fails too.
+- [ ] **Step 2: Run them and watch them fail.** Run `timeout 300 scripts/test-filter.sh AppendOnlyRequestTests`. Expected: `baselineReplay` fails, because the engine still hands every stored block to the client, `sig-0` included. Every check case fails too.
 
 - [ ] **Step 3: Implement.** Add the helper beside `requestContents`:
 
 ```swift
-    /// AppState's history length for the conversation: the floor a prefix edit raises to (#314).
+    /// AppState's history length for the conversation: where a divergence raises the floor (#314).
     private func stateHistoryCount(_ conversationId: UUID) async -> Int {
         let localState = state
         return await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history.count ?? 0 }
@@ -2197,7 +2403,7 @@ At `:1956-1958`:
         var request = GeminiRequest(contents: ThinkingReplay.withoutBlocks(await requestContents(history, from: .initial, &turnRequest, conversationId: conversationId)), systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
 ```
 
-After the drain block at `:2035-2038`, before `fireBeforeModel`:
+After the drain block at `:2035-2038`, before `fireBeforeModel`, so the hook sees what would be sent:
 
 ```swift
                 request.contents = thinkingReplay.applyingFloor(request.contents)
@@ -2207,41 +2413,38 @@ Replace `:2046-2049`:
 
 ```swift
                 var activeRequest = request
-                var requestRewritten = false
                 if case .proceed(let modifiedData) = beforeModelDecision, let data = modifiedData {
                     activeRequest = Self.applyHookRewrite(data, to: request)
-                    requestRewritten = HookRewrite.changes(request, activeRequest)
                 }
-                // #314 decision 2: a BeforeModel rewrite, or anything that changed what this turn's
-                // last request sent (a UI edit, the PreCompress list giving way to AppState's, a
-                // rewrite the hook stopped making), edits the prefix every block so far was bound
-                // to. None of them go out again: not in this request, which is the hook's output,
-                // and not later.
-                if requestRewritten || !thinkingReplay.continues(activeRequest.contents) {
-                    thinkingReplay.raiseFloor(to: await stateHistoryCount(conversationId))
-                    activeRequest.contents = ThinkingReplay.withoutBlocks(activeRequest.contents)
+                // #314 Phase 1, the prefix-continuity check (amends spec decision 2): on the request
+                // exactly as it goes out, the hook's output included. If its system, tools or
+                // messages do not extend what the server last saw, no block produced so far goes
+                // out again, starting with this request.
+                if let at = thinkingReplay.prepare(&activeRequest, historyCount: await stateHistoryCount(conversationId)) {
+                    print("Thinking replay: request \(modelRound + 1) diverges at \(at == 0 ? "system, tools or message 0" : "message \(at)"); this turn's blocks so far stay out")
                 }
-                thinkingReplay.recordSent(activeRequest.contents)
 ```
 
-After the history refresh at `:2135-2137`:
+Right after `let response = outcome.response` (`:2083`), before the AfterModel hook:
 
 ```swift
-                // #314 decision 2: replay stops through the round whose reply a hook rewrote.
-                if replyRewritten { thinkingReplay.raiseFloor(to: history.count) }
+                // What the server will expect next: the reply as it came back, not as a hook rewrote it.
+                thinkingReplay.recordReceived(response.candidates?.first?.content)
 ```
 
-- [ ] **Step 4: Run them and watch them pass.** Run the same filter. Expected: 14 passed (Task 7's three, plus these eleven). Quote the count. Then run `TurnContextEngineTests`, `CachePolicyTests` and `StreamingEngineTests`. Quote the counts.
+There is no AfterModel floor raise. If a hook rewrote the stored reply, it diverges from what was received, and the check catches it on the next send.
+
+- [ ] **Step 4: Run them and watch them pass.** Run the same filter. Expected: 17 passed (Task 7's three, plus these fourteen). Quote the count. Then run `TurnContextEngineTests`, `CachePolicyTests` and `StreamingEngineTests`. Quote the counts.
 
 - [ ] **Step 5: Mutation checks.** Make each change, run the filter, see the named test fail, and restore.
   - `ThinkingReplay(floor: 0)`: `baselineReplay` fails (`sig-0` is sent).
-  - Drop `requestRewritten ||`: `beforeModelRewriteOnce` fails at request two.
-  - Strip the blocks from `request` instead of `activeRequest`, so they leave only the next request: `beforeModelRewriteOnce`'s `sent[1].isEmpty` fails.
-  - Drop the `continues` clause: `uiEditOfTheEntry`, `uiEditWithoutContext`, `preCompressModified` and `beforeModelRewriteOnce` (`sent[2]`) fail.
-  - Delete the AfterModel raise: `afterModelRewrite` fails, because request three sends `sig-1`.
+  - Call `prepare` on `request` before the hook instead of on `activeRequest`: `beforeModelRewriteOnce` fails at request two (`sent[1]`).
+  - Remove the `prepare` call, keeping only `applyingFloor`: every check case fails.
+  - Move `recordReceived` after the AfterModel decode, so it gets `activeResponse`: `afterModelRewrite` fails, because request three sends `sig-1`.
+  - Skip the system and tools comparison inside `ThinkingReplay`: `beforeModelSystemOnce` and `beforeModelToolsOnce` fail at request four.
   - Drop the round-one `withoutBlocks`: `preCompressPrependSendsNoOldBlocks` fails.
 
-- [ ] **Step 6: Commit.** `feat(engine): replay this turn's thinking after its latest prefix edit (#314)`.
+- [ ] **Step 6: Commit.** `feat(engine): replay this turn's thinking behind a prefix-continuity check (#314)`.
 
 ### Task 12: The binding field, and the `drop_block` retry
 
@@ -2348,8 +2551,9 @@ struct AnthropicBindingRetryTests {
     func persistedFieldOnlyWhereTheBetaIsTaken() throws {
         #expect(try built(Self.request(.dropBlock), "claude-opus-5-5", Self.direct).body.contains("block_binding"))
         #expect(try built(Self.request(.dropBlock), "claude-opus-5-5", Self.vertex).body.contains("block_binding"))
+        #expect(try built(Self.request(.dropBlock), "claude-sonnet-5-5", Self.vertex).body.contains("block_binding"))
         for (model, t) in [("claude-sonnet-5", Self.direct), ("claude-haiku-4-5-20251001", Self.direct),
-                           ("claude-sonnet-5-5", Self.vertex), ("claude-made-up-9", Self.direct)] {
+                           ("claude-made-up-9", Self.direct), ("claude-made-up-9", Self.vertex)] {
             let (body, beta) = try built(Self.request(.dropBlock), model, t)
             #expect(!body.contains("block_binding") && !body.contains("\"thinking\""), "\(model)")
             #expect(beta == nil, "\(model)")
@@ -2643,7 +2847,7 @@ struct PrefixMismatchPersistenceTests {
         await h.run()
         try #require(h.client.requests.count == 4)
         #expect(h.client.requests.map(\.prefixMismatchBehavior) == [nil, nil, nil, .dropBlock])
-        #expect(try h.sentSignatures()[3] == ["sig-3"], "the retry dropped sig-1 and sig-2; they stay out (plan note 6)")
+        #expect(try h.sentSignatures()[3].isEmpty, "the retry dropped blocks; everything up to its reply stays out (plan note 6)")
         #expect(try ThinkingFixtures.bodyText(h.client.requests[3]).contains("drop_block"))
         h.app.flushSave()
 
@@ -2749,14 +2953,16 @@ In `iris.swift`, after the `request.cacheHints = …` statement:
         }
 ```
 
-After Task 11's AfterModel raise:
+After the history refresh at `:2135-2137` (the reply is stored):
 
 ```swift
                 if response.anthropicBindingFallback {
-                    // The retry's drop is a strip the API recorded: keep it (decision 2), past
-                    // everything the failed request carried; the retry's own reply keeps its blocks.
-                    // And keep sending drop_block (decision 6), from this round and across restarts.
-                    thinkingReplay.raiseFloor(to: history.count - 1)
+                    // The retry's drop is a strip the API recorded: keep it (decision 2). The floor
+                    // goes to the whole history, the retry's own reply included, as every rise does,
+                    // so the echo-to-rebuild switch below it never sits under a surviving block
+                    // (see `ThinkingReplay.floor`). And keep sending drop_block (decision 6), from
+                    // this round and across restarts.
+                    thinkingReplay.raiseFloor(to: history.count)
                     request.prefixMismatchBehavior = .dropBlock
                     await MainActor.run { localState?.recordPrefixMismatchFallback(conversationId) }
                 }
@@ -2767,7 +2973,7 @@ After Task 11's AfterModel raise:
 - [ ] **Step 5: Mutation checks.** Make each change, run the filter, see the named test fail, and restore.
   - Drop the UPDATE column: `survivesReload` fails for `updated`.
   - Drop the `loadAll` read: `survivesReload` and the restart half of `fallbackPersistsAndIsSent` fail.
-  - Delete the floor raise: `fallbackPersistsAndIsSent` fails, because request four sends `sig-1` and `sig-2`.
+  - Delete the floor raise: `fallbackPersistsAndIsSent` fails, because request four sends `sig-1`, `sig-2` and `sig-3`.
   - Change `decodeIfPresent` to `decode`: `oldConversationDecodes` fails.
 
 - [ ] **Step 6: Commit.** `feat: persist drop_block per conversation after a binding 400 (#314)`.
@@ -2788,7 +2994,7 @@ After Task 11's AfterModel raise:
 - [ ] **Step 3: Open PR 2.** Title: `feat: Phase 1 thinking replay, and the drop_block backstop (#314)`. The body lists:
   - that it depends on PR 1 (merged) and the spec, PR #384;
   - the Review Focus items it owns (3, 4, 5, and 2 for BeforeModel);
-  - plan notes 1, 2, 3, 5, 6, 9 and 12, each flagged for the owner;
+  - the **Amends spec decision 2** section, and plan notes 3, 5, 6, 9 and 12;
   - that the paid self-test (spec §2.3) and the arm measurement (§2.4) are not run here and need the owner's approval.
 
 ---
@@ -2804,9 +3010,11 @@ After Task 11's AfterModel raise:
   - `decodeIfPresent` and `CodingKeys`, with no column: Task 1.
   - The Gemini strip: Task 1.
   - Search ignores signatures: Task 1. `read_conversation` reads `messages`, not history, which Task 1 Step 6's grep confirms.
-- **Decision 2, Phase 1:**
+- **Decision 2, Phase 1, as amended:**
   - The floor and older turns: Tasks 10 and 11.
-  - The events: AfterModel, `firstDrop`, PreCompress at round two, BeforeModel, and BeforeModel without blocks: Task 11, one test each. Two more cases come from plan notes 1 and 2.
+  - The prefix-continuity check over system, tools and messages: Task 10.
+  - The events, now named cases of that check: AfterModel, `firstDrop`, PreCompress at round two, BeforeModel, and BeforeModel without blocks. Task 11 has one test each.
+  - The added cases: a UI edit with no context, the one-off BeforeModel rewrite of messages, of system and of tools, and a steady rewrite that keeps replay.
   - "Never edit, reorder or thin the middle": the front-drop guard in Task 9, and `expectFrontDroppedWindows` in Task 11.
   - "Send blocks on a model switch": the client never strips by model (Global Constraints).
   - "Once a strip is recorded, keep it stripped": the monotone floor (Task 10) and plan note 6 (Task 13).
@@ -2829,7 +3037,7 @@ After Task 11's AfterModel raise:
   - `AnthropicCapabilities.takesBindingBeta` and `.bindingBeta`;
   - `PrefixMismatchBehavior.dropBlock`, `prefixMismatchBehavior` and `forceBindingBeta`;
   - `anthropicBindingFallback`, `.prefixMismatchFallback` and `recordPrefixMismatchFallback`;
-  - `ThinkingReplay` with `applyingFloor`, `withoutBlocks`, `continues`, `recordSent` and `raiseFloor`;
+  - `ThinkingReplay` with `applyingFloor`, `withoutBlocks`, `prepare`, `recordReceived`, `raiseFloor` and `Fingerprint`;
   - `HookRewrite.changes`;
   - `ThinkingHarness` and `ThinkingFixtures`.
 - **Review Focus.** Each item has its test in the owning task: 1 in Task 2, 2 in Tasks 4 and 11, 3 in Task 9, 4 in Tasks 12 and 13, 5 in Task 11.
