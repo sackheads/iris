@@ -39,20 +39,6 @@ struct AppendOnlyRequestTests {
         try expectPrefixChain(h)
     }
 
-    @Test("PR 1 sends no block back: no request carries a thinking block or the stored field")
-    func noThinkingOnTheWire() async throws {
-        let dir = try ThinkingFixtures.tempDirectory("nowire")
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let h = try ThinkingHarness.make(ThinkingFixtures.fourRounds(), hooks: try ThinkingFixtures.hooks(in: dir),
-                                         earlierTurn: true)
-        await h.run()
-        for request in h.client.requests {
-            let text = try ThinkingFixtures.bodyText(request)
-            #expect(!text.contains("sig-"))
-            #expect(!text.contains("anthropicBlocks"))
-        }
-    }
-
     @Test("no beta header reaches an unknown id; a check model gets it on every request")
     func headerPerModel() async throws {
         let dir = try ThinkingFixtures.tempDirectory("header")

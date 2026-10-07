@@ -121,6 +121,32 @@ enum AnthropicBlocks {
         guard let elements = RawJSON.elements(raw), elements.count == array.count else { return nil }
         return "[" + zip(elements, empty).filter { !$0.1 }.map(\.0).joined(separator: ",") + "]"
     }
+
+    /// Whether `content`'s stored blocks can go out as received: an assistant reply whose array is
+    /// storable and whose tool_use blocks name the same calls, in the same order, as its parts. A
+    /// mismatch means something changed the parts after the blocks were stored.
+    static func echoable(_ content: Content) -> Bool {
+        guard content.role == "model", let raw = content.anthropicBlocks, storable(raw) != nil,
+              let array = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [[String: Any]] else { return false }
+        let blockCalls = array.filter { $0["type"] as? String == "tool_use" }
+            .map { "\($0["id"] as? String ?? "")|\($0["name"] as? String ?? "")" }
+        let partCalls = content.parts.compactMap(\.functionCall).map { "\($0.id ?? "")|\($0.name)" }
+        return blockCalls == partCalls
+    }
+
+    /// `raw` with `cacheControl` (a JSON object's text) merged into its last block, or `raw`
+    /// unchanged when that block is a thinking block, which takes no `cache_control`.
+    static func withCacheControl(_ raw: String, _ cacheControl: String) -> String {
+        guard let array = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [[String: Any]],
+              let lastType = array.last?["type"] as? String,
+              lastType != "thinking", lastType != "redacted_thinking",
+              let last = RawJSON.elementRanges(raw)?.last else { return raw }
+        let b = Array(raw.utf8)
+        let brace = last.upperBound - 1     // the last block's closing brace
+        guard b[brace] == UInt8(ascii: "}") else { return raw }
+        return String(decoding: b[..<brace], as: UTF8.self) + #","cache_control":"# + cacheControl
+            + String(decoding: b[brace...], as: UTF8.self)
+    }
 }
 
 /// JSON cut as bytes without parsing values, so blocks are stored and sent exactly as they arrived

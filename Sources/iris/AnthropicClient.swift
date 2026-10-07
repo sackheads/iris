@@ -111,11 +111,41 @@ struct AnthropicClient {
         
         var callIdCounter = 0
         var pendingIdsForName: [String: [String]] = [:]
-        
-        for content in request.contents {
+        func register(_ fc: FunctionCall) -> String {
+            let id = fc.id ?? "call_\(fc.name)_\(callIdCounter)"
+            callIdCounter += 1
+            pendingIdsForName[fc.name, default: []].append(id)
+            return id
+        }
+
+        // #314 decision 2: a reply's stored blocks go out exactly as received. Only a front run is
+        // ever dropped: a reply whose blocks cannot be echoed takes every earlier reply's with it,
+        // so no gap opens in the middle (PTM §3).
+        // Keep this builder a pure function of the whole of `request.contents` (cache markers
+        // aside): `ThinkingReplay` compares contents, not bytes, and is only sound while equal
+        // contents encode to equal messages. It is not prefix-stable in one case: an unechoable
+        // reply above the floor turns every earlier echoed reply back into parts, changing earlier
+        // messages' bytes. Such a reply only arrives through a hook rewriting a call, and that
+        // request has already diverged.
+        let lastUnechoable = request.contents.indices.last {
+            request.contents[$0].anthropicBlocks != nil && !AnthropicBlocks.echoable(request.contents[$0])
+        }
+        let echoFrom = (lastUnechoable ?? -1) + 1
+        // Spliced in after serialisation, so the blocks are never re-encoded. The token is unique
+        // per request, and in its quoted form it cannot occur inside any other JSON string.
+        let spliceToken = "IRIS_ANTHROPIC_BLOCKS_\(UUID().uuidString)_"
+        var echoed: [Int: String] = [:]
+
+        for (contentIndex, content) in request.contents.enumerated() {
             let role = content.role == "model" ? "assistant" : "user"
+            if contentIndex >= echoFrom, let raw = content.anthropicBlocks {
+                for part in content.parts { if let fc = part.functionCall { _ = register(fc) } }
+                echoed[anthropicMessages.count] = raw
+                anthropicMessages.append(["role": role, "content": spliceToken + String(anthropicMessages.count)])
+                continue
+            }
             var partsArray: [[String: Any]] = []
-            
+
             for part in content.parts {
                 if let text = part.text {
                     partsArray.append(["type": "text", "text": text])
@@ -131,10 +161,7 @@ struct AnthropicClient {
                     ])
                 }
                 if let fc = part.functionCall {
-                    let id = fc.id ?? "call_\(fc.name)_\(callIdCounter)"
-                    callIdCounter += 1
-                    pendingIdsForName[fc.name, default: []].append(id)
-                    
+                    let id = register(fc)
                     partsArray.append([
                         "type": "tool_use",
                         "id": id,
@@ -217,8 +244,10 @@ struct AnthropicClient {
         if !anthropicMessages.isEmpty {
             marked.insert(anthropicMessages.count - 1)              // (d)
         }
+        var markedEchoes = Set<Int>()
         for index in marked.sorted() {
-            markLastContentBlock(&anthropicMessages, at: index)
+            // An echoed reply's content is still a token here; its marker is merged after the splice.
+            if echoed[index] != nil { markedEchoes.insert(index) } else { markLastContentBlock(&anthropicMessages, at: index) }
         }
 
         var body: [String: Any] = [
@@ -317,7 +346,18 @@ struct AnthropicClient {
         if AnthropicCapabilities.takesBindingBeta(model: model, transport: transport) {
             urlRequest.addValue(AnthropicCapabilities.bindingBeta, forHTTPHeaderField: "anthropic-beta")
         }
-        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        var bodyData = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        if !echoed.isEmpty {
+            let marker = String(decoding: try JSONSerialization.data(withJSONObject: Self.cacheControl(ttl.history),
+                                                                     options: [.sortedKeys]), as: UTF8.self)
+            var text = String(decoding: bodyData, as: UTF8.self)
+            for (index, raw) in echoed {
+                let blocks = markedEchoes.contains(index) ? AnthropicBlocks.withCacheControl(raw, marker) : raw
+                text = text.replacingOccurrences(of: "\"\(spliceToken)\(index)\"", with: blocks)
+            }
+            bodyData = Data(text.utf8)
+        }
+        urlRequest.httpBody = bodyData
 
         LLMRequestPolicy.apply(to: &urlRequest)
         return urlRequest
