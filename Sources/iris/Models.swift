@@ -23,6 +23,11 @@ struct GeminiRequest: Codable {
 struct Content: Codable, Sendable {
     var role: String?
     var parts: [Part]
+    /// #314 decision 1: Anthropic's assistant `content` array exactly as it arrived, as JSON text,
+    /// so a later request can send the thinking blocks back unchanged. `parts` stays the source for
+    /// the UI and every other provider. nil for other providers, for a reply with no thinking
+    /// block, for a reply an AfterModel hook rewrote, and for every row written before #314.
+    var anthropicBlocks: String? = nil
 }
 
 public struct Part: Codable, Sendable {
@@ -208,6 +213,12 @@ struct GeminiResponse: Codable {
     var candidates: [Candidate]?
     var usageMetadata: UsageMetadata?
     var promptFeedback: PromptFeedback? = nil
+    /// #314 decision 7: Anthropic's `input_transformations` and diagnosis header. Never encoded:
+    /// this type is the AfterModel payload and Gemini's response shape.
+    var anthropicInputTransformations: [InputTransformation]? = nil
+    var anthropicPrefixDiagnosis: String? = nil
+
+    private enum CodingKeys: String, CodingKey { case candidates, usageMetadata, promptFeedback }
 
     /// Why the reply carries no content, or nil when the first candidate has parts. Gemini
     /// omits `parts` on an early stop (safety, recitation, empty answer) and reports the cause
@@ -244,14 +255,16 @@ struct PromptFeedback: Codable, Sendable {
 }
 
 extension Content {
-    private enum CodingKeys: String, CodingKey { case role, parts }
+    private enum CodingKeys: String, CodingKey { case role, parts, anthropicBlocks }
 
     /// `parts` is absent on a candidate Gemini stopped early. This type is also the persisted
-    /// conversation history, so absence must decode, never throw (#136).
+    /// conversation history, so absence must decode, never throw (#136). `anthropicBlocks` is
+    /// absent on every row older than #314 (invariant 1).
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         role = try c.decodeIfPresent(String.self, forKey: .role)
         parts = try c.decodeIfPresent([Part].self, forKey: .parts) ?? []
+        anthropicBlocks = try c.decodeIfPresent(String.self, forKey: .anthropicBlocks)
     }
 }
 

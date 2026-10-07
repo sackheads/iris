@@ -15,6 +15,13 @@ enum LLMStreamEvent: Sendable, Equatable {
     /// The provider ended the turn. `finishReason` is the provider's own string; `blockReason`
     /// is Gemini's prompt-level block, kept separate so the #136 pill reads exactly as before.
     case done(finishReason: String?, blockReason: String? = nil)
+    /// #314: an Anthropic reply's content array as received, for `Content.anthropicBlocks`. Once,
+    /// at the end of a complete reply that has a thinking block; never for a cut-off one.
+    case anthropicBlocks(String)
+    /// #314: Anthropic's `input_transformations` for this response. A later one replaces it.
+    case inputTransformations([InputTransformation])
+    /// #314: the `anthropic-thinking-prefix-mismatch` response header, when present.
+    case prefixMismatchDiagnosis(String)
 }
 
 /// One Server-Sent Event: the optional `event:` name and the joined `data:` payload.
@@ -64,9 +71,13 @@ protocol StreamMapper: Sendable {
     mutating func handle(_ sse: SSEEvent) throws -> [LLMStreamEvent]
     /// Called once after the last SSE event. Emits `done` if the provider never did.
     mutating func finish() throws -> [LLMStreamEvent]
+    /// Called once with a 200's headers, before any SSE event.
+    mutating func headers(_ fields: [AnyHashable: Any]) -> [LLMStreamEvent]
 }
 
 extension StreamMapper {
+    mutating func headers(_ fields: [AnyHashable: Any]) -> [LLMStreamEvent] { [] }
+
     /// Provider tool-argument JSON as the engine's argument dictionary. An empty buffer is `{}`;
     /// anything that does not parse throws, so a truncated call is never dispatched.
     static func decodeArguments(_ raw: String) throws -> [String: JSONValue] {
@@ -85,6 +96,10 @@ struct StreamAssembler: Sendable {
     private(set) var blockReason: String?
     /// `now` of the first text delta or function call; nil until then.
     private(set) var firstTokenAt: Double?
+    /// #314: the reply's content array, when the stream ended a complete reply that thought.
+    private(set) var anthropicBlocks: String?
+    private(set) var inputTransformations: [InputTransformation]?
+    private(set) var prefixMismatchDiagnosis: String?
 
     mutating func apply(_ event: LLMStreamEvent, now: Double) {
         switch event {
@@ -109,6 +124,12 @@ struct StreamAssembler: Sendable {
         case .done(let finish, let block):
             finishReason = finish
             blockReason = block
+        case .anthropicBlocks(let raw):
+            anthropicBlocks = raw
+        case .inputTransformations(let entries):
+            inputTransformations = entries
+        case .prefixMismatchDiagnosis(let value):
+            prefixMismatchDiagnosis = value
         }
     }
 
@@ -134,9 +155,12 @@ struct StreamAssembler: Sendable {
             bare.thought_signature = nil
             parts.append(Part(functionCall: bare, thoughtSignature: signature))
         }
-        let content = parts.isEmpty ? nil : Content(role: "model", parts: parts)
+        var content = parts.isEmpty ? nil : Content(role: "model", parts: parts)
+        content?.anthropicBlocks = anthropicBlocks
         var response = GeminiResponse(candidates: [Candidate(content: content, finishReason: finishReason)], usageMetadata: usage?.withTotal())
         if let blockReason { response.promptFeedback = PromptFeedback(blockReason: blockReason) }
+        response.anthropicInputTransformations = inputTransformations
+        response.anthropicPrefixDiagnosis = prefixMismatchDiagnosis
         return response
     }
 
@@ -166,7 +190,10 @@ extension LLMStreamEvent {
                 out.append(.functionCall(call))
             }
         }
+        if let raw = candidate?.content?.anthropicBlocks { out.append(.anthropicBlocks(raw)) }
         if let usage = response.usageMetadata { out.append(.usage(usage)) }
+        if let entries = response.anthropicInputTransformations { out.append(.inputTransformations(entries)) }
+        if let diagnosis = response.anthropicPrefixDiagnosis { out.append(.prefixMismatchDiagnosis(diagnosis)) }
         out.append(.done(finishReason: candidate?.finishReason, blockReason: response.promptFeedback?.blockReason))
         return out
     }
@@ -245,6 +272,7 @@ enum LLMStreaming {
                         throw APIError.http(provider: provider, statusCode: http.statusCode, body: body, headers: http.allHeaderFields)
                     }
                     var mapper = mapper
+                    for event in mapper.headers(http.allHeaderFields) { continuation.yield(event) }
                     var parser = SSEParser()
                     var lines = SSELineBuffer()
                     for try await byte in bytes {

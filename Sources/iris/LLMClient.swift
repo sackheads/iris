@@ -123,10 +123,14 @@ struct LLMClient {
     /// (AGENTS.md invariant 7). `RequestDump` uses it too, so the dumped and the sent body stay
     /// in sync.
     static func encodeGeminiBody(_ request: GeminiRequest) throws -> Data {
+        // #314: Anthropic's own blocks are not Gemini's; an unknown field is a 400.
+        var wire = request
+        for i in wire.contents.indices { wire.contents[i].anthropicBlocks = nil }
+        wire.systemInstruction?.anthropicBlocks = nil
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .useDefaultKeys
         encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(request)
+        return try encoder.encode(wire)
     }
 
     var supportsStreaming: Bool { true }

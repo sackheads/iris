@@ -266,3 +266,14 @@ actor EphemeralContainerRegistry {
         }
     }
 }
+
+/// Whether a hook's output differs from what it was given, compared as sorted-key JSON so a hook
+/// that re-serialises its input unchanged is not a rewrite. `fireEvent` hands back the payload
+/// itself whenever any hook is registered for the event, so `.proceed(data)` alone says nothing.
+enum HookRewrite {
+    static func changes<T: Encodable>(_ original: T, _ rewritten: T) -> Bool {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return (try? encoder.encode(original)) != (try? encoder.encode(rewritten))
+    }
+}

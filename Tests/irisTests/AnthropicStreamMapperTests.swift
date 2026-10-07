@@ -97,8 +97,8 @@ struct AnthropicStreamMapperTests {
         ])
     }
 
-    @Test("thinking and signature deltas are dropped")
-    func thinkingIgnored() throws {
+    @Test("thinking deltas emit no text and are kept as the reply's blocks")
+    func thinkingKeptAsBlocks() throws {
         let events = try run([
             ("content_block_start", #"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#),
             ("content_block_delta", #"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#),
@@ -108,7 +108,155 @@ struct AnthropicStreamMapperTests {
             ("message_stop", #"{"type":"message_stop"}"#)
         ])
         #expect(events == [.usage(UsageMetadata(promptTokenCount: nil, candidatesTokenCount: 2, totalTokenCount: nil)),
+                           .anthropicBlocks(#"[{"type":"thinking","thinking":"hmm","signature":"abc"}]"#),
                            .done(finishReason: "refusal")])
+    }
+
+    private static func thinking(_ index: Int, signature: String?) -> [(String, String)] {
+        var out = [("content_block_start", #"{"type":"content_block_start","index":\#(index),"content_block":{"type":"thinking","thinking":"","signature":""}}"#),
+                   ("content_block_delta", #"{"type":"content_block_delta","index":\#(index),"delta":{"type":"thinking_delta","thinking":"Check \"x\"."}}"#)]
+        if let signature {
+            out.append(("content_block_delta", #"{"type":"content_block_delta","index":\#(index),"delta":{"type":"signature_delta","signature":"\#(signature)"}}"#))
+        }
+        out.append(("content_block_stop", #"{"type":"content_block_stop","index":\#(index)}"#))
+        return out
+    }
+    private static let stop = [("message_delta", #"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}"#),
+                               ("message_stop", #"{"type":"message_stop"}"#)]
+    private static func text(_ index: Int, _ s: String) -> [(String, String)] {
+        [("content_block_start", #"{"type":"content_block_start","index":\#(index),"content_block":{"type":"text","text":""}}"#),
+         ("content_block_delta", #"{"type":"content_block_delta","index":\#(index),"delta":{"type":"text_delta","text":"\#(s)"}}"#),
+         ("content_block_stop", #"{"type":"content_block_stop","index":\#(index)}"#)]
+    }
+    private func blocks(_ events: [LLMStreamEvent]) -> [String] {
+        events.compactMap { if case .anthropicBlocks(let raw) = $0 { return raw } else { return nil } }
+    }
+
+    @Test("block order, the signature, and the tool input's own bytes are kept as received")
+    func keepsBlocksAsReceived() throws {
+        let events = try run(Self.thinking(0, signature: "sig-1") + Self.text(1, "Looking.") + [
+            ("content_block_start", #"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"search_memory","input":{}}}"#),
+            ("content_block_delta", #"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"query\": \"Sea"}}"#),
+            ("content_block_delta", #"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"ttle\", \"b\": 1.0}"}}"#),
+            ("content_block_stop", #"{"type":"content_block_stop","index":2}"#),
+        ] + Self.stop)
+        let expected = #"[{"type":"thinking","thinking":"Check \"x\".","signature":"sig-1"},{"type":"text","text":"Looking."},{"type":"tool_use","id":"toolu_1","name":"search_memory","input":{"query": "Seattle", "b": 1.0}}]"#
+        #expect(blocks(events) == [expected])
+        #expect(events.last == .done(finishReason: "end_turn"))
+        // The UI and the dispatcher still get what they got before.
+        #expect(events.contains(.textDelta("Looking.")))
+        #expect(events.contains { event in
+            if case .functionCall(let c) = event { return c.id == "toolu_1" }
+            return false
+        })
+    }
+
+    @Test("a redacted_thinking block is kept with its data")
+    func redactedKept() throws {
+        let events = try run([
+            ("content_block_start", #"{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"ENC=="}}"#),
+            ("content_block_stop", #"{"type":"content_block_stop","index":0}"#),
+        ] + Self.text(1, "ok") + Self.stop)
+        #expect(blocks(events) == [#"[{"type":"redacted_thinking","data":"ENC=="},{"type":"text","text":"ok"}]"#])
+    }
+
+    @Test("a reply that did not think stores nothing (Fable 5.1 on a short prompt)")
+    func unthoughtStoresNothing() throws {
+        #expect(blocks(try run(Self.text(0, "hi") + Self.stop)).isEmpty)
+    }
+
+    @Test("a thinking block that never got its signature stores nothing (Review Focus 1)")
+    func unsignedThinkingStoresNothing() throws {
+        #expect(blocks(try run(Self.thinking(0, signature: nil) + Self.text(1, "hi") + Self.stop)).isEmpty)
+    }
+
+    @Test("a block that never stopped stores nothing, even when the message stopped (Review Focus 1)")
+    func unstoppedBlockStoresNothing() throws {
+        let open = Array(Self.thinking(0, signature: "sig-1").dropLast())
+        #expect(blocks(try run(open + Self.stop)).isEmpty)
+    }
+
+    @Test("a stream that ends without message_stop stores nothing (Review Focus 1)")
+    func cutStreamStoresNothing() throws {
+        let events = try run(Self.thinking(0, signature: "sig-1") + Self.text(1, "hi"))
+        #expect(blocks(events).isEmpty)
+        #expect(events.last == .done(finishReason: nil))
+    }
+
+    @Test("a delta Iris does not fold (citations) stores nothing for that reply")
+    func citationsStoreNothing() throws {
+        let events = try run(Self.thinking(0, signature: "sig-1") + [
+            ("content_block_start", #"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#),
+            ("content_block_delta", #"{"type":"content_block_delta","index":1,"delta":{"type":"citations_delta","citation":{"type":"char_location"}}}"#),
+            ("content_block_stop", #"{"type":"content_block_stop","index":1}"#),
+        ] + Self.stop)
+        #expect(blocks(events).isEmpty)
+    }
+
+    @Test("a missing block index stores nothing: the array would not be what arrived")
+    func indexGapStoresNothing() throws {
+        #expect(blocks(try run(Self.thinking(0, signature: "sig-1") + Self.text(2, "hi") + Self.stop)).isEmpty)
+    }
+
+    @Test("an empty text block is left out of the stored array: sent back, it is a 400")
+    func emptyTextOmitted() throws {
+        let events = try run(Self.thinking(0, signature: "sig-1") + [
+            ("content_block_start", #"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#),
+            ("content_block_stop", #"{"type":"content_block_stop","index":1}"#),
+        ] + Self.stop)
+        #expect(blocks(events) == [#"[{"type":"thinking","thinking":"Check \"x\".","signature":"sig-1"}]"#])
+        let whole = #"[{"type":"thinking","thinking":"t","signature":"s"}, {"type":"text","text":""} ,{"type":"tool_use","id":"t1","name":"n","input":{"q": "a,]}", "b": 1.0}}]"#
+        #expect(AnthropicBlocks.storable(whole)
+                == #"[{"type":"thinking","thinking":"t","signature":"s"},{"type":"tool_use","id":"t1","name":"n","input":{"q": "a,]}", "b": 1.0}}]"#)
+    }
+
+    @Test("an empty text block in first position is left out on both paths")
+    func emptyTextFirstOmitted() throws {
+        let events = try run(Self.text(0, "") + Self.thinking(1, signature: "sig-1") + Self.stop)
+        #expect(blocks(events) == [#"[{"type":"thinking","thinking":"Check \"x\".","signature":"sig-1"}]"#])
+        let whole = #"[ {"type":"text","text":""},{"type":"thinking","thinking":"t","signature":"s"},{"type":"tool_use","id":"t1","name":"n","input":{"b": 1.0}}]"#
+        #expect(AnthropicBlocks.storable(whole)
+                == #"[{"type":"thinking","thinking":"t","signature":"s"},{"type":"tool_use","id":"t1","name":"n","input":{"b": 1.0}}]"#)
+    }
+
+    @Test("a whitespace-only text block is left out on both paths: sent back, it is a 400")
+    func blankTextOmitted() throws {
+        let events = try run(Self.thinking(0, signature: "sig-1") + Self.text(1, "\\n \\t") + Self.stop)
+        #expect(blocks(events) == [#"[{"type":"thinking","thinking":"Check \"x\".","signature":"sig-1"}]"#])
+        let whole = #"[{"type":"thinking","thinking":"t","signature":"s"},{"type":"text","text":"\n \t"}]"#
+        #expect(AnthropicBlocks.storable(whole) == #"[{"type":"thinking","thinking":"t","signature":"s"}]"#)
+    }
+
+    @Test("a tool_use id outside ^[a-zA-Z0-9_-]+$ stores nothing on both paths: sent back, it is a 400",
+          arguments: ["", "a b", "a\n", "a\r\n"])
+    func badToolIdStoresNothing(id: String) throws {
+        // Escaped for the wire, not inlined raw: an unescaped control character makes the
+        // surrounding JSON itself invalid, which would fail before the id check runs at all.
+        let wireId = id.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+        let events = try run(Self.thinking(0, signature: "sig-1") + [
+            ("content_block_start", #"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"\#(wireId)","name":"n","input":{}}}"#),
+            ("content_block_stop", #"{"type":"content_block_stop","index":1}"#),
+        ] + Self.stop)
+        #expect(blocks(events).isEmpty)
+        let whole = #"[{"type":"thinking","thinking":"t","signature":"s"},{"type":"tool_use","id":"\#(wireId)","name":"n","input":{}}]"#
+        #expect(AnthropicBlocks.storable(whole) == nil)
+    }
+
+    /// Task 3's non-stream path calls `storable`; the same rules hold for an array that arrived whole.
+    @Test("storable keeps a signed array verbatim and refuses unsigned, unthought, or unknown-typed ones (Review Focus 1)")
+    func storableArray() {
+        let signed = #"[{"type":"thinking","thinking":"t","signature":"s"},{"type":"text","text":"ok"}]"#
+        #expect(AnthropicBlocks.storable(signed) == signed)
+        #expect(AnthropicBlocks.storable(#"[{"type":"redacted_thinking","data":"E"}]"#) != nil)
+        #expect(AnthropicBlocks.storable(#"[{"type":"thinking","thinking":"t","signature":""}]"#) == nil)
+        #expect(AnthropicBlocks.storable(#"[{"type":"thinking","thinking":"t"}]"#) == nil)
+        #expect(AnthropicBlocks.storable(#"[{"type":"text","text":"ok"}]"#) == nil)
+        #expect(AnthropicBlocks.storable(#"[{"type":"thinking","thinking":"t","signature":"s"},{"type":"server_tool_use"}]"#) == nil)
+        #expect(AnthropicBlocks.storable("[]") == nil)
+        #expect(AnthropicBlocks.storable("not json") == nil)
     }
 
     @Test("an error event throws an APIError carrying the provider's type and message")

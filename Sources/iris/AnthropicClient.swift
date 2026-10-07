@@ -311,6 +311,12 @@ struct AnthropicClient {
         }
         urlRequest.httpMethod = "POST"
         urlRequest.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        // #314 decisions 4-5: the binding beta, header only, to the models and routes known to
+        // take it, on the API and Vertex alike. Without the field it changes no behaviour: an
+        // unenforced account lists mismatches in `input_transformations` and keeps the blocks.
+        if AnthropicCapabilities.takesBindingBeta(model: model, transport: transport) {
+            urlRequest.addValue(AnthropicCapabilities.bindingBeta, forHTTPHeaderField: "anthropic-beta")
+        }
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
 
         LLMRequestPolicy.apply(to: &urlRequest)
@@ -405,7 +411,9 @@ struct AnthropicClient {
         }
         
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        return try parseResponse(json)
+        var parsed = try parseResponse(json, raw: data)
+        parsed.anthropicPrefixDiagnosis = InputTransformation.diagnosis(in: httpResponse.allHeaderFields)
+        return parsed
     }
 
     /// Anthropic's non-stream Messages response back to `GeminiResponse`. `usage.input_tokens`
@@ -416,7 +424,8 @@ struct AnthropicClient {
     /// The stop reasons that can cut a block off partway.
     static let truncatingStopReasons: Set<String> = ["max_tokens", GeminiResponse.contextWindowReason]
 
-    static func parseResponse(_ json: [String: Any]) throws -> GeminiResponse {
+    /// `raw` is the response's bytes; without it no blocks are stored (#314).
+    static func parseResponse(_ json: [String: Any], raw: Data? = nil) throws -> GeminiResponse {
         var geminiResponse = GeminiResponse()
         geminiResponse.candidates = []
 
@@ -442,6 +451,12 @@ struct AnthropicClient {
                         content.parts.append(Part(text: nil, functionCall: FunctionCall(name: name, args: jsonArgs, id: id, thought_signature: nil, thoughtSignature: nil), functionResponse: nil, thought_signature: nil, thoughtSignature: nil))
                     }
                 }
+            }
+
+            // #314: the array as it arrived, cut from the response bytes, never re-serialised.
+            if let raw, let array = RawJSON.topLevelValue("content", in: raw),
+               let stored = AnthropicBlocks.storable(array) {
+                content.anthropicBlocks = stored
             }
 
             // `stop_reason` rides on the candidate as the stream's does, so a non-streamed
@@ -470,6 +485,7 @@ struct AnthropicClient {
             ).withTotal()
         }
 
+        geminiResponse.anthropicInputTransformations = InputTransformation.list(json["input_transformations"])
         return geminiResponse
     }
 }
