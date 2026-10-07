@@ -2176,7 +2176,12 @@ actor IrisEngine {
                 } else {
                     _ = await streamer.settle()
                 }
-                
+                // A reply cut off at the output limit used to read as a finished one.
+                if let reason = activeResponse.truncatedReason {
+                    let headline = "\(ConfigManager.shared.primaryProvider) stopped at its output limit (finishReason: \(reason)); the reply above is cut off."
+                    await pushToUI(role: .system, text: LLMErrorMessage.encode(LLMErrorDisplay(headline: headline, detail: nil)), conversationId: conversationId)
+                }
+
                 var toolCalls: [FunctionCall] = []
                 for part in responseContent.parts {
                     if let fc = part.functionCall {

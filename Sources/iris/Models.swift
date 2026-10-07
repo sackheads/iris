@@ -215,6 +215,18 @@ struct GeminiResponse: Codable {
         if let block = promptFeedback?.blockReason { return "blockReason: \(block)" }
         return (candidates?.isEmpty == false) ? "empty candidate" : "no candidates"
     }
+
+    /// Each provider's finish reason for "stopped at the output-token limit": Anthropic,
+    /// Gemini, OpenAI.
+    static let outputLimitReasons: Set<String> = ["max_tokens", "MAX_TOKENS", "length"]
+
+    /// The reply has content but was cut off at the output-token limit. An empty one is
+    /// `emptyReason`'s to report.
+    var truncatedReason: String? {
+        guard emptyReason == nil, let finish = candidates?.first?.finishReason,
+              Self.outputLimitReasons.contains(finish) else { return nil }
+        return finish
+    }
 }
 
 struct Candidate: Codable {

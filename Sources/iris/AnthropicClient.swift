@@ -25,6 +25,42 @@ struct AnthropicClient {
         return model[..<dash] + "@" + suffix
     }
 
+    /// `max_tokens` per model. It covers thinking as well as the reply, and thinking cannot be
+    /// turned off on some models, so a fixed 4096 cut long answers and large tool inputs short.
+    /// Source: claude-api skill `shared/models.md`, "Max Output". 5.x models get 32000 (all
+    /// document 128K); older ones their documented max, capped at 32000. Models with no
+    /// documented max there, and unknown ids, get `fallbackMaxTokens`.
+    static let maxTokensByModel: [String: Int] = [
+        "claude-fable-5-1": 32_000,
+        "claude-mythos-5-1": 32_000,
+        "claude-fable-5": 32_000,
+        "claude-mythos-5": 32_000,
+        "claude-opus-5-5": 32_000,
+        "claude-opus-5": 32_000,
+        "claude-sonnet-5": 32_000,
+        "claude-opus-4-8": 32_000,     // 128K
+        "claude-opus-4-7": 32_000,     // 128K
+        "claude-opus-4-6": 32_000,     // 128K
+        "claude-sonnet-4-6": 32_000,   // 128K
+        "claude-haiku-4-5": 32_000,    // 64K
+    ]
+    static let fallbackMaxTokens = 16_000
+    /// The docs: a non-streaming request above ~16K output risks an HTTP timeout on any model.
+    static let nonStreamingMaxTokens = 16_000
+
+    /// The table key for a model: the Vertex spelling with its `@date` dropped, so the API's
+    /// dated id, Vertex's, and the bare alias all find the same row.
+    static func maxTokensKey(_ model: String) -> String {
+        let vertex = vertexModelID(model.trimmingCharacters(in: .whitespaces))
+        guard let at = vertex.firstIndex(of: "@") else { return vertex }
+        return String(vertex[..<at])
+    }
+
+    static func maxTokens(for model: String, stream: Bool) -> Int {
+        let value = maxTokensByModel[maxTokensKey(model)] ?? fallbackMaxTokens
+        return stream ? value : min(value, nonStreamingMaxTokens)
+    }
+
     /// `global` has no regional host; `us`/`eu` are multi-region hosts; anything else is a region.
     static func vertexEndpointURL(project: String, location: String, model: String, stream: Bool) throws -> URL {
         let host = AnthropicVertexTarget(project: project, location: location).host
@@ -174,7 +210,7 @@ struct AnthropicClient {
         }
 
         var body: [String: Any] = [
-            "max_tokens": 4096,
+            "max_tokens": Self.maxTokens(for: model, stream: stream),
             "messages": anthropicMessages
         ]
         switch transport {
@@ -387,8 +423,12 @@ struct AnthropicClient {
                 }
             }
 
-            if !content.parts.isEmpty {
-                geminiResponse.candidates?.append(Candidate(content: content))
+            // `stop_reason` rides on the candidate as the stream's does, so a non-streamed
+            // `max_tokens` or `refusal` is reported the same way (an empty one names it).
+            let stopReason = json["stop_reason"] as? String
+            if !content.parts.isEmpty || stopReason != nil {
+                geminiResponse.candidates?.append(Candidate(content: content.parts.isEmpty ? nil : content,
+                                                            finishReason: stopReason))
             }
         }
 
