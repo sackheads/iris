@@ -183,3 +183,31 @@ struct ThinkingHarness {
         try client.requests.map { ThinkingFixtures.signatures(try ThinkingFixtures.body($0)) }
     }
 }
+
+extension ThinkingHarness {
+    /// A late-bound handle on a harness's history, for `roundStart` closures (a UI edit mid-turn).
+    final class Edit: @unchecked Sendable {
+        private var app: AppState?
+        private var id: UUID?
+        func bind(_ h: ThinkingHarness) { app = h.app; id = h.id }
+        func replaceText(of index: Int, with text: String) async {
+            await change { history in
+                guard history.indices.contains(index) else { return }
+                history[index].parts = [Part(text: text)]
+            }
+        }
+        func remove(at index: Int) async {
+            await change { history in
+                guard history.indices.contains(index) else { return }
+                history.remove(at: index)
+            }
+        }
+        private func change(_ body: @escaping @Sendable (inout [Content]) -> Void) async {
+            await MainActor.run {
+                guard let app, let id, var history = app.conversations.first(where: { $0.id == id })?.history else { return }
+                body(&history)
+                app.updateHistory(for: id, history: history)
+            }
+        }
+    }
+}

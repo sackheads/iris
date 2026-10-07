@@ -1194,6 +1194,12 @@ actor IrisEngine {
         return contents
     }
 
+    /// AppState's history length for the conversation: where a divergence raises the floor (#314).
+    private func stateHistoryCount(_ conversationId: UUID) async -> Int {
+        let localState = state
+        return await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history.count ?? 0 }
+    }
+
     /// Everything that arrived while the last round was running, into history, at a round
     /// boundary: the user's mid-task messages first (#172), then the event lines for cards
     /// delivered mid-turn (#187 §8.3). Returns whether anything was added, which is the caller's
@@ -1982,8 +1988,12 @@ actor IrisEngine {
         // event lines in `drainPendingInput`, the model reply, tool results. If anything removes or
         // rewrites the entry instead (the UI), the byte check drops the block rather than moving it.
         var turnRequest = TurnRequest(context: turnContext, stateHistory: stateHistory, initialHistory: history)
+        // #314 Phase 1: no reply before this turn's entry sends its blocks again, and round one
+        // sends none at all, since the PreCompress hook's list can shift an older reply past any
+        // index (Review Focus 5).
+        var thinkingReplay = ThinkingReplay(floor: stateHistory.count)
 
-        var request = GeminiRequest(contents: await requestContents(history, from: .initial, &turnRequest, conversationId: conversationId), systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
+        var request = GeminiRequest(contents: ThinkingReplay.withoutBlocks(await requestContents(history, from: .initial, &turnRequest, conversationId: conversationId)), systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
         // 5c §0.8/§0.9. Set once: later rounds only replace `request.contents`. The jobs list is
         // read only for an unattended turn, the one place it matters.
         let firesHourly = isUnattended && principal == .main
@@ -2066,6 +2076,8 @@ actor IrisEngine {
                     history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
                     request.contents = await requestContents(history, from: .state, &turnRequest, conversationId: conversationId)
                 }
+                // The BeforeModel hook sees what would be sent: no block below the floor.
+                request.contents = thinkingReplay.applyingFloor(request.contents)
 
                 let beforeModelDecision = await hooks.fireBeforeModel(request: request, useSandbox: hooksSandbox)
                 if case .block(let reason) = beforeModelDecision {
@@ -2077,6 +2089,15 @@ actor IrisEngine {
                 if case .proceed(let modifiedData) = beforeModelDecision, let data = modifiedData {
                     activeRequest = Self.applyHookRewrite(data, to: request)
                 }
+                // #314 Phase 1, the prefix-continuity check (amends spec decision 2): on the request
+                // exactly as it goes out, the hook's output included. If its system, tools or
+                // messages do not extend what the server last saw, no block produced so far goes
+                // out again, starting with this request. A hook's edit to a stored reply is such a
+                // divergence, so the edit goes out as parts, never the reply's original bytes.
+                if let at = thinkingReplay.prepare(&activeRequest, historyCount: await stateHistoryCount(conversationId)) {
+                    print("Thinking replay: request \(modelRound + 1) diverges at \(at == 0 ? "system, tools or message 0" : "message \(at)"); this turn's blocks so far stay out")
+                }
+                // #385's cap, last: the hook's rewrite replaces the whole request.
                 activeRequest.maxOutputTokens = outputTokenCap
                 
                 await MainActor.run {
@@ -2112,6 +2133,8 @@ actor IrisEngine {
                     }
                 }
                 let response = outcome.response
+                // What the server will expect next: the reply as it came back, not as a hook rewrote it.
+                thinkingReplay.recordReceived(response.candidates?.first?.content)
                 let modelName = ConfigManager.shared.getModel(for: modelTier)
                 PerformanceProfiler.shared.recordModelCall(
                     turnID: PerformanceProfiler.currentTurnID,

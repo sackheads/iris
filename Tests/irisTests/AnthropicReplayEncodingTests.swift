@@ -55,6 +55,20 @@ struct AnthropicReplayEncodingTests {
         let last = try #require((messages.last?["content"] as? [[String: Any]])?.last)
         #expect(last["type"] as? String == "tool_use")
         #expect(last["cache_control"] != nil)
+        #expect(try ThinkingFixtures.bodyText(r).contains(ThinkingFixtures.thinkingBlock(1)),
+                "the thinking block's own bytes are untouched by the marker")
+    }
+
+    @Test("a stored array with a blank text block (a hook's, say) is never echoed: it would 400")
+    func blankTextNeverEchoed() throws {
+        var reply = toolReply(1)
+        reply.anthropicBlocks = "[\(ThinkingFixtures.thinkingBlock(1)),{\"type\":\"text\",\"text\":\"  \"},"
+            + #"{"type":"tool_use","id":"toolu_1","name":"search_memory","input":{"query": "Seattle 1"}}]"#
+        #expect(AnthropicBlocks.storable(reply.anthropicBlocks!) != reply.anthropicBlocks, "precondition")
+        #expect(!AnthropicBlocks.echoable(reply))
+        let r = request([reply, result(1)])
+        #expect(ThinkingFixtures.signatures(try ThinkingFixtures.body(r)).isEmpty)
+        #expect(try !ThinkingFixtures.bodyText(r).contains(#""text":"  ""#))
     }
 
     @Test("a marker never lands on a thinking block (Review Focus 3)")

@@ -124,9 +124,10 @@ enum AnthropicBlocks {
 
     /// Whether `content`'s stored blocks can go out as received: an assistant reply whose array is
     /// storable and whose tool_use blocks name the same calls, in the same order, as its parts. A
-    /// mismatch means something changed the parts after the blocks were stored.
+    /// mismatch means something changed the parts after the blocks were stored. An array `storable`
+    /// would change (a blank text block a hook supplied) is not echoed either: the API rejects it.
     static func echoable(_ content: Content) -> Bool {
-        guard content.role == "model", let raw = content.anthropicBlocks, storable(raw) != nil,
+        guard content.role == "model", let raw = content.anthropicBlocks, storable(raw) == raw,
               let array = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [[String: Any]] else { return false }
         let blockCalls = array.filter { $0["type"] as? String == "tool_use" }
             .map { "\($0["id"] as? String ?? "")|\($0["name"] as? String ?? "")" }
