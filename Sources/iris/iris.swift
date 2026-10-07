@@ -350,6 +350,10 @@ actor IrisEngine {
     /// flip applies to the next request and never mid-stream. Injectable so a test can pin the
     /// streaming-off path directly without touching `ConfigManager.shared` (invariant 7).
     private let streamResponsesOverride: Bool?
+    /// The provider a turn's thinking replay (#314) is decided for; `nil` (the app) reads
+    /// `primaryProvider` once at the top of each turn. Injectable so a test can pin either side
+    /// without touching `ConfigManager.shared` (invariant 7).
+    private let providerOverride: String?
     /// Explicit per-engine override for the checkpoint auto-advance setting, same idiom as
     /// `streamResponsesOverride`: `nil` — always, in the app — means "consult the config". Not
     /// captured once at construction for the same reason: the only main-principal engine is built
@@ -428,7 +432,7 @@ actor IrisEngine {
     /// `CacheTTLPolicy.resolve` picks (5c §0.8). Nil everywhere else.
     private let cacheTTLOverride: CacheTTLPolicy?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil) {
         self.state = state
         self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
@@ -449,6 +453,7 @@ actor IrisEngine {
         self.stickyToolsEnabled = stickyTools
         self.cacheTTLOverride = cacheTTLOverride
         self.hooks = hooks
+        self.providerOverride = provider
         systemPrompt = nil
     }
 
@@ -1988,10 +1993,18 @@ actor IrisEngine {
         // event lines in `drainPendingInput`, the model reply, tool results. If anything removes or
         // rewrites the entry instead (the UI), the byte check drops the block rather than moving it.
         var turnRequest = TurnRequest(context: turnContext, stateHistory: stateHistory, initialHistory: history)
-        // #314 Phase 1: no reply before this turn's entry sends its blocks again, and round one
-        // sends none at all, since the PreCompress hook's list can shift an older reply past any
-        // index (Review Focus 5).
+        // #314 Phase 1: no reply before this turn's entry sends its blocks again. Only Anthropic
+        // has blocks to send, so on any other provider the check never runs (it encodes the whole
+        // history each round) and every request goes without blocks. Decided once per turn, so a
+        // provider switch mid-turn finds no block in the request either way.
+        let replaysThinking = (providerOverride ?? ConfigManager.shared.primaryProvider) == LLMProvider.anthropic.rawValue
         var thinkingReplay = ThinkingReplay(floor: stateHistory.count)
+        // Round one sends no block, and the BeforeModel hook sees none. `prepare` usually strips
+        // them anyway (below the floor by index, at or past AppState's count by index), but round
+        // one may send the PreCompress hook's list, whose indices are not AppState's: a prepend
+        // shifts an older reply up past the floor, and anything AppState gained before round one
+        // without a drain would leave a window where neither index strip reaches it (Review
+        // Focus 5). Stripping by list, not by index, holds whatever the shift.
 
         var request = GeminiRequest(contents: ThinkingReplay.withoutBlocks(await requestContents(history, from: .initial, &turnRequest, conversationId: conversationId)), systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
         // 5c §0.8/§0.9. Set once: later rounds only replace `request.contents`. The jobs list is
@@ -2077,7 +2090,8 @@ actor IrisEngine {
                     request.contents = await requestContents(history, from: .state, &turnRequest, conversationId: conversationId)
                 }
                 // The BeforeModel hook sees what would be sent: no block below the floor.
-                request.contents = thinkingReplay.applyingFloor(request.contents)
+                request.contents = replaysThinking ? thinkingReplay.applyingFloor(request.contents)
+                    : ThinkingReplay.withoutBlocks(request.contents)
 
                 let beforeModelDecision = await hooks.fireBeforeModel(request: request, useSandbox: hooksSandbox)
                 if case .block(let reason) = beforeModelDecision {
@@ -2094,7 +2108,9 @@ actor IrisEngine {
                 // messages do not extend what the server last saw, no block produced so far goes
                 // out again, starting with this request. A hook's edit to a stored reply is such a
                 // divergence, so the edit goes out as parts, never the reply's original bytes.
-                if let at = thinkingReplay.prepare(&activeRequest, historyCount: await stateHistoryCount(conversationId)) {
+                if !replaysThinking {
+                    activeRequest.contents = ThinkingReplay.withoutBlocks(activeRequest.contents)
+                } else if let at = thinkingReplay.prepare(&activeRequest, historyCount: await stateHistoryCount(conversationId)) {
                     print("Thinking replay: request \(modelRound + 1) diverges at \(at == 0 ? "system, tools or message 0" : "message \(at)"); this turn's blocks so far stay out")
                 }
                 // #385's cap, last: the hook's rewrite replaces the whole request.
@@ -2134,7 +2150,7 @@ actor IrisEngine {
                 }
                 let response = outcome.response
                 // What the server will expect next: the reply as it came back, not as a hook rewrote it.
-                thinkingReplay.recordReceived(response.candidates?.first?.content)
+                if replaysThinking { thinkingReplay.recordReceived(response.candidates?.first?.content) }
                 let modelName = ConfigManager.shared.getModel(for: modelTier)
                 PerformanceProfiler.shared.recordModelCall(
                     turnID: PerformanceProfiler.currentTurnID,

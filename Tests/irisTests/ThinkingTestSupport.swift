@@ -154,7 +154,8 @@ struct ThinkingHarness {
 
     static func make(_ script: [GeminiResponse], hooks: HookManager, store: ConversationStore? = nil,
                      seedFact: Bool = false, earlierTurn: Bool = false,
-                     roundStart: (@Sendable (Int) async -> Void)? = nil) throws -> ThinkingHarness {
+                     roundStart: (@Sendable (Int) async -> Void)? = nil,
+                     provider: String = LLMProvider.anthropic.rawValue) throws -> ThinkingHarness {
         let facts = try FactStoreManager(inMemory: true)
         if seedFact { _ = try facts.addFact(content: "Brian lives in Seattle") }
         let app = AppState(store: try store ?? ConversationStore.inMemory(),
@@ -170,7 +171,8 @@ struct ThinkingHarness {
         let client = RecordingClient(script)
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [],
                                 streamResponses: false, factStore: facts, protectionEnabled: false,
-                                sessionPeerCount: 0, roundStartHook: roundStart, hooks: hooks)
+                                sessionPeerCount: 0, roundStartHook: roundStart, hooks: hooks,
+                                provider: provider)
         return ThinkingHarness(app: app, id: id, client: client, engine: engine)
     }
 

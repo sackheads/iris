@@ -61,13 +61,14 @@ struct AppendOnlyRequestTests {
                      script: [GeminiResponse] = ThinkingFixtures.fourRounds(),
                      inputs: [String] = ["Tell me about Seattle"],
                      seedFact: Bool = false, earlierTurn: Bool = true, budget: TurnBudget? = nil,
+                     provider: String = LLMProvider.anthropic.rawValue,
                      roundStart: ((ThinkingHarness.Edit) -> @Sendable (Int) async -> Void)? = nil) async throws -> ThinkingHarness {
         let dir = try ThinkingFixtures.tempDirectory(label)
         defer { try? FileManager.default.removeItem(at: dir) }
         let hooks = try ThinkingFixtures.hooks(in: dir, scripts.mapValues { $0(dir) })
         let edit = ThinkingHarness.Edit()
         let h = try ThinkingHarness.make(script, hooks: hooks, seedFact: seedFact, earlierTurn: earlierTurn,
-                                         roundStart: roundStart?(edit))
+                                         roundStart: roundStart?(edit), provider: provider)
         edit.bind(h)
         for input in inputs {
             if let budget {
@@ -257,6 +258,24 @@ struct AppendOnlyRequestTests {
             #expect(request.maxOutputTokens == 4000)
             #expect(try ThinkingFixtures.body(request)["max_tokens"] as? Int == 4000)
         }
+    }
+
+    @Test("another provider never runs the replay path: no request carries a block, though history stores them",
+          arguments: [LLMProvider.gemini.rawValue, LLMProvider.openai.rawValue])
+    func otherProviderSendsNoBlocks(provider: String) async throws {
+        // Under Anthropic this script sends sig-1 on request two; only a skipped `prepare` sends none.
+        let h = try await run("other-\(provider)", provider: provider)
+        #expect(h.history.filter { $0.anthropicBlocks != nil }.count == 5, "precondition: sig-0 to sig-4 are stored")
+        #expect(h.client.requests.allSatisfy { $0.contents.allSatisfy { $0.anthropicBlocks == nil } })
+    }
+
+    @Test("another provider with an edited history: still no block, and the check never runs")
+    func otherProviderWithEdit() async throws {
+        let h = try await run("other-edit", provider: LLMProvider.gemini.rawValue, roundStart: { edit in
+            { round in if round == 1 { await edit.replaceText(of: 0, with: "earlier question, edited") } } })
+        #expect(h.client.requests[2].contents.first?.parts.first?.text == "earlier question, edited",
+                "precondition: the edit reached request three")
+        #expect(h.client.requests.allSatisfy { $0.contents.allSatisfy { $0.anthropicBlocks == nil } })
     }
 
     @Test("the next turn starts again from its own replies")
