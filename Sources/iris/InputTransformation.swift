@@ -2,7 +2,8 @@ import Foundation
 
 /// #314 decision 7: one entry of Anthropic's top-level `input_transformations`, present on every
 /// response when the binding beta is sent (`[]` when nothing happened). Kept raw: an unknown type
-/// or reason is stored and otherwise ignored (PTM:145). Phase 2 counts breaks by signature.
+/// or reason is stored and otherwise ignored (PTM:145). Only `type`, `path` and `reason` are kept;
+/// any other key an entry carries (for example a `signature`) is dropped, not retained for later.
 public struct InputTransformation: Codable, Sendable, Equatable {
     public var type: String
     public var path: String?

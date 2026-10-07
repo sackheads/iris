@@ -4,7 +4,7 @@ import Foundation
 /// dropped. It grows with its readers: each field arrives with the first code that reads it.
 /// PR 1 ships only the binding beta's own gate; no stored field exists yet because nothing but
 /// `takesBindingBeta` reads this table.
-struct AnthropicCapabilities: Equatable, Sendable {
+enum AnthropicCapabilities {
     /// Where the binding beta may go, on the API and Vertex alike. Vertex validates
     /// `anthropic-beta` and answers 400 "Unexpected value(s)" for a beta it does not accept; all
     /// three took it there, and Sonnet 5.5 took adaptive thinking and drop_block too (work's
@@ -20,12 +20,13 @@ struct AnthropicCapabilities: Equatable, Sendable {
     }
 
     /// Whether the binding beta may go to this model on this route (decision 4, plan note 4). A
-    /// beta a route rejects is a 400 on every request, so unknown ids never get it.
-    /// `transport` stays in the signature: the two routes are expected to diverge once more
-    /// models are probed.
+    /// beta a route rejects is a 400 on every request, so unknown ids never get it. A custom
+    /// `baseURL` is unprobed: a gateway in front of it may validate `anthropic-beta` the way
+    /// Vertex does and 400 every request, so it gets no header regardless of model.
     static func takesBindingBeta(model: String, transport: AnthropicTransport) -> Bool {
         switch transport {
-        case .direct, .vertex: return bindingBetaModels.contains(key(model))
+        case .direct(_, let baseURL): return baseURL.isEmpty && bindingBetaModels.contains(key(model))
+        case .vertex: return bindingBetaModels.contains(key(model))
         }
     }
 }

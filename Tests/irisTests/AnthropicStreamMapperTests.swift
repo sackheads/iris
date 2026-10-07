@@ -228,14 +228,20 @@ struct AnthropicStreamMapperTests {
     }
 
     @Test("a tool_use id outside ^[a-zA-Z0-9_-]+$ stores nothing on both paths: sent back, it is a 400",
-          arguments: ["", "a b"])
+          arguments: ["", "a b", "a\n", "a\r\n"])
     func badToolIdStoresNothing(id: String) throws {
+        // Escaped for the wire, not inlined raw: an unescaped control character makes the
+        // surrounding JSON itself invalid, which would fail before the id check runs at all.
+        let wireId = id.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
         let events = try run(Self.thinking(0, signature: "sig-1") + [
-            ("content_block_start", #"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"\#(id)","name":"n","input":{}}}"#),
+            ("content_block_start", #"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"\#(wireId)","name":"n","input":{}}}"#),
             ("content_block_stop", #"{"type":"content_block_stop","index":1}"#),
         ] + Self.stop)
         #expect(blocks(events).isEmpty)
-        let whole = #"[{"type":"thinking","thinking":"t","signature":"s"},{"type":"tool_use","id":"\#(id)","name":"n","input":{}}]"#
+        let whole = #"[{"type":"thinking","thinking":"t","signature":"s"},{"type":"tool_use","id":"\#(wireId)","name":"n","input":{}}]"#
         #expect(AnthropicBlocks.storable(whole) == nil)
     }
 

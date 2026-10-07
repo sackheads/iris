@@ -49,6 +49,21 @@ struct AnthropicCapabilitiesTests {
         }
     }
 
+    @Test("a custom base URL gets no binding beta, even for a probed model: a gateway may 400 on it")
+    func noHeaderOnCustomBaseURL() throws {
+        let custom = AnthropicTransport.direct(apiKey: "k", baseURL: "https://proxy.example")
+        for model in ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"] {
+            #expect(try header(model, custom) == nil, Comment(rawValue: model))
+            #expect(!AnthropicCapabilities.takesBindingBeta(model: model, transport: custom), Comment(rawValue: model))
+        }
+    }
+
+    @Test("the default direct route and Vertex are unaffected by the custom-base-URL check")
+    func headerStillSentOnDefaultRoutes() throws {
+        #expect(try header("claude-opus-5-5", Self.direct) == AnthropicCapabilities.bindingBeta)
+        #expect(try header("claude-opus-5-5", Self.vertex) == AnthropicCapabilities.bindingBeta)
+    }
+
     @Test("the header adds nothing to the body: no thinking object, no block_binding")
     func bodyUnchanged() throws {
         let r = GeminiRequest(contents: [Content(role: "user", parts: [Part(text: "hi")])], systemInstruction: nil, tools: nil)
