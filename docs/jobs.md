@@ -373,7 +373,8 @@ consecutive failure pauses the job with "failed 3 times; paused". An approved ca
 job runs with the same grant — the same mounts, network and working directory — and is refused,
 with the approval left unspent, if a granted directory has since moved. The run's container ends
 with the run: closing a run's conversation now ends its sandbox session, where before it lingered
-until the idle reaper.
+until the idle reaper. A subagent's container ends with the subagent, however it ended, completed
+included, so a delegated subagent no longer keeps the grant's mounts open after it returns (#291).
 
 **Changing one.** `schedule_job` with an explicit `name` that names a scheduled or polled job
 created in *this* conversation replaces it — schedule, prompt, profile, policy and grant from the
@@ -969,8 +970,13 @@ would start a turn nobody budgeted; delegating synchronously is allowed. The dea
 for a round, and does not wait for the turn either. At the deadline the run is closed `failed`, the
 Mac is let go back to sleep and the job is free to fire again; the turn is asked to stop, and if it is parked somewhere that never
 checks — a blocking subprocess, a stream with no timeout — it is abandoned rather than waited on.
-A subagent still working when the deadline closes the run is not stopped by it, and from then on is
-charged to nothing (#323).
+The run's subagents stop with it (#323). Cancelling the run's turn at the deadline cancels the
+subagent it is waiting on, and that subagent's own: the in-flight model call is cancelled, a running
+`run_command` is killed with everything it started, and its container is deleted. The run's result
+for that delegation reads `status: cancelled`. When the run is closed, any subagent still registered
+under it is stopped the same way, so none outlives its run. A subagent whose next round the run's
+budget refuses ends there and then, with no further model call, and the run reads `status: failed`
+and `Stopped by the background run's budget (…)` for it, not a generic stop.
 Whichever bound bit, the row and the card say `budget: weighted tokens exceeded` or `budget: time
 exceeded`; rows written before 5c still say `budget: tokens exceeded`, and are still read as a budget
 stop. A job paused before 5c by a daily budget keeps its old reason, `daily token budget reached …`,
