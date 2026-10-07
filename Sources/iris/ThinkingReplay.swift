@@ -11,7 +11,10 @@ import Foundation
 /// never an edit. Anything else (a UI edit, a PreCompress list giving way to AppState's, a
 /// BeforeModel rewrite of messages, system or tools, or its undoing, an AfterModel rewrite of the
 /// stored reply, a hook dropping blocks) diverges, and every block produced so far stays out from
-/// then on. A hook that rewrites identically every round does not diverge, and keeps replay.
+/// then on. Replay resumes with the reply to the diverging request. A BeforeModel hook that
+/// rewrites identically every round does not diverge, and keeps replay. An AfterModel rewrite
+/// always does (the stored reply has no blocks; `expected` has the received ones), so a steady
+/// one means no replay in that turn.
 ///
 /// Comparing `Content` instead of wire bytes is sound only because `AnthropicClient`'s encoding
 /// is a pure function of the whole contents: the same contents give the same messages,
