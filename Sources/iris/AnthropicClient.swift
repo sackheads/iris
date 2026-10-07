@@ -45,8 +45,10 @@ struct AnthropicClient {
         "claude-haiku-4-5": 32_000,    // 64K
     ]
     static let fallbackMaxTokens = 16_000
-    /// The docs: a non-streaming request above ~16K output risks an HTTP timeout on any model.
-    static let nonStreamingMaxTokens = 16_000
+    /// A non-streaming reply arrives all at once, so it has to finish inside
+    /// `LLMRequestPolicy.timeoutSeconds` (180 s); the docs also warn that above ~16K output a
+    /// non-streaming request risks an HTTP timeout. 8192 still doubles the old 4096.
+    static let nonStreamingMaxTokens = 8192
 
     /// The table key for a model: the Vertex spelling with its `@date` dropped, so the API's
     /// dated id, Vertex's, and the bare alias all find the same row.
@@ -56,9 +58,12 @@ struct AnthropicClient {
         return String(vertex[..<at])
     }
 
-    static func maxTokens(for model: String, stream: Bool) -> Int {
-        let value = maxTokensByModel[maxTokensKey(model)] ?? fallbackMaxTokens
-        return stream ? value : min(value, nonStreamingMaxTokens)
+    /// `budgetCap` is what a budgeted run can still afford (`GeminiRequest.maxOutputTokens`).
+    static func maxTokens(for model: String, stream: Bool, budgetCap: Int? = nil) -> Int {
+        var value = maxTokensByModel[maxTokensKey(model)] ?? fallbackMaxTokens
+        if !stream { value = min(value, nonStreamingMaxTokens) }
+        if let budgetCap { value = min(value, max(1, budgetCap)) }
+        return value
     }
 
     /// `global` has no regional host; `us`/`eu` are multi-region hosts; anything else is a region.
@@ -210,7 +215,7 @@ struct AnthropicClient {
         }
 
         var body: [String: Any] = [
-            "max_tokens": Self.maxTokens(for: model, stream: stream),
+            "max_tokens": Self.maxTokens(for: model, stream: stream, budgetCap: request.maxOutputTokens),
             "messages": anthropicMessages
         ]
         switch transport {
@@ -401,11 +406,18 @@ struct AnthropicClient {
     /// `cache_read_input_tokens` / `cache_creation_input_tokens`, so `promptTokenCount` is their
     /// sum (5a §0.4). Anthropic never sends a total, so `.withTotal()` fills one from prompt +
     /// output — otherwise the job budgets, which read the total, charge these runs nothing.
+    static let truncatedToolCallMessage = "Anthropic stopped at max_tokens inside a tool call; its input is incomplete, so the call was not run."
+
     static func parseResponse(_ json: [String: Any]) throws -> GeminiResponse {
         var geminiResponse = GeminiResponse()
         geminiResponse.candidates = []
 
         if let contentArray = json["content"] as? [[String: Any]] {
+            // Blocks arrive in order, so only the last can have been cut. Its input is partial
+            // and must never run: refused like the stream's undecodable tool JSON.
+            if json["stop_reason"] as? String == "max_tokens", contentArray.last?["type"] as? String == "tool_use" {
+                throw APIError(message: truncatedToolCallMessage)
+            }
             var content = Content(role: "model", parts: [])
 
             for part in contentArray {

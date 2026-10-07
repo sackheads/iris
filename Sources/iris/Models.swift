@@ -13,6 +13,9 @@ struct GeminiRequest: Codable {
     /// 5c: provider-side cache hints (TTL by position, OpenAI's cache key). Never encoded: this
     /// type's JSON is Gemini's request body and the hook payload, and neither knows the field.
     var cacheHints: CacheHints? = nil
+    /// The most output a budgeted run can still afford (`TurnBudget.outputTokenCap`). Never
+    /// encoded, for the same reason; Anthropic's client clamps its `max_tokens` to it.
+    var maxOutputTokens: Int? = nil
 
     private enum CodingKeys: String, CodingKey { case contents, systemInstruction, tools }
 }
