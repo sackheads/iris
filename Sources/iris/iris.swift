@@ -2166,6 +2166,7 @@ actor IrisEngine {
                 
                 var modelContent = Content(role: "model", parts: responseContent.parts)
                 // #314 decision 1: the blocks as received, taken from the reply before any hook.
+                // Read from the pre-hook `response` for provenance: a hook must never be the source of a signed block.
                 if !replyRewritten {
                     modelContent.anthropicBlocks = response.candidates?.first?.content?.anthropicBlocks
                 }

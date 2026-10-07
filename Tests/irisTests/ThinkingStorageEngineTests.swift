@@ -42,6 +42,27 @@ struct ThinkingStorageEngineTests {
                 "precondition: the hook really rewrote round two")
     }
 
+    @Test("a hook that rewrites only the text, leaving the blocks byte-identical, still stores none")
+    func textOnlyRewriteStoresNone() async throws {
+        let dir = try ThinkingFixtures.tempDirectory("textonly")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let counter = dir.appendingPathComponent("n"), out = dir.appendingPathComponent("out.json")
+        // In the payload, `parts` holds `:"done 4"` while the blocks string holds `:\"done 4\"`,
+        // so this matches the parts text only. The output is kept to check the blocks survived.
+        let script = """
+        c=$(cat '\(counter.path)' 2>/dev/null || echo 0); c=$((c+1)); echo $c > '\(counter.path)'
+        if [ "$c" -eq 4 ]; then sed -E 's/:"done 4"/:"done four"/g' | tee '\(out.path)'; else cat; fi
+        """
+        let rounds = ThinkingFixtures.fourRounds()
+        let h = try ThinkingHarness.make(rounds, hooks: try ThinkingFixtures.hooks(in: dir, ["AfterModel": script]))
+        await h.run()
+        #expect(modelEntries(h).map { $0.anthropicBlocks != nil } == [true, true, true, false])
+        #expect(modelEntries(h)[3].parts.first?.text == "done four", "precondition: the hook rewrote the text")
+        let hooked = try JSONDecoder().decode(GeminiResponse.self, from: Data(contentsOf: out))
+        #expect(hooked.candidates?.first?.content?.anthropicBlocks == rounds[3].candidates?.first?.content?.anthropicBlocks,
+                "precondition: the hook left the blocks string byte-identical")
+    }
+
     @Test("an AfterModel hook that passes its input through is not a rewrite (Review Focus 2)")
     func passThroughAfterModelKeepsBlocks() async throws {
         let dir = try ThinkingFixtures.tempDirectory("passthrough")
