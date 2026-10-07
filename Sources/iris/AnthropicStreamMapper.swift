@@ -3,10 +3,13 @@ import Foundation
 /// Anthropic Messages streaming (`"stream": true`). Text deltas pass through; a `tool_use`
 /// block's `input_json_delta` fragments are buffered per block index and emitted as one
 /// `functionCall` on `content_block_stop`; `message_start`/`message_delta` carry the two
-/// halves of usage; `thinking`/`signature` deltas and `ping` are dropped.
+/// halves of usage. Every block is also folded as it arrived, and a complete reply that thought
+/// emits its content array once, before `done` (#314); `ping` is dropped.
 struct AnthropicStreamMapper: StreamMapper {
     private struct ToolBlock { var id: String; var name: String; var json = "" }
     private var tools: [Int: ToolBlock] = [:]
+    /// #314: every block of the reply by index, so the array can be stored as received.
+    private var blocks: [Int: AnthropicBlocks.Streamed] = [:]
     private var stopReason: String?
     private var stopped = false
 
@@ -33,27 +36,49 @@ struct AnthropicStreamMapper: StreamMapper {
                 }
             }
         case "content_block_start":
-            if let index = json["index"] as? Int, let block = json["content_block"] as? [String: Any],
-               block["type"] as? String == "tool_use",
-               let id = block["id"] as? String, let name = block["name"] as? String {
+            guard let index = json["index"] as? Int, let block = json["content_block"] as? [String: Any] else { break }
+            let type = block["type"] as? String ?? ""
+            var streamed = AnthropicBlocks.Streamed(type: type)
+            streamed.text = block["text"] as? String ?? ""
+            streamed.thinking = block["thinking"] as? String ?? ""
+            streamed.signature = block["signature"] as? String ?? ""
+            streamed.data = block["data"] as? String ?? ""
+            if type == "tool_use", let id = block["id"] as? String, let name = block["name"] as? String {
                 tools[index] = ToolBlock(id: id, name: name)
+                streamed.id = id
+                streamed.name = name
             }
+            blocks[index] = streamed
         case "content_block_delta":
             guard let delta = json["delta"] as? [String: Any] else { break }
+            let index = json["index"] as? Int
             switch delta["type"] as? String {
             case "text_delta":
-                if let text = delta["text"] as? String { return [.textDelta(text)] }
-            case "input_json_delta":
-                if let index = json["index"] as? Int, let partial = delta["partial_json"] as? String {
-                    tools[index]?.json += partial
+                if let text = delta["text"] as? String {
+                    if let index { blocks[index]?.text += text }
+                    return [.textDelta(text)]
                 }
+            case "input_json_delta":
+                if let index, let partial = delta["partial_json"] as? String {
+                    tools[index]?.json += partial
+                    blocks[index]?.json += partial
+                }
+            case "thinking_delta":
+                if let index, let thinking = delta["thinking"] as? String { blocks[index]?.thinking += thinking }
+            case "signature_delta":
+                if let index, let signature = delta["signature"] as? String { blocks[index]?.signature += signature }
             default:
-                break
+                // A delta this mapper does not fold (citations): the block cannot be rebuilt as it
+                // arrived, so the reply stores nothing.
+                if let index { blocks[index]?.type = "unfolded" }
             }
         case "content_block_stop":
-            if let index = json["index"] as? Int, let block = tools.removeValue(forKey: index) {
-                let args = try Self.decodeArguments(block.json)
-                return [.functionCall(FunctionCall(name: block.name, args: args, id: block.id))]
+            if let index = json["index"] as? Int {
+                blocks[index]?.stopped = true
+                if let block = tools.removeValue(forKey: index) {
+                    let args = try Self.decodeArguments(block.json)
+                    return [.functionCall(FunctionCall(name: block.name, args: args, id: block.id))]
+                }
             }
         case "message_delta":
             var out: [LLMStreamEvent] = []
@@ -64,7 +89,15 @@ struct AnthropicStreamMapper: StreamMapper {
             return out
         case "message_stop":
             stopped = true
-            return [.done(finishReason: stopReason)]
+            var out: [LLMStreamEvent] = []
+            // Every index from 0, with none missing: otherwise the array is not what arrived.
+            let indices = blocks.keys.sorted()
+            if indices == Array(0..<indices.count),
+               let raw = AnthropicBlocks.render(indices.compactMap { blocks[$0] }) {
+                out.append(.anthropicBlocks(raw))
+            }
+            out.append(.done(finishReason: stopReason))
+            return out
         case "error":
             // Same shape and builder as a non-2xx body, so the pill and retry classification match.
             let errorType = (json["error"] as? [String: Any])?["type"] as? String

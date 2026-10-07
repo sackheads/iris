@@ -15,6 +15,9 @@ enum LLMStreamEvent: Sendable, Equatable {
     /// The provider ended the turn. `finishReason` is the provider's own string; `blockReason`
     /// is Gemini's prompt-level block, kept separate so the #136 pill reads exactly as before.
     case done(finishReason: String?, blockReason: String? = nil)
+    /// #314: an Anthropic reply's content array as received, for `Content.anthropicBlocks`. Once,
+    /// at the end of a complete reply that has a thinking block; never for a cut-off one.
+    case anthropicBlocks(String)
 }
 
 /// One Server-Sent Event: the optional `event:` name and the joined `data:` payload.
@@ -109,6 +112,8 @@ struct StreamAssembler: Sendable {
         case .done(let finish, let block):
             finishReason = finish
             blockReason = block
+        case .anthropicBlocks:
+            break
         }
     }
 
