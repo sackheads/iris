@@ -311,6 +311,21 @@ struct AnthropicClient {
             }
         }
         
+        // #314 decisions 4 and 6: the binding field travels only with its header (alone it is a
+        // 400, "Extra inputs are not permitted"), and only to a model and route the table says
+        // take the beta, unless this is the retry after a binding 400, which proved the model checks.
+        // Without the field no `thinking` object is sent at all, as before #314: each model keeps
+        // its own default. `block_binding` works only inside adaptive thinking, so the object is
+        // adaptive. Opus 5.5 and Fable 5.1 accept nothing but adaptive anyway, so for them it adds
+        // only the binding. Sonnet 5.5 is the one whose thinking this changes: Iris otherwise sends
+        // it no thinking object, and its `between_tools` mode rejects `block_binding`, so the retry
+        // (and, from Task 13, every later request of that conversation) runs it on adaptive thinking.
+        let takesBeta = AnthropicCapabilities.takesBindingBeta(model: model, transport: transport)
+        let binding = (takesBeta || request.forceBindingBeta) ? request.prefixMismatchBehavior : nil
+        if let binding {
+            body["thinking"] = ["type": "adaptive", "block_binding": ["prefix_mismatch_behavior": binding.rawValue]] as [String: Any]
+        }
+
         if stream { body["stream"] = true }
 
         var urlRequest: URLRequest
@@ -340,10 +355,11 @@ struct AnthropicClient {
         }
         urlRequest.httpMethod = "POST"
         urlRequest.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        // #314 decisions 4-5: the binding beta, header only, to the models and routes known to
-        // take it, on the API and Vertex alike. Without the field it changes no behaviour: an
+        // #314 decisions 4-5: the binding beta, to the models and routes known to take it, on the
+        // API and Vertex alike, and with the binding field wherever that goes (the retry after a
+        // binding 400 reaches any model or route). Without the field it changes no behaviour: an
         // unenforced account lists mismatches in `input_transformations` and keeps the blocks.
-        if AnthropicCapabilities.takesBindingBeta(model: model, transport: transport) {
+        if takesBeta || binding != nil {
             urlRequest.addValue(AnthropicCapabilities.bindingBeta, forHTTPHeaderField: "anthropic-beta")
         }
         var bodyData = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
@@ -379,8 +395,9 @@ struct AnthropicClient {
                 return (try makeURLRequest(request: request, model: model, transport: resolved, stream: true), resolved.providerLabel)
             }
         }
-        // A non-200 throws before any event, so a TTL rejection can be retried without the
-        // consumer ever seeing half a reply. Only before the first event, and only once.
+        // A non-200 throws before any event, so a TTL or binding rejection can be retried without
+        // the consumer ever seeing half a reply. Only before the first event, and only once: a
+        // retry that fails again throws from inside its `catch`, which nothing above catches.
         return AsyncThrowingStream { continuation in
             let task = Task {
                 var yielded = false
@@ -390,6 +407,11 @@ struct AnthropicClient {
                     } catch let error where !yielded && isTTLRejection(error, request: request) {
                         logTTLFallback(error)
                         for try await event in attempt(withoutTTL(request)) { continuation.yield(event) }
+                    } catch let error where !yielded && isBindingRejection(error, request: request) {
+                        logBindingFallback(error)
+                        // First, so the assembled reply tells the engine to raise the floor.
+                        continuation.yield(.prefixMismatchFallback)
+                        for try await event in attempt(withDropBlock(request)) { continuation.yield(event) }
                     }
                     continuation.finish()
                 } catch {
@@ -421,6 +443,26 @@ struct AnthropicClient {
         print("Anthropic rejected a 1-hour cache TTL; retrying once at the 5-minute default: \(error.localizedDescription)")
     }
 
+    /// #314 decision 6: the 400 an enforced account returns for a replayed block whose prefix
+    /// changed (MM:1624; the probe confirmed the text). A tampered signature has the same leading
+    /// clause without this sentence and is not retried. Never twice: the retry is forced.
+    static func isBindingRejection(_ error: Error, request: GeminiRequest) -> Bool {
+        guard !request.forceBindingBeta, let error = error as? APIError, error.statusCode == 400 else { return false }
+        return (error.message + " " + (error.detail ?? "")).contains("bound to a different conversation")
+    }
+
+    static func withDropBlock(_ request: GeminiRequest) -> GeminiRequest {
+        var copy = request
+        copy.prefixMismatchBehavior = .dropBlock
+        copy.forceBindingBeta = true
+        return copy
+    }
+
+    private static func logBindingFallback(_ error: Error) {
+        let diagnosis = (error as? APIError)?.prefixMismatchDiagnosis.map { "; \(InputTransformation.diagnosisHeader): \($0)" } ?? ""
+        print("Anthropic rejected a replayed thinking block (bound to a different conversation); retrying once with drop_block\(diagnosis)")
+    }
+
     static func generateContent(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "") async throws -> GeminiResponse {
         try await generateContent(request: request, model: model, transport: .direct(apiKey: apiKey, baseURL: baseURL))
     }
@@ -432,6 +474,11 @@ struct AnthropicClient {
         } catch let error where isTTLRejection(error, request: request) {
             logTTLFallback(error)
             return try await generateOnce(request: withoutTTL(request), model: model, transport: transport, session: session)
+        } catch let error where isBindingRejection(error, request: request) {
+            logBindingFallback(error)
+            var response = try await generateOnce(request: withDropBlock(request), model: model, transport: transport, session: session)
+            response.anthropicBindingFallback = true
+            return response
         }
     }
 

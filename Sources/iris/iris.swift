@@ -2222,6 +2222,13 @@ actor IrisEngine {
                 history = await MainActor.run {
                     localState?.conversations.first(where: { $0.id == conversationId })?.history ?? []
                 }
+                if replaysThinking && response.anthropicBindingFallback {
+                    // #314 plan note 6: the retry's drop is a strip the API recorded, so keep it
+                    // (decision 2). The floor goes to the whole history, the retry's own reply
+                    // included, as every rise does, so the echo-to-rebuild switch below it never
+                    // sits under a surviving block (see `ThinkingReplay.floor`).
+                    thinkingReplay.raiseFloor(to: history.count)
+                }
                 let (spentSoFar, runSink) = await MainActor.run { () -> (TokenUsage, (any TurnUsageSink)?) in
                     if let usage = activeResponse.usageMetadata {
                         localState?.updateTokenUsage(for: conversationId, usage: usage)
@@ -2786,6 +2793,8 @@ actor IrisEngine {
     nonisolated static func applyHookRewrite(_ data: Data, to request: GeminiRequest) -> GeminiRequest {
         guard var rewritten = try? JSONDecoder().decode(GeminiRequest.self, from: data) else { return request }
         rewritten.cacheHints = request.cacheHints
+        rewritten.prefixMismatchBehavior = request.prefixMismatchBehavior
+        rewritten.forceBindingBeta = request.forceBindingBeta
         return rewritten
     }
 
