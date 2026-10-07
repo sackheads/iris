@@ -311,6 +311,12 @@ struct AnthropicClient {
         }
         urlRequest.httpMethod = "POST"
         urlRequest.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        // #314 decisions 4-5: the binding beta, header only, to the models and routes known to
+        // take it, on the API and Vertex alike. Without the field it changes no behaviour: an
+        // unenforced account lists mismatches in `input_transformations` and keeps the blocks.
+        if AnthropicCapabilities.takesBindingBeta(model: model, transport: transport) {
+            urlRequest.addValue(AnthropicCapabilities.bindingBeta, forHTTPHeaderField: "anthropic-beta")
+        }
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
 
         LLMRequestPolicy.apply(to: &urlRequest)
