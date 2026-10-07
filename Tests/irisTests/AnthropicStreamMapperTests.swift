@@ -198,6 +198,18 @@ struct AnthropicStreamMapperTests {
         #expect(blocks(try run(Self.thinking(0, signature: "sig-1") + Self.text(2, "hi") + Self.stop)).isEmpty)
     }
 
+    @Test("an empty text block is left out of the stored array: sent back, it is a 400")
+    func emptyTextOmitted() throws {
+        let events = try run(Self.thinking(0, signature: "sig-1") + [
+            ("content_block_start", #"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#),
+            ("content_block_stop", #"{"type":"content_block_stop","index":1}"#),
+        ] + Self.stop)
+        #expect(blocks(events) == [#"[{"type":"thinking","thinking":"Check \"x\".","signature":"sig-1"}]"#])
+        let whole = #"[{"type":"thinking","thinking":"t","signature":"s"}, {"type":"text","text":""} ,{"type":"tool_use","id":"t1","name":"n","input":{"q": "a,]}", "b": 1.0}}]"#
+        #expect(AnthropicBlocks.storable(whole)
+                == #"[{"type":"thinking","thinking":"t","signature":"s"},{"type":"tool_use","id":"t1","name":"n","input":{"q": "a,]}", "b": 1.0}}]"#)
+    }
+
     /// Task 3's non-stream path calls `storable`; the same rules hold for an array that arrived whole.
     @Test("storable keeps a signed array verbatim and refuses unsigned, unthought, or unknown-typed ones (Review Focus 1)")
     func storableArray() {
