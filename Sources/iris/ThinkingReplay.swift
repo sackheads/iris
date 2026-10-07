@@ -32,9 +32,17 @@ struct ThinkingReplay: Sendable {
     /// image stood in for by MIME type and length) and its `anthropicBlocks` text as stored.
     /// Each outgoing message is encoded once per send, and that fingerprint is carried forward
     /// as what the next send compares against. Nothing is encoded twice.
+    ///
+    /// Fails closed: `bare` is nil when the message would not encode (a NaN in a tool argument),
+    /// and such a fingerprint equals nothing, itself included, so the check diverges there.
     struct Fingerprint: Equatable, Sendable {
-        let bare: Data
+        let bare: Data?
         let blocks: String?
+
+        static func == (lhs: Fingerprint, rhs: Fingerprint) -> Bool {
+            guard let l = lhs.bare, let r = rhs.bare else { return false }
+            return l == r && lhs.blocks == rhs.blocks
+        }
     }
 
     /// History index (AppState's list) below which no blocks are sent. Only ever rises.
@@ -50,7 +58,10 @@ struct ThinkingReplay: Sendable {
 
     init(floor: Int) { self.floor = floor }
 
-    mutating func raiseFloor(to index: Int) { floor = max(floor, index) }
+    mutating func raiseFloor(to index: Int) {
+        precondition(index >= 0, "a history index")
+        floor = max(floor, index)
+    }
 
     func applyingFloor(_ contents: [Content]) -> [Content] {
         var out = contents
@@ -65,17 +76,18 @@ struct ThinkingReplay: Sendable {
     static func fingerprint(_ content: Content) -> Fingerprint {
         var bare = content
         bare.anthropicBlocks = nil
-        return Fingerprint(bare: TurnContext.anchorBytes(of: bare) ?? Data(), blocks: content.anthropicBlocks)
+        return Fingerprint(bare: TurnContext.anchorBytes(of: bare), blocks: content.anthropicBlocks)
     }
 
     /// nil when `outgoing` extends what the server last saw; otherwise the first message that
-    /// differs, or 0 when the system instruction or the tools changed.
+    /// differs, or 0 when the system instruction or the tools changed. An encode failure on
+    /// either side is a divergence, never a match.
     private func divergence(systemAndTools: Data?, outgoing: [Fingerprint]) -> Int? {
         guard let expected else { return nil }
-        if systemAndTools != lastSystemAndTools { return 0 }
+        guard let systemAndTools, let lastSystemAndTools, systemAndTools == lastSystemAndTools else { return 0 }
         for i in expected.indices {
             guard i < outgoing.count else { return i }
-            if outgoing[i].bare != expected[i].bare { return i }
+            guard let o = outgoing[i].bare, let e = expected[i].bare, o == e else { return i }
             // Below the floor the outgoing side has no blocks by construction; compare above it.
             if i >= floor, outgoing[i].blocks != expected[i].blocks { return i }
         }
@@ -108,6 +120,8 @@ struct ThinkingReplay: Sendable {
         if let reply { expected?.append(Self.fingerprint(reply)) }
     }
 
+    /// nil only when encoding fails. An absent system or tool list still encodes (as `{}` at
+    /// worst), so a real nil-vs-nil compares equal and a failure never does.
     private static func systemAndTools(_ request: GeminiRequest) -> Data? {
         struct Bound: Encodable { let system: Content?; let tools: [Tool]? }
         let encoder = JSONEncoder()
