@@ -122,7 +122,7 @@ enum PerfCLI {
                 "perf: another run (pid \(pid)) already holds the scratch workspace at \(url.path) — wait for it to finish, or stop it")
         case .blocked(let detail):
             throw PerfCLIError.usage(
-                "perf: could not claim the scratch workspace lock at \(lockURL.path)" + (detail.map { ": \($0)" } ?? ""))
+                "perf: could not claim the scratch workspace lock at \(lockURL.path)" + ": \(detail)")
         }
         try? FileManager.default.removeItem(at: url)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

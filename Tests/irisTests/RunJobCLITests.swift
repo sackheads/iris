@@ -308,6 +308,86 @@ struct RunJobCLITests {
         #expect(try leftovers(beside: path).isEmpty)
     }
 
+    @Test("the app launching mid-takeover keeps its lock")
+    func anAppAcquireDuringATakeoverSurvives() throws {
+        // The takeover has read a dead pid and is about to move the file aside when the app
+        // launches and writes its lock — an atomic write, so a rename over the path. Unserialized,
+        // the takeover then moves the *app's* lock aside and claims the store under a live app.
+        // The app's write waits on the same directory lock, so it lands after the takeover. It
+        // then races the claim's next link: the app first, and the claim is told the app holds
+        // it; the link first, and the app overwrites the run's lock — the documented direction,
+        // the app keeping the store. Either way the app's lock is the one left. pid 1 stands in
+        // for the app, because it is alive and is not this process.
+        let path = try lockPathInOwnDirectory()
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        try Data("999999\n".utf8).write(to: path)
+
+        let appWrote = DispatchSemaphore(value: 0)
+        let landedMidTakeover = Claims()
+        let claim = GUILock.acquireExclusively(at: path, duringTakeover: {
+            DispatchQueue.global().async {
+                GUILock.acquire(at: path, pid: 1)
+                appWrote.signal()
+            }
+            // Unserialized, the app's write lands well inside this; serialized, it cannot.
+            if appWrote.wait(timeout: .now() + 0.5) == .success { landedMidTakeover.add(.acquired) }
+        })
+        #expect(landedMidTakeover.value.isEmpty, "the app's write waits for the takeover")
+        if landedMidTakeover.value.isEmpty {
+            #expect(appWrote.wait(timeout: .now() + 30) == .success)
+        }
+        #expect(claim == .held(pid: 1) || claim == .acquired, "\(claim)")
+        #expect(GUILock.state(at: path) == .held(pid: 1),
+                "the app's lock is never moved aside by a takeover that read the dead pid first")
+        #expect(try leftovers(beside: path).isEmpty)
+    }
+
+    @Test("the app launching before the takeover looks again: the claim is told the app has it")
+    func anAppAcquireBeforeTheTakeoverIsHeld() throws {
+        let path = try lockPathInOwnDirectory()
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        try Data("999999\n".utf8).write(to: path)
+        let claim = GUILock.acquireExclusively(at: path, afterReadingStale: {
+            GUILock.acquire(at: path, pid: 1)
+        })
+        #expect(claim == .held(pid: 1))
+        #expect(GUILock.state(at: path) == .held(pid: 1))
+    }
+
+    @Test("a holder releasing between a failed link and the read is retried, not refused")
+    func aReleaseMidClaimIsRetried() throws {
+        // The holder is there at each link and gone by the read, twice: the claim sees the path
+        // change hands and tries again rather than refusing with no holder to name.
+        let path = try lockPathInOwnDirectory()
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let me = ProcessInfo.processInfo.processIdentifier
+        let claim = GUILock.acquireExclusively(at: path, beforeLink: { attempt in
+            if attempt < 2 { try? Data("\(me)\n".utf8).write(to: path) }
+        }, afterLinkFailed: {
+            try? FileManager.default.removeItem(at: path)
+        })
+        #expect(claim == .acquired)
+        #expect(GUILock.state(at: path) == .held(pid: me))
+        #expect(try leftovers(beside: path).isEmpty)
+    }
+
+    @Test("a lock that never stops changing hands is refused with a reason, after a bounded wait")
+    func endlessChurnIsRefusedWithADetail() throws {
+        let path = try lockPathInOwnDirectory()
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let me = ProcessInfo.processInfo.processIdentifier
+        let attempts = Claims()
+        let claim = GUILock.acquireExclusively(at: path, beforeLink: { _ in
+            attempts.add(.acquired)
+            try? Data("\(me)\n".utf8).write(to: path)
+        }, afterLinkFailed: {
+            try? FileManager.default.removeItem(at: path)
+        })
+        #expect(claim == .blocked(detail: GUILock.churnDetail))
+        #expect(attempts.value.count == GUILock.maxClaimAttempts)
+        #expect(try leftovers(beside: path).isEmpty)
+    }
+
     @Test("release only takes a lock this process holds")
     func releaseIsPidGuarded() throws {
         // pid 1 is launchd: alive, and not us. A release that went by "the file is there" would
@@ -344,7 +424,7 @@ struct RunJobCLITests {
         let path = lockPath()
         defer { try? FileManager.default.removeItem(at: path) }
         try Data("not a pid".utf8).write(to: path)
-        #expect(GUILock.acquireExclusively(at: path) == .blocked(detail: nil))
+        #expect(GUILock.acquireExclusively(at: path) == .blocked(detail: GUILock.unreadableDetail))
         #expect(try String(contentsOf: path, encoding: .utf8) == "not a pid",
                 "refusing is recoverable; overwriting somebody else's file is not")
     }
