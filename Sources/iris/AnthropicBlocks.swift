@@ -26,15 +26,18 @@ enum AnthropicBlocks {
         var type: String
         var signature = ""
         var text = ""
+        var id = ""
         var stopped = true
 
-        init(type: String, signature: String = "", text: String = "", stopped: Bool = true) {
-            self.type = type; self.signature = signature; self.text = text; self.stopped = stopped
+        init(type: String, signature: String = "", text: String = "", id: String = "", stopped: Bool = true) {
+            self.type = type; self.signature = signature; self.text = text; self.id = id; self.stopped = stopped
         }
-        init(_ b: Streamed) { self.init(type: b.type, signature: b.signature, text: b.text, stopped: b.stopped) }
+        init(_ b: Streamed) {
+            self.init(type: b.type, signature: b.signature, text: b.text, id: b.id, stopped: b.stopped)
+        }
         init(_ o: [String: Any]) {
             self.init(type: o["type"] as? String ?? "", signature: o["signature"] as? String ?? "",
-                      text: o["text"] as? String ?? "")
+                      text: o["text"] as? String ?? "", id: o["id"] as? String ?? "")
         }
     }
 
@@ -47,11 +50,16 @@ enum AnthropicBlocks {
             && blocks.allSatisfy { $0.stopped && storableTypes.contains($0.type) }
             && blocks.contains { $0.type == "thinking" || $0.type == "redacted_thinking" }
             && blocks.allSatisfy { $0.type != "thinking" || !$0.signature.isEmpty }
+            // Sent back, an id outside this pattern is a 400 (live probe, opus-5-5).
+            && blocks.allSatisfy { $0.type != "tool_use" || $0.id.range(of: "^[a-zA-Z0-9_-]+$", options: .regularExpression) != nil }
     }
 
-    /// An empty text block is left out of what is stored: sent back, the API rejects it with a
-    /// 400, while a missing one can at worst mismatch a binding, which degrades instead of failing.
-    static func isOmitted(_ b: Shape) -> Bool { b.type == "text" && b.text.isEmpty }
+    /// A blank text block is left out of what is stored: sent back, the API rejects it with a 400,
+    /// while a missing one can at worst mismatch a binding, which degrades instead of failing.
+    static func isOmitted(_ b: Shape) -> Bool {
+        // 400: "text content blocks must be non-empty" / "must contain non-whitespace text".
+        b.type == "text" && b.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     /// The reply's array, or nil when `admits` refuses it. `blocks` must be every block of the
     /// reply, in index order.
