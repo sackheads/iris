@@ -174,6 +174,10 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// because the taint lived in transient state instead of being derived from what persists.
     var hasUnattendedInput: Bool = false
 
+    /// #314 decision 6: `drop_block` once a binding 400's retry succeeded, so later requests send
+    /// it, across restarts, wherever the beta is taken (CAUSES:93). Never cleared. Nil is unset.
+    var prefixMismatchBehavior: PrefixMismatchBehavior? = nil
+
     /// #185 -- surfaced from the store column of the same name (`ConversationStore.swift`), which
     /// every upsert already writes with `Date()`. Was write-only in memory before this: no
     /// property decoded it back, so it existed only as an ORDER BY clause the search path used.
@@ -194,7 +198,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior
     }
 
     init(from decoder: Decoder) throws {
@@ -233,6 +237,10 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         // Invariant 1: a conversation persisted before this ruling has no such key, and absent
         // means "no turn here ever started without the owner present", the correct default.
         hasUnattendedInput = try container.decodeIfPresent(Bool.self, forKey: .hasUnattendedInput) ?? false
+        // Invariant 1: absent on every conversation persisted before #314, and absent is unset.
+        // Read as a string so a value this build does not know is unset too, not a failed decode.
+        prefixMismatchBehavior = try container.decodeIfPresent(String.self, forKey: .prefixMismatchBehavior)
+            .flatMap(PrefixMismatchBehavior.init(rawValue:))
         // Migration: a legacy conversation that had a goal (activeGoal) but no contract is
         // upgraded to a locked single-qualitative-criterion contract so in-flight goals survive.
         if goalContract == nil, let legacy = activeGoal {
@@ -1962,6 +1970,15 @@ class AppState {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
               !conversations[idx].hasUnattendedInput else { return }
         conversations[idx].hasUnattendedInput = true
+        markChanged(conversationId, .metadata)
+    }
+
+    /// #314 decision 6: the conversation sends `drop_block` from now on, where the beta is taken.
+    /// Called only once a retry succeeded. A no-op once set.
+    func recordPrefixMismatchFallback(_ conversationId: UUID) {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
+              conversations[idx].prefixMismatchBehavior != .dropBlock else { return }
+        conversations[idx].prefixMismatchBehavior = .dropBlock
         markChanged(conversationId, .metadata)
     }
 

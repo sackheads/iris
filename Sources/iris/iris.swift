@@ -2017,6 +2017,11 @@ actor IrisEngine {
             promptCacheKey: Self.promptCacheKey(conversationId: conversationId, isUnattended: isUnattended,
                                                 principal: principal, jobProfile: jobProfile,
                                                 toolNames: toolsList.map(\.name)))
+        // #314 decision 6: a conversation whose binding retry once succeeded sends drop_block from
+        // then on. The client sends it only where `AnthropicCapabilities.takesBindingBeta` holds.
+        request.prefixMismatchBehavior = await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId })?.prefixMismatchBehavior
+        }
         
         // Nothing from a previous turn decides this one: a turn cancelled mid-batch could leave a
         // denial behind, and finding it here would end the next turn before it started.
@@ -2226,8 +2231,12 @@ actor IrisEngine {
                     // #314 plan note 6: the retry's drop is a strip the API recorded, so keep it
                     // (decision 2). The floor goes to the whole history, the retry's own reply
                     // included, as every rise does, so the echo-to-rebuild switch below it never
-                    // sits under a surviving block (see `ThinkingReplay.floor`).
+                    // sits under a surviving block (see `ThinkingReplay.floor`). The flag is set
+                    // only on a retry that succeeded, so this is the one place to persist
+                    // drop_block (decision 6), for this round on and across restarts.
                     thinkingReplay.raiseFloor(to: history.count)
+                    request.prefixMismatchBehavior = .dropBlock
+                    await MainActor.run { localState?.recordPrefixMismatchFallback(conversationId) }
                 }
                 let (spentSoFar, runSink) = await MainActor.run { () -> (TokenUsage, (any TurnUsageSink)?) in
                     if let usage = activeResponse.usageMetadata {

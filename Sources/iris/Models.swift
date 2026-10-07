@@ -227,8 +227,8 @@ struct GeminiResponse: Codable {
     /// this type is the AfterModel payload and Gemini's response shape.
     var anthropicInputTransformations: [InputTransformation]? = nil
     var anthropicPrefixDiagnosis: String? = nil
-    /// #314: this reply came from the drop_block retry; the engine raises the turn's replay floor
-    /// (and, from Task 13, persists the choice). Never encoded.
+    /// #314: this reply came from a drop_block retry that succeeded; the engine raises the turn's
+    /// replay floor and persists drop_block on the conversation. Never encoded.
     var anthropicBindingFallback: Bool = false
 
     private enum CodingKeys: String, CodingKey { case candidates, usageMetadata, promptFeedback }

@@ -319,7 +319,8 @@ struct AnthropicClient {
         // adaptive. Opus 5.5 and Fable 5.1 accept nothing but adaptive anyway, so for them it adds
         // only the binding. Sonnet 5.5 is the one whose thinking this changes: Iris otherwise sends
         // it no thinking object, and its `between_tools` mode rejects `block_binding`, so the retry
-        // (and, from Task 13, every later request of that conversation) runs it on adaptive thinking.
+        // (and every later request of that conversation, while the table says it takes the beta)
+        // runs it on adaptive thinking.
         let takesBeta = AnthropicCapabilities.takesBindingBeta(model: model, transport: transport)
         let binding = (takesBeta || request.forceBindingBeta) ? request.prefixMismatchBehavior : nil
         if let binding {
@@ -411,7 +412,7 @@ struct AnthropicClient {
                         logBindingFallback(error)
                         for try await event in attempt(withDropBlock(request)) { continuation.yield(event) }
                         // Last, once the retry has finished: the event means the retry succeeded,
-                        // and the engine raises the floor (and, from Task 13, persists) on it.
+                        // and the engine raises the floor and persists drop_block on it.
                         continuation.yield(.prefixMismatchFallback)
                     }
                     continuation.finish()
@@ -461,7 +462,7 @@ struct AnthropicClient {
 
     private static func logBindingFallback(_ error: Error) {
         let diagnosis = (error as? APIError)?.prefixMismatchDiagnosis.map { "; \(InputTransformation.diagnosisHeader): \($0)" } ?? ""
-        print("Anthropic rejected a replayed thinking block (bound to a different conversation); retrying once with drop_block\(diagnosis)")
+        print("Anthropic rejected a replayed thinking block (bound to a different conversation); retrying once with drop_block, which this conversation keeps from now on if the retry succeeds (sent only where the beta is taken)\(diagnosis)")
     }
 
     static func generateContent(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "") async throws -> GeminiResponse {
