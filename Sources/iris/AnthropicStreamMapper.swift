@@ -21,7 +21,9 @@ struct AnthropicStreamMapper: StreamMapper {
         let type = (json["type"] as? String) ?? sse.event ?? ""
         switch type {
         case "message_start":
-            if let usage = (json["message"] as? [String: Any])?["usage"] as? [String: Any] {
+            var out: [LLMStreamEvent] = []
+            let message = json["message"] as? [String: Any]
+            if let usage = message?["usage"] as? [String: Any] {
                 let input = usage["input_tokens"] as? Int
                 let cacheRead = usage["cache_read_input_tokens"] as? Int
                 let cacheWrite = usage["cache_creation_input_tokens"] as? Int
@@ -30,11 +32,16 @@ struct AnthropicStreamMapper: StreamMapper {
                 // itself was missing (5a review F8). `anthropicPromptTokenCount` is nil exactly
                 // when all three are absent, so it doubles as the "anything to report" check.
                 if let prompt = UsageMetadata.anthropicPromptTokenCount(input: input, cacheRead: cacheRead, cacheWrite: cacheWrite) {
-                    return [.usage(UsageMetadata(promptTokenCount: prompt, candidatesTokenCount: nil, totalTokenCount: nil,
-                                                 cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite,
-                                                 cacheWrite1hTokens: UsageMetadata.anthropicOneHourWrites(usage)))]
+                    out.append(.usage(UsageMetadata(promptTokenCount: prompt, candidatesTokenCount: nil, totalTokenCount: nil,
+                                                    cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite,
+                                                    cacheWrite1hTokens: UsageMetadata.anthropicOneHourWrites(usage))))
                 }
             }
+            // #314: the stream carries it here (measured on Vertex); `message_delta` is read too.
+            if let entries = InputTransformation.list(message?["input_transformations"]) {
+                out.append(.inputTransformations(entries))
+            }
+            return out
         case "content_block_start":
             guard let index = json["index"] as? Int, let block = json["content_block"] as? [String: Any] else { break }
             let type = block["type"] as? String ?? ""
@@ -86,6 +93,7 @@ struct AnthropicStreamMapper: StreamMapper {
             if let usage = json["usage"] as? [String: Any], let output = usage["output_tokens"] as? Int {
                 out.append(.usage(UsageMetadata(promptTokenCount: nil, candidatesTokenCount: output, totalTokenCount: nil)))
             }
+            if let entries = InputTransformation.list(json["input_transformations"]) { out.append(.inputTransformations(entries)) }
             return out
         case "message_stop":
             stopped = true
@@ -111,6 +119,10 @@ struct AnthropicStreamMapper: StreamMapper {
 
     mutating func finish() throws -> [LLMStreamEvent] {
         stopped ? [] : [.done(finishReason: stopReason)]
+    }
+
+    mutating func headers(_ fields: [AnyHashable: Any]) -> [LLMStreamEvent] {
+        InputTransformation.diagnosis(in: fields).map { [.prefixMismatchDiagnosis($0)] } ?? []
     }
 
     /// Maps Anthropic's error `type` to the status a non-2xx response would have carried, so

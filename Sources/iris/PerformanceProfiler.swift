@@ -61,13 +61,16 @@ public struct ModelCallRecord: Codable, Sendable, Equatable {
     /// The 1-hour share of `cacheWriteTokens` (5c), from Anthropic's `cache_creation` split. Nil
     /// where the provider gave no split and on records older than 5c.
     public var cacheWrite1hTokens: Int? = nil
+    /// #314: Anthropic's entries for this call. Nil without the beta header and on records older than #314.
+    public var inputTransformations: [InputTransformation]? = nil
 
-    public init(round: Int, model: String, latencyMs: Double, promptTokens: Int?, outputTokens: Int?, returnedToolCalls: Bool, firstTokenMs: Double? = nil, cacheReadTokens: Int? = nil, cacheWriteTokens: Int? = nil, cacheWrite1hTokens: Int? = nil) {
+    public init(round: Int, model: String, latencyMs: Double, promptTokens: Int?, outputTokens: Int?, returnedToolCalls: Bool, firstTokenMs: Double? = nil, cacheReadTokens: Int? = nil, cacheWriteTokens: Int? = nil, cacheWrite1hTokens: Int? = nil, inputTransformations: [InputTransformation]? = nil) {
         self.round = round; self.model = model; self.latencyMs = latencyMs
         self.promptTokens = promptTokens; self.outputTokens = outputTokens; self.returnedToolCalls = returnedToolCalls
         self.firstTokenMs = firstTokenMs
         self.cacheReadTokens = cacheReadTokens; self.cacheWriteTokens = cacheWriteTokens
         self.cacheWrite1hTokens = cacheWrite1hTokens
+        self.inputTransformations = inputTransformations
     }
 }
 

@@ -2112,11 +2112,12 @@ actor IrisEngine {
                     }
                 }
                 let response = outcome.response
+                let modelName = ConfigManager.shared.getModel(for: modelTier)
                 PerformanceProfiler.shared.recordModelCall(
                     turnID: PerformanceProfiler.currentTurnID,
                     ModelCallRecord(
                         round: modelRound,
-                        model: ConfigManager.shared.getModel(for: modelTier),
+                        model: modelName,
                         latencyMs: (CFAbsoluteTimeGetCurrent() - modelCallStart) * 1000.0,
                         promptTokens: response.usageMetadata?.promptTokenCount,
                         outputTokens: response.usageMetadata?.candidatesTokenCount,
@@ -2124,7 +2125,13 @@ actor IrisEngine {
                         firstTokenMs: streamed ? outcome.firstTokenMs : nil,
                         cacheReadTokens: response.usageMetadata?.cacheReadTokens,
                         cacheWriteTokens: response.usageMetadata?.cacheWriteTokens,
-                        cacheWrite1hTokens: response.usageMetadata?.cacheWrite1hTokens))
+                        cacheWrite1hTokens: response.usageMetadata?.cacheWrite1hTokens,
+                        inputTransformations: response.anthropicInputTransformations))
+                if let line = InputTransformation.logLine(round: modelRound, model: modelName,
+                                                          entries: response.anthropicInputTransformations,
+                                                          diagnosis: response.anthropicPrefixDiagnosis) {
+                    print(line)
+                }
                 modelRound += 1
                 // No coarse "Executing..." mark here any more: this fires on every model round
                 // whether or not it actually returned a tool call. The session strip's `.executing`

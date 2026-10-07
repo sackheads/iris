@@ -411,7 +411,9 @@ struct AnthropicClient {
         }
         
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        return try parseResponse(json, raw: data)
+        var parsed = try parseResponse(json, raw: data)
+        parsed.anthropicPrefixDiagnosis = InputTransformation.diagnosis(in: httpResponse.allHeaderFields)
+        return parsed
     }
 
     /// Anthropic's non-stream Messages response back to `GeminiResponse`. `usage.input_tokens`
@@ -483,6 +485,7 @@ struct AnthropicClient {
             ).withTotal()
         }
 
+        geminiResponse.anthropicInputTransformations = InputTransformation.list(json["input_transformations"])
         return geminiResponse
     }
 }

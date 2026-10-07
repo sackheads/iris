@@ -213,6 +213,12 @@ struct GeminiResponse: Codable {
     var candidates: [Candidate]?
     var usageMetadata: UsageMetadata?
     var promptFeedback: PromptFeedback? = nil
+    /// #314 decision 7: Anthropic's `input_transformations` and diagnosis header. Never encoded:
+    /// this type is the AfterModel payload and Gemini's response shape.
+    var anthropicInputTransformations: [InputTransformation]? = nil
+    var anthropicPrefixDiagnosis: String? = nil
+
+    private enum CodingKeys: String, CodingKey { case candidates, usageMetadata, promptFeedback }
 
     /// Why the reply carries no content, or nil when the first candidate has parts. Gemini
     /// omits `parts` on an early stop (safety, recitation, empty answer) and reports the cause
