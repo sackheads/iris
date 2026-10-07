@@ -155,6 +155,63 @@ struct AnthropicBindingRetryTests {
         #expect(!events.contains(.prefixMismatchFallback))
     }
 
+    static let ttlRejection = #"{"type":"error","error":{"type":"invalid_request_error","message":"system.0.cache_control.ttl: Extra inputs are not permitted"}}"#
+
+    /// A 1-hour prefix, as Iris's own conversation sends: on a route that rejects that TTL, the
+    /// TTL retry goes first, and the binding retry must still follow it (review Minor 3).
+    private static func oneHourRequest() -> GeminiRequest {
+        var r = GeminiRequest(contents: [Content(role: "user", parts: [Part(text: "hi")])],
+                              systemInstruction: Content(role: "system", parts: [Part(text: "sys")]), tools: nil)
+        r.cacheHints = CacheHints(ttl: CacheTTLPolicy(prefix: .oneHour, history: .oneHour))
+        return r
+    }
+
+    @Test("non-streaming: a TTL retry answered by the binding 400 still gets the binding retry, once")
+    func generateBindingAfterTTL() async throws {
+        let rec = Recorder()
+        let (session, remove) = Self.session(rejections: [Self.ttlRejection, Self.bindingRejection], stream: false, recorder: rec)
+        defer { remove() }
+        let response = try await AnthropicClient.generateContent(request: Self.oneHourRequest(), model: "claude-opus-5-5",
+                                                                 transport: Self.direct, session: session)
+        #expect(response.anthropicBindingFallback)
+        #expect(rec.all.count == 3)
+        #expect(rec.bodies[0].contains(#""ttl":"1h""#), "precondition: the first request has the 1-hour TTL")
+        #expect(!rec.bodies[1].contains(#""ttl""#) && !rec.bodies[1].contains("drop_block"))
+        #expect(!rec.bodies[2].contains(#""ttl""#))
+        #expect(rec.bodies[2].contains(#""prefix_mismatch_behavior":"drop_block""#))
+        #expect(rec.all[2].value(forHTTPHeaderField: "anthropic-beta") == AnthropicCapabilities.bindingBeta)
+    }
+
+    @Test("streaming: a TTL retry answered by the binding 400 still gets the binding retry, fallback event last")
+    func streamBindingAfterTTL() async throws {
+        let rec = Recorder()
+        let (session, remove) = Self.session(rejections: [Self.ttlRejection, Self.bindingRejection], stream: true, recorder: rec)
+        defer { remove() }
+        var events: [LLMStreamEvent] = []
+        for try await e in AnthropicClient.streamContent(request: Self.oneHourRequest(), model: "claude-opus-5-5", session: session,
+                                                         transport: { Self.direct }) { events.append(e) }
+        #expect(rec.all.count == 3)
+        #expect(!rec.bodies[2].contains(#""ttl""#))
+        #expect(rec.bodies[2].contains(#""prefix_mismatch_behavior":"drop_block""#))
+        #expect(events.contains(.textDelta("ok")))
+        #expect(events.last == .prefixMismatchFallback)
+    }
+
+    @Test("each retry fires at most once: TTL, binding, then a second binding 400 is thrown")
+    func composedRetriesStopAtThree() async throws {
+        let rec = Recorder()
+        let (session, remove) = Self.session(rejections: [Self.ttlRejection, Self.bindingRejection, Self.bindingRejection],
+                                             stream: true, recorder: rec)
+        defer { remove() }
+        var events: [LLMStreamEvent] = []
+        await #expect(throws: APIError.self) {
+            for try await e in AnthropicClient.streamContent(request: Self.oneHourRequest(), model: "claude-opus-5-5", session: session,
+                                                             transport: { Self.direct }) { events.append(e) }
+        }
+        #expect(rec.all.count == 3)
+        #expect(!events.contains(.prefixMismatchFallback))
+    }
+
     @Test("a tampered signature (no 'bound to a different conversation') is not retried")
     func tamperedNotRetried() async throws {
         let rec = Recorder()

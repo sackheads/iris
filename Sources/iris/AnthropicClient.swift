@@ -428,24 +428,28 @@ struct AnthropicClient {
             }
         }
         // A non-200 throws before any event, so a TTL or binding rejection can be retried without
-        // the consumer ever seeing half a reply. Only before the first event, and only once: a
-        // retry that fails again throws from inside its `catch`, which nothing above catches.
+        // the consumer ever seeing half a reply. Only before the first event, and each retry at
+        // most once (`retry(after:of:)`), so a TTL retry answered by the binding 400 still gets
+        // the binding retry.
         return AsyncThrowingStream { continuation in
             let task = Task {
                 var yielded = false
+                var current = request
+                var droppedBlocks = false
                 do {
-                    do {
-                        for try await event in attempt(request) { yielded = true; continuation.yield(event) }
-                    } catch let error where !yielded && isTTLRejection(error, request: request) {
-                        logTTLFallback(error)
-                        for try await event in attempt(withoutTTL(request)) { continuation.yield(event) }
-                    } catch let error where !yielded && isBindingRejection(error, request: request) {
-                        logBindingFallback(error)
-                        for try await event in attempt(withDropBlock(request)) { continuation.yield(event) }
-                        // Last, once the retry has finished: the event means the retry succeeded,
-                        // and the engine raises the floor and persists drop_block on it.
-                        continuation.yield(.prefixMismatchFallback)
+                    while true {
+                        do {
+                            for try await event in attempt(current) { yielded = true; continuation.yield(event) }
+                            break
+                        } catch let error where !yielded {
+                            guard let next = retry(after: error, of: current) else { throw error }
+                            current = next.request
+                            droppedBlocks = droppedBlocks || next.dropsBlock
+                        }
                     }
+                    // Last, once the retry has finished: the event means the retry succeeded,
+                    // and the engine raises the floor and persists drop_block on it.
+                    if droppedBlocks { continuation.yield(.prefixMismatchFallback) }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -502,17 +506,35 @@ struct AnthropicClient {
 
     static func generateContent(request: GeminiRequest, model: String, transport: AnthropicTransport,
                                 session: URLSession = .shared) async throws -> GeminiResponse {
-        do {
-            return try await generateOnce(request: request, model: model, transport: transport, session: session)
-        } catch let error where isTTLRejection(error, request: request) {
-            logTTLFallback(error)
-            return try await generateOnce(request: withoutTTL(request), model: model, transport: transport, session: session)
-        } catch let error where isBindingRejection(error, request: request) {
-            logBindingFallback(error)
-            var response = try await generateOnce(request: withDropBlock(request), model: model, transport: transport, session: session)
-            response.anthropicBindingFallback = true
-            return response
+        var current = request
+        var droppedBlocks = false
+        while true {
+            do {
+                var response = try await generateOnce(request: current, model: model, transport: transport, session: session)
+                if droppedBlocks { response.anthropicBindingFallback = true }
+                return response
+            } catch {
+                guard let next = retry(after: error, of: current) else { throw error }
+                current = next.request
+                droppedBlocks = droppedBlocks || next.dropsBlock
+            }
         }
+    }
+
+    /// The request to retry with after `error`, or nil to throw it. Each retry fires at most once,
+    /// because each transform turns its own predicate off: `withoutTTL` leaves no 1-hour prefix,
+    /// and `withDropBlock` forces the beta. They compose, so a route that rejects the 1-hour TTL
+    /// still reaches the binding backstop when the TTL retry draws the binding 400.
+    private static func retry(after error: Error, of request: GeminiRequest) -> (request: GeminiRequest, dropsBlock: Bool)? {
+        if isTTLRejection(error, request: request) {
+            logTTLFallback(error)
+            return (withoutTTL(request), false)
+        }
+        if isBindingRejection(error, request: request) {
+            logBindingFallback(error)
+            return (withDropBlock(request), true)
+        }
+        return nil
     }
 
     private static func generateOnce(request: GeminiRequest, model: String, transport: AnthropicTransport,
