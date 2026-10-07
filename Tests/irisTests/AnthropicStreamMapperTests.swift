@@ -210,6 +210,15 @@ struct AnthropicStreamMapperTests {
                 == #"[{"type":"thinking","thinking":"t","signature":"s"},{"type":"tool_use","id":"t1","name":"n","input":{"q": "a,]}", "b": 1.0}}]"#)
     }
 
+    @Test("an empty text block in first position is left out on both paths")
+    func emptyTextFirstOmitted() throws {
+        let events = try run(Self.text(0, "") + Self.thinking(1, signature: "sig-1") + Self.stop)
+        #expect(blocks(events) == [#"[{"type":"thinking","thinking":"Check \"x\".","signature":"sig-1"}]"#])
+        let whole = #"[ {"type":"text","text":""},{"type":"thinking","thinking":"t","signature":"s"},{"type":"tool_use","id":"t1","name":"n","input":{"b": 1.0}}]"#
+        #expect(AnthropicBlocks.storable(whole)
+                == #"[{"type":"thinking","thinking":"t","signature":"s"},{"type":"tool_use","id":"t1","name":"n","input":{"b": 1.0}}]"#)
+    }
+
     /// Task 3's non-stream path calls `storable`; the same rules hold for an array that arrived whole.
     @Test("storable keeps a signed array verbatim and refuses unsigned, unthought, or unknown-typed ones (Review Focus 1)")
     func storableArray() {
