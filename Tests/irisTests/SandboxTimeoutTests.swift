@@ -48,14 +48,18 @@ struct SandboxTimeoutTests {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-kill-grace-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        // The deadline counts from the spawn, and nothing outside the runner can move it, so the
-        // shell's readiness cannot gate the clock. It gates the attempt instead: an attempt whose
+        // The deadline is armed inside the runner, before `process.run()`, so launch latency
+        // counts against it, and nothing outside the runner can move it: the shell's readiness
+        // cannot gate the clock. It gates the attempt instead: an attempt whose
         // SIGTERM beat the `trap` killed an ordinary shell, which is right but tests nothing here,
         // and is run again (#386).
         for attempt in 1...3 {
             let ready = dir.appendingPathComponent("ready-\(attempt)").path
             let wall = try await Self.runTrappedShell(signalling: ready)
-            guard FileManager.default.fileExists(atPath: ready) else { continue }
+            let wasReady = FileManager.default.fileExists(atPath: ready)
+            // Printed on every attempt, so the next rerun leaves data: the cause is not known (#386).
+            print("#386 attempt \(attempt): wall \(String(format: "%.3f", wall)) s, ready file \(wasReady ? "present" : "missing")")
+            guard wasReady else { continue }
             // SIGTERM was ignored, so it took the grace period plus SIGKILL — but not the full sleep.
             #expect(wall >= 1 + CLIProcessRunner.killGraceSeconds, "attempt \(attempt)")
             #expect(wall < 9)
