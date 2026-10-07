@@ -1766,9 +1766,18 @@ actor JobRunner {
     /// The headline of the last failed model call in the transcript. An `[LLM_ERROR]` is a
     /// `.system` message holding encoded JSON, NOT something the agent said — scanning `.agent`
     /// text for it would find nothing.
+    ///
+    /// A cut reply's pill counts only when nothing was said after it: a goal job whose early turn
+    /// was cut and whose later turn finished is decided by its final round, not its first.
     static func llmErrorHeadline(in messages: [ChatMessage]) -> String? {
-        messages.last { $0.role == .system && LLMErrorMessage.parse($0.content) != nil }
-            .flatMap { LLMErrorMessage.parse($0.content)?.headline }
+        let lastAgent = messages.lastIndex { $0.role == .agent }
+        for index in messages.indices.reversed() where messages[index].role == .system {
+            guard let display = LLMErrorMessage.parse(messages[index].content) else { continue }
+            let cut = display.headline.contains(IrisEngine.truncationMarker)
+            if cut, let lastAgent, lastAgent > index { continue }
+            return display.headline
+        }
+        return nil
     }
 
     /// Whether the turn was cut short rather than ending on its own: the loop detector, a

@@ -13,6 +13,9 @@ struct GeminiRequest: Codable {
     /// 5c: provider-side cache hints (TTL by position, OpenAI's cache key). Never encoded: this
     /// type's JSON is Gemini's request body and the hook payload, and neither knows the field.
     var cacheHints: CacheHints? = nil
+    /// The most output a budgeted run can still afford (`TurnBudget.outputTokenCap`). Never
+    /// encoded, for the same reason; Anthropic's client clamps its `max_tokens` to it.
+    var maxOutputTokens: Int? = nil
 
     private enum CodingKeys: String, CodingKey { case contents, systemInstruction, tools }
 }
@@ -214,6 +217,20 @@ struct GeminiResponse: Codable {
         if let finish = candidates?.first?.finishReason { return "finishReason: \(finish)" }
         if let block = promptFeedback?.blockReason { return "blockReason: \(block)" }
         return (candidates?.isEmpty == false) ? "empty candidate" : "no candidates"
+    }
+
+    /// Each provider's finish reason for "stopped at the output-token limit": Anthropic,
+    /// Gemini, OpenAI.
+    static let outputLimitReasons: Set<String> = ["max_tokens", "MAX_TOKENS", "length"]
+    /// Anthropic's stop at the context window (4.5+): the reply is cut off just the same.
+    static let contextWindowReason = "model_context_window_exceeded"
+
+    /// The reply has content but was cut off, at the output-token limit or the context window.
+    /// An empty one is `emptyReason`'s to report.
+    var truncatedReason: String? {
+        guard emptyReason == nil, let finish = candidates?.first?.finishReason,
+              Self.outputLimitReasons.contains(finish) || finish == Self.contextWindowReason else { return nil }
+        return finish
     }
 }
 

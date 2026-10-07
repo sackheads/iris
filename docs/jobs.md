@@ -731,7 +731,7 @@ A run ends in one of five statuses:
 | --- | --- |
 | `running` | in flight right now |
 | `completed` | the turn finished and said something — or the job's gate found nothing to do, in which case the outcome says `gate: no change` and there was no turn — or a built-in job ran, which never has a turn |
-| `failed` | the model call errored, the loop was cut short, or the turn ended having said nothing at all |
+| `failed` | the model call errored, the loop was cut short, the run's final reply was cut off at the output limit or context window (on any provider: Anthropic `max_tokens` or `model_context_window_exceeded`, Gemini `MAX_TOKENS`, OpenAI `length`), or the turn ended having said nothing at all. A cut in an earlier round or turn that the run went on to finish is a warning, not a failure |
 | `blocked on approval` | the run wanted a tool it is not allowed to use unattended, and stopped (see below) |
 | `interrupted` | nothing finished it: the app quit mid-run and the next launch closed the row out, a cadence came round while the previous run of the same job was still going so this trigger was dropped rather than started twice, a gate could not answer, or a limit refused the fire before it started (the breaker, a budget, or a ledger that could not say what the job has sent) |
 

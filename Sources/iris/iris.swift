@@ -47,6 +47,19 @@ struct TurnBudget: Sendable, Equatable {
         if now >= deadline { return Self.timeExceeded }
         return nil
     }
+
+    /// No request asks for less than this: a smaller cap mostly buys a truncated reply.
+    static let minOutputTokenCap = 1024
+
+    /// The output tokens the remaining budget can still pay for, so one round cannot overshoot
+    /// it by a whole `max_tokens`. nil when there is no token limit. Output is weighed at
+    /// `CostWeights.outputWeight` when priced, at 1x when the run has no provider (as `weighted`).
+    func outputTokenCap(weightedTokens: Int) -> Int? {
+        guard maxTokens > 0 else { return nil }
+        let weight = provider == nil ? 1.0 : CostWeights.outputWeight
+        let remaining = max(0, maxTokens - weightedTokens)
+        return max(Self.minOutputTokenCap, Int(Double(remaining) / weight))
+    }
 }
 
 /// Where a turn reports what it has spent so far, after every model round (#187 §4). A protocol
@@ -1117,6 +1130,21 @@ actor IrisEngine {
     /// line that promises one is a line the transcript never keeps. `JobRunner` matches either
     /// marker, so a run cut off by its budget still finishes `failed`.
     static let budgetStopMarker = "Stopping without a summary."
+    /// A middle round cut off at the output limit: a warning, not an `[LLM_ERROR]`, so a job
+    /// run whose turn recovered is not marked failed.
+    nonisolated static let outputLimitWarningPrefix = "[output limit]"
+    /// In every truncation pill's headline, so `JobRunner` can tell a cut reply from a failed call.
+    nonisolated static let truncationMarker = "the reply above is cut off"
+
+    /// Why a reply was cut, in words: the context window, or the output limit (and, when the
+    /// run's budget is what set that limit, said so).
+    nonisolated static func truncationCause(provider: String, reason: String, budgetCapped: Bool) -> String {
+        if reason == GeminiResponse.contextWindowReason {
+            return "\(provider) stopped: the conversation reached the model's context window (finishReason: \(reason))"
+        }
+        return "\(provider) stopped at its output limit (finishReason: \(reason))"
+            + (budgetCapped ? ", capped by the run's remaining budget" : "")
+    }
 
     /// Graceful stop for a responsive-but-stuck goal loop: clear the reprompt, instruct the model
     /// to summarize and call goal_complete, and clear the goal so the loop cannot continue.
@@ -2009,9 +2037,11 @@ actor IrisEngine {
                 guard turnBudget != nil else { return (nil, TokenUsage()) }
                 return (turnBudget, localState?.runUsage(for: conversationId) ?? TokenUsage())
             }
+            var outputTokenCap: Int?
             if let budget {
                 let spent = CostWeights.weighted(usage.components, provider: budget.provider,
                                                  model: budget.model)
+                outputTokenCap = budget.outputTokenCap(weightedTokens: spent)
                 if let reason = budget.stopReason(weightedTokens: spent, now: Date()) {
                     turnFinished = true
                     // The drain consumes queued steers into history and no follow-up turn starts
@@ -2047,6 +2077,7 @@ actor IrisEngine {
                 if case .proceed(let modifiedData) = beforeModelDecision, let data = modifiedData {
                     activeRequest = Self.applyHookRewrite(data, to: request)
                 }
+                activeRequest.maxOutputTokens = outputTokenCap
                 
                 await MainActor.run {
                     localState?.updateSessionPhase(conversationId, .thinking)
@@ -2176,11 +2207,27 @@ actor IrisEngine {
                 } else {
                     _ = await streamer.settle()
                 }
-                
                 var toolCalls: [FunctionCall] = []
                 for part in responseContent.parts {
                     if let fc = part.functionCall {
                         toolCalls.append(fc)
+                    }
+                }
+
+                // A reply cut off at the output limit used to read as a finished one. In the
+                // turn's final round (no tool calls) it is the answer, so it is an error pill and
+                // a job run fails; in a middle round the turn goes on, so it is only a warning.
+                if let reason = activeResponse.truncatedReason {
+                    let provider = ConfigManager.shared.primaryProvider
+                    let budgetCapped = outputTokenCap.map { cap in
+                        provider == LLMProvider.anthropic.rawValue
+                            && cap < AnthropicClient.maxTokens(for: ConfigManager.shared.getModel(for: modelTier), stream: streamed)
+                    } ?? false
+                    let cause = Self.truncationCause(provider: provider, reason: reason, budgetCapped: budgetCapped)
+                    if toolCalls.isEmpty {
+                        await pushToUI(role: .system, text: LLMErrorMessage.encode(LLMErrorDisplay(headline: "\(cause); \(Self.truncationMarker).", detail: nil)), conversationId: conversationId)
+                    } else {
+                        await pushToUI(role: .system, text: "\(Self.outputLimitWarningPrefix) \(cause); the text above is cut off, and the turn continues.", conversationId: conversationId)
                     }
                 }
                 
