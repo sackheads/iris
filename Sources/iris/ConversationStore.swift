@@ -537,6 +537,13 @@ final class ConversationStore: Sendable {
                 t.add(column: "delegatedCacheReadTokens", .integer)
             }
         }
+        // #314 decision 6: `drop_block` once a binding 400's retry succeeded. NULL (every earlier
+        // row) is unset, which sends nothing, exactly as before.
+        m.registerMigration("v18_prefix_mismatch_behavior") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "prefixMismatchBehavior", .text)
+            }
+        }
         return m
     }
 
@@ -754,24 +761,27 @@ final class ConversationStore: Sendable {
                     tokenUsage = ?, goalContract = ?, subagentResult = ?, checkpointHistory = ?,
                     lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?,
                     isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
-                    hasUnattendedInput = ?
+                    hasUnattendedInput = ?, prefixMismatchBehavior = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  history, evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
-                                 c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.id.uuidString])
+                                 c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.prefixMismatchBehavior?.rawValue,
+                                 c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
                 INSERT INTO conversations (id, position, title, createdAt, updatedAt, workspacePath, activeGoal,
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
-                    isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasUnattendedInput)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasUnattendedInput,
+                    prefixMismatchBehavior)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
-                                 c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasUnattendedInput])
+                                 c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasUnattendedInput,
+                                 c.prefixMismatchBehavior?.rawValue])
         }
     }
 
@@ -948,6 +958,7 @@ final class ConversationStore: Sendable {
                 }
                 let subagentResult = supplementary("subagentResult")
                 let sandboxGrant = supplementary("sandboxGrant")
+                let prefixMismatch = supplementary("prefixMismatchBehavior")
                 let checkpointHistory = supplementary("checkpointHistory")
                 let lastGoalEvaluation = supplementary("lastGoalEvaluation")
                 let lastGoalCompletionReport = supplementary("lastGoalCompletionReport")
@@ -1013,6 +1024,14 @@ final class ConversationStore: Sendable {
                 if let s = sandboxGrant {
                     do { c.sandboxGrant = try decoder.decode(JobGrant.self, from: Data(s.utf8)) }
                     catch { localSoftLosses.append(("sandboxGrant", "\(error)")) }
+                }
+                // #314: a value this build does not know reads as unset. The next binding 400
+                // retries and writes it again, so nothing is lost but one retry.
+                if let s = prefixMismatch {
+                    c.prefixMismatchBehavior = PrefixMismatchBehavior(rawValue: s)
+                    if c.prefixMismatchBehavior == nil {
+                        print("WARNING: unrecognised prefixMismatchBehavior \"\(s)\" for conversation \(id); reading as unset")
+                    }
                 }
 
                 if let s = checkpointHistory {

@@ -111,11 +111,41 @@ struct AnthropicClient {
         
         var callIdCounter = 0
         var pendingIdsForName: [String: [String]] = [:]
-        
-        for content in request.contents {
+        func register(_ fc: FunctionCall) -> String {
+            let id = fc.id ?? "call_\(fc.name)_\(callIdCounter)"
+            callIdCounter += 1
+            pendingIdsForName[fc.name, default: []].append(id)
+            return id
+        }
+
+        // #314 decision 2: a reply's stored blocks go out exactly as received. Only a front run is
+        // ever dropped: a reply whose blocks cannot be echoed takes every earlier reply's with it,
+        // so no gap opens in the middle (PTM §3).
+        // Keep this builder a pure function of the whole of `request.contents` (cache markers
+        // aside): `ThinkingReplay` compares contents, not bytes, and is only sound while equal
+        // contents encode to equal messages. It is not prefix-stable in one case: an unechoable
+        // reply above the floor turns every earlier echoed reply back into parts, changing earlier
+        // messages' bytes. Such a reply only arrives through a hook rewriting a call, and that
+        // request has already diverged.
+        let lastUnechoable = request.contents.indices.last {
+            request.contents[$0].anthropicBlocks != nil && !AnthropicBlocks.echoable(request.contents[$0])
+        }
+        let echoFrom = (lastUnechoable ?? -1) + 1
+        // Spliced in after serialisation, so the blocks are never re-encoded. The token is unique
+        // per request, and in its quoted form it cannot occur inside any other JSON string.
+        let spliceToken = "IRIS_ANTHROPIC_BLOCKS_\(UUID().uuidString)_"
+        var echoed: [Int: String] = [:]
+
+        for (contentIndex, content) in request.contents.enumerated() {
             let role = content.role == "model" ? "assistant" : "user"
+            if contentIndex >= echoFrom, let raw = content.anthropicBlocks {
+                for part in content.parts { if let fc = part.functionCall { _ = register(fc) } }
+                echoed[anthropicMessages.count] = raw
+                anthropicMessages.append(["role": role, "content": spliceToken + String(anthropicMessages.count)])
+                continue
+            }
             var partsArray: [[String: Any]] = []
-            
+
             for part in content.parts {
                 if let text = part.text {
                     partsArray.append(["type": "text", "text": text])
@@ -131,10 +161,7 @@ struct AnthropicClient {
                     ])
                 }
                 if let fc = part.functionCall {
-                    let id = fc.id ?? "call_\(fc.name)_\(callIdCounter)"
-                    callIdCounter += 1
-                    pendingIdsForName[fc.name, default: []].append(id)
-                    
+                    let id = register(fc)
                     partsArray.append([
                         "type": "tool_use",
                         "id": id,
@@ -217,8 +244,10 @@ struct AnthropicClient {
         if !anthropicMessages.isEmpty {
             marked.insert(anthropicMessages.count - 1)              // (d)
         }
+        var markedEchoes = Set<Int>()
         for index in marked.sorted() {
-            markLastContentBlock(&anthropicMessages, at: index)
+            // An echoed reply's content is still a token here; its marker is merged after the splice.
+            if echoed[index] != nil { markedEchoes.insert(index) } else { markLastContentBlock(&anthropicMessages, at: index) }
         }
 
         var body: [String: Any] = [
@@ -282,6 +311,22 @@ struct AnthropicClient {
             }
         }
         
+        // #314 decisions 4 and 6: the binding field travels only with its header (alone it is a
+        // 400, "Extra inputs are not permitted"), and only to a model and route the table says
+        // take the beta, unless this is the retry after a binding 400, which proved the model checks.
+        // Without the field no `thinking` object is sent at all, as before #314: each model keeps
+        // its own default. `block_binding` works only inside adaptive thinking, so the object is
+        // adaptive. Opus 5.5 and Fable 5.1 accept nothing but adaptive anyway, so for them it adds
+        // only the binding. Sonnet 5.5 is the one whose thinking this changes: Iris otherwise sends
+        // it no thinking object, and its `between_tools` mode rejects `block_binding`, so the retry
+        // (and every later request of that conversation, while the table says it takes the beta)
+        // runs it on adaptive thinking.
+        let takesBeta = AnthropicCapabilities.takesBindingBeta(model: model, transport: transport)
+        let binding = (takesBeta || request.forceBindingBeta) ? request.prefixMismatchBehavior : nil
+        if let binding {
+            body["thinking"] = ["type": "adaptive", "block_binding": ["prefix_mismatch_behavior": binding.rawValue]] as [String: Any]
+        }
+
         if stream { body["stream"] = true }
 
         var urlRequest: URLRequest
@@ -311,16 +356,59 @@ struct AnthropicClient {
         }
         urlRequest.httpMethod = "POST"
         urlRequest.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        // #314 decisions 4-5: the binding beta, header only, to the models and routes known to
-        // take it, on the API and Vertex alike. Without the field it changes no behaviour: an
+        // #314 decisions 4-5: the binding beta, to the models and routes known to take it, on the
+        // API and Vertex alike, and with the binding field wherever that goes (the retry after a
+        // binding 400 reaches any model or route). Without the field it changes no behaviour: an
         // unenforced account lists mismatches in `input_transformations` and keeps the blocks.
-        if AnthropicCapabilities.takesBindingBeta(model: model, transport: transport) {
+        if takesBeta || binding != nil {
             urlRequest.addValue(AnthropicCapabilities.bindingBeta, forHTTPHeaderField: "anthropic-beta")
         }
-        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        var bodyData = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        if !echoed.isEmpty {
+            let marker = String(decoding: try JSONSerialization.data(withJSONObject: Self.cacheControl(ttl.history),
+                                                                     options: [.sortedKeys]), as: UTF8.self)
+            var blocksByIndex: [Int: String] = [:]
+            for (index, raw) in echoed {
+                blocksByIndex[index] = markedEchoes.contains(index) ? AnthropicBlocks.withCacheControl(raw, marker) : raw
+            }
+            bodyData = splice(bodyData, token: spliceToken, blocks: blocksByIndex)
+        }
+        urlRequest.httpBody = bodyData
 
         LLMRequestPolicy.apply(to: &urlRequest)
         return urlRequest
+    }
+
+    /// Replaces each quoted `"<token><index>"` in `body` with `blocks[index]`, in one forward pass
+    /// (one `replacingOccurrences` per reply rescanned the whole body each time: 262 ms for 30
+    /// replies on 1.1 MB). The closing quote keeps `_1` and `_10` apart; an index written any
+    /// other way (a leading zero, no closing quote, not in `blocks`) is copied through unchanged.
+    static func splice(_ body: Data, token: String, blocks: [Int: String]) -> Data {
+        let quote = UInt8(ascii: "\"")
+        let needle = Array(("\"" + token).utf8)
+        let bytes = [UInt8](body)
+        var out: [UInt8] = []
+        out.reserveCapacity(bytes.count + blocks.values.reduce(0) { $0 + $1.utf8.count })
+        var copied = 0
+        var i = 0
+        while i <= bytes.count - needle.count {
+            guard bytes[i] == quote, bytes[i..<(i + needle.count)].elementsEqual(needle) else { i += 1; continue }
+            var j = i + needle.count
+            var index = 0
+            while j < bytes.count, j - (i + needle.count) < 18, (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(bytes[j]) {
+                index = index * 10 + Int(bytes[j] - UInt8(ascii: "0"))
+                j += 1
+            }
+            let digits = j - (i + needle.count)
+            guard digits > 0, digits == 1 || bytes[i + needle.count] != UInt8(ascii: "0"),
+                  j < bytes.count, bytes[j] == quote, let replacement = blocks[index] else { i += 1; continue }
+            out.append(contentsOf: bytes[copied..<i])
+            out.append(contentsOf: replacement.utf8)
+            i = j + 1
+            copied = i
+        }
+        out.append(contentsOf: bytes[copied...])
+        return Data(out)
     }
 
     /// One streamed call: the same request with the streaming switch on, mapped to stream events.
@@ -339,18 +427,29 @@ struct AnthropicClient {
                 return (try makeURLRequest(request: request, model: model, transport: resolved, stream: true), resolved.providerLabel)
             }
         }
-        // A non-200 throws before any event, so a TTL rejection can be retried without the
-        // consumer ever seeing half a reply. Only before the first event, and only once.
+        // A non-200 throws before any event, so a TTL or binding rejection can be retried without
+        // the consumer ever seeing half a reply. Only before the first event, and each retry at
+        // most once (`retry(after:of:)`), so a TTL retry answered by the binding 400 still gets
+        // the binding retry.
         return AsyncThrowingStream { continuation in
             let task = Task {
                 var yielded = false
+                var current = request
+                var droppedBlocks = false
                 do {
-                    do {
-                        for try await event in attempt(request) { yielded = true; continuation.yield(event) }
-                    } catch let error where !yielded && isTTLRejection(error, request: request) {
-                        logTTLFallback(error)
-                        for try await event in attempt(withoutTTL(request)) { continuation.yield(event) }
+                    while true {
+                        do {
+                            for try await event in attempt(current) { yielded = true; continuation.yield(event) }
+                            break
+                        } catch let error where !yielded {
+                            guard let next = retry(after: error, of: current) else { throw error }
+                            current = next.request
+                            droppedBlocks = droppedBlocks || next.dropsBlock
+                        }
                     }
+                    // Last, once the retry has finished: the event means the retry succeeded,
+                    // and the engine raises the floor and persists drop_block on it.
+                    if droppedBlocks { continuation.yield(.prefixMismatchFallback) }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -381,18 +480,61 @@ struct AnthropicClient {
         print("Anthropic rejected a 1-hour cache TTL; retrying once at the 5-minute default: \(error.localizedDescription)")
     }
 
+    /// #314 decision 6: the 400 an enforced account returns for a replayed block whose prefix
+    /// changed (MM:1624; the probe confirmed the text). A tampered signature has the same leading
+    /// clause without this sentence and is not retried. Never twice: the retry is forced.
+    static func isBindingRejection(_ error: Error, request: GeminiRequest) -> Bool {
+        guard !request.forceBindingBeta, let error = error as? APIError, error.statusCode == 400 else { return false }
+        return (error.message + " " + (error.detail ?? "")).contains("bound to a different conversation")
+    }
+
+    static func withDropBlock(_ request: GeminiRequest) -> GeminiRequest {
+        var copy = request
+        copy.prefixMismatchBehavior = .dropBlock
+        copy.forceBindingBeta = true
+        return copy
+    }
+
+    private static func logBindingFallback(_ error: Error) {
+        let diagnosis = (error as? APIError)?.prefixMismatchDiagnosis.map { "; \(InputTransformation.diagnosisHeader): \($0)" } ?? ""
+        print("Anthropic rejected a replayed thinking block (bound to a different conversation); retrying once with drop_block, which this conversation keeps from now on if the retry succeeds (sent only where the beta is taken)\(diagnosis)")
+    }
+
     static func generateContent(request: GeminiRequest, model: String, apiKey: String, baseURL: String = "") async throws -> GeminiResponse {
         try await generateContent(request: request, model: model, transport: .direct(apiKey: apiKey, baseURL: baseURL))
     }
 
     static func generateContent(request: GeminiRequest, model: String, transport: AnthropicTransport,
                                 session: URLSession = .shared) async throws -> GeminiResponse {
-        do {
-            return try await generateOnce(request: request, model: model, transport: transport, session: session)
-        } catch let error where isTTLRejection(error, request: request) {
-            logTTLFallback(error)
-            return try await generateOnce(request: withoutTTL(request), model: model, transport: transport, session: session)
+        var current = request
+        var droppedBlocks = false
+        while true {
+            do {
+                var response = try await generateOnce(request: current, model: model, transport: transport, session: session)
+                if droppedBlocks { response.anthropicBindingFallback = true }
+                return response
+            } catch {
+                guard let next = retry(after: error, of: current) else { throw error }
+                current = next.request
+                droppedBlocks = droppedBlocks || next.dropsBlock
+            }
         }
+    }
+
+    /// The request to retry with after `error`, or nil to throw it. Each retry fires at most once,
+    /// because each transform turns its own predicate off: `withoutTTL` leaves no 1-hour prefix,
+    /// and `withDropBlock` forces the beta. They compose, so a route that rejects the 1-hour TTL
+    /// still reaches the binding backstop when the TTL retry draws the binding 400.
+    private static func retry(after error: Error, of request: GeminiRequest) -> (request: GeminiRequest, dropsBlock: Bool)? {
+        if isTTLRejection(error, request: request) {
+            logTTLFallback(error)
+            return (withoutTTL(request), false)
+        }
+        if isBindingRejection(error, request: request) {
+            logBindingFallback(error)
+            return (withDropBlock(request), true)
+        }
+        return nil
     }
 
     private static func generateOnce(request: GeminiRequest, model: String, transport: AnthropicTransport,

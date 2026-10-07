@@ -154,7 +154,8 @@ struct ThinkingHarness {
 
     static func make(_ script: [GeminiResponse], hooks: HookManager, store: ConversationStore? = nil,
                      seedFact: Bool = false, earlierTurn: Bool = false,
-                     roundStart: (@Sendable (Int) async -> Void)? = nil) throws -> ThinkingHarness {
+                     roundStart: (@Sendable (Int) async -> Void)? = nil,
+                     provider: String = LLMProvider.anthropic.rawValue) throws -> ThinkingHarness {
         let facts = try FactStoreManager(inMemory: true)
         if seedFact { _ = try facts.addFact(content: "Brian lives in Seattle") }
         let app = AppState(store: try store ?? ConversationStore.inMemory(),
@@ -170,7 +171,8 @@ struct ThinkingHarness {
         let client = RecordingClient(script)
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [],
                                 streamResponses: false, factStore: facts, protectionEnabled: false,
-                                sessionPeerCount: 0, roundStartHook: roundStart, hooks: hooks)
+                                sessionPeerCount: 0, roundStartHook: roundStart, hooks: hooks,
+                                provider: provider)
         return ThinkingHarness(app: app, id: id, client: client, engine: engine)
     }
 
@@ -181,5 +183,33 @@ struct ThinkingHarness {
     /// The signatures in the Anthropic body of each request the engine sent.
     func sentSignatures() throws -> [[String]] {
         try client.requests.map { ThinkingFixtures.signatures(try ThinkingFixtures.body($0)) }
+    }
+}
+
+extension ThinkingHarness {
+    /// A late-bound handle on a harness's history, for `roundStart` closures (a UI edit mid-turn).
+    final class Edit: @unchecked Sendable {
+        private var app: AppState?
+        private var id: UUID?
+        func bind(_ h: ThinkingHarness) { app = h.app; id = h.id }
+        func replaceText(of index: Int, with text: String) async {
+            await change { history in
+                guard history.indices.contains(index) else { return }
+                history[index].parts = [Part(text: text)]
+            }
+        }
+        func remove(at index: Int) async {
+            await change { history in
+                guard history.indices.contains(index) else { return }
+                history.remove(at: index)
+            }
+        }
+        private func change(_ body: @escaping @Sendable (inout [Content]) -> Void) async {
+            await MainActor.run {
+                guard let app, let id, var history = app.conversations.first(where: { $0.id == id })?.history else { return }
+                body(&history)
+                app.updateHistory(for: id, history: history)
+            }
+        }
     }
 }

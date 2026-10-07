@@ -350,6 +350,10 @@ actor IrisEngine {
     /// flip applies to the next request and never mid-stream. Injectable so a test can pin the
     /// streaming-off path directly without touching `ConfigManager.shared` (invariant 7).
     private let streamResponsesOverride: Bool?
+    /// The provider a turn's thinking replay (#314) is decided for; `nil` (the app) reads
+    /// `primaryProvider` once at the top of each turn. Injectable so a test can pin either side
+    /// without touching `ConfigManager.shared` (invariant 7).
+    private let providerOverride: String?
     /// Explicit per-engine override for the checkpoint auto-advance setting, same idiom as
     /// `streamResponsesOverride`: `nil` — always, in the app — means "consult the config". Not
     /// captured once at construction for the same reason: the only main-principal engine is built
@@ -428,7 +432,7 @@ actor IrisEngine {
     /// `CacheTTLPolicy.resolve` picks (5c §0.8). Nil everywhere else.
     private let cacheTTLOverride: CacheTTLPolicy?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil) {
         self.state = state
         self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
@@ -449,6 +453,7 @@ actor IrisEngine {
         self.stickyToolsEnabled = stickyTools
         self.cacheTTLOverride = cacheTTLOverride
         self.hooks = hooks
+        self.providerOverride = provider
         systemPrompt = nil
     }
 
@@ -1192,6 +1197,12 @@ actor IrisEngine {
             await pushToUI(role: .system, text: "turn context omitted from this request: the turn's entry changed", conversationId: conversationId)
         }
         return contents
+    }
+
+    /// AppState's history length for the conversation: where a divergence raises the floor (#314).
+    private func stateHistoryCount(_ conversationId: UUID) async -> Int {
+        let localState = state
+        return await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history.count ?? 0 }
     }
 
     /// Everything that arrived while the last round was running, into history, at a round
@@ -1982,8 +1993,20 @@ actor IrisEngine {
         // event lines in `drainPendingInput`, the model reply, tool results. If anything removes or
         // rewrites the entry instead (the UI), the byte check drops the block rather than moving it.
         var turnRequest = TurnRequest(context: turnContext, stateHistory: stateHistory, initialHistory: history)
+        // #314 Phase 1: no reply before this turn's entry sends its blocks again. Only Anthropic
+        // has blocks to send, so on any other provider the check never runs (it encodes the whole
+        // history each round) and every request goes without blocks. Decided once per turn, so a
+        // provider switch mid-turn finds no block in the request either way.
+        let replaysThinking = (providerOverride ?? ConfigManager.shared.primaryProvider) == LLMProvider.anthropic.rawValue
+        var thinkingReplay = ThinkingReplay(floor: stateHistory.count)
+        // Round one sends no block, and the BeforeModel hook sees none. `prepare` usually strips
+        // them anyway (below the floor by index, at or past AppState's count by index), but round
+        // one may send the PreCompress hook's list, whose indices are not AppState's: a prepend
+        // shifts an older reply up past the floor, and anything AppState gained before round one
+        // without a drain would leave a window where neither index strip reaches it (Review
+        // Focus 5). Stripping by list, not by index, holds whatever the shift.
 
-        var request = GeminiRequest(contents: await requestContents(history, from: .initial, &turnRequest, conversationId: conversationId), systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
+        var request = GeminiRequest(contents: ThinkingReplay.withoutBlocks(await requestContents(history, from: .initial, &turnRequest, conversationId: conversationId)), systemInstruction: currentSystemPrompt, tools: [Tool(functionDeclarations: toolsList)])
         // 5c §0.8/§0.9. Set once: later rounds only replace `request.contents`. The jobs list is
         // read only for an unattended turn, the one place it matters.
         let firesHourly = isUnattended && principal == .main
@@ -1994,6 +2017,11 @@ actor IrisEngine {
             promptCacheKey: Self.promptCacheKey(conversationId: conversationId, isUnattended: isUnattended,
                                                 principal: principal, jobProfile: jobProfile,
                                                 toolNames: toolsList.map(\.name)))
+        // #314 decision 6: a conversation whose binding retry once succeeded sends drop_block from
+        // then on. The client sends it only where `AnthropicCapabilities.takesBindingBeta` holds.
+        request.prefixMismatchBehavior = await MainActor.run {
+            localState?.conversations.first(where: { $0.id == conversationId })?.prefixMismatchBehavior
+        }
         
         // Nothing from a previous turn decides this one: a turn cancelled mid-batch could leave a
         // denial behind, and finding it here would end the next turn before it started.
@@ -2066,6 +2094,9 @@ actor IrisEngine {
                     history = await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.history ?? [] }
                     request.contents = await requestContents(history, from: .state, &turnRequest, conversationId: conversationId)
                 }
+                // The BeforeModel hook sees what would be sent: no block below the floor.
+                request.contents = replaysThinking ? thinkingReplay.applyingFloor(request.contents)
+                    : ThinkingReplay.withoutBlocks(request.contents)
 
                 let beforeModelDecision = await hooks.fireBeforeModel(request: request, useSandbox: hooksSandbox)
                 if case .block(let reason) = beforeModelDecision {
@@ -2077,6 +2108,17 @@ actor IrisEngine {
                 if case .proceed(let modifiedData) = beforeModelDecision, let data = modifiedData {
                     activeRequest = Self.applyHookRewrite(data, to: request)
                 }
+                // #314 Phase 1, the prefix-continuity check (amends spec decision 2): on the request
+                // exactly as it goes out, the hook's output included. If its system, tools or
+                // messages do not extend what the server last saw, no block produced so far goes
+                // out again, starting with this request. A hook's edit to a stored reply is such a
+                // divergence, so the edit goes out as parts, never the reply's original bytes.
+                if !replaysThinking {
+                    activeRequest.contents = ThinkingReplay.withoutBlocks(activeRequest.contents)
+                } else if let at = thinkingReplay.prepare(&activeRequest, historyCount: await stateHistoryCount(conversationId)) {
+                    print("Thinking replay: request \(modelRound + 1) diverges at \(at == 0 ? "system, tools or message 0" : "message \(at)"); this turn's blocks so far stay out")
+                }
+                // #385's cap, last: the hook's rewrite replaces the whole request.
                 activeRequest.maxOutputTokens = outputTokenCap
                 
                 await MainActor.run {
@@ -2112,6 +2154,8 @@ actor IrisEngine {
                     }
                 }
                 let response = outcome.response
+                // What the server will expect next: the reply as it came back, not as a hook rewrote it.
+                if replaysThinking { thinkingReplay.recordReceived(response.candidates?.first?.content) }
                 let modelName = ConfigManager.shared.getModel(for: modelTier)
                 PerformanceProfiler.shared.recordModelCall(
                     turnID: PerformanceProfiler.currentTurnID,
@@ -2182,6 +2226,17 @@ actor IrisEngine {
                 }
                 history = await MainActor.run {
                     localState?.conversations.first(where: { $0.id == conversationId })?.history ?? []
+                }
+                if replaysThinking && response.anthropicBindingFallback {
+                    // #314 plan note 6: the retry's drop is a strip the API recorded, so keep it
+                    // (decision 2). The floor goes to the whole history, the retry's own reply
+                    // included, as every rise does, so the echo-to-rebuild switch below it never
+                    // sits under a surviving block (see `ThinkingReplay.floor`). The flag is set
+                    // only on a retry that succeeded, so this is the one place to persist
+                    // drop_block (decision 6), for this round on and across restarts.
+                    thinkingReplay.raiseFloor(to: history.count)
+                    request.prefixMismatchBehavior = .dropBlock
+                    await MainActor.run { localState?.recordPrefixMismatchFallback(conversationId) }
                 }
                 let (spentSoFar, runSink) = await MainActor.run { () -> (TokenUsage, (any TurnUsageSink)?) in
                     if let usage = activeResponse.usageMetadata {
@@ -2747,6 +2802,8 @@ actor IrisEngine {
     nonisolated static func applyHookRewrite(_ data: Data, to request: GeminiRequest) -> GeminiRequest {
         guard var rewritten = try? JSONDecoder().decode(GeminiRequest.self, from: data) else { return request }
         rewritten.cacheHints = request.cacheHints
+        rewritten.prefixMismatchBehavior = request.prefixMismatchBehavior
+        rewritten.forceBindingBeta = request.forceBindingBeta
         return rewritten
     }
 

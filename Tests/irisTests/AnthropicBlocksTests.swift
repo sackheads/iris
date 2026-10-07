@@ -22,6 +22,27 @@ struct AnthropicBlocksTests {
         #expect(RawJSON.topLevelValue("content", in: Data("[1]".utf8)) == nil)
     }
 
+    @Test("RawJSON splits an array into its elements' own bytes, and answers nil for a non-array")
+    func rawJSONElements() {
+        #expect(RawJSON.elements(#" [ {"a":"x ] , {"} , [1,2] ,"s" , 3 ] "#) == [#"{"a":"x ] , {"}"#, "[1,2]", #""s""#, "3"])
+        #expect(RawJSON.elements("[]") == [])
+        #expect(RawJSON.elements(#"{"a":1}"#) == nil)
+        #expect(RawJSON.elements("[1,]") == nil)
+        #expect(RawJSON.elements("[1") == nil)
+        #expect(RawJSON.elements("[1] x") == nil)
+    }
+
+    @Test("RawJSON lists an object's members with key and value bytes as received")
+    func rawJSONMembers() {
+        let members = RawJSON.members(#"{"type":"tool_use", "caller" : {"type": "direct"},"n":1.0}"#)
+        #expect(members?.map(\.name) == ["type", "caller", "n"])
+        #expect(members?.map(\.value) == [#""tool_use""#, #"{"type": "direct"}"#, "1.0"])
+        #expect(members?[1].key == #""caller""#)
+        #expect(RawJSON.members("{}") == [])
+        #expect(RawJSON.members("[1]") == nil)
+        #expect(RawJSON.members(#"{"a":1"#) == nil)
+    }
+
     @Test("a non-stream reply keeps the response's own bytes for its blocks")
     func nonStreamKeepsBytes() throws {
         let data = Data(#"{"id":"m","content":\#(Self.raw),"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}"#.utf8)

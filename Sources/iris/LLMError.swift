@@ -10,6 +10,8 @@ struct APIError: LocalizedError, Equatable {
     var detail: String? = nil
     /// Seconds the provider asked us to wait (`Retry-After`), when it sent one.
     var retryAfter: TimeInterval? = nil
+    /// #314: Anthropic's `anthropic-thinking-prefix-mismatch` header on a rejection, when sent.
+    var prefixMismatchDiagnosis: String? = nil
 
     var errorDescription: String? { message }
 
@@ -44,7 +46,8 @@ struct APIError: LocalizedError, Equatable {
         }
         return APIError(message: headline, statusCode: statusCode, provider: provider,
                         detail: raw.isEmpty ? nil : truncated(raw, to: detailLimit),
-                        retryAfter: retryAfter(from: headers))
+                        retryAfter: retryAfter(from: headers),
+                        prefixMismatchDiagnosis: InputTransformation.diagnosis(in: headers))
     }
 
     /// The `error` dictionary from a top-level object or from the first element of an array.

@@ -16,9 +16,19 @@ struct GeminiRequest: Codable {
     /// The most output a budgeted run can still afford (`TurnBudget.outputTokenCap`). Never
     /// encoded, for the same reason; Anthropic's client clamps its `max_tokens` to it.
     var maxOutputTokens: Int? = nil
+    /// #314 decision 6: the conversation's binding choice. Sent only with its header, and only to
+    /// a model and route the table says take the beta (plan note 3). Never encoded.
+    var prefixMismatchBehavior: PrefixMismatchBehavior? = nil
+    /// #314 decision 4: set only on the client's own retry after a binding 400, which proves the
+    /// model checks, so the header and field go out whatever the table says. Never encoded.
+    var forceBindingBeta: Bool = false
 
     private enum CodingKeys: String, CodingKey { case contents, systemInstruction, tools }
 }
+
+/// #314 decision 6: `thinking.block_binding.prefix_mismatch_behavior`. Iris only ever sends
+/// `drop_block`, and only after a binding 400; `"error"` belongs to the probe's CI runs (plan note 9).
+enum PrefixMismatchBehavior: String, Codable, Sendable { case dropBlock = "drop_block" }
 
 struct Content: Codable, Sendable {
     var role: String?
@@ -217,6 +227,9 @@ struct GeminiResponse: Codable {
     /// this type is the AfterModel payload and Gemini's response shape.
     var anthropicInputTransformations: [InputTransformation]? = nil
     var anthropicPrefixDiagnosis: String? = nil
+    /// #314: this reply came from a drop_block retry that succeeded; the engine raises the turn's
+    /// replay floor and persists drop_block on the conversation. Never encoded.
+    var anthropicBindingFallback: Bool = false
 
     private enum CodingKeys: String, CodingKey { case candidates, usageMetadata, promptFeedback }
 

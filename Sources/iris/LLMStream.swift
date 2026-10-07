@@ -22,6 +22,9 @@ enum LLMStreamEvent: Sendable, Equatable {
     case inputTransformations([InputTransformation])
     /// #314: the `anthropic-thinking-prefix-mismatch` response header, when present.
     case prefixMismatchDiagnosis(String)
+    /// #314: the client retried with drop_block after a binding 400, and the retry completed.
+    /// Yielded last, after the retry's own events; a failed retry never yields it. Not a token.
+    case prefixMismatchFallback
 }
 
 /// One Server-Sent Event: the optional `event:` name and the joined `data:` payload.
@@ -100,6 +103,7 @@ struct StreamAssembler: Sendable {
     private(set) var anthropicBlocks: String?
     private(set) var inputTransformations: [InputTransformation]?
     private(set) var prefixMismatchDiagnosis: String?
+    private(set) var bindingFallback = false
 
     mutating func apply(_ event: LLMStreamEvent, now: Double) {
         switch event {
@@ -130,6 +134,8 @@ struct StreamAssembler: Sendable {
             inputTransformations = entries
         case .prefixMismatchDiagnosis(let value):
             prefixMismatchDiagnosis = value
+        case .prefixMismatchFallback:
+            bindingFallback = true
         }
     }
 
@@ -161,6 +167,7 @@ struct StreamAssembler: Sendable {
         if let blockReason { response.promptFeedback = PromptFeedback(blockReason: blockReason) }
         response.anthropicInputTransformations = inputTransformations
         response.anthropicPrefixDiagnosis = prefixMismatchDiagnosis
+        response.anthropicBindingFallback = bindingFallback
         return response
     }
 
@@ -195,6 +202,8 @@ extension LLMStreamEvent {
         if let entries = response.anthropicInputTransformations { out.append(.inputTransformations(entries)) }
         if let diagnosis = response.anthropicPrefixDiagnosis { out.append(.prefixMismatchDiagnosis(diagnosis)) }
         out.append(.done(finishReason: candidate?.finishReason, blockReason: response.promptFeedback?.blockReason))
+        // Last, as the stream path yields it: only a retry that completed sets it.
+        if response.anthropicBindingFallback { out.append(.prefixMismatchFallback) }
         return out
     }
 

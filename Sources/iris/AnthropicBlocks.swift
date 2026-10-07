@@ -18,7 +18,21 @@ enum AnthropicBlocks {
         var id = ""
         var name = ""
         var json = ""
+        /// Members of `content_block_start`'s block that `render` does not rebuild (a direct-API
+        /// tool_use's `caller`), as `"key":value` bytes joined by commas, in arrival order.
+        var extra = ""
         var stopped = false
+    }
+
+    /// The members `render` writes itself for a block of `type`; any other member of the block's
+    /// `content_block_start` is carried verbatim in `Streamed.extra`.
+    static func renderedKeys(_ type: String) -> Set<String> {
+        switch type {
+        case "thinking": return ["type", "thinking", "signature"]
+        case "redacted_thinking": return ["type", "data"]
+        case "tool_use": return ["type", "id", "name", "input"]
+        default: return ["type", "text"]
+        }
     }
 
     /// What the storage rules read from a block, from either path. A missing key reads as "".
@@ -69,6 +83,12 @@ enum AnthropicBlocks {
     }
 
     private static func render(_ b: Streamed) -> String {
+        let rebuilt = renderKnown(b)
+        // So a streamed reply stores what the non-stream path would (#314 decision 1).
+        return b.extra.isEmpty ? rebuilt : String(rebuilt.dropLast()) + "," + b.extra + "}"
+    }
+
+    private static func renderKnown(_ b: Streamed) -> String {
         switch b.type {
         case "thinking":
             return #"{"type":"thinking","thinking":\#(string(b.thinking)),"signature":\#(string(b.signature))}"#
@@ -98,56 +118,108 @@ enum AnthropicBlocks {
         guard admits(shapes) else { return nil }
         let empty = shapes.map(isOmitted)
         guard empty.contains(true) else { return raw }
-        guard let elements = topLevelElements(raw), elements.count == array.count else { return nil }
-        return "[" + zip(elements, empty).filter { !$0.1 }.map { String($0.0) }.joined(separator: ",") + "]"
+        guard let elements = RawJSON.elements(raw), elements.count == array.count else { return nil }
+        return "[" + zip(elements, empty).filter { !$0.1 }.map(\.0).joined(separator: ",") + "]"
     }
 
-    /// The top-level elements of a JSON array as their own bytes, or nil if `raw` is not one.
-    private static func topLevelElements(_ raw: String) -> [Substring]? {
-        let u = raw.utf8
-        var depth = 0, inString = false, escaped = false
-        var start: String.Index?
-        var out: [Substring] = []
-        for i in u.indices {
-            let c = u[i]
-            if inString {
-                if escaped { escaped = false } else if c == UInt8(ascii: "\\") { escaped = true }
-                else if c == UInt8(ascii: "\"") { inString = false }
-                continue
-            }
-            switch c {
-            case UInt8(ascii: "\""): inString = true
-            case UInt8(ascii: "["), UInt8(ascii: "{"):
-                depth += 1
-                if depth == 1 { start = u.index(after: i) }
-            case UInt8(ascii: "]"), UInt8(ascii: "}"):
-                if depth == 1, let s = start { out.append(raw[s..<i]) }
-                depth -= 1
-            case UInt8(ascii: ","):
-                if depth == 1, let s = start { out.append(raw[s..<i]); start = u.index(after: i) }
-            default: break
-            }
-        }
-        let trimmed = out.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        guard depth == 0, !trimmed.contains(where: \.isEmpty) else { return nil }
-        return trimmed.map { Substring($0) }
+    /// Whether `content`'s stored blocks can go out as received: an assistant reply whose array is
+    /// storable and whose tool_use blocks name the same calls, in the same order, as its parts. A
+    /// mismatch means something changed the parts after the blocks were stored. An array `storable`
+    /// would change (a blank text block a hook supplied) is not echoed either: the API rejects it.
+    static func echoable(_ content: Content) -> Bool {
+        guard content.role == "model", let raw = content.anthropicBlocks, storable(raw) == raw,
+              let array = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [[String: Any]] else { return false }
+        let blockCalls = array.filter { $0["type"] as? String == "tool_use" }
+            .map { "\($0["id"] as? String ?? "")|\($0["name"] as? String ?? "")" }
+        let partCalls = content.parts.compactMap(\.functionCall).map { "\($0.id ?? "")|\($0.name)" }
+        return blockCalls == partCalls
+    }
+
+    /// `raw` with `cacheControl` (a JSON object's text) merged into its last block, or `raw`
+    /// unchanged when that block is a thinking block, which takes no `cache_control`.
+    static func withCacheControl(_ raw: String, _ cacheControl: String) -> String {
+        guard let array = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [[String: Any]],
+              let lastType = array.last?["type"] as? String,
+              lastType != "thinking", lastType != "redacted_thinking",
+              let last = RawJSON.elementRanges(raw)?.last else { return raw }
+        let b = Array(raw.utf8)
+        let brace = last.upperBound - 1     // the last block's closing brace
+        guard b[brace] == UInt8(ascii: "}") else { return raw }
+        return String(decoding: b[..<brace], as: UTF8.self) + #","cache_control":"# + cacheControl
+            + String(decoding: b[brace...], as: UTF8.self)
     }
 }
 
-/// One top-level member of a JSON object, cut out as bytes without parsing the value, so the
-/// non-stream path stores a reply's blocks exactly as they arrived (#314 decision 1).
+/// JSON cut as bytes without parsing values, so blocks are stored and sent exactly as they arrived
+/// (#314 decision 1). The one byte-level JSON scanner: strings are skipped escape-aware, so a
+/// brace, bracket, comma or quoted key inside a string is never taken for structure.
 enum RawJSON {
+    /// One member of an object: its decoded name (nil if the key does not decode), and its key
+    /// and value as their own bytes.
+    struct Member: Equatable {
+        var name: String?
+        var key: String
+        var value: String
+    }
+
     /// The bytes of `key`'s value in the top-level object `data`, or nil when `data` is not an
-    /// object or has no such member. Strings are skipped escape-aware, so a brace or a quoted key
-    /// inside a string is never taken for structure.
+    /// object or has no such member.
     static func topLevelValue(_ key: String, in data: Data) -> String? {
-        let b = [UInt8](data)
+        var s = Scanner([UInt8](data))
+        return s.members(stoppingAt: key)?.last.flatMap { $0.name == key ? $0.value : nil }
+    }
+
+    /// Every member of the object `raw`, in order, or nil when `raw` is not one.
+    static func members(_ raw: String) -> [Member]? {
+        var s = Scanner(Array(raw.utf8))
+        guard let members = s.members(stoppingAt: nil), s.atEnd() else { return nil }
+        return members
+    }
+
+    /// The elements of the array `raw` as their own bytes, or nil when `raw` is not one.
+    static func elements(_ raw: String) -> [String]? {
+        let b = Array(raw.utf8)
+        return elementRanges(raw).map { $0.map { String(decoding: b[$0], as: UTF8.self) } }
+    }
+
+    /// The byte offsets of each element of the array `raw` (in its UTF-8), or nil when `raw` is
+    /// not one.
+    static func elementRanges(_ raw: String) -> [Range<Int>]? {
+        var s = Scanner(Array(raw.utf8))
+        s.skipSpace()
+        guard s.peek(0x5B) else { return nil }
+        s.i += 1
+        var out: [Range<Int>] = []
+        s.skipSpace()
+        if s.peek(0x5D) { s.i += 1; return s.atEnd() ? out : nil }
+        while true {
+            s.skipSpace()
+            let start = s.i
+            guard s.skipValue() else { return nil }
+            out.append(start..<s.i)
+            s.skipSpace()
+            if s.peek(0x2C) { s.i += 1; continue }
+            guard s.peek(0x5D) else { return nil }
+            s.i += 1
+            return s.atEnd() ? out : nil
+        }
+    }
+
+    private struct Scanner {
+        let b: [UInt8]
         var i = 0
-        func skipSpace() {
+        init(_ b: [UInt8]) { self.b = b }
+
+        func peek(_ c: UInt8) -> Bool { i < b.count && b[i] == c }
+
+        mutating func atEnd() -> Bool { skipSpace(); return i == b.count }
+
+        mutating func skipSpace() {
             while i < b.count, b[i] == 0x20 || b[i] == 0x09 || b[i] == 0x0A || b[i] == 0x0D { i += 1 }
         }
-        func skipString() -> Bool {               // at `"`; ends just past the closing quote
-            guard i < b.count, b[i] == 0x22 else { return false }
+
+        mutating func skipString() -> Bool {      // at `"`; ends just past the closing quote
+            guard peek(0x22) else { return false }
             i += 1
             while i < b.count {
                 switch b[i] {
@@ -158,7 +230,8 @@ enum RawJSON {
             }
             return false
         }
-        func skipValue() -> Bool {
+
+        mutating func skipValue() -> Bool {
             skipSpace()
             guard i < b.count else { return false }
             if b[i] == 0x22 { return skipString() }
@@ -185,24 +258,37 @@ enum RawJSON {
             while i < b.count, ![0x2C, 0x7D, 0x5D, 0x20, 0x09, 0x0A, 0x0D].contains(b[i]) { i += 1 }
             return i > start
         }
-        skipSpace()
-        guard i < b.count, b[i] == 0x7B else { return nil }
-        i += 1
-        while true {
+
+        /// The object's members up to and including the first named `stop` (all of them when
+        /// `stop` is nil), leaving `i` just past the object; nil when it is not one.
+        mutating func members(stoppingAt stop: String?) -> [Member]? {
             skipSpace()
-            let keyStart = i
-            guard skipString() else { return nil }
-            let name = try? JSONDecoder().decode(String.self, from: Data(b[keyStart..<i]))
-            skipSpace()
-            guard i < b.count, b[i] == 0x3A else { return nil }
+            guard peek(0x7B) else { return nil }
             i += 1
+            var out: [Member] = []
             skipSpace()
-            let valueStart = i
-            guard skipValue() else { return nil }
-            if name == key { return String(decoding: b[valueStart..<i], as: UTF8.self) }
-            skipSpace()
-            guard i < b.count, b[i] == 0x2C else { return nil }
-            i += 1
+            if peek(0x7D) { i += 1; return out }
+            while true {
+                skipSpace()
+                let keyStart = i
+                guard skipString() else { return nil }
+                let keyBytes = b[keyStart..<i]
+                let name = try? JSONDecoder().decode(String.self, from: Data(keyBytes))
+                skipSpace()
+                guard peek(0x3A) else { return nil }
+                i += 1
+                skipSpace()
+                let valueStart = i
+                guard skipValue() else { return nil }
+                out.append(Member(name: name, key: String(decoding: keyBytes, as: UTF8.self),
+                                  value: String(decoding: b[valueStart..<i], as: UTF8.self)))
+                if let stop, name == stop { return out }
+                skipSpace()
+                if peek(0x2C) { i += 1; continue }
+                guard peek(0x7D) else { return nil }
+                i += 1
+                return out
+            }
         }
     }
 }
