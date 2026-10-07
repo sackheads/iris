@@ -160,6 +160,19 @@ struct AnthropicStreamMapperTests {
         #expect(blocks(events) == [#"[{"type":"redacted_thinking","data":"ENC=="},{"type":"text","text":"ok"}]"#])
     }
 
+    @Test("a block's extra fields from content_block_start are kept verbatim (direct API's caller)")
+    func extraFieldsKept() throws {
+        let events = try run(Self.thinking(0, signature: "sig-1") + [
+            ("content_block_start", #"{"type":"content_block_start","index":1,"content_block":{"caller":{"type": "direct"},"id":"toolu_1","input":{},"name":"get_weather","type":"tool_use"}}"#),
+            ("content_block_delta", #"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\": \"Paris\"}"}}"#),
+            ("content_block_stop", #"{"type":"content_block_stop","index":1}"#),
+        ] + Self.stop)
+        let stored = try #require(blocks(events).first)
+        #expect(stored.hasSuffix(#"{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city": "Paris"},"caller":{"type": "direct"}}]"#))
+        let array = try #require(try JSONSerialization.jsonObject(with: Data(stored.utf8)) as? [[String: Any]])
+        #expect((array[1]["caller"] as? [String: String]) == ["type": "direct"])
+    }
+
     @Test("a reply that did not think stores nothing (Fable 5.1 on a short prompt)")
     func unthoughtStoresNothing() throws {
         #expect(blocks(try run(Self.text(0, "hi") + Self.stop)).isEmpty)

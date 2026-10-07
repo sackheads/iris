@@ -18,7 +18,21 @@ enum AnthropicBlocks {
         var id = ""
         var name = ""
         var json = ""
+        /// Members of `content_block_start`'s block that `render` does not rebuild (a direct-API
+        /// tool_use's `caller`), as `"key":value` bytes joined by commas, in arrival order.
+        var extra = ""
         var stopped = false
+    }
+
+    /// The members `render` writes itself for a block of `type`; any other member of the block's
+    /// `content_block_start` is carried verbatim in `Streamed.extra`.
+    static func renderedKeys(_ type: String) -> Set<String> {
+        switch type {
+        case "thinking": return ["type", "thinking", "signature"]
+        case "redacted_thinking": return ["type", "data"]
+        case "tool_use": return ["type", "id", "name", "input"]
+        default: return ["type", "text"]
+        }
     }
 
     /// What the storage rules read from a block, from either path. A missing key reads as "".
@@ -69,6 +83,12 @@ enum AnthropicBlocks {
     }
 
     private static func render(_ b: Streamed) -> String {
+        let rebuilt = renderKnown(b)
+        // So a streamed reply stores what the non-stream path would (#314 decision 1).
+        return b.extra.isEmpty ? rebuilt : String(rebuilt.dropLast()) + "," + b.extra + "}"
+    }
+
+    private static func renderKnown(_ b: Streamed) -> String {
         switch b.type {
         case "thinking":
             return #"{"type":"thinking","thinking":\#(string(b.thinking)),"signature":\#(string(b.signature))}"#

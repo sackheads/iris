@@ -55,6 +55,12 @@ struct AnthropicStreamMapper: StreamMapper {
                 streamed.id = id
                 streamed.name = name
             }
+            if let raw = RawJSON.topLevelValue("content_block", in: Data(sse.data.utf8)),
+               let members = RawJSON.members(raw) {
+                let rendered = AnthropicBlocks.renderedKeys(type)
+                streamed.extra = members.filter { !rendered.contains($0.name ?? "") }
+                    .map { $0.key + ":" + $0.value }.joined(separator: ",")
+            }
             blocks[index] = streamed
         case "content_block_delta":
             guard let delta = json["delta"] as? [String: Any] else { break }
