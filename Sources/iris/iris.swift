@@ -2139,8 +2139,13 @@ actor IrisEngine {
                 }
                 
                 var activeResponse = response
+                // #314: whether the hook changed the reply. A rewritten reply's blocks no longer
+                // match what is sent back, so it stores none.
+                var replyRewritten = false
                 if case .proceed(let modifiedData) = afterModelDecision, let data = modifiedData {
                     if let modifiedRes = try? JSONDecoder().decode(GeminiResponse.self, from: data) {
+                        replyRewritten = HookRewrite.changes(response.candidates?.first?.content,
+                                                             modifiedRes.candidates?.first?.content)
                         activeResponse = modifiedRes
                     }
                 }
@@ -2159,7 +2164,11 @@ actor IrisEngine {
                     break
                 }
                 
-                let modelContent = Content(role: "model", parts: responseContent.parts)
+                var modelContent = Content(role: "model", parts: responseContent.parts)
+                // #314 decision 1: the blocks as received, taken from the reply before any hook.
+                if !replyRewritten {
+                    modelContent.anthropicBlocks = response.candidates?.first?.content?.anthropicBlocks
+                }
                 await MainActor.run { 
                     localState?.appendContentToHistory(for: conversationId, content: modelContent) 
                 }
