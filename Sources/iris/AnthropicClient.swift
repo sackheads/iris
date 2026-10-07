@@ -367,17 +367,48 @@ struct AnthropicClient {
         if !echoed.isEmpty {
             let marker = String(decoding: try JSONSerialization.data(withJSONObject: Self.cacheControl(ttl.history),
                                                                      options: [.sortedKeys]), as: UTF8.self)
-            var text = String(decoding: bodyData, as: UTF8.self)
+            var blocksByIndex: [Int: String] = [:]
             for (index, raw) in echoed {
-                let blocks = markedEchoes.contains(index) ? AnthropicBlocks.withCacheControl(raw, marker) : raw
-                text = text.replacingOccurrences(of: "\"\(spliceToken)\(index)\"", with: blocks)
+                blocksByIndex[index] = markedEchoes.contains(index) ? AnthropicBlocks.withCacheControl(raw, marker) : raw
             }
-            bodyData = Data(text.utf8)
+            bodyData = splice(bodyData, token: spliceToken, blocks: blocksByIndex)
         }
         urlRequest.httpBody = bodyData
 
         LLMRequestPolicy.apply(to: &urlRequest)
         return urlRequest
+    }
+
+    /// Replaces each quoted `"<token><index>"` in `body` with `blocks[index]`, in one forward pass
+    /// (one `replacingOccurrences` per reply rescanned the whole body each time: 262 ms for 30
+    /// replies on 1.1 MB). The closing quote keeps `_1` and `_10` apart; an index written any
+    /// other way (a leading zero, no closing quote, not in `blocks`) is copied through unchanged.
+    static func splice(_ body: Data, token: String, blocks: [Int: String]) -> Data {
+        let quote = UInt8(ascii: "\"")
+        let needle = Array(("\"" + token).utf8)
+        let bytes = [UInt8](body)
+        var out: [UInt8] = []
+        out.reserveCapacity(bytes.count + blocks.values.reduce(0) { $0 + $1.utf8.count })
+        var copied = 0
+        var i = 0
+        while i <= bytes.count - needle.count {
+            guard bytes[i] == quote, bytes[i..<(i + needle.count)].elementsEqual(needle) else { i += 1; continue }
+            var j = i + needle.count
+            var index = 0
+            while j < bytes.count, j - (i + needle.count) < 18, (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(bytes[j]) {
+                index = index * 10 + Int(bytes[j] - UInt8(ascii: "0"))
+                j += 1
+            }
+            let digits = j - (i + needle.count)
+            guard digits > 0, digits == 1 || bytes[i + needle.count] != UInt8(ascii: "0"),
+                  j < bytes.count, bytes[j] == quote, let replacement = blocks[index] else { i += 1; continue }
+            out.append(contentsOf: bytes[copied..<i])
+            out.append(contentsOf: replacement.utf8)
+            i = j + 1
+            copied = i
+        }
+        out.append(contentsOf: bytes[copied...])
+        return Data(out)
     }
 
     /// One streamed call: the same request with the streaming switch on, mapped to stream events.
