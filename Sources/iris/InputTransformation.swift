@@ -18,10 +18,12 @@ public struct InputTransformation: Codable, Sendable, Equatable {
     static let diagnosisHeader = "anthropic-thinking-prefix-mismatch"
 
     /// The entries of a decoded `input_transformations` value; nil when it is absent or not an array.
+    /// An element that is not an object with a string `type` is skipped, not the whole array.
     static func list(_ value: Any?) -> [InputTransformation]? {
-        guard let array = value as? [[String: Any]] else { return nil }
-        return array.compactMap { entry in
-            (entry["type"] as? String).map {
+        guard let array = value as? [Any] else { return nil }
+        return array.compactMap { element in
+            guard let entry = element as? [String: Any] else { return nil }
+            return (entry["type"] as? String).map {
                 InputTransformation(type: $0, path: entry["path"] as? String, reason: entry["reason"] as? String)
             }
         }
@@ -50,7 +52,23 @@ public struct InputTransformation: Codable, Sendable, Equatable {
         var line = "Anthropic thinking (\(model), round \(round)): "
         line += known.isEmpty ? "no transformations"
             : known.map { "\($0.type)\($0.reason.map { "/\($0)" } ?? "") at \($0.path ?? "?")" }.joined(separator: ", ")
-        if let diagnosis { line += "; \(diagnosisHeader): \(diagnosis)" }
+        if let diagnosis { line += "; \(diagnosisHeader): \(capped(diagnosis))" }
         return line
+    }
+
+    /// The most of the header a console line prints, in UTF-8 bytes; it is server-controlled text.
+    static let diagnosisLogLimit = 512
+
+    /// `value` cut on a character boundary to at most `diagnosisLogLimit` UTF-8 bytes, plus "…".
+    static func capped(_ value: String) -> String {
+        guard value.utf8.count > diagnosisLogLimit else { return value }
+        var out = ""
+        var bytes = 0
+        for character in value {
+            let size = character.utf8.count
+            if bytes + size > diagnosisLogLimit { break }
+            out.append(character); bytes += size
+        }
+        return out + "…"
     }
 }

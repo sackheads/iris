@@ -87,6 +87,30 @@ struct InputTransformationTests {
                 == "Anthropic thinking (m, round 1): no transformations; anthropic-thinking-prefix-mismatch: p=1")
     }
 
+    @Test("a malformed element is skipped, not the whole array")
+    func mixedArray() throws {
+        let value = try JSONSerialization.jsonObject(with: Data(
+            #"[{"type":"thinking_dropped","reason":"prefix_binding_mismatch"},"junk",3,{"no_type":1},{"type":"thinking_mismatch_allowed"}]"#.utf8))
+        #expect(InputTransformation.list(value) == [
+            InputTransformation(type: "thinking_dropped", reason: "prefix_binding_mismatch"),
+            InputTransformation(type: "thinking_mismatch_allowed")])
+        #expect(InputTransformation.list(["not": "an array"]) == nil)
+    }
+
+    @Test("the header is capped at 512 UTF-8 bytes in the console line, on a character boundary")
+    func diagnosisCapped() throws {
+        let prefix = "Anthropic thinking (m, round 0): no transformations; anthropic-thinking-prefix-mismatch: "
+        let exact = String(repeating: "a", count: 512)
+        #expect(InputTransformation.logLine(round: 0, model: "m", entries: nil, diagnosis: exact) == prefix + exact)
+        // 511 ASCII bytes, then a 2-byte character that would cross the limit.
+        let crossing = String(repeating: "a", count: 511) + "é" + "tail"
+        let line = try #require(InputTransformation.logLine(round: 0, model: "m", entries: nil, diagnosis: crossing))
+        #expect(line == prefix + String(repeating: "a", count: 511) + "…")
+        let long = String(repeating: "b", count: 10_000)
+        let printed = try #require(InputTransformation.logLine(round: 0, model: "m", entries: nil, diagnosis: long))
+        #expect(printed.dropFirst(prefix.count).utf8.count == 512 + "…".utf8.count)
+    }
+
     @Test("a perf record written before #314 decodes, with no transformations")
     func oldRecordDecodes() throws {
         let json = #"{"round":0,"model":"m","latencyMs":1,"returnedToolCalls":false}"#
