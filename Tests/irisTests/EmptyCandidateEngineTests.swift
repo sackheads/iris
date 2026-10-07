@@ -37,4 +37,24 @@ struct EmptyCandidateEngineTests {
         #expect(pill.headline.contains("PROHIBITED_CONTENT"))
         #expect(!conv.messages.contains { $0.role == .agent && $0.content.hasPrefix("Error: No candidate") })
     }
+
+    /// #394: the pill names the engine's own provider, not `ConfigManager.shared`'s. Never touch
+    /// the global here (invariant 7) — the whole point is that the pill is right even when the
+    /// global disagrees with the engine, as a test harness or a future per-conversation provider
+    /// would leave it.
+    @Test("an engine built with provider: .anthropic names Anthropic, whatever ConfigManager.shared says")
+    func pillNamesEnginesOwnProvider() async throws {
+        let globalBefore = ConfigManager.shared.primaryProvider
+        let app = AppState()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let response = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: []), finishReason: "SAFETY")], usageMetadata: nil)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: FakeLLMClient(responses: [response]),
+                                retryDelays: [], provider: LLMProvider.anthropic.rawValue)
+        await engine.processInput("hello", source: "User", conversationId: id)
+        let conv = try #require(app.conversations.first { $0.id == id })
+        let pill = try #require(conv.messages.compactMap { LLMErrorMessage.parse($0.content) }.first)
+        #expect(pill.headline.hasPrefix(LLMProvider.anthropic.rawValue))
+        #expect(ConfigManager.shared.primaryProvider == globalBefore, "must never mutate ConfigManager.shared (invariant 7)")
+    }
 }

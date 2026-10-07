@@ -106,7 +106,7 @@ Two kinds of edit stay outside the check. Both go through the backstop, and §4 
    - The `transport` parameter stays, because the routes may diverge as more models are probed.
 5. **Ruled: Sonnet 5.5 takes the beta, adaptive thinking and `drop_block`.** The Vertex probe showed all three. The coordinator reversed the earlier hold, and the direct API follows Vertex.
 6. **After a `drop_block` retry, the floor rises too.** The API dropped blocks from that request, and spec decision 2 says "once a strip is recorded, keep it stripped". PTM also says to leave a removed block out.
-   - *Ruling:* the engine raises the floor to the whole history, the retry's own reply included. Every floor rise goes there, so a message that switches from echoed to rebuilt-from-parts never sits under a block that is still sent (`work`'s review on #388). That costs one round's reasoning on a rare event. `drop_block` stays persisted as well (decision 6).
+   - *Ruling:* the engine raises the floor to `history.count`, past the index of the retry's own reply — so that reply's blocks are stripped too, not resent (`work`'s review on #393 flagged the ambiguity: the retry's reply does *not* keep its blocks). Every floor rise goes there, so a message that switches from echoed to rebuilt-from-parts never sits under a block that is still sent (`work`'s review on #388). That costs one round's reasoning on a rare event. `drop_block` stays persisted as well (decision 6).
 7. **A reply stores blocks only when it has a thinking or `redacted_thinking` block.**
    - With nothing to replay, `parts` already says everything, and storing would only grow the row.
    - A reply holding a block type Iris does not fold stores nothing too. That covers citations and server tools. The cost is losing that one reply's thinking.
@@ -2958,9 +2958,10 @@ After the history refresh at `:2135-2137` (the reply is stored):
 ```swift
                 if response.anthropicBindingFallback {
                     // The retry's drop is a strip the API recorded: keep it (decision 2). The floor
-                    // goes to the whole history, the retry's own reply included, as every rise does,
-                    // so the echo-to-rebuild switch below it never sits under a surviving block
-                    // (see `ThinkingReplay.floor`). And keep sending drop_block (decision 6), from
+                    // rises past the retry's own reply too, so that reply's blocks are stripped and
+                    // never resent — the retry's reply does not keep its blocks, as every floor rise
+                    // does (see `ThinkingReplay.floor`), so the echo-to-rebuild switch below it never
+                    // sits under a surviving block. And keep sending drop_block (decision 6), from
                     // this round and across restarts.
                     thinkingReplay.raiseFloor(to: history.count)
                     request.prefixMismatchBehavior = .dropBlock

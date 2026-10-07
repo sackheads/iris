@@ -1993,11 +1993,14 @@ actor IrisEngine {
         // event lines in `drainPendingInput`, the model reply, tool results. If anything removes or
         // rewrites the entry instead (the UI), the byte check drops the block rather than moving it.
         var turnRequest = TurnRequest(context: turnContext, stateHistory: stateHistory, initialHistory: history)
+        // Resolved once per turn, this engine's own provider — never the global, so a test or a
+        // future per-conversation provider never mislabels a pill with the wrong name (#394).
+        let effectiveProvider = providerOverride ?? ConfigManager.shared.primaryProvider
         // #314 Phase 1: no reply before this turn's entry sends its blocks again. Only Anthropic
         // has blocks to send, so on any other provider the check never runs (it encodes the whole
         // history each round) and every request goes without blocks. Decided once per turn, so a
         // provider switch mid-turn finds no block in the request either way.
-        let replaysThinking = (providerOverride ?? ConfigManager.shared.primaryProvider) == LLMProvider.anthropic.rawValue
+        let replaysThinking = effectiveProvider == LLMProvider.anthropic.rawValue
         var thinkingReplay = ThinkingReplay(floor: stateHistory.count)
         // Round one sends no block, and the BeforeModel hook sees none. `prepare` usually strips
         // them anyway (below the floor by index, at or past AppState's count by index), but round
@@ -2206,7 +2209,7 @@ actor IrisEngine {
                 if let reason = activeResponse.emptyReason {
                     earlyEnd = "The model returned no content (\(reason))."
                     _ = await streamer.settle()
-                    let headline = "\(ConfigManager.shared.primaryProvider) returned no content (\(reason))"
+                    let headline = "\(effectiveProvider) returned no content (\(reason))"
                     await pushToUI(role: .system, text: LLMErrorMessage.encode(LLMErrorDisplay(headline: headline, detail: nil)), conversationId: conversationId)
                     break
                 }
@@ -2229,11 +2232,12 @@ actor IrisEngine {
                 }
                 if replaysThinking && response.anthropicBindingFallback {
                     // #314 plan note 6: the retry's drop is a strip the API recorded, so keep it
-                    // (decision 2). The floor goes to the whole history, the retry's own reply
-                    // included, as every rise does, so the echo-to-rebuild switch below it never
-                    // sits under a surviving block (see `ThinkingReplay.floor`). The flag is set
-                    // only on a retry that succeeded, so this is the one place to persist
-                    // drop_block (decision 6), for this round on and across restarts.
+                    // (decision 2). The floor rises past the retry's own reply too, so that
+                    // reply's blocks are stripped and never resent — it does not keep its blocks,
+                    // as every floor rise does (see `ThinkingReplay.floor`) — so the
+                    // echo-to-rebuild switch below it never sits under a surviving block. The
+                    // flag is set only on a retry that succeeded, so this is the one place to
+                    // persist drop_block (decision 6), for this round on and across restarts.
                     thinkingReplay.raiseFloor(to: history.count)
                     request.prefixMismatchBehavior = .dropBlock
                     await MainActor.run { localState?.recordPrefixMismatchFallback(conversationId) }
@@ -2290,7 +2294,7 @@ actor IrisEngine {
                 // turn's final round (no tool calls) it is the answer, so it is an error pill and
                 // a job run fails; in a middle round the turn goes on, so it is only a warning.
                 if let reason = activeResponse.truncatedReason {
-                    let provider = ConfigManager.shared.primaryProvider
+                    let provider = effectiveProvider
                     let budgetCapped = outputTokenCap.map { cap in
                         provider == LLMProvider.anthropic.rawValue
                             && cap < AnthropicClient.maxTokens(for: ConfigManager.shared.getModel(for: modelTier), stream: streamed)
