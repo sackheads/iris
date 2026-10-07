@@ -30,6 +30,7 @@ struct ComposerTextView: NSViewRepresentable {
         tv.isVerticallyResizable = true
         tv.isHorizontallyResizable = false
         tv.textContainer?.widthTracksTextView = true
+        tv.applyComposerSubstitutionPolicy()
 
         let scroll = NSScrollView()
         scroll.documentView = tv
@@ -158,6 +159,21 @@ struct ComposerTextView: NSViewRepresentable {
             let len = (textView?.string as NSString?)?.length ?? 0
             replace(range: NSRange(location: 0, length: len), with: str)
         }
+    }
+}
+
+extension NSTextView {
+    /// Disables macOS's automatic text substitutions so the composer's text reaches the
+    /// model byte for byte (#295). Left on, the system turns `--` into an em dash and
+    /// straight quotes into curly ones, silently mangling shell commands, code, and JSON
+    /// the user typed or pasted — `run_command` then fails on an option the user never
+    /// wrote. Extracted so a test can assert each flag without standing up the composer's
+    /// full NSViewRepresentable.
+    func applyComposerSubstitutionPolicy() {
+        isAutomaticDashSubstitutionEnabled = false
+        isAutomaticQuoteSubstitutionEnabled = false
+        isAutomaticTextReplacementEnabled = false
+        isAutomaticSpellingCorrectionEnabled = false
     }
 }
 
