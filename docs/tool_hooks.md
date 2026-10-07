@@ -32,6 +32,16 @@ If the turn is stopped, or the provider fails part-way through a reply, whatever
 screen and is recorded in the conversation history as the model's turn, so the next request
 reflects what the user actually saw.
 
+### Thinking replay and rewriting hooks
+
+On an Anthropic model, Iris replays this turn's own thinking blocks back to the model across
+tool-call rounds, so the model keeps its reasoning instead of starting cold each round. A
+`BeforeModel` or `AfterModel` hook that rewrites what was already sent, or a `PreCompress` hook
+that changes history, stops that replay for the rest of the turn: every block produced so far
+stays out from then on, and the turn's later requests go out without thinking, the same as an
+older turn always does. A hook that rewrites identically every round — producing the same bytes
+each time — does not count as a change and keeps replay going.
+
 ## Configuration (`~/.iris/settings.json`)
 
 Hooks are defined under the `hooks` object, keyed by the event name. Each hook array contains a `matcher` (a regex to match the target, like a specific tool name or just the event name itself) and a list of `hooks`.
