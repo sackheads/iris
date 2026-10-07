@@ -222,12 +222,14 @@ struct GeminiResponse: Codable {
     /// Each provider's finish reason for "stopped at the output-token limit": Anthropic,
     /// Gemini, OpenAI.
     static let outputLimitReasons: Set<String> = ["max_tokens", "MAX_TOKENS", "length"]
+    /// Anthropic's stop at the context window (4.5+): the reply is cut off just the same.
+    static let contextWindowReason = "model_context_window_exceeded"
 
-    /// The reply has content but was cut off at the output-token limit. An empty one is
-    /// `emptyReason`'s to report.
+    /// The reply has content but was cut off, at the output-token limit or the context window.
+    /// An empty one is `emptyReason`'s to report.
     var truncatedReason: String? {
         guard emptyReason == nil, let finish = candidates?.first?.finishReason,
-              Self.outputLimitReasons.contains(finish) else { return nil }
+              Self.outputLimitReasons.contains(finish) || finish == Self.contextWindowReason else { return nil }
         return finish
     }
 }

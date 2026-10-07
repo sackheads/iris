@@ -1133,6 +1133,18 @@ actor IrisEngine {
     /// A middle round cut off at the output limit: a warning, not an `[LLM_ERROR]`, so a job
     /// run whose turn recovered is not marked failed.
     nonisolated static let outputLimitWarningPrefix = "[output limit]"
+    /// In every truncation pill's headline, so `JobRunner` can tell a cut reply from a failed call.
+    nonisolated static let truncationMarker = "the reply above is cut off"
+
+    /// Why a reply was cut, in words: the context window, or the output limit (and, when the
+    /// run's budget is what set that limit, said so).
+    nonisolated static func truncationCause(provider: String, reason: String, budgetCapped: Bool) -> String {
+        if reason == GeminiResponse.contextWindowReason {
+            return "\(provider) stopped: the conversation reached the model's context window (finishReason: \(reason))"
+        }
+        return "\(provider) stopped at its output limit (finishReason: \(reason))"
+            + (budgetCapped ? ", capped by the run's remaining budget" : "")
+    }
 
     /// Graceful stop for a responsive-but-stuck goal loop: clear the reprompt, instruct the model
     /// to summarize and call goal_complete, and clear the goal so the loop cannot continue.
@@ -2207,11 +2219,15 @@ actor IrisEngine {
                 // a job run fails; in a middle round the turn goes on, so it is only a warning.
                 if let reason = activeResponse.truncatedReason {
                     let provider = ConfigManager.shared.primaryProvider
+                    let budgetCapped = outputTokenCap.map { cap in
+                        provider == LLMProvider.anthropic.rawValue
+                            && cap < AnthropicClient.maxTokens(for: ConfigManager.shared.getModel(for: modelTier), stream: streamed)
+                    } ?? false
+                    let cause = Self.truncationCause(provider: provider, reason: reason, budgetCapped: budgetCapped)
                     if toolCalls.isEmpty {
-                        let headline = "\(provider) stopped at its output limit (finishReason: \(reason)); the reply above is cut off."
-                        await pushToUI(role: .system, text: LLMErrorMessage.encode(LLMErrorDisplay(headline: headline, detail: nil)), conversationId: conversationId)
+                        await pushToUI(role: .system, text: LLMErrorMessage.encode(LLMErrorDisplay(headline: "\(cause); \(Self.truncationMarker).", detail: nil)), conversationId: conversationId)
                     } else {
-                        await pushToUI(role: .system, text: "\(Self.outputLimitWarningPrefix) \(provider) stopped at its output limit (finishReason: \(reason)); the text above is cut off, and the turn continues.", conversationId: conversationId)
+                        await pushToUI(role: .system, text: "\(Self.outputLimitWarningPrefix) \(cause); the text above is cut off, and the turn continues.", conversationId: conversationId)
                     }
                 }
                 

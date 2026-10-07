@@ -23,8 +23,8 @@ struct AnthropicMaxTokensTests {
 
     @Test("5.x and documented older models get 32000; Haiku's 64K is capped to 32000",
           arguments: ["claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
-                      "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5", "claude-opus-4-8",
-                      "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"])
+                      "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-4-8",
+                      "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-5", "claude-haiku-4-5"])
     func tableValues(model: String) {
         #expect(AnthropicClient.maxTokens(for: model, stream: true) == 32_000)
     }
@@ -36,9 +36,22 @@ struct AnthropicMaxTokensTests {
     }
 
     @Test("unknown ids, and models with no documented max, get the conservative 16000",
-          arguments: ["claude-next-9", "", "gpt-5", "claude-opus-4-5-20251101", "claude-sonnet-4-5"])
+          arguments: ["claude-next-9", "", "gpt-5", "claude-sonnet-4-5"])
     func fallback(model: String) {
         #expect(AnthropicClient.maxTokens(for: model, stream: true) == 16_000)
+    }
+
+    @Test("every model Iris catalogues has its own row, so none falls back to 16000",
+          arguments: ModelCatalog.knownVertexClaudeModels)
+    func catalogCovered(model: String) {
+        #expect(AnthropicClient.maxTokensByModel[AnthropicClient.maxTokensKey(model)] != nil, "\(model) has no row")
+        #expect(AnthropicClient.maxTokens(for: model, stream: true) == 32_000)
+    }
+
+    @Test("retired 3.x ids keep the 4096 they always got, on either spelling",
+          arguments: ["claude-3-haiku-20240307", "claude-3-5-sonnet@20241022", "claude-3-opus-20240229"])
+    func claude3(model: String) {
+        #expect(AnthropicClient.maxTokens(for: model, stream: true) == 4096)
     }
 
     @Test("a non-streaming request never asks for more than 8192, which fits the 180 s timeout")
@@ -102,6 +115,32 @@ struct AnthropicMaxTokensTests {
         #expect(try AnthropicClient.parseResponse(whole).candidates?.first?.content?.parts.contains { $0.functionCall != nil } == true)
     }
 
+    @Test("model_context_window_exceeded is a truncation too: a cut tool_use is refused, cut text is flagged")
+    func contextWindowNonStream() throws {
+        let cut: [String: Any] = [
+            "content": [["type": "tool_use", "id": "t1", "name": "write_file", "input": ["path": "/tmp/x"]]],
+            "stop_reason": "model_context_window_exceeded"]
+        #expect(throws: APIError.self) { _ = try AnthropicClient.parseResponse(cut) }
+        let text = try AnthropicClient.parseResponse(["content": [["type": "text", "text": "partial"]],
+                                                      "stop_reason": "model_context_window_exceeded"])
+        #expect(text.truncatedReason == "model_context_window_exceeded")
+    }
+
+    @Test("a streamed model_context_window_exceeded reaches the assembled response as a truncation")
+    func contextWindowStream() throws {
+        var mapper = AnthropicStreamMapper()
+        var assembler = StreamAssembler()
+        let lines: [(String, String)] = [
+            ("content_block_delta", #"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}"#),
+            ("message_delta", #"{"type":"message_delta","delta":{"stop_reason":"model_context_window_exceeded"},"usage":{"output_tokens":5}}"#),
+            ("message_stop", #"{"type":"message_stop"}"#),
+        ]
+        for (event, data) in lines {
+            for e in try mapper.handle(SSEEvent(event: event, data: data)) { assembler.apply(e, now: 0) }
+        }
+        #expect(assembler.response().truncatedReason == "model_context_window_exceeded")
+    }
+
     @Test("the streaming path refuses a tool block whose JSON was cut off")
     func streamedTruncatedToolRefused() throws {
         var mapper = AnthropicStreamMapper()
@@ -141,6 +180,38 @@ struct TruncatedReplyEngineTests {
         #expect(pills.count == 1)
         #expect(pills.first?.headline.contains("output limit") == true)
         #expect(pills.first?.headline.contains(finish) == true)
+    }
+
+    @Test("a context-window cut gets its own headline")
+    func contextWindowPill() async throws {
+        let conv = try #require(await run(reply("half an ans", finish: "model_context_window_exceeded")))
+        let pill = try #require(conv.messages.compactMap { LLMErrorMessage.parse($0.content) }.first)
+        #expect(pill.headline.contains("context window"))
+        #expect(pill.headline.contains(IrisEngine.truncationMarker))
+        #expect(JobRunner.status(messages: conv.messages, denials: [], softStopped: false) == .failed)
+    }
+
+    @Test("a cut final round in turn 1 does not fail a run whose final turn finished")
+    func earlyCutRecovered() async throws {
+        let app = AppState()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let client = FakeLLMClient(responses: [reply("half an ans", finish: "max_tokens"), reply("the whole answer", finish: "end_turn")])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [])
+        await engine.processInput("first", source: "job:test", conversationId: id)
+        let afterFirst = try #require(app.conversations.first { $0.id == id }).messages
+        #expect(JobRunner.status(messages: afterFirst, denials: [], softStopped: false) == .failed)
+        await engine.processInput("go on", source: "job:test", conversationId: id)
+        let messages = try #require(app.conversations.first { $0.id == id }).messages
+        #expect(messages.contains { LLMErrorMessage.parse($0.content) != nil }, "the turn-1 pill is still in the transcript")
+        #expect(JobRunner.status(messages: messages, denials: [], softStopped: false) == .completed)
+    }
+
+    @Test("any other error pill still fails the run even when a reply follows it")
+    func otherErrorStillFails() {
+        let pill = LLMErrorMessage.encode(LLMErrorDisplay(headline: "Anthropic HTTP 500", detail: nil))
+        let messages = [ChatMessage(role: .system, content: pill), ChatMessage(role: .agent, content: "done")]
+        #expect(JobRunner.status(messages: messages, denials: [], softStopped: false) == .failed)
     }
 
     @Test("a truncated final round fails a job run")

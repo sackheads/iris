@@ -27,9 +27,9 @@ struct AnthropicClient {
 
     /// `max_tokens` per model. It covers thinking as well as the reply, and thinking cannot be
     /// turned off on some models, so a fixed 4096 cut long answers and large tool inputs short.
-    /// Source: claude-api skill `shared/models.md`, "Max Output". 5.x models get 32000 (all
-    /// document 128K); older ones their documented max, capped at 32000. Models with no
-    /// documented max there, and unknown ids, get `fallbackMaxTokens`.
+    /// Source: claude-api skill `shared/models.md`, "Max Output", and the live models overview.
+    /// 5.x models get 32000 (all document 128K); older ones their documented max, capped at
+    /// 32000. Unknown ids get `fallbackMaxTokens`; every `ModelCatalog` id has a row (tested).
     static let maxTokensByModel: [String: Int] = [
         "claude-fable-5-1": 32_000,
         "claude-mythos-5-1": 32_000,
@@ -37,13 +37,19 @@ struct AnthropicClient {
         "claude-mythos-5": 32_000,
         "claude-opus-5-5": 32_000,
         "claude-opus-5": 32_000,
+        "claude-sonnet-5-5": 32_000,
         "claude-sonnet-5": 32_000,
         "claude-opus-4-8": 32_000,     // 128K
         "claude-opus-4-7": 32_000,     // 128K
         "claude-opus-4-6": 32_000,     // 128K
         "claude-sonnet-4-6": 32_000,   // 128K
+        "claude-opus-4-5": 32_000,     // 64K (live models overview; not in the bundled table)
         "claude-haiku-4-5": 32_000,    // 64K
     ]
+    /// Retired 3.x ids some clouds still serve: 4096, what Iris always sent them, so they keep
+    /// working rather than meeting a 400 above their documented max.
+    static let claude3Prefix = "claude-3-"
+    static let claude3MaxTokens = 4096
     static let fallbackMaxTokens = 16_000
     /// A non-streaming reply arrives all at once, so it has to finish inside
     /// `LLMRequestPolicy.timeoutSeconds` (180 s); the docs also warn that above ~16K output a
@@ -60,7 +66,8 @@ struct AnthropicClient {
 
     /// `budgetCap` is what a budgeted run can still afford (`GeminiRequest.maxOutputTokens`).
     static func maxTokens(for model: String, stream: Bool, budgetCap: Int? = nil) -> Int {
-        var value = maxTokensByModel[maxTokensKey(model)] ?? fallbackMaxTokens
+        let key = maxTokensKey(model)
+        var value = maxTokensByModel[key] ?? (key.hasPrefix(claude3Prefix) ? claude3MaxTokens : fallbackMaxTokens)
         if !stream { value = min(value, nonStreamingMaxTokens) }
         if let budgetCap { value = min(value, max(1, budgetCap)) }
         return value
@@ -406,7 +413,8 @@ struct AnthropicClient {
     /// `cache_read_input_tokens` / `cache_creation_input_tokens`, so `promptTokenCount` is their
     /// sum (5a §0.4). Anthropic never sends a total, so `.withTotal()` fills one from prompt +
     /// output — otherwise the job budgets, which read the total, charge these runs nothing.
-    static let truncatedToolCallMessage = "Anthropic stopped at max_tokens inside a tool call; its input is incomplete, so the call was not run."
+    /// The stop reasons that can cut a block off partway.
+    static let truncatingStopReasons: Set<String> = ["max_tokens", GeminiResponse.contextWindowReason]
 
     static func parseResponse(_ json: [String: Any]) throws -> GeminiResponse {
         var geminiResponse = GeminiResponse()
@@ -415,8 +423,9 @@ struct AnthropicClient {
         if let contentArray = json["content"] as? [[String: Any]] {
             // Blocks arrive in order, so only the last can have been cut. Its input is partial
             // and must never run: refused like the stream's undecodable tool JSON.
-            if json["stop_reason"] as? String == "max_tokens", contentArray.last?["type"] as? String == "tool_use" {
-                throw APIError(message: truncatedToolCallMessage)
+            if let stop = json["stop_reason"] as? String, truncatingStopReasons.contains(stop),
+               contentArray.last?["type"] as? String == "tool_use" {
+                throw APIError(message: "Anthropic stopped (\(stop)) inside a tool call; its input is incomplete, so the call was not run.")
             }
             var content = Content(role: "model", parts: [])
 

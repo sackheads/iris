@@ -253,7 +253,7 @@ turn while running, with role `job:<name>`.
 When the turn ends, `JobRunner` finishes the row: `tokens` = the conversation's `tokenUsage`
 delta across the run, `outcome` = the first line of the last agent message truncated to 200
 characters (or the failure reason), `status` = `completed`, or `failed` when the turn ended with
-an `[LLM_ERROR]`, an uncaught tool failure, or the loop detector's soft stop, or
+an `[LLM_ERROR]` (a cut-off reply's pill only when nothing was said after it, #385), an uncaught tool failure, or the loop detector's soft stop, or
 `blockedOnApproval` (§7), or `interrupted` when the app quit mid-run (detected at next launch:
 any `running` row is closed as `interrupted` with reason "app was not running").
 
