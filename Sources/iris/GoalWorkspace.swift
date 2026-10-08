@@ -27,8 +27,8 @@ enum GoalWorkspace {
             return .keptExisting(existingBinding)
         }
         if let proposed, !proposed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let expanded = (proposed.trimmingCharacters(in: .whitespacesAndNewlines) as NSString)
-                .expandingTildeInPath
+            // #275: `expandTilde`, so `~/.iris/...` names Iris's own home, as every tool reads it.
+            let expanded = IrisEngine.expandTilde(proposed.trimmingCharacters(in: .whitespacesAndNewlines))
             if directoryExists(expanded) { return .existing(expanded) }
         }
         let base = slug(for: objective)

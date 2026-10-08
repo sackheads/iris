@@ -30,7 +30,12 @@ struct AgentFacingPathTests {
         let root = IrisPaths.default.root.path
         #expect(IrisEngine.expandTilde("~/.iris") == root)
         #expect(IrisEngine.expandTilde("~/.iris/memory/USER.md") == root + "/memory/USER.md")
-        #expect(IrisEngine.expandTilde("~/.iris-dev/x") == NSHomeDirectory() + "/.iris-dev/x")
+        // The build's own home name (`~/.iris-dev` here) is Iris's home too, so a path the dev
+        // agent copied out of its prompt lands in the home this process actually uses.
+        let own = "~/" + BuildIdentity.current.homeDirectoryName
+        #expect(IrisEngine.expandTilde(own) == root)
+        #expect(IrisEngine.expandTilde(own + "/memory/USER.md") == root + "/memory/USER.md")
+        #expect(IrisEngine.expandTilde("~/.iris-devx") == NSHomeDirectory() + "/.iris-devx")
         #expect(IrisEngine.expandTilde("~/.irisrc") == NSHomeDirectory() + "/.irisrc")
     }
 
@@ -44,7 +49,8 @@ struct AgentFacingPathTests {
     @Test("isUnderIrisDir agrees with expandTilde")
     func underIrisDir() {
         #expect(IrisPaths.default.isUnderIrisDir("~/.iris/memory/USER.md"))
-        #expect(!IrisPaths.default.isUnderIrisDir("~/.iris-dev/x"))
+        #expect(IrisPaths.default.isUnderIrisDir("~/" + BuildIdentity.current.homeDirectoryName + "/x"))
+        #expect(!IrisPaths.default.isUnderIrisDir("~/.iris-devx"))
         #expect(!IrisPaths.default.isUnderIrisDir("~/.irisrc"))
     }
 

@@ -6,7 +6,7 @@ Iris implements a multi-tiered defense pipeline to protect the primary LLM from 
 
 The guard exists to defend against **indirect** injection — instructions smuggled in from *outside*. Iris's own first-party content (its persona, its learned skills, its memory) is not an attack surface in that sense; it *is* the agent. Running it through the guard doesn't just waste work, it actively corrupts the content, so first-party content is returned raw:
 
-*   **First-party memory reads.** `read_file` for a path under `~/.iris/memory/` (SOUL, USER, `memory.md`, skills, artifacts, library) bypasses the guard entirely (`IrisEngine`, gated on `IrisPaths.default.isUnderMemory`). Path traversal (`memory/../models/x`) is resolved before the check, so it cannot be used to smuggle an external file past the guard.
+*   **First-party reads.** `read_file` for a path under Iris's own home (`~/.iris/`, or `~/.iris-dev/` for a build from source: memory, rules, config) bypasses the guard entirely (`IrisEngine`, gated on `IrisPaths.default.isUnderIrisDir`). Path traversal (`memory/../../x`) is resolved before the check, so it cannot be used to smuggle an external file past the guard.
 *   **First-party SOUL / skills.** Loaded raw by `SkillManager` rather than routed through the guard.
 *   **Trusted tools.** `set_workspace` and `register_directory_watcher` are capped at **Tier 1 only** (structural normalization); the advanced tiers are skipped for them.
 

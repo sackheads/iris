@@ -24,25 +24,6 @@ struct IrisPathsTests {
         #expect(p.modelsDir.path == "/tmp/iris-test-root/models")
     }
 
-    @Test("isUnderMemory: true for first-party memory paths, false for escapes/outside")
-    func testIsUnderMemory() {
-        let p = IrisPaths(root: URL(fileURLWithPath: "/tmp/iris-x"))
-        // inside memory/
-        #expect(p.isUnderMemory("/tmp/iris-x/memory/library/note.md"))
-        #expect(p.isUnderMemory("/tmp/iris-x/memory/SOUL.md"))
-        #expect(p.isUnderMemory("/tmp/iris-x/memory"))
-        // `..` traversal that escapes memory/ must NOT be trusted
-        #expect(!p.isUnderMemory("/tmp/iris-x/memory/../models/secret"))
-        #expect(!p.isUnderMemory("/tmp/iris-x/memory/../../etc/passwd"))
-        // outside memory/
-        #expect(!p.isUnderMemory("/tmp/iris-x/models/m.gguf"))
-        #expect(!p.isUnderMemory("/tmp/iris-x/config/settings.json"))
-        // sibling with shared prefix must not match
-        #expect(!p.isUnderMemory("/tmp/iris-x/memory-evil/x"))
-        // relative paths are not trusted
-        #expect(!p.isUnderMemory("note.md"))
-    }
-
     @Test("isUnderIrisDir: true for paths inside root, false for escapes/outside")
     func testIsUnderIrisDir() {
         let p = IrisPaths(root: URL(fileURLWithPath: "/tmp/iris-x"))

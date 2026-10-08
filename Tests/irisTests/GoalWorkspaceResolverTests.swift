@@ -155,4 +155,13 @@ struct GoalWorkspaceResolverTests {
         #expect(!GoalWorkspace.isSensitive("\(home)/.iris/workspaces/ship", homeDirectory: home,
                                            processCwd: "\(home)/src/iris"))
     }
+
+    @Test("a ~/.iris proposal resolves to Iris's own home, not the literal directory in $HOME")
+    func irisTildeProposalFollowsTheHome() {
+        let home = IrisPaths.default.root.path + "/workspaces/x"
+        let r = GoalWorkspace.resolve(proposed: "~/.iris/workspaces/x", objective: "o",
+                                      existingBinding: nil, workspacesRoot: root,
+                                      directoryExists: exists([home]))
+        #expect(r == .existing(home))
+    }
 }

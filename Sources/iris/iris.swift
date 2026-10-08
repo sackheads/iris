@@ -800,9 +800,14 @@ actor IrisEngine {
     /// leading `~` that survives.
     nonisolated static func expandTilde(_ path: String) -> String {
         guard path.hasPrefix("~") else { return path }
-        // `~/.iris` is the model's name for Iris's own home, whichever home this process has.
-        if path == "~/.iris" { return IrisPaths.default.root.path }
-        if path.hasPrefix("~/.iris/") { return IrisPaths.default.root.path + path.dropFirst("~/.iris".count) }
+        // `~/.iris` is the model's name for Iris's own home, whichever home this process has; so
+        // is this build's own name for it (`~/.iris-dev`), which agent-facing text is rewritten to
+        // and which must reach a volatile perf copy or a test home rather than the real directory.
+        for name in Set([".iris", BuildIdentity.current.homeDirectoryName]) {
+            let spelled = "~/" + name
+            if path == spelled { return IrisPaths.default.root.path }
+            if path.hasPrefix(spelled + "/") { return IrisPaths.default.root.path + path.dropFirst(spelled.count) }
+        }
         if path == "~" { return NSHomeDirectory() }
         if path.hasPrefix("~/") { return NSHomeDirectory() + path.dropFirst(1) }
         let afterTilde = path.index(after: path.startIndex)
