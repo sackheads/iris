@@ -20,6 +20,7 @@ struct DefaultsIsolationTests {
         let key = LegacyConversationBlob.key
         let before = UserDefaults.standard.data(forKey: key)
         let fileBefore = FileManager.default.fileExists(atPath: IrisPaths.standard.conversationsDB.path)
+        let releaseFileBefore = FileManager.default.fileExists(atPath: IrisPaths.release.conversationsDB.path)
         let app = AppState()
         app.createNewConversation(id: UUID())
         app.flushSave()
@@ -28,6 +29,7 @@ struct DefaultsIsolationTests {
         #expect(app.store.isOnDisk == false)
         #expect(UserDefaults.standard.data(forKey: key) == before)
         #expect(FileManager.default.fileExists(atPath: IrisPaths.standard.conversationsDB.path) == fileBefore)
+        #expect(FileManager.default.fileExists(atPath: IrisPaths.release.conversationsDB.path) == releaseFileBefore)
         #expect(!FileManager.default.fileExists(atPath: IrisPaths.default.conversationsDB.path),
                 "#304: a regression now lands in the per-process test home, and nothing legitimate creates it there")
     }

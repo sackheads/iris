@@ -59,12 +59,20 @@ struct IrisPaths: Sendable {
         }
     }
 
-    /// The real home, regardless of any headless override — isolation tests compare file
-    /// existence at this exact path before and after a test run and must never create anything
-    /// here themselves.
-    static let standard = IrisPaths(
-        root: URL(fileURLWithPath: ("~/.iris" as NSString).expandingTildeInPath)
-    )
+    /// The current identity's real home (`~/.iris` for the installed app, `~/.iris-dev` for every
+    /// dev build and test process), regardless of any headless override. Isolation tests compare
+    /// file existence here and at `release` before and after a run and must never create anything
+    /// in either.
+    static let standard = home(for: .current)
+
+    /// The installed app's home, whatever this process is. Only `--seed-dev-home` reads it.
+    static let release = home(for: .release)
+
+    static func home(for identity: BuildIdentity,
+                     homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> IrisPaths {
+        IrisPaths(root: homeDirectory.appendingPathComponent(identity.homeDirectoryName, isDirectory: true))
+    }
+
     private static let lock = NSLock()
     nonisolated(unsafe) private static var override: IrisPaths?
 
