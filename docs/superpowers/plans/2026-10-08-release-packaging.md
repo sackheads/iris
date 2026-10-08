@@ -24,7 +24,7 @@
 - arm64 only. `MACOSX_DEPLOYMENT_TARGET = 14.0`. Hardened runtime on, App Sandbox off.
 - Never `com.apple.security.cs.disable-library-validation`. An entitlement is added only when the notarized build fails without it, and the commit names the failure.
 - `CFBundleShortVersionString` = release argument; `CFBundleVersion` = `git rev-list --count HEAD`; both are `xcodebuild` overrides, never edited in the project.
-- `SUFeedURL = https://bnaylor.github.io/iris/appcast.xml`; EdDSA key in Keychain account `iris` (`generate_keys --account iris`, `sign_update --account iris`). Never the default account; pastefix's key lives there.
+- `SUFeedURL = https://sackheads.github.io/iris/appcast.xml`; EdDSA key in Keychain account `iris` (`generate_keys --account iris`, `sign_update --account iris`). Never the default account; pastefix's key lives there.
 - Notary profile `iris-notary`, overridable with `$NOTARY_PROFILE`. Team `RMKGLPG4K4`.
 - Three PRs, each branched from `origin/main` (never stacked). Base PR 1 on main *after* #406 and #407 have merged.
 - Every PR: `swift test` green, read as exit 0 plus the Swift Testing summary plus XCTest's `Executed N tests, with 0 failures` (memory: full-suite check). Filtered runs go through `scripts/test-filter.sh` and quote the test count.
@@ -1037,7 +1037,7 @@ and paste the public key. Never run `generate_keys` without `--account iris`.
 `App/Info.plist`, add inside `<dict>` (public key from Step 1):
 
 ```xml
-    <key>SUFeedURL</key><string>https://bnaylor.github.io/iris/appcast.xml</string>
+    <key>SUFeedURL</key><string>https://sackheads.github.io/iris/appcast.xml</string>
     <key>SUPublicEDKey</key><string>PASTE-THE-PUBLIC-KEY-FROM-STEP-1</string>
     <key>SUEnableAutomaticChecks</key><true/>
     <key>SUScheduledCheckInterval</key><integer>86400</integer>
@@ -1217,7 +1217,7 @@ Port `../pastefix/scripts/release.sh` (read it in full first) with exactly these
 | `SCHEME="Pastefix"` | `SCHEME="Iris"` |
 | `INFO_PLIST=.../Pastefix/Info.plist` | `INFO_PLIST="$REPO_ROOT/App/Info.plist"` |
 | `NOTARY_PROFILE="pastefix-notary"` | `NOTARY_PROFILE="${NOTARY_PROFILE:-iris-notary}"` |
-| `GH_REPO="bnaylor/pastefix"`, feed URL | `bnaylor/iris`, `https://bnaylor.github.io/iris/appcast.xml` |
+| `GH_REPO="bnaylor/pastefix"`, feed URL | `sackheads/iris`, `https://sackheads.github.io/iris/appcast.xml` |
 | `pastefix-release-$VERSION.XXXX`, `Pastefix.xcarchive`, `Pastefix.app`, `Pastefix-$VERSION.dmg`, volname, release title, tag message | the same with `iris`/`Iris` |
 | `generate_keys -p` | `generate_keys --account iris -p` |
 | `sign_update "$DMG"` | `sign_update --account iris "$DMG"` |
@@ -1279,7 +1279,7 @@ cat > appcast.xml <<'EOF'
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
   <channel>
     <title>Iris</title>
-    <link>https://github.com/bnaylor/iris</link>
+    <link>https://github.com/sackheads/iris</link>
     <description>Iris updates</description>
     <language>en</language>
   </channel>
@@ -1287,8 +1287,8 @@ cat > appcast.xml <<'EOF'
 EOF
 touch .nojekyll && git add appcast.xml .nojekyll && git commit -qm "appcast: bootstrap" && git push origin gh-pages
 cd - && git worktree remove --force "$WT"
-gh api -X POST repos/bnaylor/iris/pages -f "source[branch]=gh-pages" -f "source[path]=/"
-curl -fsS https://bnaylor.github.io/iris/appcast.xml | head -3   # may take a minute
+gh api -X POST repos/sackheads/iris/pages -f "source[branch]=gh-pages" -f "source[path]=/"
+curl -fsS https://sackheads.github.io/iris/appcast.xml | head -3   # may take a minute
 ```
 
 - [ ] **Step 2: First release (ask first).** After PR 3 merges, on clean pushed main: `scripts/release.sh 0.1.0`.
