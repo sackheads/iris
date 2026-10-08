@@ -15,5 +15,9 @@
     <key>LSMinimumSystemVersion</key><string>$(MACOSX_DEPLOYMENT_TARGET)</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSAppleEventsUsageDescription</key><string>Iris runs the AppleScript and shell commands you approve, which can control other apps.</string>
+    <key>SUFeedURL</key><string>https://sackheads.github.io/iris/appcast.xml</string>
+    <key>SUPublicEDKey</key><string>Zn9F11/giwDJLe5KKMW4U7ZCOxnlkW0/Ni8FdwFva6k=</string>
+    <key>SUEnableAutomaticChecks</key><true/>
+    <key>SUScheduledCheckInterval</key><integer>86400</integer>
 </dict>
 </plist>
