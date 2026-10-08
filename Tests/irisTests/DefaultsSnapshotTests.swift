@@ -38,7 +38,7 @@ struct DefaultsSnapshotTests {
             "sNo": "no", "sZero": "0", "sEmpty": "", "sLead": "12abc", "sOne": "1", "sTwo": "2",
             "sCaps": "TRUE", "sYes": "Yes", "sY": "y", "sSpaceBefore": " 7", "sSpaceAfter": "7 ", "sPlus": "+5",
             "sExp": "1e3", "sHex": "0x10", "sSpaceTrue": " true", "sOn": "on",
-            "i0": 0, "i5": 5, "iNeg": -1, "bT": true, "bF": false, "d": 2.5, "dNeg": -0.5,
+            "i0": 0, "i5": 5, "iNeg": -1, "bT": true, "bF": false, "d": 2.5, "dNeg": -0.5, "dWhole": 3.0, "dZero": 0.0, "dFrac": 0.4, "dBig": 1e10, "dNegFrac": -2.7,
             "data": Data([1, 2]), "array": ["x"], "dict": ["k": "v"],
         ]
         try withSuite { name in

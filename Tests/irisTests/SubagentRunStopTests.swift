@@ -125,7 +125,8 @@ struct SubagentRunStopTests {
             role: "worker", task: "Work.", effort: "easy", parentConversationId: run,
             maxIterations: 300, client: client, appState: state, endSandboxSession: { _ in })
 
-        #expect(Date().timeIntervalSince(started) < 5, "seconds, not the poll cap")
+        // Only shows the subagent stopped well before its poll cap, not how fast; the full parallel suite runs it at ~4 s.
+        #expect(Date().timeIntervalSince(started) < 10, "seconds, not the poll cap")
         #expect(client.callCount("WORKER") == 1, "the second round was refused, not made")
         #expect(outcome.status == .failed)
         #expect(outcome.rendered.contains("status: failed"))

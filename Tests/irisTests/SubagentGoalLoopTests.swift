@@ -208,7 +208,8 @@ struct SubagentGoalLoopTests {
         task.cancel()
         let outcome = await task.value
 
-        #expect(Date().timeIntervalSince(cancelledAt) < 2, "seconds, not the 300 s poll cap")
+        // Only shows the subagent stopped well before its poll cap, not how fast; the full parallel suite runs it at ~4 s.
+        #expect(Date().timeIntervalSince(cancelledAt) < 10, "seconds, not the 300 s poll cap")
         #expect(outcome.status == .cancelled)
         #expect(await eventually(10) { client.cancelled == 1 }, "turn 2's model call was cancelled")
         #expect(await eventually { state.liveSubagents(ofRun: run).isEmpty })
@@ -283,7 +284,8 @@ struct SubagentGoalLoopTests {
             role: "worker", task: "Work.", effort: "easy", parentConversationId: run,
             maxIterations: 300, client: client, appState: state, config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
 
-        #expect(Date().timeIntervalSince(started) < 5, "seconds, not the 30 s poll cap")
+        // Only shows the subagent stopped well before its poll cap, not how fast; the full parallel suite runs it at ~4 s.
+        #expect(Date().timeIntervalSince(started) < 10, "seconds, not the 30 s poll cap")
         #expect(outcome.status == .failed)
         #expect(outcome.rendered.contains("Stopped by the background run's budget"))
         #expect(client.calls == 1, "turn 2's round was refused, not made")
@@ -317,6 +319,7 @@ struct SubagentGoalLoopTests {
             maxIterations: 300, client: client, appState: state, config: config, hooks: hooks, repromptDelay: Self.delay,
             endSandboxSession: { _ in })
 
+        // Only shows the subagent stopped well before its poll cap, not how fast; the full parallel suite runs it at ~4 s.
         #expect(Date().timeIntervalSince(started) < 10, "seconds, not the 30 s poll cap")
         #expect(outcome.status == .failed)
         #expect(client.calls == 1, "turn 2 was blocked before its model call")
