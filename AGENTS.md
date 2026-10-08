@@ -25,9 +25,11 @@ home, a Keychain item, or a hotkey. `run-dev.sh` seeds `~/.iris-dev` from `~/.ir
 it runs, via `iris --seed-dev-home`: it copies the release home — everything under it except
 `models/`, which is symlinked back to the release copy rather than duplicated (gigabytes,
 read-only) — and the release Keychain items into their `.dev`-suffixed equivalents, rewriting the
-bundled `~/.iris` spelling in the copied text to `~/.iris-dev` as it goes. It refuses outright if
-the installed app currently holds the release store's GUI lock (quit it and retry) or if the dev
-home already has content (remove it first to reseed). Exit codes: `0` seeded; `3` nothing to seed
+bundled `~/.iris` spelling to `~/.iris-dev` in the copied `.md`/`.json` files under `memory/`,
+`rules/` and `config/` only; `plugins/`, `workspaces/` and everything else are copied as-is. It
+refuses outright if the installed app currently holds the release store's GUI lock (quit it and
+retry), if that lock file exists but doesn't hold a readable pid (delete it and retry), or if the
+dev home already has content (remove it first to reseed). Exit codes: `0` seeded; `3` nothing to seed
 — no release home yet, the normal case on a machine that has never installed the app, not a
 failure; `1` anything else. `run-dev.sh` continues past `3` and stops on `1` (or any other
 non-zero, non-3 exit), because launching anyway would create an empty `~/.iris-dev`, and the
