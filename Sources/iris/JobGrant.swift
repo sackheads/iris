@@ -83,7 +83,9 @@ extension JobGrant {
     static func resolve(mounts: [String]?, network: Bool?, profile: JobProfile,
                         fileManager: FileManager = .default, paths: IrisPaths = .default,
                         home: String = NSHomeDirectory(),
-                        isVolume: (String) throws -> Bool = { try WatchRoot.isMountPoint($0) }) -> Result<JobGrant?, ToolMessage> {
+                        isVolume: (String) throws -> Bool = { try WatchRoot.isMountPoint($0) },
+                        identity: BuildIdentity = .current,
+                        release: IrisPaths = .release) -> Result<JobGrant?, ToolMessage> {
         let entries = mounts ?? []
         guard !entries.isEmpty || network != nil else { return .success(nil) }
         guard profile == .mutating else {
@@ -109,7 +111,8 @@ extension JobGrant {
             }
             guard isDirectory.boolValue else { return .failure(ToolMessage(notADirectory(source))) }
             // The breadth rule is `WatchRoot`'s — shared, not copied, so the two can never drift.
-            switch WatchRoot.breadthProblem(for: source, paths: paths, home: home, isVolume: isVolume) {
+            switch WatchRoot.breadthProblem(for: source, paths: paths, home: home, isVolume: isVolume,
+                                            identity: identity, release: release) {
             case .tooBroad: return .failure(ToolMessage(tooBroad(source)))
             case .protectedIris: return .failure(ToolMessage(protected(source)))
             case nil: break

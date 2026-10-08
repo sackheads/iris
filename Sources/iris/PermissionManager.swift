@@ -9,18 +9,27 @@ struct PermissionManager: Sendable {
     static let shared = PermissionManager()
 
     private let paths: IrisPaths
+    /// A dev process's home is `~/.iris-dev`, which leaves the installed app's `config/` and
+    /// `plugins/` as plain absolute paths to it; `isProtectedWrite` keeps them grants too.
+    private let identity: BuildIdentity
+    private let release: IrisPaths
     private var globalPermissionsURL: URL { paths.permissionsJSON }
 
     private init() {
         try? IrisPaths.default.ensureDirectories()
         paths = IrisPaths.default
+        identity = .current
+        release = .release
     }
 
     /// Injectable home, so a test can exercise the `~/.iris` carve-out below against a temp
-    /// directory instead of the machine's real allowlist.
-    init(paths: IrisPaths) {
+    /// directory instead of the machine's real allowlist. `identity` and `release` likewise, so a
+    /// test decides the release-home rule without depending on the process or touching `~/.iris`.
+    init(paths: IrisPaths, identity: BuildIdentity = .current, release: IrisPaths = .release) {
         try? paths.ensureDirectories()
         self.paths = paths
+        self.identity = identity
+        self.release = release
     }
     
     private func projectPermissionsURL(for workspace: String) -> URL {
@@ -70,8 +79,11 @@ struct PermissionManager: Sendable {
     /// the call; it cannot make `permissions.json` or a plugin an ordinary file.
     ///
     /// Deny-side only, like `isUnderProtectedWriteDir` itself: never invert it to widen an allow.
+    /// In a dev process the installed app's protected directories count as well.
     func isProtectedWrite(toolName: String, path: String) -> Bool {
-        toolName == "write_file" && paths.isUnderProtectedWriteDir(path)
+        guard toolName == "write_file" else { return false }
+        if paths.isUnderProtectedWriteDir(path) { return true }
+        return identity == .dev && release.isUnderProtectedWriteDir(path)
     }
 
     /// The same question about a persisted call, asked of the path it would actually write (which
