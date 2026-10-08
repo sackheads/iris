@@ -14,7 +14,8 @@ build_or_die() {
 }
 build_or_die swift build
 scripts/sign.sh .build/debug/iris
-# Dev builds live in ~/.iris-dev. The first run copies the installed app's home and secrets.
+# Dev builds live in ~/.iris-dev. Whenever it is missing or empty, this copies the installed
+# app's home and secrets into it.
 # Exit 3 means nothing to seed (no ~/.iris yet, e.g. a fresh machine) — fine, dev launches empty.
 # Any other non-zero exit aborts here: launching anyway would populate ~/.iris-dev itself and the
 # seeder refuses a non-empty destination, so a later retry could never seed at all.

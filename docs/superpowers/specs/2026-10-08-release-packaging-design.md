@@ -77,7 +77,7 @@ running Debug from Xcode cannot open real data. The bundle id is injectable for 
   `/usr/bin/security`, because granting `security` "Always Allow" lets any script read the keys.
   The dev binary has the signing identity that created those items, so it is expected to read
   them without prompting; confirm on first run.
-- `scripts/run-dev.sh` runs it automatically when `~/.iris-dev` does not exist.
+- `scripts/run-dev.sh` runs it automatically when `~/.iris-dev` is missing or empty.
 
 **Importing defaults into release.** Today's settings in UserDefaults (setup-wizard state, the
 hotkey, toggles) live in the `iris` domain, which dev keeps. The release domain

@@ -133,6 +133,9 @@ struct BlockedCall: Codable, Equatable, Sendable {
 
     let toolName: String
     /// Exactly what the model sent, unaltered — this is what gets re-dispatched on approval.
+    /// One exception: `DevHomeSeeder` re-points absolute paths under the release home to the dev
+    /// home when it copies a conversation's store, so a seeded dev copy's `args` can differ from
+    /// what the model actually sent.
     let args: [String: JSONValue]
     let cwd: String?
     let reason: Reason
