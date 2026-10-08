@@ -93,7 +93,7 @@ struct PrefixMismatchPersistenceTests {
         let engine2 = IrisEngine(state: app2, tier: .medium, principal: .main, client: client2, retryDelays: [],
                                  streamResponses: false, factStore: try FactStoreManager(inMemory: true),
                                  protectionEnabled: false, sessionPeerCount: 0, hooks: try ThinkingFixtures.hooks(in: dir),
-                                 provider: LLMProvider.anthropic.rawValue)
+                                 provider: LLMProvider.anthropic.rawValue, replayThinking: true)
         await engine2.processInput("again", source: "UI", conversationId: h.id)
         #expect(client2.requests.first?.prefixMismatchBehavior == .dropBlock, "after a restart, the first request sends it")
     }
@@ -170,7 +170,7 @@ struct PrefixMismatchPersistenceTests {
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: MockedAnthropicClient(session: session),
                                 retryDelays: [], streamResponses: true, factStore: try FactStoreManager(inMemory: true),
                                 protectionEnabled: false, sessionPeerCount: 0, hooks: try ThinkingFixtures.hooks(in: dir),
-                                provider: LLMProvider.anthropic.rawValue)
+                                provider: LLMProvider.anthropic.rawValue, replayThinking: true)
         await engine.processInput("hi", source: "UI", conversationId: id)
         app.flushSave()
         let persisted = app.conversations.first { $0.id == id }?.prefixMismatchBehavior

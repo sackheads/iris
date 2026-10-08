@@ -354,6 +354,12 @@ actor IrisEngine {
     /// `primaryProvider` once at the top of each turn. Injectable so a test can pin either side
     /// without touching `ConfigManager.shared` (invariant 7).
     private let providerOverride: String?
+    /// Explicit per-engine override for `ConfigManager.replayThinkingWithinTurn`, same idiom as
+    /// `providerOverride`: `nil` (the app) reads the live config once at the top of each turn, so
+    /// a Settings flip takes effect on the next turn without a relaunch. Injectable so a test can
+    /// force replay on (or off) without touching `ConfigManager.shared` (invariant 7) — the #314
+    /// engine tests pin this true so they keep testing replay now that it defaults off.
+    private let replayThinkingOverride: Bool?
     /// Explicit per-engine override for the checkpoint auto-advance setting, same idiom as
     /// `streamResponsesOverride`: `nil` — always, in the app — means "consult the config". Not
     /// captured once at construction for the same reason: the only main-principal engine is built
@@ -438,7 +444,7 @@ actor IrisEngine {
     /// `CacheTTLPolicy.resolve` picks (5c §0.8). Nil everywhere else.
     private let cacheTTLOverride: CacheTTLPolicy?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil, subagentConfig: ConfigManager = .shared, repromptDelay: TimeInterval = 1.5) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil, replayThinking: Bool? = nil, subagentConfig: ConfigManager = .shared, repromptDelay: TimeInterval = 1.5) {
         self.state = state
         self.subagentConfig = subagentConfig
         self.repromptDelay = repromptDelay
@@ -462,6 +468,7 @@ actor IrisEngine {
         self.cacheTTLOverride = cacheTTLOverride
         self.hooks = hooks
         self.providerOverride = provider
+        self.replayThinkingOverride = replayThinking
         systemPrompt = nil
     }
 
@@ -2019,8 +2026,14 @@ actor IrisEngine {
         // #314 Phase 1: no reply before this turn's entry sends its blocks again. Only Anthropic
         // has blocks to send, so on any other provider the check never runs (it encodes the whole
         // history each round) and every request goes without blocks. Decided once per turn, so a
-        // provider switch mid-turn finds no block in the request either way.
+        // provider switch mid-turn finds no block in the request either way. Gated on the
+        // `replayThinkingWithinTurn` setting (default off, PR #405): off takes exactly the
+        // non-Anthropic path above, regardless of provider — no block in any request, and
+        // `prepare`/`recordSent`/`recordReceived` never run. Storage of blocks, the binding beta
+        // header and `input_transformations` recording stay regardless, since they are local,
+        // free, and diagnostic.
         let replaysThinking = effectiveProvider == LLMProvider.anthropic.rawValue
+            && (replayThinkingOverride ?? ConfigManager.shared.replayThinkingWithinTurn)
         var thinkingReplay = ThinkingReplay(floor: stateHistory.count)
         // Round one sends no block, and the BeforeModel hook sees none. `prepare` usually strips
         // them anyway (below the floor by index, at or past AppState's count by index), but round

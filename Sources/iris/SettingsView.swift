@@ -305,6 +305,8 @@ struct SettingsView: View {
                             .help("Used for standard generation and reasoning.")
                         TextField("Hard Subagent Model", text: $config.anthropicModelHard)
                             .help("Used for complex reasoning and evaluation.")
+                        Toggle("Replay Claude's thinking within a turn", isOn: $config.replayThinkingWithinTurn)
+                            .help("Keeps reasoning across tool calls within a turn by resending each earlier signed thinking block on later requests. Costs about 15-25% more per task on Opus; whether it improves reasoning quality is unmeasured. Off by default.")
                     } else if config.primaryProvider == LLMProvider.openai.rawValue {
                         SecureField("OpenAI API Key", text: $config.openAIAPIKey)
                             .help("Required for OpenAI GPT/o1 models to function.")

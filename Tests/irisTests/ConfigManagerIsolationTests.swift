@@ -53,6 +53,22 @@ struct ConfigManagerIsolationTests {
         #expect(ConfigManager(store: store).checkpointAutoAdvance == false)
     }
 
+    /// #314 Phase 1 / #405 ruling: replay defaults off until its cost is measured against a
+    /// benefit, not just a cost. `store.bool(forKey:)` already reads back false when unset, so
+    /// unlike `checkpointAutoAdvance` this needs no presence check — but that is exactly the kind
+    /// of silent default a future edit could flip without anyone noticing, so it is pinned here.
+    @Test("replayThinkingWithinTurn defaults to false when unset and honours an explicit true")
+    func replayThinkingWithinTurnDefault() {
+        let (store, name) = suite("replay-thinking")
+        defer { cleanup(store, name) }
+
+        #expect(store.object(forKey: "REPLAY_THINKING_WITHIN_TURN") == nil)
+        #expect(ConfigManager(store: store).replayThinkingWithinTurn == false)
+
+        store.set(true, forKey: "REPLAY_THINKING_WITHIN_TURN")
+        #expect(ConfigManager(store: store).replayThinkingWithinTurn == true)
+    }
+
     @Test("maxDoneGateRetries treats a stored 0 as unset, so the Settings stepper floors at 1")
     func maxDoneGateRetriesDefault() {
         let (store, name) = suite("done-gate-retries")
