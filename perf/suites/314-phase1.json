@@ -1,0 +1,4 @@
+{ "name": "314-phase1", "lane": "real", "repetitions": 1, "pauseMs": 2000, "rungs": [4],
+  "scenarios": ["perf/prompts/caching/six-turns.json", "perf/prompts/caching/every-turn-facts.json",
+                "perf/prompts/caching/tool-heavy.json", "perf/prompts/caching/pinned-briefing.json",
+                "perf/prompts/314/goal-tool-loop.json"] }

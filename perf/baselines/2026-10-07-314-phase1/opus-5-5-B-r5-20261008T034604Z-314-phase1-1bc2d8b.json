@@ -1,0 +1,1946 @@
+{
+  "cacheCountsVersion" : 1,
+  "environment" : {
+    "basePricePerMTok" : 4,
+    "buildConfiguration" : "release",
+    "cpuCount" : 14,
+    "gitDirty" : true,
+    "gitSha" : "1bc2d8b",
+    "headless" : false,
+    "injectionGuardEnabled" : true,
+    "machineModel" : "Mac16,7",
+    "models" : {
+      "easy" : "claude-haiku-4-5-20251001",
+      "hard" : "claude-fable-5",
+      "medium" : "claude-opus-5-5"
+    },
+    "osVersion" : "Version 26.7.1 (Build 25G241)",
+    "promptGuardEngine" : "cloud",
+    "provider" : "Anthropic",
+    "sandboxEnabled" : true,
+    "streaming" : true,
+    "toolDeclarationCount" : 17,
+    "toolSandbox" : "sandboxed",
+    "vibecopEnabled" : true,
+    "vibecopEngine" : "cloud"
+  },
+  "finishedAt" : "2026-10-08T03:47:52Z",
+  "scenarios" : [
+    {
+      "category" : "caching",
+      "lane" : "real",
+      "name" : "six-turns",
+      "path" : "perf\/prompts\/caching\/six-turns.json",
+      "rungs" : [
+        {
+          "medianMs" : 14876.076875001192,
+          "p90Ms" : 14876.076875001192,
+          "repetitions" : [
+            {
+              "coldStart" : true,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 2.4283329844474792
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.7070840001106262
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 1968.3652090132236
+                    }
+                  },
+                  "finalText" : "Hello, Brian. Systems online, sarcasm loaded.",
+                  "finalTextLength" : 45,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13476,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 0,
+                      "firstTokenMs" : 1761.646082997322,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1968.4120416641235,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 24,
+                      "promptTokens" : 13480,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.43937501311302185
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 2.4227089881896973
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.7116659879684448
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.08158299326896667
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 0.0004169940948486328
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 0.0003329813480377197
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 1974.2940664291382
+                },
+                {
+                  "categories" : {
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 2697.239249974489
+                    }
+                  },
+                  "finalText" : "BLUEHERON's codename is ZIRCONFINCH, which launches quarterly, and BLUEHERON itself ships on Thursdays. Presumably that's quarterly launches landing on a Thursday, though my notes don't actually say so.",
+                  "finalTextLength" : 202,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13691,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 359,
+                      "firstTokenMs" : 1984.1865829825401,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2697.286009788513,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 186,
+                      "promptTokens" : 14054,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.7554160058498383
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 2700.264096260071
+                },
+                {
+                  "categories" : {
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.23829200863838196
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 3461.2216669917107
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 654.082083016634
+                    }
+                  },
+                  "finalText" : "\/tmp has 1 regular file at the top level. That leaves out subdirectories, symlinks and anything nested deeper.",
+                  "finalTextLength" : 110,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13691,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 377,
+                      "firstTokenMs" : 1982.1295830011368,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2003.2269954681396,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 161,
+                      "promptTokens" : 14072,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 13691,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 590,
+                      "firstTokenMs" : 1449.9200000166893,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1458.2200050354004,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 42,
+                      "promptTokens" : 14283,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.017084002494812
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.004999995231628418
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 0.0003330111503601074
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 0.00045800209045410156
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"command\":\"find \/tmp\/ -maxdepth 1 -type f | wc -l\",\"intent\":\"Count regular files in \/tmp\"}",
+                      "ms" : 652.9480218887329,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 4121.731996536255
+                },
+                {
+                  "categories" : {
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 1588.9277909994125
+                    }
+                  },
+                  "finalText" : "23. 29 also counts, if you'd rather have a spare.",
+                  "finalTextLength" : 49,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13843,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 484,
+                      "firstTokenMs" : 1376.6991249918938,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1588.9639854431152,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 97,
+                      "promptTokens" : 14331,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.2848750054836273
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 1594.1369533538818
+                },
+                {
+                  "categories" : {
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 3480.571166008711
+                    }
+                  },
+                  "finalText" : "I said hello in five words, gave a BLUEHERON answer, counted 1 regular file at the top level of \/tmp, and named 23 as a prime between 20 and 30.\n\nAbout that BLUEHERON answer: I can't see where it came from in this conversation. Treat the ZIRCONFINCH and Thursday details as unverified until I check my memory for them.",
+                  "finalTextLength" : 318,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 14327,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 86,
+                      "firstTokenMs" : 2600.1561249792576,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 3478.016972541809,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 287,
+                      "promptTokens" : 14417,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.6131250262260437
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 3480.831027030945
+                },
+                {
+                  "categories" : {
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 982.7611249983311
+                    }
+                  },
+                  "finalText" : "done",
+                  "finalTextLength" : 4,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 14413,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 178,
+                      "firstTokenMs" : 941.9448750019073,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 981.963038444519,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 43,
+                      "promptTokens" : 14595,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.520249992609024
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 984.4590425491333
+                }
+              ],
+              "wallClockMs" : 14876.076875001192
+            }
+          ],
+          "rung" : 4
+        }
+      ],
+      "summary" : {
+        "medianFirstTokenMs" : 1761.646082997322,
+        "medianMs" : 14876.076875001192,
+        "p90Ms" : 14876.076875001192,
+        "toolCallRate" : 0.16666666666666666,
+        "toolCallsByName" : {
+          "run_command" : 1
+        }
+      }
+    },
+    {
+      "category" : "caching",
+      "lane" : "real",
+      "name" : "every-turn-facts",
+      "path" : "perf\/prompts\/caching\/every-turn-facts.json",
+      "rungs" : [
+        {
+          "medianMs" : 15477.768875002861,
+          "p90Ms" : 15477.768875002861,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.0615840256214142
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.5889580249786377
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 817.1902090013027
+                    }
+                  },
+                  "finalText" : "Hey ALDERWREN, oolong's on me.",
+                  "finalTextLength" : 30,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13691,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 214,
+                      "firstTokenMs" : 697.1094579994678,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 816.662073135376,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 20,
+                      "promptTokens" : 13909,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.8048750162124634
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.0583750009536743
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.5955419838428497
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.12920799851417542
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 821.558952331543
+                },
+                {
+                  "categories" : {
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 1799.889042019844
+                    }
+                  },
+                  "finalText" : "BRACKENFOX already collects stamps, so postal history or letterpress printing would fit, since both reward the same patient obsession with tiny paper artifacts.",
+                  "finalTextLength" : 160,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13845,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 148,
+                      "firstTokenMs" : 1157.554832994938,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1798.7710237503052,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 102,
+                      "promptTokens" : 13997,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.5591250061988831
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 1800.9109497070312
+                },
+                {
+                  "categories" : {
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.1791670024394989
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 2632.2004590034485
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 723.6571249961853
+                    }
+                  },
+                  "finalText" : "There's 1 file in \/tmp. I only counted regular files at the top level, not subdirectories or anything inside them.\n\nCINDERMOTH plays the oboe, an instrument known for being hard to play well.",
+                  "finalTextLength" : 191,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13845,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 290,
+                      "firstTokenMs" : 1199.8861669898033,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1201.3829946517944,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 97,
+                      "promptTokens" : 14139,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 13845,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 439,
+                      "firstTokenMs" : 1423.8931249976158,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1429.4739961624146,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 104,
+                      "promptTokens" : 14286,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.6717920005321503
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.003792017698287964
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"command\":\"find \/tmp -maxdepth 1 -type f | wc -l\",\"intent\":\"Count files in \/tmp\"}",
+                      "ms" : 723.1049537658691,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 3357.5249910354614
+                },
+                {
+                  "categories" : {
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 3518.6663749814034
+                    }
+                  },
+                  "finalText" : "23. It's prime, and like a lichen it's quietly doing its own thing.\n\nA correction on CINDERMOTH from last time: I don't have any stored fact behind the oboe line, so I likely made it up. Treat it as fiction unless you've actually told me that.",
+                  "finalTextLength" : 243,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13969,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 453,
+                      "firstTokenMs" : 2426.325917005539,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 3517.177939414978,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 277,
+                      "promptTokens" : 14426,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.613167017698288
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 3519.5109844207764
+                },
+                {
+                  "categories" : {
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 4169.148207992315
+                    }
+                  },
+                  "finalText" : "For EMBERLYNX: we greeted ALDERWREN, picked a hobby for BRACKENFOX, counted one file in \/tmp, mentioned CINDERMOTH, and gave DUSKHERON the prime 23, which is roughly as tidy as a well-restored clock.\n\nThe oolong, stamps and lichen details may be as made-up as the oboe was, so treat them as fiction unless you told me those things yourself.",
+                  "finalTextLength" : 340,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 14269,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 319,
+                      "firstTokenMs" : 2891.249375015497,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 4167.850971221924,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 377,
+                      "promptTokens" : 14592,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.861083984375
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 4171.936988830566
+                },
+                {
+                  "categories" : {
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 1782.4439580142498
+                    }
+                  },
+                  "finalText" : "FERNQUAIL: done.",
+                  "finalTextLength" : 16,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 14429,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 367,
+                      "firstTokenMs" : 1684.0099589824677,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1781.9969654083252,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 105,
+                      "promptTokens" : 14800,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.3594170212745667
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 1787.6108884811401
+                }
+              ],
+              "wallClockMs" : 15477.768875002861
+            }
+          ],
+          "rung" : 4
+        }
+      ],
+      "summary" : {
+        "medianFirstTokenMs" : 1423.8931249976158,
+        "medianMs" : 15477.768875002861,
+        "p90Ms" : 15477.768875002861,
+        "toolCallRate" : 0.16666666666666666,
+        "toolCallsByName" : {
+          "run_command" : 1
+        }
+      }
+    },
+    {
+      "category" : "caching",
+      "lane" : "real",
+      "name" : "tool-heavy",
+      "path" : "perf\/prompts\/caching\/tool-heavy.json",
+      "rungs" : [
+        {
+          "medianMs" : 33628.27062499523,
+          "p90Ms" : 33628.27062499523,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.971583992242813
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.8397499620914459
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 836.2160409986973
+                    }
+                  },
+                  "finalText" : "Hey GRANITEWREN, found any agates?",
+                  "finalTextLength" : 34,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13691,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 215,
+                      "firstTokenMs" : 743.9839169979095,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 836.0699415206909,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 19,
+                      "promptTokens" : 13910,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.9631660282611847
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.9647919833660126
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.8489170074462891
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.17912501096725464
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 843.4029817581177
+                },
+                {
+                  "categories" : {
+                    "injectionGuard" : {
+                      "count" : 24,
+                      "ms" : 2.190663993358612
+                    },
+                    "primaryLLM" : {
+                      "count" : 13,
+                      "ms" : 24311.474793076515
+                    },
+                    "toolExecution" : {
+                      "count" : 12,
+                      "ms" : 1493.4272910058498
+                    }
+                  },
+                  "finalText" : "TIDEMARTEN, I ran all twelve commands one at a time:\n\n- **`ls`**: Printed nothing, so the directory is empty. That's not much room for ferns.\n- **`pwd`**: `\/var\/folders\/cy\/2ttwsm8958gf7dfs5528sdtw0000gn\/T\/iris-perf`\n- **`whoami`**: `root`. These ran in the sandbox VM, not on the Mac itself.\n- **`date`**: Thu Oct 8 03:46:48 UTC 2026\n- **`uname -a`**: Linux 6.18.15, aarch64, in the `iris-c370726c…` container.\n- **`df -h \/`**: `\/dev\/vdb` is 504G, with 129M used (1%).\n- **`echo one` … `echo six`**: … [truncated, 74 more characters]",
+                  "finalTextLength" : 574,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13845,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 232,
+                      "firstTokenMs" : 1776.2482919991016,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2435.283064842224,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 174,
+                      "promptTokens" : 14081,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 14077,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 227,
+                      "firstTokenMs" : 1672.4875829815865,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1677.482008934021,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 75,
+                      "promptTokens" : 14306,
+                      "returnedToolCalls" : true,
+                      "round" : 1
+                    },
+                    {
+                      "cacheReadTokens" : 13845,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 630,
+                      "firstTokenMs" : 1553.642207980156,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1570.5420970916748,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 74,
+                      "promptTokens" : 14477,
+                      "returnedToolCalls" : true,
+                      "round" : 2
+                    },
+                    {
+                      "cacheReadTokens" : 14304,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 296,
+                      "firstTokenMs" : 1582.7663339972496,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1587.0039463043213,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 72,
+                      "promptTokens" : 14602,
+                      "returnedToolCalls" : true,
+                      "round" : 3
+                    },
+                    {
+                      "cacheReadTokens" : 13845,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 896,
+                      "firstTokenMs" : 1835.9867080152035,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1847.5149869918823,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 79,
+                      "promptTokens" : 14743,
+                      "returnedToolCalls" : true,
+                      "round" : 4
+                    },
+                    {
+                      "cacheReadTokens" : 13845,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 1102,
+                      "firstTokenMs" : 1652.753042012453,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1658.4349870681763,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 78,
+                      "promptTokens" : 14949,
+                      "returnedToolCalls" : true,
+                      "round" : 5
+                    },
+                    {
+                      "cacheReadTokens" : 14475,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 646,
+                      "firstTokenMs" : 1568.6310409903526,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1589.951992034912,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 74,
+                      "promptTokens" : 15123,
+                      "returnedToolCalls" : true,
+                      "round" : 6
+                    },
+                    {
+                      "cacheReadTokens" : 14947,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 297,
+                      "firstTokenMs" : 1653.9176249802113,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1658.385992050171,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 74,
+                      "promptTokens" : 15246,
+                      "returnedToolCalls" : true,
+                      "round" : 7
+                    },
+                    {
+                      "cacheReadTokens" : 15244,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 126,
+                      "firstTokenMs" : 1693.26783400774,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1699.455976486206,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 74,
+                      "promptTokens" : 15372,
+                      "returnedToolCalls" : true,
+                      "round" : 8
+                    },
+                    {
+                      "cacheReadTokens" : 14600,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 895,
+                      "firstTokenMs" : 1656.7014999985695,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1656.8349599838257,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 74,
+                      "promptTokens" : 15497,
+                      "returnedToolCalls" : true,
+                      "round" : 9
+                    },
+                    {
+                      "cacheReadTokens" : 15495,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 125,
+                      "firstTokenMs" : 1539.652499973774,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1544.07799243927,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 74,
+                      "promptTokens" : 15622,
+                      "returnedToolCalls" : true,
+                      "round" : 10
+                    },
+                    {
+                      "cacheReadTokens" : 15370,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 375,
+                      "firstTokenMs" : 1630.464125007391,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1635.3590488433838,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 74,
+                      "promptTokens" : 15747,
+                      "returnedToolCalls" : true,
+                      "round" : 11
+                    },
+                    {
+                      "cacheReadTokens" : 15121,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 749,
+                      "firstTokenMs" : 3705.841625005007,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 3749.605894088745,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 311,
+                      "promptTokens" : 15872,
+                      "returnedToolCalls" : false,
+                      "round" : 12
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.683458000421524
+                    },
+                    "guard.tier1" : {
+                      "count" : 12,
+                      "ms" : 0.05966603755950928
+                    },
+                    "guard.tier2" : {
+                      "count" : 12,
+                      "ms" : 0.004043012857437134
+                    },
+                    "guard.tier3" : {
+                      "count" : 12,
+                      "ms" : 0.004167050123214722
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"command\":\"ls\",\"intent\":\"List current directory\"}",
+                      "ms" : 639.0880346298218,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"pwd\",\"intent\":\"Print working directory\"}",
+                      "ms" : 80.99508285522461,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"whoami\",\"intent\":\"Show current user\"}",
+                      "ms" : 62.735915184020996,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"date\",\"intent\":\"Show current date\"}",
+                      "ms" : 102.4860143661499,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"uname -a\",\"intent\":\"Show kernel\/system info\"}",
+                      "ms" : 73.8821029663086,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"df -h \/\",\"intent\":\"Check root disk usage\"}",
+                      "ms" : 94.64502334594727,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo one\",\"intent\":\"Echo one\"}",
+                      "ms" : 87.027907371521,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo two\",\"intent\":\"Echo two\"}",
+                      "ms" : 63.74502182006836,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo three\",\"intent\":\"Echo three\"}",
+                      "ms" : 78.67300510406494,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo four\",\"intent\":\"Echo four\"}",
+                      "ms" : 59.47995185852051,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo five\",\"intent\":\"Echo five\"}",
+                      "ms" : 73.16601276397705,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo six\",\"intent\":\"Echo six\"}",
+                      "ms" : 75.19793510437012,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 25822.261929512024
+                },
+                {
+                  "categories" : {
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 2434.6349589824677
+                    }
+                  },
+                  "finalText" : "OSPREYLARK already restores harpsichords, so building a clavichord from a kit is the obvious next step, mostly so they can wreck their wrists on a smaller instrument.",
+                  "finalTextLength" : 166,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13845,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 2312,
+                      "firstTokenMs" : 1657.496542006731,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2434.5810413360596,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 96,
+                      "promptTokens" : 16161,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.6537909805774689
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 2437.5380277633667
+                },
+                {
+                  "categories" : {
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 3585.0580839812756
+                    }
+                  },
+                  "finalText" : "41. Also 43 and 47, if you want the full set.\n\nI need to correct a couple of earlier replies. I have no information about GRANITEWREN or OSPREYLARK. I made up the agates and the harpsichord restoring, and \"ferns\" in TIDEMARTEN's summary was a pointless aside. A real hobby suggestion for OSPREYLARK: bird photography, since the name's already halfway there.",
+                  "finalTextLength" : 357,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13691,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 2510,
+                      "firstTokenMs" : 2185.488584011793,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 3584.9690437316895,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 245,
+                      "promptTokens" : 16205,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.7378329932689667
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 3588.742971420288
+                },
+                {
+                  "categories" : {
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 910.1440420150757
+                    }
+                  },
+                  "finalText" : "done",
+                  "finalTextLength" : 4,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 16004,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 394,
+                      "firstTokenMs" : 906.3227920234203,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 910.1569652557373,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 3,
+                      "promptTokens" : 16402,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.5399170219898224
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 912.9769802093506
+                }
+              ],
+              "wallClockMs" : 33628.27062499523
+            }
+          ],
+          "rung" : 4
+        }
+      ],
+      "summary" : {
+        "medianFirstTokenMs" : 1653.9176249802113,
+        "medianMs" : 33628.27062499523,
+        "missedExpectedToolRate" : 0.8,
+        "p90Ms" : 33628.27062499523,
+        "toolCallRate" : 0.2,
+        "toolCallsByName" : {
+          "run_command" : 12
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "caching",
+      "lane" : "real",
+      "name" : "pinned-briefing",
+      "path" : "perf\/prompts\/caching\/pinned-briefing.json",
+      "rungs" : [
+        {
+          "medianMs" : 6656.644374996424,
+          "p90Ms" : 6656.644374996424,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.7583749890327454
+                    },
+                    "injectionGuard" : {
+                      "count" : 2,
+                      "ms" : 0.34358400106430054
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 810.0356250107288
+                    }
+                  },
+                  "finalText" : "Hey Brian. What's breaking today?",
+                  "finalTextLength" : 33,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 14825,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 0,
+                      "firstTokenMs" : 680.2437500059605,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 810.0520372390747,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 16,
+                      "promptTokens" : 14829,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.4020000100135803
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 0.7553329765796661
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.34770798683166504
+                    },
+                    "guard.tier1" : {
+                      "count" : 1,
+                      "ms" : 0.07262498140335083
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 813.6420249938965
+                },
+                {
+                  "categories" : {
+                    "injectionGuard" : {
+                      "count" : 1,
+                      "ms" : 0.02104198932647705
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 855.8244589865208
+                    }
+                  },
+                  "finalText" : "23. 29 also counts, if you want a spare.",
+                  "finalTextLength" : 40,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 14697,
+                      "cacheWrite1hTokens" : 249,
+                      "cacheWriteTokens" : 249,
+                      "firstTokenMs" : 638.3179999887943,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 855.8450937271118,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 18,
+                      "promptTokens" : 14950,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.4850419759750366
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 858.6249351501465
+                },
+                {
+                  "categories" : {
+                    "injectionGuard" : {
+                      "count" : 5,
+                      "ms" : 0.28962501883506775
+                    },
+                    "primaryLLM" : {
+                      "count" : 2,
+                      "ms" : 3581.2435840070248
+                    },
+                    "toolExecution" : {
+                      "count" : 1,
+                      "ms" : 702.8177079856396
+                    }
+                  },
+                  "finalText" : "\/tmp has 1 file. I only counted regular files at the top level, not subdirectories or anything below them.\n\nAlso noted: repo-watch finished and reported 3 changed files (run cadf5cf8). The card doesn't say which files, but I can pull the run details if you want them.",
+                  "finalTextLength" : 267,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 14697,
+                      "cacheWrite1hTokens" : 360,
+                      "cacheWriteTokens" : 360,
+                      "firstTokenMs" : 1331.046665996313,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1335.4159593582153,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 101,
+                      "promptTokens" : 15061,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 15057,
+                      "cacheWrite1hTokens" : 207,
+                      "cacheWriteTokens" : 207,
+                      "firstTokenMs" : 2238.979542016983,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2245.845079421997,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 167,
+                      "promptTokens" : 15268,
+                      "returnedToolCalls" : false,
+                      "round" : 1
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.4441249966621399
+                    },
+                    "guard.tier1" : {
+                      "count" : 2,
+                      "ms" : 0.009291976690292358
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"command\":\"find \/tmp\/ -maxdepth 1 -type f | wc -l\",\"intent\":\"Count regular files in \/tmp\"}",
+                      "ms" : 702.6629447937012,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 4288.254022598267
+                },
+                {
+                  "categories" : {
+                    "injectionGuard" : {
+                      "count" : 4,
+                      "ms" : 0.09229299426078796
+                    },
+                    "primaryLLM" : {
+                      "count" : 1,
+                      "ms" : 682.563208013773
+                    }
+                  },
+                  "finalText" : "done",
+                  "finalTextLength" : 4,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 14697,
+                      "cacheWrite1hTokens" : 760,
+                      "cacheWriteTokens" : 760,
+                      "firstTokenMs" : 679.063540995121,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 682.5840473175049,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 3,
+                      "promptTokens" : 15461,
+                      "returnedToolCalls" : false,
+                      "round" : 0
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.6452910006046295
+                    }
+                  },
+                  "toolCalls" : [
+
+                  ],
+                  "totalMs" : 686.3479614257812
+                }
+              ],
+              "wallClockMs" : 6656.644374996424
+            }
+          ],
+          "rung" : 4
+        }
+      ],
+      "summary" : {
+        "medianFirstTokenMs" : 680.2437500059605,
+        "medianMs" : 6656.644374996424,
+        "missedExpectedToolRate" : 0.75,
+        "p90Ms" : 6656.644374996424,
+        "toolCallRate" : 0.25,
+        "toolCallsByName" : {
+          "run_command" : 1
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "314",
+      "lane" : "real",
+      "name" : "goal-tool-loop",
+      "path" : "perf\/prompts\/314\/goal-tool-loop.json",
+      "rungs" : [
+        {
+          "medianMs" : 24979.30141699314,
+          "p90Ms" : 24979.30141699314,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 1.5673750042915344
+                    },
+                    "injectionGuard" : {
+                      "count" : 14,
+                      "ms" : 1.8692069947719574
+                    },
+                    "primaryLLM" : {
+                      "count" : 6,
+                      "ms" : 9061.041206985712
+                    },
+                    "toolExecution" : {
+                      "count" : 5,
+                      "ms" : 1044.512416958809
+                    }
+                  },
+                  "finalText" : "The sum is 189, and `numbers.txt` now ends with `sum=189`. I ran steps 4 and 5 at the same time instead of one after the other, so the first print came out before the line was added; printing it again afterwards shows the correct file.",
+                  "finalTextLength" : 235,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13602,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 0,
+                      "firstTokenMs" : 716.1657920181751,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1500.801920890808,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 117,
+                      "promptTokens" : 13606,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 13772,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 0,
+                      "firstTokenMs" : 1085.637707978487,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1106.7039966583252,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 79,
+                      "promptTokens" : 13774,
+                      "returnedToolCalls" : true,
+                      "round" : 1
+                    },
+                    {
+                      "cacheReadTokens" : 13913,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 0,
+                      "firstTokenMs" : 1054.071624994278,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1075.7360458374023,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 95,
+                      "promptTokens" : 13915,
+                      "returnedToolCalls" : true,
+                      "round" : 2
+                    },
+                    {
+                      "cacheReadTokens" : 14058,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 0,
+                      "firstTokenMs" : 1416.553791999817,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1805.5309057235718,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 165,
+                      "promptTokens" : 14060,
+                      "returnedToolCalls" : true,
+                      "round" : 3
+                    },
+                    {
+                      "cacheReadTokens" : 14058,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 324,
+                      "firstTokenMs" : 1750.164834022522,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2175.971031188965,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 171,
+                      "promptTokens" : 14384,
+                      "returnedToolCalls" : true,
+                      "round" : 4
+                    },
+                    {
+                      "cacheReadTokens" : 14058,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 563,
+                      "firstTokenMs" : 1376.3137079775333,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1396.5829610824585,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 80,
+                      "promptTokens" : 14623,
+                      "returnedToolCalls" : false,
+                      "round" : 5
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 1.495375007390976
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 1.5622499883174896
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.778333991765976
+                    },
+                    "guard.tier1" : {
+                      "count" : 7,
+                      "ms" : 0.15412598848342896
+                    },
+                    "guard.tier2" : {
+                      "count" : 3,
+                      "ms" : 0.0009579658508300781
+                    },
+                    "guard.tier3" : {
+                      "count" : 3,
+                      "ms" : 0.0009580254554748535
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"command\":\"printf '3\\\\n14\\\\n15\\\\n92\\\\n65\\\\n' > numbers.txt\",\"intent\":\"Create numbers.txt\"}",
+                      "ms" : 695.417046546936,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"cat numbers.txt\",\"intent\":\"Print contents\"}",
+                      "ms" : 87.50796318054199,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"awk '{s+=$1} END {print s}' numbers.txt\",\"intent\":\"Sum with awk\"}",
+                      "ms" : 81.84802532196045,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"cat numbers.txt\",\"intent\":\"Print final file\"}",
+                      "ms" : 72.13890552520752,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 'sum=189' >> numbers.txt\",\"intent\":\"Append sum line\"}",
+                      "ms" : 95.02196311950684,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"cat numbers.txt\",\"intent\":\"Re-print final file after append\"}",
+                      "ms" : 83.93299579620361,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 10117.985963821411
+                },
+                {
+                  "categories" : {
+                    "injectionGuard" : {
+                      "count" : 10,
+                      "ms" : 0.9879159927368164
+                    },
+                    "primaryLLM" : {
+                      "count" : 6,
+                      "ms" : 8738.055082976818
+                    },
+                    "toolExecution" : {
+                      "count" : 5,
+                      "ms" : 413.2405000627041
+                    }
+                  },
+                  "finalText" : "`numbers.txt` has 6 lines (the five numbers plus `sum=189`), and `stats.txt` holds `max=92` and `lines=6`. The line count includes the `sum=189` line; `sort -n` reads that line as 0, so it didn't affect the max.",
+                  "finalTextLength" : 211,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13913,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 916,
+                      "firstTokenMs" : 2059.593667000532,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2825.8570432662964,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 148,
+                      "promptTokens" : 14833,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 14382,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 647,
+                      "firstTokenMs" : 1249.0036669969559,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1253.250002861023,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 87,
+                      "promptTokens" : 15031,
+                      "returnedToolCalls" : true,
+                      "round" : 1
+                    },
+                    {
+                      "cacheReadTokens" : 14058,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 1108,
+                      "firstTokenMs" : 1134.1481249928474,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1146.9190120697021,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 90,
+                      "promptTokens" : 15168,
+                      "returnedToolCalls" : true,
+                      "round" : 2
+                    },
+                    {
+                      "cacheReadTokens" : 15029,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 278,
+                      "firstTokenMs" : 1146.5062499940395,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1152.2200107574463,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 87,
+                      "promptTokens" : 15309,
+                      "returnedToolCalls" : true,
+                      "round" : 3
+                    },
+                    {
+                      "cacheReadTokens" : 14829,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 616,
+                      "firstTokenMs" : 1154.8326659798622,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1159.9619388580322,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 81,
+                      "promptTokens" : 15447,
+                      "returnedToolCalls" : true,
+                      "round" : 4
+                    },
+                    {
+                      "cacheReadTokens" : 15166,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 419,
+                      "firstTokenMs" : 1179.035000026226,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1200.103998184204,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 92,
+                      "promptTokens" : 15587,
+                      "returnedToolCalls" : false,
+                      "round" : 5
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.8004589974880219
+                    },
+                    "guard.tier1" : {
+                      "count" : 5,
+                      "ms" : 0.021000951528549194
+                    },
+                    "guard.tier2" : {
+                      "count" : 3,
+                      "ms" : 0.0010840296745300293
+                    },
+                    "guard.tier3" : {
+                      "count" : 3,
+                      "ms" : 0.0012500286102294922
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"command\":\"wc -l < numbers.txt\",\"intent\":\"Count lines\"}",
+                      "ms" : 86.9210958480835,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"sort -n numbers.txt | tail -1\",\"intent\":\"Find largest number\"}",
+                      "ms" : 68.51208209991455,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 'max=92' > stats.txt\",\"intent\":\"Write max to stats.txt\"}",
+                      "ms" : 88.70398998260498,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 'lines=6' >> stats.txt\",\"intent\":\"Append line count\"}",
+                      "ms" : 69.33403015136719,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"cat stats.txt\",\"intent\":\"Print stats.txt\"}",
+                      "ms" : 98.9539623260498,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 9162.19699382782
+                },
+                {
+                  "categories" : {
+                    "injectionGuard" : {
+                      "count" : 8,
+                      "ms" : 0.6924580335617065
+                    },
+                    "primaryLLM" : {
+                      "count" : 5,
+                      "ms" : 5373.720124989748
+                    },
+                    "toolExecution" : {
+                      "count" : 4,
+                      "ms" : 287.32666605710983
+                    }
+                  },
+                  "finalText" : "done",
+                  "finalTextLength" : 4,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 14657,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 1114,
+                      "firstTokenMs" : 1081.4907920062542,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1086.9760513305664,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 74,
+                      "promptTokens" : 15775,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 14829,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 1238,
+                      "firstTokenMs" : 1299.5435830056667,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1302.6490211486816,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 87,
+                      "promptTokens" : 16069,
+                      "returnedToolCalls" : true,
+                      "round" : 1
+                    },
+                    {
+                      "cacheReadTokens" : 15771,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 454,
+                      "firstTokenMs" : 1059.8240830004215,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1062.2899532318115,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 86,
+                      "promptTokens" : 16227,
+                      "returnedToolCalls" : true,
+                      "round" : 2
+                    },
+                    {
+                      "cacheReadTokens" : 16067,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 295,
+                      "firstTokenMs" : 1194.0364170074463,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1196.1390972137451,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 83,
+                      "promptTokens" : 16364,
+                      "returnedToolCalls" : true,
+                      "round" : 3
+                    },
+                    {
+                      "cacheReadTokens" : 14657,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 1975,
+                      "firstTokenMs" : 711.5390830039978,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 725.8819341659546,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 3,
+                      "promptTokens" : 16634,
+                      "returnedToolCalls" : false,
+                      "round" : 4
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.7698750197887421
+                    },
+                    "guard.tier1" : {
+                      "count" : 4,
+                      "ms" : 0.025499969720840454
+                    },
+                    "guard.tier2" : {
+                      "count" : 3,
+                      "ms" : 0.0009990036487579346
+                    },
+                    "guard.tier3" : {
+                      "count" : 3,
+                      "ms" : 0.001083970069885254
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"command\":\"ls -la\",\"intent\":\"List directory\"}",
+                      "ms" : 56.21004104614258,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"wc -c numbers.txt stats.txt\",\"intent\":\"Byte counts\"}",
+                      "ms" : 81.51209354400635,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"rm stats.txt\",\"intent\":\"Delete stats.txt as instructed\"}",
+                      "ms" : 59.762001037597656,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"ls -la\",\"intent\":\"Confirm stats.txt is gone\"}",
+                      "ms" : 89.22910690307617,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 5669.994950294495
+                }
+              ],
+              "wallClockMs" : 24979.30141699314
+            }
+          ],
+          "rung" : 4
+        }
+      ],
+      "summary" : {
+        "medianFirstTokenMs" : 1154.8326659798622,
+        "medianMs" : 24979.30141699314,
+        "missedExpectedToolRate" : 0,
+        "p90Ms" : 24979.30141699314,
+        "toolCallRate" : 1,
+        "toolCallsByName" : {
+          "run_command" : 15
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    }
+  ],
+  "schemaVersion" : 1,
+  "startedAt" : "2026-10-08T03:46:04Z",
+  "suite" : "314-phase1"
+}
