@@ -30,10 +30,28 @@ enum AppDefaultsImport {
         !underTests && appDomain != devDomain
     }
 
+    /// `persistentDomain(forName:)` is cfprefsd's view, and cfprefsd refuses to serve a domain
+    /// over roughly 4 MB — on one machine `iris.plist` sat at 4.8 MB (the legacy
+    /// `iris_conversations` blob), so `persistentDomain(forName: "iris")` returned nil from every
+    /// *other* process (`defaults read iris` agreed: "Domain iris does not exist"), even though
+    /// the file itself was readable. Fall back to reading the plist straight off disk when
+    /// cfprefsd has nothing. `stripConversationBlob` still runs on whichever source wins, so the
+    /// oversized blob itself is never the thing that gets imported either way.
+    static func loadSourceDomain(persistentDomain: [String: Any]?, plistDirectory: URL) -> [String: Any]? {
+        if let persistentDomain { return persistentDomain }
+        let url = plistDirectory.appendingPathComponent("\(devDomain).plist")
+        guard let data = try? Data(contentsOf: url),
+              let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+              let dict = plist as? [String: Any] else { return nil }
+        return dict
+    }
+
     /// Before anything reads a setting: a bundled app's first launch inherits the dev binary's
     /// settings.
     static func runIfNeeded() {
         guard shouldImport(appDomain: IrisDefaults.appDomain, underTests: NSClassFromString("XCTestCase") != nil) else { return }
-        importOnce(from: UserDefaults.standard.persistentDomain(forName: devDomain), into: IrisDefaults.store)
+        let source = loadSourceDomain(persistentDomain: UserDefaults.standard.persistentDomain(forName: devDomain),
+                                       plistDirectory: IrisDefaults.preferencesDirectory)
+        importOnce(from: source, into: IrisDefaults.store)
     }
 }
