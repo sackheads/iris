@@ -24,7 +24,8 @@ targets:
         ARCHS: arm64
         ENABLE_HARDENED_RUNTIME: YES
         ENABLE_APP_SANDBOX: NO
-        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application"
         DEVELOPMENT_TEAM: RMKGLPG4K4
         MARKETING_VERSION: "0.0.0"
         CURRENT_PROJECT_VERSION: "1"
