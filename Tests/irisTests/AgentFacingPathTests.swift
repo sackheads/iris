@@ -34,9 +34,18 @@ struct AgentFacingPathTests {
         #expect(IrisEngine.expandTilde("~/.irisrc") == NSHomeDirectory() + "/.irisrc")
     }
 
+    @Test("rewrites a sentence-final ~/.iris period, but not a suffix that starts with one")
+    func rewriteSentenceFinalPeriod() {
+        #expect(devHome.agentFacing("stored in ~/.iris.") == "stored in ~/.iris-dev.")
+        #expect(devHome.agentFacing("stored in ~/.iris. Next sentence.") == "stored in ~/.iris-dev. Next sentence.")
+        #expect(devHome.agentFacing("backup at ~/.iris.bak") == "backup at ~/.iris.bak")
+    }
+
     @Test("isUnderIrisDir agrees with expandTilde")
     func underIrisDir() {
         #expect(IrisPaths.default.isUnderIrisDir("~/.iris/memory/USER.md"))
+        #expect(!IrisPaths.default.isUnderIrisDir("~/.iris-dev/x"))
+        #expect(!IrisPaths.default.isUnderIrisDir("~/.irisrc"))
     }
 
     @Test("tool descriptions name the identity's home")

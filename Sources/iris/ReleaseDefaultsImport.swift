@@ -12,7 +12,9 @@ enum ReleaseDefaultsImport {
     @discardableResult
     static func importOnce(from source: [String: Any]?, into dest: UserDefaults) -> Bool {
         guard !dest.bool(forKey: markerKey) else { return false }
-        for (key, value) in IrisDefaults.perfSeed(from: source ?? [:]) where dest.object(forKey: key) == nil {
+        // Not `perfSeed`: that also applies `IRIS_PERF_SEED_JSON`, a perf-only override that
+        // must never reach the release launch path.
+        for (key, value) in IrisDefaults.stripConversationBlob(from: source ?? [:]) where dest.object(forKey: key) == nil {
             dest.set(value, forKey: key)
         }
         dest.set(true, forKey: markerKey)

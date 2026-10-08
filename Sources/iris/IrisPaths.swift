@@ -65,7 +65,9 @@ struct IrisPaths: Sendable {
     /// in either.
     static let standard = home(for: .current)
 
-    /// The installed app's home, whatever this process is. Only `--seed-dev-home` reads it.
+    /// The installed app's home, whatever this process is. `--seed-dev-home` reads it as the
+    /// seed source; isolation tests also read it, to assert that nothing under test ever
+    /// touches it.
     static let release = home(for: .release)
 
     static func home(for identity: BuildIdentity,
@@ -131,7 +133,7 @@ struct IrisPaths: Sendable {
 
     /// The conversation store (#163). At the root on purpose: `makeVolatileCopy` copies only
     /// memory/, rules/, config/ and plugins/, so a headless copy starts with no conversations,
-    /// which is the choice `IrisDefaults.perfSeed` already made for the old blob.
+    /// which is the choice `IrisDefaults.stripConversationBlob` already made for the old blob.
     var conversationsDB: URL { root.appendingPathComponent("conversations.sqlite") }
 
     /// The lock the running app holds beside the store, so `iris --run-job` refuses rather than
@@ -295,7 +297,11 @@ struct IrisPaths: Sendable {
     }
 
     /// True if `rawPath` resolves to a location inside `root` (`~/.iris`).
-    /// Tilde-expands and standardizes the path (resolving `..`) first.
+    /// Tilde-expands (via `IrisEngine.expandTilde`) and standardizes the path (resolving `..`)
+    /// first. A literal `~/.iris` spelling always expands through `IrisPaths.default`, so on an
+    /// instance whose `root` differs from `.default` the `~` form is checked against the
+    /// process's default home, not against this instance's own `root` — only an already-expanded
+    /// (or otherwise-spelled) path is checked against `root`.
     func isUnderIrisDir(_ rawPath: String) -> Bool {
         let expanded = IrisEngine.expandTilde(rawPath)   // #275: never `expandingTildeInPath` on a decider
         let resolved = URL(fileURLWithPath: expanded).standardizedFileURL.path
@@ -312,8 +318,12 @@ struct IrisPaths: Sendable {
 
     /// Bundled text spells the home `~/.iris`. Rewrites it to `displayRoot` so a dev agent is
     /// pointed at `~/.iris-dev`, in prompts and in shell commands it copies from them.
+    ///
+    /// The lookahead excludes a longer name (`-dev`, `rc`, …) and a suffix that starts with a
+    /// `.` only when a letter or digit follows that `.` (`.bak`): a sentence-final period is
+    /// not excluded, so "stored in ~/.iris." still rewrites to "stored in ~/.iris-dev.".
     func agentFacing(_ text: String) -> String {
-        text.replacing(/~\/\.iris(?![A-Za-z0-9_.\-])/, with: { _ in displayRoot })
+        text.replacing(/~\/\.iris(?![A-Za-z0-9_\-]|\.[A-Za-z0-9])/, with: { _ in displayRoot })
     }
 
     /// Create the bucket directories if absent. Called by the migrator and by managers that
