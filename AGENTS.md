@@ -189,6 +189,13 @@ Sources/IrisKit/          # everything else, as a library the executable (and la
   MCPManager.swift        # MCP client: tool discovery and call forwarding
   HookManager.swift       # before/after agent hooks (shell scripts)
   Timeout.swift           # withTimeout(seconds:) — returns at the deadline; used by run_command and Vibecop
+App/                      # the Xcode app target's own sources (Task 8); project.yml's `Iris` target links IrisKit
+  main.swift               # one line, same as Sources/iris/main.swift: `try await IrisMain.run()`
+  Info.plist                # CFBundle keys; bundle id/version/signing come from project.yml, not here
+  Iris.entitlements         # empty plist — no sandbox, no JIT entitlement
+  Assets.xcassets/          # AppIcon.appiconset, generated from Sources/IrisKit/assets/iris-icon.png
+project.yml               # XcodeGen spec for the `Iris` app target; generated into Iris.xcodeproj by
+                           #   scripts/gen-xcodeproj.sh — the project is gitignored, never commit it
 
 Tests/irisTests/          # Swift Testing suite; one file per subsystem
 docs/                     # design specs, plans, reviews, roadmaps
