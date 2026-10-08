@@ -981,10 +981,11 @@ struct SettingsView: View {
                             value: Binding(get: { config.maxSubagentIterations },
                                            set: { config.maxSubagentIterations = max(1, $0) }), in: 1...100)
                         .help("Hard cap on a subagent's goal-loop turns. A subagent that reaches it without calling goal_complete ends as failed, with no summary turn.")
-                    Stepper("Subagent turn timeout: \(config.subagentTurnTimeoutSeconds / 60) min",
-                            value: Binding(get: { config.subagentTurnTimeoutSeconds / 60 },
-                                           set: { config.subagentTurnTimeoutSeconds = max(1, $0) * 60 }), in: 1...120)
-                        .help("How long one subagent turn may run. The clock restarts on every turn; a turn that runs past it ends the subagent as timed out and cancels that turn.")
+                    // Steps a minute at a time over the stored seconds, so a hand-edited 90 stays 90.
+                    Stepper("Subagent turn timeout: \(SubagentManager.describe(seconds: Double(config.subagentTurnTimeoutSeconds)))",
+                            value: Binding(get: { config.subagentTurnTimeoutSeconds },
+                                           set: { config.subagentTurnTimeoutSeconds = max(1, $0) }), in: 1...7200, step: 60)
+                        .help("How long one subagent turn may run. The clock restarts on every turn and stops between turns; a turn that runs past it ends the subagent as timed out and cancels that turn. Time a turn spends waiting on your approval counts against it.")
                     Stepper("Loop-detection threshold: \(config.loopDetectionThreshold)",
                             value: Binding(get: { config.loopDetectionThreshold },
                                            set: { config.loopDetectionThreshold = max(2, $0) }), in: 2...20)

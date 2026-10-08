@@ -18,6 +18,9 @@ struct SubagentTurnDeadlineTests {
             /// Moves the clock by `seconds`, then holds the turn open long enough for several of
             /// `runSubagent`'s 100 ms polls to see the moved clock, then replies.
             case take(TimeInterval, GeminiResponse)
+            /// As `take`, and then, once the turn has had time to end, moves the clock by `idle`
+            /// more: time that passes between turns, not inside one.
+            case takeThenIdle(TimeInterval, idle: TimeInterval, GeminiResponse)
             /// Sleeps until cancelled, and counts the cancellation.
             case park
         }
@@ -43,6 +46,15 @@ struct SubagentTurnDeadlineTests {
             case .take(let seconds, let response):
                 clock.advance(by: seconds)
                 try await Task.sleep(nanoseconds: 400_000_000)
+                return response
+            case .takeThenIdle(let seconds, let idle, let response):
+                clock.advance(by: seconds)
+                try await Task.sleep(nanoseconds: 400_000_000)
+                let clock = self.clock
+                Task.detached {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    clock.advance(by: idle)
+                }
                 return response
             case .park:
                 lock.withLock { parkedCount += 1 }
@@ -203,5 +215,164 @@ struct SubagentTurnDeadlineTests {
         #expect(outcome.status == .timedOut)
         #expect(await eventually(10) { client.cancelled == 1 }, "turn 2's model call was cancelled")
         #expect(client.calls == 2)
+    }
+
+    // MARK: Review fixes (#403)
+
+    /// Blocks the calling thread: from a MainActor test, that holds the main actor.
+    static func block(seconds: TimeInterval) { Thread.sleep(forTimeInterval: seconds) }
+
+    @Test("a turn that ends just under the limit is followed by a turn that completes: the gap between turns does not count")
+    func gapBetweenTurnsDoesNotCount() async throws {
+        // Turn 1 takes 599 s of 600, and 5 s pass while no turn runs: the reprompt pause.
+        let clock = ManualClock()
+        let client = ClockClient(clock: clock, [
+            .takeThenIdle(599, idle: 5, SubagentGoalLoopTests.text("Step one done.")),
+            .take(1, SubagentGoalLoopTests.goalComplete("TURN-TWO-DONE")),
+        ])
+        let state = try state()
+        let parent = UUID(); state.createNewConversation(id: parent)
+        let (config, teardown) = config(turnTimeout: 600); defer { teardown() }
+
+        // A pause long enough for the idle time to land inside it.
+        let outcome = await SubagentManager.shared.runSubagent(
+            role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
+            client: client, appState: state, deadlineClock: clock.now, config: config,
+            repromptDelay: 1.0, endSandboxSession: { _ in })
+
+        #expect(outcome.status == .completed)
+        #expect(outcome.rendered.contains("TURN-TWO-DONE"))
+        #expect(client.calls == 2)
+    }
+
+    @Test("a loop that ends failed is reported failed, not timed out, when the limit passes after its last turn")
+    func failedLoopIsNotReportedTimedOut() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-subagentturn-hook-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // Blocks the reprompt, so the loop ends without a termination and goes to the grace polls.
+        let settings = dir.appendingPathComponent("settings.json")
+        try """
+        {"hooks": {"BeforeAgent": [{"matcher": "BeforeAgent", "hooks": [
+          {"type": "command", "command": "if grep -q 'Continue working'; then echo 'no reprompts' >&2; exit 2; fi; exit 0"}
+        ]}]}}
+        """.write(to: settings, atomically: true, encoding: .utf8)
+        var hooks = HookManager()
+        hooks.configPathOverride = settings.path
+
+        let clock = ManualClock()
+        let client = ClockClient(clock: clock, [.take(1, SubagentGoalLoopTests.text("Looking into it."))])
+        let state = try state()
+        let parent = UUID(); state.createNewConversation(id: parent)
+        let (config, teardown) = config(turnTimeout: 600); defer { teardown() }
+        let finished = Finished()
+
+        let task = Task {
+            let outcome = await SubagentManager.shared.runSubagent(
+                role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
+                client: client, appState: state, deadlineClock: clock.now, config: config, hooks: hooks,
+                repromptDelay: 0.01, endSandboxSession: { _ in })
+            finished.set()
+            return outcome
+        }
+        // Once the blocked reprompt has ended, the limit passes while no turn is running.
+        #expect(await eventually {
+            state.conversations.first { $0.isSubagent }?.messages.contains { $0.content.contains("Hook blocked turn") } == true
+        })
+        clock.advance(by: 700)
+        let outcome = await task.value
+
+        #expect(outcome.status == .failed)
+        #expect(!outcome.rendered.contains("timed out"))
+        #expect(client.calls == 1)
+    }
+
+    @Test("a turn-2 timeout halts the loop at the verdict, before any MainActor hop, so the turn stops there")
+    func turnTwoTimeoutHaltsBeforeTheMainActorHop() async throws {
+        let clock = ManualClock()
+        let client = ClockClient(clock: clock, [.take(1, SubagentGoalLoopTests.text("Step one done.")), .park])
+        let state = try state()
+        let parent = UUID(); state.createNewConversation(id: parent)
+        let (config, teardown) = config(turnTimeout: 600); defer { teardown() }
+
+        let task = Task {
+            await SubagentManager.shared.runSubagent(
+                role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
+                client: client, appState: state, deadlineClock: clock.now, config: config,
+                repromptDelay: 0.01, endSandboxSession: { _ in })
+        }
+        #expect(await eventually { client.parked == 1 }, "turn 2 is under way")
+        clock.advance(by: 700)
+        // Hold the main actor through the verdict: the cleanup after the poll loop needs it, so
+        // turn 2 can only be cancelled by now if the timeout itself halted the loop.
+        Self.block(seconds: 0.5)
+        let cancelledWhileMainHeld = client.cancelled
+        let outcome = await task.value
+
+        #expect(cancelledWhileMainHeld == 1, "turn 2 was cancelled at the verdict, not after a MainActor hop")
+        #expect(outcome.status == .timedOut)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        #expect(client.calls == 2, "nothing ran after the timeout")
+    }
+}
+
+/// #406 review: `GoalLoopControl` calls its turn observer outside its lock, so turn k's end can be
+/// delivered after turn k+1's begin. Plain threads, not the cooperative pool, so the ordering is
+/// forced with semaphores; every wait is bounded, so a regression fails rather than hangs.
+@Suite("A subagent's turn start under out-of-order turn events (#402)")
+struct SubagentTurnStartOrderingTests {
+
+    final class Box: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Date
+        init(_ d: Date) { value = d }
+        var now: Date { lock.withLock { value } }
+        func set(_ d: Date) { lock.withLock { value = d } }
+    }
+
+    @Test("turn k's end delivered after turn k+1's begin leaves k+1 its deadline")
+    func lateEndOfAnOlderTurnIsIgnored() {
+        let control = GoalLoopControl()
+        let id = UUID()
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        let clock = Box(t0)
+        let tracker = SubagentTurnStart(t0)
+        let endOfTurnOneEntered = DispatchSemaphore(value: 0)
+        let releaseEndOfTurnOne = DispatchSemaphore(value: 0)
+        control.observeTurns(for: id) { began, seq in
+            if !began && seq == 1 {
+                endOfTurnOneEntered.signal()
+                _ = releaseEndOfTurnOne.wait(timeout: .now() + 10)
+            }
+            tracker.record(began: began, seq: seq, at: clock.now)
+        }
+
+        control.beginTurn(for: id)                     // turn 1
+        let endDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { control.endTurn(for: id); endDone.signal() }
+        #expect(endOfTurnOneEntered.wait(timeout: .now() + 5) == .success, "turn 1's end is being delivered")
+
+        // Turn 2 begins while turn 1's end is still on its way.
+        let t2 = t0.addingTimeInterval(10)
+        clock.set(t2)
+        let beginDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { control.beginTurn(for: id); beginDone.signal() }
+        #expect(beginDone.wait(timeout: .now() + 5) == .success, "the observer is not called under the lock")
+        #expect(tracker.start == t2)
+
+        clock.set(t0.addingTimeInterval(20))
+        releaseEndOfTurnOne.signal()
+        #expect(endDone.wait(timeout: .now() + 5) == .success)
+        #expect(tracker.start == t2, "turn 1's late end did not clear turn 2's start")
+    }
+
+    @Test("a turn's begin delivered after its own end does not restart the deadline")
+    func lateBeginOfAnEndedTurnIsIgnored() {
+        let tracker = SubagentTurnStart(Date(timeIntervalSince1970: 0))
+        tracker.record(began: false, seq: 1, at: Date(timeIntervalSince1970: 5))
+        tracker.record(began: true, seq: 1, at: Date(timeIntervalSince1970: 6))
+        #expect(tracker.start == nil)
+        tracker.record(began: true, seq: 2, at: Date(timeIntervalSince1970: 7))
+        #expect(tracker.start == Date(timeIntervalSince1970: 7))
     }
 }

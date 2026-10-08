@@ -16,9 +16,13 @@ final class GoalLoopControl: @unchecked Sendable {
     private var pending: [UUID: Pending] = [:]
     private var turnsInFlight: [UUID: Int] = [:]
     private var halted: Set<UUID> = []
-    /// Called as each turn begins, before it does anything: a subagent stamps its per-turn
-    /// deadline here (#402), so the stamp is the turn's real start, not whenever a poll noticed it.
-    private var turnObservers: [UUID: @Sendable () -> Void] = [:]
+    /// Called as each turn begins (true), before it does anything, and as the last turn in flight
+    /// ends (false): a subagent's per-turn deadline runs only between the two (#402), so it is
+    /// stamped at the turn's real start and the gap between turns never counts against it.
+    /// Called outside the lock, so two calls can arrive out of order; each carries the number of
+    /// the latest turn begun when it was taken, so the receiver can drop a stale one.
+    private var turnObservers: [UUID: @Sendable (_ began: Bool, _ seq: Int) -> Void] = [:]
+    private var turnSeq: [UUID: Int] = [:]
 
     /// Stores `task` as the conversation's pending reprompt, cancelling the one it replaces.
     /// Nothing is stored for a halted loop: the task is cancelled instead and the call returns
@@ -49,23 +53,26 @@ final class GoalLoopControl: @unchecked Sendable {
     }
 
     func beginTurn(for id: UUID) {
-        let observer = lock.withLock {
+        let (observer, seq) = lock.withLock {
             turnsInFlight[id, default: 0] += 1
-            return turnObservers[id]
+            turnSeq[id, default: 0] += 1
+            return (turnObservers[id], turnSeq[id]!)
         }
-        observer?()
+        observer?(true, seq)
     }
 
-    /// Sets (or with nil, removes) what is called as each of the conversation's turns begins.
-    func observeTurns(for id: UUID, _ observer: (@Sendable () -> Void)?) {
+    /// Sets (or with nil, removes) what is called as a turn begins and as the last one ends.
+    func observeTurns(for id: UUID, _ observer: (@Sendable (_ began: Bool, _ seq: Int) -> Void)?) {
         lock.withLock { turnObservers[id] = observer }
     }
 
     func endTurn(for id: UUID) {
-        lock.withLock {
+        let (observer, seq): ((@Sendable (Bool, Int) -> Void)?, Int) = lock.withLock {
             let n = (turnsInFlight[id] ?? 1) - 1
             turnsInFlight[id] = n > 0 ? n : nil
+            return (n > 0 ? nil : turnObservers[id], turnSeq[id] ?? 0)
         }
+        observer?(false, seq)
     }
 
     /// True while a turn is running on the conversation or a reprompt is pending for it.
@@ -86,4 +93,32 @@ final class GoalLoopControl: @unchecked Sendable {
         task?.cancel()
     }
 
+}
+
+/// When the subagent's current turn began, or nil while no turn is running (#402). Fed by
+/// `GoalLoopControl`'s turn observer, whose calls can arrive out of order: an event for an older
+/// turn than the latest seen is dropped, so turn k's late end cannot clear turn k+1's start, and a
+/// turn's late begin cannot restart a turn that has already ended.
+final class SubagentTurnStart: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seq = 0
+    private var ended = false
+    private var at: Date?
+    /// Seeded with a start, so turn 1 is covered before its own begin arrives.
+    init(_ at: Date) { self.at = at }
+
+    func record(began: Bool, seq: Int, at now: @autoclosure () -> Date) {
+        lock.withLock {
+            if seq < self.seq { return }
+            if began {
+                // A begin for the turn already seen (its end got here first) is stale too.
+                if seq == self.seq, ended || at != nil { return }
+                self.seq = seq; ended = false; at = now()
+            } else {
+                self.seq = seq; ended = true; at = nil
+            }
+        }
+    }
+
+    var start: Date? { lock.withLock { at } }
 }
