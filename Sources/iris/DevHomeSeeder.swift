@@ -12,6 +12,11 @@ enum DevHomeSeeder {
         case sourceMissing(String)
         case sourceInUse(pid: Int32)
         case sourceLockUnreadable(String)
+        /// The copied `conversations.sqlite` will not open for the rewrite pass — corrupt, or not
+        /// a database at all. Named for the release store, not "the staged copy": the copy is
+        /// byte-for-byte the release content at this point, so whatever is wrong with it was
+        /// already wrong in `~/.iris`, and that is the directory a person can actually go fix.
+        case storeUnreadable(String)
 
         var description: String {
             switch self {
@@ -20,6 +25,7 @@ enum DevHomeSeeder {
             case .sourceMissing(let p): "nothing to seed from: \(p) does not exist"
             case .sourceInUse(let pid): "refusing: Iris (pid \(pid)) has the source store open; quit it and retry"
             case .sourceLockUnreadable(let p): "refusing: \(p) does not hold a readable pid; delete it and retry"
+            case .storeUnreadable(let p): "refusing: the release store could not be opened: \(p)"
             }
         }
     }
@@ -155,7 +161,9 @@ enum DevHomeSeeder {
     private static func rewriteStore(at url: URL, from sourceRoot: URL, to destRoot: URL) throws {
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         let src = sourceRoot.standardizedFileURL.path, dst = destRoot.standardizedFileURL.path
-        let queue = try DatabaseQueue(path: url.path)
+        let queue: DatabaseQueue
+        do { queue = try DatabaseQueue(path: url.path) }
+        catch { throw Failure.storeUnreadable(url.path) }
         try queue.write { db in
             let prefixColumns = [("conversations", "workspacePath")]
             let jsonColumns = [("conversations", "goalContract"), ("conversations", "mainAgentSandbox"),
@@ -177,6 +185,18 @@ enum DevHomeSeeder {
             }
             if try db.tableExists("jobs") {
                 try db.execute(sql: "UPDATE jobs SET pausedReason = ?", arguments: [copiedJobPausedReason])
+            }
+            // A copied `blockedOnApproval` run still has a live "Approve and run" button on its
+            // old card in the copied transcript (transcripts are left as written, above) — and
+            // unlike a paused job, nothing stops a click on it from re-dispatching the call in the
+            // dev copy. `JobRunner.runApproved`'s one-shot claim (`JobLedger.markApproved`) refuses
+            // once `approvedAt` is already set, the same gate a second click on a real approval
+            // hits, so stamping it here pre-expires every copied pending approval before anyone can
+            // click it. The call's details stay on the row (and on the card) for a person to read;
+            // only the ability to dispatch it again is removed.
+            if try db.tableExists("job_runs") {
+                try db.execute(sql: "UPDATE job_runs SET approvedAt = ? WHERE blockedCall IS NOT NULL AND approvedAt IS NULL",
+                               arguments: [Date()])
             }
         }
     }

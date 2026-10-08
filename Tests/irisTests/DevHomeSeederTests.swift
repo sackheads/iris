@@ -228,6 +228,67 @@ struct DevHomeSeederTests {
         #expect(original.first { $0.name == "nightly" }?.pausedReason == nil)
     }
 
+    @Test("a copied pending approval is pre-expired, so a stale \"Approve and run\" click cannot fire it in the dev copy")
+    func expiresCopiedPendingApprovals() throws {
+        let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
+        let job = Job(name: "watcher", prompt: "p", trigger: .schedule(.interval(seconds: 60)), nextFireAt: Date())
+        let pendingId = UUID(), alreadyApprovedId = UUID()
+        do {
+            let store = try ConversationStore.onDisk(at: src.conversationsDB)
+            try store.ledger.upsert(job)
+            let pending = JobRun(id: pendingId, jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                                 startedAt: Date(), status: .blockedOnApproval)
+            try store.ledger.begin(run: pending)
+            try store.ledger.setBlockedCall(runId: pendingId,
+                BlockedCall(toolName: "run_command", args: ["command": .string("echo hi")]))
+            // A run already approved and dispatched before the copy — its approvedAt must survive
+            // unchanged, not be bumped to the seed time.
+            let approved = JobRun(id: alreadyApprovedId, jobId: job.id, jobName: job.name, triggerKind: "schedule",
+                                  startedAt: Date(), status: .completed)
+            try store.ledger.begin(run: approved)
+            try store.ledger.setBlockedCall(runId: alreadyApprovedId,
+                BlockedCall(toolName: "run_command", args: ["command": .string("echo done")]))
+            _ = try store.ledger.markApproved(runId: alreadyApprovedId, at: Date(timeIntervalSince1970: 1_000))
+        }
+
+        try seedDefault(src, dst)
+
+        let destLedger = try ConversationStore.onDisk(at: dst.conversationsDB).ledger
+        let copiedPending = try #require(try destLedger.run(id: pendingId))
+        #expect(copiedPending.blockedCall != nil, "the call's details stay on the row for the card to show")
+        #expect(copiedPending.approvedAt != nil, "but it is pre-expired so a stale click cannot re-dispatch it")
+        #expect(try destLedger.markApproved(runId: pendingId, at: Date()) == false,
+                "the one-shot claim must already read as spent")
+
+        let copiedApproved = try #require(try destLedger.run(id: alreadyApprovedId))
+        #expect(copiedApproved.approvedAt == Date(timeIntervalSince1970: 1_000),
+                "a run approved before the copy keeps its real approval time")
+
+        // The release store's own row is untouched.
+        let srcRun = try #require(try ConversationStore.onDisk(at: src.conversationsDB).ledger.run(id: pendingId))
+        #expect(srcRun.approvedAt == nil)
+    }
+
+    @Test("a staged store that cannot be opened names itself as the release store, with its path, and still fails closed")
+    func unreadableStagedStoreNamesItself() throws {
+        let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
+        try Data("not a sqlite file".utf8).write(to: src.conversationsDB)
+        do {
+            _ = try DevHomeSeeder.seed(from: src, to: dst, identity: .dev,
+                                       sourceKeychain: .init(serviceSuffix: ""), destKeychain: .init(serviceSuffix: ".dev"))
+            Issue.record("expected seeding to fail on an unreadable store")
+        } catch DevHomeSeeder.Failure.storeUnreadable(let path) {
+            #expect(path.contains("conversations.sqlite"))
+            #expect("\(DevHomeSeeder.Failure.storeUnreadable(path))".contains("release store"))
+        } catch {
+            Issue.record("expected .storeUnreadable, got \(error)")
+        }
+        // Same atomicity as every other failure: nothing half-seeded is left behind.
+        #expect(!FileManager.default.fileExists(atPath: dst.root.path))
+        let siblings = (try? FileManager.default.contentsOfDirectory(atPath: dst.root.deletingLastPathComponent().path)) ?? []
+        #expect(!siblings.contains { $0.hasPrefix(dst.root.lastPathComponent) })
+    }
+
     @Test("a seeded home carries the marker; nothing else does")
     func writesMarker() throws {
         let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
