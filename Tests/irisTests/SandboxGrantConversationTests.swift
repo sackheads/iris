@@ -40,10 +40,21 @@ struct SandboxGrantConversationTests {
         state.setWorkspace(for: parent, path: IrisPaths.canonicalPath(dir.path))
         state.setSandboxGrant(for: parent, grant)
 
+        // One turn: only the conversation the subagent is created in matters here. Before #402 a
+        // 0.5 s total cut the loop short; a per-turn limit no longer does, so the cap does it.
+        let suite = "iris-grantsub-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            IrisDefaults.removeSuiteFile(named: suite, in: IrisDefaults.preferencesDirectory)
+        }
+        let config = ConfigManager(store: defaults)
+        config.maxSubagentIterations = 1
         _ = await SubagentManager.shared.runSubagent(role: "helper", task: "say hi", effort: "easy",
                                                      parentConversationId: parent, turnTimeout: 1,
                                                      client: FakeLLMClient(responses: [textResponse("hi")]),
-                                                     appState: state, recentWrites: RecentWrites())
+                                                     appState: state, recentWrites: RecentWrites(),
+                                                     config: config, repromptDelay: 0.01)
 
         let child = try #require(state.conversations.first { $0.isSubagent })
         #expect(child.isBackground)

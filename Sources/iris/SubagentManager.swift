@@ -174,16 +174,19 @@ final class SubagentManager: @unchecked Sendable {
         // Per turn, on the wall clock (`deadlineClock`), not a poll count: a count of 100ms sleeps
         // still measures *polls*, not time, when the clock behind it is injected and can be held
         // still or jumped — see the parameter doc above. Each turn stamps its own start as it
-        // begins (#402), so the deadline restarts on every reprompt, from the turn's real start.
+        // begins and clears it as it ends (#402), so the deadline restarts on every reprompt, from
+        // the turn's real start, and only a turn in flight is held to it: the reprompt pause and
+        // the grace polls after the loop's end never count, and never turn a `.failed` into a
+        // `.timedOut`. Seeded with now, so turn 1 is covered before its own stamp lands.
         final class TurnStart: @unchecked Sendable {
             private let lock = NSLock()
-            private var at: Date
+            private var at: Date?
             init(_ at: Date) { self.at = at }
-            func set(_ d: Date) { lock.withLock { at = d } }
-            func get() -> Date { lock.withLock { at } }
+            func set(_ d: Date?) { lock.withLock { at = d } }
+            func get() -> Date? { lock.withLock { at } }
         }
         let turnStart = TurnStart(deadlineClock())
-        engine.observeGoalLoopTurns(for: subagentId) { turnStart.set(deadlineClock()) }
+        engine.observeGoalLoopTurns(for: subagentId) { began in turnStart.set(began ? deadlineClock() : nil) }
 
         let engineTask = Task {
             // The first turn. Since activeGoal is set, the engine reprompts itself after each turn
@@ -227,7 +230,7 @@ final class SubagentManager: @unchecked Sendable {
                         break
                     }
                 }
-                if deadlineClock() >= turnStart.get().addingTimeInterval(perTurn) {
+                if let start = turnStart.get(), deadlineClock() >= start.addingTimeInterval(perTurn) {
                     // Classify BEFORE `engineTask.cancel()`, not after: cancelling it can itself
                     // unwind the engine's in-flight model call, which hits `processInput`'s own
                     // catch block and fires `onSubagentComplete` with `.failed` — a second write to
@@ -235,6 +238,10 @@ final class SubagentManager: @unchecked Sendable {
                     holder.set(SubagentTermination(status: .timedOut,
                         summary: "Subagent timed out: one of its turns ran past the per-turn limit (\(Self.describe(seconds: perTurn))) and was cancelled (task, pending approvals, and sandbox container cleaned up).",
                         calledGoalComplete: false))
+                    // Halt, then cancel, as `stop` does: from turn 2 on the live turn is the
+                    // reprompt task, which `engineTask.cancel()` below does not reach, and it must
+                    // not keep running through the MainActor hop that follows.
+                    engine.haltGoalLoop(for: subagentId)
                     timedOut = true
                     break
                 }

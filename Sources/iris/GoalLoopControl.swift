@@ -16,9 +16,10 @@ final class GoalLoopControl: @unchecked Sendable {
     private var pending: [UUID: Pending] = [:]
     private var turnsInFlight: [UUID: Int] = [:]
     private var halted: Set<UUID> = []
-    /// Called as each turn begins, before it does anything: a subagent stamps its per-turn
-    /// deadline here (#402), so the stamp is the turn's real start, not whenever a poll noticed it.
-    private var turnObservers: [UUID: @Sendable () -> Void] = [:]
+    /// Called as each turn begins (true), before it does anything, and as the last turn in flight
+    /// ends (false): a subagent's per-turn deadline runs only between the two (#402), so it is
+    /// stamped at the turn's real start and the gap between turns never counts against it.
+    private var turnObservers: [UUID: @Sendable (Bool) -> Void] = [:]
 
     /// Stores `task` as the conversation's pending reprompt, cancelling the one it replaces.
     /// Nothing is stored for a halted loop: the task is cancelled instead and the call returns
@@ -53,19 +54,21 @@ final class GoalLoopControl: @unchecked Sendable {
             turnsInFlight[id, default: 0] += 1
             return turnObservers[id]
         }
-        observer?()
+        observer?(true)
     }
 
-    /// Sets (or with nil, removes) what is called as each of the conversation's turns begins.
-    func observeTurns(for id: UUID, _ observer: (@Sendable () -> Void)?) {
+    /// Sets (or with nil, removes) what is called as a turn begins and as the last one ends.
+    func observeTurns(for id: UUID, _ observer: (@Sendable (Bool) -> Void)?) {
         lock.withLock { turnObservers[id] = observer }
     }
 
     func endTurn(for id: UUID) {
-        lock.withLock {
+        let observer: (@Sendable (Bool) -> Void)? = lock.withLock {
             let n = (turnsInFlight[id] ?? 1) - 1
             turnsInFlight[id] = n > 0 ? n : nil
+            return n > 0 ? nil : turnObservers[id]
         }
+        observer?(false)
     }
 
     /// True while a turn is running on the conversation or a reprompt is pending for it.
