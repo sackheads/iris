@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Testing
 @testable import iris
 
@@ -10,7 +11,7 @@ struct DevHomeSeederTests {
         let dst = IrisPaths(root: base.appendingPathComponent("dev"))
         try src.ensureDirectories()
         try "I live at ~/.iris/memory".write(to: src.userMd, atomically: true, encoding: .utf8)
-        try Data("db".utf8).write(to: src.conversationsDB)
+        _ = try ConversationStore.onDisk(at: src.conversationsDB)   // a real, migrated store
         try FileManager.default.createDirectory(at: src.modelsDir, withIntermediateDirectories: true)
         return (src, dst, { try? FileManager.default.removeItem(at: base) })
     }
@@ -156,5 +157,100 @@ struct DevHomeSeederTests {
         #expect(!FileManager.default.fileExists(atPath: dst.root.path))
         let siblings = (try? FileManager.default.contentsOfDirectory(atPath: dst.root.deletingLastPathComponent().path)) ?? []
         #expect(!siblings.contains { $0.hasPrefix(dst.root.lastPathComponent) })
+    }
+
+    private func seedDefault(_ src: IrisPaths, _ dst: IrisPaths) throws {
+        _ = try DevHomeSeeder.seed(from: src, to: dst, identity: .dev,
+                                   sourceKeychain: .init(serviceSuffix: ""), destKeychain: .init(serviceSuffix: ".dev"))
+    }
+
+    @Test("workspace paths under the release home are re-pointed at the dev home; others are not")
+    func rewritesWorkspacePaths() throws {
+        let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
+        let inside = UUID(), root = UUID(), outside = UUID(), sibling = UUID()
+        do {
+            let store = try ConversationStore.onDisk(at: src.conversationsDB)
+            _ = try store.importLegacy([
+                Conversation(id: inside, title: "a", workspacePath: src.workspacesDir.path + "/ship"),
+                Conversation(id: root, title: "b", workspacePath: src.root.path),
+                Conversation(id: outside, title: "c", workspacePath: "/tmp/elsewhere"),
+                Conversation(id: sibling, title: "d", workspacePath: src.root.path + "-other/x"),
+            ])
+        }
+        // JSONEncoder escapes `/`, so a path inside a JSON column is spelled `\/Users\/...`.
+        let escaped = src.root.path.replacingOccurrences(of: "/", with: "\\/")
+        let contract = "{\"workspace\":\"\(escaped)\\/workspaces\\/ship\",\"other\":\"\(escaped)-other\"}"
+        do {
+            let queue = try DatabaseQueue(path: src.conversationsDB.path)
+            try queue.write { db in
+                try db.execute(sql: "UPDATE conversations SET goalContract = ? WHERE id = ?",
+                               arguments: [contract, inside.uuidString])
+            }
+        }
+
+        try seedDefault(src, dst)
+
+        let queue = try DatabaseQueue(path: dst.conversationsDB.path)
+        func workspace(_ id: UUID) throws -> String? {
+            try queue.read { try String.fetchOne($0, sql: "SELECT workspacePath FROM conversations WHERE id = ?",
+                                                arguments: [id.uuidString]) }
+        }
+        #expect(try workspace(inside) == dst.workspacesDir.path + "/ship")
+        #expect(try workspace(root) == dst.root.path)
+        #expect(try workspace(outside) == "/tmp/elsewhere")
+        #expect(try workspace(sibling) == src.root.path + "-other/x")
+        let destEscaped = dst.root.path.replacingOccurrences(of: "/", with: "\\/")
+        let rewritten = try queue.read { try String.fetchOne($0, sql: "SELECT goalContract FROM conversations WHERE id = ?",
+                                                             arguments: [inside.uuidString]) }
+        #expect(rewritten == "{\"workspace\":\"\(destEscaped)\\/workspaces\\/ship\",\"other\":\"\(escaped)-other\"}")
+    }
+
+    @Test("every copied job is paused in the dev home, so it never fires in both apps")
+    func pausesCopiedJobs() throws {
+        let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
+        let running = Job(name: "nightly", prompt: "p", trigger: .schedule(.interval(seconds: 60)), nextFireAt: Date())
+        var paused = Job(name: "old", prompt: "p", trigger: .schedule(.interval(seconds: 60)), nextFireAt: nil)
+        paused.pausedReason = "failed 3 times"
+        do {
+            let store = try ConversationStore.onDisk(at: src.conversationsDB)
+            try store.ledger.upsert(running)
+            try store.ledger.upsert(paused)
+        }
+
+        try seedDefault(src, dst)
+
+        let copied = try ConversationStore.onDisk(at: dst.conversationsDB).ledger.jobs()
+        #expect(copied.count == 2)
+        #expect(copied.allSatisfy { $0.pausedReason == DevHomeSeeder.copiedJobPausedReason })
+        #expect(DevHomeSeeder.copiedJobPausedReason == "copied into the dev home; unpause to run it here")
+        // The release store keeps firing them.
+        let original = try ConversationStore.onDisk(at: src.conversationsDB).ledger.jobs()
+        #expect(original.first { $0.name == "nightly" }?.pausedReason == nil)
+    }
+
+    @Test("a seeded home carries the marker; nothing else does")
+    func writesMarker() throws {
+        let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
+        #expect(!FileManager.default.fileExists(atPath: dst.seedMarker.path))
+        try seedDefault(src, dst)
+        #expect(dst.seedMarker.lastPathComponent == ".seeded-from-release")
+        #expect(FileManager.default.fileExists(atPath: dst.seedMarker.path))
+        #expect(!FileManager.default.fileExists(atPath: src.seedMarker.path))
+    }
+
+    @Test("perf warns when the dev home it copies was never seeded from the release home")
+    func unseededPerfWarning() throws {
+        let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
+        try dst.ensureDirectories()   // what a dev launch before run-dev.sh leaves
+        let warning = try #require(DevHomeSeeder.unseededCopyWarning(standard: dst, release: src))
+        #expect(warning.contains("not seeded"))
+        #expect(warning.contains("baselines"))
+        // The installed app copies its own home: nothing to warn about.
+        #expect(DevHomeSeeder.unseededCopyWarning(standard: src, release: src) == nil)
+        // No release home: the dev home is all there is.
+        let gone = IrisPaths(root: src.root.appendingPathExtension("missing"))
+        #expect(DevHomeSeeder.unseededCopyWarning(standard: dst, release: gone) == nil)
+        try Data().write(to: dst.seedMarker)
+        #expect(DevHomeSeeder.unseededCopyWarning(standard: dst, release: src) == nil)
     }
 }

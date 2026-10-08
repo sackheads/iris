@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 
 /// `iris --seed-dev-home`: gives a dev build a copy of the installed app's home and secrets, once,
 /// so moving dev to `~/.iris-dev` does not mean re-entering every key. Secrets are copied
@@ -24,6 +25,10 @@ enum DevHomeSeeder {
     }
 
     struct Report: Equatable { var keychainServicesCopied = 0 }
+
+    /// Every copied job is paused with this, so a job does not fire in both apps once dev and
+    /// release run side by side.
+    static let copiedJobPausedReason = "copied into the dev home; unpause to run it here"
 
     static func seed(from source: IrisPaths, to dest: IrisPaths, identity: BuildIdentity,
                      sourceKeychain: KeychainManager, destKeychain: KeychainManager) throws -> Report {
@@ -53,10 +58,12 @@ enum DevHomeSeeder {
             try fm.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
             try copyTree(from: source, into: staging, finalDest: dest)
             try rewriteHomeReferences(in: [staging.memoryDir, staging.rulesDir, staging.configDir], to: dest)
+            try rewriteStore(at: staging.conversationsDB, from: source.root, to: dest.root)
+            try Data().write(to: staging.seedMarker)
 
             var report = Report()
             let services = [KeychainManager.legacyService, KeychainManager.mcpFileService]
-                + sourceKeychain.storedServices(withPrefix: "iris.plugin.")
+                + (try sourceKeychain.storedServicesOrThrow(withPrefix: "iris.plugin."))
             for service in services {
                 let secrets = try sourceKeychain.secretsOrThrow(service: service)
                 guard !secrets.isEmpty else { continue }
@@ -137,6 +144,75 @@ enum DevHomeSeeder {
                 if rewritten != text { try rewritten.write(to: url, atomically: true, encoding: .utf8) }
             }
         }
+    }
+
+    /// The copied store still names the release home in absolute paths: a goal workspace under
+    /// `~/.iris/workspaces` would have the dev agent working in the release tree. Rewrites the
+    /// workspace column by prefix, and the JSON columns that can carry a path (goal contract,
+    /// sandbox settings and grant, job trigger and policy, a run's blocked call) wherever the root
+    /// appears as a whole path component. Transcripts (`messages`, `history`) are left as written:
+    /// they record what was said. Then pauses every job (`copiedJobPausedReason`).
+    private static func rewriteStore(at url: URL, from sourceRoot: URL, to destRoot: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let src = sourceRoot.standardizedFileURL.path, dst = destRoot.standardizedFileURL.path
+        let queue = try DatabaseQueue(path: url.path)
+        try queue.write { db in
+            let prefixColumns = [("conversations", "workspacePath")]
+            let jsonColumns = [("conversations", "goalContract"), ("conversations", "mainAgentSandbox"),
+                               ("conversations", "sandboxGrant"), ("jobs", "trigger"), ("jobs", "policy"),
+                               ("job_runs", "blockedCall")]
+            for (table, column) in prefixColumns + jsonColumns {
+                guard try db.tableExists(table),
+                      try db.columns(in: table).contains(where: { $0.name == column }) else { continue }
+                let rows = try Row.fetchAll(db, sql: "SELECT rowid, \(column) FROM \(table) WHERE \(column) IS NOT NULL")
+                let isPrefix = prefixColumns.contains { $0 == (table, column) }
+                for row in rows {
+                    guard let value = row[1] as String? else { continue }
+                    let rewritten = isPrefix ? rewritingPrefix(value, from: src, to: dst)
+                                             : rewritingRoot(in: value, from: src, to: dst)
+                    guard rewritten != value else { continue }
+                    try db.execute(sql: "UPDATE \(table) SET \(column) = ? WHERE rowid = ?",
+                                   arguments: [rewritten, row[0] as Int64])
+                }
+            }
+            if try db.tableExists("jobs") {
+                try db.execute(sql: "UPDATE jobs SET pausedReason = ?", arguments: [copiedJobPausedReason])
+            }
+        }
+    }
+
+    /// `value` with a leading `src` (the whole value, or followed by `/`) replaced by `dst`.
+    static func rewritingPrefix(_ value: String, from src: String, to dst: String) -> String {
+        if value == src { return dst }
+        if value.hasPrefix(src + "/") { return dst + value.dropFirst(src.count) }
+        return value
+    }
+
+    /// Every occurrence of `src` as a whole path in `text` — not inside a longer name such as
+    /// `.iris-other` — replaced by `dst`, in both the plain spelling and `JSONEncoder`'s
+    /// escaped-slash one (`\/Users\/me\/.iris`).
+    static func rewritingRoot(in text: String, from src: String, to dst: String) -> String {
+        func escaped(_ path: String) -> String { path.replacingOccurrences(of: "/", with: "\\/") }
+        var out = text
+        for (from, to) in [(src, dst), (escaped(src), escaped(dst))] {
+            let pattern = "(?<![A-Za-z0-9_.\\-/\\\\])" + NSRegularExpression.escapedPattern(for: from)
+                + "(?![A-Za-z0-9_.\\-])"
+            guard let re = try? NSRegularExpression(pattern: pattern) else { continue }
+            out = re.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out),
+                                              withTemplate: NSRegularExpression.escapedTemplate(for: to))
+        }
+        return out
+    }
+
+    /// One line for `--perf run` when the home it is about to copy is a dev home that was never
+    /// seeded while a release home exists: the copy's prompts then lack the user's memory and
+    /// skills, so its sizes will not match baselines recorded against a seeded one. nil otherwise.
+    static func unseededCopyWarning(standard: IrisPaths, release: IrisPaths) -> String? {
+        let fm = FileManager.default
+        guard standard.root.standardizedFileURL.path != release.root.standardizedFileURL.path,
+              fm.fileExists(atPath: release.root.path),
+              !fm.fileExists(atPath: standard.seedMarker.path) else { return nil }
+        return "perf: warning: \(standard.displayRoot) was not seeded from \(release.displayRoot), so this run copies an unseeded dev home; prompt sizes will not match baselines"
     }
 
     /// Maps a finished seed attempt to the exit code `run-dev.sh` branches on: 0 seeded, 3

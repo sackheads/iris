@@ -176,8 +176,16 @@ public final class KeychainManager: @unchecked Sendable {
     }
 
     /// Base names of the stored services starting with `prefix`, for this manager's suffix only.
-    /// Reads attributes, never data, so it does not trip the Keychain's access prompt.
+    /// Reads attributes, never data, so it does not trip the Keychain's access prompt. Any listing
+    /// failure reads as no services; `storedServicesOrThrow` is for callers that must tell them apart.
     func storedServices(withPrefix prefix: String) -> [String] {
+        (try? storedServicesOrThrow(withPrefix: prefix)) ?? []
+    }
+
+    /// `storedServices(withPrefix:)`, but a listing that failed (a locked Keychain, a denied
+    /// query) throws instead of reading as "nothing stored" — the seeder would otherwise skip
+    /// every plugin's secrets and report success.
+    func storedServicesOrThrow(withPrefix prefix: String) throws -> [String] {
         let names: [String]
         if usesInMemoryStore {
             names = inMemoryLock.withLock { Array(inMemorySecrets.keys) }
@@ -189,15 +197,26 @@ public final class KeychainManager: @unchecked Sendable {
                 kSecMatchLimit as String: kSecMatchLimitAll
             ]
             var result: AnyObject?
-            guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-                  let items = result as? [[String: Any]] else { return [] }
-            names = items.compactMap { $0[kSecAttrService as String] as? String }
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            names = try Self.listedServiceNames(status: status, result: result)
         }
         return names.compactMap { name in
             guard name.hasPrefix(prefix) else { return nil }
             if serviceSuffix.isEmpty { return name.hasSuffix(".dev") ? nil : name }
             guard name.hasSuffix(serviceSuffix) else { return nil }
             return String(name.dropLast(serviceSuffix.count))
+        }
+    }
+
+    /// The service names a `kSecMatchLimitAll` attribute listing returned. Pure, so the status
+    /// handling is testable without a live Keychain (see `outcome(for:)`).
+    static func listedServiceNames(status: OSStatus, result: AnyObject?) throws -> [String] {
+        switch outcome(for: status) {
+        case .notFound: return []
+        case .failure(let bad): throw SecretsError.status(bad)
+        case .success:
+            guard let items = result as? [[String: Any]] else { return [] }
+            return items.compactMap { $0[kSecAttrService as String] as? String }
         }
     }
 }

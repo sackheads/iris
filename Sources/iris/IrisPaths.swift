@@ -136,6 +136,11 @@ struct IrisPaths: Sendable {
     /// which is the choice `IrisDefaults.stripConversationBlob` already made for the old blob.
     var conversationsDB: URL { root.appendingPathComponent("conversations.sqlite") }
 
+    /// Written by `iris --seed-dev-home` into the home it creates. Its absence in a dev home that
+    /// exists beside a release one means something else created that home first (a `swift run`
+    /// before `run-dev.sh`), so it was never seeded; `run-dev.sh` and perf say so.
+    var seedMarker: URL { root.appendingPathComponent(".seeded-from-release") }
+
     /// The lock the running app holds beside the store, so `iris --run-job` refuses rather than
     /// writing behind a live `AppState` (#187 §8). Held by `GUILock`; created at launch and
     /// removed at exit, with a dead pid in it treated as stale. Beside the database on purpose:
