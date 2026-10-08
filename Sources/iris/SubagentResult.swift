@@ -3,7 +3,7 @@ import Foundation
 enum SubagentTerminalStatus: String, Codable, Sendable, Equatable {
     case completed   // goal_complete was called by the subagent
     case failed      // LLM/engine error, or the run's budget refusing its next round, ended the run
-    case timedOut    // the poll cap in SubagentManager fired
+    case timedOut    // one turn ran past SubagentManager's per-turn deadline (#402)
     case cancelled   // stop/cancel path ended the run: Stop, a run's deadline, or its drain (#323)
 }
 
