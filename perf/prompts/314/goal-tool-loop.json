@@ -1,0 +1,7 @@
+{ "name": "goal-tool-loop", "clientMode": "real", "tier": "medium",
+  "expectedTools": ["run_command"],
+  "seedFacts": ["KESTRELMOSS restores barometers."],
+  "turns": [
+    { "prompt": "Work in the current directory and run each shell command separately, waiting for its output before the next. 1) Create numbers.txt containing 3, 14, 15, 92 and 65, one per line. 2) Print its contents. 3) Compute the sum with awk. 4) Append a line 'sum=<the sum you got>' to numbers.txt. 5) Print numbers.txt again. Then report the sum in one sentence." },
+    { "prompt": "Continue, one command at a time, each after the previous one's output: 1) Count the lines in numbers.txt. 2) Find the largest number with sort -n and tail -1. 3) Write 'max=<that value>' into stats.txt. 4) Append 'lines=<the count>' to stats.txt. 5) Print stats.txt. Then summarize both files in one sentence." },
+    { "prompt": "Finish up, one command at a time, each after the previous one's output: 1) List the directory. 2) Show the byte counts of numbers.txt and stats.txt with wc -c. 3) Delete stats.txt. 4) List the directory again to confirm it is gone. Then reply with the single word done." } ] }

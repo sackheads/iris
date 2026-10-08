@@ -38,6 +38,22 @@ struct PerfSuiteFilesTests {
         #expect(categories == ["model-only", "tool-use"])
     }
 
+    /// The #314 Phase 1 measurement suite: the four caching scenarios plus `goal-tool-loop`, whose
+    /// three turns each ask for 4-5 dependent shell steps so within-turn replay has rounds to carry.
+    @Test("the 314-phase1 suite loads: real lane, rung 4, the caching scenarios plus goal-tool-loop")
+    func phase1SuiteLoads() throws {
+        let suite = try PerfSuite.load(at: root.appendingPathComponent("perf/suites/314-phase1.json").path)
+        #expect(suite.name == "314-phase1")
+        #expect(suite.lane == .real)
+        #expect(suite.rungs == [4])
+        let scenarios = try suite.scenarioURLs(relativeTo: root).map { try Scenario.load(at: $0.path) }
+        #expect(scenarios.map(\.name) == ["six-turns", "every-turn-facts", "tool-heavy", "pinned-briefing", "goal-tool-loop"])
+        let loop = try #require(scenarios.last)
+        #expect(loop.clientMode == .real)
+        #expect(loop.turns.count == 3)
+        #expect(loop.expectedTools == ["run_command"])
+    }
+
     /// Not part of `suitesLoad` above: that test asserts every scenario is single-turn, which is
     /// deliberately false for `caching` (5a) — its six turns are the point.
     @Test("the caching suite loads: real lane, rung 4 only, seeded multi-turn scenarios (5a)")
