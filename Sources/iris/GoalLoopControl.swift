@@ -18,15 +18,19 @@ final class GoalLoopControl: @unchecked Sendable {
     private var halted: Set<UUID> = []
 
     /// Stores `task` as the conversation's pending reprompt, cancelling the one it replaces.
-    /// Nothing is stored for a halted loop; the task is cancelled instead.
-    func setReprompt(_ task: Task<Void, Never>, token: UUID, for id: UUID) {
-        let previous: Task<Void, Never>? = lock.withLock {
-            if halted.contains(id) { return task }
+    /// Nothing is stored for a halted loop: the task is cancelled instead and the call returns
+    /// false. This is the halt's only check, and it is under the same lock as the halt, so no
+    /// reprompt can be scheduled after one.
+    @discardableResult
+    func setReprompt(_ task: Task<Void, Never>, token: UUID, for id: UUID) -> Bool {
+        let (toCancel, accepted): (Task<Void, Never>?, Bool) = lock.withLock {
+            if halted.contains(id) { return (task, false) }
             let old = pending[id]?.task
             pending[id] = Pending(token: token, task: task)
-            return old
+            return (old, true)
         }
-        previous?.cancel()
+        toCancel?.cancel()
+        return accepted
     }
 
     /// Called by a reprompt task as it exits: removes its entry unless a newer one replaced it.
@@ -68,5 +72,4 @@ final class GoalLoopControl: @unchecked Sendable {
         task?.cancel()
     }
 
-    func isHalted(_ id: UUID) -> Bool { lock.withLock { halted.contains(id) } }
 }

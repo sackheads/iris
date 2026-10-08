@@ -56,6 +56,29 @@ struct SubagentGoalLoopTests {
 
     // MARK: Fixtures
 
+    /// The goal loop's pause between turns here: production waits 1.5 s.
+    static let delay: TimeInterval = 0.01
+    /// Longer than `runSubagent`'s grace after the first turn returns (3 polls of 100 ms), so a
+    /// manager that took that return for the loop's end gives up before the reprompt runs —
+    /// which a 0.01 s delay would hide. Only the turn-2 test pays it.
+    static let delayPastTheGrace: TimeInterval = 0.6
+
+    typealias Gate = JobSchedulerTests.Gate
+
+    /// Answers each call with text, the first one only once the gate opens, whether or not the
+    /// call was cancelled meanwhile.
+    final class GatedClient: LLMClientProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        let gate = Gate()
+        var calls: Int { lock.withLock { count } }
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            let n = lock.withLock { count += 1; return count }
+            if n == 1 { await gate.arriveAndWait() }
+            return SubagentGoalLoopTests.text("still working")
+        }
+    }
+
     nonisolated static func text(_ s: String, total: Int? = nil) -> GeminiResponse {
         GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: s)]))],
                        usageMetadata: total.map { UsageMetadata(promptTokenCount: $0 - 1, candidatesTokenCount: 1, totalTokenCount: $0) })
@@ -95,6 +118,8 @@ struct SubagentGoalLoopTests {
         })
     }
 
+    // Time bounds here are seconds against a cap of 30 s or more, never tighter: the full parallel
+    // suite can stall any test for about 5 s.
     private func eventually(_ seconds: Double = 10, _ condition: @MainActor () -> Bool) async -> Bool {
         let end = Date().addingTimeInterval(seconds)
         while Date() < end {
@@ -115,7 +140,7 @@ struct SubagentGoalLoopTests {
 
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
-            maxIterations: 300, client: client, appState: state, config: config, endSandboxSession: { _ in })
+            maxIterations: 300, client: client, appState: state, config: config, repromptDelay: Self.delayPastTheGrace, endSandboxSession: { _ in })
 
         #expect(outcome.status == .completed)
         #expect(outcome.rendered.contains("TURN2-SUMMARY"))
@@ -131,12 +156,12 @@ struct SubagentGoalLoopTests {
 
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
-            maxIterations: 300, client: client, appState: state, config: config, endSandboxSession: { _ in })
+            maxIterations: 300, client: client, appState: state, config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
 
         #expect(outcome.status == .failed)
         #expect(outcome.rendered.contains("reached its iteration cap (2)"))
         #expect(client.calls == 2, "two turns, no summary turn past the cap")
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        try? await Task.sleep(nanoseconds: 300_000_000)
         #expect(client.calls == 2, "nothing runs after the cap")
     }
 
@@ -175,7 +200,7 @@ struct SubagentGoalLoopTests {
         let task = Task {
             await SubagentManager.shared.runSubagent(
                 role: "worker", task: "Work.", effort: "easy", parentConversationId: run,
-                maxIterations: 3000, client: client, appState: state, config: config, endSandboxSession: { _ in })
+                maxIterations: 3000, client: client, appState: state, config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
         }
         #expect(await eventually { client.parked == 1 }, "turn 2 is under way")
         #expect(client.calls == 2)
@@ -184,11 +209,11 @@ struct SubagentGoalLoopTests {
         task.cancel()
         let outcome = await task.value
 
-        #expect(Date().timeIntervalSince(cancelledAt) < 2, "seconds, not the poll cap")
+        #expect(Date().timeIntervalSince(cancelledAt) < 20, "seconds, not the 300 s poll cap")
         #expect(outcome.status == .cancelled)
-        #expect(await eventually(2) { client.cancelled == 1 }, "turn 2's model call was cancelled")
+        #expect(await eventually(10) { client.cancelled == 1 }, "turn 2's model call was cancelled")
         #expect(await eventually { state.liveSubagents(ofRun: run).isEmpty })
-        try? await Task.sleep(nanoseconds: 2_500_000_000)
+        try? await Task.sleep(nanoseconds: 300_000_000)
         #expect(client.calls == 2, "no reprompt after the cancel")
     }
 
@@ -204,15 +229,15 @@ struct SubagentGoalLoopTests {
             await SubagentManager.shared.runSubagent(
                 role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
                 maxIterations: 3000, client: client, appState: state, deadlineClock: clock.now,
-                config: config, endSandboxSession: { _ in })
+                config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
         }
         #expect(await eventually { client.parked == 1 }, "turn 2 is under way")
         clock.advance(by: 10_000)
         let outcome = await task.value
 
         #expect(outcome.status == .timedOut)
-        #expect(await eventually(2) { client.cancelled == 1 }, "turn 2's model call was cancelled")
-        try? await Task.sleep(nanoseconds: 2_500_000_000)
+        #expect(await eventually(10) { client.cancelled == 1 }, "turn 2's model call was cancelled")
+        try? await Task.sleep(nanoseconds: 300_000_000)
         #expect(client.calls == 2, "no reprompt after the deadline")
     }
 
@@ -220,9 +245,13 @@ struct SubagentGoalLoopTests {
     func registryWaitsForTheLiveTurn() async throws {
         // Turn 2 calls goal_complete beside a command that outlasts it: the parent has its result
         // while turn 2 is still running that command, and the subagent is still alive until then.
+        // The command runs until the test removes its file, so no wall-clock guess is involved.
+        let hold = FileManager.default.temporaryDirectory.appendingPathComponent("iris-subagentloop-hold-\(UUID().uuidString)")
+        FileManager.default.createFile(atPath: hold.path, contents: nil)
+        defer { try? FileManager.default.removeItem(at: hold) }
         let both = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [
             Part(functionCall: FunctionCall(name: "goal_complete", args: ["summary": .string("done")])),
-            Part(functionCall: FunctionCall(name: "run_command", args: ["command": .string("sleep 2")])),
+            Part(functionCall: FunctionCall(name: "run_command", args: ["command": .string("while [ -e '\(hold.path)' ]; do sleep 0.05; done")])),
         ]))], usageMetadata: nil)
         let client = LoopClient([.reply(Self.text("Looking into it.")), .reply(both)])
         let state = try state()
@@ -231,16 +260,15 @@ struct SubagentGoalLoopTests {
 
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
-            maxIterations: 300, client: client, appState: state, config: config, endSandboxSession: { _ in })
-        let returnedAt = Date()
+            maxIterations: 300, client: client, appState: state, config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
         #expect(outcome.status == .completed)
         let sub = try #require(state.conversations.first { $0.isSubagent }?.id)
 
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        try? await Task.sleep(nanoseconds: 200_000_000)
         #expect(state.liveSubagents(ofRun: sub).count == 1, "turn 2 is still running its command, so it is still registered")
+        try FileManager.default.removeItem(at: hold)
         #expect(await eventually { state.liveSubagents(ofRun: sub).isEmpty })
-        #expect(Date().timeIntervalSince(returnedAt) > 1, "it went when the command did, not before")
-        try? await Task.sleep(nanoseconds: 1_700_000_000)
+        try? await Task.sleep(nanoseconds: 300_000_000)
         #expect(client.calls == 2, "the finished loop reprompts nothing")
     }
 
@@ -254,9 +282,9 @@ struct SubagentGoalLoopTests {
         let started = Date()
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: run,
-            maxIterations: 300, client: client, appState: state, config: config, endSandboxSession: { _ in })
+            maxIterations: 300, client: client, appState: state, config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
 
-        #expect(Date().timeIntervalSince(started) < 5)
+        #expect(Date().timeIntervalSince(started) < 20, "seconds, not the 30 s poll cap")
         #expect(outcome.status == .failed)
         #expect(outcome.rendered.contains("Stopped by the background run's budget"))
         #expect(client.calls == 1, "turn 2's round was refused, not made")
@@ -287,14 +315,68 @@ struct SubagentGoalLoopTests {
         // A 30 s poll cap: were the blocked turn waited on, the result would read `timed out`.
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
-            maxIterations: 300, client: client, appState: state, config: config, hooks: hooks,
+            maxIterations: 300, client: client, appState: state, config: config, hooks: hooks, repromptDelay: Self.delay,
             endSandboxSession: { _ in })
 
-        #expect(Date().timeIntervalSince(started) < 10)
+        #expect(Date().timeIntervalSince(started) < 20, "seconds, not the 30 s poll cap")
         #expect(outcome.status == .failed)
         #expect(client.calls == 1, "turn 2 was blocked before its model call")
         let sub = state.conversations.first { $0.isSubagent }
         #expect(sub?.messages.contains { $0.content.contains("Hook blocked turn") } == true,
                 "the hook, not something else, ended the loop")
+    }
+
+    // MARK: Halting
+
+    @Test("a turn that ends after its loop was halted schedules no reprompt and announces none")
+    func haltedLoopRefusesTheNextReprompt() async throws {
+        let client = GatedClient()
+        let state = try state()
+        let id = UUID(); state.createNewConversation(id: id)
+        state.setGoal(for: id, goal: "Work.")
+        let engine = IrisEngine(state: state, tier: .easy, client: client, protectionEnabled: false,
+                                sessionPeerCount: 0, repromptDelay: Self.delay)
+
+        let turn = Task { await engine.processInput("Work.", source: "System", conversationId: id) }
+        await client.gate.waitForEntry()
+        // Halted while the turn is in its model call, with the goal still set: only the halt can
+        // keep the turn's tail from scheduling the next one.
+        engine.haltGoalLoop(for: id, cancelling: false)
+        await client.gate.open()
+        await turn.value
+
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        #expect(client.calls == 1, "no reprompt after the halt")
+        #expect(!engine.goalLoopIsLive(for: id))
+        let messages = state.conversations.first { $0.id == id }?.messages ?? []
+        #expect(!messages.contains { $0.content.contains("Auto-continuing goal loop") })
+    }
+
+    @Test("stopping a subagent after it returned cancels the turn it is still running")
+    func stopAfterReturnCancelsTheLateTurn() async throws {
+        // Completed in turn 2 beside a long command: the parent has its answer, the subagent is
+        // still registered running the command, and a stop from the registry must reach it.
+        let both = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [
+            Part(functionCall: FunctionCall(name: "goal_complete", args: ["summary": .string("done")])),
+            Part(functionCall: FunctionCall(name: "run_command", args: ["command": .string("sleep 120")])),
+        ]))], usageMetadata: nil)
+        let client = LoopClient([.reply(Self.text("Looking into it.")), .reply(both)])
+        let state = try state()
+        let parent = UUID(); state.createNewConversation(id: parent)
+        let (config, teardown) = config(cap: 5); defer { teardown() }
+
+        let outcome = await SubagentManager.shared.runSubagent(
+            role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
+            maxIterations: 300, client: client, appState: state, config: config,
+            repromptDelay: Self.delay, endSandboxSession: { _ in })
+        #expect(outcome.status == .completed)
+        let sub = try #require(state.conversations.first { $0.isSubagent }?.id)
+        #expect(state.liveSubagents(ofRun: sub).count == 1, "still running its command")
+
+        // What a run's drain does to every subagent still registered under it.
+        let stoppedAt = Date()
+        _ = state.takeBackgroundDenials(for: sub)
+        #expect(await eventually(30) { state.liveSubagents(ofRun: sub).isEmpty })
+        #expect(Date().timeIntervalSince(stoppedAt) < 30, "the command was killed, not waited out")
     }
 }

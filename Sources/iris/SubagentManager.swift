@@ -60,7 +60,8 @@ final class SubagentManager: @unchecked Sendable {
     /// turns its goal loop runs before it ends `failed` without `goal_complete`. Injected so a test
     /// sets it on a store of its own rather than on `ConfigManager.shared`.
     /// `hooks` is the subagent engine's hook manager, injected so a test can block one of its
-    /// turns without a settings file in the shared home.
+    /// turns without a settings file in the shared home. `repromptDelay` is its goal loop's pause
+    /// between turns, shortened only by tests.
     func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID,
                      unit: DelegatedUnit? = nil, maxIterations: Int = 3000,
                      client: (any LLMClientProtocol)? = nil,
@@ -69,6 +70,7 @@ final class SubagentManager: @unchecked Sendable {
                      deadlineClock: @escaping @Sendable () -> Date = Date.init,
                      config: ConfigManager = .shared,
                      hooks: HookManager = .shared,
+                     repromptDelay: TimeInterval = 1.5,
                      endSandboxSession: @escaping @Sendable (UUID) async -> Void = {
                          await SandboxSessionManager.shared.endSession($0)
                      }) async -> (rendered: String, status: SubagentTerminalStatus) {
@@ -112,7 +114,7 @@ final class SubagentManager: @unchecked Sendable {
         // 2. Instantiate a fresh IrisEngine linked to this conversation
         let engine = IrisEngine(state: appState, tier: tier, principal: .subagent, roleLabel: role,
                                 client: client ?? LLMClient(), recentWrites: recentWrites,
-                                hooks: hooks, subagentConfig: config)
+                                hooks: hooks, subagentConfig: config, repromptDelay: repromptDelay)
 
         // 3. Craft the role-specific prompt
         let iterationCap = max(1, config.maxSubagentIterations)
@@ -218,7 +220,6 @@ final class SubagentManager: @unchecked Sendable {
                     holder.set(SubagentTermination(status: .timedOut,
                         summary: "Subagent timed out at its wall-clock limit and was cancelled (task, pending approvals, and sandbox container cleaned up).",
                         calledGoalComplete: false))
-                    engine.haltGoalLoop(for: subagentId)
                     timedOut = true
                     break
                 }

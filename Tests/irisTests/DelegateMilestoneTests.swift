@@ -244,7 +244,7 @@ struct DelegateMilestoneTests {
         }
         let config = ConfigManager(store: store)
         config.maxSubagentIterations = 2
-        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, subagentConfig: config)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, subagentConfig: config, repromptDelay: 0.01)
         await engine.processInput("work", source: "User", conversationId: id)
 
         #expect(client.subagentCalls == 2, "the subagent's loop ran to its cap of 2")

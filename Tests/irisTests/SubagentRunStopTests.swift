@@ -119,13 +119,14 @@ struct SubagentRunStopTests {
         let run = run(in: state, maxTokens: 100)
 
         let started = Date()
-        // A small poll cap: were the refusal not terminal the subagent would run into it and read
-        // `timed out`, rather than spending the five-minute default.
+        // A 30 s poll cap: were the refusal not terminal the subagent would run into it and read
+        // `timed out`, rather than spending the five-minute default. The bound sits well under it
+        // and well over the ~5 s stall the full parallel suite can put in any test's path (#399).
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: run,
-            maxIterations: 100, client: client, appState: state, endSandboxSession: { _ in })
+            maxIterations: 300, client: client, appState: state, endSandboxSession: { _ in })
 
-        #expect(Date().timeIntervalSince(started) < 5, "seconds, not the poll cap")
+        #expect(Date().timeIntervalSince(started) < 20, "seconds, not the poll cap")
         #expect(client.callCount("WORKER") == 1, "the second round was refused, not made")
         #expect(outcome.status == .failed)
         #expect(outcome.rendered.contains("status: failed"))
