@@ -381,6 +381,15 @@ class AppState {
         let sink: any TurnUsageSink
     }
     @ObservationIgnored private var activeRuns: [UUID: RunAccounting] = [:]
+    /// Subagents whose engine may still be working, by subagent conversation, with the run each
+    /// was started for and how to stop it (#323). Registered by `SubagentManager` and removed only
+    /// once the subagent's work has actually ended, so an entry here is a task still alive. A run's
+    /// drain stops whatever is still registered under it: no subagent outlives its run. Transient.
+    struct LiveSubagent {
+        let run: UUID
+        let stop: @Sendable (String) -> Void
+    }
+    @ObservationIgnored private var liveSubagentTasks: [UUID: LiveSubagent] = [:]
     /// State-gated tools each conversation has declared (5c §0.1). Transient, never persisted.
     @ObservationIgnored var stickyTools = StickyTools()
     var availableUpdate: ReleaseInfo?
@@ -2917,7 +2926,28 @@ class AppState {
         // run spends against nobody's row. Callers read `runUsage` before draining.
         backgroundRunDelegatedUsage.removeValue(forKey: conversationId)
         activeRuns.removeValue(forKey: conversationId)
+        // And nothing it spawned goes on working (#323). Cancelling the run's turn reaches a
+        // subagent it is still waiting on through structured cancellation; this is the backstop
+        // for one that cancellation did not reach.
+        for (_, live) in liveSubagentTasks where live.run == conversationId {
+            live.stop(SubagentManager.runEndedReason)
+        }
         return denials
+    }
+
+    /// Records a subagent whose engine is starting, under the run it works for (itself, when it
+    /// works for none). Called after `linkBackgroundDescendant`, which is what names the run.
+    func registerLiveSubagent(_ subagentId: UUID, stop: @escaping @Sendable (String) -> Void) {
+        liveSubagentTasks[subagentId] = LiveSubagent(run: backgroundRunRoot(of: subagentId), stop: stop)
+    }
+
+    func unregisterLiveSubagent(_ subagentId: UUID) {
+        liveSubagentTasks.removeValue(forKey: subagentId)
+    }
+
+    /// The subagents still working for `run`, for a test to check none outlived it.
+    func liveSubagents(ofRun run: UUID) -> [UUID] {
+        liveSubagentTasks.filter { $0.value.run == run }.map(\.key)
     }
 
     /// Records that `child` (a subagent or evaluator conversation) belongs to the background run

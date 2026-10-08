@@ -16,6 +16,21 @@ final class SubagentManager: @unchecked Sendable {
     static let shared = SubagentManager()
 
     private init() {}
+
+    /// The summary of a subagent stopped because the task waiting on it was cancelled (#323).
+    static let cancelledReason = "Cancelled: the turn that delegated to this subagent was stopped (its run reached its deadline, or the user pressed Stop), so the subagent was stopped with it — its model call and any running command were cancelled, and it did not finish its task."
+
+    /// The summary of a subagent stopped because the background run it worked for ended (#323).
+    static let runEndedReason = "Cancelled: the background run this subagent worked for has ended, so the subagent was stopped — its model call and any running command were cancelled, and it did not finish its task."
+
+    /// Whether a subagent has been stopped from outside; trips once.
+    final class StopFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var tripped = false
+        /// True for the first caller only.
+        func trip() -> Bool { lock.withLock { defer { tripped = true }; return !tripped } }
+        var isTripped: Bool { lock.withLock { tripped } }
+    }
     
     /// Runs a delegated unit to termination, returning the prose the parent sees and how the run
     /// ended. Callers that only render take `.rendered`; slice B4 branches on `.status`, because
@@ -34,6 +49,8 @@ final class SubagentManager: @unchecked Sendable {
     /// the engine: a subagent of an unattended run is unattended too, and its writes have to reach
     /// the same registry the watch coordinator consults, or a run that delegates its file writing
     /// escapes the filter (#187 §4).
+    /// `endSandboxSession` frees the subagent's container on every way out, injected so a test can
+    /// see it called without a container runtime (#291).
     /// `deadlineClock` is the wall clock the poll-cap deadline below is set and watched on,
     /// injected only so a test can hold it off until the subagent is parked mid-turn, then move it
     /// (#355, following #335/#342): a real poll cap raced a busy suite's MainActor work and
@@ -44,7 +61,10 @@ final class SubagentManager: @unchecked Sendable {
                      client: (any LLMClientProtocol)? = nil,
                      appState: AppState,
                      recentWrites: RecentWrites = .shared,
-                     deadlineClock: @escaping @Sendable () -> Date = Date.init) async -> (rendered: String, status: SubagentTerminalStatus) {
+                     deadlineClock: @escaping @Sendable () -> Date = Date.init,
+                     endSandboxSession: @escaping @Sendable (UUID) async -> Void = {
+                         await SandboxSessionManager.shared.endSession($0)
+                     }) async -> (rendered: String, status: SubagentTerminalStatus) {
         let startedAt = Date()
 
         // 1. Create a new conversation for the subagent
@@ -103,16 +123,20 @@ final class SubagentManager: @unchecked Sendable {
             appState.appendMessage(role: .system, content: "Starting subagent with role '\(role)' to execute task:\n\(task)", to: subagentId)
         }
 
-        actor ResultHolder {
-            var termination: SubagentTermination? = nil
-            func set(_ t: SubagentTermination) { if termination == nil { termination = t } }
-            func get() -> SubagentTermination? { return termination }
+        // Lock-based, not an actor, so a termination can be recorded synchronously — from a
+        // cancellation handler (#323), and from `onSubagentComplete` without the detached Task an
+        // actor hop needed. First write wins, as before.
+        final class ResultHolder: @unchecked Sendable {
+            private let lock = NSLock()
+            private var termination: SubagentTermination? = nil
+            func set(_ t: SubagentTermination) { lock.withLock { if termination == nil { termination = t } } }
+            func get() -> SubagentTermination? { lock.withLock { termination } }
         }
         let holder = ResultHolder()
 
         await MainActor.run {
             appState.onSubagentComplete[subagentId] = { termination in
-                Task { await holder.set(termination) }
+                holder.set(termination)
                 Task { @MainActor in appState.onSubagentComplete[subagentId] = nil }
             }
         }
@@ -136,59 +160,88 @@ final class SubagentManager: @unchecked Sendable {
             await engineDone.set()
         }
 
+        // How this subagent is stopped from outside (#323): by the cancellation of the task that is
+        // waiting on it — a run's turn cancelled at its deadline, or the user's Stop — or by the
+        // drain of the run it works for. The verdict is recorded before the engine is cancelled,
+        // for the reason the timeout below classifies first: the cancelled engine reports a
+        // `.failed` of its own, and that must not be the one that lands.
+        let stopped = StopFlag()
+        let stop: @Sendable (String) -> Void = { reason in
+            guard stopped.trip() else { return }
+            holder.set(SubagentTermination(status: .cancelled, summary: reason, calledGoalComplete: false))
+            engineTask.cancel()
+        }
+        await MainActor.run { appState.registerLiveSubagent(subagentId, stop: stop) }
+
         // The wall clock (`deadlineClock`), not a poll count: a count of 100ms sleeps still
         // measures *polls*, not time, when the clock behind it is injected and can be held still or
         // jumped — see the parameter doc above.
         let deadline = deadlineClock().addingTimeInterval(Double(maxIterations) * 0.1)
         var gracePolls = 0
-        while await holder.get() == nil {
-            // The engine loop is over. `goal_complete` resolves the holder from a detached Task, so
-            // allow a few polls for that to land before concluding nothing is coming.
-            if await engineDone.get() {
-                gracePolls += 1
-                if gracePolls > 3 {
-                    await engine.cancelReprompt(for: subagentId)
-                    await SandboxSessionManager.shared.endSession(subagentId)
-                    await MainActor.run { appState.clearGoal(for: subagentId) }
-                    await holder.set(SubagentTermination(status: .failed,
-                        summary: "Subagent stopped without calling goal_complete — the unit was not completed.",
+        var timedOut = false
+        await withTaskCancellationHandler {
+            while holder.get() == nil {
+                // Cancelled before the handler was installed: it never fires for that, so look.
+                if Task.isCancelled { stop(Self.cancelledReason); break }
+                // The engine loop is over. Allow a few polls for a termination still on its way
+                // before concluding nothing is coming.
+                if await engineDone.get() {
+                    gracePolls += 1
+                    if gracePolls > 3 {
+                        holder.set(SubagentTermination(status: .failed,
+                            summary: "Subagent stopped without calling goal_complete — the unit was not completed.",
+                            calledGoalComplete: false))
+                        break
+                    }
+                }
+                if deadlineClock() >= deadline {
+                    // Classify BEFORE `engineTask.cancel()`, not after: cancelling it can itself
+                    // unwind the engine's in-flight model call, which hits `processInput`'s own
+                    // catch block and fires `onSubagentComplete` with `.failed` — a second write to
+                    // this same `holder`, which would otherwise misreport a timeout (#355).
+                    holder.set(SubagentTermination(status: .timedOut,
+                        summary: "Subagent timed out after the iteration cap and was cancelled (task, pending approvals, and sandbox container cleaned up).",
                         calledGoalComplete: false))
+                    timedOut = true
                     break
                 }
+                // A poll interval, not a deadline: a cancelled sleep returns at once and the loop
+                // sees the termination the cancellation handler recorded.
+                try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
             }
-            if deadlineClock() >= deadline {
-                // Classify BEFORE `engineTask.cancel()`, not after: cancelling it can itself
-                // unwind the engine's in-flight model call (the non-streaming path replays through
-                // a cancellable `AsyncThrowingStream`), which hits `processInput`'s own catch block
-                // and fires `onSubagentComplete` with `.failed` — a second, concurrent write to this
-                // same `holder`. `set` takes whichever write lands first, so under heavy MainActor
-                // contention that second writer could beat the four awaits below it and this run
-                // would misreport "failed (goal_complete not called)" instead of "timed out" (#355).
-                // Setting the verdict first makes that race harmless: the later write is a no-op.
-                await holder.set(SubagentTermination(status: .timedOut,
-                    summary: "Subagent timed out after the iteration cap and was cancelled (task, pending approvals, and sandbox container cleaned up).",
-                    calledGoalComplete: false))
-                // Hard stop: cancel the engine task, unstick any pending approval, stop the
-                // reprompt loop, free the sandbox container, and clear the goal.
-                engineTask.cancel()
-                await MainActor.run { appState.denyPendingApprovals(for: subagentId) }
-                await engine.cancelReprompt(for: subagentId)
-                await SandboxSessionManager.shared.endSession(subagentId)
-                await MainActor.run { appState.clearGoal(for: subagentId) }
-                break
-            }
-            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+        } onCancel: {
+            stop(Self.cancelledReason)
         }
-        let termination = await holder.get() ?? SubagentTermination(status: .failed, summary: "Subagent completed with no summary.", calledGoalComplete: false)
+        let termination = holder.get() ?? SubagentTermination(status: .failed, summary: "Subagent completed with no summary.", calledGoalComplete: false)
+        let wasStopped = stopped.isTripped
+
+        // Hard stop for a subagent ended from outside: cancel the engine task (already done by
+        // `stop`, harmless twice) and unstick any pending approval.
+        if timedOut || wasStopped {
+            engineTask.cancel()
+            await MainActor.run { appState.denyPendingApprovals(for: subagentId) }
+        }
+        // Stop the reprompt loop — a reprompt in flight is a task of its own that cancelling
+        // `engineTask` does not reach — and clear the goal of anything that did not complete.
+        await engine.cancelReprompt(for: subagentId)
+        if termination.status != .completed {
+            await MainActor.run { appState.clearGoal(for: subagentId) }
+        }
+        // Every path frees the container, a completed one too (#291): it held the run's grant
+        // mounts until the idle reaper. Out of reach of this task's cancellation, which would
+        // otherwise refuse to launch the `container delete` at exactly the moment it is needed.
+        await Task { await endSandboxSession(subagentId) }.value
+
         let files = await MainActor.run { appState.drainSubagentWrites(for: subagentId) }
 
         // Grade the unit. ONLY a `.completed` run is graded: it is the one that claimed the unit is
         // done. A failed/timed-out/cancelled subagent claimed nothing, so its status carries the
         // story and `verdict` stays nil rather than reporting a grade against unfinished work.
         // Awaited, not detached (unlike the main agent's goal_complete): the parent must receive the
-        // verdict IN the result it branches on.
+        // verdict IN the result it branches on. Not when the caller has been cancelled: nobody is
+        // waiting for the verdict, and an evaluator started now would outlive the run (#323).
         var verdict: GoalEvaluation? = nil
-        if termination.status == .completed, let unit, unit.grade {
+        if termination.status == .completed, let unit, unit.grade, !Task.isCancelled, !wasStopped {
             // The directory the subagent actually worked in. With no bound workspace its
             // run_command inherits the process cwd, so the grader is pointed at the same place.
             let workspace = GoalEvaluator.gradingDirectory(await MainActor.run {
@@ -205,14 +258,16 @@ final class SubagentManager: @unchecked Sendable {
                                     summary: termination.summary, filesWritten: files,
                                     startedAt: startedAt, endedAt: Date(),
                                     unitContract: unitContract, verdict: verdict)
-        // Cheap defense-in-depth alongside the `updateSessionPhase` guard above: the timeout/failed
-        // paths above already cancel the reprompt loop before finishing; do the same here so a
-        // straggling auto-reprompt (there shouldn't be one once the goal is cleared, but nothing
-        // here guarantees it) can't fire another phase update after `finishSession`.
-        await engine.cancelReprompt(for: subagentId)
         await MainActor.run {
             appState.setSubagentResult(for: subagentId, result)
             appState.finishSession(id: subagentId, status: termination.status.rawValue)
+        }
+        // Registered until the engine task has actually returned, not just until the parent has
+        // its answer: a task still unwinding is a task still alive. Not awaited here, so an engine
+        // parked where cancellation cannot reach does not hold the parent too.
+        Task {
+            await engineTask.value
+            await MainActor.run { appState.unregisterLiveSubagent(subagentId) }
         }
         return (result.renderedForParent(), termination.status)
     }

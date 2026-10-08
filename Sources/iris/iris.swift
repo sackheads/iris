@@ -1268,16 +1268,29 @@ actor IrisEngine {
     /// background run has neither a goal nor a callback for. The line therefore ends with
     /// `budgetStopMarker` rather than `softStopMarker`: `JobRunner` matches both, so the run still
     /// finishes `failed`, and nothing promises a summary that is not coming.
-    private func endTurnWithoutSummary(conversationId: UUID, reason: String) async {
+    private func endTurnWithoutSummary(conversationId: UUID, reason: String, subagentSummary: String) async {
         cancelReprompt(for: conversationId)
         loopDetectors[conversationId] = nil
         blockedResultTrackers[conversationId] = nil
         // No goal on a job run, but an attended turn given a budget must not be reprompted into
         // spending past it either.
         let localState = state
-        await MainActor.run { localState?.clearGoal(for: conversationId) }
         await pushToUI(role: .system, text: "[\(approvalOrigin)] \(reason). \(Self.budgetStopMarker)",
                        conversationId: conversationId)
+        // A subagent's manager is told why, here and at once (#323): left to notice the loop had
+        // ended, it reported a generic "stopped without calling goal_complete", and the parent
+        // could not tell a spent budget from a subagent that gave up.
+        await MainActor.run {
+            localState?.clearGoal(for: conversationId)
+            localState?.onSubagentComplete[conversationId]?(SubagentTermination(
+                status: .failed, summary: subagentSummary, calledGoalComplete: false))
+            localState?.onSubagentComplete[conversationId] = nil
+        }
+    }
+
+    /// What the parent is told when the run's budget refuses its subagent's next round (#323).
+    static func budgetStoppedSubagentSummary(_ reason: String) -> String {
+        "Stopped by the background run's budget (\(reason)): the run has no allowance left for another model round, so this subagent made no further call and did not finish its task."
     }
 
     /// Why a run's turn ended, as the transcript records it — phrased from the very call the
@@ -2053,8 +2066,9 @@ actor IrisEngine {
                let refused = await MainActor.run(body: { localState?.firstBackgroundDenial(for: conversationId) }) {
                 turnFinished = true
                 _ = await drainPendingInput(conversationId: conversationId, hooksSandbox: hooksSandbox)
-                await endTurnWithoutSummary(conversationId: conversationId,
-                                            reason: Self.stopReason(for: refused))
+                let refusal = Self.stopReason(for: refused)
+                await endTurnWithoutSummary(conversationId: conversationId, reason: refusal,
+                                            subagentSummary: "Stopped: \(refusal), and another round could only be refused again.")
                 break
             }
             // The run's budget and spend, delegated subagents' included (#313). A subagent or
@@ -2083,7 +2097,8 @@ actor IrisEngine {
                     // history keeps them in the transcript a person reads back from the card, and
                     // a mid-task message taken and dropped is gone without a trace.
                     _ = await drainPendingInput(conversationId: conversationId, hooksSandbox: hooksSandbox)
-                    await endTurnWithoutSummary(conversationId: conversationId, reason: reason)
+                    await endTurnWithoutSummary(conversationId: conversationId, reason: reason,
+                                                subagentSummary: Self.budgetStoppedSubagentSummary(reason))
                     break
                 }
             }
