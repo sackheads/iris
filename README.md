@@ -103,8 +103,9 @@ swift run
 `swift run` re-signs the binary ad-hoc on every rebuild, and macOS keys Keychain access to the
 signature, so each rebuild asks for Keychain access again. With a Developer ID Application
 certificate in your keychain, `scripts/run-dev.sh` builds, signs with it, and launches, so one
-"Always Allow" sticks across rebuilds. `perf/run.sh` and `scripts/build_release.sh` sign the same
-way when the certificate is present (or `CODESIGN_IDENTITY` is set).
+"Always Allow" sticks across rebuilds. `perf/run.sh` signs the same way when the certificate is
+present (or `CODESIGN_IDENTITY` is set). The Xcode app build (`scripts/build-app.sh`, below) signs
+through Xcode's own manual signing instead, with a fixed Developer ID identity in `project.yml`.
 
 A build from source — `swift run`, `scripts/run-dev.sh`, or the Xcode Debug scheme — is a **dev
 build**: it keeps its own conversations and memory under `~/.iris-dev`, not the installed app's
@@ -117,6 +118,11 @@ your installed app's conversations, memory and keys instead of empty; copied job
 they do not fire in both apps. Any dev launch creates `~/.iris-dev`, so a first `swift run` before
 `scripts/run-dev.sh` leaves a home that is never seeded (`run-dev.sh` says so when it sees one). To
 reseed, quit the dev build and run `rm -rf ~/.iris-dev && scripts/run-dev.sh`.
+
+To build a real `.app` bundle from the command line instead of Xcode, run
+`scripts/build-app.sh Debug` (needs `brew install xcodegen` and the Metal Toolchain). See
+`AGENTS.md`'s "Build and test" section for the `Release` config and why not to launch it before
+your first real install.
 
 ### Global Hotkey ⌨️
 Iris runs in the background and can be summoned instantly over any other app by pressing **`Cmd + Shift + Space`** (configurable in Settings) — the installed app's default. A build from source uses `Cmd + Shift + Option + Space` instead (see above).

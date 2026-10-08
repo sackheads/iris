@@ -16,6 +16,27 @@ swift test                           # full suite
 scripts/test-filter.sh MyTestSuite   # focused run, guarded (see below)
 ```
 
+### Building the Xcode app
+
+```sh
+brew install xcodegen                          # once
+xcodebuild -downloadComponent MetalToolchain    # once; MLX's shaders need it, SwiftPM never builds them
+scripts/build-app.sh [Debug|Release] [derived-data-dir]
+```
+
+`scripts/build-app.sh` runs `scripts/gen-xcodeproj.sh` first, which regenerates `Iris.xcodeproj`
+from `project.yml` with `xcodegen`. The project is generated and gitignored — never commit
+`Iris.xcodeproj`; edit `project.yml` instead. `build-app.sh` then runs `xcodebuild` and prints the
+built `.app`'s path. `scripts/lib.sh` holds the `build_or_die` helper both build scripts share.
+
+Debug builds "Iris Dev.app" (bundle id `com.bnaylor.iris.dev`): it is a dev build exactly like
+`swift run`/`run-dev.sh` below (`~/.iris-dev`, `.dev`-suffixed Keychain services, the Option
+hotkey), signed with the Developer ID. Release builds "Iris.app" with the installed app's own
+identity (`com.bnaylor.iris`) — **never launch a locally built Release config before your first
+real install**: `BuildIdentity` resolves that bundle id to `.release` exactly like the installed
+app, so it opens `~/.iris` and spends the one-time settings import (`AppDefaultsImport`) that a
+fresh install is meant to get once.
+
 **Dev builds use `~/.iris-dev`, not `~/.iris`.** `swift build`/`swift run`, `scripts/run-dev.sh`,
 Xcode Debug and `swift test` are all dev builds (`BuildIdentity.current == .dev`): they read and
 write `~/.iris-dev`, keep their secrets under `.dev`-suffixed Keychain services, and answer to
