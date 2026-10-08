@@ -124,10 +124,17 @@ struct WatchRootTests {
         let notVolume: (String) throws -> Bool = { _ in false }
         for root in [release.root.path, release.memoryDir.path] {
             #expect(WatchRoot.breadthProblem(for: root, paths: f.paths, home: f.home, isVolume: notVolume,
-                                             identity: .dev, release: release) == .protectedIris)
+                                             identity: .dev, release: release) == .protectedRelease)
             #expect(WatchRoot.breadthProblem(for: root, paths: f.paths, home: f.home, isVolume: notVolume,
                                              identity: .release, release: release) == nil)
         }
+        // The release hit gets its own wording: it is not this build's own directory, so neither
+        // "Iris's own" nor "would react to itself" is said about it.
+        #expect(WatchRoot.refusal(for: release.root.path, paths: f.paths, home: f.home, isVolume: notVolume,
+                                  identity: .dev, release: release) == WatchRoot.protectedReleaseRefusal)
+        #expect(!WatchRoot.protectedReleaseRefusal.contains("own"))
+        #expect(!WatchRoot.protectedReleaseRefusal.contains("react to itself"))
+        // This build's own directory still gets the original wording.
         #expect(WatchRoot.refusal(for: f.base.path, paths: IrisPaths(root: f.base.appendingPathComponent("x")),
                                   home: f.home, isVolume: notVolume, identity: .dev, release: release)
                 == WatchRoot.protectedRefusal)

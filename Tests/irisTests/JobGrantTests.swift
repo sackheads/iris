@@ -131,7 +131,7 @@ struct JobGrantResolveTests {
 
     private func canonical(_ url: URL) -> String { IrisPaths.canonicalPath(url.path) }
 
-    @Test("in a dev process a mount of the release home is refused as Iris's own directory")
+    @Test("in a dev process a mount of the release home is refused, worded for the installed app's directory")
     func releaseHomeMountFromDev() throws {
         let f = try Self.fixture(); defer { f.tearDown() }
         let release = IrisPaths(root: f.base.appendingPathComponent("dot-iris-release"))
@@ -139,7 +139,8 @@ struct JobGrantResolveTests {
         let dev = JobGrant.resolve(mounts: [release.memoryDir.path], network: nil, profile: .mutating,
                                    paths: f.paths, home: f.home, isVolume: { _ in false },
                                    identity: .dev, release: release)
-        #expect(dev == .failure(ToolMessage(JobGrant.protected(canonical(release.memoryDir)))))
+        // Not `protected` (this build's own wording) — that case is `protectedRelease`'s.
+        #expect(dev == .failure(ToolMessage(JobGrant.protectedRelease(canonical(release.memoryDir)))))
         let installed = JobGrant.resolve(mounts: [release.memoryDir.path], network: nil, profile: .mutating,
                                          paths: f.paths, home: f.home, isVolume: { _ in false },
                                          identity: .release, release: release)

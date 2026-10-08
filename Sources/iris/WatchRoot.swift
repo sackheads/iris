@@ -62,6 +62,14 @@ enum WatchRoot {
         IrisPaths.standard.agentFacing("that path is or contains Iris's own directory (~/.iris); a watch there would react to itself")
     }
 
+    /// Worded for the *other* home: in a dev process the installed app's `~/.iris` is protected
+    /// too (`breadthProblem`'s `.protectedRelease`), but it is not this build's own directory and
+    /// a watch there would not react to this process's writes — so neither "Iris's own" nor
+    /// "would react to itself" is true of it. Always literally `~/.iris`: `IrisPaths.release` is
+    /// that path by definition, whichever build is asking, so there is nothing to rewrite.
+    static let protectedReleaseRefusal =
+        "that path is or contains the installed Iris app's directory (~/.iris)"
+
     /// Why `canonical` may not be watched, or nil when it may. Checked in the order a reader would
     /// want the answer: a root that is too broad is told so even when it also contains Iris's
     /// directory (the home directory does), because "name a specific folder" is the fix for both.
@@ -85,7 +93,7 @@ enum WatchRoot {
     /// by every caller that has its own sentences for the same rule — a watch refuses in its
     /// words (`refusal`), a job grant in its own (`JobGrant.resolve`) — so the rule itself is
     /// never copied.
-    enum BreadthProblem { case tooBroad, protectedIris }
+    enum BreadthProblem { case tooBroad, protectedIris, protectedRelease }
 
     /// The breadth problem `canonical` has, if any. Checked in the order a reader would want the
     /// answer: a root that is too broad is reported so even when it also contains Iris's
@@ -129,11 +137,14 @@ enum WatchRoot {
         let components = URL(fileURLWithPath: root).pathComponents
         if components.count == 3, components[1] == "volumes" { return .tooBroad }
         if (try? isVolume(canonicalRoot)) ?? true { return .tooBroad }
-        let own = identity == .dev ? [paths.root, release.root] : [paths.root]
-        for irisRoot in own {
-            let iris = IrisPaths.canonicalPath(irisRoot.path).lowercased()
-            if root == iris || root.hasPrefix(iris + "/") || iris.hasPrefix(root + "/") {
-                return .protectedIris
+        let iris = IrisPaths.canonicalPath(paths.root.path).lowercased()
+        if root == iris || root.hasPrefix(iris + "/") || iris.hasPrefix(root + "/") {
+            return .protectedIris
+        }
+        if identity == .dev {
+            let releaseIris = IrisPaths.canonicalPath(release.root.path).lowercased()
+            if root == releaseIris || root.hasPrefix(releaseIris + "/") || releaseIris.hasPrefix(root + "/") {
+                return .protectedRelease
             }
         }
         return nil
@@ -156,6 +167,7 @@ enum WatchRoot {
                               identity: identity, release: release) {
         case .tooBroad: return tooBroadRefusal
         case .protectedIris: return protectedRefusal
+        case .protectedRelease: return protectedReleaseRefusal
         case nil: return nil
         }
     }

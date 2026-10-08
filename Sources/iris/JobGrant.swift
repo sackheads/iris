@@ -53,6 +53,12 @@ extension JobGrant {
     static func protected(_ source: String) -> String {
         IrisPaths.standard.agentFacing("the mount source \(source) is or contains Iris's own directory (~/.iris), which a job may not mount.")
     }
+    /// Worded for the installed app's home when a dev process is the one refusing (`WatchRoot`'s
+    /// `.protectedRelease`): that directory is not this build's own, so neither "Iris's own" nor
+    /// a rewrite to this build's `~/.iris-dev` spelling applies — it is always literally `~/.iris`.
+    static func protectedRelease(_ source: String) -> String {
+        "the mount source \(source) is or contains the installed Iris app's directory (~/.iris), which a job may not mount."
+    }
     static let readOnlyFirst = "the first mount must be read-write when any later one is, because it is the job's working directory — put the read-write directory first."
     static func duplicate(_ source: String) -> String { "the mount source \(source) is listed twice." }
 
@@ -115,6 +121,7 @@ extension JobGrant {
                                             identity: identity, release: release) {
             case .tooBroad: return .failure(ToolMessage(tooBroad(source)))
             case .protectedIris: return .failure(ToolMessage(protected(source)))
+            case .protectedRelease: return .failure(ToolMessage(protectedRelease(source)))
             case nil: break
             }
             if isCredentialStore(source, home: home) { return .failure(ToolMessage(credentialStoreRefusal)) }
