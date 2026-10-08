@@ -921,7 +921,8 @@ targets:
         ARCHS: arm64
         ENABLE_HARDENED_RUNTIME: YES
         ENABLE_APP_SANDBOX: NO
-        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application"
         DEVELOPMENT_TEAM: RMKGLPG4K4
         MARKETING_VERSION: "0.0.0"
         CURRENT_PROJECT_VERSION: "1"
@@ -958,20 +959,39 @@ xcodegen generate --spec project.yml --quiet
 
 Add `/Iris.xcodeproj` to `.gitignore`.
 
+`CODE_SIGN_STYLE: Manual` with the `Developer ID Application` identity, not `Automatic`: a headless
+`xcodebuild` cannot satisfy Automatic signing (it needs a Mac Development certificate and a signed-in
+Xcode account, neither of which exists on a build machine), and Manual with Developer ID builds and
+signs cleanly without either.
+
 - [ ] **Step 3: Build Debug and Release**
+
+Needs the Metal Toolchain once (`xcodebuild -downloadComponent MetalToolchain`; Xcode compiles MLX's
+`.metal` sources itself, unlike SwiftPM) and both flags below — without them the build fails validating
+mlx-swift's `CudaBuild` plugin and mlx-swift-lm's `MLXHuggingFaceMacros` macro, which it declares but
+nothing has trusted in this headless Xcode:
 
 ```bash
 scripts/gen-xcodeproj.sh
 D=$(mktemp -d "${TMPDIR:-/tmp}/iris-xc.XXXX")
 xcodebuild build -project Iris.xcodeproj -scheme Iris -configuration Release \
-  -destination 'generic/platform=macOS' -derivedDataPath "$D" -quiet
+  -destination 'generic/platform=macOS' -derivedDataPath "$D" -quiet \
+  -skipPackagePluginValidation -skipMacroValidation
 APP="$D/Build/Products/Release/Iris.app"
 ls "$APP/Contents/Frameworks" "$APP/Contents/Resources"
 find "$APP" -name '*.metallib'
 /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist"
 ```
 
-Expected: `Frameworks` holds llama and onnxruntime; `Resources` holds `iris_IrisKit.bundle` and the dependency bundles; at least one `.metallib` (MLX). Record the exact `Frameworks` listing in the PR description: Task 11's allowlist is that listing plus `Sparkle.framework`.
+Expected: `Frameworks` holds `libswiftCompatibilitySpan.dylib` (weak-linked, a stray dylib sitting
+directly in `Frameworks`, not wrapped in a `.framework` — Xcode embeds it unprompted), `llama.framework`
+and `onnxruntime.framework` (a 51 KB stub nothing links; ONNX Runtime is linked statically into the
+executable, but Xcode still embeds the stub); `Resources` holds `iris_IrisKit.bundle` and the dependency
+bundles; at least one `.metallib` (MLX). Record the exact `Frameworks` listing in the PR description:
+Task 11's allowlist is that listing plus `Sparkle.framework` once Sparkle lands. Also check the
+exported entitlements (`codesign -d --entitlements - "$APP"`): a plain `xcodebuild build` signs both
+configs with `com.apple.security.get-task-allow = true`, which notarization rejects — Task 11's export
+step must strip it, and Task 11 must verify that it does.
 
 If no `.metallib` appears, MLX shaders are still not compiled: stop and report to the owner rather than working around it.
 
@@ -1223,10 +1243,22 @@ Port `../pastefix/scripts/release.sh` (read it in full first) with exactly these
 | `sign_update "$DMG"` | `sign_update --account iris "$DMG"` |
 | `-destination 'generic/platform=macOS'` with the universal-binary comment | the same destination plus `ARCHS=arm64`; comment: "arm64 only: MLX and the local engines need Apple Silicon, and an Intel Mac cannot launch the app to be offered an update." |
 | `allow-jit` must be present | delete that check (iris has no JIT entitlement); keep the `app-sandbox` must-be-absent check |
-| `frameworks == "Sparkle.framework "` | `EXPECTED_FRAMEWORKS` set at the top of the script to the sorted, space-joined listing from Task 8 Step 3 plus `Sparkle.framework`, e.g. `"Sparkle.framework llama.framework onnxruntime.framework "`; error message names it |
-| stray dylib find excludes `*/Sparkle.framework/*` | excludes `*/Contents/Frameworks/*.framework/*` |
+| no plugin/macro flags needed | the archive `xcodebuild` invocation needs `-skipPackagePluginValidation -skipMacroValidation`, same as `scripts/build-app.sh` (mlx-swift's `CudaBuild` plugin and mlx-swift-lm's `MLXHuggingFaceMacros` macro need them headless; Task 8's report) |
+| `frameworks == "Sparkle.framework "` | `EXPECTED_FRAMEWORKS` set at the top of the script to the observed `Contents/Frameworks` listing (Task 8's report: `libswiftCompatibilitySpan.dylib llama.framework onnxruntime.framework`) plus `Sparkle.framework` once Sparkle lands, e.g. `"Sparkle.framework libswiftCompatibilitySpan.dylib llama.framework onnxruntime.framework "`; error message names it |
+| stray dylib find excludes `*/Sparkle.framework/*` | excludes `*/Contents/Frameworks/*.framework/*`, and must also allow `Contents/Frameworks/libswiftCompatibilitySpan.dylib` itself — a weak-linked stray dylib sitting directly in `Frameworks`, not wrapped in a `.framework`, that Xcode embeds unprompted (Task 8's report) |
 
-Add one check after the export, before notarizing:
+Add a check after the export, before notarizing, that the exported app does not carry
+`get-task-allow`: a plain `xcodebuild build` signs both configs with
+`com.apple.security.get-task-allow = true` (Xcode injects it into the empty entitlements file; Task
+8's report), which notarization rejects. The archive-plus-export step is expected to strip it, but
+`release.sh` must verify that on the exported `$APP`, not assume it:
+
+```zsh
+codesign -d --entitlements - "$APP" 2>/dev/null | grep -q get-task-allow && \
+  die "exported app still carries com.apple.security.get-task-allow (notarization will reject it)"
+```
+
+Add one more check after the export, before notarizing:
 
 ```zsh
 for f in "$APP"/Contents/Frameworks/*.framework; do
@@ -1235,6 +1267,10 @@ done
 ```
 
 - [ ] **Step 3: Dry run on a branch (needs owner setup first)**
+
+The project signs Manual with the Developer ID identity set in `project.yml` (Task 8), not Xcode-account
+Automatic signing — Automatic fails headless with no Mac Development certificate and no signed-in Xcode
+account (Task 8's report, Concern 1). Nothing in this dry run needs an Xcode account.
 
 The owner runs once: `xcrun notarytool store-credentials iris-notary --team-id RMKGLPG4K4`. Then:
 
