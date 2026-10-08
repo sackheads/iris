@@ -1234,6 +1234,8 @@ Port `../pastefix/scripts/release.sh` (read it in full first) with exactly these
 |---|---|
 | header comment names Pastefix | Iris; "One-time setup: docs/releasing.md" |
 | `PROJECT="$REPO_ROOT/Pastefix/Pastefix.xcodeproj"` | `PROJECT="$REPO_ROOT/Iris.xcodeproj"`, and run `"$REPO_ROOT/scripts/gen-xcodeproj.sh"` in the preconditions step, after the clean-tree check |
+| (no Metal Toolchain check) | add the same check `scripts/build-app.sh` has up front: `xcrun metal --version` must succeed, or `die` with the `xcodebuild -downloadComponent MetalToolchain` hint — MLX's shaders need it and SwiftPM never builds them |
+| (no package pinning) | after `gen-xcodeproj.sh`, pin the archive to the same dependency revisions `swift test` used (swift-sdk and llama.swift track branch main): `mkdir -p "$PROJECT/project.xcworkspace/xcshareddata/swiftpm" && cp "$REPO_ROOT/Package.resolved" "$PROJECT/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"`, then pass `-disableAutomaticPackageResolution` to the archive `xcodebuild` invocation below and run `xcodebuild -resolvePackageDependencies -project "$PROJECT" -scheme "$SCHEME"` first so the pinned graph is in place before the archive step reads it (`scripts/build-app.sh` does the same pinning for local builds) |
 | `SCHEME="Pastefix"` | `SCHEME="Iris"` |
 | `INFO_PLIST=.../Pastefix/Info.plist` | `INFO_PLIST="$REPO_ROOT/App/Info.plist"` |
 | `NOTARY_PROFILE="pastefix-notary"` | `NOTARY_PROFILE="${NOTARY_PROFILE:-iris-notary}"` |
@@ -1241,7 +1243,7 @@ Port `../pastefix/scripts/release.sh` (read it in full first) with exactly these
 | `pastefix-release-$VERSION.XXXX`, `Pastefix.xcarchive`, `Pastefix.app`, `Pastefix-$VERSION.dmg`, volname, release title, tag message | the same with `iris`/`Iris` |
 | `generate_keys -p` | `generate_keys --account iris -p` |
 | `sign_update "$DMG"` | `sign_update --account iris "$DMG"` |
-| `-destination 'generic/platform=macOS'` with the universal-binary comment | the same destination plus `ARCHS=arm64`; comment: "arm64 only: MLX and the local engines need Apple Silicon, and an Intel Mac cannot launch the app to be offered an update." |
+| `-destination 'generic/platform=macOS'` with the universal-binary comment | the same destination plus `ARCHS=arm64` and `-disableAutomaticPackageResolution` (see the pinning row above); comment: "arm64 only: MLX and the local engines need Apple Silicon, and an Intel Mac cannot launch the app to be offered an update." |
 | `allow-jit` must be present | delete that check (iris has no JIT entitlement); keep the `app-sandbox` must-be-absent check |
 | no plugin/macro flags needed | the archive `xcodebuild` invocation needs `-skipPackagePluginValidation -skipMacroValidation`, same as `scripts/build-app.sh` (mlx-swift's `CudaBuild` plugin and mlx-swift-lm's `MLXHuggingFaceMacros` macro need them headless; Task 8's report) |
 | `frameworks == "Sparkle.framework "` | `EXPECTED_FRAMEWORKS` set at the top of the script to the observed `Contents/Frameworks` listing (Task 8's report: `libswiftCompatibilitySpan.dylib llama.framework onnxruntime.framework`) plus `Sparkle.framework` once Sparkle lands, e.g. `"Sparkle.framework libswiftCompatibilitySpan.dylib llama.framework onnxruntime.framework "`; error message names it |
@@ -1265,6 +1267,12 @@ for f in "$APP"/Contents/Frameworks/*.framework; do
   codesign -dv "$f" 2>&1 | grep -q "TeamIdentifier=$TEAM_ID" || die "$(basename "$f") is not signed by team $TEAM_ID"
 done
 ```
+
+Note for whoever picks up Task 11: the `get-task-allow` check above exists because Xcode injects
+it into the empty entitlements file on a plain build. Setting `CODE_SIGN_INJECT_BASE_ENTITLEMENTS:
+NO` for the Release config in `project.yml` would stop that injection at the source rather than
+catching it after export — worth doing, but out of scope for this fix wave; don't change
+`project.yml` for it now.
 
 - [ ] **Step 3: Dry run on a branch (needs owner setup first)**
 
