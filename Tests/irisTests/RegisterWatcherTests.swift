@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// `register_directory_watcher`'s arguments, refusals and the per-conversation registration rule
 /// (#187 deliverable 4, spec §5). An in-memory store, a temp directory the test removes, a volatile

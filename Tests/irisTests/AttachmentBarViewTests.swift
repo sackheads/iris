@@ -1,6 +1,6 @@
 import XCTest
 import SwiftUI
-@testable import iris
+@testable import IrisKit
 
 final class AttachmentBarViewTests: XCTestCase {
     var tempDirectory: URL!

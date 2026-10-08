@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// What a job that fell behind does when the scheduler next looks (#187 §5): the Mac slept, or the
 /// app was closed, and `nextFireAt` is now more than one cadence in the past.

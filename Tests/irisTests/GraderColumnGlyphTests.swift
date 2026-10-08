@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import SwiftUI
-@testable import iris
+@testable import IrisKit
 
 /// The graded column's whole rendering — glyph, spoken label, visible text, tint — from one
 /// derivation keyed on BOTH `method` and `verdict`. That keying is the bug this covers: a verdict

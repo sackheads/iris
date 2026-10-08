@@ -1,5 +1,5 @@
 import Testing
-@testable import iris
+@testable import IrisKit
 
 @Suite("Plugin Reference Expansion Tests")
 struct PluginReferencesTests {

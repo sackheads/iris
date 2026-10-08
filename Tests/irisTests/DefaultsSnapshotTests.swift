@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #401: `ConfigManager.init` reads its settings from one `DefaultsSnapshot` rather than key by key,
 /// because each read on a store can be a synchronous cfprefsd round trip, and hundreds of

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #313 — a job run is charged for what its delegated subagents spend while the run is active,
 /// recursively, and for nothing they spend after it has ended. Before this, subagents accrued

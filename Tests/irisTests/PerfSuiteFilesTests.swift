@@ -1,7 +1,7 @@
 // Tests/irisTests/PerfSuiteFilesTests.swift
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The committed suite and prompt files must load, or perf/run.sh fails at the worst moment.
 @Suite("perf/ suite files")

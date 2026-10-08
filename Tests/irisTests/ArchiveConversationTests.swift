@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #182. Archiving is a list-management gesture: it must never change what the agent is doing,
 /// and must never leave the user without somewhere to type.

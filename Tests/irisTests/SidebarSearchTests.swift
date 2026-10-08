@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// `AppState.reveal(hit:)` (#183): what a tap on a sidebar search result does — select the
 /// conversation and point the transcript at the matching message. Reuses the

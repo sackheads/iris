@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #273. `set_workspace` stored whatever the model sent: no length bound, no shape check, and the
 /// value is persisted to `workspacePath`, decoded on every launch, and advertised to peers.

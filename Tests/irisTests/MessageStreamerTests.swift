@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Releases `sleep` callers on demand so a flush window is deterministic.
 private actor Gate {

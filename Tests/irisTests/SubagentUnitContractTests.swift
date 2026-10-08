@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Slice B3: the parent hands a subagent a bounded definition-of-done and the finished run
 /// carries an independently-graded verdict beside B2's unverified self-report.

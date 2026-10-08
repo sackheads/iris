@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// 5a §1. `markLastContentBlock` skipped a message whose last block was a `tool_result`, so a
 /// round ending in tool results wrote its cache entry at the assistant's `tool_use` instead, and

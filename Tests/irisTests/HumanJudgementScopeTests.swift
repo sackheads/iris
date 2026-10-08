@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// D2 must not disturb the ladder, the loop guards, or D1's paths (spec §9).
 @MainActor

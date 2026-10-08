@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Slice D3 state. `judgements` is contract-scoped and dies with the contract; `checkpointHistory`
 /// is the audit trail and lives on the CONVERSATION, which outlives the goal. Both are persisted,

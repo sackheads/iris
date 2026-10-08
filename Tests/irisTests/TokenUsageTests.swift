@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #204: `TokenUsage` had no hand-written `init(from:)`, so the synthesized decoder threw
 /// `keyNotFound` for any absent key rather than falling back to the property's own default —

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #218: a guard tier whose model is installed but fails to load or infer had no UI signal — the
 /// LED read `.configured` ("enabled, not loaded") while every guarded output was being replaced by

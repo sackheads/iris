@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @Suite("Usage cache counts (5a)")
 struct UsageCacheCountTests {

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #345: `withTimeout` returns at the deadline, whether or not the operation listens to
 /// cancellation. Every wait here is bounded by the operation itself (nothing parks forever), and

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #68 binds a workspace for CONTRACTED goals at lock, and nothing else. These are the guards for
 /// that claim (spec §2).

@@ -1,6 +1,6 @@
 import Security
 import Testing
-@testable import iris
+@testable import IrisKit
 
 @Suite("Keychain service scope")
 struct KeychainServiceScopeTests {

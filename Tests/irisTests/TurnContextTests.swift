@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 private let factHeading = "# Mid-Term Fact Store Memory (JIT Context)"
 

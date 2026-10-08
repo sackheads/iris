@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #345: the two callers of `withTimeout`, now that it returns at the deadline rather than when
 /// the operation gets round to finishing.

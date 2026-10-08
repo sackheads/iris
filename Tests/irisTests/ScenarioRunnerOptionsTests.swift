@@ -1,7 +1,7 @@
 // Tests/irisTests/ScenarioRunnerOptionsTests.swift
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @MainActor
 @Suite("ScenarioRunner options")

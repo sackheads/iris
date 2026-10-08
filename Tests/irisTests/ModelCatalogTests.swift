@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import os
-@testable import iris
+@testable import IrisKit
 
 /// #206 "Test Models" and #207 "List Available Models" — `ModelCatalog`'s URL builders, response
 /// parsing, and the network paths through `MockURLProtocol` (session-injected, never global

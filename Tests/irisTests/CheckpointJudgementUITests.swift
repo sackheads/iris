@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #191: a checkpoint that stops on a humanJudged criterion asks for the verdict inline. These
 /// tests pin the state machine and the persistence the spec's §3-§7 and §11 require.

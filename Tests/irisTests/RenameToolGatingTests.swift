@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// `rename_conversation` was offered on every turn with a description that invited a rename on
 /// a first message; the eagerness suite measured it as the only unprompted tool call (#132).

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The escape hatch. Unlocks only after a grade has failed, so the agent must try before declaring
 /// something inapplicable (spec §5).

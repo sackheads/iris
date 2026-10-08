@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 // End-to-end check of the ONNX Runtime Tier 2 path against a real compiled bundle.
 //

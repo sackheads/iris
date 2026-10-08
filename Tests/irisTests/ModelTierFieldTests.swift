@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #207 amendment: "Use as" assignment from the model list into a tier field. `keyPath` is pure;
 /// the assignment test writes through an isolated `ConfigManager(store:)`, never `.shared`

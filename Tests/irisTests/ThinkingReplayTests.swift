@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @Suite("ThinkingReplay: the floor and the prefix-continuity check (#314)")
 struct ThinkingReplayTests {

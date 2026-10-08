@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The row's wording, which is the most-read half of the icon/text pair. Kept out of the view so
 /// it is testable without a SwiftUI harness — and because the distinction it draws is the point of

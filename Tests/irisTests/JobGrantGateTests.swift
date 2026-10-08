@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #282 §3, §0.9 — the pure gate. Temp directories only.
 @Suite("JobGrant.allows (#282)")

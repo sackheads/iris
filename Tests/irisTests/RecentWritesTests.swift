@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The self-write filter's memory (#187 deliverable 4, spec §4, ruling R-D4-1).
 ///

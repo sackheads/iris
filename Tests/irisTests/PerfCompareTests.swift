@@ -1,7 +1,7 @@
 // Tests/irisTests/PerfCompareTests.swift
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @Suite("PerfCompare")
 struct PerfCompareTests {

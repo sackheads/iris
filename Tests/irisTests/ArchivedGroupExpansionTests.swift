@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #182 §9 — the one genuinely new UI rule: an archived conversation can be selected (search
 /// reveal, delete re-point, launch fallback), and a selected row inside a collapsed group is

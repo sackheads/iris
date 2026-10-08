@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// An ungated completion must say so. The panel's job across this whole arc is separating claims
 /// from verified facts, and "completed without passing" is exactly such a fact.

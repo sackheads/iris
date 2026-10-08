@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// `iris --run-job <id-or-name> [--dry-run] [--json]` (#187 spec §8, ruling R35): one job, run once
 /// from a terminal, against a store this process opened itself.

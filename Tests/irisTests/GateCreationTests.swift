@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #187 deliverable 3, spec §7 — `.poll` jobs are creatable: `schedule_job` takes a gate beside
 /// its cadence, checks the shape of it while there is still a person in the conversation to read

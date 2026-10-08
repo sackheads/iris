@@ -147,7 +147,9 @@ file) so it does not make the tree look dirty. An existing `index-build` can be 
 ## Project layout
 
 ```
-Sources/iris/
+Sources/iris/main.swift   # one line: `try await IrisMain.run()`; the SwiftPM `iris` executable
+Sources/IrisKit/          # everything else, as a library the executable (and later the Xcode app) links
+  IrisMain.swift          # process entry: headless modes (--perf, --bench, --run-job, --seed-dev-home), else the app
   AppState.swift          # @Observable god-object: conversations, messages, thinking state, timing
   iris.swift              # IrisEngine: the agent turn loop, tool dispatch, goal/reprompt logic
   ToolExecutor.swift      # run_command, read_file, write_file, search_web, skill CRUD

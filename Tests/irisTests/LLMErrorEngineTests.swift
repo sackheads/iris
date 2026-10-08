@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// How the engine surfaces a failed model call: a tagged system pill, not an agent bubble, and
 /// transient provider errors (429/503/529) are retried with backoff before anything is shown.

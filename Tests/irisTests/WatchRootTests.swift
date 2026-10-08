@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The roots a watch is turned down on (#187 deliverable 4, spec §5). A volatile `IrisPaths` root
 /// and an injected home: nothing here reads or writes `~/.iris`.

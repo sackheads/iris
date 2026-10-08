@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Slice D1 adds persisted state in two places. The legacy-decode cases are the important ones:
 /// a field that throws on a missing key takes every conversation with it.

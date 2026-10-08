@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #187 deliverable 3, spec §0.2 and §4 "Read-only narrowing": what a `readOnly` job run may not
 /// call, that it is never offered those tools in the first place, and that a call reaching the

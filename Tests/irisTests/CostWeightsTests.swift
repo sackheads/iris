@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// 5c §0.5: the weighted-token table. Budgets compare these figures, so a wrong weight here moves
 /// every stop and every pause.

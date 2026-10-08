@@ -1,6 +1,6 @@
 import XCTest
 import GRDB
-@testable import iris
+@testable import IrisKit
 
 final class FactStoreTests: XCTestCase {
     

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 private func runCommandResponse(_ command: String) -> GeminiResponse {
     let call = FunctionCall(name: "run_command", args: ["command": .string(command)],

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #353, inside the VM: killing the `container exec` client on the host leaves the command running
 /// in the container, so `exec` records the command's process group there and, on a timeout or a

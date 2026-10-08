@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// `search_web` prints a JSON array of up to ten `{"title","url","snippet"}` objects. Scoring the
 /// whole blob as one prompt made the tier-2 classifier flag it at 0.94-0.999 and replaced every

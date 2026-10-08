@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The perf suite needs more than six buckets: which model call, which tool, which guard tier.
 /// These records ride on the same task-local turn id as the buckets do.

@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import GRDB
-@testable import iris
+@testable import IrisKit
 
 @MainActor
 @Suite("drop_block persists per conversation (#314)", .timeLimit(.minutes(1)))

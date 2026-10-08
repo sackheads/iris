@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Counts `apply` attempts from the store's failure-injection hook, which is consulted once per
 /// conversation per attempt — a spinning retry loop shows up here as an ever-growing count.

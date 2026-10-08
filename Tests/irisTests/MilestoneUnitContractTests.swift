@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Slice B4: the contract a delegated milestone runs against is derived from the locked ladder,
 /// never restated by a caller — so delegation cannot reshape the gate it is measured by.

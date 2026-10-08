@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import iris
+@testable import IrisKit
 
 @Suite("Agent-facing iris paths")
 struct AgentFacingPathTests {

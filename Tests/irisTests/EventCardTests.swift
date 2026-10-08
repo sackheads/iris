@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The `.event` message payload (#187 deliverable 2): a job run's outcome, encoded into a
 /// `ChatMessage.content` and rendered as a one-line card. No SwiftUI here by design (AGENTS.md:

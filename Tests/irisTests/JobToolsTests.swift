@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #187 §9, invariant 6 — `list_jobs`, `get_job_run` and (§0.5) `search_conversations` and
 /// `read_conversation` cost prompt tokens on every turn they are declared, and only a pinned

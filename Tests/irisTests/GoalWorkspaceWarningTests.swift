@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The warning shown beside the workspace row before the user approves (spec §5). Text lives out
 /// of the view so it is testable without a SwiftUI harness.

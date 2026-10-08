@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #399 — a subagent runs a goal loop: a turn that ends without `goal_complete` is reprompted, up to
 /// the subagent's own iteration cap, and the manager waits for the loop's real end rather than the

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The pure half of deliverable 3's data layer (#187): `JobPolicy`, `Gate`, `BlockedCall`, and the
 /// three new `Job` fields. Everything here is codec behaviour — the leniency that keeps a row

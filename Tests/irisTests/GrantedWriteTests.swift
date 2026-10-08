@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #282 §0.13 — the descriptor walk. Temp directories only; every "outside" is a sibling temp dir
 /// the test checks stayed empty.

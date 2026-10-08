@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import GRDB
-@testable import iris
+@testable import IrisKit
 
 /// #177: full-text search over persisted conversation messages — the `messages_fts` index the
 /// store maintains alongside `messages`, the `search_memory` `scope` argument, and `/search`.

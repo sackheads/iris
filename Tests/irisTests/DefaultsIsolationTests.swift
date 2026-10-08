@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Persisted app state must not reach the developer's real `UserDefaults` from a test run.
 /// Before this, `AppState` wrote conversations to `UserDefaults.standard` unconditionally and

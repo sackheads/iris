@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @Suite("Conversation flags: isBackground / isPinned")
 struct ConversationFlagsTests {

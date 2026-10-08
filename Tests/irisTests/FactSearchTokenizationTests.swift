@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #201: `FactStoreManager.search` matched with `FTS3Pattern` against an FTS5 table
 /// (`facts_fts`). FTS3Pattern's tokenizer folds ASCII case only and keeps diacritics, so it is the

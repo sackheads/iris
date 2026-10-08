@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @Suite("Goal workspace on the contract (#68)")
 struct GoalWorkspaceContractTests {

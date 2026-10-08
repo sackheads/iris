@@ -1,7 +1,7 @@
 // Tests/irisTests/ScenarioPinnedBriefingTests.swift
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// 5b Task 7: the scenario fields that pin a run's conversation, write ledger rows before a turn
 /// and deliver an event card mid-turn. Every run here uses its own in-memory store (the runner

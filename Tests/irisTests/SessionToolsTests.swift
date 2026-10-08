@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #185 §6. The tools cost prompt tokens on every turn they are declared, so they appear only
 /// when there is somebody to talk to.

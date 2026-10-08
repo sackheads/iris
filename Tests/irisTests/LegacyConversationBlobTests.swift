@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @Suite("Legacy conversation blob import")
 struct LegacyConversationBlobTests {

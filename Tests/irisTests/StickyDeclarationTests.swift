@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// 5c §0.1: a state-gated tool, once declared, stays declared for the conversation, and a hard
 /// strip (unattended turn, non-main principal) always wins over the sticky set.

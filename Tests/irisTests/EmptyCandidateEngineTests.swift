@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// A model reply with no content is reported as an LLM error pill that names the reason,
 /// not as an agent message and not as a decode failure (#136).

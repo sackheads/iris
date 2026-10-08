@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Gemini omits `parts` on a candidate it stopped early (safety, recitation, an empty
 /// answer). `Content` is also the persisted history type, so decoding must tolerate the

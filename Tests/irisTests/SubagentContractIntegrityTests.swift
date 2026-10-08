@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// A subagent is handed its definition of done; it does not get to renegotiate it. B3 is the
 /// first slice that gives a subagent a `goalContract` at all — which also, for the first time,

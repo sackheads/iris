@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @Suite("ADC Credential Manager & Config Tests", .serialized)
 struct ADCCredentialManagerTests {

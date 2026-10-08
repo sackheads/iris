@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Consecutive system messages collapse into one group whose header shows only the latest line.
 /// An LLM error must not disappear into a collapsed run of tool-call pills, so it always forms a

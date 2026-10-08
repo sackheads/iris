@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The choke point that feeds `RecentWrites` (#187 deliverable 4, spec §4, ruling R-D4-1): the
 /// tool dispatcher records what a tool wrote, and only when the conversation it ran in was

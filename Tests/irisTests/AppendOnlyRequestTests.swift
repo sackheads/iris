@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Spec §2.1, PRs 1-2: within one turn, each request's messages extend the last request's,
 /// ignoring `cache_control`. Bodies come from `AnthropicClient.makeURLRequest`, the RequestDump

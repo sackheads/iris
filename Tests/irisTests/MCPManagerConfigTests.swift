@@ -1,5 +1,5 @@
 import Testing
-@testable import iris
+@testable import IrisKit
 
 @Suite("MCPManager Config Merge Tests")
 struct MCPManagerConfigTests {

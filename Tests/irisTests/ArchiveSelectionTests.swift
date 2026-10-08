@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #182 §5 — the same-list design dissolves the "selected but not rendered" class for delete and
 /// search. The launch path picks by `position`, not by what the user touched, so it needs a rule.

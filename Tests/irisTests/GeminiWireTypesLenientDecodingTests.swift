@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #204 round 2: `Part`, `FunctionCall`, `FunctionResponse` and `InlineData` are reachable from a
 /// persisted `history` row (`Content.parts[]`), so a `keyNotFound` inside any of them throws out of

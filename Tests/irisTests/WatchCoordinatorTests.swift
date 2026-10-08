@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import GRDB
-@testable import iris
+@testable import IrisKit
 
 /// #187 deliverable 4, spec §2 — the actor that owns a watch's time.
 ///

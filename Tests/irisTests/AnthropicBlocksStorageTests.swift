@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #314 decision 1: the reply's blocks ride the history JSON, reach hooks, and never reach Gemini.
 @Suite("Content.anthropicBlocks storage (#314)")

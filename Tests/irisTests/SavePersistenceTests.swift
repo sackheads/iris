@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Regression tests for #62: a locked goal contract lost its criteria across a restart because
 /// the debounced save never fired during sustained activity, and `_exit(0)` on quit discarded

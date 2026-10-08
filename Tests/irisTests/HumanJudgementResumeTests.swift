@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// What happens when the last judgement lands (spec §7). The grader is NOT re-run: the verdicts
 /// are already in hand, and re-running would overwrite the user's decision with a fresh

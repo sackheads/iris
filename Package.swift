@@ -8,6 +8,10 @@ let package = Package(
     platforms: [
         .macOS(.v14)
     ],
+    products: [
+        .library(name: "IrisKit", targets: ["IrisKit"]),
+        .executable(name: "iris", targets: ["iris"])
+    ],
     dependencies: [
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "2.0.0"),
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", branch: "main"),
@@ -22,8 +26,8 @@ let package = Package(
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
         // Targets can depend on other targets in this package and products from dependencies.
-        .executableTarget(
-            name: "iris",
+        .target(
+            name: "IrisKit",
             dependencies: [
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts"),
                 .product(name: "MCP", package: "swift-sdk"),
@@ -41,9 +45,13 @@ let package = Package(
                 .process("assets")
             ]
         ),
+        .executableTarget(
+            name: "iris",
+            dependencies: ["IrisKit"]
+        ),
         .testTarget(
             name: "irisTests",
-            dependencies: ["iris", .product(name: "MCP", package: "swift-sdk")],
+            dependencies: ["IrisKit", .product(name: "MCP", package: "swift-sdk")],
             exclude: ["Fixtures"]
         ),
     ],

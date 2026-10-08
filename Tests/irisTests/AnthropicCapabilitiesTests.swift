@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @Suite("AnthropicCapabilities and the binding beta (#314)")
 struct AnthropicCapabilitiesTests {

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// 5b spec §0, decision 4 (last paragraph): nothing rotates automatically, but once the pinned
 /// conversation's history passes ~150k estimated tokens, Iris posts a one-line `/new` suggestion

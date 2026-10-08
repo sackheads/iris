@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #237. The guard tiers were configured through two process-global singletons
 /// (`CoreMLEvaluator.shared.setModel`, `AuxiliaryModelManager.shared.setMockEngine`), and

@@ -1,5 +1,5 @@
 import XCTest
-@testable import iris
+@testable import IrisKit
 
 final class GCloudHelperTests: XCTestCase {
     

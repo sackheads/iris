@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// An LLM failure is shown as a tagged system message (`[LLM_ERROR]`, like `[TOOL_CALL]`) so the
 /// chat can render a compact headline with an optional disclosure, instead of attributing a raw

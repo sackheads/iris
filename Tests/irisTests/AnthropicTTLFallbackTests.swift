@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// 5c §0.8 insurance (#367 review): if the API ever rejects `ttl` with a 400, the call is retried
 /// once at the 5-minute default instead of failing every Iris turn. Scoped mock sessions only,

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #282 §2 — what a granted fire does before its turn: stamps the hidden conversation, checks the
 /// disk and the network, and ends its container when it is over. Every runtime touch is injected;

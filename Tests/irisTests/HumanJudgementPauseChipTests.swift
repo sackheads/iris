@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The chip that hosts Accept/Reject while a goal is paused for judgement: what its ✕ may do, and
 /// what its header says. Both are pure enough to test without a SwiftUI harness.

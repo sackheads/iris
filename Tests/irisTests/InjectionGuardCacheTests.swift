@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The tier-2/3 verdict for identical content is memoized for the process lifetime (#130).
 /// The first ladder run showed the tier-3 cloud canary re-sanitizing the static 32-byte

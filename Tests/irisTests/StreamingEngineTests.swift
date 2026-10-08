@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// A client that plays scripted stream events, one script per call.
 final class ScriptedStreamClient: LLMClientProtocol, @unchecked Sendable {

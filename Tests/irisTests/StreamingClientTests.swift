@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The streaming request shapes and the URLSession → SSE → mapper pump, against a mocked transport.
 @Suite("Streaming clients", .serialized)

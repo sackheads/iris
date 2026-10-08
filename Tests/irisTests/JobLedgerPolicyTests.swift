@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import GRDB
-@testable import iris
+@testable import IrisKit
 
 /// The stored half of deliverable 3's data layer (#187): migration `v10_job_policy`, the policy
 /// columns on `jobs`, the blocked-call/approval columns on `job_runs`, and the budget, breaker and

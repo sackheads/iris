@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 import os
-@testable import iris
+@testable import IrisKit
 
 @Suite("Plugin Auth Runner Tests")
 struct PluginAuthRunnerTests {

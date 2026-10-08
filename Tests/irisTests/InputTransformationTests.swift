@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @Suite("input_transformations and the diagnosis header (#314 decision 7)")
 struct InputTransformationTests {

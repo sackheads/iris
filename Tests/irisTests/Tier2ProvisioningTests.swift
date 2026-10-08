@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #210: mirror of #202 for tier 2. `InjectionGuard.executeTier2CoreML` used to swallow any load
 /// error via `try?` and let `CoreMLEvaluator.evaluate` fall back to a "safe" 0.0 when no model was

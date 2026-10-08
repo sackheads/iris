@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #337 and #339: a grader lists its approved workspace with `read_file` instead of `ls` (which
 /// asks), and a pre-approved grader read is opened by the #282 descriptor walk from the approved

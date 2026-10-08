@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #353: a host `run_command` runs in a process group of its own, and timeout and Stop kill the
 /// whole group — SIGTERM, then SIGKILL — not just the shell, whose forked children would otherwise

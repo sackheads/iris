@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Every test process gets its own `iris-tests-<pid>` defaults suite (#121) but nothing removed
 /// the plist afterwards, so ~/Library/Preferences accumulated one file per run (about a thousand

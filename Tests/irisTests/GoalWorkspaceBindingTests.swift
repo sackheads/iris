@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Binding at lock. Every case runs against a temp IrisPaths root — never the real ~/.iris (#121).
 @MainActor

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// 5b §0.3: the `Recent Activity` turn-context section. Pure, no store — `JobRun`/`Job` fixtures
 /// only. The security property (`hostileJobNameIsOneSafeLine`) is the one that matters most: a

@@ -27,8 +27,8 @@ mkdir -p "${APP_BUNDLE}/Contents/Resources"
 cp "${BUILD_DIR}/iris" "${APP_BUNDLE}/Contents/MacOS/iris"
 
 # Copy bundled assets if present
-if [ -d "Sources/iris/assets" ]; then
-    cp -R Sources/iris/assets/* "${APP_BUNDLE}/Contents/Resources/" 2>/dev/null || true
+if [ -d "Sources/IrisKit/assets" ]; then
+    cp -R Sources/IrisKit/assets/* "${APP_BUNDLE}/Contents/Resources/" 2>/dev/null || true
 fi
 
 # Write Info.plist

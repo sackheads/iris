@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import Darwin
-@testable import iris
+@testable import IrisKit
 
 /// The one `posix_spawn` + `waitpid` helper the kill paths share (#377). Everything it spawns is a
 /// base-system binary with a marker nothing else on the machine would carry.

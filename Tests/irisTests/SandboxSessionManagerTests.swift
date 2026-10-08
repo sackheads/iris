@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// `run(workspace:)` takes the working directory as a typed mount (fix round 1: a path with a `:`
 /// in it must never be re-parsed into a different directory). A bare string in a test is the

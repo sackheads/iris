@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #314 decision 6: header always, field unset, and on the binding 400 one retry with drop_block.
 /// Scoped mock sessions only (invariant 7); `work`'s account is unenforced, so this lane is the

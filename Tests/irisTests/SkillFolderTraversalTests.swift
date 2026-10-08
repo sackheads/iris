@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #284. `skillFolder(named:)` slugged a name — lowercase, trim, spaces and underscores to dashes
 /// — and appended it to `skillsDir` without ever refusing `..`, `/` or an empty result. The slug

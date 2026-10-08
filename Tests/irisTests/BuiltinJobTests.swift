@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import os
-@testable import iris
+@testable import IrisKit
 
 /// 5b §0.8 — a built-in job runs without a model turn: no request to the client, no background
 /// conversation, one ledger row with zero tokens and no transcript, and a card only when the

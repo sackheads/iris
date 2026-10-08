@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import iris
+@testable import IrisKit
 
 @Suite("Release defaults import")
 struct ReleaseDefaultsImportTests {

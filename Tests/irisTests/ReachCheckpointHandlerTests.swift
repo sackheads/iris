@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 private func reachCheckpointResponse(summary: String) -> GeminiResponse {
     let call = FunctionCall(name: "reach_checkpoint",

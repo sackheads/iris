@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// `goal_complete` is the goal loop's terminal signal. In a plain chat with no goal running it has
 /// nothing to terminate, but it used to be offered anyway and its effects applied in full —

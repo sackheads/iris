@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The completion chip pairs the agent's self-report with the grader's verdict per criterion.
 /// The self-report carries criterion TEXT, not ids, so pairing is a text match — and a sloppy one

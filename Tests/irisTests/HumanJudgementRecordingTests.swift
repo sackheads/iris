@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Recording one accept/reject onto the stored evaluation (spec §6). `VerdictMethod.human` has
 /// existed since slice C and has never been used; this is what finally uses it.

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #314 engine tests: a scripted client that records what the engine sent, replies carrying fake
 /// signed blocks, hooks as shell scripts in a temp dir of the test's own, and the Anthropic body

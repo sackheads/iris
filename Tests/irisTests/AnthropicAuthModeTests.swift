@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #181: the Anthropic provider gains an authentication mode mirroring Gemini's, so Claude on
 /// Vertex AI is a setting on the provider the app already has, not a second provider. Every

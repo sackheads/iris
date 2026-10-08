@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Builds a GeminiResponse that calls goal_complete with a summary and optional criteria_status.
 private func goalCompleteResponse(summary: String, criteriaStatus: JSONValue? = nil) -> GeminiResponse {

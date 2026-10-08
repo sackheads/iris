@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// End-to-end guard for the headless harness: a scenario drives the real engine loop with no UI
 /// and yields per-turn PerformanceProfiler breakdowns. Proves the core is profileable without a
