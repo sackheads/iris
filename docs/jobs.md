@@ -974,7 +974,9 @@ The run's subagents stop with it (#323). Cancelling the run's turn at the deadli
 subagent it is waiting on, and that subagent's own: the in-flight model call is cancelled, a running
 `run_command` is killed with everything it started, and its container is deleted. The run's result
 for that delegation reads `status: cancelled`. When the run is closed, any subagent still registered
-under it is stopped the same way, so none outlives its run. A subagent whose next round the run's
+under it is stopped the same way, so none outlives its run. A subagent's goal loop reprompts it after any turn that ends without `goal_complete`, up to its
+iteration cap (10 by default), and each reprompt is a round like any other: charged to the run and
+checked against its budget first. A subagent whose next round the run's
 budget refuses ends there and then, with no further model call, and the run reads `status: failed`
 and `Stopped by the background run's budget (…)` for it, not a generic stop.
 Whichever bound bit, the row and the card say `budget: weighted tokens exceeded` or `budget: time

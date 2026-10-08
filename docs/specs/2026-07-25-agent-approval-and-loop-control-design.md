@@ -86,6 +86,7 @@ an approval continuation when it is cancelled/timed-out.
 ### B1. Configurable turn cap
 Replace the hardcoded `> 100` in the goal auto-reprompt with `ConfigManager.maxGoalIterations`
 (default **50**). Applies to every goal loop — main agent, self-defined goals, and subagents.
+(Since #399 a subagent has its own cap, `maxSubagentIterations`, default 10, which ends it `failed` without a summary turn.)
 
 ### B2. Loop detection
 The engine keeps a short per-conversation history of executed tool-call signatures
