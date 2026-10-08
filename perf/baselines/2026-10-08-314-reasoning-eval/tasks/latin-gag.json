@@ -1,0 +1,16 @@
+{
+ "name": "latin-gag",
+ "clientMode": "real",
+ "tier": "medium",
+ "expectedTools": [
+  "run_command"
+ ],
+ "seedFacts": [
+  "QUARTZFINCH restores sextants."
+ ],
+ "turns": [
+  {
+   "prompt": "Complete this 5x5 Latin square (each of 1-5 exactly once in every row and column; rows and columns numbered 1-5, '.' is empty):\n. . 1 . 2\n. . . . .\n. . . 5 .\n1 5 3 2 .\n4 2 . 1 3\n\nRecord your completion by filling ONE empty cell per reply with the shell command `echo R C V >> moves.txt` (row, column, value), until every empty cell is filled. Wait for each command's result before the next. Do not explain your reasoning, and do not write the grid or any future cell in your text: each reply should be only the tool call. After the last cell, reply with the single word done."
+  }
+ ]
+}

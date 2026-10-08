@@ -1,0 +1,16 @@
+{
+ "name": "records-nogag",
+ "clientMode": "real",
+ "tier": "medium",
+ "expectedTools": [
+  "run_command"
+ ],
+ "seedFacts": [
+  "QUARTZFINCH restores sextants."
+ ],
+ "turns": [
+  {
+   "prompt": "Here are 12 records:\nALDER: a=7 b=15 c=4\nBIRCH: a=6 b=1 c=21\nCEDAR: a=21 b=10 c=8\nDOGWOOD: a=13 b=7 c=13\nELM: a=18 b=29 c=15\nFIR: a=2 b=21 c=21\nGINKGO: a=6 b=5 c=4\nHAZEL: a=27 b=8 c=29\nIVY: a=1 b=8 c=19\nJUNIPER: a=9 b=2 c=7\nKAPOK: a=5 b=12 c=11\nLARCH: a=27 b=11 c=17\n\nExactly one record satisfies all three of: a*b - c is a multiple of 7; a > c; b is odd. Do these steps, one shell command per reply, waiting for each result: 1) `mkdir -p out`, 2) `date`, 3) `ls`, 4) `echo ready`, 5) finally `echo <ID> > out/answer.txt` with the ID of the record that satisfies all three. Then reply with the single word done."
+  }
+ ]
+}

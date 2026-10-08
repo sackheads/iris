@@ -1,0 +1,1 @@
+{ "name": "314-eval-xl-nogag", "lane": "real", "repetitions": 1, "pauseMs": 1000, "rungs": [4], "scenarios": ["perf/prompts/314-eval/route-nogag-xl.json", "perf/prompts/314-eval/latin-nogag-xl.json"] }

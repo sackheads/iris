@@ -1,0 +1,890 @@
+{
+  "cacheCountsVersion" : 1,
+  "environment" : {
+    "basePricePerMTok" : 4,
+    "buildConfiguration" : "release",
+    "cpuCount" : 14,
+    "gitDirty" : true,
+    "gitSha" : "109ed3e",
+    "headless" : false,
+    "injectionGuardEnabled" : true,
+    "machineModel" : "Mac16,7",
+    "models" : {
+      "easy" : "claude-haiku-4-5-20251001",
+      "hard" : "claude-fable-5",
+      "medium" : "claude-opus-5-5"
+    },
+    "osVersion" : "Version 26.7.1 (Build 25G241)",
+    "promptGuardEngine" : "cloud",
+    "provider" : "Anthropic",
+    "sandboxEnabled" : true,
+    "streaming" : true,
+    "toolDeclarationCount" : 17,
+    "toolSandbox" : "sandboxed",
+    "vibecopEnabled" : true,
+    "vibecopEngine" : "cloud"
+  },
+  "finishedAt" : "2026-10-08T05:35:45Z",
+  "scenarios" : [
+    {
+      "category" : "314-eval",
+      "lane" : "real",
+      "name" : "route-nogag-xl",
+      "path" : "perf\/prompts\/314-eval\/route-nogag-xl.json",
+      "rungs" : [
+        {
+          "medianMs" : 34902.68483299017,
+          "p90Ms" : 34902.68483299017,
+          "repetitions" : [
+            {
+              "coldStart" : true,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 3.1975829899311066
+                    },
+                    "injectionGuard" : {
+                      "count" : 26,
+                      "ms" : 2.8764190673828125
+                    },
+                    "primaryLLM" : {
+                      "count" : 13,
+                      "ms" : 33408.792167037725
+                    },
+                    "toolExecution" : {
+                      "count" : 12,
+                      "ms" : 1462.560209929943
+                    }
+                  },
+                  "finalText" : "done",
+                  "finalTextLength" : 4,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13882,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 0,
+                      "firstTokenMs" : 5151.827416986227,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 8216.221928596497,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 807,
+                      "promptTokens" : 13886,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 13437,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 956,
+                      "firstTokenMs" : 1772.5419589877129,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2318.3679580688477,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 133,
+                      "promptTokens" : 14395,
+                      "returnedToolCalls" : true,
+                      "round" : 1
+                    },
+                    {
+                      "cacheReadTokens" : 14393,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 178,
+                      "firstTokenMs" : 4350.415582984686,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 4354.708909988403,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 447,
+                      "promptTokens" : 14573,
+                      "returnedToolCalls" : true,
+                      "round" : 2
+                    },
+                    {
+                      "cacheReadTokens" : 13437,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 1641,
+                      "firstTokenMs" : 2073.244083017111,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2528.988003730774,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 196,
+                      "promptTokens" : 15080,
+                      "returnedToolCalls" : true,
+                      "round" : 3
+                    },
+                    {
+                      "cacheReadTokens" : 14571,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 678,
+                      "firstTokenMs" : 1889.514375001192,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1892.7969932556152,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 81,
+                      "promptTokens" : 15251,
+                      "returnedToolCalls" : true,
+                      "round" : 4
+                    },
+                    {
+                      "cacheReadTokens" : 15078,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 303,
+                      "firstTokenMs" : 1925.2536669969559,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1930.517077445984,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 81,
+                      "promptTokens" : 15383,
+                      "returnedToolCalls" : true,
+                      "round" : 5
+                    },
+                    {
+                      "cacheReadTokens" : 15381,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 132,
+                      "firstTokenMs" : 1775.935416996479,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1781.251072883606,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 81,
+                      "promptTokens" : 15515,
+                      "returnedToolCalls" : true,
+                      "round" : 6
+                    },
+                    {
+                      "cacheReadTokens" : 15513,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 132,
+                      "firstTokenMs" : 1913.4684999883175,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1968.7089920043945,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 81,
+                      "promptTokens" : 15647,
+                      "returnedToolCalls" : true,
+                      "round" : 7
+                    },
+                    {
+                      "cacheReadTokens" : 13882,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 1895,
+                      "firstTokenMs" : 1924.156916975975,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1946.6989040374756,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 81,
+                      "promptTokens" : 15779,
+                      "returnedToolCalls" : true,
+                      "round" : 8
+                    },
+                    {
+                      "cacheReadTokens" : 15645,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 264,
+                      "firstTokenMs" : 1861.675791978836,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1864.9699687957764,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 81,
+                      "promptTokens" : 15911,
+                      "returnedToolCalls" : true,
+                      "round" : 9
+                    },
+                    {
+                      "cacheReadTokens" : 15909,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 132,
+                      "firstTokenMs" : 1954.6420840024948,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1963.7060165405273,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 81,
+                      "promptTokens" : 16043,
+                      "returnedToolCalls" : true,
+                      "round" : 10
+                    },
+                    {
+                      "cacheReadTokens" : 13437,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 2736,
+                      "firstTokenMs" : 1728.5315830111504,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1743.6800003051758,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 81,
+                      "promptTokens" : 16175,
+                      "returnedToolCalls" : true,
+                      "round" : 11
+                    },
+                    {
+                      "cacheReadTokens" : 16041,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 264,
+                      "firstTokenMs" : 896.9203329980373,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 898.5949754714966,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 3,
+                      "promptTokens" : 16307,
+                      "returnedToolCalls" : false,
+                      "round" : 12
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.7431670129299164
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 3.189375013113022
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.7298330068588257
+                    },
+                    "guard.tier1" : {
+                      "count" : 13,
+                      "ms" : 0.13179299235343933
+                    },
+                    "guard.tier2" : {
+                      "count" : 5,
+                      "ms" : 0.0015420317649841309
+                    },
+                    "guard.tier3" : {
+                      "count" : 5,
+                      "ms" : 0.0020419955253601074
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"command\":\"python3 -c \\\"\\nimport itertools\\nM='''0 20 23 33 21 13 11 14 22\\n20 0 31 11 33 31 19 39 29\\n23 31 0 37 27 14 24 31 32\\n33 11 37 0 23 11 21 16 29\\n21 33 27 23 0 38 20 30 12\\n13 31 14 11 38 0 10 22 26\\n11 19 24 21 20 10 0 14 24\\n14 39 31 16 30 22 14 0 27\\n22 29 32 29 12 26 24 27 0'''\\nd=[list(map(int,l.split())) for l in M.splitlines()]\\nbest=min((sum(d[a][b] for a,b in zip((0,)+p,p+(0,))),p) for p in itertools.permutations(range(1,9)))\\nprint(best[0],'A'+''.join('ABCDEFGHI'[i] for i i… [truncated, 80 more characters]",
+                      "ms" : 689.8928880691528,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"which perl awk swift node 2>&1\",\"intent\":\"Find an available interpreter\"}",
+                      "ms" : 69.52798366546631,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"perl -e '\\n@d=map{[split]}(\\\"0 20 23 33 21 13 11 14 22\\\",\\\"20 0 31 11 33 31 19 39 29\\\",\\\"23 31 0 37 27 14 24 31 32\\\",\\\"33 11 37 0 23 11 21 16 29\\\",\\\"21 33 27 23 0 38 20 30 12\\\",\\\"13 31 14 11 38 0 10 22 26\\\",\\\"11 19 24 21 20 10 0 14 24\\\",\\\"14 39 31 16 30 22 14 0 27\\\",\\\"22 29 32 29 12 26 24 27 0\\\");\\n$best=1e9;\\nsub go{my($cur,$len,$used,@path)=@_; return if $len>=$best;\\n if(@path==9){my $t=$len+$d[$cur][0]; if($t<$best){$best=$t;@bp=@path}return}\\n for my $n(1..8){next if $used&(1<<$… [truncated, 172 more characters]",
+                      "ms" : 95.46101093292236,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo A >> route.txt\",\"intent\":\"Append stop A\"}",
+                      "ms" : 68.48001480102539,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo G >> route.txt\",\"intent\":\"Append stop G\"}",
+                      "ms" : 62.66200542449951,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo F >> route.txt\",\"intent\":\"Append stop F\"}",
+                      "ms" : 68.30096244812012,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo C >> route.txt\",\"intent\":\"Append stop C\"}",
+                      "ms" : 56.78403377532959,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo E >> route.txt\",\"intent\":\"Append stop E\"}",
+                      "ms" : 66.73300266265869,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo I >> route.txt\",\"intent\":\"Append stop I\"}",
+                      "ms" : 68.05300712585449,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo B >> route.txt\",\"intent\":\"Append stop B\"}",
+                      "ms" : 65.31393527984619,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo D >> route.txt\",\"intent\":\"Append stop D\"}",
+                      "ms" : 81.47597312927246,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo H >> route.txt\",\"intent\":\"Append stop H\"}",
+                      "ms" : 67.2609806060791,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 34888.41903209686
+                }
+              ],
+              "wallClockMs" : 34902.68483299017
+            }
+          ],
+          "rung" : 4
+        }
+      ],
+      "summary" : {
+        "medianFirstTokenMs" : 1913.4684999883175,
+        "medianMs" : 34902.68483299017,
+        "missedExpectedToolRate" : 0,
+        "p90Ms" : 34902.68483299017,
+        "toolCallRate" : 1,
+        "toolCallsByName" : {
+          "run_command" : 12
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "314-eval",
+      "lane" : "real",
+      "name" : "latin-nogag-xl",
+      "path" : "perf\/prompts\/314-eval\/latin-nogag-xl.json",
+      "rungs" : [
+        {
+          "medianMs" : 91280.3988340199,
+          "p90Ms" : 91280.3988340199,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.6848340034484863
+                    },
+                    "injectionGuard" : {
+                      "count" : 40,
+                      "ms" : 3.655912905931473
+                    },
+                    "primaryLLM" : {
+                      "count" : 20,
+                      "ms" : 89366.0985429883
+                    },
+                    "toolExecution" : {
+                      "count" : 19,
+                      "ms" : 1875.947085082531
+                    }
+                  },
+                  "finalText" : "done",
+                  "finalTextLength" : 4,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13755,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 0,
+                      "firstTokenMs" : 10529.205875009298,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 10538.421034812927,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 1212,
+                      "promptTokens" : 13759,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 13437,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 467,
+                      "firstTokenMs" : 8104.28033298254,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 8107.232093811035,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 908,
+                      "promptTokens" : 13906,
+                      "returnedToolCalls" : true,
+                      "round" : 1
+                    },
+                    {
+                      "cacheReadTokens" : 13755,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 296,
+                      "firstTokenMs" : 8518.46483400464,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 8523.26500415802,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 934,
+                      "promptTokens" : 14053,
+                      "returnedToolCalls" : true,
+                      "round" : 2
+                    },
+                    {
+                      "cacheReadTokens" : 13437,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 761,
+                      "firstTokenMs" : 8508.603541016579,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 8530.143976211548,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 882,
+                      "promptTokens" : 14200,
+                      "returnedToolCalls" : true,
+                      "round" : 3
+                    },
+                    {
+                      "cacheReadTokens" : 14198,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 147,
+                      "firstTokenMs" : 7864.719375014305,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 7887.0590925216675,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 782,
+                      "promptTokens" : 14347,
+                      "returnedToolCalls" : true,
+                      "round" : 4
+                    },
+                    {
+                      "cacheReadTokens" : 14051,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 441,
+                      "firstTokenMs" : 7799.022625029087,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 7834.839105606079,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 783,
+                      "promptTokens" : 14494,
+                      "returnedToolCalls" : true,
+                      "round" : 5
+                    },
+                    {
+                      "cacheReadTokens" : 13904,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 735,
+                      "firstTokenMs" : 6747.993458002806,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 6751.911997795105,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 665,
+                      "promptTokens" : 14641,
+                      "returnedToolCalls" : true,
+                      "round" : 6
+                    },
+                    {
+                      "cacheReadTokens" : 13437,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 1349,
+                      "firstTokenMs" : 6305.13425001502,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 6325.858950614929,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 613,
+                      "promptTokens" : 14788,
+                      "returnedToolCalls" : true,
+                      "round" : 7
+                    },
+                    {
+                      "cacheReadTokens" : 14492,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 441,
+                      "firstTokenMs" : 2445.5556249916553,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2448.6069679260254,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 157,
+                      "promptTokens" : 14935,
+                      "returnedToolCalls" : true,
+                      "round" : 8
+                    },
+                    {
+                      "cacheReadTokens" : 14639,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 441,
+                      "firstTokenMs" : 3349.5070410072803,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 3349.8029708862305,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 242,
+                      "promptTokens" : 15082,
+                      "returnedToolCalls" : true,
+                      "round" : 9
+                    },
+                    {
+                      "cacheReadTokens" : 15080,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 147,
+                      "firstTokenMs" : 2385.2851670086384,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2389.078974723816,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 165,
+                      "promptTokens" : 15229,
+                      "returnedToolCalls" : true,
+                      "round" : 10
+                    },
+                    {
+                      "cacheReadTokens" : 14345,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 1029,
+                      "firstTokenMs" : 1734.9586249887943,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1735.1670265197754,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 96,
+                      "promptTokens" : 15376,
+                      "returnedToolCalls" : true,
+                      "round" : 11
+                    },
+                    {
+                      "cacheReadTokens" : 15374,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 147,
+                      "firstTokenMs" : 1599.174791008234,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1616.0919666290283,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 96,
+                      "promptTokens" : 15523,
+                      "returnedToolCalls" : true,
+                      "round" : 12
+                    },
+                    {
+                      "cacheReadTokens" : 14933,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 735,
+                      "firstTokenMs" : 1740.4433329999447,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1747.9280233383179,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 96,
+                      "promptTokens" : 15670,
+                      "returnedToolCalls" : true,
+                      "round" : 13
+                    },
+                    {
+                      "cacheReadTokens" : 15227,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 588,
+                      "firstTokenMs" : 2845.722540974617,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2853.487968444824,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 237,
+                      "promptTokens" : 15817,
+                      "returnedToolCalls" : true,
+                      "round" : 14
+                    },
+                    {
+                      "cacheReadTokens" : 15668,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 294,
+                      "firstTokenMs" : 2512.50091701746,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2517.4310207366943,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 210,
+                      "promptTokens" : 15964,
+                      "returnedToolCalls" : true,
+                      "round" : 15
+                    },
+                    {
+                      "cacheReadTokens" : 14786,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 1323,
+                      "firstTokenMs" : 1745.2535000145435,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1760.2440118789673,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 96,
+                      "promptTokens" : 16111,
+                      "returnedToolCalls" : true,
+                      "round" : 16
+                    },
+                    {
+                      "cacheReadTokens" : 15962,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 294,
+                      "firstTokenMs" : 1744.3732080161572,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1752.569079399109,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 96,
+                      "promptTokens" : 16258,
+                      "returnedToolCalls" : true,
+                      "round" : 17
+                    },
+                    {
+                      "cacheReadTokens" : 16256,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 147,
+                      "firstTokenMs" : 1716.644416987896,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1722.2700119018555,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 96,
+                      "promptTokens" : 16405,
+                      "returnedToolCalls" : true,
+                      "round" : 18
+                    },
+                    {
+                      "cacheReadTokens" : 16403,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 147,
+                      "firstTokenMs" : 975.434582978487,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 975.6209850311279,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 3,
+                      "promptTokens" : 16552,
+                      "returnedToolCalls" : false,
+                      "round" : 19
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.49308300018310547
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 0.6826249957084656
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.3933750092983246
+                    },
+                    "guard.tier1" : {
+                      "count" : 20,
+                      "ms" : 0.15895697474479675
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"command\":\"echo 1 2 4 >> moves.txt\",\"intent\":\"Fill cell (1,2) with 4\"}",
+                      "ms" : 663.5630130767822,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 1 5 3 >> moves.txt\",\"intent\":\"Fill cell (1,5) with 3\"}",
+                      "ms" : 60.9360933303833,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 2 1 2 >> moves.txt\",\"intent\":\"Fill cell (2,1) with 2\"}",
+                      "ms" : 72.5400447845459,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 2 3 4 >> moves.txt\",\"intent\":\"Fill cell (2,3) with 4\"}",
+                      "ms" : 70.76907157897949,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 2 5 5 >> moves.txt\",\"intent\":\"Fill cell (2,5) with 5\"}",
+                      "ms" : 72.11804389953613,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 2 6 3 >> moves.txt\",\"intent\":\"Fill cell (2,6) with 3\"}",
+                      "ms" : 59.45003032684326,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 3 1 1 >> moves.txt\",\"intent\":\"Fill cell (3,1) with 1\"}",
+                      "ms" : 55.23407459259033,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 3 4 4 >> moves.txt\",\"intent\":\"Fill cell (3,4) with 4\"}",
+                      "ms" : 67.67189502716064,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 3 5 2 >> moves.txt\",\"intent\":\"Fill cell (3,5) with 2\"}",
+                      "ms" : 65.85800647735596,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 4 1 5 >> moves.txt\",\"intent\":\"Fill cell (4,1) with 5\"}",
+                      "ms" : 83.91499519348145,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 4 2 2 >> moves.txt\",\"intent\":\"Fill cell (4,2) with 2\"}",
+                      "ms" : 60.87195873260498,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 4 6 4 >> moves.txt\",\"intent\":\"Fill cell (4,6) with 4\"}",
+                      "ms" : 75.20198822021484,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 5 1 3 >> moves.txt\",\"intent\":\"Fill cell (5,1) with 3\"}",
+                      "ms" : 70.52803039550781,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 5 4 5 >> moves.txt\",\"intent\":\"Fill cell (5,4) with 5\"}",
+                      "ms" : 59.02290344238281,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 6 1 4 >> moves.txt\",\"intent\":\"Fill cell (6,1) with 4\"}",
+                      "ms" : 73.08292388916016,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 6 3 5 >> moves.txt\",\"intent\":\"Fill cell (6,3) with 5\"}",
+                      "ms" : 57.00802803039551,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 6 4 1 >> moves.txt\",\"intent\":\"Fill cell (6,4) with 1\"}",
+                      "ms" : 74.34296607971191,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 6 5 6 >> moves.txt\",\"intent\":\"Fill cell (6,5) with 6\"}",
+                      "ms" : 64.29004669189453,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo 6 6 2 >> moves.txt\",\"intent\":\"Fill cell (6,6) with 2\"}",
+                      "ms" : 66.62702560424805,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 91261.34896278381
+                }
+              ],
+              "wallClockMs" : 91280.3988340199
+            }
+          ],
+          "rung" : 4
+        }
+      ],
+      "summary" : {
+        "medianFirstTokenMs" : 2679.1117289960384,
+        "medianMs" : 91280.3988340199,
+        "missedExpectedToolRate" : 0,
+        "p90Ms" : 91280.3988340199,
+        "toolCallRate" : 1,
+        "toolCallsByName" : {
+          "run_command" : 19
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    }
+  ],
+  "schemaVersion" : 1,
+  "startedAt" : "2026-10-08T05:33:33Z",
+  "suite" : "314-eval-xl-nogag"
+}

@@ -1,0 +1,16 @@
+{
+ "name": "latin-nogag-xl",
+ "clientMode": "real",
+ "tier": "medium",
+ "expectedTools": [
+  "run_command"
+ ],
+ "seedFacts": [
+  "QUARTZFINCH restores sextants."
+ ],
+ "turns": [
+  {
+   "prompt": "Complete this 6x6 Latin square (each of 1-6 exactly once in every row and column; rows and columns numbered 1-6, '.' is empty):\n6 . 1 2 . 5\n. 1 . 6 . .\n. 5 3 . . 6\n. . 6 3 1 .\n. 6 2 . 4 1\n. 3 . . . .\n\nRecord your completion by filling ONE empty cell per reply with the shell command `echo R C V >> moves.txt` (row, column, value), until every empty cell is filled. Wait for each command's result before the next. After the last cell, reply with the single word done."
+  }
+ ]
+}
