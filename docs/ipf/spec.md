@@ -9,8 +9,8 @@ manifest schema, the reference syntax for config and secret values, the
 component formats, and the validation rules that Iris applies at install
 and at load. Where this document and the Iris source disagree, the source
 is the bug — file an issue. This revision was checked directly against
-`Sources/iris/IPFManifest.swift`, `Sources/iris/PluginReferences.swift`,
-`Sources/iris/PluginManager.swift`, and `Sources/iris/PluginInstaller.swift`.
+`Sources/IrisKit/IPFManifest.swift`, `Sources/IrisKit/PluginReferences.swift`,
+`Sources/IrisKit/PluginManager.swift`, and `Sources/IrisKit/PluginInstaller.swift`.
 
 ## Summary
 
@@ -52,7 +52,7 @@ config values live outside the plugin, in `~/.iris/config/plugins.json`.
 ## Manifest schema
 
 The manifest is the YAML frontmatter of `plugin.md`, decoded against
-`IPFManifest` in `Sources/iris/IPFManifest.swift`. Field names below match
+`IPFManifest` in `Sources/IrisKit/IPFManifest.swift`. Field names below match
 the Swift struct exactly.
 
 | Field | Type | Required | Constraints |
