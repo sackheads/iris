@@ -169,6 +169,9 @@ enum PerfCLI {
                 // next run's claim, which reclaims a dead pid's lock and resets the directory.
                 // That relies on the process exiting after `execute` returns (main.swift); a
                 // long-lived host calling `execute` repeatedly would keep the lock instead.
+                if let warning = DevHomeSeeder.unseededCopyWarning(standard: .standard, release: .release) {
+                    print(warning)
+                }
                 let dir = try claimScratchWorkspace()
                 FileManager.default.changeCurrentDirectoryPath(dir.path)
                 // Memory tools write through IrisPaths.default: route the whole home at a
@@ -176,7 +179,7 @@ enum PerfCLI {
                 // stay untouched. Reads see the same context.
                 try IrisPaths.useVolatileCopy(at: dir.appendingPathComponent(".iris"))
                 memoryBefore = IrisPaths.fingerprint(of: realMemory)
-                print("perf: real-lane file tools, cwd and ~/.iris confined to \(dir.path)")
+                print("perf: real-lane file tools, cwd and \(IrisPaths.standard.displayRoot) confined to \(dir.path)")
                 scratch = dir
             }
             defer {
