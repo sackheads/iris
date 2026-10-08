@@ -394,7 +394,7 @@ struct SettingsView: View {
                         
                         if config.vibecopEngine == "llama_cpp" {
                             TextField("GGUF Model", text: $config.vibecopModel)
-                                .help("The GGUF model file name (must be in ~/.iris/models/)")
+                                .help(IrisPaths.standard.agentFacing("The GGUF model file name (must be in ~/.iris/models/)"))
                             
                             let isDownloaded = downloader.isModelDownloaded(name: config.vibecopModel)
                             if !isDownloaded {
@@ -632,7 +632,7 @@ struct SettingsView: View {
                         
                         if config.promptGuardEngine == "llama_cpp" {
                             TextField("GGUF Model", text: $config.promptGuardModel)
-                                .help("The GGUF model file name for the Tier 3 Canary (must be in ~/.iris/models/)")
+                                .help(IrisPaths.standard.agentFacing("The GGUF model file name for the Tier 3 Canary (must be in ~/.iris/models/)"))
                             
                             let isDownloaded = downloader.isModelDownloaded(name: config.promptGuardModel)
                             if !isDownloaded {

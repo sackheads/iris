@@ -800,6 +800,9 @@ actor IrisEngine {
     /// leading `~` that survives.
     nonisolated static func expandTilde(_ path: String) -> String {
         guard path.hasPrefix("~") else { return path }
+        // `~/.iris` is the model's name for Iris's own home, whichever home this process has.
+        if path == "~/.iris" { return IrisPaths.default.root.path }
+        if path.hasPrefix("~/.iris/") { return IrisPaths.default.root.path + path.dropFirst("~/.iris".count) }
         if path == "~" { return NSHomeDirectory() }
         if path.hasPrefix("~/") { return NSHomeDirectory() + path.dropFirst(1) }
         let afterTilde = path.index(after: path.startIndex)
@@ -4284,7 +4287,8 @@ actor IrisEngine {
     /// What an approved call that turns out to target a protected directory returns instead of
     /// running. Also the run's outcome, so the card says why nothing happened.
     static func protectedWriteRefusal(tool: String) -> String {
-        "Not run: `\(tool)` would write into a protected directory (`~/.iris/config` or `~/.iris/plugins`), which an approval cannot authorise."
+        IrisPaths.standard.agentFacing(
+            "Not run: `\(tool)` would write into a protected directory (`~/.iris/config` or `~/.iris/plugins`), which an approval cannot authorise.")
     }
 
     /// What a call a read-only job's profile refused returns if it somehow reaches the

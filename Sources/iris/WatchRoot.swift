@@ -58,7 +58,9 @@ enum WatchRoot {
     /// `update_soul` write under `~/.iris/memory` through their own managers, where the self-write
     /// filter (spec §4) cannot see them, so a watch anywhere over that tree would fire on the run's
     /// own notes and the run would write more of them.
-    static let protectedRefusal = "that path is or contains Iris's own directory (~/.iris); a watch there would react to itself"
+    static var protectedRefusal: String {
+        IrisPaths.standard.agentFacing("that path is or contains Iris's own directory (~/.iris); a watch there would react to itself")
+    }
 
     /// Why `canonical` may not be watched, or nil when it may. Checked in the order a reader would
     /// want the answer: a root that is too broad is told so even when it also contains Iris's

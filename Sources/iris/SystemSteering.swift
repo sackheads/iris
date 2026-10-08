@@ -14,7 +14,7 @@ enum SystemSteering {
         if let url = Bundle.module.url(forResource: "SYSTEM", withExtension: "md"),
            let contents = try? String(contentsOf: url, encoding: .utf8),
            !contents.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return contents
+            return IrisPaths.standard.agentFacing(contents)
         }
         return fallback
     }

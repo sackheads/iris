@@ -1015,7 +1015,7 @@ class AppState {
 
     /// The automatic reflection pass, shared by the 30-message trigger and `/new`'s rotation of
     /// Iris (5b §0.4). `/reflect` asks for more (an OKF grooming pass) and keeps its own text.
-    static let reflectionPrompt = "System Event [Reflection Trigger]: It's time to consolidate your memories. Reflect on the recent conversation. Have you learned any new user preferences, project structures, or recurring workflows? If so, use `update_soul` to evolve your persona, `update_user_profile` to update the user profile, `update_memory` to consolidate durable facts, and `create_skill`/`update_skill` for procedural skills. When you learn something durable — a lesson, recipe, decision, or reusable artifact — archive it to your permanent library at `~/.iris/memory/library/` (see your Library Management skill). Output a transparent summary of the gist of the updates for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'"
+    static let reflectionPrompt = IrisPaths.standard.agentFacing("System Event [Reflection Trigger]: It's time to consolidate your memories. Reflect on the recent conversation. Have you learned any new user preferences, project structures, or recurring workflows? If so, use `update_soul` to evolve your persona, `update_user_profile` to update the user profile, `update_memory` to consolidate durable facts, and `create_skill`/`update_skill` for procedural skills. When you learn something durable — a lesson, recipe, decision, or reusable artifact — archive it to your permanent library at `~/.iris/memory/library/` (see your Library Management skill). Output a transparent summary of the gist of the updates for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'")
 
     /// What a reflection says when it changed nothing (both prompts ask for exactly this). Matched
     /// as a prefix of the trimmed reply; such a reflection posts no card.
@@ -1753,7 +1753,7 @@ class AppState {
             return
         } else if trimmed.hasPrefix("/reflect") {
             appendMessage(role: .system, content: "Triggering manual memory reflection...", to: convId)
-            let reflectionPrompt = """
+            let reflectionPrompt = IrisPaths.standard.agentFacing("""
             System Event [Reflection Trigger]: It's time to consolidate your memories. Reflect on the recent conversation. Have you learned any new user preferences, project structures, or recurring workflows? If so, use `update_soul` to evolve your persona, `update_user_profile` to update the user profile, `update_memory` to consolidate durable facts, and `create_skill`/`update_skill` for procedural skills. When you learn something durable — a lesson, recipe, decision, or reusable artifact — archive it to your permanent library at `~/.iris/memory/library/` (see your Library Management skill).
 
             Additionally, perform a grooming pass on your Markdown memory library. Ensure ALL memory files (`~/.iris/memory/skills/*`, `~/.iris/memory/USER.md`, `~/.iris/memory/SOUL.md`) use the Open Knowledge Format (OKF). This means each file MUST start with a YAML frontmatter block containing at least:
@@ -1765,7 +1765,7 @@ class AppState {
             timestamp: ...
             ---
             Verify that your cross-links between files are still valid, and reorganize or fix any broken links. Output a transparent summary of the gist of the updates and grooming performed for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'
-            """
+            """)
             // Asked for here, so the reply stays here; outside Iris a card goes to Iris too (5b §0.6).
             runThinkingTask(conversationId: convId) { [self] in
                 await runReflection(reflectionPrompt, in: convId, moveReplyToIris: false)
@@ -3701,11 +3701,11 @@ class AppState {
             guard let self = self else { return }
             if args == "reload" {
                 await self.engine.invalidateSystemPrompt()
-                self.emitCommandOutput("Custom rules reloaded from `~/.iris/rules/`. System prompt cache invalidated.", format: .markdown, to: convId)
+                self.emitCommandOutput(IrisPaths.standard.agentFacing("Custom rules reloaded from `~/.iris/rules/`. System prompt cache invalidated."), format: .markdown, to: convId)
             } else {
                 let custom = await SkillManager.shared.loadCustomRules()
                 let body = custom.isEmpty
-                    ? "No custom rules found in `~/.iris/rules/`."
+                    ? IrisPaths.standard.agentFacing("No custom rules found in `~/.iris/rules/`.")
                     : "**Active Custom Rules:**\n\(custom)"
                 self.emitCommandOutput(body, format: .markdown, to: convId)
             }

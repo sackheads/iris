@@ -51,7 +51,7 @@ extension JobGrant {
         "the mount source \(source) is too broad to grant (the whole filesystem, a volume or mount point, the home directory, or a system root such as /System, /Library, /usr, /private, /var, /etc, /bin, /sbin or /Volumes) — name the directory the job actually works in."
     }
     static func protected(_ source: String) -> String {
-        "the mount source \(source) is or contains Iris's own directory (~/.iris), which a job may not mount."
+        IrisPaths.standard.agentFacing("the mount source \(source) is or contains Iris's own directory (~/.iris), which a job may not mount.")
     }
     static let readOnlyFirst = "the first mount must be read-write when any later one is, because it is the job's working directory — put the read-write directory first."
     static func duplicate(_ source: String) -> String { "the mount source \(source) is listed twice." }

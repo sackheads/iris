@@ -297,10 +297,23 @@ struct IrisPaths: Sendable {
     /// True if `rawPath` resolves to a location inside `root` (`~/.iris`).
     /// Tilde-expands and standardizes the path (resolving `..`) first.
     func isUnderIrisDir(_ rawPath: String) -> Bool {
-        let expanded = (rawPath as NSString).expandingTildeInPath
+        let expanded = IrisEngine.expandTilde(rawPath)   // #275: never `expandingTildeInPath` on a decider
         let resolved = URL(fileURLWithPath: expanded).standardizedFileURL.path
         let rootPath = root.standardizedFileURL.path
         return resolved == rootPath || resolved.hasPrefix(rootPath + "/")
+    }
+
+    /// `root` as the model should write it: `~/...` when under the user's home.
+    var displayRoot: String {
+        let home = NSHomeDirectory()
+        let path = root.standardizedFileURL.path
+        return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+    }
+
+    /// Bundled text spells the home `~/.iris`. Rewrites it to `displayRoot` so a dev agent is
+    /// pointed at `~/.iris-dev`, in prompts and in shell commands it copies from them.
+    func agentFacing(_ text: String) -> String {
+        text.replacing(/~\/\.iris(?![A-Za-z0-9_.\-])/, with: { _ in displayRoot })
     }
 
     /// Create the bucket directories if absent. Called by the migrator and by managers that

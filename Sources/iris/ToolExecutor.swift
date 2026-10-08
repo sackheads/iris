@@ -127,7 +127,7 @@ struct ToolExecutor {
         ),
         FunctionDeclaration(
             name: "create_skill",
-            description: "Create a reusable procedural skill in the local skill library (~/.iris/memory/skills/<name>/SKILL.md).",
+            description: IrisPaths.standard.agentFacing("Create a reusable procedural skill in the local skill library (~/.iris/memory/skills/<name>/SKILL.md)."),
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -140,7 +140,7 @@ struct ToolExecutor {
         ),
         FunctionDeclaration(
             name: "update_skill",
-            description: "Update an existing skill in the local skill library (~/.iris/memory/skills/<name>/SKILL.md).",
+            description: IrisPaths.standard.agentFacing("Update an existing skill in the local skill library (~/.iris/memory/skills/<name>/SKILL.md)."),
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -153,7 +153,7 @@ struct ToolExecutor {
         ),
         FunctionDeclaration(
             name: "delete_skill",
-            description: "Delete a skill from the local skill library (~/.iris/memory/skills/<name>/SKILL.md).",
+            description: IrisPaths.standard.agentFacing("Delete a skill from the local skill library (~/.iris/memory/skills/<name>/SKILL.md)."),
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
