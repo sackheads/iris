@@ -315,3 +315,64 @@ struct SubagentTurnDeadlineTests {
         #expect(client.calls == 2, "nothing ran after the timeout")
     }
 }
+
+/// #406 review: `GoalLoopControl` calls its turn observer outside its lock, so turn k's end can be
+/// delivered after turn k+1's begin. Plain threads, not the cooperative pool, so the ordering is
+/// forced with semaphores; every wait is bounded, so a regression fails rather than hangs.
+@Suite("A subagent's turn start under out-of-order turn events (#402)")
+struct SubagentTurnStartOrderingTests {
+
+    final class Box: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Date
+        init(_ d: Date) { value = d }
+        var now: Date { lock.withLock { value } }
+        func set(_ d: Date) { lock.withLock { value = d } }
+    }
+
+    @Test("turn k's end delivered after turn k+1's begin leaves k+1 its deadline")
+    func lateEndOfAnOlderTurnIsIgnored() {
+        let control = GoalLoopControl()
+        let id = UUID()
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        let clock = Box(t0)
+        let tracker = SubagentTurnStart(t0)
+        let endOfTurnOneEntered = DispatchSemaphore(value: 0)
+        let releaseEndOfTurnOne = DispatchSemaphore(value: 0)
+        control.observeTurns(for: id) { began, seq in
+            if !began && seq == 1 {
+                endOfTurnOneEntered.signal()
+                _ = releaseEndOfTurnOne.wait(timeout: .now() + 10)
+            }
+            tracker.record(began: began, seq: seq, at: clock.now)
+        }
+
+        control.beginTurn(for: id)                     // turn 1
+        let endDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { control.endTurn(for: id); endDone.signal() }
+        #expect(endOfTurnOneEntered.wait(timeout: .now() + 5) == .success, "turn 1's end is being delivered")
+
+        // Turn 2 begins while turn 1's end is still on its way.
+        let t2 = t0.addingTimeInterval(10)
+        clock.set(t2)
+        let beginDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { control.beginTurn(for: id); beginDone.signal() }
+        #expect(beginDone.wait(timeout: .now() + 5) == .success, "the observer is not called under the lock")
+        #expect(tracker.start == t2)
+
+        clock.set(t0.addingTimeInterval(20))
+        releaseEndOfTurnOne.signal()
+        #expect(endDone.wait(timeout: .now() + 5) == .success)
+        #expect(tracker.start == t2, "turn 1's late end did not clear turn 2's start")
+    }
+
+    @Test("a turn's begin delivered after its own end does not restart the deadline")
+    func lateBeginOfAnEndedTurnIsIgnored() {
+        let tracker = SubagentTurnStart(Date(timeIntervalSince1970: 0))
+        tracker.record(began: false, seq: 1, at: Date(timeIntervalSince1970: 5))
+        tracker.record(began: true, seq: 1, at: Date(timeIntervalSince1970: 6))
+        #expect(tracker.start == nil)
+        tracker.record(began: true, seq: 2, at: Date(timeIntervalSince1970: 7))
+        #expect(tracker.start == Date(timeIntervalSince1970: 7))
+    }
+}

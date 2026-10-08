@@ -1114,7 +1114,7 @@ actor IrisEngine {
 
     /// Calls `observer(true)` as each of the conversation's turns begins and `observer(false)` as
     /// the last one in flight ends; nil stops it. A subagent's per-turn deadline runs between (#402).
-    nonisolated func observeGoalLoopTurns(for conversationId: UUID, _ observer: (@Sendable (Bool) -> Void)?) {
+    nonisolated func observeGoalLoopTurns(for conversationId: UUID, _ observer: (@Sendable (_ began: Bool, _ seq: Int) -> Void)?) {
         goalLoop.observeTurns(for: conversationId, observer)
     }
 

@@ -178,15 +178,10 @@ final class SubagentManager: @unchecked Sendable {
         // the turn's real start, and only a turn in flight is held to it: the reprompt pause and
         // the grace polls after the loop's end never count, and never turn a `.failed` into a
         // `.timedOut`. Seeded with now, so turn 1 is covered before its own stamp lands.
-        final class TurnStart: @unchecked Sendable {
-            private let lock = NSLock()
-            private var at: Date?
-            init(_ at: Date) { self.at = at }
-            func set(_ d: Date?) { lock.withLock { at = d } }
-            func get() -> Date? { lock.withLock { at } }
+        let turnStart = SubagentTurnStart(deadlineClock())
+        engine.observeGoalLoopTurns(for: subagentId) { began, seq in
+            turnStart.record(began: began, seq: seq, at: deadlineClock())
         }
-        let turnStart = TurnStart(deadlineClock())
-        engine.observeGoalLoopTurns(for: subagentId) { began in turnStart.set(began ? deadlineClock() : nil) }
 
         let engineTask = Task {
             // The first turn. Since activeGoal is set, the engine reprompts itself after each turn
@@ -230,7 +225,7 @@ final class SubagentManager: @unchecked Sendable {
                         break
                     }
                 }
-                if let start = turnStart.get(), deadlineClock() >= start.addingTimeInterval(perTurn) {
+                if let start = turnStart.start, deadlineClock() >= start.addingTimeInterval(perTurn) {
                     // Classify BEFORE `engineTask.cancel()`, not after: cancelling it can itself
                     // unwind the engine's in-flight model call, which hits `processInput`'s own
                     // catch block and fires `onSubagentComplete` with `.failed` — a second write to
