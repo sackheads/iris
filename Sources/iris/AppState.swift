@@ -808,6 +808,12 @@ class AppState {
             appendLaunchNotice("The saved conversations from an earlier version could not be imported; they will be retried at the next launch.",
                                to: target)
         }
+        // The on-disk store would not open and `makeDefault` fell back to memory: everything
+        // still works, and none of it is saved. Say so where the user is looking.
+        if let failure = store.openFailure, let target = noticeTarget {
+            appendLaunchNotice("The conversation store could not be opened: \(failure); changes will not be saved.",
+                               to: target)
+        }
         // `store.loadAll()` itself threw (not a per-row skip): logged in `loadConversations()`;
         // say so here too so the loss is visible, not only in the console log.
         if let headline = loadFailureHeadline, let target = noticeTarget {

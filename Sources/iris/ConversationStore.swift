@@ -184,22 +184,31 @@ final class ConversationStore: Sendable {
     /// the isolation rule in §1 directly ("this process got a memory store") instead of only
     /// inferring it from the absence of a file under the real paths.
     let path: URL?
+    /// Why the on-disk store could not be opened, when this memory store stands in for it.
+    /// `AppState` turns it into a launch notice; nil for every store opened as asked.
+    let openFailure: String?
     var isOnDisk: Bool { path != nil }
 
     /// Scheduled and event-driven jobs (#187), on this store's writer and this store's schema.
     let ledger: JobLedger
 
-    private init(writer: any DatabaseWriter, path: URL?, alreadyMigrated: Bool = false) throws {
+    private init(writer: any DatabaseWriter, path: URL?, alreadyMigrated: Bool = false,
+                 openFailure: String? = nil) throws {
         self.writer = writer
         self.path = path
+        self.openFailure = openFailure
         if !alreadyMigrated { try Self.migrator.migrate(writer) }
         self.ledger = JobLedger(writer: writer)
     }
 
     static func inMemory() throws -> ConversationStore {
+        try inMemory(openFailure: nil)
+    }
+
+    private static func inMemory(openFailure: String?) throws -> ConversationStore {
         let queue = try DatabaseQueue(configuration: Self.configuration)
         try migratedTemplate.get().backup(to: queue)
-        return try ConversationStore(writer: queue, path: nil, alreadyMigrated: true)
+        return try ConversationStore(writer: queue, path: nil, alreadyMigrated: true, openFailure: openFailure)
     }
 
     /// An empty in-memory database with every migration applied, built once per process. Each
@@ -214,7 +223,36 @@ final class ConversationStore: Sendable {
 
     static func onDisk(at url: URL) throws -> ConversationStore {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        return try ConversationStore(writer: DatabasePool(path: url.path, configuration: Self.configuration), path: url)
+        let pool = try DatabasePool(path: url.path, configuration: Self.configuration)
+        try repairPreMergeArchive(pool)
+        return try ConversationStore(writer: pool, path: url)
+    }
+
+    /// The on-disk store, or a memory store carrying the reason it could not be opened. The app
+    /// must still launch, but a store that silently loses every write has to say so.
+    static func openOrFallBack(at url: URL) -> ConversationStore {
+        do { return try onDisk(at: url) } catch {
+            print("WARNING: conversation store failed to open on disk, using memory only: \(error)")
+            return try! inMemory(openFailure: "\(error)")
+        }
+    }
+
+    /// A build of #226's branch before it merged registered the archive migration as
+    /// `v6_archive`; main renumbered it `v7_archive` (3756fde) with an identical body: one
+    /// nullable BOOLEAN `isArchived` column. A store from that build has the column but not the
+    /// identifier, so the migrator re-ran the ALTER and the open failed with "duplicate column
+    /// name: isArchived". Record `v7_archive` as applied when its column is already there. The
+    /// stray `v6_archive` row stays: GRDB ignores identifiers it has no migration for unless
+    /// `eraseDatabaseOnSchemaChange` is set, which it is not here.
+    static func repairPreMergeArchive(_ writer: some DatabaseWriter) throws {
+        try writer.write { db in
+            guard try db.tableExists("grdb_migrations") else { return }
+            let applied = Set(try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations"))
+            guard applied.contains("v6_archive"), !applied.contains("v7_archive"),
+                  try db.columns(in: "conversations").contains(where: { $0.name == "isArchived" })
+            else { return }
+            try db.execute(sql: "INSERT INTO grdb_migrations (identifier) VALUES ('v7_archive')")
+        }
     }
 
     private static var configuration: Configuration {
@@ -1516,10 +1554,7 @@ extension ConversationStore {
         let isolated = shouldIsolate(xctestLinked: NSClassFromString("XCTestCase") != nil,
                                      headless: HeadlessMode.isEnabled,
                                      volatileDefaults: IrisDefaults.isVolatileCopy)
-        if !isolated {
-            do { return try onDisk(at: IrisPaths.default.conversationsDB) }
-            catch { print("WARNING: conversation store failed to open on disk, using memory only: \(error)") }
-        }
+        if !isolated { return openOrFallBack(at: IrisPaths.default.conversationsDB) }
         return try! inMemory()
     }
 }
