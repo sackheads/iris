@@ -9,8 +9,9 @@
 # Versioning: CFBundleShortVersionString = the version given; CFBundleVersion (what Sparkle
 # compares) = `git rev-list --count HEAD`, monotonic on main. Both are xcodebuild overrides.
 #
-# Identity: $CODESIGN_IDENTITY if set, else the first "Developer ID Application" identity in the
-# keychain (same convention as scripts/sign.sh). Notary profile: $NOTARY_PROFILE, default
+# Identity: $CODESIGN_IDENTITY if set (must name team RMKGLPG4K4, or be the generic "Developer ID
+# Application"), else the first "Developer ID Application: ... (RMKGLPG4K4)" identity in the
+# keychain. Notary profile: $NOTARY_PROFILE, default
 # iris-notary. Needs the Metal Toolchain (see scripts/build-app.sh).
 # One-time setup: docs/releasing.md.
 set -euo pipefail
@@ -90,7 +91,14 @@ else
   [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || die "HEAD is not pushed to origin/main"
 fi
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && die "tag $TAG already exists"
-git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1 && die "tag $TAG already exists on origin"
+# --exit-code: 2 means no matching ref; anything else non-zero is a failure to ask.
+LS_REMOTE_RC=0
+git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1 || LS_REMOTE_RC=$?
+case $LS_REMOTE_RC in
+  0) die "tag $TAG already exists on origin" ;;
+  2) ;;
+  *) die "cannot reach origin (git ls-remote exit $LS_REMOTE_RC)" ;;
+esac
 git rev-parse -q --verify origin/gh-pages >/dev/null || die "origin/gh-pages missing (see docs/releasing.md)"
 gh auth status >/dev/null 2>&1 || die "gh is not authenticated"
 xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1 \
@@ -98,11 +106,19 @@ xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1 \
 command -v xmllint >/dev/null || die "xmllint not found"
 
 IDENTITY="${CODESIGN_IDENTITY:-}"
-if [[ -z "$IDENTITY" ]]; then
-  IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
-    | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)
+if [[ -n "$IDENTITY" ]]; then
+  [[ "$IDENTITY" == *"($TEAM_ID)"* || "$IDENTITY" == "Developer ID Application" ]] \
+    || die "CODESIGN_IDENTITY '$IDENTITY' is not a team $TEAM_ID identity"
+else
+  # Parsed in zsh rather than piped through head: under pipefail, head closing early can
+  # SIGPIPE the producer and fail the assignment.
+  IDENTITIES=$(security find-identity -v -p codesigning 2>/dev/null || true)
+  IDENTITY_RE="\"(Developer ID Application: [^\"]*\\($TEAM_ID\\))\""
+  for line in "${(@f)IDENTITIES}"; do
+    if [[ "$line" =~ $IDENTITY_RE ]]; then IDENTITY="${match[1]}"; break; fi
+  done
 fi
-[[ -n "$IDENTITY" ]] || die "no Developer ID Application identity found; set CODESIGN_IDENTITY"
+[[ -n "$IDENTITY" ]] || die "no Developer ID Application identity for team $TEAM_ID found; set CODESIGN_IDENTITY"
 echo "identity: $IDENTITY"
 
 PUBLIC_KEY=$(/usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$INFO_PLIST" 2>/dev/null || true)
@@ -114,7 +130,8 @@ echo "version: $VERSION  build: $BUILD  tag: $TAG"
 # --- Sparkle tools (from the SPM artifact; resolving packages downloads them) ---------------
 step "Resolving packages"
 xcodebuild -resolvePackageDependencies -project "$PROJECT" -scheme "$SCHEME" \
-  -derivedDataPath "$DERIVED" -disableAutomaticPackageResolution -quiet
+  -derivedDataPath "$DERIVED" -disableAutomaticPackageResolution -quiet \
+  || die "package resolution failed: Package.resolved is out of date with Package.swift; run swift package resolve and commit it (or origin/the network is unreachable)"
 SPARKLE_BIN="$DERIVED/SourcePackages/artifacts/sparkle/Sparkle/bin"
 [[ -x "$SPARKLE_BIN/sign_update" ]] || die "sign_update not found under $SPARKLE_BIN"
 KEYCHAIN_PUBLIC_KEY=$("$SPARKLE_BIN/generate_keys" --account iris -p 2>/dev/null || true)
@@ -151,23 +168,47 @@ EXPORTED_PUBLIC_KEY=$(/usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$APP/Co
 MIN_SYSTEM_VERSION=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$APP/Contents/Info.plist")
 [[ -n "$MIN_SYSTEM_VERSION" ]] || die "LSMinimumSystemVersion missing from exported app"
 
-codesign -d --entitlements - "$APP" 2>/dev/null | grep -q "com.apple.security.app-sandbox" \
+ARCHS_BUILT=$(lipo -archs "$APP/Contents/MacOS/Iris") || die "cannot read the architectures of the app binary"
+[[ "$ARCHS_BUILT" == "arm64" ]] || die "app binary is '$ARCHS_BUILT', expected exactly arm64"
+
+# Signature checks capture output and match in the shell: `codesign | grep -q` under pipefail
+# fails at random when grep exits before codesign finishes writing, and passes when codesign fails.
+APP_ENTS=$(codesign -d --entitlements - "$APP" 2>/dev/null) || die "cannot read the app's entitlements"
+[[ "$APP_ENTS" == *com.apple.security.app-sandbox* ]] \
   && die "app-sandbox entitlement present — Iris runs user-approved shell commands and must not be sandboxed"
-# A plain `xcodebuild build` injects get-task-allow; export is expected to strip it. Verify.
-codesign -d --entitlements - "$APP" 2>/dev/null | grep -q get-task-allow \
-  && die "exported app still carries com.apple.security.get-task-allow (notarization will reject it)"
 # An allowlist, not a denylist: the toolchain renames test and interop dylibs (lib_TestingInterop,
 # libswift_Testing*), and a name we did not think of must not ship. LC_ALL=C pins the sort so the
 # comparison does not depend on the release machine's locale.
-frameworks=$(ls "$APP/Contents/Frameworks" 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')
+frameworks=$({ ls "$APP/Contents/Frameworks" 2>/dev/null || true; } | LC_ALL=C sort | tr '\n' ' ')
 [[ "$frameworks" == "$EXPECTED_FRAMEWORKS" ]] \
   || die "unexpected Contents/Frameworks: ${frameworks:-<none>}(expected exactly $EXPECTED_FRAMEWORKS)"
 stray=$(find "$APP/Contents" \( -name '*.xctest' -o \( -name '*.dylib' \
   -not -path '*/Contents/Frameworks/*.framework/*' \
   -not -path '*/Contents/Frameworks/libswiftCompatibilitySpan.dylib' \) \) -print)
 [[ -z "$stray" ]] || die "test or stray dylib artefacts in the app: $stray"
-for f in "$APP"/Contents/Frameworks/*.framework; do
-  codesign -dv "$f" 2>&1 | grep -q "TeamIdentifier=$TEAM_ID" || die "$(basename "$f") is not signed by team $TEAM_ID"
+# Team and get-task-allow for every signed piece: the app, everything in Frameworks, and Sparkle's
+# nested helpers. A plain `xcodebuild build` injects get-task-allow; export is expected to strip
+# it, and notarization rejects it anywhere.
+check_signature() {  # check_signature <path>
+  local p="$1" sig ents
+  sig=$(codesign -dv "$p" 2>&1) || die "${p#$EXPORT_DIR/} is not signed"
+  [[ "$sig" =~ $'(^|\n)TeamIdentifier='"$TEAM_ID"$'(\n|$)' ]] \
+    || die "${p#$EXPORT_DIR/} is not signed by team $TEAM_ID"
+  ents=$(codesign -d --entitlements - "$p" 2>/dev/null) || die "cannot read entitlements of ${p#$EXPORT_DIR/}"
+  [[ "$ents" == *get-task-allow* ]] \
+    && die "${p#$EXPORT_DIR/} carries com.apple.security.get-task-allow (notarization will reject it)"
+  return 0
+}
+SPARKLE_VERSION_DIR="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
+SIGNED_PATHS=(
+  "$APP"
+  "$APP"/Contents/Frameworks/*(N)
+  "$SPARKLE_VERSION_DIR"/Autoupdate(N)
+  "$SPARKLE_VERSION_DIR"/Updater.app(N)
+  "$SPARKLE_VERSION_DIR"/XPCServices/*.xpc(N)
+)
+for p in "${SIGNED_PATHS[@]}"; do
+  check_signature "$p"
 done
 codesign --verify --deep --strict "$APP" || die "code signature invalid"
 
@@ -176,7 +217,8 @@ notarize() {  # notarize <artifact>
   local artifact="$1" out id result
   out=$(xcrun notarytool submit "$artifact" --keychain-profile "$NOTARY_PROFILE" --wait 2>&1) || true
   echo "$out"
-  id=$(echo "$out" | awk '/^ *id:/{print $2; exit}')
+  # No early `exit` in awk: under pipefail it can SIGPIPE the echo and fail the assignment.
+  id=$(echo "$out" | awk '/^ *id:/ && id == "" {id = $2} END {print id}')
   result=$(echo "$out" | awk '/^ *status:/{print $2}' | tail -1)
   if [[ "$result" != "Accepted" ]]; then
     [[ -n "$id" ]] && xcrun notarytool log "$id" --keychain-profile "$NOTARY_PROFILE" || true
