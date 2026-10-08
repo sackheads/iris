@@ -16,6 +16,9 @@ final class GoalLoopControl: @unchecked Sendable {
     private var pending: [UUID: Pending] = [:]
     private var turnsInFlight: [UUID: Int] = [:]
     private var halted: Set<UUID> = []
+    /// Called as each turn begins, before it does anything: a subagent stamps its per-turn
+    /// deadline here (#402), so the stamp is the turn's real start, not whenever a poll noticed it.
+    private var turnObservers: [UUID: @Sendable () -> Void] = [:]
 
     /// Stores `task` as the conversation's pending reprompt, cancelling the one it replaces.
     /// Nothing is stored for a halted loop: the task is cancelled instead and the call returns
@@ -45,7 +48,18 @@ final class GoalLoopControl: @unchecked Sendable {
         task?.cancel()
     }
 
-    func beginTurn(for id: UUID) { lock.withLock { turnsInFlight[id, default: 0] += 1 } }
+    func beginTurn(for id: UUID) {
+        let observer = lock.withLock {
+            turnsInFlight[id, default: 0] += 1
+            return turnObservers[id]
+        }
+        observer?()
+    }
+
+    /// Sets (or with nil, removes) what is called as each of the conversation's turns begins.
+    func observeTurns(for id: UUID, _ observer: (@Sendable () -> Void)?) {
+        lock.withLock { turnObservers[id] = observer }
+    }
 
     func endTurn(for id: UUID) {
         lock.withLock {

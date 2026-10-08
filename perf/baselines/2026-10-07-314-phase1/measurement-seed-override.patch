@@ -1,0 +1,19 @@
+diff --git a/Sources/iris/IrisDefaults.swift b/Sources/iris/IrisDefaults.swift
+index e8e8ab9..c6c46d5 100644
+--- a/Sources/iris/IrisDefaults.swift
++++ b/Sources/iris/IrisDefaults.swift
+@@ -61,7 +61,13 @@ enum IrisDefaults {
+         // Also clears plists left by earlier bench/perf/test processes that crashed or were
+         // killed before their own atexit handler ran; live pids and this process are skipped.
+         sweepStaleTestSuites()
+-        let seed = perfSeed(from: UserDefaults.standard.persistentDomain(forName: appDomain) ?? [:])
++        var seed = perfSeed(from: UserDefaults.standard.persistentDomain(forName: appDomain) ?? [:])
++        // MEASUREMENT PATCH (#314 Phase 1, identical on both arms): perf-only overrides of the volatile
++        // copy, so a run can target Anthropic on Vertex without writing the real domain.
++        if let raw = ProcessInfo.processInfo.environment["IRIS_PERF_SEED_JSON"],
++           let extra = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [String: Any] {
++            seed.merge(extra) { _, new in new }
++        }
+         let name = "iris-bench-\(ProcessInfo.processInfo.processIdentifier)"
+         let copy = makeVolatileCopy(of: seed, suiteName: name)
+         lock.withLock { override = copy; volatileSuiteName = name }

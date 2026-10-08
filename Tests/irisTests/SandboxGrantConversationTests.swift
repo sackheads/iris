@@ -41,7 +41,7 @@ struct SandboxGrantConversationTests {
         state.setSandboxGrant(for: parent, grant)
 
         _ = await SubagentManager.shared.runSubagent(role: "helper", task: "say hi", effort: "easy",
-                                                     parentConversationId: parent, maxIterations: 5,
+                                                     parentConversationId: parent, turnTimeout: 1,
                                                      client: FakeLLMClient(responses: [textResponse("hi")]),
                                                      appState: state, recentWrites: RecentWrites())
 
