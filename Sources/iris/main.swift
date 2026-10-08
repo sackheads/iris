@@ -31,6 +31,8 @@ if let perf = PerfCLI.parse(CommandLine.arguments) {
     fflush(stdout)
     fflush(stderr)
     _exit(code)
+} else if CommandLine.arguments.contains("--seed-dev-home") {
+    exit(DevHomeSeeder.runCLI())
 } else {
     IrisApp.main()
 }

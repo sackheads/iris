@@ -14,4 +14,6 @@ build_or_die() {
 }
 build_or_die swift build
 scripts/sign.sh .build/debug/iris
+# Dev builds live in ~/.iris-dev. The first run copies the installed app's home and secrets.
+[[ -e "$HOME/.iris-dev" ]] || .build/debug/iris --seed-dev-home
 exec .build/debug/iris "$@"
