@@ -79,11 +79,13 @@ running Debug from Xcode cannot open real data. The bundle id is injectable for 
   them without prompting; confirm on first run.
 - `scripts/run-dev.sh` runs it automatically when `~/.iris-dev` is missing or empty.
 
-**Importing defaults into release.** Today's settings in UserDefaults (setup-wizard state, the
-hotkey, toggles) live in the `iris` domain, which dev keeps. The release domain
-`com.bnaylor.iris` starts empty, so a first release launch would rerun setup. On launch under the
-release identity, if the release domain has never been imported (a marker key), copy every key of
-the `iris` domain into it once and set the marker. Never the other direction, never twice.
+**Importing defaults into a bundled app.** Today's settings in UserDefaults (setup-wizard state,
+the hotkey, toggles) live in the `iris` domain, which the bare dev binary keeps. Any bundled app
+— the installed release app (`com.bnaylor.iris`) and the Xcode Debug app (`com.bnaylor.iris.dev`)
+— starts from its own, empty domain, so its first launch would otherwise rerun setup. On launch,
+whenever the process's own domain is not `iris` (and never under tests), if that domain has never
+been imported into (a marker key), copy every key of the `iris` domain into it once and set the
+marker. Never the other direction, never twice.
 
 **Known first-launch cost (release).** Existing Keychain items were created by the bare dev
 binary (identifier `iris`). The installed `Iris.app` is a different code identity, so its first

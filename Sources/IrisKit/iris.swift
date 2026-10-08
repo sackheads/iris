@@ -4912,8 +4912,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct IrisApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     init() {
-        // Before anything reads a setting: the first release launch inherits dev's settings.
-        ReleaseDefaultsImport.runIfNeeded()
+        // Before anything reads a setting: a bundled app's first launch inherits dev's settings.
+        AppDefaultsImport.runIfNeeded()
         // Next, before anything else in the launch sequence: this claims the store for this app
         // instance, and `iris --run-job` refuses while the file names a live process (#187 §8).
         // Nothing above it may touch `conversations.sqlite` — today nothing here does, and keeping
