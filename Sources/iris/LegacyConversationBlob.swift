@@ -19,10 +19,14 @@ enum LegacyConversationBlob {
         /// The blob decoded fine but the write into the store failed (disk full, some other
         /// transient condition). The live key is left in place so the next launch retries.
         case importFailed
+        /// The store is the memory fallback for an on-disk store that would not open. Importing
+        /// into it and retiring the live key would lose the blob at quit, so nothing is touched.
+        case storeUnavailable
     }
 
     static func migrateIfNeeded(into store: ConversationStore, defaults: UserDefaults, now: Date = Date()) -> Outcome {
         guard let data = defaults.data(forKey: key) else { return .nothingToDo }
+        guard store.openFailure == nil else { return .storeUnavailable }
         let decoded: [Conversation]
         do {
             decoded = try JSONDecoder().decode([Conversation].self, from: data)

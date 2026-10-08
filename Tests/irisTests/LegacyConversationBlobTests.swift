@@ -26,6 +26,26 @@ struct LegacyConversationBlobTests {
         return c
     }
 
+    @Test("a memory store standing in for an unopenable one never takes the blob")
+    func memoryFallbackLeavesTheBlob() throws {
+        let store = try ConversationStore.inMemory(openFailure: "SQLite error 26: file is not a database")
+        let (d, name) = defaults()
+        defer { cleanup(d, name) }
+        let good = blob([conv("a")])
+        d.set(good, forKey: LegacyConversationBlob.key)
+        #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .storeUnavailable)
+        #expect(d.data(forKey: LegacyConversationBlob.key) == good)
+        #expect(d.data(forKey: LegacyConversationBlob.legacyKey) == nil)
+        #expect(try store.loadAll().conversations.isEmpty)
+
+        // An undecodable blob is not backed up and retired either: that too waits for a real store.
+        let junk = Data("not json".utf8)
+        d.set(junk, forKey: LegacyConversationBlob.key)
+        #expect(LegacyConversationBlob.migrateIfNeeded(into: store, defaults: d) == .storeUnavailable)
+        #expect(d.data(forKey: LegacyConversationBlob.key) == junk)
+        #expect(!d.dictionaryRepresentation().keys.contains { $0.hasPrefix("iris_conversations_backup_") })
+    }
+
     @Test("no blob means nothing to do")
     func nothingToDo() throws {
         let store = try ConversationStore.inMemory()

@@ -58,6 +58,8 @@ struct StoreArchiveRepairTests {
         }
         #expect(complete)
         #expect(applied.contains("v7_archive"))
+        // Gone, so a future eraseDatabaseOnSchemaChange cannot read it as an unknown migration.
+        #expect(!applied.contains("v6_archive"))
         let loaded = try store.loadAll()
         #expect(loaded.skipped.isEmpty)
         let byId = Dictionary(uniqueKeysWithValues: loaded.conversations.map { ($0.id, $0) })

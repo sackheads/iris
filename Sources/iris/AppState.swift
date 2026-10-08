@@ -3316,7 +3316,8 @@ class AppState {
     }
 
     private func loadConversations() {
-        // One-time move off the UserDefaults blob (spec §6). Cheap when there is no key.
+        // One-time move off the UserDefaults blob (spec §6). Cheap when there is no key. A
+        // memory-fallback store returns `.storeUnavailable` and leaves the blob for a real one.
         let outcome = LegacyConversationBlob.migrateIfNeeded(into: store, defaults: IrisDefaults.store)
         if case .imported(let n) = outcome { print("Imported \(n) conversations from the legacy blob.") }
         if outcome == .undecodable { legacyBlobUndecodable = true }

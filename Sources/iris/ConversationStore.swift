@@ -205,7 +205,7 @@ final class ConversationStore: Sendable {
         try inMemory(openFailure: nil)
     }
 
-    private static func inMemory(openFailure: String?) throws -> ConversationStore {
+    static func inMemory(openFailure: String?) throws -> ConversationStore {
         let queue = try DatabaseQueue(configuration: Self.configuration)
         try migratedTemplate.get().backup(to: queue)
         return try ConversationStore(writer: queue, path: nil, alreadyMigrated: true, openFailure: openFailure)
@@ -241,9 +241,9 @@ final class ConversationStore: Sendable {
     /// `v6_archive`; main renumbered it `v7_archive` (3756fde) with an identical body: one
     /// nullable BOOLEAN `isArchived` column. A store from that build has the column but not the
     /// identifier, so the migrator re-ran the ALTER and the open failed with "duplicate column
-    /// name: isArchived". Record `v7_archive` as applied when its column is already there. The
-    /// stray `v6_archive` row stays: GRDB ignores identifiers it has no migration for unless
-    /// `eraseDatabaseOnSchemaChange` is set, which it is not here.
+    /// name: isArchived". Record `v7_archive` as applied when its column is already there, and
+    /// drop the stray `v6_archive` row: GRDB ignores it today, but under
+    /// `eraseDatabaseOnSchemaChange` an unknown identifier would erase the whole store.
     static func repairPreMergeArchive(_ writer: some DatabaseWriter) throws {
         try writer.write { db in
             guard try db.tableExists("grdb_migrations") else { return }
@@ -252,6 +252,7 @@ final class ConversationStore: Sendable {
                   try db.columns(in: "conversations").contains(where: { $0.name == "isArchived" })
             else { return }
             try db.execute(sql: "INSERT INTO grdb_migrations (identifier) VALUES ('v7_archive')")
+            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'v6_archive'")
         }
     }
 
