@@ -116,6 +116,17 @@ struct RunCommandProcessGroupTests {
         #expect(await ToolExecutor().runCommand("true", cwd: nil, timeoutSeconds: 10) == "Success")
         // `/private/tmp`, as `Process` reported it too: zsh resolves the symlink.
         #expect(await ToolExecutor().runCommand("pwd", cwd: "/tmp", timeoutSeconds: 10) == "/private/tmp\n")
+        // #275: `cwd` must go through `IrisEngine.expandTilde`, not `expandingTildeInPath` — under
+        // `swift test` `~/.iris` routes to this process's own temp home (`IrisPaths.default`), never
+        // the real one. `expandingTildeInPath` would instead expand to the developer's actual
+        // `~/.iris`, which this test must never touch (invariant 7) and which would answer with a
+        // different directory than the one asserted below.
+        // `realpath(3)`, not `resolvingSymlinksInPath()`: Foundation's deliberately leaves `/var`
+        // (and `/tmp`, `/etc`) unresolved for compatibility, which is not what `pwd` — asking the
+        // kernel via `chdir` — actually reports (the `/tmp` case above is the same thing).
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let expectedHome = String(cString: realpath(IrisPaths.default.root.path, &buffer))
+        #expect(await ToolExecutor().runCommand("pwd", cwd: "~/.iris", timeoutSeconds: 10) == expectedHome + "\n")
         // Nothing types at a command: stdin is at end of file, not the app's.
         #expect(await ToolExecutor().runCommand("cat; echo eof", cwd: nil, timeoutSeconds: 10) == "eof\n")
         #expect(await ToolExecutor().runCommand("echo hi", cwd: "/nonexistent-iris-353", timeoutSeconds: 10)

@@ -94,7 +94,7 @@ enum WorkspaceInventory {
     /// can match a live conversation's `workspacePath` against an entry's URL the same way `scan`
     /// matches an owner, and so it can be unit-tested directly.
     static func standardizedPath(_ path: String) -> String {
-        var expanded = (path as NSString).expandingTildeInPath
+        var expanded = IrisEngine.expandTilde(path)   // #275: never `expandingTildeInPath` on a decider
         if expanded.count > 1, expanded.hasSuffix("/") { expanded.removeLast() }
         return URL(fileURLWithPath: expanded).standardizedFileURL.path
     }

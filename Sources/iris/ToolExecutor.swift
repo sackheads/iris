@@ -463,7 +463,7 @@ struct ToolExecutor {
             ephemeralContainer = (containerPath, name)
             var containerArgs = ["run", "--rm", "--name", name, ConfigManager.shared.sandboxImage, "bash", "-c", command]
             if let cwd = cwd {
-                let expandedPath = (cwd as NSString).expandingTildeInPath
+                let expandedPath = IrisEngine.expandTilde(cwd)   // #275: never `expandingTildeInPath` on a decider
                 // `-v`, where the session path uses `--mount` (see `ContainerMount`). The CLI
                 // lowers both to the same virtiofs bind; this one is the ephemeral no-conversation
                 // path and is left as it was rather than changed for symmetry alone.
@@ -475,7 +475,7 @@ struct ToolExecutor {
         } else {
             executable = "/bin/zsh"
             arguments = ["-c", command]
-            directory = cwd.map { ($0 as NSString).expandingTildeInPath }
+            directory = cwd.map { IrisEngine.expandTilde($0) }   // #275: never `expandingTildeInPath` on a decider
             environment = BinaryResolver.commandEnvironment(base: ProcessInfo.processInfo.environment)
         }
 
