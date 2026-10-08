@@ -463,7 +463,7 @@ class ConfigManager: @unchecked Sendable {
         self.anthropicModelMedium = resolveModel(key: "ANTHROPIC_MODEL_MEDIUM", provider: "Anthropic", migrated: oldMedium, fallback: "claude-sonnet-5")
         self.anthropicModelHard = resolveModel(key: "ANTHROPIC_MODEL_HARD", provider: "Anthropic", migrated: oldHard, fallback: "claude-fable-5")
 
-        self.replayThinkingWithinTurn = store.bool(forKey: "REPLAY_THINKING_WITHIN_TURN")
+        self.replayThinkingWithinTurn = saved.bool(forKey: "REPLAY_THINKING_WITHIN_TURN")
 
         self.openaiModelEasy = resolveModel(key: "OPENAI_MODEL_EASY", provider: "OpenAI", migrated: oldEasy, fallback: "gpt-5.6-luna")
         self.openaiModelMedium = resolveModel(key: "OPENAI_MODEL_MEDIUM", provider: "OpenAI", migrated: oldMedium, fallback: "gpt-5.6-terra")
