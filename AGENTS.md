@@ -37,6 +37,13 @@ real install**: `BuildIdentity` resolves that bundle id to `.release` exactly li
 app, so it opens `~/.iris` and spends the one-time settings import (`AppDefaultsImport`) that a
 fresh install is meant to get once.
 
+Sharing `~/.iris-dev` does not mean sharing settings: `UserDefaults` domains are keyed by bundle
+id, so "Iris Dev.app" persists to its own `com.bnaylor.iris.dev` domain, separate from the `iris`
+domain `swift run`/`run-dev.sh` use. `AppDefaultsImport` seeds `com.bnaylor.iris.dev` from `iris`
+once, on its first launch; after that, a setting changed in one dev build is not seen by the
+other. `Iris Dev.app` and `scripts/run-dev.sh` are also separate processes — do not run both at
+once against one `~/.iris-dev`: both would open the store's GUI lock and run the same jobs.
+
 **Dev builds use `~/.iris-dev`, not `~/.iris`.** `swift build`/`swift run`, `scripts/run-dev.sh`,
 Xcode Debug and `swift test` are all dev builds (`BuildIdentity.current == .dev`): they read and
 write `~/.iris-dev`, keep their secrets under `.dev`-suffixed Keychain services, and answer to
@@ -169,7 +176,7 @@ file) so it does not make the tree look dirty. An existing `index-build` can be 
 
 ```
 Sources/iris/main.swift   # one line: `try await IrisMain.run()`; the SwiftPM `iris` executable
-Sources/IrisKit/          # everything else, as a library the executable (and later the Xcode app) links
+Sources/IrisKit/          # everything else, as a library both the executable and the Xcode app link
   IrisMain.swift          # process entry: headless modes (--perf, --bench, --run-job, --seed-dev-home), else the app
   AppState.swift          # @Observable god-object: conversations, messages, thinking state, timing
   iris.swift              # IrisEngine: the agent turn loop, tool dispatch, goal/reprompt logic
@@ -189,7 +196,7 @@ Sources/IrisKit/          # everything else, as a library the executable (and la
   MCPManager.swift        # MCP client: tool discovery and call forwarding
   HookManager.swift       # before/after agent hooks (shell scripts)
   Timeout.swift           # withTimeout(seconds:) — returns at the deadline; used by run_command and Vibecop
-App/                      # the Xcode app target's own sources (Task 8); project.yml's `Iris` target links IrisKit
+App/                      # the Xcode app target's own sources; project.yml's `Iris` target links IrisKit
   main.swift               # one line, same as Sources/iris/main.swift: `try await IrisMain.run()`
   Info.plist                # CFBundle keys; bundle id/version/signing come from project.yml, not here
   Iris.entitlements         # empty plist — no sandbox, no JIT entitlement
