@@ -455,7 +455,8 @@ enum GateEvaluator {
     /// what would actually be bound: `/tmp/innocuous -> /` is a mount of the whole disk, and a
     /// refusal that reads the text would miss it.
     static func mountRefusal(_ entry: String, fileManager: FileManager = .default,
-                             paths: IrisPaths = .default) -> String? {
+                             paths: IrisPaths = .default, identity: BuildIdentity = .current,
+                             release: IrisPaths = .release) -> String? {
         let normalized = readOnly([entry])[0]
         do {
             _ = try ContainerMount.argument(for: normalized)
@@ -479,8 +480,11 @@ enum GateEvaluator {
         }
         // The same two directories `PermissionManager` will not let a write into: the allowlist,
         // the hook definitions and the plugins are how Iris decides what anything may do, and a
-        // gate script reading them on a cadence puts them in a model's context forever.
-        guard !paths.isUnderProtectedWriteDir(source) else {
+        // gate script reading them on a cadence puts them in a model's context forever. In a dev
+        // process the installed app's own config and plugins are off limits too, the same
+        // injectable identity/release pattern `PermissionManager.isProtectedWrite` uses.
+        guard !paths.isUnderProtectedWriteDir(source),
+              !(identity == .dev && release.isUnderProtectedWriteDir(source)) else {
             return "the mount source \(source) is part of Iris's own configuration, which a gate may not read — name a directory outside it"
         }
         return nil
