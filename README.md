@@ -106,8 +106,15 @@ certificate in your keychain, `scripts/run-dev.sh` builds, signs with it, and la
 "Always Allow" sticks across rebuilds. `perf/run.sh` and `scripts/build_release.sh` sign the same
 way when the certificate is present (or `CODESIGN_IDENTITY` is set).
 
+A build from source — `swift run`, `scripts/run-dev.sh`, or the Xcode Debug scheme — is a **dev
+build**: it keeps its own conversations, memory and settings under `~/.iris-dev`, not the
+installed app's `~/.iris`, uses its own `.dev`-suffixed Keychain services, and answers to
+`Cmd + Shift + Option + Space` instead of the hotkey below. `scripts/run-dev.sh` seeds
+`~/.iris-dev` from `~/.iris` and its Keychain items the first time it runs (`iris
+--seed-dev-home`), so a local build starts from your installed app's settings instead of empty.
+
 ### Global Hotkey ⌨️
-Iris runs in the background and can be summoned instantly over any other app by pressing **`Cmd + Shift + Space`** (configurable in Settings).
+Iris runs in the background and can be summoned instantly over any other app by pressing **`Cmd + Shift + Space`** (configurable in Settings) — the installed app's default. A build from source uses `Cmd + Shift + Option + Space` instead (see above).
 
 ### Slash Commands ⚡
 
