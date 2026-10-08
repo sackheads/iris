@@ -4977,8 +4977,7 @@ struct IrisApp: App {
         .commands {
             CommandGroup(after: .appSettings) {
                 if let updater = UpdaterController.shared {
-                    Button("Check for Updates…") { updater.checkForUpdates() }
-                        .disabled(!updater.canCheckForUpdates)
+                    CheckForUpdatesButton(updater: updater)
                 }
                 Divider()
                 Button("Rerun Setup Wizard...") {
@@ -5000,8 +4999,7 @@ struct IrisApp: App {
             }
             Divider()
             if let updater = UpdaterController.shared {
-                Button("Check for Updates…") { updater.checkForUpdates() }
-                    .disabled(!updater.canCheckForUpdates)
+                CheckForUpdatesButton(updater: updater)
             }
             Button("Settings...") {
                 NSApp.activate(ignoringOtherApps: true)

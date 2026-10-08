@@ -1038,7 +1038,8 @@ struct SettingsView: View {
                         Button("Check Now") { updater.checkForUpdates() }
                             .disabled(!updater.canCheckForUpdates)
                     } else {
-                        LabeledContent("Installed Version", value: Constants.appVersion)
+                        LabeledContent("Installed Version",
+                                       value: Constants.appVersion.first?.isNumber == true ? "v\(Constants.appVersion)" : Constants.appVersion)
                         Text("Updates are disabled in dev builds.").foregroundStyle(.secondary)
                     }
                 }

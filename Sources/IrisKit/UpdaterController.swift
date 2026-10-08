@@ -1,6 +1,7 @@
 import AppKit
 import Observation
 import Sparkle
+import SwiftUI
 
 /// Owns Sparkle's standard updater. Constructed only for the installed release app: a dev build
 /// has no feed, no stable version and no business replacing itself.
@@ -27,6 +28,8 @@ final class UpdaterController: NSObject {
         controller = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: self, userDriverDelegate: nil)
         // The KVO handler is a Sendable closure and SPUUpdater is main-actor isolated, so read the
         // value from the change record (`.initial` delivers it too) rather than from the updater.
+        // KVO calls back on whichever thread made the change, and nothing in Sparkle's API promises
+        // that is main, so the hop stays rather than an `assumeIsolated` that could trap.
         observation = controller.updater.observe(\.canCheckForUpdates, options: [.initial, .new]) { [weak self] _, change in
             let value = change.newValue ?? false
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.canCheckForUpdates = value } }
@@ -65,3 +68,14 @@ final class UpdaterController: NSObject {
 }
 
 extension UpdaterController: SPUUpdaterDelegate {}
+
+/// A View, not a bare Button in `Commands` or `MenuBarExtra` content: those scopes are not
+/// guaranteed to re-evaluate on an Observation change, and `canCheckForUpdates` starts false.
+struct CheckForUpdatesButton: View {
+    let updater: UpdaterController
+
+    var body: some View {
+        Button("Check for Updates…") { updater.checkForUpdates() }
+            .disabled(!updater.canCheckForUpdates)
+    }
+}
