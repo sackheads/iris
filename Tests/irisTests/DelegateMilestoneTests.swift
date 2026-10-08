@@ -232,11 +232,22 @@ struct DelegateMilestoneTests {
     @Test("a subagent that never completes does not pause the human")
     func failedSubagentDoesNotCheckpoint() async {
         let app = AppState(); let id = UUID(); ladder(on: app, id)
-        // subagentTerminal nil ⇒ the subagent never calls goal_complete and hits its iteration cap.
+        // subagentTerminal nil ⇒ the subagent never calls goal_complete and hits its iteration cap,
+        // set to 2 on a store of this test's own so the loop runs (#399) without ten reprompts.
         let client = RoutingClient(main: [Self.delegateCall(), Self.response(nil)],
                                    subagentTerminal: nil)
-        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client)
+        let suite = "iris-delegatemilestone-\(UUID().uuidString)"
+        let store = UserDefaults(suiteName: suite)!
+        defer {
+            store.removePersistentDomain(forName: suite)
+            IrisDefaults.removeSuiteFile(named: suite, in: IrisDefaults.preferencesDirectory)
+        }
+        let config = ConfigManager(store: store)
+        config.maxSubagentIterations = 2
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, subagentConfig: config, repromptDelay: 0.01)
         await engine.processInput("work", source: "User", conversationId: id)
+
+        #expect(client.subagentCalls == 2, "the subagent's loop ran to its cap of 2")
 
         let conv = app.conversations.first { $0.id == id }
         #expect(conv?.goalContract?.checkpointStatus == .running,

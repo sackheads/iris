@@ -977,6 +977,10 @@ struct SettingsView: View {
                             value: Binding(get: { config.maxGoalIterations },
                                            set: { config.maxGoalIterations = max(1, $0) }), in: 1...500)
                         .help("Hard cap on autonomous goal-loop turns before the agent summarizes and stops.")
+                    Stepper("Max subagent iterations: \(config.maxSubagentIterations)",
+                            value: Binding(get: { config.maxSubagentIterations },
+                                           set: { config.maxSubagentIterations = max(1, $0) }), in: 1...100)
+                        .help("Hard cap on a subagent's goal-loop turns. A subagent that reaches it without calling goal_complete ends as failed, with no summary turn.")
                     Stepper("Loop-detection threshold: \(config.loopDetectionThreshold)",
                             value: Binding(get: { config.loopDetectionThreshold },
                                            set: { config.loopDetectionThreshold = max(2, $0) }), in: 2...20)
