@@ -52,6 +52,12 @@ enum AppDefaultsImport {
         guard shouldImport(appDomain: IrisDefaults.appDomain, underTests: NSClassFromString("XCTestCase") != nil) else { return }
         let source = loadSourceDomain(persistentDomain: UserDefaults.standard.persistentDomain(forName: devDomain),
                                        plistDirectory: IrisDefaults.preferencesDirectory)
-        importOnce(from: source, into: IrisDefaults.store)
+        let store = IrisDefaults.store
+        guard importOnce(from: source, into: store) else { return }
+        // synchronize() forces the write cfprefsd would otherwise coalesce; false means it was
+        // refused, which would otherwise surface only as settings silently missing next launch.
+        if !store.synchronize() {
+            FileHandle.standardError.write(Data("iris: settings import could not be saved (cfprefsd refused the write)\n".utf8))
+        }
     }
 }

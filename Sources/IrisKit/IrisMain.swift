@@ -5,6 +5,10 @@ import Foundation
 public enum IrisMain {
     @MainActor
     public static func run() async throws {
+        // Before anything reads a setting, even in a headless mode: a bundled app's first launch
+        // (or first --run-job/--perf/--bench invocation from the bundle executable) inherits the
+        // dev binary's settings. No-op under tests and in the bare dev binary (`shouldImport`).
+        AppDefaultsImport.runIfNeeded()
         // `run` is @MainActor, so the @MainActor entry points can execute directly.
         if let perf = PerfCLI.parse(CommandLine.arguments) {
             switch perf {
