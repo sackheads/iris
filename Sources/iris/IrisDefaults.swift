@@ -82,10 +82,24 @@ enum IrisDefaults {
     /// store on `AppState()` — on the author's machine 472 KB of JSON plus the row inserts, inside
     /// the measured window. The store itself never reaches a volatile copy (spec §1), so there is
     /// nothing else to strip.
-    static func perfSeed(from domain: [String: Any]) -> [String: Any] {
-        domain.filter { key, _ in
+    ///
+    /// `IRIS_PERF_SEED_JSON`, if present in `environment`, then overrides keys in the result —
+    /// any `ConfigManager` key, by its raw `UserDefaults` name, not a fixed set. The #314 Phase 1
+    /// measurement (PR #405) used this, as a one-off patch to this function, to target Anthropic
+    /// on Vertex without writing the real domain; it is a standing feature of the seed path now,
+    /// which is how a later perf run sets `REPLAY_THINKING_WITHIN_TURN` (or any other key) too.
+    /// `environment` defaults to the real process environment, as every production caller wants,
+    /// but takes a fake dict in a test so the real environment is never mutated (invariant 7).
+    /// Malformed or absent JSON leaves the domain's own values untouched.
+    static func perfSeed(from domain: [String: Any], environment: [String: String] = ProcessInfo.processInfo.environment) -> [String: Any] {
+        var seed = domain.filter { key, _ in
             key != "iris_conversations" && key != "iris_conversations_legacy" && !key.hasPrefix("iris_conversations_backup_")
         }
+        if let raw = environment["IRIS_PERF_SEED_JSON"],
+           let extra = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [String: Any] {
+            seed.merge(extra) { _, new in new }
+        }
+        return seed
     }
 
     static func makeVolatileCopy(of seed: [String: Any], suiteName: String) -> UserDefaults {

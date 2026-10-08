@@ -155,7 +155,8 @@ struct ThinkingHarness {
     static func make(_ script: [GeminiResponse], hooks: HookManager, store: ConversationStore? = nil,
                      seedFact: Bool = false, earlierTurn: Bool = false,
                      roundStart: (@Sendable (Int) async -> Void)? = nil,
-                     provider: String = LLMProvider.anthropic.rawValue) throws -> ThinkingHarness {
+                     provider: String = LLMProvider.anthropic.rawValue,
+                     replayThinking: Bool = true) throws -> ThinkingHarness {
         let facts = try FactStoreManager(inMemory: true)
         if seedFact { _ = try facts.addFact(content: "Brian lives in Seattle") }
         let app = AppState(store: try store ?? ConversationStore.inMemory(),
@@ -169,10 +170,13 @@ struct ThinkingHarness {
                 anthropicBlocks: "[\(ThinkingFixtures.thinkingBlock(0)),{\"type\":\"text\",\"text\":\"earlier answer\"}]"))
         }
         let client = RecordingClient(script)
+        // `replayThinking` defaults true: these #314 engine tests exist to exercise replay, which
+        // now defaults off (the setting, PR #405) — forcing it on here keeps them testing what
+        // they always tested, without touching `ConfigManager.shared` (invariant 7).
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [],
                                 streamResponses: false, factStore: facts, protectionEnabled: false,
                                 sessionPeerCount: 0, roundStartHook: roundStart, hooks: hooks,
-                                provider: provider)
+                                provider: provider, replayThinking: replayThinking)
         return ThinkingHarness(app: app, id: id, client: client, engine: engine)
     }
 

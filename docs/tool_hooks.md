@@ -34,13 +34,18 @@ reflects what the user actually saw.
 
 ### Thinking replay and rewriting hooks
 
-On an Anthropic model, Iris replays this turn's own thinking blocks back to the model across
-tool-call rounds, so the model keeps its reasoning instead of starting cold each round. A
-`BeforeModel` or `AfterModel` hook that rewrites what was already sent, or a `PreCompress` hook
-that changes history, drops every block produced up to that point: none of them goes out again in
-this turn. Replay is not off for the rest of the turn, though. It resumes with the next reply, whose
-blocks are sent back on the rounds after it. A `PreCompress` edit therefore costs only the
-reasoning from before it.
+"Replay Claude's thinking within a turn" (Settings, off by default) controls whether, on an
+Anthropic model, Iris replays this turn's own thinking blocks back to the model across tool-call
+rounds, so the model keeps its reasoning instead of starting cold each round. A paid measurement
+(PR #405) found replay costs about 18% more per task on Opus 5.5 with no fewer rounds, and whether
+it improves reasoning quality is unmeasured either way — hence the setting and its default. With
+the setting off, every request goes without blocks, exactly as on a non-Anthropic model.
+
+With the setting on: a `BeforeModel` or `AfterModel` hook that rewrites what was already sent, or
+a `PreCompress` hook that changes history, drops every block produced up to that point: none of
+them goes out again in this turn. Replay is not off for the rest of the turn, though. It resumes
+with the next reply, whose blocks are sent back on the rounds after it. A `PreCompress` edit
+therefore costs only the reasoning from before it.
 
 A `BeforeModel` hook that rewrites identically every round — producing the same bytes each time —
 does not count as a change and keeps replay going. An `AfterModel` rewrite always counts: a reply

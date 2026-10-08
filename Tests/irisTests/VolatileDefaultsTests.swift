@@ -85,4 +85,36 @@ struct VolatileDefaultsTests {
         let seed = IrisDefaults.perfSeed(from: domain)
         #expect(Set(seed.keys) == Set(["ENABLE_VIBECOP", "PRIMARY_PROVIDER"]))
     }
+
+    /// `IRIS_PERF_SEED_JSON` is how a perf/bench run overrides config for a measurement (#405's
+    /// Phase 1 baseline used this, as a one-off patch, to target Anthropic on Vertex). A fake
+    /// `environment` dict exercises it without ever touching the real process environment
+    /// (invariant 7) — `ProcessInfo.processInfo.environment` is itself process-global.
+    @Test("IRIS_PERF_SEED_JSON overrides a domain key, replayThinkingWithinTurn included, and adds a new one")
+    func perfSeedAppliesEnvironmentOverride() {
+        let domain: [String: Any] = ["PRIMARY_PROVIDER": "Gemini", "ENABLE_VIBECOP": true]
+        let env = ["IRIS_PERF_SEED_JSON": #"{"PRIMARY_PROVIDER":"Anthropic","REPLAY_THINKING_WITHIN_TURN":true}"#]
+        let seed = IrisDefaults.perfSeed(from: domain, environment: env)
+        #expect(seed["PRIMARY_PROVIDER"] as? String == "Anthropic", "the override wins over the domain's own value")
+        #expect(seed["REPLAY_THINKING_WITHIN_TURN"] as? Bool == true, "a key absent from the domain is still added")
+        #expect(seed["ENABLE_VIBECOP"] as? Bool == true, "a key the override does not mention is untouched")
+
+        let copyName = "iris-volatile-seedenv-\(UUID().uuidString)"
+        let copy = IrisDefaults.makeVolatileCopy(of: seed, suiteName: copyName)
+        defer {
+            copy.removePersistentDomain(forName: copyName)
+            IrisDefaults.removeSuiteFile(named: copyName, in: IrisDefaults.preferencesDirectory)
+        }
+        #expect(ConfigManager(store: copy).replayThinkingWithinTurn == true,
+                "ConfigManager reads the override the same way it reads any other seeded key")
+    }
+
+    @Test("no IRIS_PERF_SEED_JSON, or malformed JSON, leaves the domain's own values untouched")
+    func perfSeedIgnoresMissingOrMalformedOverride() {
+        let domain: [String: Any] = ["PRIMARY_PROVIDER": "Gemini"]
+        #expect(Set(IrisDefaults.perfSeed(from: domain, environment: [:]).keys) == Set(["PRIMARY_PROVIDER"]))
+        let malformed = IrisDefaults.perfSeed(from: domain, environment: ["IRIS_PERF_SEED_JSON": "{not json"])
+        #expect(malformed["PRIMARY_PROVIDER"] as? String == "Gemini")
+        #expect(malformed.count == 1)
+    }
 }

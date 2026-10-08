@@ -155,7 +155,17 @@ class ConfigManager: @unchecked Sendable {
     var anthropicModelHard: String {
         didSet { store.set(anthropicModelHard, forKey: "ANTHROPIC_MODEL_HARD") }
     }
-    
+
+    /// #314 Phase 1 — whether a later request in the same turn resends this turn's own earlier
+    /// signed thinking blocks (Anthropic only; gates `IrisEngine.replaysThinking`). Default off:
+    /// a paid measurement (PR #405) found replay costs about 18% more per task on Opus 5.5 with
+    /// no fewer rounds, and both arms succeeded every time, so whether it improves reasoning
+    /// quality is still unmeasured. `store.bool(forKey:)` reads back false when nothing was ever
+    /// written, which is exactly the off default this needs.
+    var replayThinkingWithinTurn: Bool {
+        didSet { store.set(replayThinkingWithinTurn, forKey: "REPLAY_THINKING_WITHIN_TURN") }
+    }
+
     var openaiModelEasy: String {
         didSet { store.set(openaiModelEasy, forKey: "OPENAI_MODEL_EASY") }
     }
@@ -452,6 +462,8 @@ class ConfigManager: @unchecked Sendable {
         self.anthropicModelEasy = resolveModel(key: "ANTHROPIC_MODEL_EASY", provider: "Anthropic", migrated: oldEasy, fallback: "claude-haiku-4-5-20251001")
         self.anthropicModelMedium = resolveModel(key: "ANTHROPIC_MODEL_MEDIUM", provider: "Anthropic", migrated: oldMedium, fallback: "claude-sonnet-5")
         self.anthropicModelHard = resolveModel(key: "ANTHROPIC_MODEL_HARD", provider: "Anthropic", migrated: oldHard, fallback: "claude-fable-5")
+
+        self.replayThinkingWithinTurn = saved.bool(forKey: "REPLAY_THINKING_WITHIN_TURN")
 
         self.openaiModelEasy = resolveModel(key: "OPENAI_MODEL_EASY", provider: "OpenAI", migrated: oldEasy, fallback: "gpt-5.6-luna")
         self.openaiModelMedium = resolveModel(key: "OPENAI_MODEL_MEDIUM", provider: "OpenAI", migrated: oldMedium, fallback: "gpt-5.6-terra")
