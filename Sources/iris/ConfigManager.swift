@@ -237,8 +237,16 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(vibecopModel, forKey: "VIBECOP_MODEL") }
     }
 
+    static let defaultMaxSubagentIterations = 10
+
     var maxGoalIterations: Int {
         didSet { store.set(maxGoalIterations, forKey: "MAX_GOAL_ITERATIONS") }
+    }
+    /// The most turns a subagent's goal loop runs before it ends `failed` without `goal_complete`
+    /// (#399). Separate from `maxGoalIterations`: a delegated unit is meant to be small, and each
+    /// reprompt is a full model round charged to whoever delegated it.
+    var maxSubagentIterations: Int {
+        didSet { store.set(maxSubagentIterations, forKey: "MAX_SUBAGENT_ITERATIONS") }
     }
     var maxDoneGateRetries: Int {
         didSet { store.set(maxDoneGateRetries, forKey: "MAX_DONE_GATE_RETRIES") }
@@ -483,6 +491,9 @@ class ConfigManager: @unchecked Sendable {
 
         let savedMaxIters = store.integer(forKey: "MAX_GOAL_ITERATIONS")
         self.maxGoalIterations = savedMaxIters == 0 ? 50 : savedMaxIters
+        // Unset (0) or a hand-edited negative is the default, as for the job limits.
+        let savedSubagentIters = store.integer(forKey: "MAX_SUBAGENT_ITERATIONS")
+        self.maxSubagentIterations = savedSubagentIters <= 0 ? Self.defaultMaxSubagentIterations : savedSubagentIters
         let savedLoop = store.integer(forKey: "LOOP_DETECTION_THRESHOLD")
         let savedGateRetries = store.integer(forKey: "MAX_DONE_GATE_RETRIES")
         self.maxDoneGateRetries = savedGateRetries == 0 ? 3 : savedGateRetries

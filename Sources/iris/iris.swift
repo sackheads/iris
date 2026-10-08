@@ -428,12 +428,16 @@ actor IrisEngine {
     /// The command-hook runner. `.shared` reads the real settings file; a test injects one over a
     /// config of its own (invariant 7).
     private let hooks: HookManager
+    /// Where the subagents this engine delegates to read their iteration cap (#399); injected so a
+    /// test can set the cap without touching `ConfigManager.shared`.
+    private let subagentConfig: ConfigManager
     /// Perf and tests: the Anthropic TTL policy for every request, instead of the one
     /// `CacheTTLPolicy.resolve` picks (5c §0.8). Nil everywhere else.
     private let cacheTTLOverride: CacheTTLPolicy?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil) {
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil, subagentConfig: ConfigManager = .shared) {
         self.state = state
+        self.subagentConfig = subagentConfig
         self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
         self.injectedFactStore = factStore
@@ -958,28 +962,7 @@ actor IrisEngine {
                 await pushToUI(role: .system, text: "Goal was interrupted by restart. Resuming: \(objective)", conversationId: convId)
 
                 // Brief delay to let the UI render the message, then re-kick the loop.
-                repromptTasks[convId] = Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    guard !Task.isCancelled, let self else { return }
-                    let stillActive = await MainActor.run {
-                        localState?.conversations.first(where: { $0.id == convId })?.activeGoal != nil
-                    }
-                    guard stillActive else { return }
-                    let contract = await MainActor.run {
-                        localState?.conversations.first(where: { $0.id == convId })?.goalContract
-                    }
-                    let oracle = contract?.oracleText() ?? ""
-                    let closing: String
-                    if let c = contract, c.hasLadder, !c.isFinalMilestone {
-                        closing = "When the current checkpoint's criteria are satisfied, call `reach_checkpoint` (NOT goal_complete)."
-                    } else {
-                        closing = "If every criterion is satisfied, call goal_complete."
-                    }
-                    let reprompt = oracle.isEmpty
-                        ? "Continue working on your goal. What is your next step? \(closing)"
-                        : "\(oracle)\n\nContinue working toward the objective above. What is your next step? \(closing)"
-                    await self.processInput(reprompt, source: "System", conversationId: convId)
-                }
+                scheduleReprompt(for: convId, afterNanoseconds: 1_000_000_000)
             }
         }
     }
@@ -1108,8 +1091,27 @@ actor IrisEngine {
         return "Checkpoint \(ladderPos) reached and graded. Waiting on the user's judgement of: \(names). Do not continue this milestone until the user has decided."
     }
 
-    /// Tracks the pending auto-reprompt task per conversation so the goal loop can be cancelled.
-    private var repromptTasks: [UUID: Task<Void, Never>] = [:]
+    /// The pending auto-reprompt and the turns in flight per conversation, so the goal loop can be
+    /// cancelled, halted, and asked whether it is still going (#399).
+    nonisolated let goalLoop = GoalLoopControl()
+
+    /// A per-conversation iteration cap that replaces `maxGoalIterations` and ends the loop without
+    /// a summary turn: a subagent's (#399).
+    private var goalIterationCaps: [UUID: Int] = [:]
+
+    func setGoalIterationCap(_ cap: Int, for conversationId: UUID) {
+        goalIterationCaps[conversationId] = max(1, cap)
+    }
+
+    /// True while a turn is running on the conversation or its next reprompt is pending.
+    nonisolated func goalLoopIsLive(for conversationId: UUID) -> Bool {
+        goalLoop.isLive(for: conversationId)
+    }
+
+    /// Ends the conversation's goal loop for good and cancels whatever turn the loop is running.
+    nonisolated func haltGoalLoop(for conversationId: UUID, cancelling: Bool = true) {
+        goalLoop.halt(conversationId, cancelling: cancelling)
+    }
 
     /// Per-conversation loop detectors (reset on a fresh UI turn).
     private var loopDetectors: [UUID: LoopDetector] = [:]
@@ -1120,8 +1122,7 @@ actor IrisEngine {
 
     /// Cancels a conversation's pending auto-reprompt, stopping its goal loop.
     func cancelReprompt(for conversationId: UUID) {
-        repromptTasks[conversationId]?.cancel()
-        repromptTasks[conversationId] = nil
+        goalLoop.cancelReprompt(for: conversationId)
     }
 
     /// The tail of the `.system` line a soft stop posts. Shared rather than copied because
@@ -1453,6 +1454,8 @@ actor IrisEngine {
     /// being derived from what persists. See `Conversation.hasUnattendedInput` /
     /// `AppState.markConversationTouchedByUnattendedInput`.
     func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil, lifetime: TurnLifetime? = nil) async {
+        goalLoop.beginTurn(for: conversationId)
+        defer { goalLoop.endTurn(for: conversationId) }
         await withEngineTurn(conversationId, lifetime: lifetime) {
             let turnID = PerformanceProfiler.shared.beginTurn(label: input, source: source)
             let turnStart = CFAbsoluteTimeGetCurrent()
@@ -2517,43 +2520,81 @@ actor IrisEngine {
         let paused = await MainActor.run {
             localState?.conversations.first(where: { $0.id == conversationId })?.goalContract?.isPaused == true
         }
-        if let _ = activeGoalResult.0, !paused {
-            if activeGoalResult.1 >= ConfigManager.shared.maxGoalIterations {
+        // A halted loop (a subagent stopped from outside, #399) schedules nothing more.
+        if let _ = activeGoalResult.0, !paused, !goalLoop.isHalted(conversationId) {
+            if let cap = goalIterationCaps[conversationId], activeGoalResult.1 >= cap {
+                await endAtIterationCap(conversationId: conversationId, cap: cap)
+            } else if goalIterationCaps[conversationId] == nil,
+                      activeGoalResult.1 >= ConfigManager.shared.maxGoalIterations {
                 await softStopWithSummary(conversationId: conversationId,
                                           reason: "reached the \(ConfigManager.shared.maxGoalIterations)-iteration limit")
             } else {
                 await pushToUI(role: .system, text: "Auto-continuing goal loop (iteration \(activeGoalResult.1))...", conversationId: conversationId)
-                repromptTasks[conversationId]?.cancel()
-                repromptTasks[conversationId] = Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: 1_500_000_000)
-                    guard !Task.isCancelled, let self else { return }
-                    // Re-verify the conversation still exists and the goal is still active before
-                    // reprompting — it may have been deleted or stopped during the sleep.
-                    let stillActive = await MainActor.run { () -> Bool in
-                        guard let conv = localState?.conversations.first(where: { $0.id == conversationId }) else { return false }
-                        return conv.activeGoal != nil
-                    }
-                    guard stillActive else { return }
-                    let contract = await MainActor.run {
-                        localState?.conversations.first(where: { $0.id == conversationId })?.goalContract
-                    }
-                    let oracle = contract?.oracleText() ?? ""
-                    // Keep the closing instruction consistent with the oracle. With an active ladder
-                    // that hasn't reached its final checkpoint, the next terminal action is
-                    // `reach_checkpoint`, NOT `goal_complete` — otherwise this tail contradicts the
-                    // ladder oracle and steers the model straight past every checkpoint.
-                    let closing: String
-                    if let c = contract, c.hasLadder, !c.isFinalMilestone {
-                        closing = "When the current checkpoint's criteria are satisfied, call `reach_checkpoint` (NOT goal_complete)."
-                    } else {
-                        closing = "If every criterion is satisfied, call goal_complete."
-                    }
-                    let reprompt = oracle.isEmpty
-                        ? "Continue working on your goal. What is your next step? \(closing)"
-                        : "\(oracle)\n\nContinue working toward the objective above. What is your next step? \(closing)"
-                    await self.processInput(reprompt, source: "System", conversationId: conversationId)
-                }
+                scheduleReprompt(for: conversationId, afterNanoseconds: 1_500_000_000)
             }
+        }
+    }
+
+    /// The goal loop's next turn: a task of its own, started after `delay`, so each
+    /// `processInput` is one turn and the loop is live until this task has run (#399).
+    private func scheduleReprompt(for conversationId: UUID, afterNanoseconds delay: UInt64) {
+        let localState = state
+        let goalLoop = self.goalLoop
+        let token = UUID()
+        let task = Task { [weak self] in
+            // Every way out removes this task's own entry, so the loop reads as over once it is.
+            defer { goalLoop.finishReprompt(token: token, for: conversationId) }
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled, let self, !goalLoop.isHalted(conversationId) else { return }
+            // Re-verify the conversation still exists and the goal is still active before
+            // reprompting — it may have been deleted or stopped during the sleep.
+            let stillActive = await MainActor.run { () -> Bool in
+                guard let conv = localState?.conversations.first(where: { $0.id == conversationId }) else { return false }
+                return conv.activeGoal != nil
+            }
+            guard stillActive else { return }
+            let contract = await MainActor.run {
+                localState?.conversations.first(where: { $0.id == conversationId })?.goalContract
+            }
+            let oracle = contract?.oracleText() ?? ""
+            // Keep the closing instruction consistent with the oracle. With an active ladder
+            // that hasn't reached its final checkpoint, the next terminal action is
+            // `reach_checkpoint`, NOT `goal_complete` — otherwise this tail contradicts the
+            // ladder oracle and steers the model straight past every checkpoint.
+            let closing: String
+            if let c = contract, c.hasLadder, !c.isFinalMilestone {
+                closing = "When the current checkpoint's criteria are satisfied, call `reach_checkpoint` (NOT goal_complete)."
+            } else {
+                closing = "If every criterion is satisfied, call goal_complete."
+            }
+            let reprompt = oracle.isEmpty
+                ? "Continue working on your goal. What is your next step? \(closing)"
+                : "\(oracle)\n\nContinue working toward the objective above. What is your next step? \(closing)"
+            guard !Task.isCancelled, !goalLoop.isHalted(conversationId) else { return }
+            await self.processInput(reprompt, source: "System", conversationId: conversationId)
+        }
+        goalLoop.setReprompt(task, token: token, for: conversationId)
+    }
+
+    /// What the parent is told when a subagent spends its iteration cap without `goal_complete`.
+    static func iterationCapSummary(_ cap: Int) -> String {
+        "Subagent reached its iteration cap (\(cap)) without calling goal_complete, so it was stopped and did not finish its task."
+    }
+
+    /// The end of a capped loop (#399): no summary turn — that would be one round past the cap the
+    /// cap exists to bound — and the subagent's manager is told why, at once.
+    private func endAtIterationCap(conversationId: UUID, cap: Int) async {
+        goalLoop.cancelReprompt(for: conversationId)
+        loopDetectors[conversationId] = nil
+        blockedResultTrackers[conversationId] = nil
+        let localState = state
+        await pushToUI(role: .system, text: "[\(approvalOrigin)] reached its iteration cap (\(cap)) without calling goal_complete. Stopping.",
+                       conversationId: conversationId)
+        await MainActor.run {
+            localState?.clearGoal(for: conversationId)
+            localState?.onSubagentComplete[conversationId]?(SubagentTermination(
+                status: .failed, summary: Self.iterationCapSummary(cap), calledGoalComplete: false))
+            localState?.onSubagentComplete[conversationId] = nil
         }
     }
     
@@ -3846,12 +3887,12 @@ actor IrisEngine {
             if let appState = self.state {
                 if isBackground {
                     Task {
-                        let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState, recentWrites: self.recentWrites).rendered
+                        let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig).rendered
                         await self.handleSystemEvent("Background subagent result:\n\(rendered)", source: "SubagentManager", conversationId: conversationId)
                     }
                     result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes."
                 } else {
-                    result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState, recentWrites: self.recentWrites).rendered
+                    result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig).rendered
                 }
             } else {
                 result = "Error: AppState not available for subagent execution."
@@ -4015,7 +4056,7 @@ actor IrisEngine {
             let outcome = await SubagentManager.shared.runSubagent(
                 role: role, task: task, effort: effort, parentConversationId: conversationId,
                 unit: DelegatedUnit(contract: unitContract, grade: false), client: self.client,
-                appState: appState, recentWrites: self.recentWrites)
+                appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig)
 
             // Only a `.completed` subagent reaches the checkpoint — it is the run that claimed the
             // milestone is done. Anything else claimed nothing: hand the outcome back to the loop

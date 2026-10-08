@@ -56,12 +56,19 @@ final class SubagentManager: @unchecked Sendable {
     /// (#355, following #335/#342): a real poll cap raced a busy suite's MainActor work and
     /// sometimes let the run's own soft-stop classify as `.failed` first. The default is the same
     /// wall clock as before, so nothing changes outside tests.
+    /// `config` supplies the subagent's iteration cap (`maxSubagentIterations`, #399): the most
+    /// turns its goal loop runs before it ends `failed` without `goal_complete`. Injected so a test
+    /// sets it on a store of its own rather than on `ConfigManager.shared`.
+    /// `hooks` is the subagent engine's hook manager, injected so a test can block one of its
+    /// turns without a settings file in the shared home.
     func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID,
                      unit: DelegatedUnit? = nil, maxIterations: Int = 3000,
                      client: (any LLMClientProtocol)? = nil,
                      appState: AppState,
                      recentWrites: RecentWrites = .shared,
                      deadlineClock: @escaping @Sendable () -> Date = Date.init,
+                     config: ConfigManager = .shared,
+                     hooks: HookManager = .shared,
                      endSandboxSession: @escaping @Sendable (UUID) async -> Void = {
                          await SandboxSessionManager.shared.endSession($0)
                      }) async -> (rendered: String, status: SubagentTerminalStatus) {
@@ -104,11 +111,14 @@ final class SubagentManager: @unchecked Sendable {
 
         // 2. Instantiate a fresh IrisEngine linked to this conversation
         let engine = IrisEngine(state: appState, tier: tier, principal: .subagent, roleLabel: role,
-                                client: client ?? LLMClient(), recentWrites: recentWrites)
+                                client: client ?? LLMClient(), recentWrites: recentWrites,
+                                hooks: hooks, subagentConfig: config)
 
         // 3. Craft the role-specific prompt
-        let customPromptText = generateRolePrompt(role: role)
+        let iterationCap = max(1, config.maxSubagentIterations)
+        let customPromptText = generateRolePrompt(role: role, iterationCap: iterationCap)
         await engine.setSystemPrompt(text: customPromptText)
+        await engine.setGoalIterationCap(iterationCap, for: subagentId)
 
         // 4. Inject the initial task and set the goal so the engine auto-loops.
         // With a unit contract the objective IS the task, so the loop gate (activeGoal != nil) is
@@ -141,11 +151,12 @@ final class SubagentManager: @unchecked Sendable {
             }
         }
 
-        // Tracks the engine loop ending. A subagent that stops WITHOUT calling goal_complete — its
-        // own goal loop soft-stopped on the iteration cap, the model just replied with text, the
-        // turn threw — never fires `onSubagentComplete`. Without this the poll below would spin to
-        // the deadline (3000 × 100ms = five minutes, by default) waiting for a termination that can
-        // no longer arrive, stalling the parent that is awaiting the result.
+        // Tracks the first turn returning. On its own that is NOT the loop's end (#399): a turn that
+        // ends without goal_complete schedules the next one as a reprompt task of its own, 1.5 s
+        // later, and the poll below waits for `goalLoopIsLive` too. Together they catch a loop
+        // that ended without firing `onSubagentComplete` — a hook-blocked turn, a reprompt that
+        // found its goal gone — which would otherwise spin to the deadline (five minutes, by
+        // default), stalling the parent that is awaiting the result.
         actor EngineDone {
             var finished = false
             func set() { finished = true }
@@ -154,8 +165,8 @@ final class SubagentManager: @unchecked Sendable {
         let engineDone = EngineDone()
 
         let engineTask = Task {
-            // Kick off the first turn. Since activeGoal is set, the engine will autonomously reprompt itself
-            // in a loop until goal_complete is called.
+            // The first turn. Since activeGoal is set, the engine reprompts itself after each turn
+            // until goal_complete, the iteration cap, or a stop; those turns run in its own tasks.
             await engine.processInput(task, source: "System", conversationId: subagentId)
             await engineDone.set()
         }
@@ -166,9 +177,13 @@ final class SubagentManager: @unchecked Sendable {
         // for the reason the timeout below classifies first: the cancelled engine reports a
         // `.failed` of its own, and that must not be the one that lands.
         let stopped = StopFlag()
+        // After the first turn the live turn runs in the engine's reprompt task, which cancelling
+        // `engineTask` does not reach, so the loop is halted too: halting forbids any further
+        // reprompt before it cancels the pending one, so a turn unwinding cannot schedule another.
         let stop: @Sendable (String) -> Void = { reason in
             guard stopped.trip() else { return }
             holder.set(SubagentTermination(status: .cancelled, summary: reason, calledGoalComplete: false))
+            engine.haltGoalLoop(for: subagentId)
             engineTask.cancel()
         }
         await MainActor.run { appState.registerLiveSubagent(subagentId, stop: stop) }
@@ -183,9 +198,10 @@ final class SubagentManager: @unchecked Sendable {
             while holder.get() == nil {
                 // Cancelled before the handler was installed: it never fires for that, so look.
                 if Task.isCancelled { stop(Self.cancelledReason); break }
-                // The engine loop is over. Allow a few polls for a termination still on its way
-                // before concluding nothing is coming.
-                if await engineDone.get() {
+                // The engine loop is over: the first turn returned and no turn or reprompt is
+                // left. Allow a few polls for a termination still on its way before concluding
+                // nothing is coming.
+                if await engineDone.get(), !engine.goalLoopIsLive(for: subagentId) {
                     gracePolls += 1
                     if gracePolls > 3 {
                         holder.set(SubagentTermination(status: .failed,
@@ -200,8 +216,9 @@ final class SubagentManager: @unchecked Sendable {
                     // catch block and fires `onSubagentComplete` with `.failed` — a second write to
                     // this same `holder`, which would otherwise misreport a timeout (#355).
                     holder.set(SubagentTermination(status: .timedOut,
-                        summary: "Subagent timed out after the iteration cap and was cancelled (task, pending approvals, and sandbox container cleaned up).",
+                        summary: "Subagent timed out at its wall-clock limit and was cancelled (task, pending approvals, and sandbox container cleaned up).",
                         calledGoalComplete: false))
+                    engine.haltGoalLoop(for: subagentId)
                     timedOut = true
                     break
                 }
@@ -221,9 +238,10 @@ final class SubagentManager: @unchecked Sendable {
             engineTask.cancel()
             await MainActor.run { appState.denyPendingApprovals(for: subagentId) }
         }
-        // Stop the reprompt loop — a reprompt in flight is a task of its own that cancelling
-        // `engineTask` does not reach — and clear the goal of anything that did not complete.
-        await engine.cancelReprompt(for: subagentId)
+        // Stop the loop on every way out — a reprompt in flight is a task of its own that cancelling
+        // `engineTask` does not reach — and clear the goal of anything that did not complete. A
+        // completed loop is only forbidden further turns: its last turn is still writing results.
+        engine.haltGoalLoop(for: subagentId, cancelling: termination.status != .completed)
         if termination.status != .completed {
             await MainActor.run { appState.clearGoal(for: subagentId) }
         }
@@ -265,8 +283,12 @@ final class SubagentManager: @unchecked Sendable {
         // Registered until the engine task has actually returned, not just until the parent has
         // its answer: a task still unwinding is a task still alive. Not awaited here, so an engine
         // parked where cancellation cannot reach does not hold the parent too.
+        // And until the loop's last turn has, too: after the first turn, that is a reprompt task.
         Task {
             await engineTask.value
+            while engine.goalLoopIsLive(for: subagentId) {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
             await MainActor.run { appState.unregisterLiveSubagent(subagentId) }
         }
         return (result.renderedForParent(), termination.status)
@@ -277,7 +299,7 @@ final class SubagentManager: @unchecked Sendable {
     static func toolDeclaration() -> FunctionDeclaration {
         FunctionDeclaration(
             name: "invoke_subagent",
-            description: "Spawn an isolated subagent with a constrained persona to execute a task. By default, this blocks until the subagent completes. Set 'background' to true to run it asynchronously and receive a notification when it finishes (not in a background job run, where it is refused). Criteria are optional; when you provide them, the run is graded by an independent evaluator and the verdict is returned to you alongside the subagent's own (unverified) summary.",
+            description: "Spawn an isolated subagent with a constrained persona to execute a task. The subagent works in a loop, reprompted after each turn until it calls goal_complete or reaches its iteration cap (a capped subagent comes back failed); each of its turns is a full model round. By default, this blocks until the subagent completes. Set 'background' to true to run it asynchronously and receive a notification when it finishes (not in a background job run, where it is refused). Criteria are optional; when you provide them, the run is graded by an independent evaluator and the verdict is returned to you alongside the subagent's own (unverified) summary.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -302,7 +324,7 @@ final class SubagentManager: @unchecked Sendable {
     static func milestoneDelegationDeclaration() -> FunctionDeclaration {
         FunctionDeclaration(
             name: "delegate_milestone",
-            description: "Hand the CURRENT checkpoint's milestone to a bounded subagent that works it in its own context. Its definition of done is taken from the locked ladder — you do not restate it. When the subagent finishes the milestone, the checkpoint is reached and graded automatically: a clean grade advances the ladder on its own, anything contested pauses for the user. Use reach_checkpoint instead when you did the work yourself.",
+            description: "Hand the CURRENT checkpoint's milestone to a bounded subagent that works it in its own context, in a loop of turns up to its iteration cap. Its definition of done is taken from the locked ladder — you do not restate it. When the subagent finishes the milestone, the checkpoint is reached and graded automatically: a clean grade advances the ladder on its own, anything contested pauses for the user. Use reach_checkpoint instead when you did the work yourself.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -315,7 +337,7 @@ final class SubagentManager: @unchecked Sendable {
         )
     }
 
-    func generateRolePrompt(role: String) -> String {
+    func generateRolePrompt(role: String, iterationCap: Int = ConfigManager.shared.maxSubagentIterations) -> String {
         let base = "You are Iris, operating in a specialized subagent role: **\(role.uppercased())**.\n" +
                    "You are executing within a fully configurable sandboxed micro-VM. You have full root permissions inside this VM environment to install packages, configure tools, and run commands needed to complete your objective.\n\n"
         var specific = ""
@@ -333,6 +355,6 @@ final class SubagentManager: @unchecked Sendable {
             specific = "Your goal is to execute the assigned task efficiently and autonomously."
         }
         
-        return base + specific + "\n\nWhen you are finished, you MUST call the `goal_complete` tool with a summary of your findings to return control to the parent agent."
+        return base + specific + "\n\nYou work in a loop: after each turn in which you have not called `goal_complete`, you are prompted to continue, for at most \(iterationCap) turn\(iterationCap == 1 ? "" : "s") in all. Reaching that cap without `goal_complete` ends your task as failed. When you are finished, you MUST call the `goal_complete` tool with a summary of your findings to return control to the parent agent."
     }
 }
