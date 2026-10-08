@@ -31,7 +31,7 @@ Two new types, plus one `decodeIfPresent`-defaulted field on `Conversation`:
 enum SubagentTerminalStatus: String, Codable, Sendable, Equatable {
     case completed   // goal_complete was called by the subagent
     case failed      // LLM/engine error ended the run
-    case timedOut    // the 5-minute poll cap in SubagentManager fired
+    case timedOut    // the 5-minute poll cap in SubagentManager fired (since #402: one turn ran past the per-turn limit, default 15 min)
     case cancelled   // stop/cancel path ended the run
 }
 

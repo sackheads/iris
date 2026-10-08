@@ -198,7 +198,7 @@ struct SubagentGradingTests {
     func timedOutContractedRunIsNotGraded() async throws {
         let (state, parentId) = freshState()
         // Never terminates, so the contract is still observable on the conversation at the cap.
-        // A real wall clock raced a busy suite here (#355): `maxIterations * 100ms` could elapse
+        // A real wall clock raced a busy suite here (#355): the deadline could elapse
         // before the subagent's own call had even been placed, or `engineTask.cancel()`'s unwind of
         // that call could beat the cap's own classification to `holder`, depending on which
         // MainActor hop landed first under load. The manual clock removes the first race by
@@ -211,13 +211,13 @@ struct SubagentGradingTests {
             await SubagentManager.shared.runSubagent(
                 role: "engineer", task: "build a widget", effort: "easy",
                 parentConversationId: parentId, unit: gradedUnit("the widget exists"),
-                maxIterations: 2, client: client, appState: state, deadlineClock: clock.now)
+                turnTimeout: 1, client: client, appState: state, deadlineClock: clock.now)
         }
 
         // Hold the precondition: the deadline cannot be allowed to arrive until the subagent's own
         // call is actually in flight.
         await waitFor("the subagent to reach its model call") { client.calls >= 1 }
-        // Now move the clock well past the cap (maxIterations(2) * 100ms = 0.2s on this clock).
+        // Now move the clock well past the 1 s turn deadline on this clock.
         clock.advance(by: 60)
 
         let result = try #require(await finished(runTask),

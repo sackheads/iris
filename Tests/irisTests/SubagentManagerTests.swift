@@ -344,12 +344,12 @@ final class SubagentManagerTests: XCTestCase {
         let runTask = Task {
             await SubagentManager.shared.runSubagent(
                 role: "worker", task: "loop forever", effort: "easy",
-                parentConversationId: parentId, maxIterations: 3, client: client, appState: state,
+                parentConversationId: parentId, turnTimeout: 1, client: client, appState: state,
                 deadlineClock: clock.now)
         }
 
         await waitFor("the subagent to reach its model call") { client.calls >= 1 }
-        clock.advance(by: 60) // well past the cap (maxIterations(3) * 100ms = 0.3s on this clock)
+        clock.advance(by: 60) // well past the 1 s turn deadline on this clock
 
         let result = await finished(runTask)
         let summary = try XCTUnwrap(result, "the deadline ended a run parked in its model call").rendered

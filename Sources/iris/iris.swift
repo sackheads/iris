@@ -1112,6 +1112,12 @@ actor IrisEngine {
         goalLoop.isLive(for: conversationId)
     }
 
+    /// Calls `observer` as each of the conversation's turns begins; nil stops it. A subagent's
+    /// per-turn deadline restarts there (#402).
+    nonisolated func observeGoalLoopTurns(for conversationId: UUID, _ observer: (@Sendable () -> Void)?) {
+        goalLoop.observeTurns(for: conversationId, observer)
+    }
+
     /// Ends the conversation's goal loop for good and cancels whatever turn the loop is running.
     nonisolated func haltGoalLoop(for conversationId: UUID, cancelling: Bool = true) {
         goalLoop.halt(conversationId, cancelling: cancelling)
