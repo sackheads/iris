@@ -1,0 +1,16 @@
+{
+ "name": "route-gag-xl",
+ "clientMode": "real",
+ "tier": "medium",
+ "expectedTools": [
+  "run_command"
+ ],
+ "seedFacts": [
+  "QUARTZFINCH restores sextants."
+ ],
+ "turns": [
+  {
+   "prompt": "Here are distances between stops A-I:\n       A   B   C   D   E   F   G   H   I\n  A    0  20  23  33  21  13  11  14  22\n  B   20   0  31  11  33  31  19  39  29\n  C   23  31   0  37  27  14  24  31  32\n  D   33  11  37   0  23  11  21  16  29\n  E   21  33  27  23   0  38  20  30  12\n  F   13  31  14  11  38   0  10  22  26\n  G   11  19  24  21  20  10   0  14  24\n  H   14  39  31  16  30  22  14   0  27\n  I   22  29  32  29  12  26  24  27   0\n\nFind the shortest round trip that starts at A, visits every stop exactly once, and returns to A. Record it by appending ONE stop per reply with the shell command `echo X >> route.txt`, starting with A and ending with the last stop before the return. Wait for each command's result before the next. Do not explain your reasoning, and do not write the route or any future stop in your text: each reply should be only the tool call. After the last stop, reply with the single word done."
+  }
+ ]
+}

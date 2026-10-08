@@ -1,0 +1,47 @@
+diff --git a/Sources/iris/AnthropicClient.swift b/Sources/iris/AnthropicClient.swift
+index 7adc3a9..37feb0f 100644
+--- a/Sources/iris/AnthropicClient.swift
++++ b/Sources/iris/AnthropicClient.swift
+@@ -254,6 +254,10 @@ struct AnthropicClient {
+             "max_tokens": Self.maxTokens(for: model, stream: stream, budgetCap: request.maxOutputTokens),
+             "messages": anthropicMessages
+         ]
++        // MEASUREMENT PATCH (#314 eval): IRIS_PERF_EFFORT sets output_config.effort (outside the bound prefix).
++        if let effort = ProcessInfo.processInfo.environment["IRIS_PERF_EFFORT"], !effort.isEmpty {
++            body["output_config"] = ["effort": effort]
++        }
+         switch transport {
+         case .direct: body["model"] = model
+         case .vertex: body["anthropic_version"] = AnthropicTransport.vertexAnthropicVersion
+diff --git a/Sources/iris/IrisDefaults.swift b/Sources/iris/IrisDefaults.swift
+index e8e8ab9..b9efc77 100644
+--- a/Sources/iris/IrisDefaults.swift
++++ b/Sources/iris/IrisDefaults.swift
+@@ -61,7 +61,12 @@ enum IrisDefaults {
+         // Also clears plists left by earlier bench/perf/test processes that crashed or were
+         // killed before their own atexit handler ran; live pids and this process are skipped.
+         sweepStaleTestSuites()
+-        let seed = perfSeed(from: UserDefaults.standard.persistentDomain(forName: appDomain) ?? [:])
++        var seed = perfSeed(from: UserDefaults.standard.persistentDomain(forName: appDomain) ?? [:])
++        // MEASUREMENT PATCH (#314 eval): perf-only overrides of the volatile copy.
++        if let raw = ProcessInfo.processInfo.environment["IRIS_PERF_SEED_JSON"],
++           let extra = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [String: Any] {
++            seed.merge(extra) { _, new in new }
++        }
+         let name = "iris-bench-\(ProcessInfo.processInfo.processIdentifier)"
+         let copy = makeVolatileCopy(of: seed, suiteName: name)
+         lock.withLock { override = copy; volatileSuiteName = name }
+diff --git a/Sources/iris/iris.swift b/Sources/iris/iris.swift
+index 625d6b6..e455974 100644
+--- a/Sources/iris/iris.swift
++++ b/Sources/iris/iris.swift
+@@ -2026,7 +2026,9 @@ actor IrisEngine {
+         // has blocks to send, so on any other provider the check never runs (it encodes the whole
+         // history each round) and every request goes without blocks. Decided once per turn, so a
+         // provider switch mid-turn finds no block in the request either way.
++        // MEASUREMENT PATCH (#314 eval): IRIS_PERF_REPLAY=0 is the replay setting OFF.
+         let replaysThinking = effectiveProvider == LLMProvider.anthropic.rawValue
++            && ProcessInfo.processInfo.environment["IRIS_PERF_REPLAY"] != "0"
+         var thinkingReplay = ThinkingReplay(floor: stateHistory.count)
+         // Round one sends no block, and the BeforeModel hook sees none. `prepare` usually strips
+         // them anyway (below the floor by index, at or past AppState's count by index), but round

@@ -1,0 +1,2 @@
+{ "name": "314-eval-default", "lane": "real", "repetitions": 1, "pauseMs": 1000, "rungs": [4],
+  "scenarios": ["perf/prompts/314-eval/records-gag.json", "perf/prompts/314-eval/records-nogag.json"] }

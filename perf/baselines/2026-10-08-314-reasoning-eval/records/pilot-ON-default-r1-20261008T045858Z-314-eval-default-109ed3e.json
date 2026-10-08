@@ -1,0 +1,457 @@
+{
+  "cacheCountsVersion" : 1,
+  "environment" : {
+    "basePricePerMTok" : 4,
+    "buildConfiguration" : "release",
+    "cpuCount" : 14,
+    "gitDirty" : true,
+    "gitSha" : "109ed3e",
+    "headless" : false,
+    "injectionGuardEnabled" : true,
+    "machineModel" : "Mac16,7",
+    "models" : {
+      "easy" : "claude-haiku-4-5-20251001",
+      "hard" : "claude-fable-5",
+      "medium" : "claude-opus-5-5"
+    },
+    "osVersion" : "Version 26.7.1 (Build 25G241)",
+    "promptGuardEngine" : "cloud",
+    "provider" : "Anthropic",
+    "sandboxEnabled" : true,
+    "streaming" : true,
+    "toolDeclarationCount" : 17,
+    "toolSandbox" : "sandboxed",
+    "vibecopEnabled" : true,
+    "vibecopEngine" : "cloud"
+  },
+  "finishedAt" : "2026-10-08T04:59:31Z",
+  "scenarios" : [
+    {
+      "category" : "314-eval",
+      "lane" : "real",
+      "name" : "records-gag",
+      "path" : "perf\/prompts\/314-eval\/records-gag.json",
+      "rungs" : [
+        {
+          "medianMs" : 15094.359791994095,
+          "p90Ms" : 15094.359791994095,
+          "repetitions" : [
+            {
+              "coldStart" : true,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 3.065667003393173
+                    },
+                    "injectionGuard" : {
+                      "count" : 12,
+                      "ms" : 1.5685829818248749
+                    },
+                    "primaryLLM" : {
+                      "count" : 6,
+                      "ms" : 13930.485790997744
+                    },
+                    "toolExecution" : {
+                      "count" : 5,
+                      "ms" : 1143.345874965191
+                    }
+                  },
+                  "finalText" : "done",
+                  "finalTextLength" : 4,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13959,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 0,
+                      "firstTokenMs" : 4618.794625014067,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 4665.956020355225,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 412,
+                      "promptTokens" : 13963,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 13437,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 987,
+                      "firstTokenMs" : 2801.1946670114994,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2816.757082939148,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 75,
+                      "promptTokens" : 14426,
+                      "returnedToolCalls" : true,
+                      "round" : 1
+                    },
+                    {
+                      "cacheReadTokens" : 14424,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 144,
+                      "firstTokenMs" : 2000.4951669871807,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2015.104055404663,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 77,
+                      "promptTokens" : 14570,
+                      "returnedToolCalls" : true,
+                      "round" : 2
+                    },
+                    {
+                      "cacheReadTokens" : 13437,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 1258,
+                      "firstTokenMs" : 1718.4061670005322,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1722.8749990463257,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 80,
+                      "promptTokens" : 14697,
+                      "returnedToolCalls" : true,
+                      "round" : 3
+                    },
+                    {
+                      "cacheReadTokens" : 14568,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 257,
+                      "firstTokenMs" : 1653.9492909908295,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1672.2859144210815,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 89,
+                      "promptTokens" : 14827,
+                      "returnedToolCalls" : true,
+                      "round" : 4
+                    },
+                    {
+                      "cacheReadTokens" : 14695,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 270,
+                      "firstTokenMs" : 1034.8986670076847,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1038.122057914734,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 3,
+                      "promptTokens" : 14967,
+                      "returnedToolCalls" : false,
+                      "round" : 5
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.6601249873638153
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 3.058582991361618
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.6469579935073853
+                    },
+                    "guard.tier1" : {
+                      "count" : 6,
+                      "ms" : 0.09404096007347107
+                    },
+                    "guard.tier2" : {
+                      "count" : 5,
+                      "ms" : 0.0016259849071502686
+                    },
+                    "guard.tier3" : {
+                      "count" : 5,
+                      "ms" : 0.0016670525074005127
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"command\":\"mkdir -p out\",\"intent\":\"Step 1: create out dir\"}",
+                      "ms" : 830.6010961532593,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"date\",\"intent\":\"Step 2: print date\"}",
+                      "ms" : 99.38502311706543,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"ls\",\"intent\":\"Step 3: list directory\"}",
+                      "ms" : 69.9610710144043,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo ready\",\"intent\":\"Step 4: echo ready\"}",
+                      "ms" : 56.700944900512695,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo LARCH > out\/answer.txt\",\"intent\":\"Step 5: write answer\"}",
+                      "ms" : 84.96701717376709,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 15087.422013282776
+                }
+              ],
+              "wallClockMs" : 15094.359791994095
+            }
+          ],
+          "rung" : 4
+        }
+      ],
+      "summary" : {
+        "medianFirstTokenMs" : 1859.4506669938564,
+        "medianMs" : 15094.359791994095,
+        "missedExpectedToolRate" : 0,
+        "p90Ms" : 15094.359791994095,
+        "toolCallRate" : 1,
+        "toolCallsByName" : {
+          "run_command" : 5
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    },
+    {
+      "category" : "314-eval",
+      "lane" : "real",
+      "name" : "records-nogag",
+      "path" : "perf\/prompts\/314-eval\/records-nogag.json",
+      "rungs" : [
+        {
+          "medianMs" : 14602.11124998331,
+          "p90Ms" : 14602.11124998331,
+          "repetitions" : [
+            {
+              "coldStart" : false,
+              "index" : 0,
+              "modelCalls" : [
+
+              ],
+              "turns" : [
+                {
+                  "categories" : {
+                    "contextAssembly" : {
+                      "count" : 1,
+                      "ms" : 0.7061249911785126
+                    },
+                    "injectionGuard" : {
+                      "count" : 12,
+                      "ms" : 1.241875022649765
+                    },
+                    "primaryLLM" : {
+                      "count" : 6,
+                      "ms" : 13500.23816600442
+                    },
+                    "toolExecution" : {
+                      "count" : 5,
+                      "ms" : 1085.0415839850903
+                    }
+                  },
+                  "finalText" : "done",
+                  "finalTextLength" : 4,
+                  "modelCalls" : [
+                    {
+                      "cacheReadTokens" : 13919,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 0,
+                      "firstTokenMs" : 4061.3747919797897,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 4791.397929191589,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 441,
+                      "promptTokens" : 13923,
+                      "returnedToolCalls" : true,
+                      "round" : 0
+                    },
+                    {
+                      "cacheReadTokens" : 13919,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 494,
+                      "firstTokenMs" : 1848.0277090072632,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1853.5150289535522,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 74,
+                      "promptTokens" : 14415,
+                      "returnedToolCalls" : true,
+                      "round" : 1
+                    },
+                    {
+                      "cacheReadTokens" : 14413,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 143,
+                      "firstTokenMs" : 1842.3093340098858,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1848.3740091323853,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 76,
+                      "promptTokens" : 14558,
+                      "returnedToolCalls" : true,
+                      "round" : 2
+                    },
+                    {
+                      "cacheReadTokens" : 14556,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 126,
+                      "firstTokenMs" : 1555.9555410146713,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1561.5750551223755,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 80,
+                      "promptTokens" : 14684,
+                      "returnedToolCalls" : true,
+                      "round" : 3
+                    },
+                    {
+                      "cacheReadTokens" : 13919,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 893,
+                      "firstTokenMs" : 2032.0127080082893,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 2032.4119329452515,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 129,
+                      "promptTokens" : 14814,
+                      "returnedToolCalls" : true,
+                      "round" : 4
+                    },
+                    {
+                      "cacheReadTokens" : 14682,
+                      "cacheWrite1hTokens" : 0,
+                      "cacheWriteTokens" : 310,
+                      "firstTokenMs" : 1409.1044999957085,
+                      "inputTransformations" : [
+
+                      ],
+                      "latencyMs" : 1413.5620594024658,
+                      "model" : "claude-opus-5-5",
+                      "outputTokens" : 3,
+                      "promptTokens" : 14994,
+                      "returnedToolCalls" : false,
+                      "round" : 5
+                    }
+                  ],
+                  "spans" : {
+                    "assembly.factSearch" : {
+                      "count" : 1,
+                      "ms" : 0.48374998569488525
+                    },
+                    "assembly.systemPrompt" : {
+                      "count" : 1,
+                      "ms" : 0.7044160068035126
+                    },
+                    "assembly.userProfile" : {
+                      "count" : 1,
+                      "ms" : 0.3773750066757202
+                    },
+                    "guard.tier1" : {
+                      "count" : 6,
+                      "ms" : 0.10066699981689453
+                    },
+                    "guard.tier2" : {
+                      "count" : 1,
+                      "ms" : 0.0003330111503601074
+                    },
+                    "guard.tier3" : {
+                      "count" : 1,
+                      "ms" : 0.0003749728202819824
+                    }
+                  },
+                  "toolCalls" : [
+                    {
+                      "args" : "{\"command\":\"mkdir -p out\",\"intent\":\"Step 1: create out dir\"}",
+                      "ms" : 792.1340465545654,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"date\",\"intent\":\"Step 2: date\"}",
+                      "ms" : 82.94904232025146,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"ls\",\"intent\":\"Step 3: list files\"}",
+                      "ms" : 85.23702621459961,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo ready\",\"intent\":\"Step 4: echo ready\"}",
+                      "ms" : 67.33095645904541,
+                      "name" : "run_command",
+                      "ok" : true
+                    },
+                    {
+                      "args" : "{\"command\":\"echo LARCH > out\/answer.txt\",\"intent\":\"Step 5: write answer (LARCH)\"}",
+                      "ms" : 56.71203136444092,
+                      "name" : "run_command",
+                      "ok" : true
+                    }
+                  ],
+                  "totalMs" : 14594.527006149292
+                }
+              ],
+              "wallClockMs" : 14602.11124998331
+            }
+          ],
+          "rung" : 4
+        }
+      ],
+      "summary" : {
+        "medianFirstTokenMs" : 1845.1685215085745,
+        "medianMs" : 14602.11124998331,
+        "missedExpectedToolRate" : 0,
+        "p90Ms" : 14602.11124998331,
+        "toolCallRate" : 1,
+        "toolCallsByName" : {
+          "run_command" : 5
+        },
+        "unexpectedToolCallRate" : 0,
+        "unexpectedToolCallsByName" : {
+
+        }
+      }
+    }
+  ],
+  "schemaVersion" : 1,
+  "startedAt" : "2026-10-08T04:58:58Z",
+  "suite" : "314-eval-default"
+}
