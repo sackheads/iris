@@ -2,9 +2,9 @@ import Foundation
 import Security
 
 public final class KeychainManager: @unchecked Sendable {
-    public static let shared = KeychainManager()
+    public static let shared = KeychainManager(serviceSuffix: BuildIdentity.current.keychainServiceSuffix)
 
-    private let legacyService = "com.iris.secrets"
+    static let legacyService = "com.iris.secrets"
     private let account = "all-keys"
 
     public static let mcpFileService = "iris.mcp"
@@ -31,14 +31,24 @@ public final class KeychainManager: @unchecked Sendable {
     private var inMemorySecrets: [String: [String: String]] = [:]
     private let inMemoryLock = NSLock()
 
-    private init() {}
+    /// Appended to every base service name passed to the methods below, so callers never
+    /// build the suffixed name themselves (Task 3 of the dev/release separation plan).
+    private let serviceSuffix: String
+
+    init(serviceSuffix: String) {
+        self.serviceSuffix = serviceSuffix
+    }
+
+    /// The service name actually used for Keychain/in-memory storage for a given base name.
+    func resolvedService(_ base: String) -> String { base + serviceSuffix }
 
     // MARK: - Legacy API (service = com.iris.secrets), unchanged behavior
-    public func loadSecrets() -> [String: String] { secrets(service: legacyService) }
-    public func saveSecrets(_ secrets: [String: String]) { saveSecrets(secrets, service: legacyService) }
+    public func loadSecrets() -> [String: String] { secrets(service: Self.legacyService) }
+    public func saveSecrets(_ secrets: [String: String]) { saveSecrets(secrets, service: Self.legacyService) }
 
     // MARK: - Service-scoped API
     public func secrets(service: String) -> [String: String] {
+        let service = resolvedService(service)
         if usesInMemoryStore {
             return inMemoryLock.withLock { inMemorySecrets[service] ?? [:] }
         }
@@ -56,6 +66,7 @@ public final class KeychainManager: @unchecked Sendable {
     }
 
     public func saveSecrets(_ secrets: [String: String], service: String) {
+        let service = resolvedService(service)
         if usesInMemoryStore {
             inMemoryLock.withLock { inMemorySecrets[service] = secrets }
             return
@@ -78,6 +89,7 @@ public final class KeychainManager: @unchecked Sendable {
     }
 
     public func deleteSecrets(service: String) {
+        let service = resolvedService(service)
         if usesInMemoryStore {
             inMemoryLock.withLock { inMemorySecrets[service] = nil }
             return
@@ -88,5 +100,31 @@ public final class KeychainManager: @unchecked Sendable {
             kSecAttrAccount as String: account
         ]
         SecItemDelete(query as CFDictionary)
+    }
+
+    /// Base names of the stored services starting with `prefix`, for this manager's suffix only.
+    /// Reads attributes, never data, so it does not trip the Keychain's access prompt.
+    func storedServices(withPrefix prefix: String) -> [String] {
+        let names: [String]
+        if usesInMemoryStore {
+            names = inMemoryLock.withLock { Array(inMemorySecrets.keys) }
+        } else {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrAccount as String: account,
+                kSecReturnAttributes as String: true,
+                kSecMatchLimit as String: kSecMatchLimitAll
+            ]
+            var result: AnyObject?
+            guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+                  let items = result as? [[String: Any]] else { return [] }
+            names = items.compactMap { $0[kSecAttrService as String] as? String }
+        }
+        return names.compactMap { name in
+            guard name.hasPrefix(prefix) else { return nil }
+            if serviceSuffix.isEmpty { return name.hasSuffix(".dev") ? nil : name }
+            guard name.hasSuffix(serviceSuffix) else { return nil }
+            return String(name.dropLast(serviceSuffix.count))
+        }
     }
 }
