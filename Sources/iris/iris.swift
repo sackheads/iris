@@ -4907,7 +4907,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct IrisApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     init() {
-        // First, before anything else in the launch sequence: this claims the store for this app
+        // Before anything reads a setting: the first release launch inherits dev's settings.
+        ReleaseDefaultsImport.runIfNeeded()
+        // Next, before anything else in the launch sequence: this claims the store for this app
         // instance, and `iris --run-job` refuses while the file names a live process (#187 §8).
         // Nothing above it may touch `conversations.sqlite` — today nothing here does, and keeping
         // the acquire first is what stops that becoming a window rather than a rule.
