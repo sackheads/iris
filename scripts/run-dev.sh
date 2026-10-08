@@ -5,13 +5,9 @@
 #
 #   scripts/run-dev.sh [extra iris arguments]
 set -euo pipefail
+# Before the cd: ${0:A} resolves a relative $0 against the current directory.
+source "${0:A:h}/lib.sh"
 cd "$(dirname "$0")/.."
-# Print the whole build log only when the build fails; a bare `| tail -1` hides the error.
-build_or_die() {
-  local out
-  if ! out=$("$@" 2>&1); then echo "$out"; echo "build failed" >&2; exit 1; fi
-  echo "$out" | tail -1
-}
 build_or_die swift build
 scripts/sign.sh .build/debug/iris
 # Dev builds live in ~/.iris-dev. Whenever it is missing or empty, this copies the installed
