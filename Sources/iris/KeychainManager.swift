@@ -88,6 +88,79 @@ public final class KeychainManager: @unchecked Sendable {
         }
     }
 
+    // MARK: - Throwing API (callers that must not lose a secret silently)
+
+    /// A Keychain call that failed for a reason other than "nothing stored there". The seeder
+    /// uses this to distinguish a locked Keychain, a denied ACL or a bad status from an item
+    /// that was simply never created, which `secrets(service:)`'s empty dictionary cannot.
+    enum SecretsError: Error, Equatable { case status(OSStatus) }
+
+    /// What a raw Keychain `OSStatus` means to a caller that cares. A pure function of the
+    /// status code, kept separate from any live `SecItem*` call so it is unit-testable without
+    /// touching the real Keychain — `usesInMemoryStore` never produces a non-success status to
+    /// test against, and the ad-hoc/linker-signed test binary re-prompts for the login password
+    /// on every real Keychain call (see `usesInMemoryStore`'s doc above).
+    enum StatusOutcome: Equatable { case success, notFound, failure(OSStatus) }
+
+    static func outcome(for status: OSStatus) -> StatusOutcome {
+        switch status {
+        case errSecSuccess: return .success
+        case errSecItemNotFound: return .notFound
+        default: return .failure(status)
+        }
+    }
+
+    /// `secrets(service:)`, but any Keychain failure other than "not found" throws instead of
+    /// coming back as the same empty dictionary an absent item would.
+    func secretsOrThrow(service: String) throws -> [String: String] {
+        let service = resolvedService(service)
+        if usesInMemoryStore {
+            return inMemoryLock.withLock { inMemorySecrets[service] ?? [:] }
+        }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var dataTypeRef: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        switch Self.outcome(for: status) {
+        case .notFound: return [:]
+        case .failure(let bad): throw SecretsError.status(bad)
+        case .success:
+            guard let data = dataTypeRef as? Data else { return [:] }
+            return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+        }
+    }
+
+    /// `saveSecrets(_:service:)`, but a non-success status throws instead of only printing —
+    /// used wherever a silently dropped secret would strand the caller.
+    func saveSecretsOrThrow(_ secrets: [String: String], service: String) throws {
+        let service = resolvedService(service)
+        if usesInMemoryStore {
+            inMemoryLock.withLock { inMemorySecrets[service] = secrets }
+            return
+        }
+        guard let data = try? JSONEncoder().encode(secrets) else { throw SecretsError.status(errSecParam) }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        let attributes: [String: Any] = [kSecValueData as String: data]
+        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            var newQuery = query
+            newQuery[kSecValueData as String] = data
+            let addStatus = SecItemAdd(newQuery as CFDictionary, nil)
+            guard addStatus == errSecSuccess else { throw SecretsError.status(addStatus) }
+        } else if status != errSecSuccess {
+            throw SecretsError.status(status)
+        }
+    }
+
     public func deleteSecrets(service: String) {
         let service = resolvedService(service)
         if usesInMemoryStore {

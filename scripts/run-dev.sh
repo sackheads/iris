@@ -15,5 +15,15 @@ build_or_die() {
 build_or_die swift build
 scripts/sign.sh .build/debug/iris
 # Dev builds live in ~/.iris-dev. The first run copies the installed app's home and secrets.
-[[ -e "$HOME/.iris-dev" ]] || .build/debug/iris --seed-dev-home
+# Exit 3 means nothing to seed (no ~/.iris yet, e.g. a fresh machine) — fine, dev launches empty.
+# Any other non-zero exit aborts here: launching anyway would create ~/.iris-dev itself and the
+# seeder refuses a non-empty destination, so a later retry could never seed at all.
+if [[ ! -e "$HOME/.iris-dev" ]]; then
+  seed_output=$(.build/debug/iris --seed-dev-home 2>&1) && seed_rc=0 || seed_rc=$?
+  echo "$seed_output"
+  if [[ $seed_rc -ne 0 && $seed_rc -ne 3 ]]; then
+    echo "not launching dev: seeding failed (see above)" >&2
+    exit 1
+  fi
+fi
 exec .build/debug/iris "$@"
