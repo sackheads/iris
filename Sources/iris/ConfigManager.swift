@@ -238,6 +238,8 @@ class ConfigManager: @unchecked Sendable {
     }
 
     static let defaultMaxSubagentIterations = 10
+    /// Longer than `run_command`'s 10-minute default, so one long command fits in a turn (#402).
+    static let defaultSubagentTurnTimeoutSeconds = 900
 
     var maxGoalIterations: Int {
         didSet { store.set(maxGoalIterations, forKey: "MAX_GOAL_ITERATIONS") }
@@ -247,6 +249,12 @@ class ConfigManager: @unchecked Sendable {
     /// reprompt is a full model round charged to whoever delegated it.
     var maxSubagentIterations: Int {
         didSet { store.set(maxSubagentIterations, forKey: "MAX_SUBAGENT_ITERATIONS") }
+    }
+    /// The most seconds one subagent turn may run before the subagent ends `timedOut` (#402). Per
+    /// turn, reset on each reprompt: the whole subagent is bounded by this times its iteration cap,
+    /// and in a job run by the run's own deadline.
+    var subagentTurnTimeoutSeconds: Int {
+        didSet { store.set(subagentTurnTimeoutSeconds, forKey: "SUBAGENT_TURN_TIMEOUT_SECONDS") }
     }
     var maxDoneGateRetries: Int {
         didSet { store.set(maxDoneGateRetries, forKey: "MAX_DONE_GATE_RETRIES") }
@@ -498,6 +506,8 @@ class ConfigManager: @unchecked Sendable {
         // Unset (0) or a hand-edited negative is the default, as for the job limits.
         let savedSubagentIters = saved.integer(forKey: "MAX_SUBAGENT_ITERATIONS")
         self.maxSubagentIterations = savedSubagentIters <= 0 ? Self.defaultMaxSubagentIterations : savedSubagentIters
+        let savedTurnTimeout = saved.integer(forKey: "SUBAGENT_TURN_TIMEOUT_SECONDS")
+        self.subagentTurnTimeoutSeconds = savedTurnTimeout <= 0 ? Self.defaultSubagentTurnTimeoutSeconds : savedTurnTimeout
         let savedLoop = saved.integer(forKey: "LOOP_DETECTION_THRESHOLD")
         let savedGateRetries = saved.integer(forKey: "MAX_DONE_GATE_RETRIES")
         self.maxDoneGateRetries = savedGateRetries == 0 ? 3 : savedGateRetries

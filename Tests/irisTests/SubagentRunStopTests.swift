@@ -119,14 +119,14 @@ struct SubagentRunStopTests {
         let run = run(in: state, maxTokens: 100)
 
         let started = Date()
-        // A 30 s poll cap: were the refusal not terminal the subagent would run into it and read
-        // `timed out`, rather than spending the five-minute default.
+        // A 30 s turn deadline: were the refusal not terminal the subagent would run into it and read
+        // `timed out`, rather than spending the 15-minute default.
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: run,
-            maxIterations: 300, client: client, appState: state, endSandboxSession: { _ in })
+            turnTimeout: 30, client: client, appState: state, endSandboxSession: { _ in })
 
-        // Only shows the subagent stopped well before its poll cap, not how fast; the full parallel suite runs it at ~4 s.
-        #expect(Date().timeIntervalSince(started) < 10, "seconds, not the poll cap")
+        // Only shows the subagent stopped well before its turn deadline, not how fast; the full parallel suite runs it at ~4 s.
+        #expect(Date().timeIntervalSince(started) < 10, "seconds, not the turn deadline")
         #expect(client.callCount("WORKER") == 1, "the second round was refused, not made")
         #expect(outcome.status == .failed)
         #expect(outcome.rendered.contains("status: failed"))
@@ -182,7 +182,7 @@ struct SubagentRunStopTests {
         let waiting = Task {
             await SubagentManager.shared.runSubagent(
                 role: "worker", task: "Work.", effort: "easy", parentConversationId: run,
-                maxIterations: 100, client: client, appState: state, endSandboxSession: { id in
+                turnTimeout: 10, client: client, appState: state, endSandboxSession: { id in
                     // A cancelled task never launches `container delete`, so only an uncancelled
                     // call counts as freeing the container.
                     if !Task.isCancelled { ended.add(id) }
@@ -195,7 +195,7 @@ struct SubagentRunStopTests {
         waiting.cancel()
         let outcome = await waiting.value
 
-        #expect(Date().timeIntervalSince(cancelledAt) < 5, "the poll cap is ten seconds: this is the cancel")
+        #expect(Date().timeIntervalSince(cancelledAt) < 5, "the turn deadline is ten seconds: this is the cancel")
         #expect(outcome.status == .cancelled)
         #expect(outcome.rendered.contains("status: cancelled"))
         #expect(outcome.rendered.contains(SubagentManager.cancelledReason))
@@ -214,7 +214,7 @@ struct SubagentRunStopTests {
         let waiting = Task {
             await SubagentManager.shared.runSubagent(
                 role: "worker", task: "Work.", effort: "easy", parentConversationId: run,
-                maxIterations: 100, client: client, appState: state, endSandboxSession: { _ in })
+                turnTimeout: 10, client: client, appState: state, endSandboxSession: { _ in })
         }
         #expect(await eventually { client.parkedCalls == 1 })
         #expect(state.liveSubagents(ofRun: run).count == 1)
@@ -222,7 +222,7 @@ struct SubagentRunStopTests {
         _ = state.takeBackgroundDenials(for: run)
         let outcome = await waiting.value
 
-        #expect(outcome.status == .cancelled, "stopped by the drain, not left to the poll cap")
+        #expect(outcome.status == .cancelled, "stopped by the drain, not left to the turn deadline")
         #expect(outcome.rendered.contains(SubagentManager.runEndedReason))
         #expect(await eventually { client.cancelledCalls == 1 })
         #expect(await eventually { state.liveSubagents(ofRun: run).isEmpty })

@@ -139,7 +139,7 @@ struct SubagentGoalLoopTests {
 
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
-            maxIterations: 300, client: client, appState: state, config: config, repromptDelay: Self.delayPastTheGrace, endSandboxSession: { _ in })
+            turnTimeout: 30, client: client, appState: state, config: config, repromptDelay: Self.delayPastTheGrace, endSandboxSession: { _ in })
 
         #expect(outcome.status == .completed)
         #expect(outcome.rendered.contains("TURN2-SUMMARY"))
@@ -155,7 +155,7 @@ struct SubagentGoalLoopTests {
 
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
-            maxIterations: 300, client: client, appState: state, config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
+            turnTimeout: 30, client: client, appState: state, config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
 
         #expect(outcome.status == .failed)
         #expect(outcome.rendered.contains("reached its iteration cap (2)"))
@@ -199,7 +199,7 @@ struct SubagentGoalLoopTests {
         let task = Task {
             await SubagentManager.shared.runSubagent(
                 role: "worker", task: "Work.", effort: "easy", parentConversationId: run,
-                maxIterations: 3000, client: client, appState: state, config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
+                turnTimeout: 300, client: client, appState: state, config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
         }
         #expect(await eventually { client.parked == 1 }, "turn 2 is under way")
         #expect(client.calls == 2)
@@ -208,8 +208,8 @@ struct SubagentGoalLoopTests {
         task.cancel()
         let outcome = await task.value
 
-        // Only shows the subagent stopped well before its poll cap, not how fast; the full parallel suite runs it at ~4 s.
-        #expect(Date().timeIntervalSince(cancelledAt) < 10, "seconds, not the 300 s poll cap")
+        // Only shows the subagent stopped well before its turn deadline, not how fast; the full parallel suite runs it at ~4 s.
+        #expect(Date().timeIntervalSince(cancelledAt) < 10, "seconds, not the 300 s turn deadline")
         #expect(outcome.status == .cancelled)
         #expect(await eventually(10) { client.cancelled == 1 }, "turn 2's model call was cancelled")
         #expect(await eventually { state.liveSubagents(ofRun: run).isEmpty })
@@ -228,7 +228,7 @@ struct SubagentGoalLoopTests {
         let task = Task {
             await SubagentManager.shared.runSubagent(
                 role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
-                maxIterations: 3000, client: client, appState: state, deadlineClock: clock.now,
+                turnTimeout: 300, client: client, appState: state, deadlineClock: clock.now,
                 config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
         }
         #expect(await eventually { client.parked == 1 }, "turn 2 is under way")
@@ -260,7 +260,7 @@ struct SubagentGoalLoopTests {
 
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
-            maxIterations: 300, client: client, appState: state, config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
+            turnTimeout: 30, client: client, appState: state, config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
         #expect(outcome.status == .completed)
         let sub = try #require(state.conversations.first { $0.isSubagent }?.id)
 
@@ -282,17 +282,17 @@ struct SubagentGoalLoopTests {
         let started = Date()
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: run,
-            maxIterations: 300, client: client, appState: state, config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
+            turnTimeout: 30, client: client, appState: state, config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
 
-        // Only shows the subagent stopped well before its poll cap, not how fast; the full parallel suite runs it at ~4 s.
-        #expect(Date().timeIntervalSince(started) < 10, "seconds, not the 30 s poll cap")
+        // Only shows the subagent stopped well before its turn deadline, not how fast; the full parallel suite runs it at ~4 s.
+        #expect(Date().timeIntervalSince(started) < 10, "seconds, not the 30 s turn deadline")
         #expect(outcome.status == .failed)
         #expect(outcome.rendered.contains("Stopped by the background run's budget"))
         #expect(client.calls == 1, "turn 2's round was refused, not made")
         #expect(await eventually { state.liveSubagents(ofRun: run).isEmpty })
     }
 
-    @Test("a hook-blocked reprompt ends the loop promptly, not at the poll cap")
+    @Test("a hook-blocked reprompt ends the loop promptly, not at the turn deadline")
     func hookBlockedTurnEndsPromptly() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-subagentloop-hook-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -313,14 +313,14 @@ struct SubagentGoalLoopTests {
         let (config, teardown) = config(cap: 5); defer { teardown() }
 
         let started = Date()
-        // A 30 s poll cap: were the blocked turn waited on, the result would read `timed out`.
+        // A 30 s turn deadline: were the blocked turn waited on, the result would read `timed out`.
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
-            maxIterations: 300, client: client, appState: state, config: config, hooks: hooks, repromptDelay: Self.delay,
+            turnTimeout: 30, client: client, appState: state, config: config, hooks: hooks, repromptDelay: Self.delay,
             endSandboxSession: { _ in })
 
-        // Only shows the subagent stopped well before its poll cap, not how fast; the full parallel suite runs it at ~4 s.
-        #expect(Date().timeIntervalSince(started) < 10, "seconds, not the 30 s poll cap")
+        // Only shows the subagent stopped well before its turn deadline, not how fast; the full parallel suite runs it at ~4 s.
+        #expect(Date().timeIntervalSince(started) < 10, "seconds, not the 30 s turn deadline")
         #expect(outcome.status == .failed)
         #expect(client.calls == 1, "turn 2 was blocked before its model call")
         let sub = state.conversations.first { $0.isSubagent }
@@ -369,7 +369,7 @@ struct SubagentGoalLoopTests {
 
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
-            maxIterations: 300, client: client, appState: state, config: config,
+            turnTimeout: 30, client: client, appState: state, config: config,
             repromptDelay: Self.delay, endSandboxSession: { _ in })
         #expect(outcome.status == .completed)
         let sub = try #require(state.conversations.first { $0.isSubagent }?.id)

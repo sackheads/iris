@@ -51,11 +51,15 @@ final class SubagentManager: @unchecked Sendable {
     /// escapes the filter (#187 §4).
     /// `endSandboxSession` frees the subagent's container on every way out, injected so a test can
     /// see it called without a container runtime (#291).
-    /// `deadlineClock` is the wall clock the poll-cap deadline below is set and watched on,
+    /// `deadlineClock` is the wall clock the per-turn deadline below is set and watched on,
     /// injected only so a test can hold it off until the subagent is parked mid-turn, then move it
-    /// (#355, following #335/#342): a real poll cap raced a busy suite's MainActor work and
+    /// (#355, following #335/#342): a real deadline raced a busy suite's MainActor work and
     /// sometimes let the run's own soft-stop classify as `.failed` first. The default is the same
     /// wall clock as before, so nothing changes outside tests.
+    /// `turnTimeout` is how long one turn may run before the subagent ends `.timedOut` (#402),
+    /// restarted whenever a turn begins. Nil, as at every production call site, reads `config`'s
+    /// `subagentTurnTimeoutSeconds`; tests pass a short one. There is no total limit of its own:
+    /// the cap times this bounds the subagent, and a background run's deadline cancels it sooner.
     /// `config` supplies the subagent's iteration cap (`maxSubagentIterations`, #399): the most
     /// turns its goal loop runs before it ends `failed` without `goal_complete`. Injected so a test
     /// sets it on a store of its own rather than on `ConfigManager.shared`.
@@ -63,7 +67,7 @@ final class SubagentManager: @unchecked Sendable {
     /// turns without a settings file in the shared home. `repromptDelay` is its goal loop's pause
     /// between turns, shortened only by tests.
     func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID,
-                     unit: DelegatedUnit? = nil, maxIterations: Int = 3000,
+                     unit: DelegatedUnit? = nil, turnTimeout: TimeInterval? = nil,
                      client: (any LLMClientProtocol)? = nil,
                      appState: AppState,
                      recentWrites: RecentWrites = .shared,
@@ -118,7 +122,8 @@ final class SubagentManager: @unchecked Sendable {
 
         // 3. Craft the role-specific prompt
         let iterationCap = max(1, config.maxSubagentIterations)
-        let customPromptText = generateRolePrompt(role: role, iterationCap: iterationCap)
+        let perTurn = max(1, turnTimeout ?? Double(config.subagentTurnTimeoutSeconds))
+        let customPromptText = generateRolePrompt(role: role, iterationCap: iterationCap, turnTimeout: perTurn)
         await engine.setSystemPrompt(text: customPromptText)
         await engine.setGoalIterationCap(iterationCap, for: subagentId)
 
@@ -157,7 +162,7 @@ final class SubagentManager: @unchecked Sendable {
         // ends without goal_complete schedules the next one as a reprompt task of its own, 1.5 s
         // later, and the poll below waits for `goalLoopIsLive` too. Together they catch a loop
         // that ended without firing `onSubagentComplete` — a hook-blocked turn, a reprompt that
-        // found its goal gone — which would otherwise spin to the deadline (five minutes, by
+        // found its goal gone — which would otherwise spin to the turn deadline (15 minutes, by
         // default), stalling the parent that is awaiting the result.
         actor EngineDone {
             var finished = false
@@ -165,6 +170,20 @@ final class SubagentManager: @unchecked Sendable {
             func get() -> Bool { finished }
         }
         let engineDone = EngineDone()
+
+        // Per turn, on the wall clock (`deadlineClock`), not a poll count: a count of 100ms sleeps
+        // still measures *polls*, not time, when the clock behind it is injected and can be held
+        // still or jumped — see the parameter doc above. Each turn stamps its own start as it
+        // begins (#402), so the deadline restarts on every reprompt, from the turn's real start.
+        final class TurnStart: @unchecked Sendable {
+            private let lock = NSLock()
+            private var at: Date
+            init(_ at: Date) { self.at = at }
+            func set(_ d: Date) { lock.withLock { at = d } }
+            func get() -> Date { lock.withLock { at } }
+        }
+        let turnStart = TurnStart(deadlineClock())
+        engine.observeGoalLoopTurns(for: subagentId) { turnStart.set(deadlineClock()) }
 
         let engineTask = Task {
             // The first turn. Since activeGoal is set, the engine reprompts itself after each turn
@@ -190,10 +209,6 @@ final class SubagentManager: @unchecked Sendable {
         }
         await MainActor.run { appState.registerLiveSubagent(subagentId, stop: stop) }
 
-        // The wall clock (`deadlineClock`), not a poll count: a count of 100ms sleeps still
-        // measures *polls*, not time, when the clock behind it is injected and can be held still or
-        // jumped — see the parameter doc above.
-        let deadline = deadlineClock().addingTimeInterval(Double(maxIterations) * 0.1)
         var gracePolls = 0
         var timedOut = false
         await withTaskCancellationHandler {
@@ -212,13 +227,13 @@ final class SubagentManager: @unchecked Sendable {
                         break
                     }
                 }
-                if deadlineClock() >= deadline {
+                if deadlineClock() >= turnStart.get().addingTimeInterval(perTurn) {
                     // Classify BEFORE `engineTask.cancel()`, not after: cancelling it can itself
                     // unwind the engine's in-flight model call, which hits `processInput`'s own
                     // catch block and fires `onSubagentComplete` with `.failed` — a second write to
                     // this same `holder`, which would otherwise misreport a timeout (#355).
                     holder.set(SubagentTermination(status: .timedOut,
-                        summary: "Subagent timed out at its wall-clock limit and was cancelled (task, pending approvals, and sandbox container cleaned up).",
+                        summary: "Subagent timed out: one of its turns ran past the per-turn limit (\(Self.describe(seconds: perTurn))) and was cancelled (task, pending approvals, and sandbox container cleaned up).",
                         calledGoalComplete: false))
                     timedOut = true
                     break
@@ -290,17 +305,24 @@ final class SubagentManager: @unchecked Sendable {
             while engine.goalLoopIsLive(for: subagentId) {
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
+            engine.observeGoalLoopTurns(for: subagentId, nil)
             await MainActor.run { appState.unregisterLiveSubagent(subagentId) }
         }
         return (result.renderedForParent(), termination.status)
     }
     
+    /// "15 min" for whole minutes, "90 s" otherwise.
+    static func describe(seconds: TimeInterval) -> String {
+        let s = Int(seconds.rounded())
+        return s >= 60 && s % 60 == 0 ? "\(s / 60) min" : "\(s) s"
+    }
+
     /// The `invoke_subagent` tool schema. Declared beside the manager it drives so the contract
     /// input (slice B3) is unit-testable without standing up an engine.
     static func toolDeclaration() -> FunctionDeclaration {
         FunctionDeclaration(
             name: "invoke_subagent",
-            description: "Spawn an isolated subagent with a constrained persona to execute a task. The subagent works in a loop, reprompted after each turn until it calls goal_complete or reaches its iteration cap (a capped subagent comes back failed); each of its turns is a full model round. By default, this blocks until the subagent completes. Set 'background' to true to run it asynchronously and receive a notification when it finishes (not in a background job run, where it is refused). Criteria are optional; when you provide them, the run is graded by an independent evaluator and the verdict is returned to you alongside the subagent's own (unverified) summary.",
+            description: "Spawn an isolated subagent with a constrained persona to execute a task. The subagent works in a loop, reprompted after each turn until it calls goal_complete or reaches its iteration cap (a capped subagent comes back failed); each of its turns is a full model round, with a time limit of its own that restarts every turn (a turn past it comes back timed out). By default, this blocks until the subagent completes. Set 'background' to true to run it asynchronously and receive a notification when it finishes (not in a background job run, where it is refused). Criteria are optional; when you provide them, the run is graded by an independent evaluator and the verdict is returned to you alongside the subagent's own (unverified) summary.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -325,7 +347,7 @@ final class SubagentManager: @unchecked Sendable {
     static func milestoneDelegationDeclaration() -> FunctionDeclaration {
         FunctionDeclaration(
             name: "delegate_milestone",
-            description: "Hand the CURRENT checkpoint's milestone to a bounded subagent that works it in its own context, in a loop of turns up to its iteration cap. Its definition of done is taken from the locked ladder — you do not restate it. When the subagent finishes the milestone, the checkpoint is reached and graded automatically: a clean grade advances the ladder on its own, anything contested pauses for the user. Use reach_checkpoint instead when you did the work yourself.",
+            description: "Hand the CURRENT checkpoint's milestone to a bounded subagent that works it in its own context, in a loop of turns up to its iteration cap, each turn under a time limit that restarts every turn. Its definition of done is taken from the locked ladder — you do not restate it. When the subagent finishes the milestone, the checkpoint is reached and graded automatically: a clean grade advances the ladder on its own, anything contested pauses for the user. Use reach_checkpoint instead when you did the work yourself.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -338,7 +360,8 @@ final class SubagentManager: @unchecked Sendable {
         )
     }
 
-    func generateRolePrompt(role: String, iterationCap: Int = ConfigManager.shared.maxSubagentIterations) -> String {
+    func generateRolePrompt(role: String, iterationCap: Int = ConfigManager.shared.maxSubagentIterations,
+                            turnTimeout: TimeInterval = Double(ConfigManager.shared.subagentTurnTimeoutSeconds)) -> String {
         let base = "You are Iris, operating in a specialized subagent role: **\(role.uppercased())**.\n" +
                    "You are executing within a fully configurable sandboxed micro-VM. You have full root permissions inside this VM environment to install packages, configure tools, and run commands needed to complete your objective.\n\n"
         var specific = ""
@@ -356,6 +379,6 @@ final class SubagentManager: @unchecked Sendable {
             specific = "Your goal is to execute the assigned task efficiently and autonomously."
         }
         
-        return base + specific + "\n\nYou work in a loop: after each turn in which you have not called `goal_complete`, you are prompted to continue, for at most \(iterationCap) turn\(iterationCap == 1 ? "" : "s") in all. Reaching that cap without `goal_complete` ends your task as failed. When you are finished, you MUST call the `goal_complete` tool with a summary of your findings to return control to the parent agent."
+        return base + specific + "\n\nYou work in a loop: after each turn in which you have not called `goal_complete`, you are prompted to continue, for at most \(iterationCap) turn\(iterationCap == 1 ? "" : "s") in all. Reaching that cap without `goal_complete` ends your task as failed. Each turn may run for at most \(Self.describe(seconds: turnTimeout)), its tool calls included; a turn that runs longer is cancelled and ends your task as timed out, so split long work across turns. When you are finished, you MUST call the `goal_complete` tool with a summary of your findings to return control to the parent agent."
     }
 }

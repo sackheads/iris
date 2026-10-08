@@ -61,6 +61,7 @@ struct DefaultsSnapshotTests {
             let store = try #require(CountingDefaults(suiteName: name))
             store.set("Anthropic", forKey: "PRIMARY_PROVIDER")
             store.set(7, forKey: "MAX_SUBAGENT_ITERATIONS")
+            store.set(45, forKey: "SUBAGENT_TURN_TIMEOUT_SECONDS")
             store.set(false, forKey: "STREAM_RESPONSES")
             let before = store.reads
 
@@ -69,6 +70,7 @@ struct DefaultsSnapshotTests {
             #expect(store.reads == before, "every setting came from the one snapshot")
             #expect(config.primaryProvider == "Anthropic")
             #expect(config.maxSubagentIterations == 7)
+            #expect(config.subagentTurnTimeoutSeconds == 45)
             #expect(config.streamResponses == false)
         }
     }
