@@ -8,6 +8,10 @@ import AppKit
 /// substitution turned off. Builds a real NSTextView and runs the same configuration function
 /// `ComposerTextView.makeNSView` calls, rather than asserting on hardcoded booleans, so a
 /// regression that flips one flag back on in the production code is caught here too.
+/// On the main actor: `NSTextView.init` registers with a shared AppKit dictionary, and building
+/// several at once on pool threads crashed the test process (SIGSEGV in
+/// `NSServicesMenuHandler registerServicesMenuSendTypes`, seen during #401).
+@MainActor
 @Suite("ComposerTextView substitution policy")
 struct ComposerTextViewSubstitutionTests {
     @Test("disables automatic dash substitution")

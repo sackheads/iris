@@ -353,45 +353,49 @@ class ConfigManager: @unchecked Sendable {
         // Bound locally because `self.store` is unreadable until every stored property is
         // initialised; it is the same store the instance property returns from here on.
         let store = storeOverride ?? IrisDefaults.store
-        let savedProvider = store.string(forKey: "PRIMARY_PROVIDER") ?? "Gemini"
+        // Every read below comes from one snapshot: each `store` read can be a synchronous
+        // round trip to cfprefsd, and ~60 of them per manager, on the main actor in hundreds of
+        // tests, held every main-actor test in the parallel suite for seconds (#401).
+        let saved = DefaultsSnapshot(store)
+        let savedProvider = saved.string(forKey: "PRIMARY_PROVIDER") ?? "Gemini"
         self.primaryProvider = savedProvider
-        self.geminiAuthMode = store.string(forKey: "GEMINI_AUTH_MODE") ?? GeminiAuthMode.apiKey.rawValue
-        self.anthropicAuthMode = store.string(forKey: "ANTHROPIC_AUTH_MODE") ?? AnthropicAuthMode.apiKey.rawValue
-        self.anthropicVertexProject = store.string(forKey: "ANTHROPIC_VERTEX_PROJECT") ?? ""
-        let savedLocation = (store.string(forKey: "ANTHROPIC_VERTEX_LOCATION") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        self.geminiAuthMode = saved.string(forKey: "GEMINI_AUTH_MODE") ?? GeminiAuthMode.apiKey.rawValue
+        self.anthropicAuthMode = saved.string(forKey: "ANTHROPIC_AUTH_MODE") ?? AnthropicAuthMode.apiKey.rawValue
+        self.anthropicVertexProject = saved.string(forKey: "ANTHROPIC_VERTEX_PROJECT") ?? ""
+        let savedLocation = (saved.string(forKey: "ANTHROPIC_VERTEX_LOCATION") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         self.anthropicVertexLocation = savedLocation.isEmpty ? Self.defaultVertexLocation : savedLocation
         
-        self.appearanceTheme = store.string(forKey: "APPEARANCE_THEME") ?? "system"
+        self.appearanceTheme = saved.string(forKey: "APPEARANCE_THEME") ?? "system"
         
-        if store.object(forKey: "COPY_CHATS_AS_MARKDOWN") != nil {
-            self.copyChatsAsMarkdown = store.bool(forKey: "COPY_CHATS_AS_MARKDOWN")
+        if saved.object(forKey: "COPY_CHATS_AS_MARKDOWN") != nil {
+            self.copyChatsAsMarkdown = saved.bool(forKey: "COPY_CHATS_AS_MARKDOWN")
         } else {
             self.copyChatsAsMarkdown = true
         }
 
         // Defaults on: the LEDs are what the window has always had, so an existing install keeps
         // them without touching Settings.
-        if store.object(forKey: "SHOW_MODEL_LEDS") != nil {
-            self.showModelLEDs = store.bool(forKey: "SHOW_MODEL_LEDS")
+        if saved.object(forKey: "SHOW_MODEL_LEDS") != nil {
+            self.showModelLEDs = saved.bool(forKey: "SHOW_MODEL_LEDS")
         } else {
             self.showModelLEDs = true
         }
-        if store.object(forKey: "STREAM_RESPONSES") != nil {
-            self.streamResponses = store.bool(forKey: "STREAM_RESPONSES")
+        if saved.object(forKey: "STREAM_RESPONSES") != nil {
+            self.streamResponses = saved.bool(forKey: "STREAM_RESPONSES")
         } else {
             self.streamResponses = true
         }
 
-        if store.object(forKey: "CHECKPOINT_AUTO_ADVANCE") != nil {
-            self.checkpointAutoAdvance = store.bool(forKey: "CHECKPOINT_AUTO_ADVANCE")
+        if saved.object(forKey: "CHECKPOINT_AUTO_ADVANCE") != nil {
+            self.checkpointAutoAdvance = saved.bool(forKey: "CHECKPOINT_AUTO_ADVANCE")
         } else {
             self.checkpointAutoAdvance = true
         }
 
-        let savedCascade = store.integer(forKey: "MAX_SESSION_CASCADE")
+        let savedCascade = saved.integer(forKey: "MAX_SESSION_CASCADE")
         self.maxSessionCascade = savedCascade == 0 ? 8 : savedCascade
 
-        self.defaultEmojiSkinTone = store.object(forKey: "DEFAULT_EMOJI_SKIN_TONE") as? Int ?? SkinTone.none.rawValue
+        self.defaultEmojiSkinTone = saved.object(forKey: "DEFAULT_EMOJI_SKIN_TONE") as? Int ?? SkinTone.none.rawValue
         
         var keychainSecrets = KeychainManager.shared.loadSecrets()
         var secretsMigrated = false
@@ -399,7 +403,7 @@ class ConfigManager: @unchecked Sendable {
         func migrate(key: String, dest: inout String) {
             if let keychainValue = keychainSecrets[key] {
                 dest = keychainValue
-            } else if let udValue = store.string(forKey: key), !udValue.isEmpty {
+            } else if let udValue = saved.string(forKey: key), !udValue.isEmpty {
                 dest = udValue
                 keychainSecrets[key] = udValue
                 store.removeObject(forKey: key)
@@ -421,19 +425,19 @@ class ConfigManager: @unchecked Sendable {
         migrate(key: "OPENAI_API_KEY", dest: &openaiKey)
         self.openAIAPIKey = openaiKey
         
-        geminiBaseURL = store.string(forKey: "GEMINI_BASE_URL") ?? ""
-        anthropicBaseURL = store.string(forKey: "ANTHROPIC_BASE_URL") ?? ""
-        openAIBaseURL = store.string(forKey: "OPENAI_BASE_URL") ?? ""
+        geminiBaseURL = saved.string(forKey: "GEMINI_BASE_URL") ?? ""
+        anthropicBaseURL = saved.string(forKey: "ANTHROPIC_BASE_URL") ?? ""
+        openAIBaseURL = saved.string(forKey: "OPENAI_BASE_URL") ?? ""
 
         // Try reading old global models first for migration, else fallback to defaults.
         // The old global keys only migrate onto whichever provider was active at the time.
-        let oldEasy = store.string(forKey: "MODEL_EASY")
-        let oldMedium = store.string(forKey: "MODEL_MEDIUM")
-        let oldHard = store.string(forKey: "MODEL_HARD")
+        let oldEasy = saved.string(forKey: "MODEL_EASY")
+        let oldMedium = saved.string(forKey: "MODEL_MEDIUM")
+        let oldHard = saved.string(forKey: "MODEL_HARD")
 
         func resolveModel(key: String, provider: String, migrated: String?, fallback: String) -> String {
-            if let saved = store.string(forKey: key) {
-                return saved
+            if let value = saved.string(forKey: key) {
+                return value
             }
             if savedProvider == provider, let migrated {
                 return migrated
@@ -472,82 +476,82 @@ class ConfigManager: @unchecked Sendable {
         if secretsMigrated {
             KeychainManager.shared.saveSecrets(keychainSecrets)
         }
-        self.googleTokenExpiry = store.double(forKey: "GOOGLE_TOKEN_EXPIRY")
-        self.enableSandboxing = store.bool(forKey: "ENABLE_SANDBOXING")
-        self.sandboxImage = store.string(forKey: "SANDBOX_IMAGE") ?? "ubuntu:latest"
-        let savedIdle = store.integer(forKey: "SANDBOX_IDLE_TIMEOUT_MINUTES")
+        self.googleTokenExpiry = saved.double(forKey: "GOOGLE_TOKEN_EXPIRY")
+        self.enableSandboxing = saved.bool(forKey: "ENABLE_SANDBOXING")
+        self.sandboxImage = saved.string(forKey: "SANDBOX_IMAGE") ?? "ubuntu:latest"
+        let savedIdle = saved.integer(forKey: "SANDBOX_IDLE_TIMEOUT_MINUTES")
         self.sandboxIdleTimeoutMinutes = savedIdle == 0 ? 30 : savedIdle
 
-        if store.object(forKey: "MAIN_AGENT_SANDBOX_DEFAULT") == nil {
+        if saved.object(forKey: "MAIN_AGENT_SANDBOX_DEFAULT") == nil {
             // First run with this key. Preserve the experience of users who already run
             // sandboxed (enableSandboxing on today == sandboxed main agent); fresh installs
             // default to host (the dual-layer model).
-            let seeded: SandboxPref = store.bool(forKey: "ENABLE_SANDBOXING") ? .sandboxed : .host
+            let seeded: SandboxPref = saved.bool(forKey: "ENABLE_SANDBOXING") ? .sandboxed : .host
             self.mainAgentSandboxDefault = seeded
             store.set(seeded.rawValue, forKey: "MAIN_AGENT_SANDBOX_DEFAULT")
         } else {
-            let raw = store.string(forKey: "MAIN_AGENT_SANDBOX_DEFAULT") ?? "host"
+            let raw = saved.string(forKey: "MAIN_AGENT_SANDBOX_DEFAULT") ?? "host"
             self.mainAgentSandboxDefault = SandboxPref(rawValue: raw) ?? .host
         }
 
-        self.enableVibecop = store.bool(forKey: "ENABLE_VIBECOP")
-        let savedEngine = store.string(forKey: "VIBECOP_ENGINE") ?? ""
+        self.enableVibecop = saved.bool(forKey: "ENABLE_VIBECOP")
+        let savedEngine = saved.string(forKey: "VIBECOP_ENGINE") ?? ""
         self.vibecopEngine = savedEngine.isEmpty ? "llama_cpp" : savedEngine
         
-        let savedVibecop = store.string(forKey: "VIBECOP_MODEL") ?? ""
+        let savedVibecop = saved.string(forKey: "VIBECOP_MODEL") ?? ""
         self.vibecopModel = savedVibecop.isEmpty ? "gemma-4-E2B-it-Q4_K_M.gguf" : savedVibecop
 
-        let savedMaxIters = store.integer(forKey: "MAX_GOAL_ITERATIONS")
+        let savedMaxIters = saved.integer(forKey: "MAX_GOAL_ITERATIONS")
         self.maxGoalIterations = savedMaxIters == 0 ? 50 : savedMaxIters
         // Unset (0) or a hand-edited negative is the default, as for the job limits.
-        let savedSubagentIters = store.integer(forKey: "MAX_SUBAGENT_ITERATIONS")
+        let savedSubagentIters = saved.integer(forKey: "MAX_SUBAGENT_ITERATIONS")
         self.maxSubagentIterations = savedSubagentIters <= 0 ? Self.defaultMaxSubagentIterations : savedSubagentIters
-        let savedTurnTimeout = store.integer(forKey: "SUBAGENT_TURN_TIMEOUT_SECONDS")
+        let savedTurnTimeout = saved.integer(forKey: "SUBAGENT_TURN_TIMEOUT_SECONDS")
         self.subagentTurnTimeoutSeconds = savedTurnTimeout <= 0 ? Self.defaultSubagentTurnTimeoutSeconds : savedTurnTimeout
-        let savedLoop = store.integer(forKey: "LOOP_DETECTION_THRESHOLD")
-        let savedGateRetries = store.integer(forKey: "MAX_DONE_GATE_RETRIES")
+        let savedLoop = saved.integer(forKey: "LOOP_DETECTION_THRESHOLD")
+        let savedGateRetries = saved.integer(forKey: "MAX_DONE_GATE_RETRIES")
         self.maxDoneGateRetries = savedGateRetries == 0 ? 3 : savedGateRetries
         self.loopDetectionThreshold = savedLoop == 0 ? 5 : savedLoop
-        let savedVibecopTO = store.integer(forKey: "VIBECOP_TIMEOUT_SECONDS")
+        let savedVibecopTO = saved.integer(forKey: "VIBECOP_TIMEOUT_SECONDS")
         self.vibecopTimeoutSeconds = savedVibecopTO == 0 ? 5 : savedVibecopTO
 
         // #187 §0.1. Unset (0) is the default, following the #208 pattern — and so is a negative,
         // which is a typo rather than a way to ask for no limit at all (a hand-edited plist, a
         // stepper driven past zero). Reading -1 as "unbounded" would take the ceiling off the
         // whole unattended system.
-        let savedPerRun = store.integer(forKey: "JOB_PER_RUN_TOKEN_BUDGET")
+        let savedPerRun = saved.integer(forKey: "JOB_PER_RUN_TOKEN_BUDGET")
         self.jobPerRunTokenBudget = savedPerRun <= 0 ? JobDefaults.perRunTokenBudget : savedPerRun
-        let savedDaily = store.integer(forKey: "JOB_DAILY_TOKEN_BUDGET")
+        let savedDaily = saved.integer(forKey: "JOB_DAILY_TOKEN_BUDGET")
         self.jobDailyTokenBudget = savedDaily <= 0 ? JobDefaults.dailyTokenBudget : savedDaily
-        let savedGlobalDaily = store.integer(forKey: "JOB_GLOBAL_DAILY_TOKEN_BUDGET")
+        let savedGlobalDaily = saved.integer(forKey: "JOB_GLOBAL_DAILY_TOKEN_BUDGET")
         self.jobGlobalDailyTokenBudget = savedGlobalDaily <= 0 ? JobDefaults.globalDailyTokenBudget : savedGlobalDaily
-        let savedRunsPerHour = store.integer(forKey: "JOB_MAX_RUNS_PER_HOUR")
+        let savedRunsPerHour = saved.integer(forKey: "JOB_MAX_RUNS_PER_HOUR")
         self.jobMaxRunsPerHour = savedRunsPerHour <= 0 ? JobDefaults.maxRunsPerHour : savedRunsPerHour
-        let savedWatchRuns = store.integer(forKey: "JOB_MAX_RUNS_PER_HOUR_WATCH")
+        let savedWatchRuns = saved.integer(forKey: "JOB_MAX_RUNS_PER_HOUR_WATCH")
         self.jobMaxRunsPerHourForWatch = savedWatchRuns <= 0
             ? JobDefaults.maxRunsPerHourForWatch : savedWatchRuns
-        let savedRunTimeout = store.integer(forKey: "JOB_RUN_TIMEOUT_SECONDS")
+        let savedRunTimeout = saved.integer(forKey: "JOB_RUN_TIMEOUT_SECONDS")
         self.jobRunTimeoutSeconds = savedRunTimeout <= 0 ? JobDefaults.runTimeoutSeconds : savedRunTimeout
 
-        if store.object(forKey: "ENABLE_PROMPT_INJECTION_PROTECTION") != nil {
-            self.enableAdvancedPromptInjectionProtection = store.bool(forKey: "ENABLE_PROMPT_INJECTION_PROTECTION")
+        if saved.object(forKey: "ENABLE_PROMPT_INJECTION_PROTECTION") != nil {
+            self.enableAdvancedPromptInjectionProtection = saved.bool(forKey: "ENABLE_PROMPT_INJECTION_PROTECTION")
         } else {
             self.enableAdvancedPromptInjectionProtection = true // Default to true
         }
         
-        let savedPromptEngine = store.string(forKey: "PROMPT_GUARD_ENGINE") ?? ""
+        let savedPromptEngine = saved.string(forKey: "PROMPT_GUARD_ENGINE") ?? ""
         self.promptGuardEngine = savedPromptEngine.isEmpty ? "llama_cpp" : savedPromptEngine
         
-        let savedPromptModel = store.string(forKey: "PROMPT_GUARD_MODEL") ?? ""
+        let savedPromptModel = saved.string(forKey: "PROMPT_GUARD_MODEL") ?? ""
         self.promptGuardModel = savedPromptModel.isEmpty ? "Qwen3.5-2B-Q4_K_M.gguf" : savedPromptModel
         
         // Default to the accurate DeBERTa-v3 ONNX guard. The old distilbert CoreML default
         // over-blocked ordinary tool output; see docs/prompt_guard_coreml.md.
-        let savedCoreMLModel = store.string(forKey: "PROMPT_GUARD_COREML_MODEL") ?? ""
+        let savedCoreMLModel = saved.string(forKey: "PROMPT_GUARD_COREML_MODEL") ?? ""
         self.promptGuardCoreMLModel = savedCoreMLModel.isEmpty ? "https://luthen.scromp.net/iris/deberta-v3-base-prompt-injection-v2.onnx.zip" : savedCoreMLModel
 
-        self.auxiliaryVisionEngine = store.string(forKey: "AUXILIARY_VISION_ENGINE") ?? ""
-        self.auxiliaryVisionModel = store.string(forKey: "AUXILIARY_VISION_MODEL") ?? ""
+        self.auxiliaryVisionEngine = saved.string(forKey: "AUXILIARY_VISION_ENGINE") ?? ""
+        self.auxiliaryVisionModel = saved.string(forKey: "AUXILIARY_VISION_MODEL") ?? ""
     }
     
     var isConfigured: Bool {
@@ -578,5 +582,53 @@ class ConfigManager: @unchecked Sendable {
         var secrets = KeychainManager.shared.loadSecrets()
         secrets[key] = value
         KeychainManager.shared.saveSecrets(secrets)
+    }
+}
+
+/// One `dictionaryRepresentation()` of a store, read with `UserDefaults`' own coercions, so that
+/// `ConfigManager.init` asks cfprefsd once rather than once per key (#401). The representation
+/// covers the same search list `object(forKey:)` does: arguments, the suite, the global domain and
+/// registered defaults.
+struct DefaultsSnapshot {
+    private let values: [String: Any]
+
+    init(_ store: UserDefaults) { values = store.dictionaryRepresentation() }
+
+    func object(forKey key: String) -> Any? { values[key] }
+
+    func string(forKey key: String) -> String? {
+        switch values[key] {
+        case let s as String: return s
+        case let n as NSNumber: return n.stringValue
+        default: return nil
+        }
+    }
+
+    func integer(forKey key: String) -> Int {
+        switch values[key] {
+        case let n as NSNumber: return n.intValue
+        // Strict, as UserDefaults is: leading space and a sign, then digits to the end ("7 " is 0).
+        case let s as String: return Int(s.drop { $0 == " " || $0 == "\t" }) ?? 0
+        default: return 0
+        }
+    }
+
+    func double(forKey key: String) -> Double {
+        switch values[key] {
+        case let n as NSNumber: return n.doubleValue
+        case let s as String: return (s as NSString).doubleValue
+        default: return 0
+        }
+    }
+
+    func bool(forKey key: String) -> Bool {
+        switch values[key] {
+        case let n as NSNumber: return n.boolValue
+        // Only "yes", "true" (any case) and "1": UserDefaults reads "2" or "-1" as false.
+        case let s as String:
+            let lowered = s.lowercased()
+            return lowered == "yes" || lowered == "true" || s == "1"
+        default: return false
+        }
     }
 }

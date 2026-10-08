@@ -120,13 +120,13 @@ struct SubagentRunStopTests {
 
         let started = Date()
         // A 30 s turn deadline: were the refusal not terminal the subagent would run into it and read
-        // `timed out`, rather than spending the 15-minute default. The bound sits well under it
-        // and well over the ~5 s stall the full parallel suite can put in any test's path (#399).
+        // `timed out`, rather than spending the 15-minute default.
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: run,
             turnTimeout: 30, client: client, appState: state, endSandboxSession: { _ in })
 
-        #expect(Date().timeIntervalSince(started) < 20, "seconds, not the turn deadline")
+        // Only shows the subagent stopped well before its turn deadline, not how fast; the full parallel suite runs it at ~4 s.
+        #expect(Date().timeIntervalSince(started) < 10, "seconds, not the turn deadline")
         #expect(client.callCount("WORKER") == 1, "the second round was refused, not made")
         #expect(outcome.status == .failed)
         #expect(outcome.rendered.contains("status: failed"))
