@@ -1478,20 +1478,120 @@ actor IrisEngine {
     /// this conversation without the owner present") lived in transient call-chain state instead of
     /// being derived from what persists. See `Conversation.hasUnattendedInput` /
     /// `AppState.markConversationTouchedByUnattendedInput`.
-    func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil, lifetime: TurnLifetime? = nil) async {
+    func processInput(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil, lifetime: TurnLifetime? = nil, goalFacts: GoalFacts? = nil) async {
         goalLoop.beginTurn(for: conversationId)
         defer { goalLoop.endTurn(for: conversationId) }
         await withEngineTurn(conversationId, lifetime: lifetime) {
             let turnID = PerformanceProfiler.shared.beginTurn(label: input, source: source)
             let turnStart = CFAbsoluteTimeGetCurrent()
             await PerformanceProfiler.$currentTurnID.withValue(turnID) {
-                await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, turnBudget: turnBudget, usageSink: usageSink)
+                await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, turnBudget: turnBudget, usageSink: usageSink, goalFacts: goalFacts)
             }
             PerformanceProfiler.shared.endTurn(turnID, totalMs: (CFAbsoluteTimeGetCurrent() - turnStart) * 1000.0)
         }
     }
 
-    private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil) async {
+    /// Top-k cap on the facts JIT injects into one turn.
+    nonisolated static let jitFactLimit = 5
+
+    /// Whether this turn searches the fact store for its turn context (#415). Only a main-agent
+    /// turn the user typed has a query worth matching. Everything else is skipped:
+    /// - system and trigger turns (rename, reflection, goal draft, `/vibecop init`, the
+    ///   goal-complete check), whose text is boilerplate that matched nearly every fact. A /goal
+    ///   run's kickoff, steers and reprompts get facts through `GoalFacts` instead;
+    /// - subagents: their task is written by the main agent, which already had this turn's facts
+    ///   and can pass on what matters; a second search on its wording only re-injects them;
+    /// - the evaluator: it grades evidence, and remembered facts are not evidence;
+    /// - jobs and peer messages: unattended or written by another session, so nothing there is
+    ///   the user asking, and a peer could otherwise probe the user's facts through the reply.
+    /// `Scenario.Turn.userSource` counts too: the perf harness's simulated user turns.
+    nonisolated static func retrievesFacts(source: String, principal: Principal, input: String) -> Bool {
+        principal == .main && (source == "UI" || source == Scenario.Turn.userSource)
+            && !input.hasPrefix("System Event [")
+    }
+
+    /// How a /goal turn gets facts (#415 review). Its text is "System" boilerplate around the
+    /// user's objective, so JIT never searches it; instead the run searches once with the
+    /// objective at kickoff, again with each steer the user types on a resume, and every other
+    /// turn of the run (reprompts, a resume without a steer) carries what those found.
+    enum GoalFacts: Sendable, Equatable {
+        /// The kickoff: replace the run's facts with a search for the objective.
+        case start(objective: String)
+        /// A resume with the user's typed steer: search it, newest first ahead of the carried facts.
+        case steer(String)
+        /// Reprompts: no search. A run with nothing carried (the app restarted mid-run) searches
+        /// its contract's objective once.
+        case carry
+    }
+
+    /// The facts a goal run carries, by id, so a fact retracted mid-run drops out on the next turn.
+    /// Transient by design: rebuilt from the objective after a restart.
+    private var goalRunFactIDs: [UUID: [String]] = [:]
+
+    /// Drops a finished or stopped goal run's carried facts.
+    func clearGoalRunFacts(for conversationId: UUID) {
+        goalRunFactIDs[conversationId] = nil
+    }
+
+    /// Test seam: what a goal run currently carries.
+    func goalRunFactIDsForTesting(_ conversationId: UUID) -> [String]? {
+        goalRunFactIDs[conversationId]
+    }
+
+    private func goalRunFacts(_ mode: GoalFacts, conversationId: UUID) async -> [Fact] {
+        func search(_ query: String) -> [String] {
+            ((try? factStore.search(query: query, limit: Self.jitFactLimit, applyRelevanceFloor: true)) ?? []).map(\.id)
+        }
+        var ids: [String]
+        switch mode {
+        case .start(let objective):
+            ids = search(objective)
+        case .steer(let steer):
+            let carried = goalRunFactIDs[conversationId] ?? []
+            ids = search(steer) + carried
+        case .carry:
+            if let carried = goalRunFactIDs[conversationId] {
+                ids = carried
+            } else {
+                let localState = state
+                let objective = await MainActor.run {
+                    localState?.conversations.first(where: { $0.id == conversationId })?.goalContract?.objective
+                }
+                ids = objective.map(search) ?? []
+            }
+        }
+        let facts = FactStoreManager.dedupe((try? factStore.activeFacts(ids: ids)) ?? [])
+        let kept = Array(facts.prefix(Self.jitFactLimit))
+        goalRunFactIDs[conversationId] = kept.map(\.id)
+        return kept
+    }
+
+    /// `- [id] (saved 3 weeks ago) content`: the id for `manage_fact`, the age so a resolved
+    /// investigation does not read as current (#415).
+    /// The entity is named when the content does not already say it, so two facts with the same
+    /// text about different entities read as two facts: `- [id] (about Alice; saved …) …`.
+    nonisolated static func renderFactLines(_ facts: [Fact], now: Date = Date()) -> String {
+        facts.map { fact in
+            let age = "saved \(FactAge.label(from: fact.createdAt, now: now))"
+            let about = entityLabel(fact).map { "about \($0); " } ?? ""
+            return "- [\(fact.id)] (\(about)\(age)) \(fact.content)"
+        }
+        .joined(separator: "\n")
+    }
+
+    /// The fact's entity, trimmed, unless it is empty or every word of it is already in the content.
+    nonisolated static func entityLabel(_ fact: Fact) -> String? {
+        guard let entity = fact.entity?.trimmingCharacters(in: .whitespacesAndNewlines), !entity.isEmpty else { return nil }
+        func words(_ text: String) -> [String] {
+            text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+                .split(whereSeparator: { !($0.isLetter || $0.isNumber) }).map(String.init)
+        }
+        let contentWords = Set(words(fact.content))
+        let entityWords = words(entity)
+        return !entityWords.isEmpty && entityWords.allSatisfy(contentWords.contains) ? nil : entity
+    }
+
+    private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil, goalFacts: GoalFacts? = nil) async {
         if source == "UI" {
             loopDetectors[conversationId] = nil
             blockedResultTrackers[conversationId] = nil
@@ -1549,24 +1649,6 @@ actor IrisEngine {
         // prompt cache (5a §0.2).
         let currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath)
 
-        let facts = measureSpanSync("assembly.factSearch") {
-            (try? factStore.search(query: input, limit: 5)) ?? []
-        }
-
-        if !facts.isEmpty {
-            try? factStore.reinforceFacts(ids: facts.map { $0.id })
-        }
-
-        // Per-turn content rides this turn's own entry in the request, not the system prompt, so the
-        // cached prefix (tools, system, older history) stays byte-stable across turns (5a §0.2).
-        var turnContext = TurnContext(sections: [])
-        if !facts.isEmpty {
-            // The ids go in so `manage_fact` — first offered on these turns, then kept declared
-            // (5c §0.1) — has something to name.
-            let factString = facts.map { "- [\($0.id)] \($0.content)" }.joined(separator: "\n")
-            turnContext.sections.append(.init(heading: "Mid-Term Fact Store Memory (JIT Context)", body: factString))
-        }
-
         // Read once for the gates below that all ask about this conversation: whether it is an
         // unattended run, whether it has a goal to complete, what a job run of it may do, and
         // whether it is the pinned conversation (5b: gates both the job tools below and the
@@ -1585,6 +1667,31 @@ actor IrisEngine {
         // conversation, so a set could never help it and would leave an entry behind per fire.
         let stickyApplies = stickyToolsEnabled && principal == .main && !isUnattended
         let sticky: Set<String> = stickyApplies ? storedSticky : []
+
+        // #415: only a turn that carries something the user typed gets facts searched for it, plus
+        // a /goal run's turns, which carry the facts found for the objective and the user's steers.
+        // Retrieval counts as usage and nothing else: trust moves only on manage_fact feedback.
+        let facts: [Fact]
+        if Self.retrievesFacts(source: source, principal: principal, input: input) {
+            facts = measureSpanSync("assembly.factSearch") {
+                (try? factStore.search(query: input, limit: Self.jitFactLimit, applyRelevanceFloor: true)) ?? []
+            }
+        } else if let goalFacts, principal == .main, !isUnattended {
+            facts = await measureSpan("assembly.factSearch") { await self.goalRunFacts(goalFacts, conversationId: conversationId) }
+        } else {
+            facts = []
+        }
+
+        // Per-turn content rides this turn's own entry in the request, not the system prompt, so the
+        // cached prefix (tools, system, older history) stays byte-stable across turns (5a §0.2).
+        var turnContext = TurnContext(sections: [])
+        if !facts.isEmpty {
+            // The ids go in so `manage_fact` — first offered on these turns, then kept declared
+            // (5c §0.1) — has something to name.
+            let factString = Self.renderFactLines(facts)
+            turnContext.sections.append(.init(heading: "Mid-Term Fact Store Memory (JIT Context)", body: factString))
+        }
+
 
         // #185 §6: computed once per turn and reused below for the session-tools declaration
         // gate — never call `sessionPeerCount` a second time there, that would reintroduce the
@@ -2606,7 +2713,7 @@ actor IrisEngine {
                 ? "Continue working on your goal. What is your next step? \(closing)"
                 : "\(oracle)\n\nContinue working toward the objective above. What is your next step? \(closing)"
             guard !Task.isCancelled else { return }
-            await self.processInput(reprompt, source: "System", conversationId: conversationId)
+            await self.processInput(reprompt, source: "System", conversationId: conversationId, goalFacts: .carry)
         }
         return goalLoop.setReprompt(task, token: token, for: conversationId)
     }
@@ -3830,11 +3937,14 @@ actor IrisEngine {
             let supersedesArg = functionCall.args["supersedes"]?.stringValue ?? ""
             let supersedes = supersedesArg.isEmpty ? nil : supersedesArg
             do {
-                let fact = try factStore.addFact(content: content, category: category, entity: entity, supersedes: supersedes)
+                let (fact, isNew) = try factStore.saveFact(content: content, category: category, entity: entity, supersedes: supersedes)
+                let saved = isNew
+                    ? "Fact saved to fact store as [\(fact.id)]"
+                    : "Already stored as [\(fact.id)]; nothing new saved"
                 if let supersedes {
-                    result = "Fact saved as [\(fact.id)]; fact [\(supersedes)] marked superseded."
+                    result = "\(saved); fact [\(supersedes)] marked superseded."
                 } else {
-                    result = "Fact saved to fact store as [\(fact.id)]."
+                    result = "\(saved)."
                 }
             } catch {
                 result = "Fact not saved: \(Self.factStoreFailure(error))"
@@ -3854,7 +3964,7 @@ actor IrisEngine {
                 let facts = (try? factStore.search(query: query)) ?? []
                 let body = facts.isEmpty
                     ? "No relevant facts found."
-                    : facts.map { "- [\($0.id)] \($0.content)" }.joined(separator: "\n")
+                    : Self.renderFactLines(facts)
                 blocks.append(scope == "all" ? "Facts:\n\(body)" : body)
             }
             if scope != "facts" {

@@ -2127,6 +2127,8 @@ class AppState {
             conversations[idx].activeGoal = nil
             conversations[idx].goalContract = nil
             conversations[idx].goalIterationCount = 0
+            // The run's carried facts (#415); a later kickoff replaces them anyway.
+            if let engine { Task { await engine.clearGoalRunFacts(for: conversationId) } }
             if pausedOnUser {
                 conversations[idx].lastGoalEvaluation = nil
                 conversations[idx].lastGoalCompletionReport = nil
@@ -2580,7 +2582,8 @@ class AppState {
         let steerLine = (steer?.isEmpty == false) ? "\n\n\(framing.steerHeading): \(steer!)" : ""
         let reprompt = "\(contract.oracleText())\(steerLine)\n\n\(framing.closingLine)"
         runThinkingTask(conversationId: conversationId) { [self] in
-            await engine.processInput(reprompt, source: "System", conversationId: conversationId)
+            let goalFacts: IrisEngine.GoalFacts = (steer?.isEmpty == false) ? .steer(steer!) : .carry
+            await engine.processInput(reprompt, source: "System", conversationId: conversationId, goalFacts: goalFacts)
         }
     }
 
@@ -2592,7 +2595,8 @@ class AppState {
         let objective = contract.objective
         let kickoff = "GOAL MODE ACTIVATED. Your goal is: \(objective). You must continually use tools to achieve this goal. If you need to stop and think or plan, use the `reflect` tool or just output text. When the goal is COMPLETELY FINISHED, use the `goal_complete` tool."
         runThinkingTask(conversationId: conversationId) { [self] in
-            await engine.processInput(kickoff, source: "System", conversationId: conversationId)
+            await engine.processInput(kickoff, source: "System", conversationId: conversationId,
+                                      goalFacts: .start(objective: objective))
         }
     }
 
