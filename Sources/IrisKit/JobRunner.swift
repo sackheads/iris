@@ -81,8 +81,11 @@ actor JobRunner {
     /// same reason `usageSource` exists. A gate whose previous signal cannot be read is a gate
     /// error like any other, and there is no other way to make only that read fail.
     private let lastGateSignal: @Sendable (UUID) throws -> String?
-    /// Ends the run's container when the run closes (§2). Injected so a test can watch which
-    /// conversations were ended without touching `SandboxSessionManager.shared` (invariant 7).
+    /// Ends the run's container when the run closes (§2), and closes the conversation's sandbox
+    /// for good: a turn the deadline abandoned may still call `run_command`, and must not get a
+    /// new container for it (#292). Injected so a test can watch which conversations were ended
+    /// without touching `SandboxSessionManager.shared` (invariant 7); `sandboxSessions` instead
+    /// keeps the real close and only swaps the manager.
     private let endSandboxSession: @Sendable (UUID) async -> Void
     /// Makes sure the host-only network a `network: false` grant runs on exists (§0.7), answering
     /// the failure detail or nil. Injected so a test can answer without a runtime; the default
@@ -119,6 +122,7 @@ actor JobRunner {
 
     init(state: AppState, engine: IrisEngine, ledger: JobLedger,
          endSandboxSession: (@Sendable (UUID) async -> Void)? = nil,
+         sandboxSessions: SandboxSessionManager? = nil,
          ensureIsolatedNetwork: (@Sendable () async -> String?)? = nil,
          now: @escaping @Sendable () -> Date = Date.init,
          calendar: Calendar = .current,
@@ -145,7 +149,7 @@ actor JobRunner {
         self.gateEvaluator = gateEvaluator ?? Self.liveGateEvaluator(
             sandboxAvailable: resolvedSandboxAvailable, image: { config.sandboxImage })
         self.lastGateSignal = lastGateSignal ?? { [ledger] in try ledger.lastGateSignal(jobId: $0) }
-        self.endSandboxSession = endSandboxSession ?? { await SandboxSessionManager.shared.endSession($0) }
+        self.endSandboxSession = endSandboxSession ?? { await (sandboxSessions ?? .shared).closeSession($0) }
         self.ensureIsolatedNetwork = ensureIsolatedNetwork ?? {   // Task 4a: the real network check
             do { try await CLIContainerRuntime().ensureIsolatedNetwork(named: NetworkMode.isolatedNetworkName); return nil }
             catch ContainerRuntimeError.networkFailed(let detail) { return detail }
@@ -1655,7 +1659,8 @@ actor JobRunner {
             await MainActor.run { state.finishSession(id: conversationId, status: status) }
         }
         // The run's container goes with the run (§2): before this, a job's container stood until
-        // the idle reaper or the next launch's sweep, holding its mounts open the whole time.
+        // the idle reaper or the next launch's sweep, holding its mounts open the whole time. A
+        // close, not an end: the run's conversation never gets another container (#292).
         await endSandboxSession(conversationId)
     }
 

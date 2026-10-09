@@ -30,18 +30,36 @@ actor SandboxSessionManager {
     /// In-flight create tasks keyed by conversationId. Concurrent first-commands await the same
     /// task instead of each spawning their own container.
     private var creating: [UUID: Task<Void, Error>] = [:]
+    /// Conversations whose session was closed for good (`closeSession`): a finished background
+    /// run, a subagent that has returned, a deleted conversation. Each is one-shot, so a command
+    /// arriving after the close can only come from a turn that ignored its cancellation, and it is
+    /// refused rather than given a container that nothing but the idle reaper would end (#292).
+    /// Never cleared: conversation ids are never reused, so no legitimate caller is ever waiting
+    /// on the mark to lift, and clearing it on any schedule reopens the hole for a turn that is
+    /// slower than that schedule. One UUID per closed conversation for the life of the process.
+    private var closed: Set<UUID> = []
 
     static let shared = SandboxSessionManager(runtime: CLIContainerRuntime(),
                                               image: { ConfigManager.shared.sandboxImage })
 
+    /// Starts the container system when a create says it is not ready, answering whether that
+    /// worked. Injected so a test can drive the retry without spawning `container system start`.
+    private let startContainerSystem: @Sendable () async -> Bool
+
     init(runtime: ContainerRuntime, image: @escaping @Sendable () -> String,
-         mountAgreementAttempts: Int = SandboxSessionManager.mountAgreementAttempts) {
+         mountAgreementAttempts: Int = SandboxSessionManager.mountAgreementAttempts,
+         startContainerSystem: @escaping @Sendable () async -> Bool = {
+             await SandboxingManager.shared.startContainerSystem().success
+         }) {
         self.runtime = runtime
         self.image = image
         self.mountAgreementAttempts = mountAgreementAttempts
+        self.startContainerSystem = startContainerSystem
     }
 
     func hasSession(_ id: UUID) -> Bool { sessions[id] != nil }
+
+    func isClosed(_ id: UUID) -> Bool { closed.contains(id) }
 
     private func name(for id: UUID) -> String { "\(Self.namePrefix)\(id.uuidString.lowercased())" }
 
@@ -131,6 +149,8 @@ actor SandboxSessionManager {
             if error is CancellationError {
                 return decorate("Error: the command was cancelled.", notice: wasLost && created, for: id)
             }
+            // Closed under the running command: the run is over, so there is nothing to heal.
+            if closed.contains(id) { return Self.closedMidCommandError }
             // Container likely died/was reaped: mark lost, recreate once, retry.
             lostSessions.insert(id)
             await runtime.remove(name: name(for: id))
@@ -185,14 +205,37 @@ actor SandboxSessionManager {
         workspace?.target ?? "/"
     }
 
+    /// Ends this conversation's container. The conversation may start another one: the next
+    /// `run` creates it. For a conversation that is finished, use `closeSession`.
     func endSession(_ id: UUID) async {
         // If a delete arrives while this conversation's very first `create` is still in flight
         // (no session entry yet), that just-created container won't be torn down here. It's an
         // orphan, but it's swept by `reapOrphans()` on next launch via the `iris-` prefix.
+        // `closeSession` does not have this hole: the create checks the mark before it records.
         if let s = sessions[id] { await runtime.remove(name: s.name) }
         sessions[id] = nil
         lostSessions.remove(id)
     }
+
+    /// Ends this conversation's container and refuses it another for the life of the process
+    /// (#292). For one-shot conversations only (a background run, a subagent, a deleted
+    /// conversation), whose turn can outlive its close when it ignores cancellation. Marked
+    /// before the container is removed, so a command racing the removal cannot slip a new
+    /// container in behind it.
+    func closeSession(_ id: UUID) async {
+        closed.insert(id)
+        await endSession(id)
+    }
+
+    /// What `run_command` answers in a conversation whose session was closed. Nothing ran.
+    static let closedSessionError =
+        "Error: this run has ended; no new sandbox session will be started for it. Nothing was run."
+
+    /// What a command gets when its run closed (and removed its container) while it ran.
+    static let closedMidCommandError =
+        "Error: this run has ended and its sandbox container was removed while the command ran; it was not retried."
+
+    private struct SessionClosed: Error {}
 
     /// Deletes the containers a previous process left behind. Launch only, before anything else
     /// can have started one.
@@ -238,6 +281,7 @@ actor SandboxSessionManager {
     /// Ensures a container exists for `id`, coalescing concurrent first-commands onto a single
     /// create so actor re-entrancy across the suspending `createDetached` can't spawn duplicates.
     private func ensureSession(_ id: UUID, workspace: ContainerMount?, mounts: [String], network: NetworkMode) async throws {
+        if closed.contains(id) { throw SessionClosed() }
         if sessions[id] != nil { return }
         if let inflight = creating[id] {
             try await inflight.value
@@ -288,10 +332,10 @@ actor SandboxSessionManager {
         } catch {
             if case ContainerRuntimeError.createFailed(let msg) = error,
                ToolExecutor.sandboxSetupHint(for: msg) != nil {
-                let startResult = await SandboxingManager.shared.startContainerSystem()
-                if startResult.success {
+                if await startContainerSystem() {
                     try await runtime.createDetached(name: name(for: id), image: image(),
                                                      mounts: mounts, workdir: workdir, network: network)
+                    try refuseIfClosed(id)
                     sessions[id] = Session(name: name(for: id), mountedWorkspace: workspace,
                                            mounts: mounts, network: network, lastUsed: Date())
                     return
@@ -299,8 +343,15 @@ actor SandboxSessionManager {
             }
             throw error
         }
+        try refuseIfClosed(id)
         sessions[id] = Session(name: name(for: id), mountedWorkspace: workspace,
                                mounts: mounts, network: network, lastUsed: Date())
+    }
+
+    /// A close that landed while the create was suspended: the container just made is not
+    /// recorded, and `create`'s sweep deletes it.
+    private func refuseIfClosed(_ id: UUID) throws {
+        if closed.contains(id) { throw SessionClosed() }
     }
 
     private func format(_ r: (stdout: String, stderr: String, exitCode: Int32)) -> String {
@@ -317,6 +368,7 @@ actor SandboxSessionManager {
     }
 
     private func creationError(_ error: Error) -> String {
+        if error is SessionClosed { return Self.closedSessionError }
         if case ContainerRuntimeError.createFailed(let msg) = error,
            let hint = ToolExecutor.sandboxSetupHint(for: msg) {
             return hint

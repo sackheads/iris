@@ -375,6 +375,10 @@ with the approval left unspent, if a granted directory has since moved. The run'
 with the run: closing a run's conversation now ends its sandbox session, where before it lingered
 until the idle reaper. A subagent's container ends with the subagent, however it ended, completed
 included, so a delegated subagent no longer keeps the grant's mounts open after it returns (#291).
+Ending is for good: a turn the deadline abandoned that calls `run_command` afterwards is refused
+("this run has ended; no new sandbox session will be started for it") rather than given a fresh
+container that only the idle reaper would end, and the same holds for a subagent after it returns
+and a deleted conversation (#292).
 
 **Changing one.** `schedule_job` with an explicit `name` that names a scheduled or polled job
 created in *this* conversation replaces it — schedule, prompt, profile, policy and grant from the
