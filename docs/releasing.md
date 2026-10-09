@@ -41,8 +41,8 @@ the whole thing from a maintainer's machine.
      `generate_keys --account iris -x ~/Desktop/iris-sparkle-private-key.txt`, store the file's
      contents in the owner's password manager, delete the file, and check that iCloud Drive's
      Desktop & Documents sync has not already uploaded a copy (if it has, delete it there too).
-     Until the owner confirms the key is in the password manager, treat the Keychain copy as the
-     only one.
+     The iris key was exported this way on 2026-10-08; the backup is in the owner's password
+     manager and the export file was deleted.
 4. **`brew install xcodegen`** and the **Metal Toolchain**
    (`xcodebuild -downloadComponent MetalToolchain`) — see `AGENTS.md`'s "Building the Xcode app".
    MLX's shaders are compiled into a `.metallib` by the Xcode build, never by `swift build`, and
