@@ -35,7 +35,7 @@ Iris supports in-app slash commands (`/-commands`) typed into the chat composer 
 | `/jobs reschedule` | `/jobs reschedule <name> <cron> [timezone]` | Give a scheduled or polled job (built-ins such as the daily digest included) a new five-field cron and report its next fire. Quote names or crons with spaces: `/jobs reschedule "Daily digest" "0 9 * * *"`. An invalid cron changes nothing; a directory watch is refused. |
 | `/jobs delete` | `/jobs delete <name>` | Delete a job and its ledger rows. Refused while one of its runs is in flight. |
 | `/stop` | `/stop` | Cancel active goal mode or background subagent tasks. |
-| `/update` | `/update` | Query GitHub API for the latest Iris release updates. |
+| `/update` | `/update` | Check for a new version of Iris with Sparkle (installed release app only; dev builds reply that updates are disabled). |
 
 ---
 

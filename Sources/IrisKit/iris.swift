@@ -4891,6 +4891,8 @@ extension IrisEngine {
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.activate(ignoringOtherApps: true)
+        // Sparkle wants its scheduled checks started after launch, not at construction.
+        MainActor.assumeIsolated { UpdaterController.shared?.start() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -4974,6 +4976,9 @@ struct IrisApp: App {
         }
         .commands {
             CommandGroup(after: .appSettings) {
+                if let updater = UpdaterController.shared {
+                    CheckForUpdatesButton(updater: updater)
+                }
                 Divider()
                 Button("Rerun Setup Wizard...") {
                     NotificationCenter.default.post(name: NSNotification.Name("RerunSetupWizard"), object: nil)
@@ -4993,6 +4998,9 @@ struct IrisApp: App {
                 // In macOS 13+, we'd use openWindow(id:)
             }
             Divider()
+            if let updater = UpdaterController.shared {
+                CheckForUpdatesButton(updater: updater)
+            }
             Button("Settings...") {
                 NSApp.activate(ignoringOtherApps: true)
                 NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)

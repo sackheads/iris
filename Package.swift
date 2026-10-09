@@ -21,7 +21,8 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-transformers.git", branch: "main"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", branch: "main"),
         .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager", from: "1.20.0"),
-        .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0")
+        .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.10.0")
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -39,7 +40,8 @@ let package = Package(
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
                 .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager"),
-                .product(name: "Yams", package: "Yams")
+                .product(name: "Yams", package: "Yams"),
+                .product(name: "Sparkle", package: "Sparkle")
             ],
             resources: [
                 .process("assets")

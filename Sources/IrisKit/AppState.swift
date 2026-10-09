@@ -392,9 +392,6 @@ class AppState {
     @ObservationIgnored private var liveSubagentTasks: [UUID: LiveSubagent] = [:]
     /// State-gated tools each conversation has declared (5c §0.1). Transient, never persisted.
     @ObservationIgnored var stickyTools = StickyTools()
-    var availableUpdate: ReleaseInfo?
-    var isCheckingForUpdates = false
-    var updateCheckStatusMessage: String?
     var onSubagentComplete: [UUID: @Sendable (SubagentTermination) -> Void] = [:]
 
     /// Fired by the `submit_evaluation` handler in the EVALUATOR's own conversation; the closure
@@ -3040,27 +3037,6 @@ class AppState {
         pending.continuation.resume(returning: approved)
     }
     
-    func checkForUpdates(explicit: Bool = false) {
-        isCheckingForUpdates = true
-        updateCheckStatusMessage = "Checking for updates..."
-        Task {
-            let result = await UpdateManager.shared.checkForUpdates()
-            await MainActor.run {
-                self.isCheckingForUpdates = false
-                switch result {
-                case .updateAvailable(let release):
-                    self.availableUpdate = release
-                    self.updateCheckStatusMessage = "Update available: \(release.tagName)"
-                case .upToDate:
-                    self.availableUpdate = nil
-                    self.updateCheckStatusMessage = explicit ? "Iris is up to date (v\(Constants.appVersion))." : nil
-                case .error(let msg):
-                    self.updateCheckStatusMessage = explicit ? "Failed to check for updates: \(msg)" : nil
-                }
-            }
-        }
-    }
-    
     private var saveTask: Task<Void, Never>? = nil
     /// When the oldest currently-unwritten change arrived; nil when nothing is pending.
     private var firstDirtyAt: Date? = nil
@@ -3864,20 +3840,17 @@ class AppState {
         }
     }
 
+    static func updateCommandReply(updater: UpdaterController?) -> String? {
+        guard let updater else {
+            return "Updates are disabled in dev builds. Install Iris from a release DMG to get updates."
+        }
+        updater.checkForUpdates()
+        return nil   // Sparkle's own window reports the result.
+    }
+
     private func handleUpdateCommand(convId: UUID) {
-        Task { [weak self] in
-            guard let self = self else { return }
-            let result = await UpdateManager.shared.checkForUpdates()
-            let body: String
-            switch result {
-            case .updateAvailable(let release):
-                body = "🎉 **Update available:** [\(release.name)](\(release.htmlUrl))\n\n\(release.body)"
-            case .upToDate:
-                body = "Iris is up to date (v\(Constants.appVersion))."
-            case .error(let err):
-                body = "Failed to check for updates: \(err)"
-            }
-            self.emitCommandOutput(body, format: .markdown, to: convId)
+        if let reply = Self.updateCommandReply(updater: UpdaterController.shared) {
+            emitCommandOutput(reply, format: .markdown, to: convId)
         }
     }
 }

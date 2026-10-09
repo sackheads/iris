@@ -8,6 +8,29 @@ It features **native Model Context Protocol (MCP) support** for limitless tool e
 <br/>
 ![Setup Wizard](assets/wizard.jpg)
 
+## 📥 Install
+
+Requires an Apple Silicon Mac running macOS 14 or later.
+
+Download the latest `.dmg` from [GitHub Releases](https://github.com/sackheads/iris/releases),
+open it, and drag `Iris.app` to `Applications`. Run it from `/Applications`, not from the mounted
+DMG: an app run from the disk image is translocated by macOS and cannot update itself. The app is
+notarized, so Gatekeeper opens it without a right-click bypass; the first launch still shows
+macOS's standard confirmation that it was downloaded from the Internet.
+
+Keychain prompts appear only for secrets (API keys, etc.) that already exist from a build from
+source — older source builds stored them under the installed app's Keychain items, before dev
+builds moved to their own `.dev` ones. The installed app's first use of each such item prompts
+once; choose "Always Allow" (one per item) so you aren't asked again. A fresh install has none and
+shows no prompts.
+
+The installed app checks for updates once a day and installs them through [Sparkle](https://sparkle-project.org) when you accept them; check
+by hand with **Iris > Check for Updates…** or `/update`. See "Updates & Releases" below for detail.
+
+Building from source instead? A dev build (`swift run`, `scripts/run-dev.sh`, or the Xcode Debug
+scheme) keeps its own conversations and memory under `~/.iris-dev`, separate from the installed
+app's `~/.iris`, so the two never collide. See "Project Setup" below.
+
 ## 🚀 Architecture
 
 At its core, Iris is a Swift-based execution chassis that bridges your local environment and cloud LLMs.
@@ -139,7 +162,7 @@ Iris supports in-app slash commands typed directly into the composer. Determinis
 *   **Skills & Bundles:** `/skills [new <name>|reload|show <name>|curate]` (scaffold, list, reload, view, or curate skills), `/bundle [save <name> s1,s2|<name>|clear]` (manage or activate selective skill bundle filters).
 *   **Journey & Learning:** `/journey` (render chronological timeline of all learned memories, skills, and facts).
 *   **Memory & Rules:** `/rules [reload]` (inspect/reload custom rules), `/facts [all|search <q>|probe <e>]` (query SQLite FactStore; `all` includes retracted and superseded facts), `/search <query>` (full-text search across every saved conversation, archived ones included) — the same index also backs a search field in the sidebar, so conversation search isn't slash-command-only: type into it to see grouped, ranked hits and jump straight to the matching message.
-*   **Session Control:** `/new` (fresh chat; in Iris it rotates instead: a reflection pass, then a fresh pinned Iris that opens with a summary of the old one, which is archived as "Iris — until ‹date›" and stays readable through `search_conversations`/`read_conversation`. Refused while a turn is running or a goal is active there. Esc stops it: before the new Iris exists, Iris is not rotated (a reflection already under way may have updated memory); after, the rotation finishes without a summary. Nothing rotates automatically — once Iris's own history runs past about 150k estimated tokens, it posts a one-line suggestion to run `/new`, once per crossing, and never while a rotation is already running; you decide when to reset), `/clear` (clear current buffer; refused in a pinned conversation such as Iris), `/archive` (move this conversation to the archive; refused on Iris itself — `/new` archives Iris by rotating it), `/unarchive` (return it to the active list), `/stop` (cancel active goal/subagents), `/update` (check for GitHub releases). Peer session discovery and messaging (see Sessions, above) have no slash commands of their own — an agent reaches other sessions through `list_sessions`, `send_to_session`, and `set_session_card`, not anything you type.
+*   **Session Control:** `/new` (fresh chat; in Iris it rotates instead: a reflection pass, then a fresh pinned Iris that opens with a summary of the old one, which is archived as "Iris — until ‹date›" and stays readable through `search_conversations`/`read_conversation`. Refused while a turn is running or a goal is active there. Esc stops it: before the new Iris exists, Iris is not rotated (a reflection already under way may have updated memory); after, the rotation finishes without a summary. Nothing rotates automatically — once Iris's own history runs past about 150k estimated tokens, it posts a one-line suggestion to run `/new`, once per crossing, and never while a rotation is already running; you decide when to reset), `/clear` (clear current buffer; refused in a pinned conversation such as Iris), `/archive` (move this conversation to the archive; refused on Iris itself — `/new` archives Iris by rotating it), `/unarchive` (return it to the active list), `/stop` (cancel active goal/subagents), `/update` (check for a new version; installed release app only). Peer session discovery and messaging (see Sessions, above) have no slash commands of their own — an agent reaches other sessions through `list_sessions`, `send_to_session`, and `set_session_card`, not anything you type.
 *   **Autonomous Workflows:** `/goal <desc>` (autonomous execution loop), `/reflect` (memory reflection), `/vibecop init` (generate security rules).
 
 See [docs/slash_commands.md](docs/slash_commands.md) for the full command reference.
@@ -239,7 +262,7 @@ and does not record and what the lock does and does not protect, is in
 
 ### Updates & Releases
 
-- **Auto-Updates**: Iris automatically checks GitHub Releases for new updates. You can also manually check for updates and view release notes at any time via the **Updates** tab in Settings.
+- **Auto-Updates**: The installed app (from a release DMG) updates itself with [Sparkle](https://sparkle-project.org): it checks the signed appcast once a day, and Sparkle's own window shows the release notes and installs the update when you accept it. Check by hand with **Iris > Check for Updates…**, the menu bar item, `/update`, or **Check Now** in Settings' **Updates** tab, where you can also turn the daily check off. Dev builds (`swift run`, the Xcode Debug app) never check or update; `/update` there says so.
 - **Developer & Maintainer Releases**: Instructions for building signed release bundles, publishing releases, and managing release notes can be found in [docs/releasing.md](docs/releasing.md).
 
 ### Model Context Protocol (MCP)

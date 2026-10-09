@@ -6,7 +6,6 @@ enum Constants {
     /// Info.plist to read), and an unstamped Xcode build reports "0.0.0" (`MARKETING_VERSION`'s
     /// default in `project.yml`).
     static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
-    static let gitHubRepo = "sackheads/iris"
 }
 
 extension KeyboardShortcuts.Name {

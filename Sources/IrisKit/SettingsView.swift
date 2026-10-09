@@ -151,10 +151,6 @@ struct SettingsView: View {
     @State private var downloader = ModelDownloader.shared
     @State private var showingDownloadError = false
     
-    @State private var availableUpdate: ReleaseInfo?
-    @State private var isCheckingForUpdates = false
-    @State private var updateCheckStatusMessage: String?
-    
     @State private var vibecopTestStatus: String?
     @State private var isTestingVibecopModel = false
     @State private var tier2TestStatus: String?
@@ -1034,54 +1030,17 @@ struct SettingsView: View {
             // MARK: - Updates Tab
             Form {
                 Section(header: Text("Application Updates").font(.headline)) {
-                    HStack {
-                        Text("Installed Version:")
-                        Spacer()
-                        Text("v\(Constants.appVersion)")
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    if let update = availableUpdate {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
-                                    .foregroundColor(.irisIndigo)
-                                Text("New Version Available: \(update.tagName)")
-                                    .font(.headline)
-                            }
-                            
-                            if !update.body.isEmpty {
-                                Text(update.body)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(4)
-                            }
-                            
-                            Button("Download Update (\(update.tagName))") {
-                                UpdateManager.shared.openReleasePage(url: update.htmlUrl)
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
-                        .padding(.vertical, 4)
-                    }
-                    
-                    HStack {
-                        Button(action: { checkForUpdates() }) {
-                            if isCheckingForUpdates {
-                                ProgressView()
-                                    .controlSize(.small)
-                            } else {
-                                Text("Check for Updates")
-                            }
-                        }
-                        .disabled(isCheckingForUpdates)
-                        
-                        if let msg = updateCheckStatusMessage {
-                            Spacer()
-                            Text(msg)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                    if let updater = UpdaterController.shared {
+                        LabeledContent("Installed Version", value: updater.versionDescription)
+                        Toggle("Automatically check for updates", isOn: Binding(
+                            get: { updater.automaticallyChecksForUpdates },
+                            set: { updater.automaticallyChecksForUpdates = $0 }))
+                        Button("Check Now") { updater.checkForUpdates() }
+                            .disabled(!updater.canCheckForUpdates)
+                    } else {
+                        LabeledContent("Installed Version",
+                                       value: Constants.appVersion.first?.isNumber == true ? "v\(Constants.appVersion)" : Constants.appVersion)
+                        Text("Updates are disabled in dev builds.").foregroundStyle(.secondary)
                     }
                 }
             }
@@ -1101,27 +1060,6 @@ struct SettingsView: View {
             Button("OK", role: .cancel) { downloader.error = nil }
         } message: {
             Text(downloader.error ?? "An unknown error occurred.")
-        }
-    }
-    
-    private func checkForUpdates() {
-        isCheckingForUpdates = true
-        updateCheckStatusMessage = "Checking for updates..."
-        Task {
-            let result = await UpdateManager.shared.checkForUpdates()
-            await MainActor.run {
-                self.isCheckingForUpdates = false
-                switch result {
-                case .updateAvailable(let release):
-                    self.availableUpdate = release
-                    self.updateCheckStatusMessage = "Update available: \(release.tagName)"
-                case .upToDate:
-                    self.availableUpdate = nil
-                    self.updateCheckStatusMessage = "Iris is up to date (v\(Constants.appVersion))."
-                case .error(let msg):
-                    self.updateCheckStatusMessage = "Failed to check for updates: \(msg)"
-                }
-            }
         }
     }
     

@@ -26,7 +26,7 @@ struct SlashCommandItem: Identifiable, Sendable, Equatable {
         SlashCommandItem(id: "reflect", command: "/reflect", usage: "/reflect", description: "Trigger manual memory reflection and grooming"),
         SlashCommandItem(id: "vibecop", command: "/vibecop init", usage: "/vibecop init", description: "Initialize Vibecop Guardian rules for the workspace"),
         SlashCommandItem(id: "rename", command: "/rename", usage: "/rename", description: "Automatically rename current conversation"),
-        SlashCommandItem(id: "update", command: "/update", usage: "/update", description: "Check for GitHub release updates"),
+        SlashCommandItem(id: "update", command: "/update", usage: "/update", description: "Check for a new version of Iris"),
         SlashCommandItem(id: "sandbox", command: "/sandbox", usage: "/sandbox", description: "Check or configure subagent VM container runtime")
     ]
     
