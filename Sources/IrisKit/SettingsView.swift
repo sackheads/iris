@@ -355,8 +355,9 @@ struct SettingsView: View {
                 )
             }
             .onChange(of: showModelListSheet) { _, isShowing in
-                // The sheet can be dismissed by Esc/swipe as well as the Close button, and none of
-                // those routes run `onClose` — cancel the in-flight listing whichever way it closed.
+                // Esc now triggers the Close button's `.cancelAction` shortcut, which runs `onClose`
+                // directly — but this still catches any other way the sheet closes without going
+                // through that button, so the in-flight listing is cancelled no matter how it closed.
                 if !isShowing { modelListTask?.cancel() }
             }
             .onChange(of: config.primaryProvider) { _, _ in
@@ -1429,6 +1430,7 @@ private struct ModelListSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close", action: onClose)
+                        .keyboardShortcut(.cancelAction)
                 }
             }
             .searchable(text: $searchText, prompt: "Filter models")
