@@ -7,7 +7,7 @@ import Foundation
 /// "takes" as long as the test says and nothing waits on a real wall clock. Limits are set on stores
 /// of the tests' own.
 @MainActor
-@Suite("A subagent's per-turn deadline (#402)")
+@Suite("A subagent's per-turn deadline (#402)", .timeLimit(.minutes(1)))
 struct SubagentTurnDeadlineTests {
 
     typealias ManualClock = SubagentRunStopTests.ManualClock
@@ -183,7 +183,7 @@ struct SubagentTurnDeadlineTests {
         clock.advance(by: 2)
         #expect(await eventually(20) { finished.isSet }, "the limit ended it")
         if !finished.isSet { task.cancel() }  // a failure, not a hang
-        let outcome = await task.value
+        let outcome = await SubagentGoalLoopTests.value(of: task)
 
         #expect(outcome.status == .timedOut)
         #expect(outcome.rendered.contains("per-turn limit (10 min)"))
@@ -218,7 +218,7 @@ struct SubagentTurnDeadlineTests {
         clock.advance(by: 200)  // 700 s into turn 2
         #expect(await eventually(20) { finished.isSet }, "turn 2's own limit ended it")
         if !finished.isSet { task.cancel() }  // a failure, not a hang
-        let outcome = await task.value
+        let outcome = await SubagentGoalLoopTests.value(of: task)
 
         #expect(outcome.status == .timedOut)
         #expect(await eventually(10) { client.cancelled == 1 }, "turn 2's model call was cancelled")
@@ -316,7 +316,7 @@ struct SubagentTurnDeadlineTests {
         let holdUntil = Date().addingTimeInterval(10)
         while client.cancelled == 0, Date() < holdUntil { Self.block(seconds: 0.01) }
         let cancelledWhileMainHeld = client.cancelled
-        let outcome = await task.value
+        let outcome = await SubagentGoalLoopTests.value(of: task)
 
         #expect(cancelledWhileMainHeld == 1, "turn 2 was cancelled at the verdict, not after a MainActor hop")
         #expect(outcome.status == .timedOut)
@@ -328,7 +328,7 @@ struct SubagentTurnDeadlineTests {
 /// #406 review: `GoalLoopControl` calls its turn observer outside its lock, so turn k's end can be
 /// delivered after turn k+1's begin. Plain threads, not the cooperative pool, so the ordering is
 /// forced with semaphores; every wait is bounded, so a regression fails rather than hangs.
-@Suite("A subagent's turn start under out-of-order turn events (#402)")
+@Suite("A subagent's turn start under out-of-order turn events (#402)", .timeLimit(.minutes(1)))
 struct SubagentTurnStartOrderingTests {
 
     final class Box: @unchecked Sendable {
