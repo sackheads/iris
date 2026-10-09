@@ -68,8 +68,8 @@ struct HarnessConfigImporterTests {
 
     @Test("detect only lists configs that exist")
     func detect() throws {
-        let home = FileManager.default.temporaryDirectory
-            .appendingPathComponent("iris-home-\(UUID().uuidString)")
+        let home = try tempDirectory(prefix: "iris-home")
+        defer { try? FileManager.default.removeItem(at: home) }
         let cursorDir = home.appendingPathComponent(".cursor")
         try FileManager.default.createDirectory(at: cursorDir, withIntermediateDirectories: true)
         try #"{ "mcpServers": {} }"#.write(to: cursorDir.appendingPathComponent("mcp.json"),

@@ -7,8 +7,8 @@ struct SkillCurationAdvancementsTests {
 
     @Test("SkillBundleManager creates, saves, lists, and retrieves skill bundles")
     func testSkillBundleManager() throws {
-        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("iris-bundle-test-\(UUID().uuidString)")
+        let tempRoot = try tempDirectory(prefix: "iris-bundle-test")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
         let paths = IrisPaths(root: tempRoot)
         try paths.ensureDirectories()
 
@@ -27,8 +27,8 @@ struct SkillCurationAdvancementsTests {
 
     @Test("JourneyManager builds timeline from frontmatter timestamps")
     func testJourneyManager() async throws {
-        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("iris-journey-test-\(UUID().uuidString)")
+        let tempRoot = try tempDirectory(prefix: "iris-journey-test")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
         let paths = IrisPaths(root: tempRoot)
         try paths.ensureDirectories()
 
@@ -61,8 +61,8 @@ struct SkillCurationAdvancementsTests {
 
     @Test("SkillCurator scans skills, prunes empty ones, and outputs REPORT.md")
     func testSkillCurator() async throws {
-        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("iris-curator-test-\(UUID().uuidString)")
+        let tempRoot = try tempDirectory(prefix: "iris-curator-test")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
         let paths = IrisPaths(root: tempRoot)
         try paths.ensureDirectories()
 
@@ -94,8 +94,8 @@ struct SkillCurationAdvancementsTests {
 
     @Test("SkillManager filters discoverSkills when activeBundle is set")
     func testSkillManagerSelectiveBundleFiltering() async throws {
-        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("iris-discover-bundle-test-\(UUID().uuidString)")
+        let tempRoot = try tempDirectory(prefix: "iris-discover-bundle-test")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
         let paths = IrisPaths(root: tempRoot)
         try paths.ensureDirectories()
 

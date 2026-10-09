@@ -100,7 +100,8 @@ final class FactStoreTests: XCTestCase {
     }
 
     func testLegacyHolographicMigration() throws {
-        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("iris-test-migrator-\(UUID().uuidString)")
+        let tempDir = try tempDirectory(prefix: "iris-test-migrator")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
         let paths = IrisPaths(root: tempDir)
         try paths.ensureDirectories()
 

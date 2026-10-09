@@ -7,8 +7,8 @@ struct SkillCreationTests {
 
     @Test("createSkill creates directory, SKILL.md with OKF frontmatter, and body")
     func testCreateSkill() async throws {
-        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("iris-skill-test-\(UUID().uuidString)")
+        let tempRoot = try tempDirectory(prefix: "iris-skill-test")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
         let paths = IrisPaths(root: tempRoot)
         try paths.ensureDirectories()
 
@@ -47,8 +47,8 @@ struct SkillCreationTests {
 
     @Test("deleteSkill removes skill directory and file")
     func testDeleteSkill() async throws {
-        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("iris-skill-delete-\(UUID().uuidString)")
+        let tempRoot = try tempDirectory(prefix: "iris-skill-delete")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
         let paths = IrisPaths(root: tempRoot)
         try paths.ensureDirectories()
 
@@ -93,8 +93,8 @@ struct SkillCreationTests {
 
     @Test("updateSkill modifies body/description while preserving skill name")
     func testUpdateSkill() async throws {
-        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("iris-skill-update-\(UUID().uuidString)")
+        let tempRoot = try tempDirectory(prefix: "iris-skill-update")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
         let paths = IrisPaths(root: tempRoot)
         try paths.ensureDirectories()
 

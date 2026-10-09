@@ -6,8 +6,7 @@ import Foundation
 struct PluginManagerTests {
     /// Builds a temp ~/.iris with one installed plugin and returns (paths, pluginDir).
     func fixture(manifest: String, id: String, mcpJSON: String? = nil) throws -> (IrisPaths, URL) {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("iris-pm-test-\(UUID().uuidString)")
+        let root = try tempDirectory(prefix: "iris-pm-test")
         let paths = IrisPaths(root: root)
         try paths.ensureDirectories()
         let dir = paths.pluginsDir.appendingPathComponent(id)
@@ -40,6 +39,7 @@ struct PluginManagerTests {
     @Test("loads a valid plugin and resolves references")
     func loadsAndResolves() async throws {
         let (paths, _) = try fixture(manifest: simpleManifest, id: "echo-plug", mcpJSON: mcpJSON)
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         KeychainManager.shared.saveSecrets(["TOKEN": "tok123"], service: KeychainManager.pluginService("echo-plug"))
         defer { KeychainManager.shared.deleteSecrets(service: KeychainManager.pluginService("echo-plug")) }
 
@@ -58,6 +58,7 @@ struct PluginManagerTests {
     @Test("missing required secret means needsConfig, not failure")
     func missingSecret() async throws {
         let (paths, _) = try fixture(manifest: simpleManifest, id: "echo-plug", mcpJSON: mcpJSON)
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let pm = PluginManager(paths: paths)
         await pm.loadAll()
 
@@ -72,6 +73,7 @@ struct PluginManagerTests {
     @Test("broken manifest isolates to that plugin")
     func brokenIsolated() async throws {
         let (paths, _) = try fixture(manifest: "not a manifest", id: "broken")
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let dir2 = paths.pluginsDir.appendingPathComponent("good-one")
         try FileManager.default.createDirectory(at: dir2, withIntermediateDirectories: true)
         try "---\nipf: \"1.0\"\nid: good-one\nname: Good\nversion: 1.0.0\n---\n"
@@ -91,6 +93,7 @@ struct PluginManagerTests {
     @Test("disabled plugin contributes nothing")
     func disabled() async throws {
         let (paths, _) = try fixture(manifest: simpleManifest, id: "echo-plug", mcpJSON: mcpJSON)
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         KeychainManager.shared.saveSecrets(["TOKEN": "t"], service: KeychainManager.pluginService("echo-plug"))
         defer { KeychainManager.shared.deleteSecrets(service: KeychainManager.pluginService("echo-plug")) }
 
@@ -115,6 +118,7 @@ struct PluginManagerTests {
         ---
         """
         let (paths, dir) = try fixture(manifest: manifest, id: "skills-plug")
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let skillDir = dir.appendingPathComponent("skills/my-skill")
         try FileManager.default.createDirectory(at: skillDir, withIntermediateDirectories: true)
         try "---\nname: my-skill\ndescription: Does things.\n---\n"
@@ -145,6 +149,7 @@ struct PluginManagerTests {
         { "echo": { "command": "/bin/echo", "args": ["hi"], "env": { "TOKEN": "${keychain:NOT_DECLARED}" } } }
         """
         let (paths, _) = try fixture(manifest: manifest, id: "echo-plug", mcpJSON: mcpJSON)
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let pm = PluginManager(paths: paths)
         await pm.loadAll()
 
@@ -158,8 +163,8 @@ struct PluginManagerTests {
 
     @Test("pathological directory name isolates to failed, no crash")
     func pathologicalDirectoryName() async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("iris-pm-test-\(UUID().uuidString)")
+        let root = try tempDirectory(prefix: "iris-pm-test")
+        defer { try? FileManager.default.removeItem(at: root) }
         let paths = IrisPaths(root: root)
         try paths.ensureDirectories()
 
@@ -197,6 +202,7 @@ struct PluginManagerTests {
         ---
         """
         let (paths, _) = try fixture(manifest: manifest, id: "mcp-missing")
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let pm = PluginManager(paths: paths)
         await pm.loadAll()
 

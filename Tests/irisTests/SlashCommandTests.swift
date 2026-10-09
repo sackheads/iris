@@ -20,9 +20,9 @@ struct SlashCommandTests {
     }
 
     @Test("SkillManager.readSkillBody retrieves skill contents")
-    func testSkillManagerReadSkillBody() async {
-        let root = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("iris-skill-read-\(UUID().uuidString)")
+    func testSkillManagerReadSkillBody() async throws {
+        let root = try tempDirectory(prefix: "iris-skill-read")
+        defer { try? FileManager.default.removeItem(at: root) }
         let paths = IrisPaths(root: root)
         try? paths.ensureDirectories()
 

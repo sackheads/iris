@@ -2,6 +2,17 @@ import Testing
 import Foundation
 @testable import IrisKit
 
+/// A fresh `<prefix>-<UUID>` directory under the OS temp dir, already created. Fixtures across
+/// the suite used to build this inline and never remove it, which left thousands of `iris-*`
+/// entries in `$TMPDIR` behind a full run (#309). Callers still own cleanup: `defer { try?
+/// FileManager.default.removeItem(at: dir) }` right after the call, same as the existing pattern
+/// in `SkillFolderTraversalTests` and `PermissionCarveOutTests`. This only factors out creation.
+func tempDirectory(prefix: String) throws -> URL {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("\(prefix)-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dir
+}
+
 /// #314 engine tests: a scripted client that records what the engine sent, replies carrying fake
 /// signed blocks, hooks as shell scripts in a temp dir of the test's own, and the Anthropic body
 /// each recorded request builds. No network, no `ConfigManager.shared` writes (invariant 7).
