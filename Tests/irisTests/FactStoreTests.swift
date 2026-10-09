@@ -99,31 +99,31 @@ final class FactStoreTests: XCTestCase {
         XCTAssertLessThan(age0, age1, "Newer fact should be ranked higher")
     }
 
-    func testLegacyHolographicMigration() throws {
-        let tempDir = try tempDirectory(prefix: "iris-test-migrator")
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-        let paths = IrisPaths(root: tempDir)
-        try paths.ensureDirectories()
+    func testLegacyHolographicMigration() async throws {
+        try await withTempDirectory(prefix: "iris-test-migrator") { tempDir in
+            let paths = IrisPaths(root: tempDir)
+            try paths.ensureDirectories()
 
-        // Create legacy holographic database
-        let legacyQueue = try DatabaseQueue(path: paths.holographicDB.path)
-        try legacyQueue.write { db in
-            try db.execute(sql: """
-                CREATE TABLE facts (
-                    id TEXT PRIMARY KEY,
-                    content TEXT NOT NULL,
-                    hrrVectorData BLOB NOT NULL,
-                    trustScore DOUBLE NOT NULL DEFAULT 1.0,
-                    timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-                INSERT INTO facts (id, content, hrrVectorData) VALUES ('legacy-1', 'Legacy Holographic Fact', X'0000');
-            """)
+            // Create legacy holographic database
+            let legacyQueue = try DatabaseQueue(path: paths.holographicDB.path)
+            try legacyQueue.write { db in
+                try db.execute(sql: """
+                    CREATE TABLE facts (
+                        id TEXT PRIMARY KEY,
+                        content TEXT NOT NULL,
+                        hrrVectorData BLOB NOT NULL,
+                        trustScore DOUBLE NOT NULL DEFAULT 1.0,
+                        timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                    INSERT INTO facts (id, content, hrrVectorData) VALUES ('legacy-1', 'Legacy Holographic Fact', X'0000');
+                """)
+            }
+
+            // Initialize FactStoreManager pointing at test paths
+            let mgr = try FactStoreManager(paths: paths)
+            let facts = try mgr.search(query: "Legacy")
+            XCTAssertEqual(facts.count, 1)
+            XCTAssertEqual(facts.first?.content, "Legacy Holographic Fact")
         }
-
-        // Initialize FactStoreManager pointing at test paths
-        let mgr = try FactStoreManager(paths: paths)
-        let facts = try mgr.search(query: "Legacy")
-        XCTAssertEqual(facts.count, 1)
-        XCTAssertEqual(facts.first?.content, "Legacy Holographic Fact")
     }
 }

@@ -67,15 +67,15 @@ struct HarnessConfigImporterTests {
     }
 
     @Test("detect only lists configs that exist")
-    func detect() throws {
-        let home = try tempDirectory(prefix: "iris-home")
-        defer { try? FileManager.default.removeItem(at: home) }
-        let cursorDir = home.appendingPathComponent(".cursor")
-        try FileManager.default.createDirectory(at: cursorDir, withIntermediateDirectories: true)
-        try #"{ "mcpServers": {} }"#.write(to: cursorDir.appendingPathComponent("mcp.json"),
-                                           atomically: true, encoding: .utf8)
-        let detected = HarnessConfigImporter.detect(home: home)
-        #expect(detected.map(\.name) == ["Cursor"])
+    func detect() async throws {
+        try await withTempDirectory(prefix: "iris-home") { home in
+            let cursorDir = home.appendingPathComponent(".cursor")
+            try FileManager.default.createDirectory(at: cursorDir, withIntermediateDirectories: true)
+            try #"{ "mcpServers": {} }"#.write(to: cursorDir.appendingPathComponent("mcp.json"),
+                                               atomically: true, encoding: .utf8)
+            let detected = HarnessConfigImporter.detect(home: home)
+            #expect(detected.map(\.name) == ["Cursor"])
+        }
     }
 
     @Test("known locations cover the major harnesses")
