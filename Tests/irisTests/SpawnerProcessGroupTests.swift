@@ -364,3 +364,32 @@ struct CancelledTurnHookTests {
         #expect(!FileManager.default.fileExists(atPath: target.path))
     }
 }
+
+/// #452 review: the warn-only list was pinned only as a constant. This drives a real turn: a
+/// `PreCompress` hook may be redacting the history the provider is about to receive, so one its
+/// timeout killed must stop the turn before any model call, not send the unredacted history.
+@MainActor
+@Suite("Timed-out PreCompress hook sends nothing", .timeLimit(.minutes(1)))
+struct TimedOutPreCompressTests {
+    @Test("a PreCompress hook that exits 0 when its timeout kills it stops the turn before any model call")
+    func timedOutPreCompressMakesNoModelCall() async throws {
+        let nap = RunCommandProcessGroupTests.marker()
+        defer { RunCommandProcessGroupTests.killAll(nap) }
+        let dir = try ThinkingFixtures.tempDirectory("precompress-timeout")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // The trap prints the history it was given, so a warn that kept going would still have
+        // something to send; the hook's verdict never arrives either way.
+        let hook: [String: Any] = ["type": "command", "timeout": 1,
+                                   "command": "trap 'cat; exit 0' TERM; sleep \(nap)"]
+        let settings = dir.appendingPathComponent("settings.json")
+        try JSONSerialization.data(withJSONObject: ["hooks": ["PreCompress": [["matcher": "PreCompress", "hooks": [hook]]]]])
+            .write(to: settings)
+        var hooks = HookManager()
+        hooks.configPathOverride = settings.path
+
+        let h = try ThinkingHarness.make([ThinkingFixtures.reply(1, toolCall: false)], hooks: hooks)
+        await h.run("SECRET-\(nap) needs redacting")
+        #expect(h.client.requests.isEmpty, "the turn sent \(h.client.requests.count) request(s) past a timed-out PreCompress hook")
+        #expect(await RunCommandProcessGroupTests.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the timeout")
+    }
+}
