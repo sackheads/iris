@@ -45,7 +45,7 @@ struct Fact: Identifiable, Codable, FetchableRecord, PersistableRecord, Sendable
 
     /// What write-time dedup and the merge migration compare: the same text about two different
     /// entities ("Prefers dark mode." for Alice and for Bob) is two facts. Nil and empty entity
-    /// are the same. Pre-injection dedup uses `contentKey` alone: one line in the prompt is enough.
+    /// are the same. Pre-injection dedup uses it too; the rendered line names the entity.
     struct DedupKey: Hashable { let content: String; let entity: String }
     var dedupKey: DedupKey { DedupKey(content: contentKey, entity: FactStoreManager.contentKey(entity ?? "")) }
 
@@ -503,8 +503,8 @@ final class FactStoreManager: @unchecked Sendable {
 
     /// First occurrence wins, so pass facts already in rank order.
     static func dedupe(_ facts: [Fact]) -> [Fact] {
-        var seen: Set<String> = []
-        return facts.filter { seen.insert($0.contentKey).inserted }
+        var seen: Set<Fact.DedupKey> = []
+        return facts.filter { seen.insert($0.dedupKey).inserted }
     }
 
     /// Retrieves active facts associated with a specific entity (probe).

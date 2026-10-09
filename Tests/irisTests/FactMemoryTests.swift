@@ -374,6 +374,65 @@ struct FactInjectionDedupTests {
     }
 }
 
+@MainActor
+@Suite("Fact entity in the prompt (#415)")
+struct FactEntityLineTests {
+    @Test("the same text about Alice and about Bob is injected twice, each line naming its entity")
+    func sameTextTwoEntities() async throws {
+        let facts = try FactStoreManager(inMemory: true)
+        try facts.addFact(content: "Prefers dark mode.", entity: "Alice")
+        try facts.addFact(content: "Prefers dark mode.", entity: "Bob")
+        let app = AppState()
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let client = FactTurnClient()
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], streamResponses: false, factStore: facts,
+                                protectionEnabled: false, sessionPeerCount: 0)
+        await engine.processInput("does anyone want dark mode?", source: "UI", conversationId: id)
+        let block = turnContextBlock(try #require(client.requests.first))
+        #expect(block.contains("(about Alice; saved today) Prefers dark mode."), "\(block)")
+        #expect(block.contains("(about Bob; saved today) Prefers dark mode."), "\(block)")
+    }
+
+    @Test("an entity already named in the content, or empty, is not repeated")
+    func entityOmittedWhenRedundant() {
+        let now = Date()
+        let named = Fact(id: "f1", content: "Brian prefers terse commits", entity: "brian", timestamp: now)
+        let blank = Fact(id: "f2", content: "The sky is blue", entity: "  ", timestamp: now)
+        let other = Fact(id: "f3", content: "Prefers oolong", entity: "Brian Naylor", timestamp: now)
+        #expect(IrisEngine.renderFactLines([named, blank, other], now: now) == """
+            - [f1] (saved today) Brian prefers terse commits
+            - [f2] (saved today) The sky is blue
+            - [f3] (about Brian Naylor; saved today) Prefers oolong
+            """)
+    }
+
+    @Test("clearGoal drops the run's carried facts")
+    func clearGoalDropsCarry() async throws {
+        let facts = try FactStoreManager(inMemory: true)
+        try facts.addFact(content: "The Seattle office moves in March")
+        let app = AppState()
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: FactTurnClient(),
+                                retryDelays: [], streamResponses: false, factStore: facts,
+                                protectionEnabled: false, sessionPeerCount: 0)
+        app.installEngine(engine)
+        await engine.processInput("kickoff", source: "System", conversationId: id,
+                                  goalFacts: .start(objective: "plan the Seattle move"))
+        #expect(await engine.goalRunFactIDsForTesting(id)?.count == 1)
+        app.clearGoal(for: id)
+        let deadline = Date().addingTimeInterval(30)
+        while await engine.goalRunFactIDsForTesting(id) != nil, Date() < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(await engine.goalRunFactIDsForTesting(id) == nil)
+    }
+}
+
 @Suite("Fact age in the prompt (#415)")
 struct FactAgeTests {
     @Test("age labels")

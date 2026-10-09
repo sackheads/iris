@@ -2127,6 +2127,8 @@ class AppState {
             conversations[idx].activeGoal = nil
             conversations[idx].goalContract = nil
             conversations[idx].goalIterationCount = 0
+            // The run's carried facts (#415); a later kickoff replaces them anyway.
+            if let engine { Task { await engine.clearGoalRunFacts(for: conversationId) } }
             if pausedOnUser {
                 conversations[idx].lastGoalEvaluation = nil
                 conversations[idx].lastGoalCompletionReport = nil

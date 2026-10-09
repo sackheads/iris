@@ -1528,6 +1528,16 @@ actor IrisEngine {
     /// Transient by design: rebuilt from the objective after a restart.
     private var goalRunFactIDs: [UUID: [String]] = [:]
 
+    /// Drops a finished or stopped goal run's carried facts.
+    func clearGoalRunFacts(for conversationId: UUID) {
+        goalRunFactIDs[conversationId] = nil
+    }
+
+    /// Test seam: what a goal run currently carries.
+    func goalRunFactIDsForTesting(_ conversationId: UUID) -> [String]? {
+        goalRunFactIDs[conversationId]
+    }
+
     private func goalRunFacts(_ mode: GoalFacts, conversationId: UUID) async -> [Fact] {
         func search(_ query: String) -> [String] {
             ((try? factStore.search(query: query, limit: Self.jitFactLimit, applyRelevanceFloor: true)) ?? []).map(\.id)
@@ -1558,9 +1568,27 @@ actor IrisEngine {
 
     /// `- [id] (saved 3 weeks ago) content`: the id for `manage_fact`, the age so a resolved
     /// investigation does not read as current (#415).
+    /// The entity is named when the content does not already say it, so two facts with the same
+    /// text about different entities read as two facts: `- [id] (about Alice; saved …) …`.
     nonisolated static func renderFactLines(_ facts: [Fact], now: Date = Date()) -> String {
-        facts.map { "- [\($0.id)] (saved \(FactAge.label(from: $0.createdAt, now: now))) \($0.content)" }
-            .joined(separator: "\n")
+        facts.map { fact in
+            let age = "saved \(FactAge.label(from: fact.createdAt, now: now))"
+            let about = entityLabel(fact).map { "about \($0); " } ?? ""
+            return "- [\(fact.id)] (\(about)\(age)) \(fact.content)"
+        }
+        .joined(separator: "\n")
+    }
+
+    /// The fact's entity, trimmed, unless it is empty or every word of it is already in the content.
+    nonisolated static func entityLabel(_ fact: Fact) -> String? {
+        guard let entity = fact.entity?.trimmingCharacters(in: .whitespacesAndNewlines), !entity.isEmpty else { return nil }
+        func words(_ text: String) -> [String] {
+            text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+                .split(whereSeparator: { !($0.isLetter || $0.isNumber) }).map(String.init)
+        }
+        let contentWords = Set(words(fact.content))
+        let entityWords = words(entity)
+        return !entityWords.isEmpty && entityWords.allSatisfy(contentWords.contains) ? nil : entity
     }
 
     private func processInputBody(_ input: String, source: String, conversationId: UUID, inlineParts: [Part] = [], restrictToGoalComplete: Bool = false, turnBudget: TurnBudget? = nil, usageSink: (any TurnUsageSink)? = nil, goalFacts: GoalFacts? = nil) async {
