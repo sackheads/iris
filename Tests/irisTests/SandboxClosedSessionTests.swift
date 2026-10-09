@@ -121,10 +121,30 @@ struct SandboxClosedSessionTests {
 
         let out = await m.run(command: "a", conversationId: id, workspace: "/ws")
         #expect(out == SandboxSessionManager.closedSessionError)
-        #expect(rt.createdCount == 1, "the retry branch ran its create")
+        #expect(rt.createdCount == 0, "a conversation closed during the start is not retried (#293 rebase)")
         #expect(!(await m.hasSession(id)), "and the closed conversation was not given the session")
         #expect(rt.execCount == 0)
-        #expect(rt.removedNames.contains("iris-\(id.uuidString.lowercased())"), "the retried container was swept")
+        #expect(rt.removedNames.contains("iris-\(id.uuidString.lowercased())"), "the failed create was still swept")
+    }
+
+    @Test("a close that lands while the system is started for the isolated network refuses the retry")
+    func closeDuringNetworkSelfHeal() async {
+        let rt = MockRuntime()
+        rt.nextNetworkError = ContainerRuntimeError.networkFailed("unauthorized request")
+        let id = UUID()
+        let box = ManagerBox()
+        let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" }, startContainerSystem: {
+            await box.manager?.closeSession(id)
+            return true
+        })
+        box.manager = m
+
+        let out = await m.run(command: "a", conversationId: id, workspace: "/ws", network: .isolated)
+        #expect(out == SandboxSessionManager.closedSessionError)
+        #expect(rt.networksEnsured.isEmpty, "the network check was not retried for a closed conversation")
+        #expect(rt.createdCount == 0, "and no container was created")
+        #expect(rt.execCount == 0)
+        #expect(!(await m.hasSession(id)))
     }
 
     @Test("a close under a running command does not self-heal into a new container")
