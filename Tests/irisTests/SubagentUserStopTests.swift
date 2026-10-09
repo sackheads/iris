@@ -269,6 +269,34 @@ struct SubagentUserStopTests {
         #expect(outcome.stoppedBy == .parent)
     }
 
+    @Test("Esc on an idle parent whose only background subagent is being graded records the parent's Stop")
+    func escDuringGradingIsRecorded() async throws {
+        let client = RoutingClient(["WORKER": [calls([("goal_complete", ["summary": .string("done")])])]])
+        let state = try state()
+        let main = state.createNewConversation()
+        let request = Box<SubagentStopKind?>(nil)
+        let interruptible = Box<Bool>(false)
+
+        // `endSandboxSession` runs after the result is settled, while it is being graded.
+        let outcome = await SubagentManager.shared.runSubagent(
+            role: "worker", task: "Work.", effort: "easy", parentConversationId: main, background: true,
+            client: client, appState: state, endSandboxSession: { _ in
+                await MainActor.run {
+                    let worker = state.conversations.first { $0.title == "Subagent: worker" }!.id
+                    #expect(state.backgroundSubagents(under: main).isEmpty, "settled: not stoppable")
+                    // What `ChatView.handleEscape` does.
+                    interruptible.set(state.hasInterruptibleWork(in: state.selectedConversationId))
+                    if interruptible.get { state.interruptActiveConversation() }
+                    request.set(state.subagentStopRequest(worker))
+                }
+            })
+
+        #expect(interruptible.get, "Esc's guard passes for a settled background subagent")
+        #expect(request.get == .parent)
+        // The engine routes the post-back on this: `.parent` delivers without waking the parent.
+        #expect(outcome.stoppedBy == .parent)
+    }
+
     @Test("a parent Stop accepted just after goal_complete still does not wake the parent")
     func stopRacingCompletionDoesNotWakeParent() async throws {
         let client = RoutingClient([

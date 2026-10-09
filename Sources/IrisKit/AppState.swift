@@ -764,12 +764,15 @@ class AppState {
     }
 
     /// Whether Esc/Stop has anything to reach in `conversationId`: its own turn or rotation, or a
-    /// background subagent working for it while it is idle (#236). Wider than `isThinking(in:)` on
+    /// background subagent working for it while it is idle (#236), settled ones included: a Stop
+    /// while one is being graded must still record `.parent` so its result does not wake the
+    /// parent (`stopBackgroundSubagents`). Wider than `isThinking(in:)` on
     /// purpose; the indicator stays scoped to the conversation's own turn. Both Esc guards
     /// (`ChatView.handleEscape`, `interruptActiveConversation`) go through this one predicate.
     func hasInterruptibleWork(in conversationId: UUID?) -> Bool {
         guard let conversationId else { return false }
-        return isThinking(in: conversationId) || !backgroundSubagents(under: conversationId).isEmpty
+        return isThinking(in: conversationId)
+            || !backgroundSubagents(under: conversationId, stoppableOnly: false).isEmpty
     }
 
     func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID, isPeer: Bool = false) {
