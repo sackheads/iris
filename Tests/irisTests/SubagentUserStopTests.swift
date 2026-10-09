@@ -172,7 +172,9 @@ struct SubagentUserStopTests {
 
         #expect(await eventually { client.cancelledCalls == 1 }, "the subagent's model call was cancelled")
         #expect(await eventually { finishedStatus(of: worker, in: state) == "cancelled" })
-        #expect(state.hasInterruptibleWork(in: main) == false, "nothing left to stop")
+        // Waited for, not read: the session finishes before the live subagent is unregistered,
+        // which happens once its engine task has unwound (#458).
+        #expect(await eventually { !state.hasInterruptibleWork(in: main) }, "nothing left to stop")
     }
 
     @Test("/stop stops the conversation's background subagents and says how many")
