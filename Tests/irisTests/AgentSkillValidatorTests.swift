@@ -5,9 +5,8 @@ import Foundation
 @Suite("Agent Skill Validator Tests")
 struct AgentSkillValidatorTests {
     func makeSkill(dirName: String, skillMD: String?) throws -> URL {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("iris-skill-test-\(UUID().uuidString)")
-            .appendingPathComponent(dirName)
+        let root = try tempDirectory(prefix: "iris-skill-test")
+        let dir = root.appendingPathComponent(dirName)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         if let skillMD {
             try skillMD.write(to: dir.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
@@ -24,6 +23,7 @@ struct AgentSkillValidatorTests {
         ---
         Instructions here.
         """)
+        defer { try? FileManager.default.removeItem(at: dir.deletingLastPathComponent()) }
         #expect(AgentSkillValidator.validate(directory: dir).isEmpty)
     }
 
@@ -46,12 +46,14 @@ struct AgentSkillValidatorTests {
         Instructions here.
         """.replacingOccurrences(of: "\n", with: "\r\n")
         let dir = try makeSkill(dirName: "pdf-processing", skillMD: content)
+        defer { try? FileManager.default.removeItem(at: dir.deletingLastPathComponent()) }
         #expect(AgentSkillValidator.validate(directory: dir).isEmpty)
     }
 
     @Test("missing SKILL.md is a violation")
     func missingFile() throws {
         let dir = try makeSkill(dirName: "no-skill", skillMD: nil)
+        defer { try? FileManager.default.removeItem(at: dir.deletingLastPathComponent()) }
         #expect(!AgentSkillValidator.validate(directory: dir).isEmpty)
     }
 
@@ -63,6 +65,7 @@ struct AgentSkillValidatorTests {
         description: Something.
         ---
         """)
+        defer { try? FileManager.default.removeItem(at: dir.deletingLastPathComponent()) }
         #expect(AgentSkillValidator.validate(directory: dir).contains { $0.contains("match") })
     }
 
@@ -73,6 +76,7 @@ struct AgentSkillValidatorTests {
         name: desc-less
         ---
         """)
+        defer { try? FileManager.default.removeItem(at: dir.deletingLastPathComponent()) }
         #expect(AgentSkillValidator.validate(directory: dir).contains { $0.contains("description") })
     }
 }

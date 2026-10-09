@@ -102,9 +102,10 @@ struct HeadlessModeTests {
         ])
         let suite = PerfSuite(name: "scope-probe", lane: .fake, repetitions: 1, rungs: [5],
                               scenarios: ["perf/prompts/fake/text-only.json"])
+        let outDir = try tempDirectory(prefix: "iris-perfcli-scope")
+        defer { try? FileManager.default.removeItem(at: outDir) }
         let code = try await PerfCLI.runSuiteRespectingLane(suite, repetitionsOverride: 1,
-                                                            out: FileManager.default.temporaryDirectory
-                                                                .appendingPathComponent("iris-perfcli-scope-\(UUID().uuidString)").path,
+                                                            out: outDir.path,
                                                             dumpRequestsDir: nil, environment: PerfCLIEnvironmentRecorder().environment,
                                                             client: probe)
         #expect(code == 0)

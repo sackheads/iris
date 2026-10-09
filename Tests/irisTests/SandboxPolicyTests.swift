@@ -55,21 +55,23 @@ struct SandboxPolicyResolveTests {
 @Suite("SandboxPolicy per-workspace override I/O")
 struct SandboxPolicyIOTests {
     private func tempWorkspace() -> String {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("iris-sbx-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = (try? tempDirectory(prefix: "iris-sbx"))
+            ?? FileManager.default.temporaryDirectory.appendingPathComponent("iris-sbx-\(UUID().uuidString)")
         return dir.path
     }
 
     @Test("missing file -> nil")
     func missing() {
-        #expect(SandboxPolicy.perWorkspaceOverride(workspace: tempWorkspace()) == nil)
+        let ws = tempWorkspace()
+        defer { try? FileManager.default.removeItem(atPath: ws) }
+        #expect(SandboxPolicy.perWorkspaceOverride(workspace: ws) == nil)
         #expect(SandboxPolicy.perWorkspaceOverride(workspace: nil) == nil)
     }
 
     @Test("write then read round-trips")
     func roundTrip() {
         let ws = tempWorkspace()
+        defer { try? FileManager.default.removeItem(atPath: ws) }
         SandboxPolicy.setWorkspaceOverride(.sandboxed, for: ws)
         #expect(SandboxPolicy.perWorkspaceOverride(workspace: ws) == .sandboxed)
         SandboxPolicy.setWorkspaceOverride(.host, for: ws)
@@ -79,6 +81,7 @@ struct SandboxPolicyIOTests {
     @Test("clear removes the override")
     func clear() {
         let ws = tempWorkspace()
+        defer { try? FileManager.default.removeItem(atPath: ws) }
         SandboxPolicy.setWorkspaceOverride(.sandboxed, for: ws)
         SandboxPolicy.setWorkspaceOverride(nil, for: ws)
         #expect(SandboxPolicy.perWorkspaceOverride(workspace: ws) == nil)

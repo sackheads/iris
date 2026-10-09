@@ -5,15 +5,14 @@ import Foundation
 @Suite("Plugin Installer Tests", .serialized)
 struct PluginInstallerTests {
     func tempPaths() throws -> IrisPaths {
-        let paths = IrisPaths(root: FileManager.default.temporaryDirectory
-            .appendingPathComponent("iris-installer-\(UUID().uuidString)"))
+        let paths = IrisPaths(root: try tempDirectory(prefix: "iris-installer"))
         try paths.ensureDirectories()
         return paths
     }
 
     func sourceDir(manifest: String) throws -> URL {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("iris-src-\(UUID().uuidString)/neat-plug")
+        let root = try tempDirectory(prefix: "iris-src")
+        let dir = root.appendingPathComponent("neat-plug")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try manifest.write(to: dir.appendingPathComponent("plugin.md"), atomically: true, encoding: .utf8)
         try #"{ "s": { "command": "/bin/echo", "args": [] } }"#
@@ -39,7 +38,9 @@ struct PluginInstallerTests {
     @Test("stage reads a local directory into a draft without installing")
     func stage() throws {
         let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let src = try sourceDir(manifest: manifest)
+        defer { try? FileManager.default.removeItem(at: src.deletingLastPathComponent()) }
         let draft = try PluginInstaller(paths: paths).stage(directory: src, source: "local")
         #expect(draft.manifest.id == "neat-plug")
         #expect(draft.files.keys.contains("plugin.md"))
@@ -50,7 +51,9 @@ struct PluginInstallerTests {
     @Test("commit installs atomically: directory, keychain, state")
     func commit() throws {
         let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let src = try sourceDir(manifest: manifest)
+        defer { try? FileManager.default.removeItem(at: src.deletingLastPathComponent()) }
         var draft = try PluginInstaller(paths: paths).stage(directory: src, source: "local")
         draft.secretValues["API_KEY"] = "sk-123"
         try PluginInstaller(paths: paths).commit(draft)
@@ -67,7 +70,9 @@ struct PluginInstallerTests {
     @Test("uninstall removes directory, keychain service, and state")
     func uninstall() async throws {
         let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let src = try sourceDir(manifest: manifest)
+        defer { try? FileManager.default.removeItem(at: src.deletingLastPathComponent()) }
         var draft = try PluginInstaller(paths: paths).stage(directory: src, source: "local")
         draft.secretValues["API_KEY"] = "sk-123"
         let installer = PluginInstaller(paths: paths)
@@ -82,15 +87,18 @@ struct PluginInstallerTests {
     @Test("reinstall over an existing install succeeds and replaces content")
     func reinstall() throws {
         let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let installer = PluginInstaller(paths: paths)
 
         let src1 = try sourceDir(manifest: manifest)
+        defer { try? FileManager.default.removeItem(at: src1.deletingLastPathComponent()) }
         var draft1 = try installer.stage(directory: src1, source: "local")
         draft1.secretValues["API_KEY"] = "sk-123"
         try installer.commit(draft1)
 
         let manifestV2 = manifest.replacingOccurrences(of: "version: 2.0.0", with: "version: 3.0.0")
         let src2 = try sourceDir(manifest: manifestV2)
+        defer { try? FileManager.default.removeItem(at: src2.deletingLastPathComponent()) }
         var draft2 = try installer.stage(directory: src2, source: "local")
         draft2.secretValues["API_KEY"] = "sk-123"
         try installer.commit(draft2)
@@ -108,7 +116,9 @@ struct PluginInstallerTests {
     @Test("commit skips empty-string secret values (no empty Keychain entries)")
     func skipsEmptySecrets() throws {
         let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let src = try sourceDir(manifest: manifest)
+        defer { try? FileManager.default.removeItem(at: src.deletingLastPathComponent()) }
         var draft = try PluginInstaller(paths: paths).stage(directory: src, source: "local")
         draft.secretValues["API_KEY"] = ""   // wizard-seeded placeholder, never filled in
         try PluginInstaller(paths: paths).commit(draft)
@@ -119,7 +129,9 @@ struct PluginInstallerTests {
     @Test(".DS_Store in the source directory is not staged")
     func skipsHiddenFiles() throws {
         let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let src = try sourceDir(manifest: manifest)
+        defer { try? FileManager.default.removeItem(at: src.deletingLastPathComponent()) }
         try Data().write(to: src.appendingPathComponent(".DS_Store"))
         let draft = try PluginInstaller(paths: paths).stage(directory: src, source: "local")
         #expect(draft.files[".DS_Store"] == nil)
@@ -128,7 +140,9 @@ struct PluginInstallerTests {
     @Test("commit of an invalid draft leaves no trace")
     func atomicity() throws {
         let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let src = try sourceDir(manifest: manifest)
+        defer { try? FileManager.default.removeItem(at: src.deletingLastPathComponent()) }
         var draft = try PluginInstaller(paths: paths).stage(directory: src, source: "local")
         draft.files["plugin.md"] = Data("garbage".utf8)   // corrupt it post-stage
         #expect(throws: (any Error).self) {

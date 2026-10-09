@@ -5,8 +5,7 @@ import Foundation
 @Suite("Plugin State Store Tests")
 struct PluginStateTests {
     func tempPaths() throws -> IrisPaths {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("iris-test-\(UUID().uuidString)")
+        let dir = try tempDirectory(prefix: "iris-pst-test")
         let paths = IrisPaths(root: dir)
         try paths.ensureDirectories()
         return paths
@@ -15,6 +14,7 @@ struct PluginStateTests {
     @Test("pluginsDir and pluginsJSON resolve under root")
     func pathLayout() throws {
         let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         #expect(paths.pluginsDir.path.hasSuffix("/plugins"))
         #expect(paths.pluginsJSON.path.hasSuffix("/config/plugins.json"))
         #expect(FileManager.default.fileExists(atPath: paths.pluginsDir.path))
@@ -23,6 +23,7 @@ struct PluginStateTests {
     @Test("round-trips state")
     func roundTrip() throws {
         let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let store = PluginStateStore(paths: paths)
         var state = PluginState(source: "snippet")
         state.enabled = false
@@ -37,6 +38,7 @@ struct PluginStateTests {
     @Test("load returns empty when file absent")
     func emptyLoad() throws {
         let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         #expect(PluginStateStore(paths: paths).load().isEmpty)
     }
 }

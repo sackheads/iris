@@ -58,13 +58,22 @@ struct KillEscalationPoolStarvationTests {
     /// #377: the one-off `container run`'s delete is started by the runner's ladder, not by a
     /// `Task` after `run_command` returns. A stub stands in for the `container` binary, so no VM
     /// is involved; the in-VM group kill on a real VM is `SandboxRealVMTests`.
+    ///
+    /// The scenario's own fixture directory (the stub binary and its call log) is picked here,
+    /// in the parent, and removed here too, once the exit test returns — on every outcome,
+    /// including a child that never reaches `finish` (a crash, or a harness SIGKILL). `exit(code)`
+    /// skips every `defer` in the child, so a cleanup that lived there only ran on the paths that
+    /// called it explicitly; this is #427's parent-owned pattern for the message file, applied to
+    /// the fixture dir too (#309).
     @Test("a timed-out one-off container is deleted while the pool is held")
-    func ephemeralDeleteOffPool() async {
+    func ephemeralDeleteOffPool() async throws {
         let log: String = Starvation.messageFile()
-        await #expect(processExitsWith: .success) { [log = log as String] in
-            await Starvation.ephemeralDelete(log: log)
+        let dir = try tempDirectory(prefix: "iris-377")
+        await #expect(processExitsWith: .success) { [log = log as String, dir = dir as URL] in
+            await Starvation.ephemeralDelete(log: log, dir: dir)
         }
         Starvation.report(log)
+        try? FileManager.default.removeItem(at: dir)
     }
 }
 
@@ -165,10 +174,11 @@ enum Starvation {
         }
     }
 
-    static func ephemeralDelete(log: String) async {
+    /// `dir` is the fixture directory the parent test picked and will remove once the exit test
+    /// returns (`ephemeralDeleteOffPool`); nothing here creates or deletes it.
+    static func ephemeralDelete(log: String, dir: URL) async {
         begin(log)
         let nap = marker()
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-377-\(UUID().uuidString)")
         let log = dir.appendingPathComponent("calls").path
         let stub = dir.appendingPathComponent("container").path
         do {

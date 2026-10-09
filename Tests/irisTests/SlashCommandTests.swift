@@ -20,31 +20,31 @@ struct SlashCommandTests {
     }
 
     @Test("SkillManager.readSkillBody retrieves skill contents")
-    func testSkillManagerReadSkillBody() async {
-        let root = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("iris-skill-read-\(UUID().uuidString)")
-        let paths = IrisPaths(root: root)
-        try? paths.ensureDirectories()
+    func testSkillManagerReadSkillBody() async throws {
+        try await withTempDirectory(prefix: "iris-skill-read") { root in
+            let paths = IrisPaths(root: root)
+            try? paths.ensureDirectories()
 
-        let skillFolder = paths.skillsDir.appendingPathComponent("test-skill")
-        try? FileManager.default.createDirectory(at: skillFolder, withIntermediateDirectories: true)
-        let skillContent = """
-        ---
-        name: test-skill
-        description: Test skill description
-        ---
+            let skillFolder = paths.skillsDir.appendingPathComponent("test-skill")
+            try? FileManager.default.createDirectory(at: skillFolder, withIntermediateDirectories: true)
+            let skillContent = """
+            ---
+            name: test-skill
+            description: Test skill description
+            ---
 
-        # Test Skill Body
-        Instructions go here.
-        """
-        try? skillContent.write(to: skillFolder.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+            # Test Skill Body
+            Instructions go here.
+            """
+            try? skillContent.write(to: skillFolder.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
 
-        let body = await SkillManager.shared.readSkillBody(name: "test-skill", paths: paths)
-        #expect(body != nil)
-        #expect(body?.contains("Test Skill Body") == true)
+            let body = await SkillManager.shared.readSkillBody(name: "test-skill", paths: paths)
+            #expect(body != nil)
+            #expect(body?.contains("Test Skill Body") == true)
 
-        let nonExistent = await SkillManager.shared.readSkillBody(name: "non-existent", paths: paths)
-        #expect(nonExistent == nil)
+            let nonExistent = await SkillManager.shared.readSkillBody(name: "non-existent", paths: paths)
+            #expect(nonExistent == nil)
+        }
     }
 
     @Test("FactStoreManager probes and searches facts for /facts command")
