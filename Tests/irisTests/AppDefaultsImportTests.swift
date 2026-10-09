@@ -41,9 +41,46 @@ struct AppDefaultsImportTests {
     func shouldImportGate() {
         #expect(AppDefaultsImport.shouldImport(appDomain: "com.bnaylor.iris", underTests: false))
         #expect(AppDefaultsImport.shouldImport(appDomain: "com.bnaylor.iris.dev", underTests: false))
-        #expect(!AppDefaultsImport.shouldImport(appDomain: "iris", underTests: false))
+        #expect(!AppDefaultsImport.shouldImport(appDomain: AppDefaultsImport.legacyDomain, underTests: false))
+        #expect(AppDefaultsImport.shouldImport(appDomain: IrisDefaults.appDomain(bundleIdentifier: nil), underTests: false))
         #expect(!AppDefaultsImport.shouldImport(appDomain: "com.bnaylor.iris", underTests: true))
         #expect(!AppDefaultsImport.shouldImport(appDomain: "com.bnaylor.iris.dev", underTests: true))
+    }
+
+    @Test("a bundle-less dev launch seeds its domain from the legacy store once, not again (#447)")
+    func bundlelessSeedsOnce() {
+        let legacyName = "iris-import-legacy-\(UUID().uuidString)"
+        let legacy = UserDefaults(suiteName: legacyName)!
+        defer {
+            legacy.removePersistentDomain(forName: legacyName)
+            IrisDefaults.removeSuiteFile(named: legacyName, in: IrisDefaults.preferencesDirectory)
+        }
+        let (dest, cleanDest) = suite(); defer { cleanDest() }
+        legacy.set("anthropic", forKey: "PROVIDER")
+        legacy.set(true, forKey: "HAS_COMPLETED_SETUP")
+        let domain = IrisDefaults.appDomain(bundleIdentifier: nil)
+        let source = { legacy.persistentDomain(forName: legacyName) }
+
+        #expect(AppDefaultsImport.seedIfNeeded(appDomain: domain, underTests: false, source: source, into: dest))
+        #expect(dest.string(forKey: "PROVIDER") == "anthropic")
+        #expect(dest.bool(forKey: "HAS_COMPLETED_SETUP"))
+
+        legacy.set("gemini", forKey: "PROVIDER")
+        legacy.set("late", forKey: "LATE_KEY")
+        dest.removeObject(forKey: "PROVIDER")   // even a key the dev domain lost is not re-seeded
+        #expect(!AppDefaultsImport.seedIfNeeded(appDomain: domain, underTests: false, source: source, into: dest))
+        #expect(dest.object(forKey: "PROVIDER") == nil)
+        #expect(dest.object(forKey: "LATE_KEY") == nil)
+    }
+
+    @Test("seeding never runs under tests or into the legacy domain itself")
+    func seedGate() {
+        let (dest, cleanup) = suite(); defer { cleanup() }
+        let source = { ["PROVIDER": "anthropic"] as [String: Any]? }
+        #expect(!AppDefaultsImport.seedIfNeeded(appDomain: IrisDefaults.appDomain(bundleIdentifier: nil), underTests: true, source: source, into: dest))
+        #expect(!AppDefaultsImport.seedIfNeeded(appDomain: AppDefaultsImport.legacyDomain, underTests: false, source: source, into: dest))
+        #expect(dest.object(forKey: "PROVIDER") == nil)
+        #expect(!dest.bool(forKey: AppDefaultsImport.markerKey))
     }
 
     /// A scratch directory standing in for `~/Library/Preferences`, never the real one.

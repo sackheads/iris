@@ -134,9 +134,10 @@ A build from source — `swift run`, `scripts/run-dev.sh`, or the Xcode Debug sc
 build**: it keeps its own conversations and memory under `~/.iris-dev`, not the installed app's
 `~/.iris`, uses its own `.dev`-suffixed Keychain services, and answers to
 `Cmd + Shift + Option + Space` instead of the hotkey below. Its settings are not in `~/.iris-dev`:
-they live in its own defaults domain (`iris` for `swift run` and `scripts/run-dev.sh`;
-`com.bnaylor.iris.dev` for the Xcode Debug build), separate from the installed app's and from each
-other — a setting changed in one dev build is not seen by the others. `scripts/run-dev.sh` seeds
+every dev build (`swift run`, `scripts/run-dev.sh` and the Xcode Debug build) shares the
+`com.bnaylor.iris.dev` defaults domain, separate from the installed app's `com.bnaylor.iris`. Its
+first launch copies in the settings an older dev build left in the legacy `iris` domain, once.
+`scripts/run-dev.sh` seeds
 `~/.iris-dev` from `~/.iris` and its Keychain
 items when `~/.iris-dev` is missing or empty (`iris --seed-dev-home`), so a local build starts from
 your installed app's conversations, memory and keys instead of empty; copied jobs arrive paused, so

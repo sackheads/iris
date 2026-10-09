@@ -40,12 +40,18 @@ real install**: `BuildIdentity` resolves that bundle id to `.release` exactly li
 app, so it opens `~/.iris` and spends the one-time settings import (`AppDefaultsImport`) that a
 fresh install is meant to get once.
 
-Sharing `~/.iris-dev` does not mean sharing settings: `UserDefaults` domains are keyed by bundle
-id, so "Iris Dev.app" persists to its own `com.bnaylor.iris.dev` domain, separate from the `iris`
-domain `swift run`/`run-dev.sh` use. `AppDefaultsImport` seeds `com.bnaylor.iris.dev` from `iris`
-once, on its first launch; after that, a setting changed in one dev build is not seen by the
-other. `Iris Dev.app` and `scripts/run-dev.sh` are also separate processes — do not run both at
-once against one `~/.iris-dev`: both would open the store's GUI lock and run the same jobs.
+Dev builds share settings as well as `~/.iris-dev`: "Iris Dev.app" persists to its bundle id's
+domain, `com.bnaylor.iris.dev`, and the bundle-less `swift run`/`run-dev.sh` binary opens that same
+domain (`IrisDefaults.appDomain(bundleIdentifier:)`), so a setting changed in one is seen by the
+other. The release app keeps `com.bnaylor.iris`. No build writes the legacy `iris` domain any
+more (it is the process-name domain the bare binary used before #447); it is only the source
+`AppDefaultsImport` copies into a domain once, on that domain's first launch (marker key
+`IRIS_IMPORTED_DEV_DEFAULTS`), and on a machine that has never launched the release app it still
+holds the user's real settings, so leave it alone. One exception: KeyboardShortcuts always uses
+`.standard`, so a dev hotkey recorded from `swift run` lands in `iris` under its own
+`toggleIrisDev` name. `Iris Dev.app` and `scripts/run-dev.sh` are still separate processes — do
+not run both at once against one `~/.iris-dev`: both would open the store's GUI lock and run the
+same jobs.
 
 **Dev builds use `~/.iris-dev`, not `~/.iris`.** `swift build`/`swift run`, `scripts/run-dev.sh`,
 Xcode Debug and `swift test` are all dev builds (`BuildIdentity.current == .dev`): they read and

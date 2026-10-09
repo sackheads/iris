@@ -26,12 +26,29 @@ enum IrisDefaults {
     /// True only under --bench/--perf. Gates every code path that mutates ConfigManager for a run.
     static var isVolatileCopy: Bool { lock.withLock { override != nil } }
 
-    /// The domain the shipping app persists to: the bundle id in a .app, the process name under
-    /// `swift run` (which is why the dev plist is `iris.plist`).
-    static var appDomain: String { Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName }
+    /// The domain this process persists to: the bundle id in a .app, and Iris Dev.app's domain
+    /// (`com.bnaylor.iris.dev`) for the bare SwiftPM binary (`swift run`, `scripts/run-dev.sh`).
+    /// The bare binary used to fall back to `.standard`, which is the process-name domain `iris`:
+    /// the legacy domain every bundled app imports from once, and on a machine that has never run
+    /// the release app, the user's live settings. Dev runs wrote straight into it (#447). Sharing
+    /// Iris Dev.app's domain matches the home both already share (`~/.iris-dev`).
+    static var appDomain: String { appDomain(bundleIdentifier: Bundle.main.bundleIdentifier) }
+
+    static func appDomain(bundleIdentifier: String?) -> String {
+        bundleIdentifier ?? BuildIdentity.devBundleIdentifier
+    }
+
+    /// The suite a non-test process opens instead of `.standard`: nil for a bundled app, whose
+    /// `.standard` already is its own domain; the dev domain for the bare binary.
+    static func bundlelessSuiteName(bundleIdentifier: String?) -> String? {
+        bundleIdentifier == nil ? appDomain(bundleIdentifier: nil) : nil
+    }
 
     nonisolated(unsafe) private static let processStore: UserDefaults = {
-        guard NSClassFromString("XCTestCase") != nil else { return .standard }
+        guard NSClassFromString("XCTestCase") != nil else {
+            guard let name = bundlelessSuiteName(bundleIdentifier: Bundle.main.bundleIdentifier) else { return .standard }
+            return UserDefaults(suiteName: name) ?? .standard
+        }
         let suiteName = "iris-tests-\(ProcessInfo.processInfo.processIdentifier)"
         guard let suite = UserDefaults(suiteName: suiteName) else { return .standard }
         suite.removePersistentDomain(forName: suiteName)   // every test process starts from defaults
