@@ -37,15 +37,20 @@ the whole thing from a maintainer's machine.
      this path is for key setup done outside a release.)
    - **Never** run a bare `generate_keys --account iris` on a machine that lacks the key expecting
      to "regenerate" it. Restore from the backup export instead.
-   - **Back up the private key before cutting a release.** Run
-     `generate_keys --account iris -x ~/Desktop/iris-sparkle-private-key.txt` once, move the file
-     into the password manager, then delete it from disk. This was done on 2026-10-08.
+   - **Back up the private key before cutting a release.** The procedure: run
+     `generate_keys --account iris -x ~/Desktop/iris-sparkle-private-key.txt`, store the file's
+     contents in the owner's password manager, delete the file, and check that iCloud Drive's
+     Desktop & Documents sync has not already uploaded a copy (if it has, delete it there too).
+     Until the owner confirms the key is in the password manager, treat the Keychain copy as the
+     only one.
 4. **`brew install xcodegen`** and the **Metal Toolchain**
    (`xcodebuild -downloadComponent MetalToolchain`) — see `AGENTS.md`'s "Building the Xcode app".
    MLX's shaders are compiled into a `.metallib` by the Xcode build, never by `swift build`, and
    `scripts/gen-xcodeproj.sh` (which both `release.sh` and `scripts/build-app.sh` run first)
    needs `xcodegen` to regenerate `Iris.xcodeproj` from `project.yml`.
-5. **`gh`** authenticated with push access to `sackheads/iris` (`gh auth login`).
+5. **`gh`** authenticated with push access to `sackheads/iris` (`gh auth login`). The repo must
+   be public: Sparkle downloads the release DMG anonymously, so a private repo's asset is a 404 to
+   every installed copy, and the script refuses to run unless `gh repo view` reports `PUBLIC`.
 6. **About 25 GB free disk.** Each run's archive, export and DMG live under a `mktemp -d` work
    directory under `$TMPDIR`, printed as `work dir: …` as soon as it's created; delete it when
    done.
@@ -71,6 +76,17 @@ scripts/release.sh 1.2.3 --dry-run   # builds, notarizes, DMGs, signs, prints th
 scripts/release.sh 1.2.3             # the same, then tags v1.2.3, creates the GitHub release, pushes the appcast
 ```
 
+Before building anything, the script checks (in both modes): the Metal Toolchain runs; the
+working tree is clean; `origin/gh-pages` can be fetched; on `main` with `HEAD` pushed to
+`origin/main` (unless `RELEASE_ALLOW_BRANCH=1`, below); the tag exists neither locally nor on
+`origin`; `gh` is authenticated and `sackheads/iris` is public; the notary profile works;
+`xmllint` exists; a team `RMKGLPG4K4` Developer ID identity is available; `App/Info.plist` has a
+`SUPublicEDKey`; and the build number is newer than every `<sparkle:version>` already in
+`appcast.xml` on `gh-pages`. Sparkle only offers a build higher than the installed one, so
+re-releasing the same commit under a new version would reach nobody: land a commit on `main`
+first. After resolving packages it also checks that the Keychain's `iris` EdDSA key matches
+`SUPublicEDKey`.
+
 Any second argument other than exactly `--dry-run` is rejected. `RELEASE_ALLOW_BRANCH=1` skips
 the `main`/pushed-to-origin checks so a release can be dry-run tested from a feature branch; the
 script refuses to honor it without `--dry-run`, and a real release must never set it.
@@ -92,7 +108,8 @@ stray test or dylib artefacts, that every signed piece (the app, its frameworks,
 `get-task-allow` entitlement, and that the built binary's architecture is exactly `arm64`.
 
 Versions: the argument becomes `CFBundleShortVersionString`; `CFBundleVersion` (what Sparkle
-compares) is `git rev-list --count HEAD`. No version-bump commit is needed or wanted.
+compares) is `git rev-list --count HEAD`. No version-bump commit is needed or wanted, but every
+release needs at least one new commit on `main` since the last one (the build-number check above).
 
 Release notes are whatever `gh release create --generate-notes` produces from merged PRs; the
 appcast links to the release page. Edit the release on GitHub afterwards if the generated notes
@@ -110,21 +127,28 @@ done. The script prints it (`work dir: …`) as soon as it's created.
   `App/Info.plist`, stop. Restore the correct private key from backup. Do not change the public
   key in the app to match a new private key: every installed copy would stop updating.
 
-### Recovery after a failure past the tag push
+### Recovery after a failure at or past the tag
 
-The tag is pushed before the GitHub release is created, so a failure in `gh release create`, the
-asset-reachability check that follows it, or the appcast push leaves `v<version>` on `origin` —
-and the script's own precondition ("tag already exists on origin") then refuses to let you just
-re-run it.
+The script creates the tag locally, pushes it, creates the GitHub release, checks the DMG's
+download URL, then pushes the appcast. Its preconditions refuse a tag that already exists locally
+or on `origin`, so a failure part-way needs cleaning up before a re-run.
 
-- If the release was **not** created: `git push --delete origin vX.Y.Z && git tag -d vX.Y.Z`, then
-  re-run `scripts/release.sh X.Y.Z`.
-- If the release **was** created: `gh release delete vX.Y.Z --yes --cleanup-tag && git tag -d vX.Y.Z`
-  (`gh` deletes the release and the tag on origin; it does **not** delete the local tag, and a
-  leftover local tag blocks the script's "tag already exists" precondition), then re-run.
-- If only the appcast push failed, the release itself is fine and doesn't need undoing — paste
-  the saved item file (the script prints `item file: $ITEM_FILE` when it composes the item) into
-  `appcast.xml` on `gh-pages` by hand: as the first `<item>` in `<channel>`, commit, push.
+- If **`git push origin "$TAG"` failed**, the tag exists only locally: `git tag -d vX.Y.Z`, fix
+  what stopped the push, then re-run `scripts/release.sh X.Y.Z`.
+- If **`gh release create` failed and no release exists** (`gh release view vX.Y.Z` says not
+  found): `git push --delete origin vX.Y.Z && git tag -d vX.Y.Z`, then re-run.
+- If **`gh release create` failed but a release exists** (for example, created without its DMG):
+  `gh release delete vX.Y.Z --yes --cleanup-tag && git tag -d vX.Y.Z` (`gh` deletes the release
+  and the tag on origin; it does **not** delete the local tag, and a leftover local tag blocks the
+  script's "tag already exists" precondition), then re-run.
+- If **the release was created but the asset-reachability check failed** ("release asset not
+  reachable at …"), do not delete the release; GitHub's CDN is usually just slow. Wait a few
+  minutes and check the URL the script printed with `curl -fsSLI <url>`. Once it answers, take the
+  appcast-only path below.
+- If **only the appcast step failed** (or you are finishing after the reachability check), the
+  release itself is fine and doesn't need undoing — paste the saved item file (the script prints
+  `item file: $ITEM_FILE` when it composes the item) into `appcast.xml` on `gh-pages` by hand: as
+  the first `<item>` in `<channel>`, check it with `xmllint --noout`, commit, push.
 - If the script was interrupted between adding and removing its `gh-pages` worktree, run
   `git worktree prune`. Normally an `EXIT` trap removes the worktree even on failure, but a
   killed process can skip it.
