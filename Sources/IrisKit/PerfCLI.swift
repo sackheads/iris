@@ -144,10 +144,47 @@ enum PerfCLI {
         return false
     }
 
+    /// What `execute` does to the process before a run: a volatile copy of the settings store, a
+    /// volatile `~/.iris` (real lane), and the Keychain bypass (real lane); plus the real lane's
+    /// scratch-workspace claim and cwd change around it, so a test can reach the volatile `~/.iris`
+    /// call without either. Each of these is a
+    /// process-wide, one-way switch, and its readers are singletons (`ConfigManager.shared`,
+    /// `MemoryManager.shared`, `KeychainManager.shared`) that capture what they see at first touch,
+    /// so they are injected rather than task-scoped like `HeadlessMode` (#324): a task-local volatile
+    /// copy seeded from the real domain would be captured by whichever singleton the test happened
+    /// to touch first, and would then outlive the scope for the whole test process. The real CLI
+    /// passes `process`; a test passes closures that leave the globals alone.
+    struct ExecutionEnvironment {
+        var useVolatileDefaults: () -> Void
+        /// The store the real-lane Keychain decision reads, after `useVolatileDefaults`.
+        var defaults: () -> UserDefaults
+        var useVolatilePaths: (URL) throws -> Void
+        var requestKeychainBypass: () -> Void
+        /// The real lane's scratch workspace: a shared lock and directory under `$TMPDIR`.
+        var claimScratch: () throws -> URL
+        var releaseScratch: () -> Void
+        /// Moves the whole process's cwd (invariant 7), so a test passes a no-op.
+        var changeDirectory: (String) -> Void
+        /// The home whose memory the run must leave untouched, read before `useVolatilePaths`.
+        var realHome: () -> IrisPaths
+
+        /// The live process: exactly what `iris --perf run` has always done.
+        static var process: ExecutionEnvironment {
+            ExecutionEnvironment(useVolatileDefaults: { IrisDefaults.useVolatileCopyOfStandard() },
+                                 defaults: { IrisDefaults.store },
+                                 useVolatilePaths: { try IrisPaths.useVolatileCopy(at: $0) },
+                                 requestKeychainBypass: { KeychainManager.requestHeadlessBypass() },
+                                 claimScratch: { try claimScratchWorkspace() },
+                                 releaseScratch: { releaseScratchWorkspace() },
+                                 changeDirectory: { FileManager.default.changeCurrentDirectoryPath($0) },
+                                 realHome: { IrisPaths.default })
+        }
+    }
+
     /// Runs `suite`, entering `HeadlessMode`'s scope first when the lane is fake. Separated from
     /// `execute` so a test can exercise exactly this decision — does a fake-lane suite actually
-    /// enter the scope — without calling `IrisDefaults.useVolatileCopyOfStandard()`, which is its
-    /// own process-wide latch (#324) and not this seam's concern. `client` exists only for that
+    /// enter the scope — on its own. `environment` supplies the real lane's volatile `~/.iris`
+    /// (see `ExecutionEnvironment`). `client` exists only for that
     /// test seam (forwarded to `PerfRunner.run`, which forwards it to `ScenarioRunner.run`'s
     /// `clientOverride`); production never passes it. Scoped to this call's task tree (#318) — see
     /// `HeadlessMode`. For the real `iris --perf run` CLI this is the process's outermost task and
@@ -156,13 +193,14 @@ enum PerfCLI {
     @MainActor
     static func runSuiteRespectingLane(_ suite: PerfSuite, repetitionsOverride: Int?, out: String,
                                        dumpRequestsDir: String?,
+                                       environment: ExecutionEnvironment,
                                        client: (any LLMClientProtocol)? = nil) async throws -> Int32 {
         let runSuite: () async throws -> Int32 = {
             let root = PerfPaths.repoRoot()   // before any cwd change
             let previousCwd = FileManager.default.currentDirectoryPath
             var scratch: URL?
             var memoryBefore: String?
-            let realMemory = IrisPaths.default.memoryDir   // the real home, before any override
+            let realMemory = environment.realHome().memoryDir   // the real home, before any override
             if suite.lane == .real {
                 // If anything between this claim and `scratch = dir` throws, the defer below
                 // never sees `scratch`: the lock and the half-built directory are left for the
@@ -172,12 +210,12 @@ enum PerfCLI {
                 if let warning = DevHomeSeeder.unseededCopyWarning(standard: .standard, release: .release) {
                     print(warning)
                 }
-                let dir = try claimScratchWorkspace()
-                FileManager.default.changeCurrentDirectoryPath(dir.path)
+                let dir = try environment.claimScratch()
+                environment.changeDirectory(dir.path)
                 // Memory tools write through IrisPaths.default: route the whole home at a
                 // copy under the scratch directory so USER.md, the fact store and skills
                 // stay untouched. Reads see the same context.
-                try IrisPaths.useVolatileCopy(at: dir.appendingPathComponent(".iris"))
+                try environment.useVolatilePaths(dir.appendingPathComponent(".iris"))
                 memoryBefore = IrisPaths.fingerprint(of: realMemory)
                 print("perf: real-lane file tools, cwd and \(IrisPaths.standard.displayRoot) confined to \(dir.path)")
                 scratch = dir
@@ -188,9 +226,9 @@ enum PerfCLI {
                 // is released last, after the directory is gone, so a waiting run's claim finds
                 // nothing left to reset.
                 if let scratch {
-                    FileManager.default.changeCurrentDirectoryPath(previousCwd)
+                    environment.changeDirectory(previousCwd)
                     try? FileManager.default.removeItem(at: scratch)
-                    releaseScratchWorkspace()
+                    environment.releaseScratch()
                 }
             }
             let dumpDir = dumpRequestsDir.map { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : root.appendingPathComponent($0) }
@@ -218,8 +256,31 @@ enum PerfCLI {
         return try await runSuite()
     }
 
+    /// The process changes a run needs before `ConfigManager.shared` is first touched (inside the
+    /// runner): settings from a volatile copy so guard toggles never persist, and for the real
+    /// lane the Keychain bypass when the provider never needs a secret. Separate from `execute` so
+    /// a test can check the real lane's decision without running a real-lane suite.
+    static func prepare(for suite: PerfSuite, environment: ExecutionEnvironment) {
+        environment.useVolatileDefaults()
+        guard suite.lane != .fake else { return }
+        let store = environment.defaults()
+        // A rebuilt binary prompts for Keychain access on its first secret read, which
+        // blocks an unattended run. Skip the Keychain when the provider never needs it.
+        let provider = store.string(forKey: "PRIMARY_PROVIDER") ?? "Gemini"
+        let authMode = store.string(forKey: "GEMINI_AUTH_MODE") ?? GeminiAuthMode.apiKey.rawValue
+        let anthropicMode = store.string(forKey: "ANTHROPIC_AUTH_MODE") ?? AnthropicAuthMode.apiKey.rawValue
+        if shouldBypassKeychain(provider: provider, geminiAuthMode: authMode, anthropicAuthMode: anthropicMode) {
+            environment.requestKeychainBypass()
+        } else {
+            print("perf: provider secrets come from the Keychain; a rebuilt binary prompts once before the run can start")
+        }
+    }
+
+    /// `environment` has no default on purpose: a test that forgot it would get the live process,
+    /// which is #324 again. The real CLI (`IrisMain`) passes `.process`; a test passes its own so a
+    /// run leaves the process as it found it.
     @MainActor
-    static func execute(_ cmd: PerfCommand) async -> Int32 {
+    static func execute(_ cmd: PerfCommand, environment: ExecutionEnvironment) async -> Int32 {
         do {
             switch cmd {
             case .run(let suitePath, let reps, let out, let fakeOnly, let dumpRequestsDir):
@@ -230,21 +291,9 @@ enum PerfCLI {
                 }
                 // Settings come from a volatile copy so guard toggles never persist. Must precede
                 // the first touch of ConfigManager.shared (inside the runner).
-                IrisDefaults.useVolatileCopyOfStandard()
-                if suite.lane != .fake {
-                    // A rebuilt binary prompts for Keychain access on its first secret read, which
-                    // blocks an unattended run. Skip the Keychain when the provider never needs it.
-                    let provider = IrisDefaults.store.string(forKey: "PRIMARY_PROVIDER") ?? "Gemini"
-                    let authMode = IrisDefaults.store.string(forKey: "GEMINI_AUTH_MODE") ?? GeminiAuthMode.apiKey.rawValue
-                    let anthropicMode = IrisDefaults.store.string(forKey: "ANTHROPIC_AUTH_MODE") ?? AnthropicAuthMode.apiKey.rawValue
-                    if shouldBypassKeychain(provider: provider, geminiAuthMode: authMode, anthropicAuthMode: anthropicMode) {
-                        KeychainManager.requestHeadlessBypass()
-                    } else {
-                        print("perf: provider secrets come from the Keychain; a rebuilt binary prompts once before the run can start")
-                    }
-                }
+                prepare(for: suite, environment: environment)
                 return try await Self.runSuiteRespectingLane(suite, repetitionsOverride: reps, out: out,
-                                                              dumpRequestsDir: dumpRequestsDir)
+                                                              dumpRequestsDir: dumpRequestsDir, environment: environment)
             case .report(let path):
                 print(PerfReport.render(try PerfRunRecord.load(at: path)))
                 return 0

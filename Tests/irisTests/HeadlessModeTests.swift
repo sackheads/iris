@@ -7,13 +7,11 @@ import Foundation
 /// the same `swift test` process. It is now task-scoped (`$scoped`, bound by `withEnabled`), the
 /// same seam `CoreMLEvaluator.$scopedModel` and `AuxiliaryModelManager.$scopedEngines` use.
 ///
-/// These tests exercise the seam itself (`HeadlessMode.withEnabled`) rather than a full
-/// `PerfCLI.execute(.run(...))` call: `execute`'s `.run` case also calls
-/// `IrisDefaults.useVolatileCopyOfStandard()` unconditionally, which is its OWN process-global latch
-/// that no test exercises today (AGENTS invariant 7) — driving a real suite through `execute` here
-/// would introduce exactly the class of bug this issue fixes, in a different flag. `withEnabled` is
-/// the mechanism both `BenchCLI.run` and `PerfCLI.execute`'s fake lane are built on, so asserting
-/// against it covers what those entry points actually do to `HeadlessMode`.
+/// These tests exercise the seam itself (`HeadlessMode.withEnabled`) and the halves of the CLI
+/// entry points that enter it. `withEnabled` is the mechanism both `BenchCLI.run` and
+/// `PerfCLI.execute`'s fake lane are built on, so asserting against it covers what those entry
+/// points actually do to `HeadlessMode`. `PerfCLI.execute` itself is driven end to end, with its
+/// process-wide switches injected, in `PerfCLITests` (#324).
 @Suite("HeadlessMode (#318)")
 struct HeadlessModeTests {
     @Test("isEnabled is false with no scope active")
@@ -82,7 +80,7 @@ struct HeadlessModeTests {
     // `PerfCLI.runSuiteRespectingLane` are the halves of each entry point that make the
     // fake/not-fake decision and enter the scope — extracted so these tests can call them directly
     // without also calling `IrisDefaults.useVolatileCopyOfStandard()`, a separate process-wide
-    // latch (#324) that neither `run` nor `execute` resets and that no test may trip.
+    // latch that `BenchCLI.run` still sets and that no test may trip.
 
     @MainActor
     @Test("BenchCLI's fake lane actually enters the headless scope")
@@ -107,7 +105,8 @@ struct HeadlessModeTests {
         let code = try await PerfCLI.runSuiteRespectingLane(suite, repetitionsOverride: 1,
                                                             out: FileManager.default.temporaryDirectory
                                                                 .appendingPathComponent("iris-perfcli-scope-\(UUID().uuidString)").path,
-                                                            dumpRequestsDir: nil, client: probe)
+                                                            dumpRequestsDir: nil, environment: PerfCLIEnvironmentRecorder().environment,
+                                                            client: probe)
         #expect(code == 0)
         #expect(probe.sawHeadlessDuringCall)
     }
