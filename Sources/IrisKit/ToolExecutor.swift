@@ -85,7 +85,7 @@ struct ToolExecutor {
         ),
         FunctionDeclaration(
             name: "write_file",
-            description: "Writes content to a file, overwriting existing content.",
+            description: "Writes content to a file, overwriting existing content. Writing a skill's own SKILL.md this way still works (for hand-editing), but prefer create_skill/update_skill for a skill's frontmatter — they take title/tags and keep the prompt cache in sync for you.",
             parameters: Schema(
                 type: "OBJECT",
                 properties: [
@@ -133,7 +133,9 @@ struct ToolExecutor {
                 properties: [
                     "name": Schema(type: "STRING", description: "Short kebab-case skill identifier (e.g. gke-deployment-debug). One folder name, not a path: empty, '.', '..' or anything containing '/' is refused."),
                     "description": Schema(type: "STRING", description: "High-signal summary of what this skill does and when to trigger it"),
-                    "body": Schema(type: "STRING", description: "Full Markdown body containing numbered steps, exact commands, pitfalls, and verification steps")
+                    "body": Schema(type: "STRING", description: "Full Markdown body containing numbered steps, exact commands, pitfalls, and verification steps"),
+                    "title": Schema(type: "STRING", description: "Optional OKF `title:` frontmatter field — a human-readable display title, distinct from `name`. Omit to leave it unset."),
+                    "tags": Schema(type: "ARRAY", description: "Optional OKF `tags:` frontmatter field — topic tags for this skill. Omit to leave it unset.", items: Schema(type: "STRING"))
                 ],
                 required: ["name", "description", "body"]
             )
@@ -146,7 +148,9 @@ struct ToolExecutor {
                 properties: [
                     "name": Schema(type: "STRING", description: "Skill identifier to update. One folder name, not a path: empty, '.', '..' or anything containing '/' is refused."),
                     "description": Schema(type: "STRING", description: "Updated description (optional if unchanged)"),
-                    "body": Schema(type: "STRING", description: "Updated Markdown body or additional procedures (optional if description updated)")
+                    "body": Schema(type: "STRING", description: "Updated Markdown body or additional procedures (optional if description updated)"),
+                    "title": Schema(type: "STRING", description: "Optional OKF `title:` frontmatter field. Omit to leave whatever the skill already has untouched."),
+                    "tags": Schema(type: "ARRAY", description: "Optional OKF `tags:` frontmatter field. Omit to leave whatever the skill already has untouched.", items: Schema(type: "STRING"))
                 ],
                 required: ["name"]
             )
@@ -230,7 +234,7 @@ struct ToolExecutor {
                 }
                 return await writeFile(grantRoot: grantedMount.source, relative: relative, content: content)
             }
-            return await writeFile(path, content: content, cwd: cwd)
+            return await writeFile(path, content: content, cwd: cwd, paths: irisPaths ?? .default)
         case "register_directory_watcher":
             switch RegisterWatcherArguments.parse(args) {
             case .failure(let message): return message.text
@@ -246,14 +250,24 @@ struct ToolExecutor {
                   let body = args["body"]?.stringValue ?? args["content"]?.stringValue else {
                 return "Error: Missing name, description, or body for create_skill"
             }
-            return await createSkill(name: name, description: description, body: body)
+            let title = ScheduleJobArguments.text(args["title"])
+            switch ScheduleJobArguments.stringList(args["tags"], shape: Self.tagsShape) {
+            case .failure(let message): return "Error: " + message.text
+            case .success(let tags):
+                return await createSkill(name: name, description: description, body: body, title: title, tags: tags)
+            }
         case "update_skill":
             guard let name = args["name"]?.stringValue else {
                 return "Error: Missing name for update_skill"
             }
             let description = args["description"]?.stringValue
             let body = args["body"]?.stringValue ?? args["content"]?.stringValue
-            return await updateSkill(name: name, description: description, body: body)
+            let title = ScheduleJobArguments.text(args["title"])
+            switch ScheduleJobArguments.stringList(args["tags"], shape: Self.tagsShape) {
+            case .failure(let message): return "Error: " + message.text
+            case .success(let tags):
+                return await updateSkill(name: name, description: description, body: body, title: title, tags: tags)
+            }
         case "delete_skill":
             guard let name = args["name"]?.stringValue else { return "Error: Missing name for delete_skill" }
             return await deleteSkill(name: name)
@@ -612,9 +626,13 @@ struct ToolExecutor {
         }.value
     }
 
-    private func writeFile(_ path: String, content: String, cwd: String? = nil) async -> String {
+    /// `paths` is read only to decide whether this write lands on a skill's own `SKILL.md`
+    /// (#417 item 2) — a `write_file` call carries no other signal of that. On a plain write
+    /// (anywhere else) it changes nothing.
+    private func writeFile(_ path: String, content: String, cwd: String? = nil, paths: IrisPaths = .default) async -> String {
         let expandedPath = Self.resolvePath(path, cwd: cwd)
-        return await Task.detached {
+        let targetedSkillFolder = Self.skillFileTarget(expandedPath, paths: paths)
+        let result = await Task.detached {
             do {
                 try content.write(toFile: expandedPath, atomically: true, encoding: .utf8)
                 return "Successfully wrote to \(expandedPath)"
@@ -622,7 +640,43 @@ struct ToolExecutor {
                 return "Error writing file: \(error.localizedDescription)"
             }
         }.value
+        guard result.hasPrefix("Successfully wrote to"), let targetedSkillFolder else { return result }
+        // A `write_file` landing on a skill's own SKILL.md deliberately does not get funnelled
+        // through `update_skill`'s slug-and-reconstruct path (#417 item 2): that path is also
+        // how a user hand-edits a skill outside the model entirely, and rewriting their exact
+        // content into OKF-reconstructed form would silently change what they wrote. What a
+        // plain Foundation write must not skip is the prompt cache — the engine's skill list
+        // goes stale until something else invalidates it — and a check of what landed, surfaced
+        // as a warning rather than a refusal (`write_file` must still work for a skill the user
+        // is actively editing by hand, even mid-edit).
+        await AppState.shared.invalidateEnginePrompt()
+        var suffix = " Skill prompt cache invalidated."
+        let warnings = SkillFrontmatter.warnings(content: content, folderName: targetedSkillFolder)
+        if !warnings.isEmpty {
+            suffix += " Warning: this skill's frontmatter may not load as expected:\n"
+                + warnings.map { "- \($0)" }.joined(separator: "\n")
+        }
+        return result + suffix
     }
+
+    /// Whether `expandedPath` is a skill's own `SKILL.md` — one level directly under the skills
+    /// directory — and if so, that skill's folder name. Resolved the same symlink-safe way
+    /// `skillFolder(named:)` resolves a name to a folder, but starting from the path a
+    /// `write_file` call gives rather than a tool-given name.
+    static func skillFileTarget(_ expandedPath: String, paths: IrisPaths = .default) -> String? {
+        let url = URL(fileURLWithPath: expandedPath)
+        guard url.lastPathComponent == "SKILL.md" else { return nil }
+        let folder = url.deletingLastPathComponent()
+        guard !folder.lastPathComponent.isEmpty else { return nil }
+        let resolvedParent = IrisPaths.realPath(folder.deletingLastPathComponent().path).lowercased()
+        let resolvedSkillsDir = IrisPaths.realPath(paths.skillsDir.path).lowercased()
+        guard resolvedParent == resolvedSkillsDir else { return nil }
+        return folder.lastPathComponent
+    }
+
+    // No "Error: " prefix, matching `ScheduleJobArguments.mountsShape`: the dispatch switch below
+    // prepends it, the same way `RegisterWatcherArguments` does for `mounts`.
+    static let tagsShape: ToolMessage = "tags must be a list of short strings, e.g. [\"kubernetes\", \"debugging\"]."
 
     /// A granted run's read (#282 §0.13): the same walk the write takes, from the covering mount's root.
     func readFile(grantRoot: String, relative: [String]) async -> String {
@@ -867,26 +921,26 @@ except Exception as e:
     /// One sentence for all three tools, so a refusal reads the same wherever it comes from.
     static let invalidSkillName = "Error: that is not a valid skill name — a skill name is a single folder name, not a path."
 
-    func createSkill(name: String, description: String, body: String, paths: IrisPaths = .default) async -> String {
+    func createSkill(name: String, description: String, body: String, title: String? = nil,
+                     tags: [String]? = nil, paths: IrisPaths = .default) async -> String {
         guard let skillFolder = Self.skillFolder(named: name, paths: paths) else { return Self.invalidSkillName }
         let cleanName = skillFolder.lastPathComponent
         if Self.isDanglingLink(skillFolder) { return Self.brokenLinkMessage(cleanName) }
         let skillFile = skillFolder.appendingPathComponent("SKILL.md")
-        
+
         let isoFormatter = ISO8601DateFormatter()
         let timestamp = isoFormatter.string(from: Date())
-        
+        let frontmatter = SkillFrontmatter.render(name: cleanName, title: title, description: description,
+                                                  type: "skill", tags: tags, timestamp: timestamp, existing: [])
+
         let okfContent = """
         ---
-        name: \(cleanName)
-        description: \(description)
-        type: skill
-        timestamp: \(timestamp)
+        \(frontmatter)
         ---
 
         \(body.trimmingCharacters(in: .whitespacesAndNewlines))
         """
-        
+
         let fileManager = FileManager.default
         do {
             try fileManager.createDirectory(at: skillFolder, withIntermediateDirectories: true)
@@ -898,60 +952,45 @@ except Exception as e:
         }
     }
 
-    func updateSkill(name: String, description: String?, body: String?, paths: IrisPaths = .default) async -> String {
+    func updateSkill(name: String, description: String?, body: String?, title: String? = nil,
+                     tags: [String]? = nil, paths: IrisPaths = .default) async -> String {
         guard let skillFolder = Self.skillFolder(named: name, paths: paths) else { return Self.invalidSkillName }
         let cleanName = skillFolder.lastPathComponent
         if Self.isDanglingLink(skillFolder) { return Self.brokenLinkMessage(cleanName) }
         let skillFile = skillFolder.appendingPathComponent("SKILL.md")
         let fileManager = FileManager.default
-        
+
         guard fileManager.fileExists(atPath: skillFile.path) else {
             let desc = description ?? "No description provided."
             let content = body ?? "No procedure steps provided."
-            return await createSkill(name: cleanName, description: desc, body: content, paths: paths)
+            return await createSkill(name: cleanName, description: desc, body: content, title: title, tags: tags, paths: paths)
         }
-        
-        var existingDesc = "No description provided."
+
+        var existingFields: [SkillFrontmatterField] = []
         var existingBody = ""
-        
+
         if let existingContent = try? String(contentsOf: skillFile, encoding: .utf8) {
-            let lines = existingContent.components(separatedBy: .newlines)
-            var inFrontmatter = false
-            var bodyLines: [String] = []
-            
-            for line in lines {
-                if line == "---" {
-                    inFrontmatter = !inFrontmatter
-                    continue
-                }
-                if inFrontmatter {
-                    if line.starts(with: "description:") {
-                        existingDesc = String(line.dropFirst("description:".count)).trimmingCharacters(in: .whitespaces)
-                    }
-                } else {
-                    bodyLines.append(line)
-                }
-            }
-            existingBody = bodyLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            (existingFields, existingBody) = SkillFrontmatter.parse(existingContent)
         }
-        
-        let finalDesc = description ?? existingDesc
+
+        let finalDesc = description ?? SkillFrontmatter.value(existingFields, key: "description") ?? "No description provided."
         let finalBody = body ?? existingBody
-        
+        let existingType = SkillFrontmatter.value(existingFields, key: "type") ?? "skill"
+
         let isoFormatter = ISO8601DateFormatter()
         let timestamp = isoFormatter.string(from: Date())
-        
+        let frontmatter = SkillFrontmatter.render(name: cleanName, title: title, description: finalDesc,
+                                                  type: existingType, tags: tags, timestamp: timestamp,
+                                                  existing: existingFields)
+
         let okfContent = """
         ---
-        name: \(cleanName)
-        description: \(finalDesc)
-        type: skill
-        timestamp: \(timestamp)
+        \(frontmatter)
         ---
 
         \(finalBody)
         """
-        
+
         do {
             try okfContent.write(to: skillFile, atomically: true, encoding: .utf8)
             await AppState.shared.invalidateEnginePrompt()

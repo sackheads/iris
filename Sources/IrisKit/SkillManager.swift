@@ -65,11 +65,26 @@ struct SkillManager {
     }
 
     /// A registered skill, parsed from its SKILL.md frontmatter. The body is never read.
+    ///
+    /// `warning`, when non-nil, is a load-time oddity that `listSkills` does not refuse on (#417
+    /// item 3): a frontmatter `name:` that disagrees with the skill's own folder, or a display
+    /// name shared with another registered skill, where sort order silently decides which one
+    /// `readSkillBody` returns. Neither is validated for plugin skills (`AgentSkillValidator`
+    /// already enforces both there) — this is the check user skills never had.
     struct SkillInfo: Sendable {
         let name: String
         let description: String
         let folderName: String
         let skillFilePath: String
+        let warning: String?
+
+        init(name: String, description: String, folderName: String, skillFilePath: String, warning: String? = nil) {
+            self.name = name
+            self.description = description
+            self.folderName = folderName
+            self.skillFilePath = skillFilePath
+            self.warning = warning
+        }
     }
 
     /// Deterministic list of registered skills across the built-in skills dir and any plugin
@@ -98,7 +113,25 @@ struct SkillManager {
                 skills.append(parseFrontmatter(from: content, folderName: item, skillFilePath: skillPath))
             }
         }
+        skills = Self.flagDuplicateNames(skills)
         return skills.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Adds a duplicate-name warning to every skill whose display `name` collides with another
+    /// skill's, case-insensitively (#417 item 3). A mismatch warning `parseFrontmatter` already
+    /// set is kept alongside it; sort order (by `name`, then whatever `contentsOfDirectory`
+    /// returned the folders in) decides which of the duplicates `readSkillBody` actually returns.
+    private static func flagDuplicateNames(_ skills: [SkillInfo]) -> [SkillInfo] {
+        var counts: [String: Int] = [:]
+        for skill in skills { counts[skill.name.lowercased(), default: 0] += 1 }
+        return skills.map { skill in
+            guard (counts[skill.name.lowercased()] ?? 0) > 1 else { return skill }
+            let duplicateWarning = "duplicate skill name '\(skill.name)' (folder '\(skill.folderName)'); " +
+                "another registered skill uses the same name, and sort order decides which one loads"
+            let combined = [skill.warning, duplicateWarning].compactMap { $0 }.joined(separator: "; ")
+            return SkillInfo(name: skill.name, description: skill.description, folderName: skill.folderName,
+                             skillFilePath: skill.skillFilePath, warning: combined)
+        }
     }
 
     func discoverSkills(paths: IrisPaths = .default, activeBundle: SkillBundle? = nil, extraRoots: [URL]? = nil) async -> String {
@@ -129,36 +162,25 @@ struct SkillManager {
     }
 
     private func parseFrontmatter(from content: String, folderName: String, skillFilePath: String) -> SkillInfo {
-        let lines = content.components(separatedBy: .newlines)
-        var isFrontmatter = false
+        let (fields, _) = SkillFrontmatter.parse(content)
         // Display-name precedence: explicit `name:` > OKF `title:` > folder name.
-        var explicitName: String?
-        var title: String?
-        var description = "No description provided."
-
-        func value(_ line: String, _ key: String) -> String {
-            String(line.dropFirst(key.count)).trimmingCharacters(in: .whitespaces)
-        }
-
-        for line in lines {
-            if line == "---" {
-                if isFrontmatter { break }
-                isFrontmatter = true
-                continue
-            }
-            if isFrontmatter {
-                if line.starts(with: "name:") {
-                    explicitName = value(line, "name:")
-                } else if line.starts(with: "title:") {
-                    title = value(line, "title:")
-                } else if line.starts(with: "description:") {
-                    description = value(line, "description:")
-                }
-            }
-        }
-
+        let explicitName = SkillFrontmatter.value(fields, key: "name")
+        let title = SkillFrontmatter.value(fields, key: "title")
+        let description = SkillFrontmatter.value(fields, key: "description") ?? "No description provided."
         let name = explicitName ?? title ?? folderName
-        return SkillInfo(name: name, description: description, folderName: folderName, skillFilePath: skillFilePath)
+
+        // #417 item 3: a mismatched `name:` can shadow another skill's name, silently, and
+        // nothing reported it. `create_skill` guarantees agreement by construction (it writes
+        // the slugged folder name as `name:`), so this only ever fires for a hand-written or
+        // `write_file`-written SKILL.md.
+        let mismatchWarning: String? = {
+            guard let explicitName, !explicitName.isEmpty,
+                  explicitName.lowercased() != folderName.lowercased() else { return nil }
+            return "frontmatter name '\(explicitName)' does not match its folder '\(folderName)'"
+        }()
+
+        return SkillInfo(name: name, description: description, folderName: folderName,
+                         skillFilePath: skillFilePath, warning: mismatchWarning)
     }
 
     /// Reads and returns the full `SKILL.md` content for a skill by name or folder name.
