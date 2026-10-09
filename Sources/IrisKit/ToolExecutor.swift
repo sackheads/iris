@@ -251,7 +251,7 @@ struct ToolExecutor {
                 return "Error: Missing name, description, or body for create_skill"
             }
             let title = ScheduleJobArguments.text(args["title"])
-            switch ScheduleJobArguments.stringList(args["tags"], shape: Self.tagsShape) {
+            switch Self.tagsArgument(args) {
             case .failure(let message): return "Error: " + message.text
             case .success(let tags):
                 return await createSkill(name: name, description: description, body: body, title: title, tags: tags)
@@ -263,7 +263,7 @@ struct ToolExecutor {
             let description = args["description"]?.stringValue
             let body = args["body"]?.stringValue ?? args["content"]?.stringValue
             let title = ScheduleJobArguments.text(args["title"])
-            switch ScheduleJobArguments.stringList(args["tags"], shape: Self.tagsShape) {
+            switch Self.tagsArgument(args) {
             case .failure(let message): return "Error: " + message.text
             case .success(let tags):
                 return await updateSkill(name: name, description: description, body: body, title: title, tags: tags)
@@ -663,20 +663,65 @@ struct ToolExecutor {
     /// directory — and if so, that skill's folder name. Resolved the same symlink-safe way
     /// `skillFolder(named:)` resolves a name to a folder, but starting from the path a
     /// `write_file` call gives rather than a tool-given name.
+    ///
+    /// `.standardizedFileURL` lexically collapses a `.`/`..` component before anything else runs
+    /// (#417 PR review item 4: `foo/./SKILL.md` named its folder `.`, not `foo`, without this).
+    /// The filename compares case-insensitively (item 3): APFS is case-insensitive by default, so
+    /// `skills/foo/skill.md` and `skills/foo/SKILL.md` are the *same file*, and a write to the
+    /// lowercase spelling silently overwrote the real one with no cache invalidation or warning.
     static func skillFileTarget(_ expandedPath: String, paths: IrisPaths = .default) -> String? {
-        let url = URL(fileURLWithPath: expandedPath)
-        guard url.lastPathComponent == "SKILL.md" else { return nil }
+        let url = URL(fileURLWithPath: expandedPath).standardizedFileURL
+        guard url.lastPathComponent.caseInsensitiveCompare("SKILL.md") == .orderedSame else { return nil }
         let folder = url.deletingLastPathComponent()
         guard !folder.lastPathComponent.isEmpty else { return nil }
-        let resolvedParent = IrisPaths.realPath(folder.deletingLastPathComponent().path).lowercased()
         let resolvedSkillsDir = IrisPaths.realPath(paths.skillsDir.path).lowercased()
-        guard resolvedParent == resolvedSkillsDir else { return nil }
-        return folder.lastPathComponent
+
+        // The common case: the write names a child directly under the skills dir (including
+        // through a symlinked skills dir — resolving `folder`'s *parent* resolves that).
+        let resolvedParent = IrisPaths.realPath(folder.deletingLastPathComponent().path).lowercased()
+        if resolvedParent == resolvedSkillsDir { return folder.lastPathComponent }
+
+        // A write straight to a skill folder symlink's real target, bypassing the symlink
+        // itself (#417 PR review item 5): by the time that path is walked neither side still
+        // looks like a symlink, so the forward comparison above can never match it. Resolve the
+        // other direction instead — each of the skills dir's own entries — and match on that.
+        let resolvedFolder = IrisPaths.realPath(folder.path).lowercased()
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: paths.skillsDir.path) else {
+            return nil
+        }
+        for entry in entries {
+            let candidate = paths.skillsDir.appendingPathComponent(entry).path
+            if IrisPaths.realPath(candidate).lowercased() == resolvedFolder { return entry }
+        }
+        return nil
     }
 
     // No "Error: " prefix, matching `ScheduleJobArguments.mountsShape`: the dispatch switch below
     // prepends it, the same way `RegisterWatcherArguments` does for `mounts`.
     static let tagsShape: ToolMessage = "tags must be a list of short strings, e.g. [\"kubernetes\", \"debugging\"]."
+
+    /// `create_skill`/`update_skill`'s `tags` argument, read so a caller can tell "not asked"
+    /// (`nil`) from "asked to clear" (`[]`) from "asked to set" (non-empty) (#417 PR review item
+    /// 9). `ScheduleJobArguments.stringList`, used for `mounts`/`ignore` elsewhere, treats an
+    /// empty list as "nothing asked" — right for those, but it would make `tags: []` a silent
+    /// no-op here, with no way for a model to ever clear a skill's tags once set.
+    static func tagsArgument(_ args: [String: JSONValue]) -> Result<[String]?, ToolMessage> {
+        guard ScheduleJobArguments.present(args["tags"]), let value = args["tags"] else { return .success(nil) }
+        switch value {
+        case .string(let text):
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return .success(trimmed.isEmpty ? [] : [trimmed])
+        case .array(let items):
+            var values: [String] = []
+            for item in items {
+                guard case .string = item, let text = ScheduleJobArguments.text(item) else { return .failure(Self.tagsShape) }
+                values.append(text)
+            }
+            return .success(values)
+        default:
+            return .failure(Self.tagsShape)
+        }
+    }
 
     /// A granted run's read (#282 §0.13): the same walk the write takes, from the covering mount's root.
     func readFile(grantRoot: String, relative: [String]) async -> String {
@@ -968,19 +1013,27 @@ except Exception as e:
 
         var existingFields: [SkillFrontmatterField] = []
         var existingBody = ""
+        var lineEnding = "\n"
 
         if let existingContent = try? String(contentsOf: skillFile, encoding: .utf8) {
+            // Captured on the raw content, before `parse` normalizes CRLF to `\n` internally —
+            // the only way the file's own line ending survives a rewrite (#417 PR review item 6).
+            lineEnding = SkillFrontmatter.lineEnding(of: existingContent)
             (existingFields, existingBody) = SkillFrontmatter.parse(existingContent)
         }
 
-        let finalDesc = description ?? SkillFrontmatter.value(existingFields, key: "description") ?? "No description provided."
         let finalBody = body ?? existingBody
-        let existingType = SkillFrontmatter.value(existingFields, key: "type") ?? "skill"
 
         let isoFormatter = ISO8601DateFormatter()
         let timestamp = isoFormatter.string(from: Date())
-        let frontmatter = SkillFrontmatter.render(name: cleanName, title: title, description: finalDesc,
-                                                  type: existingType, tags: tags, timestamp: timestamp,
+        // `description`/`type` pass straight through as given — `nil` means `render` carries the
+        // existing field's raw lines over unchanged, which is what keeps a multi-line
+        // `description:` (a folded `>`/literal `|` block, or a plain scalar wrapped onto a
+        // continuation line) from being truncated to its first line on an update that never
+        // mentioned `description` (#417 PR review, blocking finding). `type` isn't a tool
+        // parameter at all, so it is always `nil` here — always carried over or defaulted.
+        let frontmatter = SkillFrontmatter.render(name: cleanName, title: title, description: description,
+                                                  type: nil, tags: tags, timestamp: timestamp,
                                                   existing: existingFields)
 
         let okfContent = """
@@ -990,9 +1043,10 @@ except Exception as e:
 
         \(finalBody)
         """
+        let finalContent = lineEnding == "\r\n" ? okfContent.replacingOccurrences(of: "\n", with: "\r\n") : okfContent
 
         do {
-            try okfContent.write(to: skillFile, atomically: true, encoding: .utf8)
+            try finalContent.write(to: skillFile, atomically: true, encoding: .utf8)
             await AppState.shared.invalidateEnginePrompt()
             return "Successfully updated skill '\(cleanName)' in \(skillFile.path). System prompt cache updated."
         } catch {
