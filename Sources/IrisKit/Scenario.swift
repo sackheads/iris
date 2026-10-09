@@ -70,6 +70,10 @@ struct Scenario: Codable, Sendable {
     }
 
     struct Turn: Codable, Sendable {
+        /// A scenario turn's default source: the perf harness's stand-in for the user typing.
+        /// `IrisEngine.retrievesFacts` treats it as a user turn, as `every-turn-facts` needs.
+        static let userSource = "User"
+
         var prompt: String
         var source: String
         /// Runs added to the ledger just before this turn starts, so the pinned conversation's
@@ -83,7 +87,7 @@ struct Scenario: Codable, Sendable {
         /// real-client scenario waits; the fake lane skips it. Nil means none.
         var pauseBeforeSeconds: Int?
 
-        init(prompt: String, source: String = "User", ledgerRuns: [LedgerRun]? = nil, eventCard: LedgerRun? = nil,
+        init(prompt: String, source: String = Turn.userSource, ledgerRuns: [LedgerRun]? = nil, eventCard: LedgerRun? = nil,
              pauseBeforeSeconds: Int? = nil) {
             self.prompt = prompt; self.source = source
             self.ledgerRuns = ledgerRuns; self.eventCard = eventCard
@@ -93,7 +97,7 @@ struct Scenario: Codable, Sendable {
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             prompt = try c.decode(String.self, forKey: .prompt)
-            source = try c.decodeIfPresent(String.self, forKey: .source) ?? "User"
+            source = try c.decodeIfPresent(String.self, forKey: .source) ?? Self.userSource
             ledgerRuns = try c.decodeIfPresent([LedgerRun].self, forKey: .ledgerRuns)
             eventCard = try c.decodeIfPresent(LedgerRun.self, forKey: .eventCard)
             pauseBeforeSeconds = try c.decodeIfPresent(Int.self, forKey: .pauseBeforeSeconds)

@@ -43,19 +43,15 @@ final class FactStoreTests: XCTestCase {
         XCTAssertTrue(brianFacts.allSatisfy { $0.content.contains("Brian") || $0.entity == "Brian" })
     }
     
-    func testReinforceFacts() throws {
-        let fact1 = "My favorite language is Swift because of its safety."
-        let added = try factStore.addFact(content: fact1)
-        
+    func testSearchDoesNotRaiseTrust() throws {
+        // #415: retrieval used to add 0.1 trust per hit, which let any hit win again next turn.
+        try factStore.addFact(content: "My favorite language is Swift because of its safety.")
+
         let results1 = try factStore.search(query: "Swift", limit: 1)
         XCTAssertEqual(results1.count, 1)
-        let initialTrust = results1[0].trustScore
-        
-        try factStore.reinforceFacts(ids: [added.id])
-        
         let results2 = try factStore.search(query: "Swift", limit: 1)
         XCTAssertEqual(results2.count, 1)
-        XCTAssertGreaterThan(results2[0].trustScore, initialTrust)
+        XCTAssertEqual(results2[0].trustScore, results1[0].trustScore)
     }
     
     func testEvictOldFacts() throws {
@@ -83,13 +79,13 @@ final class FactStoreTests: XCTestCase {
         try writer.write { db in
             let sql1 = """
                 INSERT INTO facts (id, content, category, trustScore, timestamp)
-                VALUES (?, 'Time decay test fact', 'general', 1.0, datetime('now', '-10 days'))
+                VALUES (?, 'Time decay test fact, older', 'general', 1.0, datetime('now', '-10 days'))
                 """
             try db.execute(sql: sql1, arguments: [UUID().uuidString])
             
             let sql2 = """
                 INSERT INTO facts (id, content, category, trustScore, timestamp)
-                VALUES (?, 'Time decay test fact', 'general', 1.0, datetime('now'))
+                VALUES (?, 'Time decay test fact, newer', 'general', 1.0, datetime('now'))
                 """
             try db.execute(sql: sql2, arguments: [UUID().uuidString])
         }

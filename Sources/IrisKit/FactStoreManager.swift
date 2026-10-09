@@ -24,6 +24,8 @@ struct Fact: Identifiable, Codable, FetchableRecord, PersistableRecord, Sendable
     var entity: String?
     var tags: String?
     var trustScore: Double
+    /// Legacy time column. Written once at insert since #416; before that JIT reinforcement
+    /// rewrote it on every hit, so on an old row it may be a retrieval time. Read `createdAt`.
     var timestamp: Date
     /// `FactStatus` raw value. Rows written before the v2 migration read back as `active`.
     var status: String
@@ -31,6 +33,15 @@ struct Fact: Identifiable, Codable, FetchableRecord, PersistableRecord, Sendable
     var helpfulCount: Int
     var supersededBy: String?
     var supersededAt: Date?
+    /// When the fact was saved. Written once, never by retrieval (#416). Rows from before the v3
+    /// migration carry their `timestamp`, the best time known for them.
+    var createdAt: Date
+    /// The last time a search or probe returned the fact as a retrieval (#416).
+    var lastRetrievedAt: Date?
+
+    /// What write-time dedup and pre-injection dedup compare. Computed, not stored: a stored key
+    /// would be empty on any row written by raw SQL, and the FTS index already narrows the lookup.
+    var contentKey: String { FactStoreManager.contentKey(content) }
 
     static let databaseTableName = "facts"
 
@@ -48,7 +59,9 @@ struct Fact: Identifiable, Codable, FetchableRecord, PersistableRecord, Sendable
         retrievalCount: Int = 0,
         helpfulCount: Int = 0,
         supersededBy: String? = nil,
-        supersededAt: Date? = nil
+        supersededAt: Date? = nil,
+        createdAt: Date? = nil,
+        lastRetrievedAt: Date? = nil
     ) {
         self.id = id
         self.content = content
@@ -62,6 +75,28 @@ struct Fact: Identifiable, Codable, FetchableRecord, PersistableRecord, Sendable
         self.helpfulCount = helpfulCount
         self.supersededBy = supersededBy
         self.supersededAt = supersededAt
+        self.createdAt = createdAt ?? timestamp
+        self.lastRetrievedAt = lastRetrievedAt
+    }
+
+    // Invariant 1: the #416 fields are decoded if present, so a row read before (or without) the
+    // v3 migration still decodes.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        content = try c.decode(String.self, forKey: .content)
+        category = try c.decodeIfPresent(String.self, forKey: .category) ?? "general"
+        entity = try c.decodeIfPresent(String.self, forKey: .entity)
+        tags = try c.decodeIfPresent(String.self, forKey: .tags)
+        trustScore = try c.decodeIfPresent(Double.self, forKey: .trustScore) ?? 1.0
+        timestamp = try c.decodeIfPresent(Date.self, forKey: .timestamp) ?? Date()
+        status = try c.decodeIfPresent(String.self, forKey: .status) ?? FactStatus.active.rawValue
+        retrievalCount = try c.decodeIfPresent(Int.self, forKey: .retrievalCount) ?? 0
+        helpfulCount = try c.decodeIfPresent(Int.self, forKey: .helpfulCount) ?? 0
+        supersededBy = try c.decodeIfPresent(String.self, forKey: .supersededBy)
+        supersededAt = try c.decodeIfPresent(Date.self, forKey: .supersededAt)
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? timestamp
+        lastRetrievedAt = try c.decodeIfPresent(Date.self, forKey: .lastRetrievedAt)
     }
 }
 
@@ -180,11 +215,31 @@ final class FactStoreManager: @unchecked Sendable {
             try db.execute(sql: "ALTER TABLE facts ADD COLUMN supersededAt DATETIME")
         }
 
+        // #416: `timestamp` was the only time column and JIT reinforcement rewrote it on every hit.
+        // `createdAt` is written once; `lastRetrievedAt` takes the retrieval time. An existing row's
+        // creation time is unknown, so it gets its `timestamp`, the best time on record.
+        migrator.registerMigration("v3_fact_created_at") { db in
+            try db.execute(sql: "ALTER TABLE facts ADD COLUMN createdAt DATETIME")
+            try db.execute(sql: "ALTER TABLE facts ADD COLUMN lastRetrievedAt DATETIME")
+            try db.execute(sql: "UPDATE facts SET createdAt = timestamp WHERE createdAt IS NULL")
+        }
+
+        // #416: one-time merge of the exact duplicates (by `contentKey`) that write-time dedup now
+        // prevents. Runs after v3 so "oldest" is decided by `createdAt`.
+        migrator.registerMigration("v4_fact_dedup") { db in
+            try mergeDuplicateActiveFacts(db)
+        }
+
         return migrator
     }
 
     /// Adds a fact to the SQLite Fact Store. When `supersedes` names an existing fact, the insert
     /// and the supersession share one transaction: a rejected supersession inserts nothing.
+    ///
+    /// Dedup (#416): when an active fact already has the same `contentKey`, whatever its category
+    /// or entity, nothing is inserted and that fact is returned unchanged (no trust bump: parallel
+    /// `save_fact` calls in one turn are how duplicates arose, and they are not evidence). A
+    /// `supersedes` on that call then points at the existing fact.
     @discardableResult
     func addFact(
         content: String,
@@ -194,96 +249,213 @@ final class FactStoreManager: @unchecked Sendable {
         trustScore: Double = 1.0,
         supersedes: String? = nil
     ) throws -> Fact {
+        try saveFact(content: content, category: category, entity: entity, tags: tags,
+                     trustScore: trustScore, supersedes: supersedes).fact
+    }
+
+    /// `addFact`, also saying whether a row was inserted or an existing duplicate returned, so
+    /// `save_fact` can tell the model the truth.
+    func saveFact(
+        content: String,
+        category: String = "general",
+        entity: String? = nil,
+        tags: String? = nil,
+        trustScore: Double = 1.0,
+        supersedes: String? = nil
+    ) throws -> (fact: Fact, isNew: Bool) {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw FactStoreError.emptyContent }
 
-        let fact = Fact(
+        let now = Date()
+        let candidate = Fact(
             content: trimmed,
             category: category,
             entity: entity,
             tags: tags,
             trustScore: trustScore,
-            timestamp: Date()
+            timestamp: now,
+            createdAt: now
         )
-        try writer.write { db in
-            try fact.insert(db)
+        let (fact, inserted) = try writer.write { db -> (Fact, Bool) in
+            let existing = try Self.activeFact(db, matchingKeyOf: trimmed)
+            let fact = existing ?? candidate
+            if existing == nil { try fact.insert(db) }
             if let supersedes {
                 try Self.markSuperseded(db, id: supersedes, by: fact.id)
             }
+            return (fact, existing == nil)
         }
-        try? evictOldFacts()
-        return fact
+        if inserted { try? evictOldFacts() }
+        return (fact, inserted)
     }
 
-    /// Searches active facts using FTS5 full-text matching, trust weighting, and exponential time decay.
+    /// The dedup key: trimmed, whitespace runs collapsed to one space, case-folded, and trailing
+    /// sentence punctuation dropped, so "The sky is blue." and "the sky  is blue" are one fact.
+    static func contentKey(_ content: String) -> String {
+        let words = content
+            .folding(options: [.caseInsensitive], locale: nil)
+            .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+        var key = words.joined(separator: " ")
+        while let last = key.last, ".!;:,".contains(last) { key.removeLast() }
+        return key
+    }
+
+    /// The oldest active fact whose key equals `content`'s. The FTS index narrows the scan to rows
+    /// holding every token (a superset of key equality: the tokenizer folds case and diacritics);
+    /// content with no tokens at all falls back to a scan of the active rows.
+    private static func activeFact(_ db: Database, matchingKeyOf content: String) throws -> Fact? {
+        let key = contentKey(content)
+        let candidates: [Fact]
+        if let pattern = FTS5Pattern(matchingAllTokensIn: content) {
+            candidates = try Fact.fetchAll(db, sql: """
+                SELECT facts.* FROM facts JOIN facts_fts ON facts_fts.rowid = facts.rowid
+                WHERE facts_fts MATCH ? AND facts.status = 'active'
+                ORDER BY COALESCE(facts.createdAt, facts.timestamp) ASC, facts.rowid ASC
+                """, arguments: [pattern])
+        } else {
+            candidates = try Fact.fetchAll(db, sql: """
+                SELECT * FROM facts WHERE status = 'active'
+                ORDER BY COALESCE(createdAt, timestamp) ASC, rowid ASC
+                """)
+        }
+        return candidates.first { $0.contentKey == key }
+    }
+
+    /// v4_fact_dedup's body. Per key among active facts: keep the oldest, give it the summed
+    /// `retrievalCount` and `helpfulCount`, the highest trust (so a helpful rating on a copy is not
+    /// lost) and the latest `lastRetrievedAt`; re-point lineage and relations at it; delete the
+    /// rest. Deletes go through the `facts_fts` sync triggers; the rebuild afterwards is a
+    /// belt-and-braces resync of the external-content index.
+    static func mergeDuplicateActiveFacts(_ db: Database) throws {
+        let active = try Fact.fetchAll(db, sql: """
+            SELECT * FROM facts WHERE status = 'active'
+            ORDER BY COALESCE(createdAt, timestamp) ASC, rowid ASC
+            """)
+        var groups: [String: [Fact]] = [:]
+        var order: [String] = []
+        for fact in active {
+            let key = fact.contentKey
+            if groups[key] == nil { order.append(key) }
+            groups[key, default: []].append(fact)
+        }
+        var merged = false
+        for key in order {
+            guard let group = groups[key], group.count > 1, let keeper = group.first else { continue }
+            let dupes = Array(group.dropFirst())
+            let lastRetrieved = group.compactMap(\.lastRetrievedAt).max()
+            try db.execute(sql: """
+                UPDATE facts SET retrievalCount = ?, helpfulCount = ?, trustScore = ?, lastRetrievedAt = ?
+                WHERE id = ?
+                """, arguments: [group.map(\.retrievalCount).reduce(0, +), group.map(\.helpfulCount).reduce(0, +),
+                                 group.map(\.trustScore).max() ?? keeper.trustScore, lastRetrieved, keeper.id])
+            for dupe in dupes {
+                try db.execute(sql: "UPDATE facts SET supersededBy = ? WHERE supersededBy = ?", arguments: [keeper.id, dupe.id])
+                try db.execute(sql: "UPDATE OR IGNORE fact_relations SET sourceId = ? WHERE sourceId = ?", arguments: [keeper.id, dupe.id])
+                try db.execute(sql: "UPDATE OR IGNORE fact_relations SET targetId = ? WHERE targetId = ?", arguments: [keeper.id, dupe.id])
+                try db.execute(sql: "DELETE FROM fact_relations WHERE sourceId = ? OR targetId = ?", arguments: [dupe.id, dupe.id])
+                try db.execute(sql: "DELETE FROM facts WHERE id = ?", arguments: [dupe.id])
+            }
+            merged = true
+        }
+        if merged {
+            try db.execute(sql: "INSERT INTO facts_fts(facts_fts) VALUES('rebuild')")
+        }
+    }
+
+    /// The minimum BM25 relevance (`-bm25(facts_fts)`) a fact needs before JIT injects it
+    /// unasked. FTS5's BM25 gives a term in at least half of the indexed rows an IDF of ~1e-6, so a
+    /// fact that matches only on such a term scores ~1e-6 and is dropped, while one rare-enough
+    /// term matched once scores well above this. See `FactRelevanceTests` for the fixture.
+    static let jitRelevanceFloor = 0.05
+    /// Below this many indexed rows BM25 has no IDF signal at all (every term is in half the
+    /// rows), so the floor is not applied: any content-word match counts.
+    static let minRowsForRelevanceFloor = 3
+
+    /// Searches active facts with FTS5, ranked by BM25 relevance with a mild trust/recency
+    /// adjustment. The query's stopwords are dropped first (`FactQueryTerms`); a query that is
+    /// nothing but stopwords matches nothing. An empty query browses by trust instead.
+    ///
+    /// `relevanceFloor` drops matches whose raw BM25 relevance is below it. JIT passes
+    /// `jitRelevanceFloor`; an explicit search (search_memory, /facts) passes nil, since asking
+    /// for a term already says it matters. Results are deduped by `contentKey`.
+    ///
     /// `countsAsRetrieval` is the usage signal that keeps a fact alive through eviction, so browse
     /// paths (`/facts`, the journey scan) pass `false`: a human reading the store is not a retrieval.
+    /// A retrieval bumps only `retrievalCount` and `lastRetrievedAt`, never trust or `createdAt`.
     func search(
         query: String,
         category: String? = nil,
         entity: String? = nil,
         limit: Int = 5,
-        threshold: Double = 0.1,
+        relevanceFloor: Double? = nil,
         countsAsRetrieval: Bool = true
     ) throws -> [Fact] {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let results = try reader.read { db -> [Fact] in
-            let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-            let sanitizedQuery = sanitizeFTSQuery(trimmedQuery)
-
-            let candidates: [Fact]
-            if sanitizedQuery.isEmpty {
-                candidates = try Fact.fetchAll(
+            if trimmedQuery.isEmpty {
+                let browse = try Fact.fetchAll(
                     db,
-                    sql: "SELECT * FROM facts WHERE status = 'active' ORDER BY trustScore DESC, timestamp DESC LIMIT ?",
+                    sql: "SELECT * FROM facts WHERE status = 'active' ORDER BY trustScore DESC, COALESCE(createdAt, timestamp) DESC LIMIT ?",
                     arguments: [limit * 2]
                 )
-            } else {
-                // FTS5Pattern, not FTS3Pattern: `facts_fts` is an FTS5 table, tokenized by the
-                // same unicode61 tokenizer that built the index (see
-                // `ConversationStore.searchConversations`'s comment for the FTS3/FTS5 distinction
-                // this mirrors).
-                let ftsPattern = FTS5Pattern(matchingAnyTokenIn: sanitizedQuery)
-                var sql = """
-                    SELECT facts.*
-                    FROM facts
-                    JOIN facts_fts ON facts_fts.rowid = facts.rowid
-                    WHERE facts_fts MATCH ? AND facts.status = 'active'
-                    """
-                var args: [DatabaseValueConvertible?] = [ftsPattern]
+                return Array(Self.dedupe(browse).prefix(limit))
+            }
 
-                if let category = category {
-                    sql += " AND facts.category = ?"
-                    args.append(category)
-                }
-                if let entity = entity {
-                    sql += " AND facts.entity = ?"
-                    args.append(entity)
-                }
+            let terms = FactQueryTerms.contentTerms(in: trimmedQuery)
+            guard !terms.isEmpty else { return [] }
+            // Matched against content, entity and tags only: every row's category is a word like
+            // "general", which would otherwise match any query that happens to contain it.
+            let match = "{content entity tags} : (" + terms.map { "\"\($0)\"" }.joined(separator: " OR ") + ")"
+            var sql = """
+                SELECT facts.*, -bm25(facts_fts) AS relevance
+                FROM facts_fts
+                JOIN facts ON facts.rowid = facts_fts.rowid
+                WHERE facts_fts MATCH ? AND facts.status = 'active'
+                """
+            var args: [DatabaseValueConvertible?] = [match]
+            if let category {
+                sql += " AND facts.category = ?"
+                args.append(category)
+            }
+            if let entity {
+                sql += " AND facts.entity = ?"
+                args.append(entity)
+            }
+            sql += " ORDER BY relevance DESC LIMIT ?"
+            args.append(max(limit * 4, 20))
 
-                candidates = try Fact.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+            let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+            var floor = relevanceFloor
+            if floor != nil, try Int.fetchOne(db, sql: "SELECT count(*) FROM facts") ?? 0 < Self.minRowsForRelevanceFloor {
+                floor = nil
             }
 
             let now = Date()
-            let scored = candidates.compactMap { fact -> (Fact, Double)? in
-                let ageInSeconds = now.timeIntervalSince(fact.timestamp)
-                let ageInDays = max(0, ageInSeconds / 86400.0)
-                let decayFactor = exp(-0.05 * ageInDays)
-                let baseScore = 1.0 + (fact.trustScore * 0.1)
-                let finalScore = baseScore * decayFactor
-
-                if finalScore >= threshold {
-                    return (fact, finalScore)
-                }
-                return nil
+            let scored = try rows.compactMap { row -> (Fact, Double)? in
+                let relevance: Double = row["relevance"] ?? 0
+                if let floor, relevance < floor { return nil }
+                let fact = try Fact(row: row)
+                return (fact, relevance * Self.rankAdjustment(for: fact, now: now))
             }
-
-            return scored
-                .sorted { $0.1 > $1.1 }
-                .prefix(limit)
-                .map { $0.0 }
+            let ranked = scored.sorted { $0.1 > $1.1 }.map(\.0)
+            return Array(Self.dedupe(ranked).prefix(limit))
         }
         if countsAsRetrieval { try? incrementRetrievals(ids: results.map(\.id)) }
         return results
+    }
+
+    /// Ranking only, never a filter: trust earned through explicit feedback lifts a fact a little,
+    /// and age lowers it by at most half (a year-old standing fact is still worth showing).
+    private static func rankAdjustment(for fact: Fact, now: Date) -> Double {
+        let ageInDays = max(0, now.timeIntervalSince(fact.createdAt) / 86400.0)
+        let recency = max(0.5, exp(-ageInDays / 365.0))
+        return (1.0 + fact.trustScore * 0.1) * recency
+    }
+
+    /// First occurrence wins, so pass facts already in rank order.
+    static func dedupe(_ facts: [Fact]) -> [Fact] {
+        var seen: Set<String> = []
+        return facts.filter { seen.insert($0.contentKey).inserted }
     }
 
     /// Retrieves active facts associated with a specific entity (probe).
@@ -292,9 +464,9 @@ final class FactStoreManager: @unchecked Sendable {
             let sql = """
                 SELECT * FROM facts
                 WHERE status = 'active' AND (entity = ? OR content LIKE ?)
-                ORDER BY trustScore DESC, timestamp DESC LIMIT ?
+                ORDER BY trustScore DESC, COALESCE(createdAt, timestamp) DESC LIMIT ?
                 """
-            return try Fact.fetchAll(db, sql: sql, arguments: [entity, "%\(entity)%", limit])
+            return Self.dedupe(try Fact.fetchAll(db, sql: sql, arguments: [entity, "%\(entity)%", limit]))
         }
         if countsAsRetrieval { try? incrementRetrievals(ids: results.map(\.id)) }
         return results
@@ -306,7 +478,7 @@ final class FactStoreManager: @unchecked Sendable {
             let statusClause = includeInactive ? "" : "WHERE status = 'active'"
             let sql = """
                 SELECT * FROM facts \(statusClause)
-                ORDER BY trustScore DESC, timestamp DESC LIMIT ?
+                ORDER BY trustScore DESC, COALESCE(createdAt, timestamp) DESC LIMIT ?
                 """
             return try Fact.fetchAll(db, sql: sql, arguments: [limit])
         }
@@ -367,21 +539,6 @@ final class FactStoreManager: @unchecked Sendable {
         }
     }
 
-    /// Reinforces facts by bumping trust score and updating timestamp.
-    func reinforceFacts(ids: [String]) throws {
-        guard !ids.isEmpty else { return }
-        try writer.write { db in
-            let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
-            let sql = """
-                UPDATE facts
-                SET timestamp = CURRENT_TIMESTAMP,
-                    trustScore = trustScore + 0.1
-                WHERE id IN (\(placeholders))
-                """
-            try db.execute(sql: sql, arguments: StatementArguments(ids))
-        }
-    }
-
     /// Removes a fact by ID.
     func removeFact(id: String) throws {
         try writer.write { db in
@@ -396,22 +553,24 @@ final class FactStoreManager: @unchecked Sendable {
             let sql = """
                 DELETE FROM facts
                 WHERE status = 'active' AND retrievalCount = 0 AND helpfulCount = 0
-                AND (((julianday('now') - julianday(timestamp)) > 30 AND trustScore < 1.2)
-                     OR ((julianday('now') - julianday(timestamp)) > 90))
+                AND (((julianday('now') - julianday(COALESCE(createdAt, timestamp))) > 30 AND trustScore < 1.2)
+                     OR ((julianday('now') - julianday(COALESCE(createdAt, timestamp))) > 90))
                 """
             try db.execute(sql: sql)
         }
     }
 
-    /// Counts a retrieval against every fact a search or probe just returned. Each UPDATE also
+    /// Counts a retrieval against every fact a search or probe just returned: `retrievalCount` and
+    /// `lastRetrievedAt` only. Trust moves solely on explicit feedback (`recordFeedback`), and
+    /// `createdAt`/`timestamp` are never touched, so retrieval cannot feed itself (#415). Each UPDATE also
     /// fires the FTS5 after-update trigger, so the index is rewritten for those rows; that churn is
     /// acceptable at a result set of five to ten facts.
     private func incrementRetrievals(ids: [String]) throws {
         guard !ids.isEmpty else { return }
         try writer.write { db in
             let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
-            try db.execute(sql: "UPDATE facts SET retrievalCount = retrievalCount + 1 WHERE id IN (\(placeholders))",
-                           arguments: StatementArguments(ids))
+            try db.execute(sql: "UPDATE facts SET retrievalCount = retrievalCount + 1, lastRetrievedAt = ? WHERE id IN (\(placeholders))",
+                           arguments: StatementArguments([Date()] + ids))
         }
     }
 
@@ -467,18 +626,67 @@ final class FactStoreManager: @unchecked Sendable {
                                 try fact.insert(db)
                             }
                         }
+                        // The HRR store had no dedup either, and this runs after v4 did its merge.
+                        try Self.mergeDuplicateActiveFacts(db)
                     }
                 }
             }
         }
     }
 
-    /// Sanitizes FTS query input by replacing special characters.
-    private func sanitizeFTSQuery(_ query: String) -> String {
-        let allowed = CharacterSet.alphanumerics.union(.whitespaces)
-        return query.unicodeScalars
-            .filter { allowed.contains($0) }
-            .map { String($0) }
-            .joined()
+}
+
+/// Query-side tokenization for fact search (#415): lowercased, diacritic-folded alphanumeric
+/// words of two or more characters, minus a small English stopword list, deduped in order.
+enum FactQueryTerms {
+    /// Function words plus the conversational filler a prompt is made of ("can you help me…").
+    /// Small on purpose: a content word missing from here only costs a weak match, which the BM25
+    /// floor then judges; a content word wrongly listed here can never match at all.
+    static let stopwords: Set<String> = [
+        "a", "about", "above", "after", "again", "all", "also", "am", "an", "and", "any", "are", "as",
+        "at", "be", "because", "been", "before", "being", "below", "between", "both", "but", "by",
+        "can", "could", "did", "do", "does", "doing", "done", "down", "during", "each", "else", "etc",
+        "ever", "few", "for", "from", "further", "get", "gets", "got", "had", "has", "have", "having",
+        "he", "help", "her", "here", "hers", "herself", "him", "himself", "his", "how", "however", "i", "if",
+        "in", "into", "is", "it", "its", "itself", "just", "know", "let", "like", "may", "me", "might", "more",
+        "most", "much", "must", "my", "myself", "no", "nor", "not", "now", "of", "off", "ok", "okay",
+        "on", "once", "only", "or", "other", "our", "ours", "ourselves", "out", "over", "own",
+        "please", "same", "shall", "she", "should", "so", "some", "such", "sure", "tell", "than",
+        "thank", "thanks", "that", "the", "their", "theirs", "them", "themselves", "then", "there",
+        "these", "they", "think", "this", "those", "through", "to", "too", "under", "until", "up", "us", "very",
+        "want", "was", "we", "were", "what", "when", "where", "which", "while", "who", "whom", "why",
+        "will", "with", "would", "yeah", "yes", "yet", "you", "your", "yours", "yourself",
+        "yourselves",
+        // contraction remnants once the apostrophe splits the word
+        "ll", "re", "ve", "don", "doesn", "didn", "isn", "aren", "wasn",
+    ]
+
+    static func contentTerms(in query: String) -> [String] {
+        let folded = query.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+        var seen: Set<String> = []
+        var terms: [String] = []
+        for word in folded.split(whereSeparator: { !($0.isLetter || $0.isNumber) }) {
+            let term = String(word)
+            guard term.count >= 2, !stopwords.contains(term), seen.insert(term).inserted else { continue }
+            terms.append(term)
+        }
+        return terms
+    }
+}
+
+/// A coarse, locale-independent age for a fact ("today", "3 weeks ago"), so the prompt bytes for a
+/// given age are the same on every machine.
+enum FactAge {
+    static func label(from date: Date, now: Date) -> String {
+        let days = Int(max(0, now.timeIntervalSince(date)) / 86400)
+        func unit(_ n: Int, _ name: String) -> String { "\(n) \(name)\(n == 1 ? "" : "s") ago" }
+        switch days {
+        case 0: return "today"
+        case 1: return "yesterday"
+        case ..<14: return unit(days, "day")
+        case ..<61: return unit(days / 7, "week")
+        case ..<730: return unit(days / 30, "month")
+        default: return unit(days / 365, "year")
+        }
     }
 }
