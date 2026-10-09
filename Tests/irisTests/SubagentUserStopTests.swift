@@ -83,7 +83,7 @@ struct SubagentUserStopTests {
     /// A background subagent as `invoke_subagent background: true` starts one: an unstructured
     /// task nothing cancels.
     private func spawnBackground(_ role: String, under parent: UUID, client: any LLMClientProtocol,
-                                 state: AppState) -> Task<(rendered: String, status: SubagentTerminalStatus), Never> {
+                                 state: AppState) -> Task<(rendered: String, status: SubagentTerminalStatus, stoppedBy: SubagentStopKind?), Never> {
         Task {
             await SubagentManager.shared.runSubagent(
                 role: role, task: "Work.", effort: "easy", parentConversationId: parent, background: true,
@@ -141,7 +141,7 @@ struct SubagentUserStopTests {
         try await Task.sleep(nanoseconds: 500_000_000)
         #expect(postBacks().count == 1, "exactly one post-back")
         #expect(postBacks().first?.content.contains("status: cancelled") == true)
-        #expect(postBacks().first?.content.contains(SubagentManager.userStoppedReason) == true)
+        #expect(postBacks().first?.content.contains(SubagentManager.parentStoppedReason) == true)
         #expect(client.parentCalls == parentCallsBefore, "the post-back did not start a turn the user just stopped")
         let history = state.conversations.first { $0.id == main }?.history.flatMap(\.parts).compactMap(\.text) ?? []
         #expect(history.contains { $0.contains("status: cancelled") }, "the next turn reads that it was stopped")
@@ -182,13 +182,14 @@ struct SubagentUserStopTests {
 
         let outcome = await a.value
         #expect(outcome.status == .cancelled)
-        #expect(outcome.rendered.contains(SubagentManager.userStoppedReason))
+        #expect(outcome.rendered.contains(SubagentManager.rowStoppedReason))
+        #expect(outcome.stoppedBy == .row)
         #expect(finishedStatus(of: alpha, in: state) == "cancelled")
         #expect(await eventually { client.cancelledCalls == 1 })
         try await Task.sleep(nanoseconds: 300_000_000)
         #expect(client.cancelledCalls == 1, "the sibling's call is still running")
         #expect(finishedStatus(of: beta, in: state) == nil)
-        #expect(state.stoppableBackgroundSubagents(under: main) == [beta])
+        #expect(state.backgroundSubagents(under: main) == [beta])
 
         #expect(state.stopSubagent(beta))
         #expect(await b.value.status == .cancelled)
@@ -196,25 +197,117 @@ struct SubagentUserStopTests {
 
     // MARK: Nothing stopped twice
 
-    @Test("a subagent whose result is decided is not stopped again")
+    @Test("a subagent whose result is decided is not stopped again, and its row offers no Stop")
     func settledSubagentIsNotStopped() async throws {
         let client = RoutingClient(["WORKER": [calls([("goal_complete", ["summary": .string("done")])])]])
         let state = try state()
         let main = state.createNewConversation()
         let stopAccepted = Box<Bool?>(nil)
+        let offered = Box<Bool?>(nil)
 
         // `endSandboxSession` runs after the result is decided and while the subagent is still
-        // registered: the window a late Stop lands in.
+        // registered: the window grading also sits in.
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: main, background: true,
             client: client, appState: state, endSandboxSession: { id in
-                let accepted = await MainActor.run { state.stopSubagent(id) }
+                let (accepted, button) = await MainActor.run { (state.stopSubagent(id), state.userStoppableSubagents.contains(id)) }
                 stopAccepted.set(accepted)
+                offered.set(button)
             })
 
         #expect(outcome.status == .completed, "the late Stop did not turn a completion into a cancel")
         #expect(stopAccepted.get == false, "there was nothing left to stop")
-        #expect(state.stopBackgroundSubagents(under: main) == 0)
+        #expect(offered.get == false, "the strip hides Stop once it would do nothing")
+        #expect(outcome.stoppedBy == nil, "a row Stop of a settled subagent is not recorded")
+        #expect(!outcome.rendered.contains(SubagentManager.stoppedAfterCompletionNote))
+    }
+
+    @Test("the parent's Stop while a subagent is settled (being graded) is recorded, so its result will not wake the parent")
+    func parentStopDuringGradingIsRecorded() async throws {
+        let client = RoutingClient(["WORKER": [calls([("goal_complete", ["summary": .string("done")])])]])
+        let state = try state()
+        let main = state.createNewConversation()
+        let stopped = Box<Int?>(nil)
+
+        let outcome = await SubagentManager.shared.runSubagent(
+            role: "worker", task: "Work.", effort: "easy", parentConversationId: main, background: true,
+            client: client, appState: state, endSandboxSession: { _ in
+                let n = await MainActor.run { state.stopBackgroundSubagents(under: main) }
+                stopped.set(n)
+            })
+
+        #expect(stopped.get == 0, "settled: nothing left to stop, so not counted in the notice")
+        #expect(outcome.status == .completed)
+        #expect(outcome.stoppedBy == .parent)
+    }
+
+    @Test("a parent Stop accepted just after goal_complete still does not wake the parent")
+    func stopRacingCompletionDoesNotWakeParent() async throws {
+        let client = RoutingClient([
+            RoutingClient.parent: [
+                calls([("invoke_subagent", ["role": .string("worker"), "task": .string("Research."),
+                                            "effort": .string("easy"), "background": .string("true")])]),
+                text("Spawned it."),
+            ],
+            "WORKER": [calls([("goal_complete", ["summary": .string("done")])])],
+        ])
+        let state = try state()
+        let main = state.createNewConversation()
+        let engine = IrisEngine(state: state, tier: .medium, client: client, protectionEnabled: false, sessionPeerCount: 0)
+        state.installEngine(engine)
+
+        await engine.processInput("Start a background worker.", source: "User", conversationId: main)
+        // The moment the completion is recorded (its handler clears itself), before the manager's
+        // poll sees it and settles: the window the review reproduced 10 of 10.
+        var stoppedCount = 0
+        let end = Date().addingTimeInterval(10)
+        while Date() < end {
+            if let worker = subagentId("worker", in: state), state.onSubagentComplete[worker] == nil,
+               state.conversations.first(where: { $0.id == worker })?.messages.contains(where: { $0.role == .system }) == true,
+               state.subagentStopRequest(worker) == nil, !state.backgroundSubagents(under: main, stoppableOnly: false).isEmpty {
+                stoppedCount = state.stopBackgroundSubagents(under: main)
+                break
+            }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        #expect(stoppedCount == 1, "the Stop landed before the result settled")
+
+        let postBacks: @MainActor () -> [ChatMessage] = {
+            state.conversations.first { $0.id == main }?.messages
+                .filter { $0.content.contains("Background subagent result") } ?? []
+        }
+        #expect(await eventually { postBacks().count == 1 })
+        try await Task.sleep(nanoseconds: 500_000_000)
+        #expect(postBacks().count == 1)
+        #expect(postBacks().first?.content.contains(SubagentManager.stoppedAfterCompletionNote) == true)
+        #expect(client.callCount(RoutingClient.parent) == 2, "the parent was not woken")
+    }
+
+    @Test("a row Stop delivers the result as usual, so the parent can re-plan")
+    func rowStopWakesParent() async throws {
+        let client = ParkingSubagentsClient(parent: [
+            calls([("invoke_subagent", ["role": .string("worker"), "task": .string("Research."),
+                                        "effort": .string("easy"), "background": .string("true")])]),
+            text("Spawned it."),
+            text("Re-planning without it."),
+        ])
+        let state = try state()
+        let main = state.createNewConversation()
+        let engine = IrisEngine(state: state, tier: .medium, client: client, protectionEnabled: false, sessionPeerCount: 0)
+        state.installEngine(engine)
+
+        await engine.processInput("Start a background worker.", source: "User", conversationId: main)
+        #expect(await eventually { client.parkedCalls == 1 })
+        let worker = try #require(subagentId("worker", in: state))
+        #expect(state.userStoppableSubagents.contains(worker), "the row offers Stop while it works")
+
+        #expect(state.stopSubagent(worker))
+        #expect(!state.userStoppableSubagents.contains(worker))
+
+        #expect(await eventually { client.parentCalls == 3 }, "the post-back started a parent turn")
+        let postBack = state.conversations.first { $0.id == main }?.messages
+            .first { $0.content.contains("Background subagent result") }
+        #expect(postBack?.content.contains(SubagentManager.rowStoppedReason) == true)
     }
 
     @Test("Stop calls a registered stop once it is live and never once it is settled")
@@ -226,6 +319,7 @@ struct SubagentUserStopTests {
 
         #expect(state.stopBackgroundSubagents(under: parent) == 1)
         #expect(fired.get == 1)
+        #expect(state.stopBackgroundSubagents(under: parent) == 0, "already stopped")
         state.settleLiveSubagent(sub)
         #expect(state.stopSubagent(sub) == false)
         #expect(state.stopBackgroundSubagents(under: parent) == 0)
@@ -248,6 +342,23 @@ struct SubagentUserStopTests {
         state.unregisterLiveSubagent(grandchild)
     }
 
+    @Test("a background grandchild is still reached after its foreground parent has left the registry")
+    func orphanedGrandchildIsReached() async throws {
+        let state = try state()
+        let main = state.createNewConversation()
+        let foreground = UUID(), grandchild = UUID()
+        let fired = Box<[UUID]>([])
+        state.registerLiveSubagent(foreground, parent: main, background: false, stop: { _ in fired.set(fired.get + [foreground]) })
+        state.registerLiveSubagent(grandchild, parent: foreground, background: true, stop: { _ in fired.set(fired.get + [grandchild]) })
+        state.unregisterLiveSubagent(foreground)   // its work ended; the background one it spawned did not
+
+        #expect(state.delegationRoot(of: grandchild) == main, "its asks are still the main session's")
+        #expect(state.backgroundSubagents(under: main) == [grandchild])
+        #expect(state.stopBackgroundSubagents(under: main) == 1)
+        #expect(fired.get == [grandchild])
+        state.unregisterLiveSubagent(grandchild)
+    }
+
     @Test("a running foreground subagent stops through its waiting task, with the cancelled-turn reason")
     func foregroundStopsWithTheParentsTurn() async throws {
         let client = ParkingSubagentsClient()
@@ -259,7 +370,7 @@ struct SubagentUserStopTests {
                 turnTimeout: 20, client: client, appState: state, endSandboxSession: { _ in })
         }
         #expect(await eventually { client.parkedCalls == 1 })
-        #expect(state.stoppableBackgroundSubagents(under: main).isEmpty)
+        #expect(state.backgroundSubagents(under: main).isEmpty)
 
         waiting.cancel()
         let outcome = await waiting.value

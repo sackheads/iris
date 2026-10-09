@@ -4127,16 +4127,17 @@ actor IrisEngine {
                     Task {
                         let outcome = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, background: true, client: subagentClient, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay)
                         let event = "Background subagent result:\n\(outcome.rendered)"
-                        // Nothing cancels this task, so a cancelled background subagent is one the
-                        // user stopped (#236). Its result is news, not a request: waking the parent
-                        // would undo the Stop that ended it.
-                        if outcome.status == .cancelled {
+                        // Routed on which Stop the user pressed, not on the status (#236): a Stop
+                        // accepted just after goal_complete still reads completed. The parent's own
+                        // Stop means stop everything, so its result is news and wakes nothing; a
+                        // row Stop ended one helper, so the parent hears as usual and can re-plan.
+                        if outcome.stoppedBy == .parent {
                             await self.deliverStoppedSubagentResult(event, conversationId: conversationId)
                         } else {
                             await self.handleSystemEvent(event, source: "SubagentManager", conversationId: conversationId)
                         }
                     }
-                    result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes."
+                    result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes. If the user stops this conversation, the subagent is stopped too and its result appears only in the transcript, with no System Event."
                 } else {
                     result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay).rendered
                 }
