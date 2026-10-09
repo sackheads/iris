@@ -294,10 +294,13 @@ struct ToolApprovalRequest: Identifiable {
     /// ever constructed fresh by `enqueueUserApproval` for the lifetime of one pending ask.
     let humanOnly: Bool
     let continuation: CheckedContinuation<Bool, Never>
+    /// When the ask was raised, so `list_sessions` can say how long a peer has waited (#418).
+    let requestedAt: Date
 
     init(id: UUID, toolName: String, details: String, workspace: String?, conversationId: UUID?, origin: String,
-         humanOnly: Bool = false, continuation: CheckedContinuation<Bool, Never>) {
+         humanOnly: Bool = false, requestedAt: Date = Date(), continuation: CheckedContinuation<Bool, Never>) {
         self.id = id
+        self.requestedAt = requestedAt
         self.toolName = toolName
         self.details = details
         self.workspace = workspace
@@ -590,11 +593,68 @@ class AppState {
     /// here treats a reservation as busy, and in each case that is the answer the caller wants: a
     /// user message typed in that window takes the #172 inbox and is drained when the turn ends
     /// rather than starting a second one beside it; an event line waits for the same flush;
-    /// archiving refuses; `list_sessions` reports busy; the session strip counts it as running.
+    /// archiving refuses; `list_sessions` reports busy (waiting, if an approval is open); the session strip counts it as running.
     func hasTurnInFlight(for conversationId: UUID) -> Bool {
         if (engineTurnCounts[conversationId] ?? 0) > 0 { return true }
         if rotationHold == conversationId { return true }
         return activeTasks.values.contains { $0.conversationId == conversationId }
+    }
+
+    /// The subagent or evaluator conversation → the conversation that delegated it (#418), so an
+    /// approval a delegate raises is charged to the session whose work is blocked on it. Transient:
+    /// a delegate lives for one process at most, and nothing about it is persisted.
+    @ObservationIgnored private var delegationParent: [UUID: UUID] = [:]
+
+    func linkDelegate(_ child: UUID, of parent: UUID) {
+        delegationParent[child] = parent
+    }
+
+    func unlinkDelegate(_ child: UUID) {
+        delegationParent[child] = nil
+    }
+
+    /// The session `id` works for: itself unless it is a delegate. Bounded, so a cycle written by
+    /// a future caller degrades to a wrong attribution rather than a hang.
+    func delegationRoot(of id: UUID) -> UUID {
+        var current = id
+        for _ in 0..<16 {
+            guard let parent = delegationParent[current] else { return current }
+            current = parent
+        }
+        return current
+    }
+
+    /// What `list_sessions` reports for `conversation` (#418), derived from state the harness
+    /// owns — the approval queue, the turn counts and the goal contract — never from anything the
+    /// session wrote about itself (#419 point 2). An approval outranks a running turn: the turn is
+    /// parked on the dialog, so "busy" would say it is working when it is waiting on the user. A
+    /// goal decision ranks below a running turn, since a turn in flight is not waiting on anyone.
+    func sessionStatus(for conversation: Conversation) -> SessionStatus {
+        let asks = pendingApprovals.filter {
+            guard let owner = $0.conversationId else { return false }
+            return delegationRoot(of: owner) == conversation.id
+        }
+        if let first = asks.first {
+            // A tool name is not always ours (an MCP server chooses its own), and this phrase sits
+            // in the listing's unquoted, harness-owned slot — so it is flattened like a card field.
+            var phrase = "approval: " + IrisEngine.flattenCardField(first.toolName, cap: IrisEngine.cardNameCap)
+            if first.conversationId != conversation.id { phrase += " (subagent)" }
+            if asks.count > 1 { phrase += ", +\(asks.count - 1) more" }
+            return .waiting(on: phrase, since: first.requestedAt)
+        }
+        if hasTurnInFlight(for: conversation.id) { return .busy }
+        if let contract = conversation.goalContract {
+            if contract.state == .draft {
+                return .waiting(on: "goal contract to review", since: conversation.updatedAt)
+            }
+            if contract.checkpointStatus == .pausedForReview {
+                return .waiting(on: "checkpoint review", since: conversation.updatedAt)
+            }
+            if contract.awaitingHumanJudgement {
+                return .waiting(on: "goal judgement", since: conversation.updatedAt)
+            }
+        }
+        return .idle
     }
 
     func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID, isPeer: Bool = false) {
@@ -1311,7 +1371,7 @@ class AppState {
     }
 
     /// #185 §6.3 — a session's self-description to its peers, written by `set_session_card`.
-    /// Advertised, not authoritative: `SessionDirectory.peers` never reads this for `isBusy`.
+    /// Advertised, not authoritative: `sessionStatus(for:)` never reads it.
     ///
     /// Deliberately a plain setter. The length bound lives at the `set_session_card` handler
     /// (#246) and at render, not here: the listing's hardening tests plant hostile values through
@@ -1562,6 +1622,7 @@ class AppState {
         mainStartTimeByConversation[id] = nil
         mainPhaseByConversation[id] = nil
         stickyTools.forget(id)   // archive keeps it (the conversation can come back); delete cannot
+        unlinkDelegate(id)
         // Same reasoning for the event queue (#187 §8.3): a card delivered to a conversation that
         // is then deleted has nowhere to land, and its line must not sit in the dictionary
         // forever waiting for a turn that can never run.
@@ -2950,6 +3011,7 @@ class AppState {
 
     func unregisterLiveSubagent(_ subagentId: UUID) {
         liveSubagentTasks.removeValue(forKey: subagentId)
+        unlinkDelegate(subagentId)
     }
 
     /// The subagents still working for `run`, for a test to check none outlived it.

@@ -314,7 +314,10 @@ demand through `list_sessions`.
 ## 6.1 The three tools
 
 - **`list_sessions()`** — no parameters. Returns, per peer: `session_id`, `name` and `description`
-  (empty when no card), `workspace`, and `busy` / `idle`. Capped and ordered per §4. Busy/idle is
+  (empty when no card), `workspace`, and `busy` / `idle`. Capped and ordered per §4. *(Amended by
+  #418: the status is now `busy`, `waiting` — blocked on a decision the user owes, with what and for
+  how long — or `idle` with an age, and the list is ordered by last activity with live sessions kept
+  ahead of idle ones at the cap.)* Busy/idle is
   **derived by the harness**, never read from a card: a model-written "what I am doing" string is
   advertised, not authoritative (§9), and liveness is exactly the field a peer must not be able to
   misreport. See §12 on where that derived state comes from.
@@ -460,6 +463,8 @@ Recorded here so the question is answered rather than re-asked.
   normal case, and §5.2's inbox handles the in-flight part. A session paused awaiting a human
   decision receives the message and will see it when it resumes — it is not woken past its pause,
   because the pause suppresses the loop rather than the inbox.
+- *(Superseded by #418: the declaration is still gated on a peer, but a call is no longer refused
+  with none, and a session sees its own id, title and card in its turn context.)*
 - **`set_session_card` is gated on a peer existing** (§6), so a lone session cannot describe itself
   until there is someone to describe itself to. Deliberate: the card has no reader before then, and
   ungating it would put a declaration on every single-conversation turn for no benefit.

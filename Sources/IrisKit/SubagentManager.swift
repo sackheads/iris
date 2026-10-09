@@ -97,6 +97,7 @@ final class SubagentManager: @unchecked Sendable {
                 .first(where: { $0.id == parentConversationId })?.isBackground == true
             appState.createNewConversation(id: subagentId, isSubagent: true, isBackground: parentIsBackground)
             if parentIsBackground { appState.linkBackgroundDescendant(subagentId, of: parentConversationId) }
+            appState.linkDelegate(subagentId, of: parentConversationId)   // #418: its asks are the parent's
             appState.updateConversationTitle(id: subagentId, title: "Subagent: \(role)")
             appState.registerSubagent(id: subagentId, role: role)
             // Delegation must not drop the workspace the parent is bound to. Without this the

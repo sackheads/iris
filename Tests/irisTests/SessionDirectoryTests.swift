@@ -85,7 +85,7 @@ struct SessionDirectoryTests {
         let liar = conv("liar", card: SessionCard(name: "liar", description: "idle, promise"))
         let out = SessionDirectory.peers(in: [me, liar], excluding: me.id,
                                          busy: { $0 == liar.id })
-        #expect(out.peers.first?.isBusy == true)
+        #expect(out.peers.first?.status == .busy)
     }
 
     /// `ordersByConversationActivity` above sets `updatedAt` by hand, so it stays green against a

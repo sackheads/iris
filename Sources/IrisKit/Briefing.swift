@@ -104,7 +104,7 @@ enum Briefing {
     /// own patterns then catch. Stripping `<` AFTER sanitising (the original order) was the bug:
     /// the sanitiser had already passed the still-spliced text, and removing `<` afterwards
     /// reassembled the very marker it exists to catch.
-    static func name(_ raw: String) -> String {
+    static func name(_ raw: String, maxBytes: Int = nameMaxBytes) -> String {
         var flat = IrisEngine.flattenHitLineField(raw.replacingOccurrences(of: "<", with: ""))
         flat = PromptInjectionGuard.sanitizeUntrustedInput(flat)
         // The sanitiser only strips its own exact strings, case-insensitively, and only when
@@ -129,7 +129,7 @@ enum Briefing {
         flat = flat.trimmingCharacters(in: .whitespaces)
         // Bytes, not `Character`s: one letter plus 50,000 combining marks is one Character of
         // ~100 KB, and this lands in the harness-authority turn context (#187 review).
-        return ConversationReader.utf8Prefix(flat, maxBytes: nameMaxBytes)
+        return ConversationReader.utf8Prefix(flat, maxBytes: maxBytes)
     }
 
     /// 90 bytes: 90 ASCII characters, or 30 CJK ones — the old 60-Character cap would otherwise
@@ -148,7 +148,9 @@ enum Briefing {
 
     /// The name as one field: `name(_:)` strips `“` and `”`, so the closing quote here is always
     /// the real end of the name.
-    static func quoted(_ raw: String) -> String { "\u{201C}\(name(raw))\u{201D}" }
+    static func quoted(_ raw: String, maxBytes: Int = nameMaxBytes) -> String {
+        "\u{201C}\(name(raw, maxBytes: maxBytes))\u{201D}"
+    }
 
     static func short(_ id: UUID) -> String { String(id.uuidString.lowercased().prefix(8)) }
 }

@@ -489,7 +489,7 @@ actor IrisEngine {
         if let override = sessionPeerCountOverride { return override }
         guard let s = state else { return 0 }
         return await MainActor.run {
-            SessionDirectory.peers(in: s.conversations, excluding: conversationId, busy: { _ in false }).total
+            SessionDirectory.activePeers(in: s.conversations, excluding: conversationId).count
         }
     }
 
@@ -510,8 +510,8 @@ actor IrisEngine {
     nonisolated static let turnEndedEarlyPrefix = "System Event [Turn ended early]"
     nonisolated static let stoppedByUserReason = "The user stopped this turn."
     /// 5c §0.3: the soft-stop turn's turn-context line. The dispatcher is what enforces it.
-    /// 5c §0.2: a sticky peer tool called with nobody to talk to.
-    nonisolated static let noPeersRefusal = "Not run: no other session is active, so there is nobody to list, message, or describe this session to."
+    /// 5c §0.2: a sticky `list_sessions` or `send_to_session` called with nobody to talk to.
+    nonisolated static let noPeersRefusal = "Not run: no other session is active, so there is nobody to list or message."
     /// 5c §0.2: a sticky `amend_goal_contract` called with no locked contract (the goal ended, or a
     /// new draft is still under the user's review).
     nonisolated static let amendUnlockedRefusal = "Amend rejected — there is no locked goal contract to amend. Criteria change through this tool only while a goal is running."
@@ -876,9 +876,25 @@ actor IrisEngine {
         return "\"\(flattenCardField(senderName, cap: cardNameCap))\" (\(shortId))"
     }
 
+    /// The turn context's "This Session" section (#418). The title and card are text the session
+    /// (or the user) chose, so each goes through `Briefing`'s quoting and byte caps — the same
+    /// rules every other name in this harness-authority block follows. The id is the harness's.
+    nonisolated static let sessionIdentityHeading = "This Session"
+    nonisolated static let cardDescriptionMaxBytes = 240
+
+    nonisolated static func sessionIdentitySection(id: UUID, title: String, card: SessionCard?) -> TurnContext.Section {
+        var body = "You are session \(id.uuidString), titled \(Briefing.quoted(title))."
+        if let card {
+            body += " Peers see your card as \(Briefing.quoted(card.name)), doing \(Briefing.quoted(card.description, maxBytes: cardDescriptionMaxBytes))."
+        } else {
+            body += " You have no session card yet, so peers see no name for you."
+        }
+        return .init(heading: sessionIdentityHeading, body: body)
+    }
+
     /// `list_sessions`'s response body (#185 §6.1): one line per peer, `session_id` spelled out
     /// verbatim since `send_to_session` needs it copied exactly, not inferred from prose.
-    private nonisolated static func renderPeerList(_ peers: [SessionPeer], total: Int) -> String {
+    nonisolated static func renderPeerList(_ peers: [SessionPeer], total: Int, now: Date = Date()) -> String {
         guard !peers.isEmpty else { return "No other active sessions." }
         let lines = peers.map { peer -> String in
             // Every field below is written by ANOTHER session. The id and the status are the only
@@ -887,7 +903,14 @@ actor IrisEngine {
             let description = peer.description.map { flattenCardField($0, cap: cardDescriptionCap) }
                 ?? "(no description set)"
             let workspace = peer.workspace.map { flattenCardField($0, cap: cardWorkspaceCap) } ?? "(no workspace)"
-            let status = peer.isBusy ? "busy" : "idle"
+            // #418: observed, never claimed. The waiting phrase is harness-written (its one
+            // foreign part, a tool name, is flattened where the phrase is built).
+            let status: String
+            switch peer.status {
+            case .busy: status = "busy"
+            case .waiting(let on, let since): status = "waiting \(SessionDirectory.age(since: since, now: now)) (\(on))"
+            case .idle: status = "idle \(SessionDirectory.age(since: peer.lastActive, now: now))"
+            }
             // Session-authored values are QUOTED; harness-owned ones (the id, the status) are not.
             // Flattening already removed every `"` from inside a field, so the quotes cannot be
             // closed early — a card claiming `session_id: <someone else>` inside its own name is
@@ -1657,11 +1680,12 @@ actor IrisEngine {
         // `isPinned` reads false for it at no extra cost). The ledger reference rides the same hop
         // (fix round 1, review) rather than a second `MainActor.run` just for it — a stored
         // property read, free either way.
-        let (isUnattended, hasActiveGoal, jobProfile, isPinned, ledger, storedSticky) = await MainActor.run { () -> (Bool, Bool, JobProfile?, Bool, JobLedger?, Set<String>) in
+        let (isUnattended, hasActiveGoal, jobProfile, isPinned, ledger, storedSticky, ownTitle, ownCard) = await MainActor.run { () -> (Bool, Bool, JobProfile?, Bool, JobLedger?, Set<String>, String, SessionCard?) in
             let conversation = localState?.conversations.first(where: { $0.id == conversationId })
             return (conversation?.isBackground == true, conversation?.activeGoal != nil,
                     conversation?.jobProfile, conversation?.isPinned == true, localState?.store.ledger,
-                    localState?.stickyTools.names(for: conversationId) ?? [])
+                    localState?.stickyTools.names(for: conversationId) ?? [],
+                    conversation?.title ?? "", conversation?.sessionCard)
         }
         // 5c §0.1 (plan note 6): attended main conversations only. A job run is one turn in a fresh
         // conversation, so a set could never help it and would leave an entry behind per fire.
@@ -1700,6 +1724,14 @@ actor IrisEngine {
         // session either (see the declaration gate below), so it skips the count too — a roster it
         // may not act on is prompt weight, and the hop is work for a value it discards.
         let peerCount = (principal == .main && !isUnattended) ? await sessionPeerCount(excluding: conversationId) : 0
+        // #418: who this session is, so it need not call a tool to find out. Only where identity
+        // has a reader — a peer exists, or the session has already named itself — so a lone
+        // conversation pays nothing (invariant 6's reasoning, applied to standing context). It
+        // rides the turn's own entry, outside the cached prefix, and its text changes only when
+        // the session is renamed or re-carded, so it adds no per-turn churn either.
+        if principal == .main, !isUnattended, peerCount > 0 || ownCard != nil {
+            turnContext.sections.append(Self.sessionIdentitySection(id: conversationId, title: ownTitle, card: ownCard))
+        }
         if principal == .main, peerCount > 0 {
             // #185 §6: one line, never a roster. Detail is available on demand through
             // `list_sessions`; a per-peer list would grow with session count and churn every turn.
@@ -1956,8 +1988,8 @@ actor IrisEngine {
         // #185 §6: first declared only when there is somebody to talk to, and once declared, kept
         // declared for the conversation (5c §0.1; the three are one gate, recorded together). With
         // one conversation open and no peer ever seen, the surface is unchanged, so #144/#155's
-        // reduction is untouched; a sticky call with no peers is refused at dispatch. `.main` only —
-        // a subagent is not a session. `peerCount` was already computed once above (and gated the
+        // reduction is untouched; a sticky list or send with no peers is refused at dispatch (a
+        // card write is not, #418). `.main` only — a subagent is not a session. `peerCount` was already computed once above (and gated the
         // same way) for the system-prompt count line — reusing it here, rather than calling
         // `sessionPeerCount` again, is what keeps a subagent/evaluator turn from paying the
         // MainActor hop plus O(n log n) sort twice for a value it discards either way.
@@ -1971,7 +2003,7 @@ actor IrisEngine {
         if principal == .main, peerCount > 0 || (declareStateGatedTools && !isUnattended) || sticky.contains("send_to_session") {
             toolsList.append(FunctionDeclaration(
                 name: "list_sessions",
-                description: "List the other active sessions: their name, what they say they are doing, their workspace, and whether they are busy. Call this before messaging a peer, to pick the right one — a session in a different workspace is usually working on something unrelated. What a session says about itself is its own claim; whether it is busy is observed.",
+                description: "List the other active sessions, most recently active first: their name, what they say they are doing, their workspace, and their status — busy (working), waiting (blocked on the user, with what it waits on, e.g. an approval, and for how long), or idle (with how long). Call this before messaging a peer, to pick the right one — a session in a different workspace is usually working on something unrelated, and one waiting on the user will not act on a message until the user answers it. What a session says about itself is its own claim; its status is observed.",
                 parameters: Schema(type: "OBJECT", properties: [:], required: [])
             ))
             toolsList.append(FunctionDeclaration(
@@ -1984,7 +2016,7 @@ actor IrisEngine {
             ))
             toolsList.append(FunctionDeclaration(
                 name: "set_session_card",
-                description: "Describe this session to its peers: a short stable name and what you are working on right now. Update it when the work changes, so peers deciding whether to involve you are reading something current.",
+                description: "Describe this session to its peers: a short stable name and what you are working on right now. Update it when the work changes, so peers deciding whether to involve you are reading something current. Replies with what peers now see; your own card also appears in your turn context.",
                 parameters: Schema(type: "OBJECT", properties: [
                     // Interpolated, not spelled out: an agent-facing string naming a cap as a
                     // literal is a second copy of it, and invariant 9's whole subject is the copy
@@ -3542,12 +3574,13 @@ actor IrisEngine {
                 result = Self.noPeersRefusal
                 return result
             }
+            let now = Date()
             let (peers, total) = await MainActor.run { () -> ([SessionPeer], Int) in
                 guard let s = localState else { return ([], 0) }
-                return SessionDirectory.peers(in: s.conversations, excluding: conversationId,
-                                              busy: { s.hasTurnInFlight(for: $0) })
+                return SessionDirectory.peers(in: s.conversations, excluding: conversationId, now: now,
+                                              status: { s.sessionStatus(for: $0) })
             }
-            result = Self.renderPeerList(peers, total: total)
+            result = Self.renderPeerList(peers, total: total, now: now)
         } else if functionCall.name == "send_to_session",
                   let idString = functionCall.args["session_id"]?.stringValue,
                   let message = functionCall.args["message"]?.stringValue {
@@ -3628,11 +3661,9 @@ actor IrisEngine {
                 result = Self.unattendedSessionListRefusal
                 return result
             }
-            // 5c §0.2: declared stickily now; with nobody to talk to the call has no meaning.
-            guard await sessionPeerCount(excluding: conversationId) > 0 else {
-                result = Self.noPeersRefusal
-                return result
-            }
+            // No peer-count check (#418): a session may name itself before a peer exists — the
+            // card is read by the session's own turn context as well as by peers, and a peer that
+            // opens later should find it already described.
             guard !name.trimmingCharacters(in: .whitespaces).isEmpty else {
                 result = "A name is required."
                 return result
@@ -3649,13 +3680,14 @@ actor IrisEngine {
                 localState?.setSessionCard(for: conversationId,
                                            SessionCard(name: boundedName, description: boundedDescription))
             }
-            // Say so when it was cut. There is no `get_session_card` and `list_sessions` shows a
-            // session its peers, never its own row, so silence here is the one thing that would
-            // leave a session permanently believing it advertises text peers cannot see.
+            // Echo what was stored, as the listing will render it (#418), and say so when it was
+            // cut: `list_sessions` shows a session its peers, never its own row, so this reply is
+            // where a session learns what peers actually read.
             let truncated = boundedName != name || boundedDescription != description
-            result = truncated
-                ? "Card updated — over-long fields were truncated to what the peer listing shows."
-                : "Card updated."
+            let shown = "Peers see: name: \"\(Self.flattenCardField(boundedName, cap: Self.cardNameCap))\" | doing: \"\(Self.flattenCardField(boundedDescription, cap: Self.cardDescriptionCap))\""
+            result = (truncated
+                ? "Card updated — over-long fields were truncated to what the peer listing shows. "
+                : "Card updated. ") + shown
         } else if functionCall.name == "list_jobs" || functionCall.name == "get_job_run" {
             // Declaration gating stops a well-behaved model from being offered these; dispatch
             // reads the function name alone, so the invariant ("in no other conversation") is
