@@ -561,4 +561,95 @@ struct SkillToolFrontmatterTests {
         let (_, body) = SkillFrontmatter.parse(content)
         #expect(body == "Line one\nLine two", "the body's two lines must stay two lines, not gain a blank line between them")
     }
+
+    // MARK: - #434 follow-ups from the iris-86 review of #424
+
+    /// Item 1: `scalarValue` used to return the colon-split text raw, so a value `render` had
+    /// quoted (#417 item 7) showed its own quote marks verbatim wherever that field is displayed
+    /// — `/skills`, `discoverSkills`'s skill list in the model's system prompt.
+    @Test("scalarValue strips one pair of surrounding quotes and unescapes")
+    func scalarValueUnquotes() {
+        let doubleQuoted = SkillFrontmatterField(key: "title", rawLines: ["title: \"GKE: nodes\""])
+        #expect(doubleQuoted.scalarValue == "GKE: nodes")
+
+        // The literal file text is `tag: "back\\"` — one escaped backslash before the closing
+        // quote, the exact form `SkillFrontmatter`'s own `quoted()` writes for a tag ending in `\`.
+        let escapedBackslash = SkillFrontmatterField(key: "tag", rawLines: ["tag: \"back\\\\\""])
+        #expect(escapedBackslash.scalarValue == "back\\")
+
+        let singleQuoted = SkillFrontmatterField(key: "title", rawLines: ["title: 'it''s fine'"])
+        #expect(singleQuoted.scalarValue == "it's fine")
+
+        let bare = SkillFrontmatterField(key: "title", rawLines: ["title: plain"])
+        #expect(bare.scalarValue == "plain")
+
+        // A single stray quote character is not a matching pair — left alone rather than
+        // stripped into an empty string.
+        let stray = SkillFrontmatterField(key: "title", rawLines: ["title: \""])
+        #expect(stray.scalarValue == "\"")
+    }
+
+    /// `create_skill` always writes an explicit `name:`, which outranks `title:` in
+    /// `SkillManager`'s display-name precedence (`name:` > `title:` > folder) — so this has to be
+    /// a title-only OKF skill (no `name:` at all, same shape `/reflect` grooming leaves a
+    /// hand-written skill in) for `title:`'s quoting to actually reach `listSkills`'s `name`.
+    @Test("a quoted title displays without its quotes in listSkills, for a title-only OKF skill")
+    func quotedTitleDisplaysUnquoted() async throws {
+        let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+
+        let dir = paths.skillsDir.appendingPathComponent("colon-display")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let okf = """
+        ---
+        title: "GKE: nodes"
+        description: d
+        ---
+
+        Body.
+        """
+        try okf.write(to: dir.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+
+        let skills = await SkillManager.shared.listSkills(paths: paths)
+        let skill = try #require(skills.first { $0.folderName == "colon-display" })
+        #expect(skill.name == "GKE: nodes", "the display name must not show the quotes the file's title: carries")
+        #expect(!skill.name.contains("\""))
+    }
+
+    /// Unlike `title`, `description` is always displayed — in `/skills` and in
+    /// `discoverSkills`'s skill list the model reads — regardless of display-name precedence, so
+    /// this is the path most likely to actually show a stray quote mark in practice (many
+    /// descriptions naturally contain `: `, which `yamlScalarLine` quotes, #417 item 7).
+    @Test("a quoted description displays without its quotes in listSkills")
+    func quotedDescriptionDisplaysUnquoted() async throws {
+        let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+
+        _ = await ToolExecutor.shared.createSkill(name: "quoted-desc", description: "Debug: stuck nodes",
+                                                   body: "b", paths: paths)
+        let content = try String(contentsOf: paths.skillsDir.appendingPathComponent("quoted-desc/SKILL.md"), encoding: .utf8)
+        #expect(content.contains("description: \"Debug: stuck nodes\""), "sanity: this description really was quoted on write")
+
+        let skills = await SkillManager.shared.listSkills(paths: paths)
+        let skill = try #require(skills.first { $0.folderName == "quoted-desc" })
+        #expect(skill.description == "Debug: stuck nodes")
+        #expect(!skill.description.contains("\""))
+    }
+
+    /// Item 2: strict YAML treats ` #` as a comment opener on a bare scalar, so an unquoted
+    /// `title: Fix C #builds` reads back as just `Fix C` to any real YAML parser.
+    @Test("a title containing \" #\" is quoted, not left as a bare scalar a YAML comment would truncate")
+    func titleWithHashCommentIsQuoted() async throws {
+        let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+
+        _ = await ToolExecutor.shared.createSkill(name: "hash-title", description: "d", body: "b",
+                                                   title: "Fix C #builds", paths: paths)
+        let skillDir = paths.skillsDir.appendingPathComponent("hash-title")
+        let content = try String(contentsOf: skillDir.appendingPathComponent("SKILL.md"), encoding: .utf8)
+        #expect(content.contains("title: \"Fix C #builds\""), "the whole value must be quoted, not truncated at the '#'")
+
+        let violations = AgentSkillValidator.validate(directory: skillDir)
+        #expect(!violations.contains { $0.contains("not valid YAML") }, "\(violations)")
+    }
 }

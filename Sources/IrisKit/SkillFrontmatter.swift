@@ -12,15 +12,47 @@ struct SkillFrontmatterField: Equatable {
     let key: String
     var rawLines: [String]
 
-    /// The text after the first line's colon, trimmed, or nil for a key with no inline value
-    /// (a list, or a folded/literal block scalar, spelled as indented lines below the key rather
-    /// than `key: value`). This is a *display* reading only — `render` must never rebuild a
-    /// field from this when the field has continuation lines (#417 PR review: a multi-line
+    /// The text after the first line's colon, trimmed, with one pair of surrounding YAML quotes
+    /// stripped and unescaped if present, or nil for a key with no inline value (a list, or a
+    /// folded/literal block scalar, spelled as indented lines below the key rather than
+    /// `key: value`). This is a *display* reading only — `render` must never rebuild a field
+    /// from this when the field has continuation lines (#417 PR review: a multi-line
     /// `description:` read this way loses every line past the first).
+    ///
+    /// Unquoting matters because `render`/`yamlScalarLine` quotes a value whenever a bare scalar
+    /// would read differently (#417 item 7) — without this, a title like `GKE: nodes`, written
+    /// back as `title: "GKE: nodes"`, showed its own quotes verbatim in `/skills` and the
+    /// model's skill list (#434 item 1).
     var scalarValue: String? {
         guard let first = rawLines.first, let colon = first.firstIndex(of: ":") else { return nil }
-        let value = String(first[first.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+        let raw = String(first[first.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+        guard !raw.isEmpty else { return nil }
+        let value = Self.unquoted(raw)
         return value.isEmpty ? nil : value
+    }
+
+    /// Strips one pair of surrounding `"..."` or `'...'` quotes from `raw` and unescapes the
+    /// content — `\"` and `\\` inside a double-quoted value (the style `SkillFrontmatter.quoted`
+    /// writes), `''` inside a single-quoted one. `raw` with no surrounding quotes, or too short
+    /// to have a matching pair (a bare `"` on its own), is returned unchanged.
+    private static func unquoted(_ raw: String) -> String {
+        guard raw.count >= 2 else { return raw }
+        if raw.hasPrefix("\""), raw.hasSuffix("\"") {
+            var result = ""
+            var iterator = raw.dropFirst().dropLast().makeIterator()
+            while let char = iterator.next() {
+                if char == "\\", let escaped = iterator.next() {
+                    result.append(escaped)
+                } else {
+                    result.append(char)
+                }
+            }
+            return result
+        }
+        if raw.hasPrefix("'"), raw.hasSuffix("'") {
+            return raw.dropFirst().dropLast().replacingOccurrences(of: "''", with: "'")
+        }
+        return raw
     }
 }
 
@@ -98,16 +130,18 @@ enum SkillFrontmatter {
     private static let yamlIndicatorChars = Set("-?:,[]{}#&*!|>'\"%@`")
 
     /// Renders one scalar value as `key: value`, quoting it when a bare scalar would parse
-    /// differently or not at all — a value containing `: ` (a second mapping pair), one starting
-    /// with a YAML indicator character, one that is empty, or one with leading/trailing
-    /// whitespace (#417 PR review item 7: `title: GKE: nodes`). Newlines are flattened first
-    /// (never emitted as a bare scalar either way).
+    /// differently or not at all — a value containing `: ` (a second mapping pair), one
+    /// containing ` #` (a comment, under strict YAML: `title: Fix C #builds` reads as `Fix C`,
+    /// #434 item 2), one starting with a YAML indicator character, one that is empty, or one
+    /// with leading/trailing whitespace (#417 PR review item 7: `title: GKE: nodes`). Newlines
+    /// are flattened first (never emitted as a bare scalar either way).
     private static func yamlScalarLine(_ key: String, _ rawValue: String) -> String {
         let value = flattenNewlines(rawValue)
         let needsQuoting = value.isEmpty
             || value.first.map { yamlIndicatorChars.contains($0) } == true
             || value.hasSuffix(":")
             || value.contains(": ")
+            || value.contains(" #")
             || value.hasPrefix(" ") || value.hasSuffix(" ")
         guard needsQuoting else { return "\(key): \(value)" }
         return "\(key): \(quoted(value))"
