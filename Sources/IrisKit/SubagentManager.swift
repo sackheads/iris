@@ -68,7 +68,9 @@ final class SubagentManager: @unchecked Sendable {
     /// between turns, shortened only by tests.
     /// `onTurnEvent` sees each turn event after the deadline has recorded it, so a test can move
     /// `deadlineClock` at a known point (a turn's end) rather than after a real-time wait that a
-    /// busy suite outlasts, landing the move inside the turn (#410). Nil in production.
+    /// busy suite outlasts, landing the move inside the turn (#410). Nil in production; called
+    /// outside `GoalLoopControl`'s lock (and after `SubagentTurnStart`'s), so a tap that calls back
+    /// into the loop cannot deadlock.
     func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID,
                      unit: DelegatedUnit? = nil, turnTimeout: TimeInterval? = nil,
                      client: (any LLMClientProtocol)? = nil,
