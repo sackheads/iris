@@ -454,6 +454,23 @@ struct JobsCommandTests {
         #expect(out.contains("⚠️ pr-sweep · failed · 1a2b3c4d · could not reach the API"))
     }
 
+    @Test("two unacknowledged failures render as separate lines, not one run-on paragraph")
+    func renderTwoFailureLinesAreSeparateParagraphs() {
+        let now = Date()
+        let j1 = job("pr-sweep")
+        let j2 = job("backup")
+        let failed1 = run(j1, id: UUID(uuidString: "1A2B3C4D-0000-0000-0000-000000000001")!,
+                          status: .failed, outcome: "could not reach the API")
+        let failed2 = run(j2, id: UUID(uuidString: "DEADBEEF-0000-0000-0000-000000000002")!,
+                          status: .failed, outcome: "disk full")
+        let out = JobsCommand.render(jobs: [j1, j2], lastRuns: [:], usage: .empty,
+                                     unacknowledged: [failed1, failed2], unreadableJobs: 0, now: now)
+        // Markdown renders a single "\n" as a space, so the lines must be joined by a blank
+        // line (like the watch/grant lines) rather than run together into one paragraph.
+        #expect(out.contains("⚠️ pr-sweep · failed · 1a2b3c4d · could not reach the API\n\n⚠️ backup · failed · deadbeef · disk full"))
+        #expect(!out.contains("could not reach the API\n⚠️"))
+    }
+
     @Test("a blocked run names the failure reason when it produced no outcome")
     func renderBlockedLine() {
         let now = Date()

@@ -312,7 +312,10 @@ enum JobsCommand: Equatable {
         }
 
         if !unacknowledged.isEmpty {
-            blocks.append(unacknowledged.map(failureLine).joined(separator: "\n"))
+            // Blank line between entries, same as the watch and grant lines above (#294):
+            // the block is markdown, where a single newline renders as a space, so joining
+            // with "\n" ran every failure line into one paragraph.
+            blocks.append(unacknowledged.map(failureLine).joined(separator: "\n\n"))
         }
         // Said out loud rather than swallowed: a job silently missing from the table is the one
         // case where the listing is actively misleading about what is scheduled.
