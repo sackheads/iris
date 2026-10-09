@@ -1822,7 +1822,7 @@ class AppState {
             tags: [..., ...]
             timestamp: ...
             ---
-            Verify that your cross-links between files are still valid, and reorganize or fix any broken links. Output a transparent summary of the gist of the updates and grooming performed for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'
+            For a skill, set `title`/`tags` with `update_skill`'s own `title`/`tags` parameters — not `write_file` — and only pass the field that's actually missing or stale; omitting the other leaves it as it was. Verify that your cross-links between files are still valid, and reorganize or fix any broken links. Output a transparent summary of the gist of the updates and grooming performed for the user. If nothing needs updating, just reply 'No memory consolidation needed at this time.'
             """)
             // Asked for here, so the reply stays here; outside Iris a card goes to Iris too (5b §0.6).
             runThinkingTask(conversationId: convId) { [self] in
@@ -3442,7 +3442,11 @@ class AppState {
                 if skills.isEmpty {
                     body = "No skills are currently registered."
                 } else {
-                    let list = skills.map { "- **\($0.name)** — \($0.description)" }.joined(separator: "\n")
+                    let list = skills.map { skill -> String in
+                        let line = "- **\(skill.name)** — \(skill.description)"
+                        guard let warning = skill.warning else { return line }
+                        return line + "\n  Warning: \(warning)"
+                    }.joined(separator: "\n")
                     body = "**Registered skills (\(skills.count))**\n\n\(list)"
                 }
                 self.emitCommandOutput(body, format: .markdown, to: convId)
