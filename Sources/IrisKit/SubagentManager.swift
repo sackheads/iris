@@ -281,9 +281,11 @@ final class SubagentManager: @unchecked Sendable {
             stop(Self.cancelledReason)
         }
         let termination = holder.get() ?? SubagentTermination(status: .failed, summary: "Subagent completed with no summary.", calledGoalComplete: false)
-        let wasStopped = stopped.isTripped
         // Decided: a later Stop from the user must not cut a completed subagent's last turn short.
+        // Read the flag only after settling: a Stop accepted between the two would otherwise trip
+        // it unseen, and the result would lose its stopped-after-completion note (#236).
         await MainActor.run { appState.settleLiveSubagent(subagentId) }
+        let wasStopped = stopped.isTripped
 
         // Hard stop for a subagent ended from outside: cancel the engine task (already done by
         // `stop`, harmless twice) and unstick any pending approval.
