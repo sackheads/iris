@@ -28,8 +28,8 @@ status=${PIPESTATUS[0]}
 # swift-testing line alone cannot be the guard. Fail only when NEITHER runner executed anything:
 # take the highest count either framework printed (a run can report more than one such line,
 # e.g. per-suite), and treat a missing line as 0.
-swift_ran=$(grep -oE 'Test run with [0-9]+ tests' "$log" | grep -oE '[0-9]+' | sort -rn | head -1)
-xctest_ran=$(grep -oE 'Executed [0-9]+ tests' "$log" | grep -oE '[0-9]+' | sort -rn | head -1)
+swift_ran=$(grep -oE 'Test run with [0-9]+ tests?' "$log" | grep -oE '[0-9]+' | sort -rn | head -1)
+xctest_ran=$(grep -oE 'Executed [0-9]+ tests?' "$log" | grep -oE '[0-9]+' | sort -rn | head -1)
 # Only treat a zero count as "matched nothing" when the build+run itself succeeded. A build
 # failure also leaves both counts at 0 (neither framework ever printed a line), and blaming the
 # filter there is the same misdirection #271 exists to prevent: it hides the compiler's own error
