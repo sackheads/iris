@@ -304,14 +304,20 @@ struct ToolExecutor {
         var isDirectory: ObjCBool = false
         guard let path = WatchRoot.canonical(resolved),
               FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            return "That path does not exist or is not a directory: \(resolved)"
+            // #287: `resolved` has not passed `WatchRoot.canonical` here — it is the model's
+            // `path` argument after cwd-joining, nothing more — so this is the one echo in this
+            // function that is not even a real, existing directory yet. Flatten it the same way.
+            return "That path does not exist or is not a directory: \(IrisEngine.flattenToolEcho(resolved))"
         }
+        // #287: bounded and flattened once, for every sentence below that names the directory —
+        // the tier-1 trust rests on this form, not on `path` happening to be short.
+        let displayPath = IrisEngine.flattenToolEcho(path)
         if let refusal = WatchRoot.refusal(for: path, paths: irisPaths ?? .default,
                                            home: homeDirectory ?? NSHomeDirectory()) {
-            return "Not watching \(path): \(refusal)."
+            return "Not watching \(displayPath): \(refusal)."
         }
         if let ignore = parsed.ignore, WatchGlob.ignoresEveryProbe(ignore) {
-            return "Not watching \(path): \(Self.allIgnoredRefusal)."
+            return "Not watching \(displayPath): \(Self.allIgnoredRefusal)."
         }
         let window = parsed.quietWindowSeconds.map(FSWatch.clampQuietWindow)
         let clamped = window != nil && window != parsed.quietWindowSeconds
@@ -333,7 +339,12 @@ struct ToolExecutor {
             switch JobGrant.resolve(mounts: parsed.mounts, network: parsed.network, profile: profile,
                                     paths: irisPaths ?? .default, home: homeDirectory ?? NSHomeDirectory()) {
             case .failure(let message):
-                return "Not watching \(path): \(ScheduleJobArguments.grantRefusal(message, mountsNamed: !(parsed.mounts ?? []).isEmpty).text)"
+                // #287: a mount refusal can quote the raw mount entry the model sent
+                // (`JobGrant.resolve`'s `malformed(entry, reason)`), so the message text is
+                // echoed back flattened too, not just the directory.
+                let refusalText = IrisEngine.flattenToolEcho(
+                    ScheduleJobArguments.grantRefusal(message, mountsNamed: !(parsed.mounts ?? []).isEmpty).text)
+                return "Not watching \(displayPath): \(refusalText)."
             case .success(let resolved): grant = resolved
             }
             var job: Job
@@ -383,7 +394,7 @@ struct ToolExecutor {
             // is nothing here to reload — the job is stored and the next launch picks it up.
             try tools.ledger.upsert(job)
             guard case .fsEvent(let stored) = job.trigger else { return "Could not save the watcher job." }
-            var sentences = ["Watching \(path): \(opening)."]
+            var sentences = ["Watching \(displayPath): \(opening)."]
             var runs = "It runs once the folder has been quiet for \(stored.quietWindowSeconds) s"
                 + " (\(stored.ceilingSeconds) s when changes never stop) and never alongside its own previous run;"
                 + " it ignores .git/, .DS_Store, node_modules/, *~, *.swp, *.swx, .#*, 4913, *.tmp and Foundation's atomic-write temp files"
