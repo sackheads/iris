@@ -186,6 +186,17 @@ private struct SessionRowView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                // #236: the only way to stop one subagent alone. The logic is
+                // `AppState.stopSubagent`; the button goes once its result is decided.
+                if session.kind == .subagent, state.userStoppableSubagents.contains(sessionId) {
+                    Button { state.stopSubagent(sessionId) } label: {
+                        Image(systemName: "stop.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.mini)
+                    .font(.caption)
+                    .help("Stop this subagent")
+                }
             }
             .padding(.vertical, 1)
             .contentShape(Rectangle())

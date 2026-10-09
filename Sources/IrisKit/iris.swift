@@ -605,6 +605,23 @@ actor IrisEngine {
         await processInput(safeMessage, source: source, conversationId: conversationId)
     }
 
+    /// A stopped background subagent's post-back (#236): the transcript line now and the result in
+    /// the parent's history, routed as an event line is (`deliverEvent`), so it starts no turn. A
+    /// turn still unwinding from the same Stop picks it up at its end.
+    func deliverStoppedSubagentResult(_ message: String, conversationId: UUID) async {
+        let safeMessage = await sanitizeArrival(message, source: "SubagentManager")
+        let localState = state
+        await MainActor.run {
+            guard let localState, localState.conversations.contains(where: { $0.id == conversationId }) else { return }
+            localState.appendMessage(role: .system, content: safeMessage, to: conversationId)
+            if localState.hasTurnInFlight(for: conversationId) {
+                localState.enqueueEventLine(safeMessage, for: conversationId)
+            } else {
+                localState.appendContentToHistory(for: conversationId, content: AppState.eventLineContent(safeMessage))
+            }
+        }
+    }
+
     /// The structural guard, then the tier-3 injection guard, tagged by `source`. Factored out of
     /// `handleSystemEvent` because `deliverPeerMessage`'s busy path bypasses `handleSystemEvent`
     /// entirely (it enqueues instead of calling `processInput`) and must still run identical
@@ -4108,10 +4125,19 @@ actor IrisEngine {
             if let appState = self.state {
                 if isBackground {
                     Task {
-                        let rendered = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay).rendered
-                        await self.handleSystemEvent("Background subagent result:\n\(rendered)", source: "SubagentManager", conversationId: conversationId)
+                        let outcome = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, background: true, client: subagentClient, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay)
+                        let event = "Background subagent result:\n\(outcome.rendered)"
+                        // Routed on which Stop the user pressed, not on the status (#236): a Stop
+                        // accepted just after goal_complete still reads completed. The parent's own
+                        // Stop means stop everything, so its result is news and wakes nothing; a
+                        // row Stop ended one helper, so the parent hears as usual and can re-plan.
+                        if outcome.stoppedBy == .parent {
+                            await self.deliverStoppedSubagentResult(event, conversationId: conversationId)
+                        } else {
+                            await self.handleSystemEvent(event, source: "SubagentManager", conversationId: conversationId)
+                        }
                     }
-                    result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes."
+                    result = "Subagent '\(role)' spawned in the background. You will receive a System Event when it finishes. If the user stops this conversation, the subagent is stopped too and its result appears only in the transcript, with no System Event."
                 } else {
                     result = await SubagentManager.shared.runSubagent(role: role, task: task, effort: effort, parentConversationId: conversationId, unit: unit, client: subagentClient, appState: appState, recentWrites: self.recentWrites, config: self.subagentConfig, repromptDelay: self.repromptDelay).rendered
                 }

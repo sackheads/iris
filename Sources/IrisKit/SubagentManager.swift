@@ -12,6 +12,13 @@ struct DelegatedUnit: Sendable {
     var grade: Bool = true
 }
 
+/// Which Stop of the user's reached a subagent (#236): Stop, Esc or `/stop` in the conversation it
+/// works under, or the Stop on its own session-strip row.
+enum SubagentStopKind: Sendable, Equatable {
+    case parent
+    case row
+}
+
 final class SubagentManager: @unchecked Sendable {
     static let shared = SubagentManager()
 
@@ -22,6 +29,18 @@ final class SubagentManager: @unchecked Sendable {
 
     /// The summary of a subagent stopped because the background run it worked for ended (#323).
     static let runEndedReason = "Cancelled: the background run this subagent worked for has ended, so the subagent was stopped — its model call and any running command were cancelled, and it did not finish its task."
+
+    /// The summary of a subagent stopped by Stop, Esc or `/stop` in the conversation it works
+    /// under (#236). Its post-back starts no turn: the user stopped everything there.
+    static let parentStoppedReason = "Cancelled: the user stopped the conversation that delegated to this subagent, and this subagent with it — its model call and any running command were cancelled, and it did not finish its task."
+
+    /// The summary of a subagent stopped from its own row in the session strip (#236). Only this
+    /// helper was stopped, so its post-back is delivered as usual for the parent to re-plan.
+    static let rowStoppedReason = "Cancelled: the user stopped this subagent from the session strip — its model call and any running command were cancelled, and it did not finish its task. The conversation that delegated to it was not stopped."
+
+    /// Appended when a user Stop was accepted after `goal_complete` had already decided the result
+    /// (#236): the status stays completed, but its last turn was cut short and it was not graded.
+    static let stoppedAfterCompletionNote = "Note: the user stopped this subagent just after it called goal_complete, so its last turn was cut short and it was not graded."
 
     /// Whether a subagent has been stopped from outside; trips once.
     final class StopFlag: @unchecked Sendable {
@@ -72,8 +91,10 @@ final class SubagentManager: @unchecked Sendable {
     /// busy suite outlasts, landing the move inside the turn (#410). Nil in production; called
     /// outside `GoalLoopControl`'s lock (and after `SubagentTurnStart`'s), so a tap that calls back
     /// into the loop cannot deadlock.
+    /// `background` is true for `invoke_subagent background: true`, whose caller is an unstructured
+    /// task nothing cancels: the parent's Stop reaches it through the registry instead (#236).
     func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID,
-                     unit: DelegatedUnit? = nil, turnTimeout: TimeInterval? = nil,
+                     unit: DelegatedUnit? = nil, background: Bool = false, turnTimeout: TimeInterval? = nil,
                      client: (any LLMClientProtocol)? = nil,
                      appState: AppState,
                      recentWrites: RecentWrites = .shared,
@@ -84,7 +105,7 @@ final class SubagentManager: @unchecked Sendable {
                      onTurnEvent: (@Sendable (_ began: Bool, _ seq: Int) -> Void)? = nil,
                      endSandboxSession: @escaping @Sendable (UUID) async -> Void = {
                          await SandboxSessionManager.shared.closeSession($0)
-                     }) async -> (rendered: String, status: SubagentTerminalStatus) {
+                     }) async -> (rendered: String, status: SubagentTerminalStatus, stoppedBy: SubagentStopKind?) {
         let startedAt = Date()
 
         // 1. Create a new conversation for the subagent
@@ -200,8 +221,9 @@ final class SubagentManager: @unchecked Sendable {
         }
 
         // How this subagent is stopped from outside (#323): by the cancellation of the task that is
-        // waiting on it — a run's turn cancelled at its deadline, or the user's Stop — or by the
-        // drain of the run it works for. The verdict is recorded before the engine is cancelled,
+        // waiting on it — a run's turn cancelled at its deadline, or the user's Stop — by the
+        // drain of the run it works for, or by the user stopping it directly, which is the only
+        // way to reach a background subagent (#236). The verdict is recorded before the engine is cancelled,
         // for the reason the timeout below classifies first: the cancelled engine reports a
         // `.failed` of its own, and that must not be the one that lands.
         let stopped = StopFlag()
@@ -214,7 +236,9 @@ final class SubagentManager: @unchecked Sendable {
             engine.haltGoalLoop(for: subagentId)
             engineTask.cancel()
         }
-        await MainActor.run { appState.registerLiveSubagent(subagentId, stop: stop) }
+        await MainActor.run {
+            appState.registerLiveSubagent(subagentId, parent: parentConversationId, background: background, stop: stop)
+        }
 
         var gracePolls = 0
         var timedOut = false
@@ -257,6 +281,10 @@ final class SubagentManager: @unchecked Sendable {
             stop(Self.cancelledReason)
         }
         let termination = holder.get() ?? SubagentTermination(status: .failed, summary: "Subagent completed with no summary.", calledGoalComplete: false)
+        // Decided: a later Stop from the user must not cut a completed subagent's last turn short.
+        // Read the flag only after settling: a Stop accepted between the two would otherwise trip
+        // it unseen, and the result would lose its stopped-after-completion note (#236).
+        await MainActor.run { appState.settleLiveSubagent(subagentId) }
         let wasStopped = stopped.isTripped
 
         // Hard stop for a subagent ended from outside: cancel the engine task (already done by
@@ -303,9 +331,12 @@ final class SubagentManager: @unchecked Sendable {
                                     summary: termination.summary, filesWritten: files,
                                     startedAt: startedAt, endedAt: Date(),
                                     unitContract: unitContract, verdict: verdict)
-        await MainActor.run {
+        // Read while still registered: the background post-back is routed on it, not on the
+        // status, which a completion can win over an accepted Stop (#236).
+        let stoppedBy = await MainActor.run {
             appState.setSubagentResult(for: subagentId, result)
             appState.finishSession(id: subagentId, status: termination.status.rawValue)
+            return appState.subagentStopRequest(subagentId)
         }
         // Registered until the engine task has actually returned, not just until the parent has
         // its answer: a task still unwinding is a task still alive. Not awaited here, so an engine
@@ -319,7 +350,11 @@ final class SubagentManager: @unchecked Sendable {
             engine.observeGoalLoopTurns(for: subagentId, nil)
             await MainActor.run { appState.unregisterLiveSubagent(subagentId) }
         }
-        return (result.renderedForParent(), termination.status)
+        var rendered = result.renderedForParent()
+        if wasStopped, termination.status != .cancelled, stoppedBy != nil {
+            rendered += "\n" + Self.stoppedAfterCompletionNote
+        }
+        return (rendered, termination.status, stoppedBy)
     }
     
     /// "15 min" for whole minutes, "90 s" otherwise.
@@ -340,7 +375,7 @@ final class SubagentManager: @unchecked Sendable {
                     "role": Schema(type: "STRING", description: "The persona (e.g., code_reviewer, security_auditor, researcher, engineer)"),
                     "task": Schema(type: "STRING", description: "The exact task prompt for the subagent"),
                     "effort": Schema(type: "STRING", description: "The reasoning effort required. 'easy' for simple/repetitive lookups, 'medium' for standard tasks, 'hard' for complex problem solving."),
-                    "background": Schema(type: "BOOLEAN", description: "Optional. If true, returns immediately while the subagent runs in the background. The system will notify you with the results when done. Refused in a background job run, where delegation must block."),
+                    "background": Schema(type: "BOOLEAN", description: "Optional. If true, returns immediately while the subagent runs in the background. The system will notify you with the results when done, unless the user stops this conversation, which stops the subagent too and leaves its result only in the transcript. Refused in a background job run, where delegation must block."),
                     "criteria": Schema(type: "ARRAY", description: "Optional definition of done for this delegated unit. When present, the subagent runs against these criteria and an independent grader verifies them, returning a trusted verdict. You author them — the subagent does not negotiate them.", items: Schema(type: "OBJECT", properties: [
                         "text": Schema(type: "STRING", description: "The criterion — what 'done' looks like for this unit."),
                         "kind": Schema(type: "STRING", description: "executable | qualitative | humanJudged"),
