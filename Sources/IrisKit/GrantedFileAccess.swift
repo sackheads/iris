@@ -15,13 +15,15 @@ enum GrantedFileError: Error, Equatable {
     case stagingExists(String)
     case io(call: String, errno: Int32)
 
-    /// Who is walking: a granted job run (#282) or the goal grader reading its approved workspace
-    /// (#339). Same walk, same refusals; the sentence names the right directory.
-    enum Scope: Sendable { case grant, approvedWorkspace }
+    /// Who is walking: a granted job run (#282), the goal grader reading its approved workspace
+    /// (#339), or any other approved by-path call, walked from `/` along its decided real path
+    /// (#256). Same walk, same refusals; the sentence names the right directory.
+    enum Scope: Sendable { case grant, approvedWorkspace, approvedPath }
 
     var message: String { message(for: .grant) }
 
     func message(for scope: Scope) -> String {
+        if scope == .approvedPath, let text = approvedPathMessage { return text }
         let who = scope == .grant ? "a granted run" : "the grader"
         let directory = scope == .grant ? "the granted directory" : "the approved workspace"
         switch self {
@@ -38,6 +40,19 @@ enum GrantedFileError: Error, Equatable {
         case .missing(let component): return "no such file or directory: `\(component)`"
         case .stagingExists(let name): return "a staging file `\(name)` already exists; try again"
         case .io(let call, let code): return "\(call) failed: \(String(cString: strerror(code)))"
+        }
+    }
+
+    /// The decided path has no link in it by construction (`IrisPaths.realPath`), so a link met on
+    /// the walk is one put there after the approval.
+    private var approvedPathMessage: String? {
+        switch self {
+        case .symlink(let component):
+            return "`\(component)` is a symlink now, but was not when this path was approved; an approved call does not follow a link — nothing was done"
+        case .badComponent, .emptyPath, .rootUnavailable, .renamed:
+            return "the path is not the one that was approved; nothing was done"
+        default:
+            return nil
         }
     }
 }

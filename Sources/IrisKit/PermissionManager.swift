@@ -54,22 +54,37 @@ struct PermissionManager: Sendable {
             if paths.isUnderIrisDir(details) { return true }
         }
 
-        let rule = PermissionRule(toolName: toolName, details: details)
-        
         // Check global
-        if let globalRules = loadRules(from: globalPermissionsURL), globalRules.contains(rule) {
+        if let globalRules = loadRules(from: globalPermissionsURL),
+           globalRules.contains(where: { Self.rule($0, matches: toolName, details, base: nil) }) {
             return true
         }
         
         // Check project
         if let workspace = workspace {
             let projectURL = projectPermissionsURL(for: workspace)
-            if let projectRules = loadRules(from: projectURL), projectRules.contains(rule) {
+            if let projectRules = loadRules(from: projectURL),
+               projectRules.contains(where: { Self.rule($0, matches: toolName, details, base: workspace) }) {
                 return true
             }
         }
         
         return false
+    }
+
+    /// Exact, or for a file tool the rule's path at its real location (#256), ignoring case where
+    /// the volume does. The dispatcher hands a file tool's `details` over already resolved
+    /// (`IrisEngine.decidedPath`), so a rule saved in another spelling of the same file —
+    /// `~/notes.md`, a path through `/tmp`, or a project rule relative to its workspace (`base`) —
+    /// is the same file and matches. A relative global rule has no directory to be relative to and
+    /// matches only its exact spelling, which a resolved path never is.
+    private static func rule(_ rule: PermissionRule, matches toolName: String, _ details: String, base: String?) -> Bool {
+        guard rule.toolName == toolName else { return false }
+        if rule.details == details { return true }
+        guard toolName == "read_file" || toolName == "write_file", details.hasPrefix("/") else { return false }
+        let spelled = ToolExecutor.resolvePath(rule.details, cwd: base)
+        guard spelled.hasPrefix("/") else { return false }
+        return IrisPaths.samePath(IrisPaths.realPath(spelled), details)
     }
     
     /// Whether this call would write into a directory where a write is a *grant* rather than an

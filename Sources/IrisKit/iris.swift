@@ -3507,6 +3507,14 @@ actor IrisEngine {
         if Self.jobCreationTools.contains(functionCall.name), principal != .main {
             return Self.subagentJobCreationRefusal
         }
+        // #256: the owner approves the directory the watch will be on, not the model's spelling of
+        // it — the executor resolves a relative path against the workspace, and the approval below
+        // used to show it raw.
+        var functionCall = functionCall
+        if functionCall.name == "register_directory_watcher", let raw = functionCall.args["path"]?.stringValue {
+            if raw.contains("\u{0}") { return ToolExecutor.nulPathRefusal(functionCall.name) }
+            functionCall.args["path"] = .string(Self.decidedWatchPath(raw, cwd: workspacePath))
+        }
         // 5b §0.5, structural ruling (#187, broadened under review #340): Iris reads other chats
         // and holds the job tools, so a standing job created there is the one place an injection
         // that survived the guard would outlive the turn — and so is any conversation a turn was
@@ -4363,14 +4371,38 @@ actor IrisEngine {
         } else {
             var needsApproval = false
             var details = ""
+            // #256: the arguments every decision below and the executor see. A file tool's path is
+            // replaced by the one path it is judged by, so nothing after this resolves it again.
+            var callArgs = functionCall.args
+            // #339: set for a grader read spelled inside its contract's approved workspace —
+            // walked from that root by descriptor, whatever approves it.
+            var approvedWorkspaceRoot: String?
+            // The path a by-path open must still be at the moment it is opened; nil for a walked call.
+            var decidedPath: String?
             if functionCall.name == "run_command", let cmd = functionCall.args["command"]?.stringValue {
                 needsApproval = true
                 details = cmd
             } else if functionCall.name == "read_file" || functionCall.name == "write_file", let path = functionCall.args["path"]?.stringValue {
+                if path.contains("\u{0}") { return ToolExecutor.nulPathRefusal(functionCall.name) }
                 needsApproval = true
-                details = path
+                // A grant's walk and a grader's approved-workspace walk descend the spelling and
+                // follow no link, so the spelling is what they act on. Everything else is opened
+                // by path, so it is judged by the real path the kernel would act on.
+                let spelled = ToolExecutor.resolvePath(path, cwd: workspacePath)
+                let contract = principal == .evaluator && functionCall.name == "read_file"
+                    ? await MainActor.run { localState?.conversations.first(where: { $0.id == conversationId })?.goalContract }
+                    : nil
+                // Decided on the spelling, as #339 narrowed it: a path that reaches the workspace
+                // only through a `..` or a link from outside is resolved like any other and asks.
+                if let contract, contract.approvedReadComponents(of: spelled) != nil {
+                    approvedWorkspaceRoot = contract.approvedWorkspace
+                }
+                let walked = sandboxGrant != nil || approvedWorkspaceRoot != nil
+                details = Self.decidedPath(path, cwd: workspacePath, walked: walked)
+                callArgs["path"] = .string(details)
+                if !walked { decidedPath = details }
             }
-            
+
             // R20: a command out of an unattended run is the container's or nobody's, whatever the
             // profile and whatever the allowlist says. The resolution answers "host" the moment the
             // master switch is off or the runtime has gone, however the conversation is pinned, and
@@ -4407,40 +4439,49 @@ actor IrisEngine {
             // exactly the race the walk exists to close. nil under a grant is a refusal at the gate
             // and again in the executor, never a Foundation write.
             let grantedMount = sandboxGrant?.allowedMount(toolName: functionCall.name, details: details, cwd: workspacePath)
-            // #339: a grader read spelled inside its contract's approved workspace is walked from
-            // that root by descriptor, whatever approves it. The decision is by spelling alone, the
-            // same pure function the approval gate's pre-approval rests on, so no read the gate
-            // waves through is ever opened by path — a link swapped in after the gate is met by
-            // the walk, not followed.
-            var approvedWorkspaceRoot: String?
-            if principal == .evaluator, functionCall.name == "read_file" {
-                let contract = await MainActor.run {
-                    localState?.conversations.first(where: { $0.id == conversationId })?.goalContract
-                }
-                if let contract, contract.approvedReadComponents(of: ToolExecutor.resolvePath(details, cwd: workspacePath)) != nil {
-                    approvedWorkspaceRoot = contract.approvedWorkspace
-                }
-            }
+            // #339: `approvedWorkspaceRoot` above is decided on the same path the gate's
+            // pre-approval reads (`isHumanApprovedRead`), by spelling alone, so no read the gate
+            // waves through is ever opened by path — a link swapped in after the gate is met by the
+            // walk, not followed.
             if needsApproval {
                 let approved = await localState?.requestApproval(
-                    toolName: functionCall.name, details: details, args: functionCall.args,
+                    toolName: functionCall.name, details: details, args: callArgs,
                     workspace: workspacePath,
                     conversationId: conversationId, origin: approvalOrigin, inSandbox: useSandbox,
                     callerRole: principal == .evaluator ? .evaluator : .agent,
-                    allowedCommands: evaluatorChecks, grantedMount: grantedMount) ?? false
+                    allowedCommands: evaluatorChecks, grantedMount: grantedMount,
+                    graderReadWalked: approvedWorkspaceRoot != nil) ?? false
                 if approved {
-                    result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot)
+                    result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath)
                 } else {
                     result = Self.deniedToolResult
                 }
             } else {
-                result = await executeToolWithHooks(name: functionCall.name, args: functionCall.args, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot)
+                result = await executeToolWithHooks(name: functionCall.name, args: callArgs, cwd: workspacePath, conversationId: conversationId, useSandbox: useSandbox, isUnattended: isUnattended, grant: sandboxGrant, grantedMount: grantedMount, approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath)
             }
         }
         
         return result
     }
     
+    /// The one path a `read_file`/`write_file` call is approved, allowlisted, protected-checked and
+    /// executed by (#256): tilde expanded and a relative path joined onto the workspace, as the
+    /// executor would, then — unless the call is `walked` from a root by descriptor, which follows
+    /// no link and so acts on the spelling — taken to the real path, so a `..` or a link out of the
+    /// workspace is judged at its target. With no workspace a relative path lands under the
+    /// process's own directory, which is where Foundation would have opened it.
+    nonisolated static func decidedPath(_ path: String, cwd: String?, walked: Bool) -> String {
+        let spelled = ToolExecutor.resolvePath(path, cwd: cwd)
+        return walked ? spelled : IrisPaths.realPath(spelled)
+    }
+
+    /// The directory a `register_directory_watcher` call would watch, as `ToolExecutor` stores
+    /// it; the resolved spelling when there is no such directory, which the executor refuses.
+    nonisolated static func decidedWatchPath(_ path: String, cwd: String?) -> String {
+        let spelled = ToolExecutor.resolvePath(path, cwd: cwd)
+        return WatchRoot.canonical(spelled) ?? spelled
+    }
+
     /// What a tool call returns when its turn was cancelled before it was dispatched.
     static func cancelledToolResult(_ tool: String) -> String {
         "Cancelled: \(tool) did not run."
@@ -4496,9 +4537,16 @@ actor IrisEngine {
         // (#187 §4, R-D4-1): a person clicked "Approve and run" on this call a moment ago, so its
         // write is the human-driven kind a watch is meant to notice, like any other foreground
         // write. The filter is fed from the dispatcher's unattended branch only.
+        // #256: a by-path file tool runs the path the card showed and nothing else, by the same
+        // descriptor walk a live call takes. The click can come days after the card, and a link
+        // swapped into that path in between is refused rather than followed.
+        let decidedPath: String? = grant == nil && (call.toolName == "read_file" || call.toolName == "write_file")
+            ? call.args["path"].map { IrisPaths.throughPrivate(ToolExecutor.resolvePath($0.stringValue, cwd: call.cwd)) }
+            : nil
         return await executeToolWithHooks(name: call.toolName, args: call.args, cwd: call.cwd,
                                           conversationId: conversationId, useSandbox: useSandbox,
-                                          origin: .approvedCall, grant: grant, grantedMount: grantedMount)
+                                          origin: .approvedCall, grant: grant, grantedMount: grantedMount,
+                                          decidedPath: decidedPath)
     }
 
     /// What an approved call that turns out to target a protected directory returns instead of
@@ -4640,7 +4688,7 @@ actor IrisEngine {
         return sanitizedResult + "\n[Iris: the injection guard has withheld \(consecutive) consecutive results from \(name). Do not retry the same approach — use a different source or report what you have.]"
     }
 
-    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil, approvedWorkspaceRoot: String? = nil) async -> String {
+    private func executeToolWithHooks(name: String, args: [String: JSONValue], cwd: String?, conversationId: UUID?, useSandbox: Bool, isUnattended: Bool = false, origin: ToolCallOrigin = .modelTurn, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil, approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil) async -> String {
         var execArgs: [String: JSONValue] = args
 
         // Session strip activity (#217/#19): the detail is derived from the tool's own arguments
@@ -4692,7 +4740,7 @@ actor IrisEngine {
         }
 
         var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant, grantedMount: grantedMount,
-                                              approvedWorkspaceRoot: approvedWorkspaceRoot)
+                                              approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath)
 
         if name == "write_file", result.hasPrefix("Successfully wrote to "),
            let cid = conversationId, let path = execArgs["path"]?.stringValue {

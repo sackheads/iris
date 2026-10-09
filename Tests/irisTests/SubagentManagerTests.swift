@@ -372,12 +372,10 @@ final class SubagentManagerTests: XCTestCase {
         // instead, and the probe is written under a directory of its own rather than into the
         // process working directory, which no test may depend on (#242, #160).
         //
-        // What the rule below actually buys, since review measured it: *not* the approval. With
-        // Vibecop disabled — which it is in the volatile under-test defaults — `consultVibecop`
-        // short-circuits to APPROVE and the write is allowed whether or not any rule exists (the
-        // test passes with this line removed). The rule keeps the outcome independent of that
-        // setting, so a future test that flips `ENABLE_VIBECOP` cannot send this one into a real
-        // consult and a modal nobody answers. The isolation is what the injection is for.
+        // The rule below is what approves the write: since #334 a disabled Vibecop is no verdict,
+        // so without it the call would wait on a prompt nobody answers. It names the file the
+        // write lands on, because since #256 the allowlist judges the resolved path, and a rule for
+        // the bare relative `ledger_probe.txt` names no file at all.
         let base = FileManager.default.temporaryDirectory
             .appendingPathComponent("iris-290-\(UUID().uuidString)", isDirectory: true)
         // The workspace sits *beside* the iris root, never under it: a workspace nested inside
@@ -390,7 +388,8 @@ final class SubagentManagerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: base) }
 
         let permissions = PermissionManager(paths: paths)
-        permissions.allowGlobally(toolName: "write_file", details: "ledger_probe.txt")
+        permissions.allowGlobally(toolName: "write_file",
+                                  details: probeDir.appendingPathComponent("ledger_probe.txt").path)
         state.permissions = permissions
 
         let lock = NSLock(); var count = 0

@@ -289,6 +289,33 @@ struct IrisPaths: Sendable {
         return resolved
     }
 
+    /// `/tmp`, `/var` and `/etc` spelled as the `/private` directories they link to. Those three
+    /// links are the system's, not something a run can swap, so following them here is not a
+    /// fresh resolution; a path recorded through one (an older card, a temp directory) can then be
+    /// walked with no link followed (#256). Any other spelling is returned unchanged.
+    static func throughPrivate(_ path: String) -> String {
+        for link in ["/tmp", "/var", "/etc"] where path == link || path.hasPrefix(link + "/") {
+            return "/private" + path
+        }
+        return path
+    }
+
+    /// Whether two real paths (`realPath` output) name the same file. Exact, or equal but for case
+    /// on a case-insensitive volume (#256). `realPath` already returns the on-disk case of every
+    /// existing component, so the two can differ in case only in a tail that does not exist yet,
+    /// which lives on the volume of the deepest existing ancestor — the one asked here.
+    static func samePath(_ a: String, _ b: String) -> Bool {
+        if a == b { return true }
+        guard a.lowercased() == b.lowercased() else { return false }
+        var url = URL(fileURLWithPath: a)
+        while !FileManager.default.fileExists(atPath: url.path), url.pathComponents.count > 1 {
+            url = url.deletingLastPathComponent()
+        }
+        guard let sensitive = try? url.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
+                .volumeSupportsCaseSensitiveNames else { return false }
+        return !sensitive
+    }
+
     /// True if `rawPath` resolves to a location inside `root` (`~/.iris`).
     /// Tilde-expands (via `IrisEngine.expandTilde`) and standardizes the path (resolving `..`)
     /// first. A literal `~/.iris` spelling always expands through `IrisPaths.default`, so on an
@@ -298,8 +325,11 @@ struct IrisPaths: Sendable {
     func isUnderIrisDir(_ rawPath: String) -> Bool {
         let expanded = IrisEngine.expandTilde(rawPath)   // #275: never `expandingTildeInPath` on a decider
         let resolved = URL(fileURLWithPath: expanded).standardizedFileURL.path
-        let rootPath = root.standardizedFileURL.path
-        return resolved == rootPath || resolved.hasPrefix(rootPath + "/")
+        // The root's real path too: a file tool's path arrives already resolved (#256), so a home
+        // reached through a link (`/var` → `/private/var`) is spelled by its target.
+        return Set([root.standardizedFileURL.path, Self.realPath(root.path)]).contains { rootPath in
+            resolved == rootPath || resolved.hasPrefix(rootPath + "/")
+        }
     }
 
     /// `root` as the model should write it: `~/...` when under the user's home.

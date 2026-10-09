@@ -2732,7 +2732,8 @@ class AppState {
                          conversationId: UUID? = nil, origin: String = "Main agent",
                          inSandbox: Bool = false, callerRole: VibecopCallerRole = .agent,
                          allowedCommands: [String] = [], vibecopEnabled: Bool? = nil,
-                         grantedMount: ContainerMount? = nil, humanOnly: Bool = false) async -> Bool {
+                         grantedMount: ContainerMount? = nil, humanOnly: Bool = false,
+                         graderReadWalked: Bool = false) async -> Bool {
         // No pre-granted-approval branch here, deliberately (#187 R21, 2026-09-21): a call a
         // person clicked "Approve and run" on is dispatched by `IrisEngine.executeApprovedCall`,
         // which runs the tool through the hook layer directly and never enters this function. The
@@ -2811,7 +2812,11 @@ class AppState {
             if toolName == "run_command", contract.isHumanApprovedCheck(details, workingDirectory: workspace) {
                 return true
             }
-            if toolName == "read_file",
+            // `graderReadWalked` is the dispatcher's word that the executor walks this read from
+            // the approved root (#339). It decided that on the model's spelling, which `details`
+            // no longer carries once resolved (#256): a `..` or an outside link resolved into the
+            // workspace must still ask, and must never be opened by path on this pre-approval.
+            if toolName == "read_file", graderReadWalked,
                contract.isHumanApprovedRead(ToolExecutor.resolvePath(details, cwd: workspace)) {
                 return true
             }
