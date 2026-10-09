@@ -23,6 +23,10 @@ final class SubagentManager: @unchecked Sendable {
     /// The summary of a subagent stopped because the background run it worked for ended (#323).
     static let runEndedReason = "Cancelled: the background run this subagent worked for has ended, so the subagent was stopped — its model call and any running command were cancelled, and it did not finish its task."
 
+    /// The summary of a subagent the user stopped: Stop or `/stop` in its parent conversation, or
+    /// the Stop on its row in the session strip (#236).
+    static let userStoppedReason = "Cancelled: the user stopped this subagent, so its model call and any running command were cancelled, and it did not finish its task."
+
     /// Whether a subagent has been stopped from outside; trips once.
     final class StopFlag: @unchecked Sendable {
         private let lock = NSLock()
@@ -72,8 +76,10 @@ final class SubagentManager: @unchecked Sendable {
     /// busy suite outlasts, landing the move inside the turn (#410). Nil in production; called
     /// outside `GoalLoopControl`'s lock (and after `SubagentTurnStart`'s), so a tap that calls back
     /// into the loop cannot deadlock.
+    /// `background` is true for `invoke_subagent background: true`, whose caller is an unstructured
+    /// task nothing cancels: the parent's Stop reaches it through the registry instead (#236).
     func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID,
-                     unit: DelegatedUnit? = nil, turnTimeout: TimeInterval? = nil,
+                     unit: DelegatedUnit? = nil, background: Bool = false, turnTimeout: TimeInterval? = nil,
                      client: (any LLMClientProtocol)? = nil,
                      appState: AppState,
                      recentWrites: RecentWrites = .shared,
@@ -200,8 +206,9 @@ final class SubagentManager: @unchecked Sendable {
         }
 
         // How this subagent is stopped from outside (#323): by the cancellation of the task that is
-        // waiting on it — a run's turn cancelled at its deadline, or the user's Stop — or by the
-        // drain of the run it works for. The verdict is recorded before the engine is cancelled,
+        // waiting on it — a run's turn cancelled at its deadline, or the user's Stop — by the
+        // drain of the run it works for, or by the user stopping it directly, which is the only
+        // way to reach a background subagent (#236). The verdict is recorded before the engine is cancelled,
         // for the reason the timeout below classifies first: the cancelled engine reports a
         // `.failed` of its own, and that must not be the one that lands.
         let stopped = StopFlag()
@@ -214,7 +221,9 @@ final class SubagentManager: @unchecked Sendable {
             engine.haltGoalLoop(for: subagentId)
             engineTask.cancel()
         }
-        await MainActor.run { appState.registerLiveSubagent(subagentId, stop: stop) }
+        await MainActor.run {
+            appState.registerLiveSubagent(subagentId, parent: parentConversationId, background: background, stop: stop)
+        }
 
         var gracePolls = 0
         var timedOut = false
@@ -258,6 +267,8 @@ final class SubagentManager: @unchecked Sendable {
         }
         let termination = holder.get() ?? SubagentTermination(status: .failed, summary: "Subagent completed with no summary.", calledGoalComplete: false)
         let wasStopped = stopped.isTripped
+        // Decided: a later Stop from the user must not cut a completed subagent's last turn short.
+        await MainActor.run { appState.settleLiveSubagent(subagentId) }
 
         // Hard stop for a subagent ended from outside: cancel the engine task (already done by
         // `stop`, harmless twice) and unstick any pending approval.

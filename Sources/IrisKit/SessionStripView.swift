@@ -186,12 +186,28 @@ private struct SessionRowView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                // #236: the only way to stop a background subagent short of quitting. The logic is
+                // `AppState.stopSubagent`; a subagent already settled just ignores it.
+                if session.kind == .subagent, !Self.isFinished(session.phase) {
+                    Button { state.stopSubagent(sessionId) } label: {
+                        Image(systemName: "stop.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.mini)
+                    .font(.caption)
+                    .help("Stop this subagent")
+                }
             }
             .padding(.vertical, 1)
             .contentShape(Rectangle())
             .onTapGesture { if !isMain { onTap() } }
             .help(isMain ? "" : "Click to view this session's transcript")
         }
+    }
+
+    private static func isFinished(_ phase: SessionSummary.Phase) -> Bool {
+        if case .finished = phase { return true }
+        return false
     }
 
     /// `nil` (via `elapsedStartTime`) while the session is `.idle` — omit the elapsed time

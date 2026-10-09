@@ -388,9 +388,15 @@ class AppState {
     /// was started for and how to stop it (#323). Registered by `SubagentManager` and removed only
     /// once the subagent's work has actually ended, so an entry here is a task still alive. A run's
     /// drain stops whatever is still registered under it: no subagent outlives its run. Transient.
+    /// `parent` and `background` let the user's Stop reach a background subagent, which no
+    /// cancellation of the parent's tasks does (#236). `settled` is set once its result is decided:
+    /// a settled subagent's last turn may still be writing, and the user has nothing left to stop.
     struct LiveSubagent {
         let run: UUID
+        let parent: UUID
+        let background: Bool
         let stop: @Sendable (String) -> Void
+        var settled = false
     }
     @ObservationIgnored private var liveSubagentTasks: [UUID: LiveSubagent] = [:]
     /// State-gated tools each conversation has declared (5c §0.1). Transient, never persisted.
@@ -1022,18 +1028,22 @@ class AppState {
     /// the engine's next turn boundary (see `IrisEngine.processInput`), which then clears the
     /// thinking indicator via the tracked task's completion.
     func interruptActiveConversation() {
-        guard let convId = selectedConversationId, isThinking else { return }
+        // A background subagent may be working while nothing else is, between its turns included.
+        guard let convId = selectedConversationId,
+              isThinking || !stoppableBackgroundSubagents(under: convId).isEmpty else { return }
+        // Its subagents run in their own tasks, which `cancelTasks` does not reach (#236).
+        let stopped = stopBackgroundSubagents(under: convId)
         // A rotation runs under no conversation id, so `cancelTasks` cannot reach it. It reports
         // its own outcome ("Rotation stopped; …"), so no "Interrupted." unless more was running.
         if let rotation = rotationTask, rotationConversationIds.contains(convId) {
             rotation.cancel()
-            guard activeTasks.values.contains(where: { $0.conversationId == convId }) else { return }
+            guard stopped > 0 || activeTasks.values.contains(where: { $0.conversationId == convId }) else { return }
         }
         let dropped = pendingUserMessageCount(for: convId)
         cancelTasks(for: convId)
         let notice = dropped == 0 ? "Interrupted."
             : "Interrupted. \(dropped) queued message\(dropped == 1 ? "" : "s") dropped."
-        appendMessage(role: .system, content: notice, to: convId)
+        appendMessage(role: .system, content: notice + Self.stoppedSubagentsSuffix(stopped), to: convId)
     }
     
     /// `select` nil means the default rule — select the new conversation unless it is a subagent
@@ -1740,8 +1750,9 @@ class AppState {
             return
         } else if trimmed.hasPrefix("/stop") {
             clearGoal(for: convId)
+            let stopped = stopBackgroundSubagents(under: convId)
             cancelTasks(for: convId)
-            appendMessage(role: .system, content: "Goal mode cancelled.", to: convId)
+            appendMessage(role: .system, content: "Goal mode cancelled." + Self.stoppedSubagentsSuffix(stopped), to: convId)
             return
         } else if trimmed == "/skills" || trimmed.hasPrefix("/skills ") {
             handleSkillsCommand(trimmed, convId: convId)
@@ -3005,8 +3016,55 @@ class AppState {
 
     /// Records a subagent whose engine is starting, under the run it works for (itself, when it
     /// works for none). Called after `linkBackgroundDescendant`, which is what names the run.
-    func registerLiveSubagent(_ subagentId: UUID, stop: @escaping @Sendable (String) -> Void) {
-        liveSubagentTasks[subagentId] = LiveSubagent(run: backgroundRunRoot(of: subagentId), stop: stop)
+    func registerLiveSubagent(_ subagentId: UUID, parent: UUID, background: Bool,
+                              stop: @escaping @Sendable (String) -> Void) {
+        liveSubagentTasks[subagentId] = LiveSubagent(run: backgroundRunRoot(of: subagentId), parent: parent,
+                                                     background: background, stop: stop)
+    }
+
+    /// Its result is decided: from here on the user's Stop leaves it alone (#236).
+    func settleLiveSubagent(_ subagentId: UUID) {
+        liveSubagentTasks[subagentId]?.settled = true
+    }
+
+    /// Stops one subagent at the user's request: the session strip's Stop (#236). Through the
+    /// same `stop` the run drain uses, so the loop is halted before its turn is cancelled. False
+    /// when there is nothing to stop: unknown, or already settled.
+    @discardableResult
+    func stopSubagent(_ subagentId: UUID) -> Bool {
+        guard let live = liveSubagentTasks[subagentId], !live.settled else { return false }
+        live.stop(SubagentManager.userStoppedReason)
+        return true
+    }
+
+    /// The unsettled background subagents working under `conversationId`: its own, and any a
+    /// subagent under it spawned in turn. A foreground subagent is not one of them, because the
+    /// cancellation of the turn that waits on it already stops it (#323); it is walked through,
+    /// since a background subagent it spawned is reached by nothing else.
+    func stoppableBackgroundSubagents(under conversationId: UUID) -> [UUID] {
+        var tree: Set<UUID> = [conversationId]
+        var grew = true
+        while grew {
+            grew = false
+            for (id, live) in liveSubagentTasks where !tree.contains(id) && tree.contains(live.parent) {
+                tree.insert(id)
+                grew = true
+            }
+        }
+        return liveSubagentTasks.filter { tree.contains($0.key) && $0.value.background && !$0.value.settled }.map(\.key)
+    }
+
+    /// Stops every background subagent under `conversationId` (#236): Stop and `/stop` in the
+    /// parent. Returns how many it stopped, for the notice.
+    @discardableResult
+    func stopBackgroundSubagents(under conversationId: UUID) -> Int {
+        let ids = stoppableBackgroundSubagents(under: conversationId)
+        return ids.filter { stopSubagent($0) }.count
+    }
+
+    /// " Also stopped N background subagent(s).", or "" for none.
+    static func stoppedSubagentsSuffix(_ count: Int) -> String {
+        count == 0 ? "" : " Also stopped \(count) background subagent\(count == 1 ? "" : "s")."
     }
 
     func unregisterLiveSubagent(_ subagentId: UUID) {
