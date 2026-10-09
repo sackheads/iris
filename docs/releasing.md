@@ -69,9 +69,11 @@ If it ever needs recreating: an orphan branch with an `appcast.xml` containing a
 
 ## Cutting a release
 
-From a clean, pushed `main`:
+From a clean, pushed `main` — in practice the main checkout itself, since `main` cannot be
+checked out in a second worktree:
 
 ```sh
+git switch main && git pull --ff-only   # in the main checkout; the script refuses anything else
 scripts/release.sh 1.2.3 --dry-run   # builds, notarizes, DMGs, signs, prints the appcast item; publishes nothing
 scripts/release.sh 1.2.3             # the same, then tags v1.2.3, creates the GitHub release, pushes the appcast
 ```
@@ -116,7 +118,10 @@ appcast links to the release page. Edit the release on GitHub afterwards if the 
 need help.
 
 Each run leaves its work directory (DerivedData, archive, DMG) under `$TMPDIR`; delete it when
-done. The script prints it (`work dir: …`) as soon as it's created.
+done. The script prints it (`work dir: …`) as soon as it's created. **Never open the `Iris.app`
+(or the DMG's copy) in that directory**, dry run included: it carries the installed app's
+identity (`com.bnaylor.iris`), so it opens `~/.iris` and, on a machine that has never run the
+installed app, spends the one-time settings import. Install releases from the published DMG.
 
 ## If something goes wrong
 
