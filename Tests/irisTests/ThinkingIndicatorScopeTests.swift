@@ -4,10 +4,11 @@ import Observation
 @testable import IrisKit
 
 /// #234: the "Iris is thinking" indicator (and the spectrum line, LED bar, and Escape's
-/// interrupt guard) must reflect the SELECTED conversation's own turn, not whether ANY
-/// conversation (main, subagent, evaluator) has one running. No view reads the global
-/// `AppState.isThinking` any more — every per-conversation surface goes through
-/// `AppState.isThinking(in:)`; the global stays only as a turn-lifecycle probe other tests use
+/// interrupt guard) must reflect the SELECTED conversation's own work, not whether ANY
+/// conversation (main, subagent, evaluator) has a turn running. No view reads the global
+/// `AppState.isThinking` any more — the indicator surfaces go through `isThinking(in:)`, and
+/// Escape through the wider `hasInterruptibleWork(in:)`, which also counts the conversation's
+/// background subagents (#236, see `SubagentUserStopTests`); the global stays only as a turn-lifecycle probe other tests use
 /// (`JobRetryTests`, `CheckpointJudgementResolutionTests`) — see its doc comment.
 ///
 /// Each test drives `beginThinking()`/`beginEngineTurn(for:)` (and their `end*` counterparts) in

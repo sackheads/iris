@@ -774,7 +774,7 @@ struct ChatView: View {
     private func handleEscape() {
         if !selectedMessageIDs.isEmpty {
             selectedMessageIDs.removeAll()
-        } else if state.isThinking(in: state.selectedConversationId) {
+        } else if state.hasInterruptibleWork(in: state.selectedConversationId) {
             state.interruptActiveConversation()
         }
     }

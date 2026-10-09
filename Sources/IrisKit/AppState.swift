@@ -334,7 +334,7 @@ class AppState {
     /// was exactly the bug in #234 — a subagent's turn in one conversation lit the "Iris is
     /// thinking" indicator in every window, regardless of which conversation was selected. No view
     /// reads this any more; every per-conversation surface (the composer's row, the spectrum
-    /// line, the LED bar, Escape) reads `isThinking(in:)` instead.
+    /// line, the LED bar) reads `isThinking(in:)` instead, and Escape `hasInterruptibleWork(in:)`.
     ///
     /// Kept anyway — per the #438 review's "write-only" finding — because it is still a correct,
     /// cheap, synchronous probe for "does ANY turn, anywhere, currently hold the thinking
@@ -737,7 +737,7 @@ class AppState {
     /// Whether `conversationId` itself has a turn running — the per-conversation counterpart to
     /// the global `isThinking` (#234). `nil` (no selection) is never thinking. Every UI surface
     /// that shows status for ONE conversation — the composer's "Iris is thinking..." row, the
-    /// spectrum line, the LED bar, Escape's interrupt guard — must call this with
+    /// spectrum line, the LED bar; Escape via `hasInterruptibleWork(in:)` — must call this with
     /// `selectedConversationId`/the conversation it is rendering, not read `isThinking` directly,
     /// or a subagent/evaluator turn (or any other conversation's turn) lights up a conversation
     /// that is actually idle. Built on `hasTurnInFlight` rather than a parallel flag, per #234's
@@ -755,14 +755,21 @@ class AppState {
     func isThinking(in conversationId: UUID?) -> Bool {
         guard let conversationId else { return false }
         if hasTurnInFlight(for: conversationId) { return true }
-        // Both read unconditionally, not `rotationTask != nil && rotationConversationIds...`:
-        // `&&` short-circuits, and Observation only tracks a property actually read during the
-        // call, so skipping the second read whenever `rotationTask` is nil would mean a render
-        // that happens while idle never registers `rotationConversationIds` as a dependency, and
-        // would miss the transition into a rotation (#438 review).
+        // Belt and braces: `&&` would be correct too, since every rotation transition also flips
+        // `rotationTask`, which is always read and tracked. Reading both keeps each field a
+        // dependency on its own, which `rotationFieldsAreObservedByIsThinking` pins (#438 review).
         let rotating = rotationTask != nil
         let inRotation = rotationConversationIds.contains(conversationId)
         return rotating && inRotation
+    }
+
+    /// Whether Esc/Stop has anything to reach in `conversationId`: its own turn or rotation, or a
+    /// background subagent working for it while it is idle (#236). Wider than `isThinking(in:)` on
+    /// purpose; the indicator stays scoped to the conversation's own turn. Both Esc guards
+    /// (`ChatView.handleEscape`, `interruptActiveConversation`) go through this one predicate.
+    func hasInterruptibleWork(in conversationId: UUID?) -> Bool {
+        guard let conversationId else { return false }
+        return isThinking(in: conversationId) || !backgroundSubagents(under: conversationId).isEmpty
     }
 
     func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID, isPeer: Bool = false) {
@@ -1130,13 +1137,11 @@ class AppState {
     /// the engine's next turn boundary (see `IrisEngine.processInput`), which then clears the
     /// thinking indicator via the tracked task's completion.
     func interruptActiveConversation() {
-        // A background subagent may be working while nothing else is, between its turns included.
-        // Otherwise scoped to the selected conversation, not the global `isThinking`: Esc on an
-        // idle conversation while a DIFFERENT one was busy used to append a stray "Interrupted."
-        // (#234). `isThinking(in:)`, not the narrower `hasTurnInFlight`, so this still reaches a
-        // rotation mid-summary on the new conversation (see that method's doc comment).
-        guard let convId = selectedConversationId,
-              isThinking(in: convId) || !backgroundSubagents(under: convId).isEmpty else { return }
+        // Scoped to the selected conversation, not the global `isThinking`: Esc on an idle
+        // conversation while a DIFFERENT one was busy used to append a stray "Interrupted." (#234).
+        // Still reaches a background subagent working while its parent is idle (#236) and a
+        // rotation mid-summary on the new conversation (see `isThinking(in:)`).
+        guard let convId = selectedConversationId, hasInterruptibleWork(in: convId) else { return }
         // Its subagents run in their own tasks, which `cancelTasks` does not reach (#236).
         let stopped = stopBackgroundSubagents(under: convId)
         // A rotation runs under no conversation id, so `cancelTasks` cannot reach it. It reports
