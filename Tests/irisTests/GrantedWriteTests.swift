@@ -4,7 +4,7 @@ import Foundation
 
 /// #282 §0.13 — the descriptor walk. Temp directories only; every "outside" is a sibling temp dir
 /// the test checks stayed empty.
-@Suite("Granted writes go through a descriptor walk (#282)")
+@Suite("Granted writes go through a descriptor walk (#282)", .timeLimit(.minutes(1)))
 struct GrantedWriteTests {
     struct Tree {
         let base: URL; let root: URL; let outside: URL

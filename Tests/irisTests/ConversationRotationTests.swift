@@ -6,7 +6,7 @@ import Foundation
 /// the pin, summarise the old one into the new one, then archive the old one. The order is what
 /// these tests pin: cards follow the pin from the moment it moves, and the archive comes last.
 @MainActor
-@Suite struct ConversationRotationTests {
+@Suite(.timeLimit(.minutes(1))) struct ConversationRotationTests {
 
     /// Answers the summary request per `summary`, every other request with plain text, and records
     /// each request with the tier it asked for. The summary request is recognised by its prompt,
@@ -150,7 +150,7 @@ import Foundation
     }
 
     private func waitForEntry(_ gate: JobSchedulerTests.Gate) async throws {
-        try await bounded("gate entry") { await gate.waitForEntry() }
+        try await gate.waitForEntry(within: 10)
     }
 
     /// Opens `gate` when the test leaves, on every path, so nothing parked on it outlives the test.

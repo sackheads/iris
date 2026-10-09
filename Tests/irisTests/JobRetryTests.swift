@@ -7,7 +7,7 @@ import Foundation
 /// sleep assertion the run is wrapped in, which is the other half of "a run that started finishes
 /// or is stopped": a Mac that idles mid-run would otherwise leave a `running` row behind.
 @MainActor
-@Suite("Job retry, pause and the sleep assertion (#187)")
+@Suite("Job retry, pause and the sleep assertion (#187)", .timeLimit(.minutes(1)))
 struct JobRetryTests {
 
     // MARK: Fixtures
@@ -679,13 +679,13 @@ struct JobRetryTests {
     }
 
     @Test("the run waits for the claim, and the deadline taking it is what releases the wait")
-    func theRunWaitsForWhicheverClaimsTheEnding() async {
+    func theRunWaitsForWhicheverClaimsTheEnding() async throws {
         let ending = DeadlineFlag()
         let waiting = Task { await ending.wait() }
         // Resolved by the claim, not by the racer it belongs to finishing: this is the difference
         // between a run that ends at its deadline and one that waits on a turn that never returns.
         #expect(await ending.claim(deadline: true) == true)
-        #expect(await waiting.value == true)
+        #expect(try await value(of: waiting) == true)
     }
 
     @Test("a turn that came back on its own is never written up as a timeout, whatever the watchdog does")
@@ -762,7 +762,7 @@ struct JobRetryTests {
         // Bounded, like the deadline tests: a queue-path regression otherwise stalls the run until
         // the 600 s default deadline. Opened on the way out so a failed test still unwinds.
         defer { Task { await gate.open() } }
-        try #require(await finished(Task { await gate.waitForEntry() }) != nil, "the first fire reached the model")
+        try await gate.waitForEntry()  // the first fire reached the model
         let held = Task { await runner.fire(job: j, origin: .watcher(paths: ["/tmp/in/b.txt"])) }
         try #require(await finished(held) != nil, "the second fire was held, not run alongside the first")
         await gate.open()

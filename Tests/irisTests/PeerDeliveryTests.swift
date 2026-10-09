@@ -48,7 +48,7 @@ private func withTimeout<T: Sendable>(_ ms: Int, _ op: @Sendable @escaping () as
 /// pin is framing, labelling and attribution, none of which is tier 2/3's business — and tier 1
 /// structural sanitisation still runs, so `busyPeerMessageIsSanitised` keeps its teeth.
 @MainActor
-@Suite("Peer delivery")
+@Suite("Peer delivery", .timeLimit(.minutes(1)))
 struct PeerDeliveryTests {
 
     @Test("a session cannot frame its message as a system source")

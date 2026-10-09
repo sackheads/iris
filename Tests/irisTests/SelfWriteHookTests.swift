@@ -10,7 +10,7 @@ import Foundation
 /// Every test injects its own registry and writes into a temp directory of its own (invariant 7):
 /// `RecentWrites.shared` is never reached here, and nothing lands in the machine's `~/.iris`.
 @MainActor
-@Suite("Unattended file-tool writes are recorded (#187)")
+@Suite("Unattended file-tool writes are recorded (#187)", .timeLimit(.minutes(1)))
 struct SelfWriteHookTests {
 
     // MARK: fixtures

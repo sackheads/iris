@@ -20,7 +20,7 @@ private func user(_ text: String) -> Content { Content(role: "user", parts: [Par
 private func model(_ text: String) -> Content { Content(role: "model", parts: [Part(text: text)]) }
 
 /// The block itself: what it renders, and where it is allowed to land (5a §1, Review Focus 2).
-@Suite("TurnContext block (5a)")
+@Suite("TurnContext block (5a)", .timeLimit(.minutes(1)))
 struct TurnContextTests {
     private let context = TurnContext(sections: [
         .init(heading: "Mid-Term Fact Store Memory (JIT Context)", body: "- [f1] Brian lives in Seattle"),
@@ -261,7 +261,7 @@ private func systemText(_ r: GeminiRequest) -> String {
 /// never reaches history (5a §1, §3 unit tests 2-4). In-memory fact store and an injected peer
 /// count; nothing here reads `FactStoreManager.shared` or mutates `ConfigManager.shared`.
 @MainActor
-@Suite("TurnContext on an engine turn (5a)")
+@Suite("TurnContext on an engine turn (5a)", .timeLimit(.minutes(1)))
 struct TurnContextEngineTests {
     @MainActor private struct Run {
         let app: AppState
@@ -437,7 +437,7 @@ private final class FlakyOnceForMarkerInferenceEngine: AuxiliaryInferenceEngine,
 /// process-global `MemoryManager.shared.paths` (invariant 7). No `.serialized` needed — nothing
 /// here shares mutable state across tests any more.
 @MainActor
-@Suite("USER.md / AGENTS.md guarded-text cache (5a Task 7)")
+@Suite("USER.md / AGENTS.md guarded-text cache (5a Task 7)", .timeLimit(.minutes(1)))
 struct GuardedFileCacheTests {
 
     private func newConversation(_ app: AppState) -> UUID {
@@ -885,7 +885,7 @@ struct GuardedFileCacheTests {
 /// gets the section, only when the ledger has something to say, built fresh from a real
 /// `JobLedger` over an in-memory `ConversationStore` — never a fake.
 @MainActor
-@Suite("Recent Activity briefing (5b §0.3)")
+@Suite("Recent Activity briefing (5b §0.3)", .timeLimit(.minutes(1)))
 struct BriefingEngineTests {
     private func leadText(_ request: GeminiRequest) -> String {
         request.contents.first?.parts.first?.text ?? ""
@@ -962,7 +962,7 @@ struct BriefingEngineTests {
 /// 5c §0.8/§0.9 on a real engine turn: the hints every round of a turn carries. A real
 /// `JobLedger` over an in-memory store decides the background prefix's TTL; no globals.
 @MainActor
-@Suite("Cache hints on an engine turn (5c)")
+@Suite("Cache hints on an engine turn (5c)", .timeLimit(.minutes(1)))
 struct CacheHintsEngineTests {
     private func run(pinned: Bool = false, background: Bool = false, jobs: [Job] = [],
                      override: CacheTTLPolicy? = nil, profile: JobProfile? = nil,

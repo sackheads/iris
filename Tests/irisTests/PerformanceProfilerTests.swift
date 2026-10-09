@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import IrisKit
 
-@Suite("PerformanceProfiler value types")
+@Suite("PerformanceProfiler value types", .timeLimit(.minutes(1)))
 struct PerformanceProfilerValueTypeTests {
 
     @Test("CommandProfile.add accumulates ms and count per category")
@@ -50,7 +50,7 @@ struct PerformanceProfilerValueTypeTests {
     }
 }
 
-@Suite("PerformanceProfiler lifecycle")
+@Suite("PerformanceProfiler lifecycle", .timeLimit(.minutes(1)))
 struct PerformanceProfilerLifecycleTests {
 
     @Test("record attributes to the active turn")
@@ -149,7 +149,7 @@ struct PerformanceProfilerLifecycleTests {
     }
 }
 
-@Suite("PerformanceProfiler measure helpers")
+@Suite("PerformanceProfiler measure helpers", .timeLimit(.minutes(1)))
 struct PerformanceProfilerMeasureTests {
 
     @Test("measure records elapsed time to the current turn on shared profiler")

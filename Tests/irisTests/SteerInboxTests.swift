@@ -28,7 +28,7 @@ private func eventually(_ timeoutMs: Int = 3000, _ condition: @MainActor @Sendab
 /// A user message sent while a turn is already running must steer that turn, or follow it,
 /// never start a second turn interleaved on the same history (#172).
 @MainActor
-@Suite("Mid-turn user messages (#172)")
+@Suite("Mid-turn user messages (#172)", .timeLimit(.minutes(1)))
 struct SteerInboxTests {
     private var sampleAttachment: FileAttachment {
         FileAttachment(id: UUID(), filename: "a.txt", fileURL: URL(fileURLWithPath: "/tmp/a.txt"),
@@ -142,7 +142,7 @@ struct SteerInboxTests {
     /// arrival never runs through `runThinkingTask`, so the engine turn's own end hop is the only
     /// thing that can hand the queue on; without it the bubble appears and is silently ignored.
     @Test("a message typed during an arrival turn is drained when that turn ends")
-    func arrivalTurnDrainsQueue() async {
+    func arrivalTurnDrainsQueue() async throws {
         let gate = Gate()
         let client = ScriptedStreamClient([
             [.event(.textDelta("arrival")), .block { await gate.wait() }, .event(.done(finishReason: nil))],
@@ -169,7 +169,7 @@ struct SteerInboxTests {
         #expect(client.calls == 1)
 
         await gate.release()
-        _ = await arrival.value
+        _ = try await value(of: arrival)
         #expect(await eventually { client.calls == 2 && !app.isThinking })
         #expect(app.pendingUserMessageCount(for: id) == 0, "the arrival's end hop drained it")
         #expect(texts(app, id, .agent) == ["arrival", "answer"])

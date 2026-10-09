@@ -7,7 +7,7 @@ import Foundation
 /// run could delegate its way to `autoApproveTools` → Vibecop → a modal dialog nobody is there to
 /// answer: either a local model approving a mutating command unattended, or a run parked forever.
 @MainActor
-@Suite("A descendant of a background run is background too")
+@Suite("A descendant of a background run is background too", .timeLimit(.minutes(1)))
 struct BackgroundDescendantTests {
 
     private func textResponse(_ text: String) -> GeminiResponse {

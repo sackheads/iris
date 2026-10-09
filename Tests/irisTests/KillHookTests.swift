@@ -55,7 +55,7 @@ struct KillHookTests {
         }
         #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5))
         call.cancel()
-        _ = try? await call.value
+        _ = try? await value(of: call)
         #expect(await calls.refired(), "got: \(calls.all)")
     }
 
@@ -74,7 +74,7 @@ struct KillHookTests {
             withUnsafeCurrentTask { $0?.cancel() }
             return try await CLIProcessRunner(executable: "/bin/sh").run(["-c", "true"], timeoutSeconds: 30, onKill: calls.hook)
         }
-        await #expect(throws: CancellationError.self) { _ = try await call.value }
+        await #expect(throws: CancellationError.self) { _ = try await value(of: call) }
         // The ladder that a pre-launch cancel starts finishes after its grace; it must still find
         // nothing running.
         try? await Task.sleep(nanoseconds: UInt64((CLIProcessRunner.killGraceSeconds + 0.5) * 1e9))
@@ -95,7 +95,7 @@ struct KillHookTests {
         }
         #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5))
         runner.terminate()
-        let output = try await call.value.get()
+        let output = try await value(of: call).get()
         #expect(output.killed)
         #expect(calls.all == ["iris.process-group"])
     }

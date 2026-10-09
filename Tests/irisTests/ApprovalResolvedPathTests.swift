@@ -12,7 +12,7 @@ import Foundation
 /// real allowlist or `~/.iris`. Temp directories sit under `/var`, a link to `/private/var`, so
 /// the spelling a test writes is not the real path — which is exactly what these tests need.
 @MainActor
-@Suite("Approval judges the resolved path (#256)")
+@Suite("Approval judges the resolved path (#256)", .timeLimit(.minutes(1)))
 struct ApprovalResolvedPathTests {
 
     // MARK: fixtures
@@ -87,7 +87,7 @@ struct ApprovalResolvedPathTests {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         if shown == nil { state.denyPendingApprovals(for: id) }
-        await turn.value
+        try await value(of: turn)
         return (shown, state, id)
     }
 
@@ -388,7 +388,7 @@ struct ApprovalResolvedPathTests {
         state.setGoalContract(for: cid, contract)
         state.setWorkspace(for: cid, path: f.real(f.workspace))
 
-        func asks(walked: Bool) async -> Bool {
+        func asks(walked: Bool) async throws -> Bool {
             let finished = Locked(false)
             let call = Task { @MainActor in
                 defer { finished.mutate { $0 = true } }
@@ -405,13 +405,13 @@ struct ApprovalResolvedPathTests {
                 try? await Task.sleep(nanoseconds: 5_000_000)
             }
             if !queued { state.denyPendingApprovals(for: cid) }
-            _ = await call.value
+            _ = try await value(of: call)
             return queued
         }
         // The same resolved path either way: spelled inside, the dispatcher walks it and it is
         // pre-approved; spelled `../ws/notes.txt` or through an outside link, it is not walked and asks.
-        #expect(await asks(walked: true) == false)
-        #expect(await asks(walked: false) == true)
+        #expect(try await asks(walked: true) == false)
+        #expect(try await asks(walked: false) == true)
     }
 
     // MARK: the pure pieces

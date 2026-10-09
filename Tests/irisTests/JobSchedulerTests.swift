@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import IrisKit
 
-@Suite("JobScheduler")
+@Suite("JobScheduler", .timeLimit(.minutes(1)))
 struct JobSchedulerTests {
     final class Fired: @unchecked Sendable { var names: [String] = []; let lock = NSLock()
         func add(_ n: String) { lock.lock(); names.append(n); lock.unlock() } }
@@ -32,8 +32,13 @@ struct JobSchedulerTests {
             await withCheckedContinuation { openWaiters.append($0) }
         }
 
-        /// Returns once the handler has reached `arriveAndWait`.
-        func waitForEntry() async {
+        /// Returns once the handler has reached `arriveAndWait`, or fails the test after
+        /// `seconds` rather than parking it for ever (#435).
+        func waitForEntry(within seconds: Double = 30, sourceLocation: SourceLocation = #_sourceLocation) async throws {
+            try await value(of: Task { await self.entry() }, within: seconds, sourceLocation: sourceLocation)
+        }
+
+        private func entry() async {
             if entered { return }
             await withCheckedContinuation { entryWaiters.append($0) }
         }
@@ -149,12 +154,12 @@ struct JobSchedulerTests {
         try store.ledger.upsert(job)
 
         let first = Task { await s.tick() }
-        await gate.waitForEntry()
+        try await gate.waitForEntry()
         try store.ledger.setNextFire(jobId: job.id, at: now.addingTimeInterval(-1), lastRunAt: now)
         await gate.open()
         #expect(await s.tick() == 1)
         #expect(fired.names == ["slow", "slow"])
-        #expect(await first.value == 1)
+        #expect(try await value(of: first) == 1)
     }
 
     @Test("a job whose handler is still running is handed over once per occurrence, not once per poll")
@@ -180,7 +185,7 @@ struct JobSchedulerTests {
         try store.ledger.upsert(job)
 
         let firing = Task { await s.tick() }
-        await gate.waitForEntry()
+        try await gate.waitForEntry()
         // Three polls inside the same minute: only the first of them finds the job due.
         var handovers = 0
         for offset in [61.0, 71.0, 81.0] {
@@ -188,7 +193,7 @@ struct JobSchedulerTests {
             handovers += await s.tick()
         }
         await gate.open()
-        _ = await firing.value
+        _ = try await value(of: firing)
 
         #expect(handovers == 1, "one occurrence, one trigger")
         #expect(calls.value == 2, "the held-open fire, and the one occurrence that came due")

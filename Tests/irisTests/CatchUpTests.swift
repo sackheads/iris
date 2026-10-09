@@ -7,7 +7,7 @@ import Foundation
 ///
 /// Every test here pins the clock and puts an eight-hour gap in front of a quarter-hourly cron, so
 /// the three policies are compared on exactly the same 32 missed occurrences.
-@Suite("Catch-up after sleep")
+@Suite("Catch-up after sleep", .timeLimit(.minutes(1)))
 struct CatchUpTests {
 
     // MARK: A fixed day, in UTC
@@ -99,7 +99,12 @@ struct CatchUpTests {
             await withCheckedContinuation { openWaiters.append($0) }
         }
 
-        func waitForEntry() async {
+        /// Fails the test after `seconds` rather than parking it for ever (#435).
+        func waitForEntry(within seconds: Double = 30, sourceLocation: SourceLocation = #_sourceLocation) async throws {
+            try await value(of: Task { await self.entry() }, within: seconds, sourceLocation: sourceLocation)
+        }
+
+        private func entry() async {
             if entered { return }
             await withCheckedContinuation { entryWaiters.append($0) }
         }
@@ -185,9 +190,8 @@ struct CatchUpTests {
         #expect(await scheduler.tick() == 0)
     }
 
-    // `.timeLimit`, because the rendezvous below is an unbounded continuation: the failure it
-    // exists to catch fails fast, but a future change that handed this job no fires at all would
-    // park `waitForEntry()` for ever and hang the suite instead of failing it.
+    // The failure this exists to catch fails fast, and a future change that handed this job no
+    // fires at all fails `waitForEntry()` at its bound (#435); `.timeLimit` is the backstop.
     @Test("a burst still running is not planned a second time by an overlapping tick",
           .timeLimit(.minutes(1)))
     func aTruncatedBurstIsNotPlannedTwice() async throws {
@@ -204,13 +208,13 @@ struct CatchUpTests {
         try store.ledger.upsert(Self.job(.replay(cap: 5)))
 
         let firstTick = Task { await scheduler.tick() }
-        await gate.waitForEntry()
+        try await gate.waitForEntry()
         #expect(try store.ledger.job(named: "behind")?.nextFireAt == Self.at(8, 30),
                 "the row is due again on purpose: three of the five slots have been handed over")
 
         let overlapping = await scheduler.tick()
         await gate.open()
-        let started = await firstTick.value
+        let started = try await value(of: firstTick)
 
         #expect(overlapping == 0, "the burst in flight owns the job until it ends")
         #expect(fires.overlapped == false, "and a job never runs beside itself")

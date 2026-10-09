@@ -7,7 +7,7 @@ import Foundation
 /// usage only on their own conversations, so the run row, the mid-run `TurnBudget` check and the
 /// day's `tokensToday` all missed delegated spend.
 @MainActor
-@Suite("Delegated spend is charged to the run (#313)")
+@Suite("Delegated spend is charged to the run (#313)", .timeLimit(.minutes(1)))
 struct DelegatedSpendTests {
 
     // MARK: Fixtures
@@ -370,7 +370,7 @@ struct DelegatedSpendTests {
 
         let jobRunner = runner(store, state, engine, config)
         let fire = Task { await jobRunner.fire(job: job, origin: .schedule) }
-        await gate.waitForEntry()
+        try await gate.waitForEntry()
 
         // Parked in the subagent's second call: the parent has made no round since delegating.
         let midRun = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
@@ -378,7 +378,7 @@ struct DelegatedSpendTests {
         #expect(midRun.totalTokens == 60, "the subagent's first round is on the row while it is still working")
 
         await gate.open()
-        _ = await fire.value
+        _ = try await value(of: fire)
         let finished = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(finished.totalTokens == 66)
     }

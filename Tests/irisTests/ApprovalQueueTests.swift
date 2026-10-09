@@ -3,7 +3,7 @@ import Foundation
 @testable import IrisKit
 
 @MainActor
-@Suite("Approval queue")
+@Suite("Approval queue", .timeLimit(.minutes(1)))
 struct ApprovalQueueTests {
     @Test("autoApproveTools short-circuits requestApproval without enqueuing")
     func autoApproveShortCircuits() async {
@@ -18,7 +18,7 @@ struct ApprovalQueueTests {
     }
 
     @Test("resolveApproval resolves the FIFO head; deny then approve")
-    func fifoResolve() async {
+    func fifoResolve() async throws {
         let app = AppState()
         let cid = UUID()
         // Enqueue in a DETERMINISTIC order. Two `async let`s start concurrently and can reach the
@@ -37,8 +37,8 @@ struct ApprovalQueueTests {
         #expect(app.pendingApprovals.first?.details == "a", "the head must be the first one queued")
         app.resolveApproval(id: app.pendingApprovals[0].id, .deny)     // head (a) denied
         app.resolveApproval(id: app.pendingApprovals[0].id, .approve)  // next (b) approved
-        let v1 = await t1.value
-        let v2 = await t2.value
+        let v1 = try await value(of: t1)
+        let v2 = try await value(of: t2)
         #expect(v1 == false)
         #expect(v2 == true)
         #expect(app.pendingApprovals.isEmpty)
@@ -163,7 +163,7 @@ struct ApprovalQueueTests {
     }
 
     @Test("enqueue in a cancelled task returns false and leaves the queue empty")
-    func cancelledEnqueueNoLeak() async {
+    func cancelledEnqueueNoLeak() async throws {
         let app = AppState()
         let cid = UUID()
         let t = Task { () -> Bool in
@@ -174,7 +174,7 @@ struct ApprovalQueueTests {
                                                  conversationId: cid, origin: "Subagent (x)")
         }
         t.cancel()
-        let v = await t.value
+        let v = try await value(of: t)
         #expect(v == false)
         #expect(app.pendingApprovals.isEmpty)
     }
@@ -182,7 +182,7 @@ struct ApprovalQueueTests {
     /// A click names the request it was shown. Stop removes a request by id from anywhere in the
     /// queue (#334), so position is no longer a safe stand-in for identity.
     @Test("a click resolves the request it was shown, wherever it sits; a stale click resolves nothing")
-    func resolveById() async {
+    func resolveById() async throws {
         let app = AppState(store: try! ConversationStore.inMemory(), createIfEmpty: false, emitLaunchNotices: false)
         let cid = UUID()
         func waitForQueue(_ count: Int) async {
@@ -209,9 +209,9 @@ struct ApprovalQueueTests {
         #expect(app.pendingApprovals.map(\.details) == ["c"], "a stale click resolves nothing")
 
         app.resolveApproval(id: ids[2], .deny)
-        #expect(await b.value == true)
-        #expect(await a.value == false)
-        #expect(await c.value == false)
+        #expect(try await value(of: b) == true)
+        #expect(try await value(of: a) == false)
+        #expect(try await value(of: c) == false)
         #expect(app.pendingApprovals.isEmpty)
     }
 }

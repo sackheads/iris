@@ -16,7 +16,7 @@ import Foundation
 // unscoped tier-2 call could see the model appear and vanish between `executeTier2CoreML`'s two
 // `hasModelLoaded` checks, which fails closed and blocks benign content (#375). The two tests that
 // need an installed model now install it on an evaluator of their own.
-@Suite("guard test isolation (#237)")
+@Suite("guard test isolation (#237)", .timeLimit(.minutes(1)))
 struct GuardTestIsolationTests {
     @Test("a scoped model is visible through the real sanitize path")
     func scopedVisible() async {

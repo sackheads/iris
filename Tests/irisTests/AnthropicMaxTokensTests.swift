@@ -4,7 +4,7 @@ import Foundation
 
 /// `max_tokens` is sized per model instead of a fixed 4096, which thinking alone could use up,
 /// and a reply cut off at the limit is surfaced instead of reading as a finished one.
-@Suite("Anthropic max_tokens per model")
+@Suite("Anthropic max_tokens per model", .timeLimit(.minutes(1)))
 struct AnthropicMaxTokensTests {
 
     private static let request = GeminiRequest(
@@ -154,7 +154,7 @@ struct AnthropicMaxTokensTests {
 
 /// The engine half: a truncated reply keeps its text and gets an error pill after it.
 @MainActor
-@Suite("IrisEngine truncated reply")
+@Suite("IrisEngine truncated reply", .timeLimit(.minutes(1)))
 struct TruncatedReplyEngineTests {
     private func run(_ responses: [GeminiResponse]) async -> Conversation? {
         let app = AppState()
@@ -241,7 +241,7 @@ struct TruncatedReplyEngineTests {
 
 /// A budgeted run asks for no more output than its remaining budget can pay for.
 @MainActor
-@Suite("Output cap from the run budget")
+@Suite("Output cap from the run budget", .timeLimit(.minutes(1)))
 struct BudgetOutputCapTests {
     private func firstRequest(budget: TurnBudget?) async throws -> GeminiRequest {
         let app = AppState()

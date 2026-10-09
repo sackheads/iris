@@ -10,7 +10,7 @@ import Foundation
 /// a secret that must never come back. Isolated `AppState` and `PermissionManager`; nothing
 /// touches `ConfigManager.shared` or the real `~/.iris` (invariant 7).
 @MainActor
-@Suite("Grader reads: directory listings and the descriptor walk (#337, #339)")
+@Suite("Grader reads: directory listings and the descriptor walk (#337, #339)", .timeLimit(.minutes(1)))
 struct GraderWorkspaceReadTests {
     nonisolated static let check = "swift test --filter Foo"
 
@@ -79,7 +79,7 @@ struct GraderWorkspaceReadTests {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         if queued { state.resolveApproval(id: state.pendingApprovals[0].id, .deny) } else { state.denyPendingApprovals(for: cid) }
-        let approved = await call.value
+        let approved = try await value(of: call)
         #expect(queued || approved, "unasked means approved")
         return queued
     }
@@ -313,7 +313,7 @@ struct GraderWorkspaceReadTests {
         _ = await GoalEvaluator.shared.evaluate(contract: contract, workspace: spelled,
                                                 originatingConversationId: originId, app: state, client: grader)
         done.mutate { $0 = true }
-        await watcher.value
+        try await value(of: watcher)
         #expect(asked.value == 0, "a read of the approved workspace asked")
         let results = grader.results
         #expect(results.count == 3, "\(results)")

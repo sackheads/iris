@@ -2,7 +2,9 @@ import Testing
 import Foundation
 @testable import IrisKit
 
-@Test func testHookManagerProceed() async throws {
+// Free-function tests take no suite trait, so each carries the limit itself (#435): they run
+// real hook processes.
+@Test(.timeLimit(.minutes(1))) func testHookManagerProceed() async throws {
     let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -42,7 +44,7 @@ import Foundation
     }
 }
 
-@Test func testHookManagerBlock() async throws {
+@Test(.timeLimit(.minutes(1))) func testHookManagerBlock() async throws {
     let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -80,7 +82,7 @@ import Foundation
     }
 }
 
-@Test func testHookManagerWarning() async throws {
+@Test(.timeLimit(.minutes(1))) func testHookManagerWarning() async throws {
     let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -121,7 +123,7 @@ import Foundation
     }
 }
 
-@Test func testHookManagerBeforeToolSelection() async throws {
+@Test(.timeLimit(.minutes(1))) func testHookManagerBeforeToolSelection() async throws {
     let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -161,7 +163,7 @@ import Foundation
     }
 }
 
-@Test func testHookManagerPreCompress() async throws {
+@Test(.timeLimit(.minutes(1))) func testHookManagerPreCompress() async throws {
     let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -203,7 +205,7 @@ import Foundation
     }
 }
 
-@Test func testHookManagerNotification() async throws {
+@Test(.timeLimit(.minutes(1))) func testHookManagerNotification() async throws {
     let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -248,7 +250,7 @@ import Foundation
     #expect(output.contains("Something happened"))
 }
 
-@Test func testHookManagerChaining() async throws {
+@Test(.timeLimit(.minutes(1))) func testHookManagerChaining() async throws {
     let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -294,7 +296,7 @@ import Foundation
     }
 }
 
-@Test func testHookManagerMissingEventTypes() async throws {
+@Test(.timeLimit(.minutes(1))) func testHookManagerMissingEventTypes() async throws {
     let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -374,7 +376,7 @@ import Foundation
     } else { Issue.record("AfterAgent failed") }
 }
 
-@Test func testHookManagerLoginPathEnv() async throws {
+@Test(.timeLimit(.minutes(1))) func testHookManagerLoginPathEnv() async throws {
     let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: tempDir) }

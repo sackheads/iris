@@ -9,7 +9,7 @@ import Foundation
 /// and existence is a closure over a set of paths (invariant 7). What a batch turns into is the
 /// coordinator's business and is tested there; all that matters here is which streams exist, which
 /// root each batch is tagged with, and what happens when a root goes away.
-@Suite("Watcher manager sync (#187)")
+@Suite("Watcher manager sync (#187)", .timeLimit(.minutes(1)))
 struct WatcherManagerSyncTests {
 
     // MARK: Fixtures
@@ -239,7 +239,7 @@ struct WatcherManagerSyncTests {
         #expect(await manager.activeRoots == ["/r"])
 
         stat.release()
-        await stalled.value
+        try await value(of: stalled)
         #expect(await manager.activeRoots == ["/r"])
         await manager.stopAll()
     }
@@ -256,7 +256,7 @@ struct WatcherManagerSyncTests {
         await manager.sync(with: [Self.watchJob("a", root: "/new")])
         #expect(await manager.activeRoots == ["/new"])
         stat.release()
-        await older.value
+        try await value(of: older)
         #expect(await manager.activeRoots == ["/new"], "the older table landed last and won")
         await manager.stopAll()
     }

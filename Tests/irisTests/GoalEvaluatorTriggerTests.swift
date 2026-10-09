@@ -3,7 +3,7 @@ import Foundation
 @testable import IrisKit
 
 @MainActor
-@Suite("GoalEvaluator trigger")
+@Suite("GoalEvaluator trigger", .timeLimit(.minutes(1)))
 struct GoalEvaluatorTriggerTests {
     private func response(_ fc: FunctionCall?) -> GeminiResponse {
         let part = Part(text: fc == nil ? "done" : nil, functionCall: fc, functionResponse: nil,

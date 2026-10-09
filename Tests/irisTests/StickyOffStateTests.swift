@@ -5,7 +5,7 @@ import Foundation
 /// 5c §0.2: a sticky declaration does not widen what can be done. Every sticky tool, called while
 /// its state is off, is refused at dispatch with a sentence.
 @MainActor
-@Suite struct StickyOffStateTests {
+@Suite(.timeLimit(.minutes(1))) struct StickyOffStateTests {
     /// Scripted replies like `FakeLLMClient`, plus the requests it was sent.
     private final class ScriptedClient: LLMClientProtocol, @unchecked Sendable {
         private let lock = NSLock()

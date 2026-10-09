@@ -9,7 +9,7 @@ import Foundation
 /// No test here goes near the `container` binary, a daemon, or a VM (invariant 7). The one test
 /// that spawns anything spawns `/bin/sh`, its own child, through the same injected executable the
 /// runtime uses, and asserts afterwards that nothing survived it.
-@Suite("Sandbox command timeout")
+@Suite("Sandbox command timeout", .timeLimit(.minutes(1)))
 struct SandboxTimeoutTests {
 
     // MARK: - The runner kills what it starts
@@ -164,7 +164,7 @@ struct SandboxTimeoutTests {
         }
         call.cancel()
         var thrown: Error?
-        do { _ = try await call.value } catch { thrown = error }
+        do { _ = try await value(of: call) } catch { thrown = error }
         #expect(thrown is CancellationError)
         // The shell does not trap SIGTERM, so the ladder's first rung ends it.
         let until = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds + 3)
@@ -260,7 +260,7 @@ struct SandboxTimeoutTests {
 
         let started = Date()
         var thrown: Error?
-        do { _ = try await task.value } catch { thrown = error }
+        do { _ = try await value(of: task) } catch { thrown = error }
 
         #expect(thrown is CancellationError)
         #expect(Date().timeIntervalSince(started) < 10, "and it says so promptly")

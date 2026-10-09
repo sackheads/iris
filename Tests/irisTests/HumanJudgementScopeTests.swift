@@ -4,7 +4,7 @@ import Foundation
 
 /// D2 must not disturb the ladder, the loop guards, or D1's paths (spec §9).
 @MainActor
-@Suite("Human judgement scope (D2)", .serialized)
+@Suite("Human judgement scope (D2)", .serialized, .timeLimit(.minutes(1)))
 struct HumanJudgementScopeTests {
     @Test("a checkpoint pause is still a checkpoint pause, not a judgement pause")
     func checkpointPauseIsUnchanged() {

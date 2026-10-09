@@ -9,7 +9,7 @@ import Foundation
 /// truncated card name is still a name; a truncated path is a *different path*, and storing one
 /// silently points the workspace somewhere else or nowhere — worse than leaving it unbounded.
 @MainActor
-@Suite("set_workspace validates the path it is given")
+@Suite("set_workspace validates the path it is given", .timeLimit(.minutes(1)))
 struct SetWorkspaceValidationTests {
 
     private func toolResultText(_ app: AppState, conversationId: UUID) -> String {
@@ -213,7 +213,7 @@ struct SetWorkspaceValidationTests {
     }
 }
 
-@Suite("workspaceRefusal in isolation")
+@Suite("workspaceRefusal in isolation", .timeLimit(.minutes(1)))
 struct WorkspaceRefusalUnitTests {
     @Test("the length rule fires on a path longer than PATH_MAX")
     func lengthRule() {
@@ -227,7 +227,7 @@ struct WorkspaceRefusalUnitTests {
 /// back to `expandingTildeInPath` fails here rather than silently disabling the length rule. That
 /// holds for the `~` and `~/…` shapes `expandTilde` handles itself; its `~user` branch still goes
 /// through Foundation and still truncates, as its own comment says.
-@Suite("expandingTildeInPath truncates at PATH_MAX")
+@Suite("expandingTildeInPath truncates at PATH_MAX", .timeLimit(.minutes(1)))
 struct TildeExpansionTruncationTests {
     @Test("Foundation truncates an over-long path to exactly PATH_MAX, silently")
     func foundationTruncates() {

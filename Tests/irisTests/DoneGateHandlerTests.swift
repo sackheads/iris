@@ -8,7 +8,7 @@ import Foundation
 /// `GoalEvaluationParsing` reconciles strictly by `criterion_id` and contract ids are minted per
 /// test — a canned payload with a hardcoded id silently yields `cannot_verify` for everything.
 @MainActor
-@Suite("Done gate handler (D1)", .serialized)
+@Suite("Done gate handler (D1)", .serialized, .timeLimit(.minutes(1)))
 struct DoneGateHandlerTests {
     /// Routes by principal: the grader is the engine whose toolset offers `submit_evaluation`.
     /// `graderVerdicts` maps criterion TEXT to the verdict the grader should return for it.

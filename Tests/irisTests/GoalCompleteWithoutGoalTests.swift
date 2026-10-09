@@ -6,7 +6,7 @@ import Foundation
 /// nothing to terminate, but it used to be offered anyway and its effects applied in full —
 /// surfacing the goal-completion panel over an ordinary conversation (#84).
 @MainActor
-@Suite("goal_complete without a goal")
+@Suite("goal_complete without a goal", .timeLimit(.minutes(1)))
 struct GoalCompleteWithoutGoalTests {
     /// Records every prompt the model was sent, so an extra autonomous turn is observable.
     private final class RecordingClient: LLMClientProtocol, @unchecked Sendable {

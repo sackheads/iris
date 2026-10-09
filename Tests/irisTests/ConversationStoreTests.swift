@@ -3,7 +3,7 @@ import Foundation
 import GRDB
 @testable import IrisKit
 
-@Suite("Conversation store")
+@Suite("Conversation store", .timeLimit(.minutes(1)))
 struct ConversationStoreTests {
     static func sample(id: UUID = UUID(), title: String = "t") -> Conversation {
         var c = Conversation(id: id, title: title, workspacePath: "/tmp/w")

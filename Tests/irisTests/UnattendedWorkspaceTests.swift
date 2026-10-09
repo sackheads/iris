@@ -5,7 +5,7 @@ import Foundation
 /// #282 §0.10 — a background run cannot move its own boundary. `set_workspace` is not declared to
 /// an unattended turn (invariant 6) and is refused in the dispatcher if called anyway.
 @MainActor
-@Suite("set_workspace is refused unattended (#282)")
+@Suite("set_workspace is refused unattended (#282)", .timeLimit(.minutes(1)))
 struct UnattendedWorkspaceTests {
     private func engine(_ app: AppState, client: any LLMClientProtocol) -> IrisEngine {
         IrisEngine(state: app, tier: .medium, principal: .main, client: client,

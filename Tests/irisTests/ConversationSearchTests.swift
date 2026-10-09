@@ -5,7 +5,7 @@ import GRDB
 
 /// #177: full-text search over persisted conversation messages — the `messages_fts` index the
 /// store maintains alongside `messages`, the `search_memory` `scope` argument, and `/search`.
-@Suite("Conversation search (#177)")
+@Suite("Conversation search (#177)", .timeLimit(.minutes(1)))
 struct ConversationSearchTests {
 
     private func conversation(id: UUID = UUID(), title: String, _ messages: [ChatMessage]) -> Conversation {
@@ -529,7 +529,7 @@ private func textReply() -> GeminiResponse {
 }
 
 @MainActor
-@Suite("search_memory scopes (#177)", .serialized)
+@Suite("search_memory scopes (#177)", .serialized, .timeLimit(.minutes(1)))
 struct SearchMemoryScopeTests {
 
     /// Structural (tier 1) guarding only. Under `swift test` no prompt-guard model is provisioned:
@@ -684,7 +684,7 @@ struct SearchMemoryScopeTests {
 // MARK: - /search
 
 @MainActor
-@Suite("/search command (#177)")
+@Suite("/search command (#177)", .timeLimit(.minutes(1)))
 struct SearchSlashCommandTests {
 
     private func app() throws -> (AppState, UUID) {

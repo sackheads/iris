@@ -6,7 +6,7 @@ import Foundation
 /// round ending in tool results wrote its cache entry at the assistant's `tool_use` instead, and
 /// the results were re-sent uncached on the next round and the next turn. The API accepts
 /// `cache_control` on `tool_result` blocks; the skip was an artifact.
-@Suite("Anthropic cache breakpoints (5a)")
+@Suite("Anthropic cache breakpoints (5a)", .timeLimit(.minutes(1)))
 struct AnthropicCacheBreakpointTests {
     private func part(_ text: String) -> Part {
         Part(text: text, functionCall: nil, functionResponse: nil, thought_signature: nil, thoughtSignature: nil)
@@ -278,7 +278,7 @@ struct AnthropicCacheBreakpointTests {
 /// rendered by the client that sends them. Everything through the end of the previous turn must be
 /// the same bytes, or the read point (§1's marker (b)/(c)) has nothing to match (5a final review).
 @MainActor
-@Suite("Anthropic whole-request prefix across turns (5a)")
+@Suite("Anthropic whole-request prefix across turns (5a)", .timeLimit(.minutes(1)))
 struct AnthropicWholeRequestPrefixTests {
     private func body(_ request: GeminiRequest) throws -> [String: Any] {
         let urlRequest = try AnthropicClient.makeURLRequest(request: request, model: "m", apiKey: "k", stream: false)

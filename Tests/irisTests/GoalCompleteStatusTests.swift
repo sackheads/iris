@@ -17,7 +17,7 @@ private func goalCompleteResponse(summary: String, criteriaStatus: JSONValue? = 
 }
 
 @MainActor
-@Suite("GoalComplete status report")
+@Suite("GoalComplete status report", .timeLimit(.minutes(1)))
 struct GoalCompleteStatusTests {
 
     /// When goal_complete carries a criteria_status array, it is stored on the conversation

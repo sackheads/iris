@@ -5,7 +5,7 @@ import Foundation
 /// The gate's judgement pause (spec §3, §4). Agent-fixable problems come first; a judgement pause
 /// happens only when nothing else blocks, and it never burns a retry.
 @MainActor
-@Suite("Human judgement gate (D2)", .serialized)
+@Suite("Human judgement gate (D2)", .serialized, .timeLimit(.minutes(1)))
 struct HumanJudgementGateTests {
     final class GateClient: LLMClientProtocol, @unchecked Sendable {
         nonisolated(unsafe) private static let idPattern = /id ([0-9A-Fa-f-]{36}) \[[a-zA-Z]+\] ([^\n]*)/

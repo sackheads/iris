@@ -3,7 +3,7 @@ import Foundation
 @testable import IrisKit
 
 /// #285 — the watch-sync queue: in order, one run at a time, and at most one run waiting.
-@Suite("Sync coalescer (#285)")
+@Suite("Sync coalescer (#285)", .timeLimit(.minutes(1)))
 struct SyncCoalescerTests {
 
     /// Stands in for the jobs table and the sync that reads it: `write` is a ledger write, and
@@ -46,7 +46,7 @@ struct SyncCoalescerTests {
 
     @Test("a burst of writes behind a running sync costs one more sync, and it sees the last write",
           .timeLimit(.minutes(1)))
-    func aBurstRunsAtMostTwoSyncs() async {
+    func aBurstRunsAtMostTwoSyncs() async throws {
         let probe = Probe()
         let queue = SyncCoalescer { await probe.run() }
         var tasks = [await queue.request()]
@@ -58,7 +58,7 @@ struct SyncCoalescerTests {
             tasks.append(await queue.request())
         }
         await probe.releaseAll()
-        for task in tasks { await task.value }
+        for task in tasks { try await value(of: task) }
 
         #expect(await probe.seen.count == 2, "one in progress, one behind it — not \(burst + 1)")
         #expect(await probe.seen.last == burst, "the last sync read the table after the last write")
@@ -66,7 +66,7 @@ struct SyncCoalescerTests {
 
     @Test("a request made once the waiting sync has started gets a sync of its own",
           .timeLimit(.minutes(1)))
-    func aRequestAfterTheWaitingSyncStartsIsNotFoldedIntoIt() async {
+    func aRequestAfterTheWaitingSyncStartsIsNotFoldedIntoIt() async throws {
         // The ordering half: the waiting sync may already have read the table, so a write after it
         // started must not be answered by it.
         let probe = Probe()
@@ -75,14 +75,14 @@ struct SyncCoalescerTests {
         await probe.waitForRuns(1)
         let second = await queue.request()
         await probe.releaseOne()
-        await first.value
+        try await value(of: first)
         await probe.waitForRuns(2)
 
         await probe.write()
         let third = await queue.request()
         #expect(third != second, "the started sync read before this write")
         await probe.releaseAll()
-        await third.value
+        try await value(of: third)
 
         #expect(await probe.seen == [0, 0, 1])
     }

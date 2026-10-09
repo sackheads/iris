@@ -4,7 +4,7 @@ import Foundation
 
 /// End-to-end D3: reach_checkpoint grades first, then decides.
 @MainActor
-@Suite("Checkpoint auto-advance (D3)")
+@Suite("Checkpoint auto-advance (D3)", .timeLimit(.minutes(1)))
 struct CheckpointAutoAdvanceTests {
 
     /// Routes by principal: the grader offers `submit_evaluation` and is scripted to hand back

@@ -16,7 +16,7 @@ import Observation
 /// never `AppState.shared` (Invariant 7) — so a test that regressed `isThinking(in:)` back to
 /// reading the global flag would see it return true for an idle, unselected conversation.
 @MainActor
-@Suite("Thinking indicator scope (#234)")
+@Suite("Thinking indicator scope (#234)", .timeLimit(.minutes(1)))
 struct ThinkingIndicatorScopeTests {
     private func app() -> (AppState, UUID, UUID) {
         let state = AppState()

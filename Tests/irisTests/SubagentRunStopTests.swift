@@ -193,7 +193,7 @@ struct SubagentRunStopTests {
 
         let cancelledAt = Date()
         waiting.cancel()
-        let outcome = await waiting.value
+        let outcome = try await value(of: waiting)
 
         #expect(Date().timeIntervalSince(cancelledAt) < 5, "the turn deadline is ten seconds: this is the cancel")
         #expect(outcome.status == .cancelled)
@@ -220,7 +220,7 @@ struct SubagentRunStopTests {
         #expect(state.liveSubagents(ofRun: run).count == 1)
 
         _ = state.takeBackgroundDenials(for: run)
-        let outcome = await waiting.value
+        let outcome = try await value(of: waiting)
 
         #expect(outcome.status == .cancelled, "stopped by the drain, not left to the turn deadline")
         #expect(outcome.rendered.contains(SubagentManager.runEndedReason))
@@ -257,7 +257,7 @@ struct SubagentRunStopTests {
         #expect(state.liveSubagents(ofRun: runConversation).count == 1)
 
         clock.advance(by: 601)
-        _ = await fire.value
+        _ = try await value(of: fire)
 
         let closed = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(closed.failureReason == TurnBudget.timeExceeded)

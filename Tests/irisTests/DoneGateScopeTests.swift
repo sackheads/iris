@@ -5,7 +5,7 @@ import Foundation
 /// D1 gates terminal goal_complete for a main-principal goal with a locked contract. Everything
 /// else must behave exactly as before — these are the guards for that claim (spec §2, §8).
 @MainActor
-@Suite("Done gate scope (D1)", .serialized)
+@Suite("Done gate scope (D1)", .serialized, .timeLimit(.minutes(1)))
 struct DoneGateScopeTests {
     private func response(_ fc: FunctionCall?) -> GeminiResponse {
         let part = Part(text: fc == nil ? "ok" : nil, functionCall: fc, functionResponse: nil,

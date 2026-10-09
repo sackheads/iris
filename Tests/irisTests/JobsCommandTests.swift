@@ -7,7 +7,7 @@ import Foundation
 /// rendering are pure so the table, the failure lines and the run-id matching can be pinned
 /// exactly; the handlers are driven through a real in-memory `AppState`.
 @MainActor
-@Suite("/jobs (#187)")
+@Suite("/jobs (#187)", .timeLimit(.minutes(1)))
 struct JobsCommandTests {
 
     // MARK: Fixtures
@@ -670,7 +670,7 @@ struct JobsCommandTests {
     }
 
     @Test("/jobs lists the ledger's jobs in the current conversation, without a model turn")
-    func listCommand() async {
+    func listCommand() async throws {
         let j = job(nextFireAt: Date().addingTimeInterval(120))
         let (app, id) = makeApp(with: [j])
 
@@ -678,7 +678,7 @@ struct JobsCommandTests {
 
         // The listing is one hop away: it awaits the watch coordinator for the absorbed totals
         // before it renders (spec §6). Await that hop rather than a wall clock (#366).
-        await app.jobsListingTask?.value
+        if let listing = app.jobsListingTask { try await value(of: listing) }
         #expect(output(app, id).contains("pr-sweep"))
         #expect(app.conversations.first { $0.id == id }?.history.isEmpty == true,
                 "a deterministic command never enters the model's history")

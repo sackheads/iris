@@ -9,7 +9,7 @@ import os
 /// `MockURLProtocol.scopedSession`, not the shared `.handler` — that single global slot would
 /// otherwise race with `StreamingClientTests`, the other Swift Testing suite using this mock,
 /// since both can run concurrently.
-@Suite("Model catalog (#206, #207)")
+@Suite("Model catalog (#206, #207)", .timeLimit(.minutes(1)))
 struct ModelCatalogTests {
     private func withMock<T>(_ handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data), _ body: (URLSession) async throws -> T) async rethrows -> T {
         let (session, remove) = MockURLProtocol.scopedSession(handler)
@@ -252,7 +252,7 @@ struct ModelCatalogTests {
         }
         task.cancel()
         do {
-            _ = try await task.value
+            _ = try await value(of: task)
             Issue.record("expected cancellation to propagate as an error")
         } catch is CancellationError {
             // expected

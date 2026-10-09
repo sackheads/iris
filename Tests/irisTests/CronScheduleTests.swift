@@ -10,7 +10,7 @@ private actor NextBox {
     func take() -> Date?? { result }
 }
 
-@Suite("CronSchedule")
+@Suite("CronSchedule", .timeLimit(.minutes(1)))
 struct CronScheduleTests {
     static let la = TimeZone(identifier: "America/Los_Angeles")!
     static func date(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int, tz: TimeZone = la) -> Date {

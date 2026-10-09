@@ -5,7 +5,7 @@ import Foundation
 /// Pure mappings behind the session strip (#217 + #19): the tool-argument → activity-text
 /// derivation and the token-count formatter. No SwiftUI here by design (AGENTS.md: no SwiftUI
 /// unit tests) — everything the strip renders from is testable as plain functions.
-@Suite("SessionActivity")
+@Suite("SessionActivity", .timeLimit(.minutes(1)))
 struct SessionActivityTests {
     @Test("run_command surfaces the command")
     func runCommand() {
@@ -142,7 +142,7 @@ struct SessionActivityTests {
 /// `finishSession`, and `visibleSessions`. Uses the isolated in-memory constructor (AGENTS.md
 /// invariant 7) so nothing here touches `~/.iris`.
 @MainActor
-@Suite("AppState session tracking (#217 + #19)")
+@Suite("AppState session tracking (#217 + #19)", .timeLimit(.minutes(1)))
 struct SessionTrackingTests {
     private func isolatedApp() -> AppState {
         AppState(store: try! ConversationStore.inMemory(), tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
@@ -355,7 +355,7 @@ struct SessionTrackingTests {
 /// The linger sweep is a pure function over `[SessionSummary]` + `now` (AppState schedules it via
 /// a `Task.sleep`, which is not itself worth testing) — this is what makes the 60s window testable
 /// without sleeping in a test.
-@Suite("SessionSummary.sweep")
+@Suite("SessionSummary.sweep", .timeLimit(.minutes(1)))
 struct SessionSweepTests {
     private func finished(_ at: Date) -> SessionSummary {
         SessionSummary(id: UUID(), kind: .subagent, role: "r", startTime: at, phase: .finished(status: "completed", at: at), lastActivity: nil)
@@ -393,7 +393,7 @@ struct SessionSweepTests {
 /// `phase` mid-call) is the seam #217/#19 needs, since by the time the turn returns the phase has
 /// already moved on to `.thinking`/`.responding` for whatever round came after the tool call.
 @MainActor
-@Suite("executeToolWithHooks session activity (#217 + #19)")
+@Suite("executeToolWithHooks session activity (#217 + #19)", .timeLimit(.minutes(1)))
 struct ExecuteToolSessionActivityTests {
     private static func response(_ fc: FunctionCall?, text: String = "ok") -> GeminiResponse {
         let part = Part(text: fc == nil ? text : nil, functionCall: fc)

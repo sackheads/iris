@@ -3,7 +3,7 @@ import Foundation
 @testable import IrisKit
 
 @MainActor
-@Suite("Checkpoint reprompt suppression")
+@Suite("Checkpoint reprompt suppression", .timeLimit(.minutes(1)))
 struct CheckpointRepromptTests {
     @Test("a paused checkpoint does not auto-reprompt")
     func pausedDoesNotReprompt() async {

@@ -7,7 +7,7 @@ import Foundation
 /// dispatcher anyway fails closed with the whole call recorded — plus the other half of the same
 /// decision, that a `mutating` job is creatable again and runs sandboxed with the full surface.
 @MainActor
-@Suite("job profiles narrow a read-only run (#187)")
+@Suite("job profiles narrow a read-only run (#187)", .timeLimit(.minutes(1)))
 struct JobProfileTests {
 
     // MARK: Fixtures

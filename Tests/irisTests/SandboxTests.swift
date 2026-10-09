@@ -4,7 +4,7 @@ import Foundation
 
 /// None of these touches `ConfigManager.shared`: it is process-global and suites run
 /// concurrently, so mutating it races and its setters persist beyond the test (#109, invariant 7).
-@Suite("Sandbox config")
+@Suite("Sandbox config", .timeLimit(.minutes(1)))
 struct SandboxTests {
     @Test("sandbox config written by one ConfigManager is visible to another over the same store")
     func testSandboxConfigPersists() throws {
@@ -123,7 +123,7 @@ struct SandboxTests {
             withUnsafeCurrentTask { $0?.cancel() }
             return await executor.runCommand("true", cwd: stub.dir.path, useSandbox: true, timeoutSeconds: 5)
         }
-        _ = await call.value
+        _ = try await value(of: call)
         try await Task.sleep(nanoseconds: 300_000_000)
         #expect(await registry.current().isEmpty)
         #expect(!FileManager.default.fileExists(atPath: stub.dir.appendingPathComponent("calls").path))

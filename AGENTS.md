@@ -108,6 +108,12 @@ only an `XCTestCase` class makes Swift Testing legitimately print "Test run with
 suites passed" while XCTest runs the tests fine — the script passes that run rather than crying
 wolf (#301, #303).
 
+**A test never awaits an unstructured task bare.** `await task.value` ignores the test's
+cancellation, so `.timeLimit` cannot end a test parked on it and one lost wakeup hangs the whole
+run (#428). Await it through `value(of:within:)` (`Tests/irisTests/BoundedWait.swift`), which fails
+the test at its bound instead, and give a suite that starts tasks or processes
+`.timeLimit(.minutes(1))` (#435).
+
 **Opt-in tests.** Two kinds of test are skipped unless an environment variable asks for them,
 because they need something the default suite must not depend on:
 

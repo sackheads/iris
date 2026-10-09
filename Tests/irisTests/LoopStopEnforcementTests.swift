@@ -12,7 +12,7 @@ private func runCommandResponse(_ command: String) -> GeminiResponse {
 }
 
 @MainActor
-@Suite("Loop-stop enforcement")
+@Suite("Loop-stop enforcement", .timeLimit(.minutes(1)))
 struct LoopStopEnforcementTests {
 
     /// Regression guard for #16: when loop detection stops a goal, the follow-up summary turn

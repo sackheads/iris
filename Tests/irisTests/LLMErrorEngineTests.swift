@@ -5,7 +5,7 @@ import Foundation
 /// How the engine surfaces a failed model call: a tagged system pill, not an agent bubble, and
 /// transient provider errors (429/503/529) are retried with backoff before anything is shown.
 @MainActor
-@Suite("IrisEngine LLM error handling")
+@Suite("IrisEngine LLM error handling", .timeLimit(.minutes(1)))
 struct LLMErrorEngineTests {
     /// Throws the scripted errors in order, then returns `finalResponse` for every later call.
     private final class FlakyClient: LLMClientProtocol, @unchecked Sendable {
@@ -111,7 +111,7 @@ struct LLMErrorEngineTests {
         while client.callCount < 1 { try await Task.sleep(nanoseconds: 10_000_000) }
         try await Task.sleep(nanoseconds: 100_000_000)
         turn.cancel()
-        await turn.value
+        try await value(of: turn)
         let conv = try #require(app.conversations.first { $0.id == id })
         #expect(client.callCount == 1)
         #expect(!conv.messages.contains { LLMErrorMessage.parse($0.content) != nil },

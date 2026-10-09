@@ -7,7 +7,7 @@ import Foundation
 /// Workspace tools when no refresh token is configured, and the goal-contract tools outside the
 /// goal-draft turn / a locked contract.
 @MainActor
-@Suite("tool surface trim (#133)")
+@Suite("tool surface trim (#133)", .timeLimit(.minutes(1)))
 struct ToolSurfaceTrimTests {
     static let googleTools = ["google_tasks_list_tasklists", "google_tasks_list_tasks", "google_tasks_create_task",
                               "google_calendar_list_events", "google_calendar_create_event", "google_docs_get",
