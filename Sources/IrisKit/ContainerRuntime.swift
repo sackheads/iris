@@ -189,6 +189,9 @@ extension ContainerRuntime {
 /// own — `/bin/sh -c 'sleep …'` — with no `container` binary, daemon or VM in sight.
 struct CLIProcessRunner: Sendable {
     let executable: String
+    /// Runs just before `process.run()`. For tests: a slow launch, to show the deadline and a
+    /// cancel landing mid-launch still reach the child (#421).
+    var beforeLaunch: (@Sendable () -> Void)? = nil
 
     /// How long SIGTERM gets to be polite before SIGKILL settles it.
     static let killGraceSeconds: Double = 2
@@ -210,6 +213,27 @@ struct CLIProcessRunner: Sendable {
     private final class Box: @unchecked Sendable {
         let process: Process
         init(_ process: Process) { self.process = process }
+    }
+
+    /// Holds the watchdog, which is armed inside the continuation once the child has launched and
+    /// cancelled by `run` once it has its answer.
+    private final class Watchdog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var timer: DispatchSourceTimer?
+        private var cancelled = false
+        func arm(_ make: () -> DispatchSourceTimer) {
+            lock.withLock {
+                guard !cancelled else { return }
+                timer = make()
+            }
+        }
+        func cancel() {
+            lock.withLock {
+                cancelled = true
+                timer?.cancel()
+                timer = nil
+            }
+        }
     }
 
     /// Set by the watchdog before it kills, read after the exit is observed, so the two agree on
@@ -462,24 +486,27 @@ struct CLIProcessRunner: Sendable {
         // The watchdog kills; it never abandons. Racing the wait with a `withTimeout` and walking
         // away would leave the child running and unreaped — a zombie holding a pid and, for
         // `container exec`, a live connection to the VM.
-        let watchdog: DispatchSourceTimer? = timeoutSeconds.map { seconds in
-            let timer = DispatchSource.makeTimerSource(queue: ladder)
-            timer.schedule(deadline: .now() + .seconds(max(1, seconds)))
-            timer.setEventHandler {
-                // Not "is the child still running?": a child can exit in milliseconds and leave
-                // something it spawned holding the inherited pipes, in which case end-of-file
-                // never comes, the collector never publishes, and the only condition that means
-                // "nobody has been told yet" is the collector's own.
-                guard !collector.hasAnswered else { return }
-                deadline.fire()
-                Self.enforce({ ContainerRuntimeError.timedOut(elapsedSeconds: Date().timeIntervalSince(started)) },
-                             on: child, hasAnswered: { collector.hasAnswered },
-                             fail: { collector.fail($0) }, onKill: onKill)
+        let watchdog = Watchdog()
+        defer { watchdog.cancel() }
+        let armWatchdog = { (seconds: Int) in
+            watchdog.arm {
+                let timer = DispatchSource.makeTimerSource(queue: ladder)
+                timer.schedule(deadline: .now() + .seconds(max(1, seconds)))
+                timer.setEventHandler {
+                    // Not "is the child still running?": a child can exit in milliseconds and
+                    // leave something it spawned holding the inherited pipes, in which case
+                    // end-of-file never comes, the collector never publishes, and the only
+                    // condition that means "nobody has been told yet" is the collector's own.
+                    guard !collector.hasAnswered else { return }
+                    deadline.fire()
+                    Self.enforce({ ContainerRuntimeError.timedOut(elapsedSeconds: Date().timeIntervalSince(started)) },
+                                 on: child, hasAnswered: { collector.hasAnswered },
+                                 fail: { collector.fail($0) }, onKill: onKill)
+                }
+                timer.resume()
+                return timer
             }
-            timer.resume()
-            return timer
         }
-        defer { watchdog?.cancel() }
 
         let result: (stdout: String, stderr: String, exitCode: Int32) = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { cont in
@@ -497,11 +524,31 @@ struct CLIProcessRunner: Sendable {
                 // Installed before `run()`: a process that exits first would never call a handler
                 // attached after the fact, and this continuation would never resume.
                 process.terminationHandler = { collector.noteExit($0.terminationStatus) }
+                beforeLaunch?()
                 do {
                     try process.run()
                 } catch {
                     process.terminationHandler = nil
                     collector.fail(ContainerRuntimeError.launchFailed(error.localizedDescription))
+                    return
+                }
+                // Armed once `run()` has returned, so the deadline is the command's own (#421), as
+                // `ProcessGroupRunner` arms after `posix_spawn`. Armed before it, a deadline that
+                // fired mid-launch found no pid, signalled nothing and answered `.timedOut` — and
+                // the child, launched a moment later, ran on with nobody reading its pipes and
+                // nothing left to kill it. A `run()` that hangs is no less bounded than before:
+                // the old deadline could not kill a child that did not exist yet either, and this
+                // continuation body could not return until `run()` did.
+                if let timeoutSeconds { armWatchdog(timeoutSeconds) }
+                // The same window, for a cancel: its ladder may have run while the launch was in
+                // progress and found nothing to kill. Run it again now there is a child; the
+                // ladder is serial and a second pass finds a dead child and does nothing.
+                if Task.isCancelled {
+                    ladder.async {
+                        Self.enforce({ CancellationError() }, on: child,
+                                     hasAnswered: { collector.hasAnswered },
+                                     fail: { collector.fail($0) }, onKill: onKill)
+                    }
                 }
             }
         } onCancel: {

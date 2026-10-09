@@ -48,8 +48,9 @@ struct SandboxTimeoutTests {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-kill-grace-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        // The deadline is armed inside the runner, before `process.run()`, so launch latency
-        // counts against it, and nothing outside the runner can move it: the shell's readiness
+        // The deadline is armed once `process.run()` returns (#421), but the shell still has to be
+        // scheduled and reach its first statement after that, and under load that took up to
+        // 0.5 s here; nothing outside the runner can wait for it, since the shell's readiness
         // cannot gate the clock. It gates the attempt instead: an attempt whose
         // SIGTERM beat the `trap` killed an ordinary shell, which is right but tests nothing here,
         // and is run again (#386).
@@ -107,6 +108,68 @@ struct SandboxTimeoutTests {
         }
         #expect(!processExists(matching: marker), "the shell is gone, whichever rung ended it")
         return wall
+    }
+
+    /// #421: the deadline is the command's own. Armed before `process.run()`, a deadline that
+    /// fired while the launch was still in progress found no pid, signalled nothing and answered
+    /// `.timedOut` — and the child, launched a moment later, ran on with nothing left to kill it.
+    @Test("a deadline is counted from the launch, and a slow launch leaves nothing running", .timeLimit(.minutes(1)))
+    func slowLaunchKeepsItsDeadline() async throws {
+        let nap = "9.\(Int.random(in: 100_000...999_999))"
+        let marker = "iris-421-\(UUID().uuidString)"
+        defer {
+            Self.killAll(matching: "sleep \(nap)")
+            Self.killAll(matching: marker)
+        }
+        let launchDelay = 1.5
+        let runner = CLIProcessRunner(executable: "/bin/sh", beforeLaunch: { usleep(UInt32(launchDelay * 1_000_000)) })
+        let started = Date()
+        var thrown: Error?
+        do {
+            _ = try await runner.run(["-c", "while :; do sleep \(nap); done   # \(marker)"], timeoutSeconds: 1)
+        } catch {
+            thrown = error
+        }
+        let wall = Date().timeIntervalSince(started)
+        let error = try #require(thrown as? ContainerRuntimeError)
+        guard case .timedOut = error else {
+            Issue.record("expected .timedOut, got \(error)")
+            return
+        }
+        // The full second after the launch, not what was left of it.
+        #expect(wall >= launchDelay + 1)
+        #expect(!Self.processExists(matching: marker), "the deadline killed the child it launched late")
+    }
+
+    /// #421, the cancel's half of the same window: its ladder ran during the launch, found no pid,
+    /// and answered. The runner checks for a cancel once the launch is done and kills the child.
+    @Test("a cancel that lands mid-launch still kills the child", .timeLimit(.minutes(1)))
+    func cancelMidLaunchKillsChild() async throws {
+        let nap = "9.\(Int.random(in: 100_000...999_999))"
+        let marker = "iris-421-\(UUID().uuidString)"
+        defer {
+            Self.killAll(matching: "sleep \(nap)")
+            Self.killAll(matching: marker)
+        }
+        let launching = DispatchSemaphore(value: 0)
+        let runner = CLIProcessRunner(executable: "/bin/sh", beforeLaunch: {
+            launching.signal()
+            usleep(1_000_000)
+        })
+        let call = Task {
+            try await runner.run(["-c", "while :; do sleep \(nap); done   # \(marker)"], timeoutSeconds: 60)
+        }
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async { launching.wait(); c.resume() }
+        }
+        call.cancel()
+        var thrown: Error?
+        do { _ = try await call.value } catch { thrown = error }
+        #expect(thrown is CancellationError)
+        // The shell does not trap SIGTERM, so the ladder's first rung ends it.
+        let until = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds + 3)
+        while Self.processExists(matching: marker), Date() < until { try await Task.sleep(nanoseconds: 50_000_000) }
+        #expect(!Self.processExists(matching: marker), "the cancel killed the child it launched late")
     }
 
     /// R26: the deadline wins the wait. An orphan that inherited the child's stdout keeps the
