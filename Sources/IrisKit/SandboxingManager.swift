@@ -4,23 +4,34 @@ import CryptoKit
 
 final class SandboxingManager: @unchecked Sendable {
     static let shared = SandboxingManager()
-    
-    private init() {}
-    
+
     static let containerSearchPaths: [String] = [
         "/usr/local/bin/container",     // Default installer location
         "/opt/homebrew/bin/container",  // Homebrew on Apple Silicon
     ]
 
-    /// The first existing container binary path, or nil if not installed.
-    var containerBinaryPath: String? {
-        for path in Self.containerSearchPaths {
-            if FileManager.default.fileExists(atPath: path) {
-                return path
-            }
-        }
-        return nil
+    /// Where to find the `container` binary. Injected so a test can point this manager at a stub
+    /// binary (one that sleeps forever, or overruns a pipe) instead of searching the real machine
+    /// (#293 review).
+    private let binaryPath: @Sendable () -> String?
+    /// How long `startContainerSystem` gives `container system start` before killing it and
+    /// answering `false`. Generous by default: a first start after a reboot or reinstall can
+    /// download and install the default kernel, which takes minutes, not seconds. Injected so a
+    /// test can force the timeout branch without waiting out the real default.
+    private let startTimeoutSeconds: Double
+
+    init(binaryPath: @escaping @Sendable () -> String? = SandboxingManager.resolveBinaryPath,
+         startTimeoutSeconds: Double = 120) {
+        self.binaryPath = binaryPath
+        self.startTimeoutSeconds = startTimeoutSeconds
     }
+
+    static func resolveBinaryPath() -> String? {
+        containerSearchPaths.first { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    /// The first existing container binary path, or nil if not installed.
+    var containerBinaryPath: String? { binaryPath() }
 
     var isContainerInstalled: Bool {
         containerBinaryPath != nil
@@ -73,38 +84,60 @@ final class SandboxingManager: @unchecked Sendable {
         }
     }
     
-    /// Starts the container system daemon and automatically approves kernel image download ("y").
+    /// One `container system start` at a time: a second caller while one is already running joins
+    /// it rather than spawning its own (#293 review) — two concurrent starts is the one case where
+    /// the auto-approved kernel download ("y") would run twice at once.
+    private let lock = NSLock()
+    private var inFlightStart: Task<(success: Bool, message: String?), Never>?
+
+    /// Starts the container system daemon and automatically approves the kernel image download
+    /// ("y"). Bounded by `startTimeoutSeconds`: a `container system start` stuck waiting on
+    /// launchd, or on a slow kernel download, answers `false` rather than hanging the caller
+    /// forever — this now sits on JobRunner's fire-time pre-check and click-time re-check, both
+    /// ahead of a run's own deadline, and a hang there would wedge the job `inFlight` for good
+    /// (#293 review).
     @discardableResult
     func startContainerSystem() async -> (success: Bool, message: String?) {
         guard let binaryPath = containerBinaryPath else {
             return (false, "Apple container runtime is not installed.")
         }
-        
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/bin/sh")
-                process.arguments = ["-c", "echo 'y' | \(binaryPath) system start"]
-                
-                let pipe = Pipe()
-                process.standardOutput = pipe
-                process.standardError = pipe
-                
-                do {
-                    try process.run()
-                    process.waitUntilExit()
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let output = String(data: data, encoding: .utf8) ?? ""
-                    
-                    if process.terminationStatus == 0 {
-                        continuation.resume(returning: (true, nil))
-                    } else {
-                        continuation.resume(returning: (false, output.isEmpty ? "container system start exited with status \(process.terminationStatus)" : output))
-                    }
-                } catch {
-                    continuation.resume(returning: (false, error.localizedDescription))
-                }
+        let task: Task<(success: Bool, message: String?), Never> = lock.withLock {
+            if let existing = inFlightStart { return existing }
+            let t = Task {
+                let result = await Self.runStart(binaryPath: binaryPath, timeoutSeconds: self.startTimeoutSeconds)
+                // Cleared from inside the task itself, once its own result is in hand: `Task`
+                // has no identity to compare against from outside, and this runs exactly once
+                // per start regardless of how many callers joined it.
+                self.lock.withLock { self.inFlightStart = nil }
+                return result
             }
+            inFlightStart = t
+            return t
+        }
+        return await task.value
+    }
+
+    /// `container system start`, through `ProcessGroupRunner` rather than `sh -c`: no shell to
+    /// splice an unquoted path into, and the pipes drain as the process runs (not after
+    /// `waitUntilExit`), so progress output from a kernel download cannot overrun the pipe buffer
+    /// and deadlock the start (#293 review).
+    private static func runStart(binaryPath: String, timeoutSeconds: Double) async -> (success: Bool, message: String?) {
+        let result = await ProcessGroupRunner.capture(executable: binaryPath, arguments: ["system", "start"],
+                                                       environment: nil, stdin: Data("y\n".utf8), mergeStderr: true,
+                                                       timeoutSeconds: timeoutSeconds)
+        switch result {
+        case .success(let output):
+            if output.timedOut {
+                return (false, "container system start did not finish within \(Int(timeoutSeconds)) seconds")
+            }
+            guard output.status == 0 else {
+                let text = String(data: output.stdout, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return (false, text.isEmpty ? "container system start exited with status \(output.status)" : text)
+            }
+            return (true, nil)
+        case .failure(let error):
+            return (false, error.localizedDescription)
         }
     }
 }
