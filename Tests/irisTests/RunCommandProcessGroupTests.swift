@@ -184,6 +184,25 @@ struct RunCommandProcessGroupTests {
         #expect(await Self.appears("sleep \(nap)", within: 3), "a server started with its output redirected must outlive the call")
     }
 
+    @Test("ToolExecutor.runCommand leaves a detached background job alive")
+    func runCommandLeavesDetachedBackgroundAlive() async {
+        let nap = Self.marker()
+        defer { Self.killAll(nap) }
+        // Same shape as `detachedBackgroundSurvives`, but through `ToolExecutor.runCommand` itself:
+        // that test moved to calling `ProcessGroupRunner` directly for its timing (#429), which
+        // dropped coverage at this layer for the property that matters — if `runCommand` ever
+        // killed the group on return, it would take a detached background job with it, and
+        // nothing at this layer would notice.
+        let started = Date()
+        let out = await ToolExecutor().runCommand("(sleep \(nap) >/dev/null 2>&1 &); echo started",
+                                                    cwd: nil, timeoutSeconds: 10)
+        // Generous, not tight: this is a liveness check, not a timing measurement (#429).
+        #expect(Date().timeIntervalSince(started) < 20, "runCommand should not have hung")
+        #expect(out == "started\n")
+        #expect(await Self.appears("sleep \(nap)", within: 3),
+                "a detached background job must survive runCommand's return")
+    }
+
     @Test("a plain command leaves no process behind")
     func plainCommandLeavesNothing() async {
         let nap = "0.\(Int.random(in: 100_000...999_999))"
