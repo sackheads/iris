@@ -192,7 +192,13 @@ struct ToolExecutor {
     /// no symlink followed, whatever approved it — never opened by path.
     func execute(name: String, args: [String: JSONValue], cwd: String? = nil, conversationId: UUID? = nil,
                  useSandbox: Bool = false, grant: JobGrant? = nil, grantedMount: ContainerMount? = nil,
-                 approvedWorkspaceRoot: String? = nil) async -> String {
+                 approvedWorkspaceRoot: String? = nil, decidedPath: String? = nil) async -> String {
+        // A NUL ends the C string the kernel is handed, so the file opened is not the one named
+        // (#256). The dispatcher refuses it before approval; this covers a hook's rewrite.
+        if ["read_file", "write_file", "register_directory_watcher"].contains(name),
+           args["path"]?.stringValue.contains("\u{0}") == true {
+            return Self.nulPathRefusal(name)
+        }
         switch name {
         case "run_command":
             guard let command = args["command"]?.stringValue else { return "Error: Missing command" }
@@ -224,6 +230,9 @@ struct ToolExecutor {
                 }
                 return await readFile(approvedWorkspace: approvedWorkspaceRoot, relative: relative)
             }
+            if let decidedPath, let refusal = Self.decidedPathRefusal("read_file", path: path, cwd: cwd, decided: decidedPath) {
+                return refusal
+            }
             return await readFile(path, cwd: cwd)
         case "write_file":
             guard let path = args["path"]?.stringValue, let content = args["content"]?.stringValue else { return "Error: Missing path or content" }
@@ -233,6 +242,9 @@ struct ToolExecutor {
                     return Self.notUnderGrantedDirectory(grantedMount.source)
                 }
                 return await writeFile(grantRoot: grantedMount.source, relative: relative, content: content)
+            }
+            if let decidedPath, let refusal = Self.decidedPathRefusal("write_file", path: path, cwd: cwd, decided: decidedPath) {
+                return refusal
             }
             return await writeFile(path, content: content, cwd: cwd, paths: irisPaths ?? .default)
         case "register_directory_watcher":
@@ -779,6 +791,24 @@ struct ToolExecutor {
               let real = IrisPaths.realPathForAllow(resolvePath(path, cwd: cwd)),
               grant.covering(real)?.source == decided.source else { return nil }
         return relative
+    }
+
+    /// #256: a by-path open runs only the path that was approved, and only while it still resolves
+    /// to itself. `decided` is the dispatcher's real path for the call; a hook that rewrote the path,
+    /// or a link swapped into it since the decision, is refused rather than followed. What is left
+    /// is the window between this check and Foundation's open — a by-path API cannot close it.
+    static func decidedPathRefusal(_ tool: String, path: String, cwd: String?, decided: String) -> String? {
+        guard resolvePath(path, cwd: cwd) == decided else {
+            return "Error: `\(tool)` was approved for \(decided), not \(path); nothing was done."
+        }
+        guard IrisPaths.realPath(decided) == decided else {
+            return "Error: \(decided) changed after it was approved (it now resolves elsewhere through a link); nothing was done."
+        }
+        return nil
+    }
+
+    static func nulPathRefusal(_ tool: String) -> String {
+        "Error: `\(tool)` was given a path containing a NUL character, which cannot name a file; nothing was done."
     }
 
     static func notUnderGrantedDirectory(_ source: String) -> String {

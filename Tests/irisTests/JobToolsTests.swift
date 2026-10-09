@@ -1491,6 +1491,8 @@ struct JobToolsTests {
         /// passed every test in this file silently. Recorded on every call so the pinned tests below
         /// can assert it was actually true, not merely that SOME approval happened.
         private(set) var lastHumanOnly: Bool?
+        /// What the dialog would have shown (#256).
+        private(set) var lastDetails: String?
         var resolution = true
 
         override func requestApproval(toolName: String, details: String, args: [String: JSONValue] = [:],
@@ -1498,9 +1500,10 @@ struct JobToolsTests {
                                       origin: String = "Main agent", inSandbox: Bool = false,
                                       callerRole: VibecopCallerRole = .agent, allowedCommands: [String] = [],
                                       vibecopEnabled: Bool? = nil, grantedMount: ContainerMount? = nil,
-                                      humanOnly: Bool = false) async -> Bool {
+                                      humanOnly: Bool = false, graderReadWalked: Bool? = nil) async -> Bool {
             approvalCount += 1
             lastHumanOnly = humanOnly
+            lastDetails = details
             return resolution
         }
     }
@@ -1757,6 +1760,27 @@ struct JobToolsTests {
         #expect(humanOnly == true, "the pinned gate must ask humanOnly, not whatever requestApproval defaults to")
         #expect(result != IrisEngine.pinnedJobCreationDeclined)
         #expect(try app.store.ledger.jobs().count == 1)
+    }
+
+    @Test("a relative watch path's approval names the directory the watch is created on (#256)")
+    func registerWatcherApprovalShowsResolvedPath() async throws {
+        let (app, id) = pinnedCountingApp()
+        let dir = try scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        app.setWorkspace(for: id, path: dir.path)
+        let (_, approvalCount, _) = await runJobCreationCall(
+            FunctionCall(name: "register_directory_watcher",
+                        args: ["path": .string("sub"), "instructions": .string("watch it")], id: "c1"),
+            on: app, as: id, resolution: true)
+        let watched = try #require(WatchRoot.canonical(dir.appendingPathComponent("sub").path))
+        #expect(approvalCount == 1)
+        #expect(app.lastDetails?.components(separatedBy: "\n").first == "path: \(watched)")
+        let jobs = try app.store.ledger.jobs()
+        guard case .fsEvent(let watch)? = jobs.first?.trigger else {
+            Issue.record("no watch was created: \(jobs)"); return
+        }
+        #expect(watch.path == watched, "the approved directory is the one watched")
     }
 
     @Test("register_directory_watcher in a non-pinned conversation creates the job without an approval request")
