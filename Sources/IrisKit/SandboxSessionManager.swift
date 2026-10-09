@@ -42,8 +42,9 @@ actor SandboxSessionManager {
     static let shared = SandboxSessionManager(runtime: CLIContainerRuntime(),
                                               image: { ConfigManager.shared.sandboxImage })
 
-    /// Starts the container system when a create says it is not ready, answering whether that
-    /// worked. Injected so a test can drive the retry without spawning `container system start`.
+    /// Starts the container system when a create, or the isolated-network check ahead of it,
+    /// says the system is not ready — answering whether that worked. Injected so a test can drive
+    /// the retry without spawning `container system start` (#293).
     private let startContainerSystem: @Sendable () async -> Bool
 
     init(runtime: ContainerRuntime, image: @escaping @Sendable () -> String,
@@ -311,7 +312,7 @@ actor SandboxSessionManager {
         // here untouched, and `creationError` says so. Before the `do`, on purpose: nothing has
         // been created yet, so there is nothing for the sweep below to stop or delete.
         if case .isolated(let networkName) = network {
-            try await runtime.ensureIsolatedNetwork(named: networkName)
+            try await ensureIsolatedNetworkSelfHealing(id, named: networkName)
         }
         do {
             try await attemptCreate(id, workspace: workspace, mounts: mounts, network: network)
@@ -332,7 +333,10 @@ actor SandboxSessionManager {
         } catch {
             if case ContainerRuntimeError.createFailed(let msg) = error,
                ToolExecutor.sandboxSetupHint(for: msg) != nil {
+                // A closed conversation never self-starts the system or retries (#292).
+                try refuseIfClosed(id)
                 if await startContainerSystem() {
+                    try refuseIfClosed(id)
                     try await runtime.createDetached(name: name(for: id), image: image(),
                                                      mounts: mounts, workdir: workdir, network: network)
                     try refuseIfClosed(id)
@@ -352,6 +356,25 @@ actor SandboxSessionManager {
     /// recorded, and `create`'s sweep deletes it.
     private func refuseIfClosed(_ id: UUID) throws {
         if closed.contains(id) { throw SessionClosed() }
+    }
+
+    /// §0.7's network check, self-healing once (#293): a listing or create that fails with a
+    /// detail that reads like the container system not running gets exactly one `container system
+    /// start` and a retry — the same self-heal `attemptCreate`'s `createFailed` branch does for
+    /// the container itself. Any other failure (permissions, a malformed name, …) fails closed
+    /// with no start attempted, per spec §0.7: this is not a general retry-on-any-failure. A
+    /// conversation closed before or during the start gets neither the start nor the retry (#292).
+    private func ensureIsolatedNetworkSelfHealing(_ id: UUID, named name: String) async throws {
+        do {
+            try await runtime.ensureIsolatedNetwork(named: name)
+        } catch {
+            guard case ContainerRuntimeError.networkFailed(let detail) = error,
+                  ToolExecutor.sandboxSetupHint(for: detail) != nil else { throw error }
+            try refuseIfClosed(id)
+            guard await startContainerSystem() else { throw error }
+            try refuseIfClosed(id)
+            try await runtime.ensureIsolatedNetwork(named: name)
+        }
     }
 
     private func format(_ r: (stdout: String, stderr: String, exitCode: Int32)) -> String {

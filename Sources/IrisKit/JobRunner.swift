@@ -89,8 +89,14 @@ actor JobRunner {
     private let endSandboxSession: @Sendable (UUID) async -> Void
     /// Makes sure the host-only network a `network: false` grant runs on exists (§0.7), answering
     /// the failure detail or nil. Injected so a test can answer without a runtime; the default
-    /// asks the real `CLIContainerRuntime`.
+    /// asks the real `CLIContainerRuntime`. Call sites use `checkIsolatedNetwork()`, which wraps
+    /// this with the self-heal below (#293) — never this directly.
     private let ensureIsolatedNetwork: @Sendable () async -> String?
+    /// Starts the container system once when `ensureIsolatedNetwork`'s failure reads like the
+    /// system not running (#293) — the same self-heal `SandboxSessionManager.create` does for a
+    /// failed container create. Injected so a test can drive the retry without spawning
+    /// `container system start`.
+    private let startContainerSystem: @Sendable () async -> Bool
     /// The jobs with a run in flight right now. Every fire goes through `fire`, so one set here is
     /// the whole overlap story, whatever woke the job.
     private var inFlight: Set<UUID> = []
@@ -124,6 +130,7 @@ actor JobRunner {
          endSandboxSession: (@Sendable (UUID) async -> Void)? = nil,
          sandboxSessions: SandboxSessionManager? = nil,
          ensureIsolatedNetwork: (@Sendable () async -> String?)? = nil,
+         startContainerSystem: (@Sendable () async -> Bool)? = nil,
          now: @escaping @Sendable () -> Date = Date.init,
          calendar: Calendar = .current,
          config: ConfigManager = .shared,
@@ -154,6 +161,9 @@ actor JobRunner {
             do { try await CLIContainerRuntime().ensureIsolatedNetwork(named: NetworkMode.isolatedNetworkName); return nil }
             catch ContainerRuntimeError.networkFailed(let detail) { return detail }
             catch { return "\(error)" }
+        }
+        self.startContainerSystem = startContainerSystem ?? {
+            await SandboxingManager.shared.startContainerSystem().success
         }
         self.watchdogSlice = watchdogSlice
         self.deadlineClock = deadlineClock
@@ -998,7 +1008,7 @@ actor JobRunner {
             // §0.7: "network off" is a network that has to exist. This is the check that puts the
             // reason on the row; the session manager asks again at create so a container rebuilt
             // mid-turn is isolated too.
-            if !grant.network, let detail = await ensureIsolatedNetwork() {
+            if !grant.network, let detail = await checkIsolatedNetwork() {
                 await closeFailed(run: run, job: job, origin: origin, conversationId: conversationId,
                                   reason: Self.isolatedNetworkUnavailableReason(detail), at: now(), note: note)
                 return
@@ -1329,7 +1339,7 @@ actor JobRunner {
         let grant = job.effectiveGrant
         if let grant {
             if let drift = JobGrant.drift(grant) { return await refuse(drift, for: job) }
-            if !grant.network, let detail = await ensureIsolatedNetwork() {
+            if !grant.network, let detail = await checkIsolatedNetwork() {
                 return await refuse(Self.isolatedNetworkUnavailableReason(detail), for: job)
             }
         }
@@ -1598,6 +1608,18 @@ actor JobRunner {
     static func grantSourceUnavailableReason(_ path: String) -> String { "grant source unavailable: \(path)" }
     /// A `network: false` fire whose host-only network could not be created (§0.7).
     static func isolatedNetworkUnavailableReason(_ detail: String) -> String { "isolated network unavailable: \(detail)" }
+
+    /// §0.7's network check, self-healing once (#293). A granted `network: false` run with the
+    /// container system stopped used to fail here, at the listing, never reaching the self-start
+    /// a stopped-system `createFailed` already gets — so the first fire after a reboot always
+    /// failed. A failure whose detail reads like the system not running gets exactly one
+    /// `container system start` and a retry; any other failure (permissions, a malformed network
+    /// name, …) fails closed with no start attempted, per spec §0.7.
+    private func checkIsolatedNetwork() async -> String? {
+        guard let detail = await ensureIsolatedNetwork() else { return nil }
+        guard ToolExecutor.sandboxSetupHint(for: detail) != nil, await startContainerSystem() else { return detail }
+        return await ensureIsolatedNetwork()
+    }
 
     /// Closes a run that never started its turn, as a failure: the row, the retry ladder and the
     /// card, exactly as the tail of `run` would have written them, minus everything that only a
