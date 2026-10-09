@@ -6,7 +6,7 @@ import Foundation
 /// budget refuses their next round, and cancelled — model call included — when the run's turn is
 /// cancelled at its deadline or the run is drained. Scripted clients only.
 @MainActor
-@Suite("A run's subagents stop with the run (#323)")
+@Suite("A run's subagents stop with the run (#323)", .timeLimit(.minutes(1)))
 struct SubagentRunStopTests {
 
     typealias RoutingClient = DelegatedSpendTests.RoutingClient

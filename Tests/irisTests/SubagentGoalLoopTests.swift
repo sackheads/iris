@@ -7,7 +7,7 @@ import Foundation
 /// first turn returning. Stops, deadlines and the run's budget reach whichever turn is live.
 /// Scripted clients only; caps are set on stores of the tests' own.
 @MainActor
-@Suite("A subagent's goal loop (#399)")
+@Suite("A subagent's goal loop (#399)", .timeLimit(.minutes(1)))
 struct SubagentGoalLoopTests {
 
     typealias ManualClock = SubagentRunStopTests.ManualClock
@@ -24,8 +24,10 @@ struct SubagentGoalLoopTests {
         private var callCount = 0
         private var parkedCount = 0
         private var cancelledCount = 0
+        /// Runs as a `.park` step begins, inside the turn: a known point to move a `ManualClock`.
+        private let onPark: (@Sendable () -> Void)?
 
-        init(_ steps: [Step]) { self.steps = steps }
+        init(_ steps: [Step], onPark: (@Sendable () -> Void)? = nil) { self.steps = steps; self.onPark = onPark }
 
         var calls: Int { lock.withLock { callCount } }
         var parked: Int { lock.withLock { parkedCount } }
@@ -41,6 +43,7 @@ struct SubagentGoalLoopTests {
                 return response
             case .park?:
                 lock.withLock { parkedCount += 1 }
+                onPark?()
                 do {
                     try await Task.sleep(nanoseconds: 600 * 1_000_000_000)
                 } catch {
@@ -128,6 +131,19 @@ struct SubagentGoalLoopTests {
         return condition()
     }
 
+    /// `task.value`, but a stuck task fails the test rather than hanging the run (#428). An
+    /// unstructured task's value ignores the waiter's cancellation, so `.timeLimit` alone cannot
+    /// end it: this cancels `task` when the waiter is cancelled or after `seconds`. A subagent
+    /// cancelled that way comes back `.cancelled`, which the caller's status check reports.
+    nonisolated static func value<T: Sendable>(of task: Task<T, Never>, within seconds: Double = 30) async -> T {
+        let watchdog = Task {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            if !Task.isCancelled { task.cancel() }
+        }
+        defer { watchdog.cancel() }
+        return await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+    }
+
     // MARK: The loop
 
     @Test("a subagent whose first turn is text only is reprompted, and the parent gets turn 2's result")
@@ -206,7 +222,7 @@ struct SubagentGoalLoopTests {
         #expect(state.liveSubagents(ofRun: run).count == 1, "registered while it works")
         let cancelledAt = Date()
         task.cancel()
-        let outcome = await task.value
+        let outcome = await Self.value(of: task)
 
         // Only shows the subagent stopped well before its turn deadline, not how fast; the full parallel suite runs it at ~4 s.
         #expect(Date().timeIntervalSince(cancelledAt) < 10, "seconds, not the 300 s turn deadline")
@@ -219,11 +235,16 @@ struct SubagentGoalLoopTests {
 
     @Test("the deadline during turn 2 times the subagent out and cancels that turn")
     func deadlineDuringTurnTwo() async throws {
-        let client = LoopClient([.reply(Self.text("Looking into it.")), .park])
+        // The clock moves from inside turn 2's model call, after turn 2 has stamped its start.
+        // Moved from the test after a real-time wait for the park, a busy suite could land the
+        // move between turns: turn 2 then stamped the moved clock, was never past its limit, and
+        // parked for 600 s, hanging the run (#428).
+        let clock = ManualClock()
+        let client = LoopClient([.reply(Self.text("Looking into it.")), .park],
+                                onPark: { clock.advance(by: 10_000) })
         let state = try state()
         let parent = UUID(); state.createNewConversation(id: parent)
         let (config, teardown) = config(cap: 5); defer { teardown() }
-        let clock = ManualClock()
 
         let task = Task {
             await SubagentManager.shared.runSubagent(
@@ -231,9 +252,9 @@ struct SubagentGoalLoopTests {
                 turnTimeout: 300, client: client, appState: state, deadlineClock: clock.now,
                 config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
         }
-        #expect(await eventually { client.parked == 1 }, "turn 2 is under way")
-        clock.advance(by: 10_000)
-        let outcome = await task.value
+        let outcome = await Self.value(of: task)
+
+        #expect(client.parked == 1, "the limit passed during turn 2")
 
         #expect(outcome.status == .timedOut)
         #expect(await eventually(10) { client.cancelled == 1 }, "turn 2's model call was cancelled")
@@ -340,12 +361,12 @@ struct SubagentGoalLoopTests {
                                 sessionPeerCount: 0, repromptDelay: Self.delay)
 
         let turn = Task { await engine.processInput("Work.", source: "System", conversationId: id) }
-        await client.gate.waitForEntry()
+        #expect(await eventually { client.calls == 1 }, "the turn is in its model call")
         // Halted while the turn is in its model call, with the goal still set: only the halt can
         // keep the turn's tail from scheduling the next one.
         engine.haltGoalLoop(for: id, cancelling: false)
         await client.gate.open()
-        await turn.value
+        await Self.value(of: turn)
 
         try? await Task.sleep(nanoseconds: 300_000_000)
         #expect(client.calls == 1, "no reprompt after the halt")
