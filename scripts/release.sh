@@ -74,7 +74,8 @@ step "Checking preconditions"
 # the Xcode build (SwiftPM never does), so the archive fails late without it.
 xcrun metal --version >/dev/null 2>&1 \
   || die "Metal Toolchain missing; install it with: xcodebuild -downloadComponent MetalToolchain"
-[[ -z "$(git status --porcelain)" ]] || die "working tree not clean"
+TREE_CHANGES=$(git status --porcelain) || die "git status failed"
+[[ -z "$TREE_CHANGES" ]] || die "working tree not clean"
 build_or_die "$REPO_ROOT/scripts/gen-xcodeproj.sh"
 # Pin the archive to the same dependency revisions `swift test` used: swift-sdk and llama.swift
 # track branch main. Every xcodebuild below passes -disableAutomaticPackageResolution.
@@ -101,6 +102,11 @@ case $LS_REMOTE_RC in
 esac
 git rev-parse -q --verify origin/gh-pages >/dev/null || die "origin/gh-pages missing (see docs/releasing.md)"
 gh auth status >/dev/null 2>&1 || die "gh is not authenticated"
+# Sparkle downloads the enclosure anonymously: a private repo's release asset is a 404 to it.
+REPO_VISIBILITY=$(gh repo view "$GH_REPO" --json visibility --jq .visibility) \
+  || die "cannot read the visibility of $GH_REPO"
+[[ "$REPO_VISIBILITY" == "PUBLIC" ]] \
+  || die "$GH_REPO is $REPO_VISIBILITY; Sparkle cannot download release assets from a non-public repo"
 xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1 \
   || die "notary profile '$NOTARY_PROFILE' missing (see docs/releasing.md)"
 command -v xmllint >/dev/null || die "xmllint not found"
@@ -121,11 +127,31 @@ fi
 [[ -n "$IDENTITY" ]] || die "no Developer ID Application identity for team $TEAM_ID found; set CODESIGN_IDENTITY"
 echo "identity: $IDENTITY"
 
-PUBLIC_KEY=$(/usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$INFO_PLIST" 2>/dev/null || true)
-[[ -n "$PUBLIC_KEY" ]] || die "SUPublicEDKey missing from $INFO_PLIST"
+PUBLIC_KEY=$(/usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$INFO_PLIST" 2>/dev/null) \
+  || die "missing SUPublicEDKey in $INFO_PLIST"
+[[ -n "$PUBLIC_KEY" ]] || die "SUPublicEDKey is empty in $INFO_PLIST"
 
-BUILD=$(git rev-list --count HEAD)
+BUILD=$(git rev-list --count HEAD) || die "cannot count commits on HEAD"
 echo "version: $VERSION  build: $BUILD  tag: $TAG"
+
+# Sparkle offers an update only when its build is higher than the installed one, so a release
+# whose build is not newer than every published item would be invisible to installed copies.
+published_builds() {  # published_builds <appcast xml> -> each <sparkle:version> number, one per line
+  local rest="$1"
+  while [[ "$rest" =~ '<sparkle:version>[[:space:]]*([0-9]+)[[:space:]]*</sparkle:version>' ]]; do
+    print -r -- "${match[1]}"
+    rest="${rest[MEND+1,-1]}"
+  done
+  return 0
+}
+APPCAST_XML=$(git show origin/gh-pages:appcast.xml) || die "cannot read appcast.xml from origin/gh-pages"
+LATEST_PUBLISHED=0
+for n in ${(f)"$(published_builds "$APPCAST_XML")"}; do
+  if (( n > LATEST_PUBLISHED )); then LATEST_PUBLISHED=$n; fi
+done
+if (( LATEST_PUBLISHED >= BUILD )); then
+  die "build $BUILD is not newer than the latest published build $LATEST_PUBLISHED; land a commit on main first"
+fi
 
 # --- Sparkle tools (from the SPM artifact; resolving packages downloads them) ---------------
 step "Resolving packages"
@@ -155,18 +181,24 @@ xcodebuild -exportArchive -archivePath "$ARCHIVE" -exportOptionsPlist "$EXPORT_O
   -exportPath "$EXPORT_DIR" -quiet
 [[ -d "$APP" ]] || die "export did not produce $APP"
 
-BUILT_SHORT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
-BUILT_BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Contents/Info.plist")
+APP_PLIST="$APP/Contents/Info.plist"
+BUILT_SHORT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PLIST") \
+  || die "missing CFBundleShortVersionString in $APP_PLIST"
+BUILT_BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP_PLIST") \
+  || die "missing CFBundleVersion in $APP_PLIST"
 [[ "$BUILT_SHORT" == "$VERSION" && "$BUILT_BUILD" == "$BUILD" ]] \
   || die "built app reports $BUILT_SHORT ($BUILT_BUILD), expected $VERSION ($BUILD)"
 
-EXPORTED_FEED_URL=$(/usr/libexec/PlistBuddy -c "Print :SUFeedURL" "$APP/Contents/Info.plist" 2>/dev/null || true)
-EXPORTED_PUBLIC_KEY=$(/usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$APP/Contents/Info.plist" 2>/dev/null || true)
+EXPORTED_FEED_URL=$(/usr/libexec/PlistBuddy -c "Print :SUFeedURL" "$APP_PLIST" 2>/dev/null) \
+  || die "missing SUFeedURL in $APP_PLIST — Sparkle would abort at launch; do NOT ship"
+EXPORTED_PUBLIC_KEY=$(/usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$APP_PLIST" 2>/dev/null) \
+  || die "missing SUPublicEDKey in $APP_PLIST — Sparkle would abort at launch; do NOT ship"
 [[ "$EXPORTED_FEED_URL" == "$FEED_URL" && "$EXPORTED_PUBLIC_KEY" == "$PUBLIC_KEY" ]] \
-  || die "exported app is missing or has wrong SUFeedURL/SUPublicEDKey — Sparkle would abort at launch; do NOT ship"
+  || die "exported app has the wrong SUFeedURL/SUPublicEDKey — Sparkle would abort at launch; do NOT ship"
 
-MIN_SYSTEM_VERSION=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$APP/Contents/Info.plist")
-[[ -n "$MIN_SYSTEM_VERSION" ]] || die "LSMinimumSystemVersion missing from exported app"
+MIN_SYSTEM_VERSION=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$APP_PLIST") \
+  || die "missing LSMinimumSystemVersion in $APP_PLIST"
+[[ -n "$MIN_SYSTEM_VERSION" ]] || die "LSMinimumSystemVersion is empty in $APP_PLIST"
 
 ARCHS_BUILT=$(lipo -archs "$APP/Contents/MacOS/Iris") || die "cannot read the architectures of the app binary"
 [[ "$ARCHS_BUILT" == "arm64" ]] || die "app binary is '$ARCHS_BUILT', expected exactly arm64"
@@ -200,10 +232,14 @@ check_signature() {  # check_signature <path>
   return 0
 }
 SPARKLE_VERSION_DIR="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
+# Required, not globbed: if Sparkle's layout moves, every helper glob would match nothing and the
+# helpers would ship unchecked.
+[[ -e "$SPARKLE_VERSION_DIR/Autoupdate" ]] \
+  || die "Sparkle's Autoupdate not found at ${SPARKLE_VERSION_DIR#$EXPORT_DIR/}/Autoupdate; its helpers would go unchecked"
 SIGNED_PATHS=(
   "$APP"
   "$APP"/Contents/Frameworks/*(N)
-  "$SPARKLE_VERSION_DIR"/Autoupdate(N)
+  "$SPARKLE_VERSION_DIR"/Autoupdate
   "$SPARKLE_VERSION_DIR"/Updater.app(N)
   "$SPARKLE_VERSION_DIR"/XPCServices/*.xpc(N)
 )
@@ -305,6 +341,8 @@ done
 (( ASSET_OK )) || die "release asset not reachable at $ENCLOSURE_URL"
 
 step "Updating appcast on gh-pages"
+# Notarization can take 20+ minutes; build on what gh-pages holds now, not at the start.
+git fetch -q origin gh-pages || die "cannot fetch origin/gh-pages; the release exists — paste the item by hand (docs/releasing.md)"
 git worktree add -q --detach "$PAGES_WT" origin/gh-pages
 (
   cd "$PAGES_WT"
