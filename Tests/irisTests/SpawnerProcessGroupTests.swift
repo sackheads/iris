@@ -14,12 +14,13 @@ struct HookManagerProcessGroupTests {
     typealias P = RunCommandProcessGroupTests
 
     /// A `BeforeTool` hook running `command`, with its own config file.
-    private func manager(_ command: String, timeout: Int? = nil) throws -> (HookManager, URL) {
+    private func manager(_ command: String, timeout: Int? = nil, event: String = "BeforeTool",
+                         matcher: String = "t") throws -> (HookManager, URL) {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("iris-hook-pg-\(UUID().uuidString).json")
         var hook: [String: Any] = ["type": "command", "command": command]
         if let timeout { hook["timeout"] = timeout }
-        let config: [String: Any] = ["hooks": ["BeforeTool": [["matcher": "t", "hooks": [hook]]]]]
+        let config: [String: Any] = ["hooks": [event: [["matcher": matcher, "hooks": [hook]]]]]
         try JSONSerialization.data(withJSONObject: config).write(to: url)
         var m = HookManager()
         m.configPathOverride = url.path
@@ -65,7 +66,7 @@ struct HookManagerProcessGroupTests {
     /// #452: a hook killed by its timeout can still exit 0 — through its trap, as here, or when
     /// the group SIGKILL ends its child an instant before the shell. Read by status alone, that
     /// was a proceed, and a `BeforeTool` hook that would have blocked let the tool through.
-    @Test("a hook that exits 0 when its timeout kills it does not let the tool through")
+    @Test("a gating hook that exits 0 when its timeout kills it does not let the tool through")
     func killedHookDoesNotProceed() async throws {
         let nap = P.marker()
         defer { P.killAll(nap) }
@@ -74,6 +75,22 @@ struct HookManagerProcessGroupTests {
         let decision = await m.fireBeforeTool(toolName: "t", args: [:])
         guard case .block(let reason) = decision else { Issue.record("a timed-out hook let the tool through: \(decision)"); return }
         #expect(reason == "Hook timed out after 1 seconds")
+        #expect(await P.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the timeout")
+    }
+
+    /// #452, the other half: on an event that gates nothing, a timed-out hook warns and the turn
+    /// goes on with the payload it had. Its trap's JSON is a rewrite it never finished deciding.
+    @Test("a non-gating hook that exits 0 when its timeout kills it keeps the original payload")
+    func killedAfterHookKeepsPayload() async throws {
+        let nap = P.marker()
+        defer { P.killAll(nap) }
+        let (m, url) = try manager(#"trap 'echo "{\"result\":\"rewritten\"}"; exit 0' TERM; sleep \#(nap)"#,
+                                   timeout: 1, event: "AfterTool")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let decision = await m.fireAfterTool(toolName: "t", result: "original")
+        guard case .proceed(let data?) = decision else { Issue.record("expected the turn to go on: \(decision)"); return }
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: String])
+        #expect(json["result"] == "original", "a timed-out AfterTool hook's rewrite was applied")
         #expect(await P.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the timeout")
     }
 
@@ -109,21 +126,31 @@ struct HookManagerProcessGroupTests {
         #expect(String(data: data, encoding: .utf8) == "{\"a\":\"b\"}\n")
     }
 
-    @Test("a timed-out hook blocks, whatever its status", arguments: [128 + SIGKILL, 0, 2, 1])
-    func timedOutBlocks(status: Int32) {
+    @Test("a timed-out hook blocks a gating event and warns on any other, whatever its status",
+          arguments: [128 + SIGKILL, 0, 2, 1])
+    func timedOutDecision(status: Int32) {
         let killed = ProcessGroupRunner.Output(stdout: Data("{}".utf8), stderr: Data(), status: status,
                                                timedOut: true, killed: true)
-        guard case .block(let reason) = HookManager.decision(for: .success(killed), timeoutSeconds: 7) else {
+        guard case .block(let reason) = HookManager.decision(for: .success(killed), timeoutSeconds: 7, gating: true) else {
             Issue.record("expected block for status \(status)"); return
         }
         #expect(reason == "Hook timed out after 7 seconds")
+        guard case .warning(let message) = HookManager.decision(for: .success(killed), timeoutSeconds: 7, gating: false) else {
+            Issue.record("expected warning for status \(status)"); return
+        }
+        #expect(message == "Hook timed out after 7 seconds")
+    }
+
+    @Test("the gating events are the ones that stand before an action")
+    func gatingEvents() {
+        #expect(HookManager.gatingEvents == ["BeforeTool", "BeforeModel", "BeforeToolSelection", "BeforeAgent"])
     }
 
     @Test("a signal is not an exit code: a hook killed by SIGINT warns rather than blocks")
     func signalIsNotExitTwo() {
         // `Process.terminationStatus` reported the signal number, so SIGINT (2) read as a block.
         let killed = ProcessGroupRunner.Output(stdout: Data(), stderr: Data(), status: 128 + SIGINT)
-        guard case .warning = HookManager.decision(for: .success(killed), timeoutSeconds: 60) else {
+        guard case .warning = HookManager.decision(for: .success(killed), timeoutSeconds: 60, gating: true) else {
             Issue.record("expected warning"); return
         }
     }

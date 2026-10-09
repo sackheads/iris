@@ -131,7 +131,8 @@ struct HookManager {
             for hook in eventConfig.hooks {
                 if hook.type != "command" { continue }
                 
-                let decision = await executeCommandHook(hook: hook, payload: currentData, useSandbox: useSandbox)
+                let decision = await executeCommandHook(hook: hook, payload: currentData, useSandbox: useSandbox,
+                                                         gating: Self.gatingEvents.contains(eventName))
                 switch decision {
                 case .block:
                     return decision // Immediate hard block
@@ -152,7 +153,8 @@ struct HookManager {
     /// How long a hook gets when its definition sets no `timeout`.
     static let defaultTimeoutSeconds = 60
 
-    private func executeCommandHook(hook: HookDefinition, payload: Data?, useSandbox: Bool = false) async -> HookDecision {
+    private func executeCommandHook(hook: HookDefinition, payload: Data?, useSandbox: Bool = false,
+                                    gating: Bool) async -> HookDecision {
         let executable: String
         let arguments: [String]
         // Named, so a timeout or a cancel can delete it: killing the `container run` client does
@@ -191,10 +193,16 @@ struct HookManager {
         // A cancel kills the hook, so its verdict never arrived: fail closed, or a hook that would
         // have blocked lets the tool through as a warning (#364 review).
         if Task.isCancelled { return Self.cancelledDecision }
-        return Self.decision(for: outcome, timeoutSeconds: timeout)
+        return Self.decision(for: outcome, timeoutSeconds: timeout, gating: gating)
     }
 
     static let cancelledDecision = HookDecision.block(reason: "cancelled before the hook decided")
+
+    /// Events whose hook stands between the agent and an action: a hook its timeout killed fails
+    /// closed here. On every other event it is a warning, so a hung notifier cannot break a turn
+    /// (#452; docs/tool_hooks.md, "Timeouts and background jobs"). `BeforeAgent` gates the turn
+    /// itself, so it is here too.
+    static let gatingEvents: Set<String> = ["BeforeTool", "BeforeModel", "BeforeToolSelection", "BeforeAgent"]
 
     /// Spawns one hook in a process group of its own (#364): the payload goes in on stdin while
     /// stdout and stderr drain, so neither side can fill a pipe and stall; on timeout or cancel
@@ -212,10 +220,11 @@ struct HookManager {
                                                 stdin: payload, timeoutSeconds: timeoutSeconds, onKilled: onKilled)
     }
 
-    /// A hook its own timeout killed blocks; otherwise exit 2 blocks with stderr as the reason,
-    /// exit 0 proceeds, with stdout as the new payload when it is JSON, and anything else is a
-    /// warning.
-    static func decision(for outcome: Result<ProcessGroupRunner.Output, Error>, timeoutSeconds: Int) -> HookDecision {
+    /// A hook its own timeout killed blocks on a gating event and warns on any other; otherwise
+    /// exit 2 blocks with stderr as the reason, exit 0 proceeds, with stdout as the new payload
+    /// when it is JSON, and anything else is a warning.
+    static func decision(for outcome: Result<ProcessGroupRunner.Output, Error>, timeoutSeconds: Int,
+                         gating: Bool) -> HookDecision {
         let output: ProcessGroupRunner.Output
         switch outcome {
         case .success(let o): output = o
@@ -226,11 +235,12 @@ struct HookManager {
         }
         // Read before the status: a killed hook never gave its verdict, and its status can be 0
         // anyway (a `trap 'exit 0' TERM`, or a shell that outlives its child's SIGKILL by an
-        // instant). A warning would let the tool through like a proceed, so this fails closed,
-        // as a cancel does (#452; docs/tool_hooks.md, "Timeouts and background jobs").
+        // instant). Per docs/tool_hooks.md, "Timeouts and background jobs" (#452): a gating
+        // event fails closed, as a cancel does; any other warns, and `fireEvent` keeps the
+        // payload it had, so a partial rewrite is never applied.
         if output.killed {
-            return .block(reason: output.timedOut ? "Hook timed out after \(timeoutSeconds) seconds"
-                                                  : "Hook was killed before it decided")
+            let reason = output.timedOut ? "Hook timed out after \(timeoutSeconds) seconds" : "Hook was killed before it decided"
+            return gating ? .block(reason: reason) : .warning(message: reason)
         }
         if output.status == 2 {
             let reason = String(data: output.stderr, encoding: .utf8) ?? "Unknown hook error"
