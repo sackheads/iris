@@ -39,6 +39,8 @@ Every conversation persists as one JSON blob under the `iris_conversations` key 
 
 A fake-lane `--perf` run has volatile defaults but the real `IrisPaths`; without the third row it would open the user's real database. In-memory is right for every headless run because the perf record already captures each turn's final text.
 
+If the normal app's on-disk open throws, it still launches on an in-memory store, but the store carries the error and `AppState` reports it as a launch notice ("changes will not be saved") rather than only in the console. That launch also leaves the legacy settings blob (§6) alone: importing it into memory and retiring its key would lose it at quit. Before opening, `onDisk` records `v7_archive` as applied for a store from a pre-merge #226 build that ran the same migration under the name `v6_archive`, and deletes the `v6_archive` row so a future `eraseDatabaseOnSchemaChange` cannot treat it as unknown. Without the `v7_archive` record the migrator re-ran the ALTER and the open failed on the duplicate `isArchived` column.
+
 ## 2. Schema (GRDB migration `v1_conversation_store`)
 
 ```
