@@ -289,6 +289,17 @@ struct IrisPaths: Sendable {
         return resolved
     }
 
+    /// `/tmp`, `/var` and `/etc` spelled as the `/private` directories they link to. Those three
+    /// links are the system's, not something a run can swap, so following them here is not a
+    /// fresh resolution; a path recorded through one (an older card, a temp directory) can then be
+    /// walked with no link followed (#256). Any other spelling is returned unchanged.
+    static func throughPrivate(_ path: String) -> String {
+        for link in ["/tmp", "/var", "/etc"] where path == link || path.hasPrefix(link + "/") {
+            return "/private" + path
+        }
+        return path
+    }
+
     /// Whether two real paths (`realPath` output) name the same file. Exact, or equal but for case
     /// on a case-insensitive volume (#256). `realPath` already returns the on-disk case of every
     /// existing component, so the two can differ in case only in a tail that does not exist yet,

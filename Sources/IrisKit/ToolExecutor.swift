@@ -230,8 +230,9 @@ struct ToolExecutor {
                 }
                 return await readFile(approvedWorkspace: approvedWorkspaceRoot, relative: relative)
             }
-            if let decidedPath, let refusal = Self.decidedPathRefusal("read_file", path: path, cwd: cwd, decided: decidedPath) {
-                return refusal
+            if let decidedPath {
+                if let refusal = Self.decidedPathRefusal("read_file", path: path, cwd: cwd, decided: decidedPath) { return refusal }
+                return await readFile(decided: decidedPath)
             }
             return await readFile(path, cwd: cwd)
         case "write_file":
@@ -243,8 +244,9 @@ struct ToolExecutor {
                 }
                 return await writeFile(grantRoot: grantedMount.source, relative: relative, content: content)
             }
-            if let decidedPath, let refusal = Self.decidedPathRefusal("write_file", path: path, cwd: cwd, decided: decidedPath) {
-                return refusal
+            if let decidedPath {
+                if let refusal = Self.decidedPathRefusal("write_file", path: path, cwd: cwd, decided: decidedPath) { return refusal }
+                return await writeFile(decided: decidedPath, content: content)
             }
             return await writeFile(path, content: content, cwd: cwd, paths: irisPaths ?? .default)
         case "register_directory_watcher":
@@ -793,18 +795,51 @@ struct ToolExecutor {
         return relative
     }
 
-    /// #256: a by-path open runs only the path that was approved, and only while it still resolves
-    /// to itself. `decided` is the dispatcher's real path for the call; a hook that rewrote the path,
-    /// or a link swapped into it since the decision, is refused rather than followed. What is left
-    /// is the window between this check and Foundation's open — a by-path API cannot close it.
+    /// #256: an approved call runs only the path that was approved. `decided` is the dispatcher's
+    /// real path for the call (or the one a card recorded); a hook that rewrote it is refused here.
+    /// That it still names the same file is the walk's job (`readFile(decided:)`, `writeFile(decided:)`).
     static func decidedPathRefusal(_ tool: String, path: String, cwd: String?, decided: String) -> String? {
-        guard resolvePath(path, cwd: cwd) == decided else {
+        guard IrisPaths.throughPrivate(resolvePath(path, cwd: cwd)) == decided else {
             return "Error: `\(tool)` was approved for \(decided), not \(path); nothing was done."
         }
-        guard IrisPaths.realPath(decided) == decided else {
-            return "Error: \(decided) changed after it was approved (it now resolves elsewhere through a link); nothing was done."
-        }
         return nil
+    }
+
+    /// The decided path's components below `/`, or nil when it is not absolute.
+    private static func decidedComponents(_ decided: String) -> [String]? {
+        guard decided.hasPrefix("/") else { return nil }
+        return decided.split(separator: "/", omittingEmptySubsequences: true).map(String.init).filter { $0 != "." }
+    }
+
+    /// An approved read, walked from `/` by descriptor with `O_NOFOLLOW` on every component (#256).
+    /// The decided path is a real path, so it has no link in it: a link the walk meets was swapped
+    /// in after the approval, and is refused rather than followed — atomically, per component, with
+    /// no window between a check and the open.
+    func readFile(decided: String) async -> String {
+        guard let relative = Self.decidedComponents(decided) else {
+            return "Error reading file: the path is not the one that was approved; nothing was done"
+        }
+        return await Task.detached {
+            do { return try GrantedFileAccess(root: "/").read(relative: relative) }
+            catch let error as GrantedFileError { return "Error reading file: \(error.message(for: .approvedPath))" }
+            catch { return "Error reading file: \(error.localizedDescription)" }
+        }.value
+    }
+
+    /// An approved write, the same walk (#256): staged in the final directory's descriptor and
+    /// `renameat`-ed into place, as Foundation's atomic save does, keeping an existing file's mode.
+    /// The leaf is never followed or replaced if it is a link: a write to a dangling link is refused.
+    func writeFile(decided: String, content: String) async -> String {
+        guard let relative = Self.decidedComponents(decided) else {
+            return "Error writing file: the path is not the one that was approved; nothing was done"
+        }
+        return await Task.detached {
+            do {
+                try GrantedFileAccess(root: "/").write(relative: relative, content: content)
+                return "Successfully wrote to \(decided)"
+            } catch let error as GrantedFileError { return "Error writing file: \(error.message(for: .approvedPath))" }
+            catch { return "Error writing file: \(error.localizedDescription)" }
+        }.value
     }
 
     static func nulPathRefusal(_ tool: String) -> String {

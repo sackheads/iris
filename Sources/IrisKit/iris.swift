@@ -4511,9 +4511,16 @@ actor IrisEngine {
         // (#187 §4, R-D4-1): a person clicked "Approve and run" on this call a moment ago, so its
         // write is the human-driven kind a watch is meant to notice, like any other foreground
         // write. The filter is fed from the dispatcher's unattended branch only.
+        // #256: a by-path file tool runs the path the card showed and nothing else, by the same
+        // descriptor walk a live call takes. The click can come days after the card, and a link
+        // swapped into that path in between is refused rather than followed.
+        let decidedPath: String? = grant == nil && (call.toolName == "read_file" || call.toolName == "write_file")
+            ? call.args["path"].map { IrisPaths.throughPrivate(ToolExecutor.resolvePath($0.stringValue, cwd: call.cwd)) }
+            : nil
         return await executeToolWithHooks(name: call.toolName, args: call.args, cwd: call.cwd,
                                           conversationId: conversationId, useSandbox: useSandbox,
-                                          origin: .approvedCall, grant: grant, grantedMount: grantedMount)
+                                          origin: .approvedCall, grant: grant, grantedMount: grantedMount,
+                                          decidedPath: decidedPath)
     }
 
     /// What an approved call that turns out to target a protected directory returns instead of

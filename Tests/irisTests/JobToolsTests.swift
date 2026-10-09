@@ -1500,7 +1500,7 @@ struct JobToolsTests {
                                       origin: String = "Main agent", inSandbox: Bool = false,
                                       callerRole: VibecopCallerRole = .agent, allowedCommands: [String] = [],
                                       vibecopEnabled: Bool? = nil, grantedMount: ContainerMount? = nil,
-                                      humanOnly: Bool = false, graderReadWalked: Bool? = nil) async -> Bool {
+                                      humanOnly: Bool = false, graderReadWalked: Bool = false) async -> Bool {
             approvalCount += 1
             lastHumanOnly = humanOnly
             lastDetails = details

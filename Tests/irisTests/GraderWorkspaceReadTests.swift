@@ -67,7 +67,10 @@ struct GraderWorkspaceReadTests {
         let call = Task { @MainActor in
             defer { finished.mutate { $0 = true } }
             return await state.requestApproval(toolName: "read_file", details: details, workspace: f.proj.path,
-                                               conversationId: cid, callerRole: role, vibecopEnabled: false)
+                                               conversationId: cid, callerRole: role, vibecopEnabled: false,
+                                               // the dispatcher's walk decision, on the spelling (#256)
+                                               graderReadWalked: state.conversations.first { $0.id == cid }?.goalContract?
+                                                   .approvedReadComponents(of: ToolExecutor.resolvePath(details, cwd: f.proj.path)) != nil)
         }
         var queued = false
         for _ in 0..<400 {

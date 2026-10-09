@@ -217,7 +217,7 @@ struct ApprovalResolvedPathTests {
                 == f.real(f.outside) + "/x.txt")
     }
 
-    @Test("a dangling link as a write target is shown as the link, and the write replaces the link")
+    @Test("a dangling link as a write target is shown as the link, and the write is refused, not followed")
     func danglingLinkWrite() async throws {
         let f = try fixture(); defer { f.tearDown() }
         let missing = f.outside.appendingPathComponent("missing.txt")
@@ -226,14 +226,13 @@ struct ApprovalResolvedPathTests {
 
         let (shown, _, _) = try await attendedTurn(f, call: write("d", "here"), answer: .approve)
 
-        #expect(shown == f.real(f.workspace) + "/d", "there is no target to show; the link is what is written")
-        #expect(try String(contentsOf: link, encoding: .utf8) == "here")
+        #expect(shown == f.real(f.workspace) + "/d", "there is no target to show; the link is what is named")
         let attributes = try FileManager.default.attributesOfItem(atPath: link.path)
-        #expect(attributes[.type] as? FileAttributeType == .typeRegular)
+        #expect(attributes[.type] as? FileAttributeType == .typeSymbolicLink, "the link is left alone")
         #expect(!FileManager.default.fileExists(atPath: missing.path), "nothing was created outside")
     }
 
-    @Test("execution refuses a decided path that a link was swapped into, or that a hook rewrote")
+    @Test("execution refuses a hook's rewrite, and a link swapped into the decided path")
     func executionRechecksDecidedPath() async throws {
         let f = try fixture(); defer { f.tearDown() }
         let sub = f.workspace.appendingPathComponent("sub")
@@ -245,15 +244,97 @@ struct ApprovalResolvedPathTests {
         #expect(ToolExecutor.decidedPathRefusal("write_file", path: decided + ".other", cwd: nil, decided: decided) != nil,
                 "a hook's rewrite is not what was approved")
 
+        let executor = ToolExecutor()
+        let wrote = await executor.execute(name: "write_file", args: ["path": .string(decided), "content": .string("ok")],
+                                           decidedPath: decided)
+        #expect(wrote == "Successfully wrote to \(decided)")
+        #expect(await executor.execute(name: "read_file", args: ["path": .string(decided)], decidedPath: decided) == "ok")
+
         // The swap: `sub` becomes a link out after the decision.
         try FileManager.default.removeItem(at: sub)
         try FileManager.default.createSymbolicLink(at: sub, withDestinationURL: f.outside)
-        #expect(ToolExecutor.decidedPathRefusal("write_file", path: decided, cwd: nil, decided: decided) != nil)
-        let result = await ToolExecutor().execute(name: "write_file",
-                                                  args: ["path": .string(decided), "content": .string("x")],
-                                                  decidedPath: decided)
-        #expect(result.hasPrefix("Error:") && result.contains("changed after it was approved"), "\(result)")
-        #expect(!FileManager.default.fileExists(atPath: f.outside.appendingPathComponent("f.txt").path))
+        try "secret".write(to: f.outside.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+        let write = await executor.execute(name: "write_file", args: ["path": .string(decided), "content": .string("x")],
+                                           decidedPath: decided)
+        #expect(write.hasPrefix("Error writing file:") && write.contains("is a symlink now"), "\(write)")
+        let read = await executor.execute(name: "read_file", args: ["path": .string(decided)], decidedPath: decided)
+        #expect(read.hasPrefix("Error reading file:") && !read.contains("secret"), "\(read)")
+        #expect(try String(contentsOf: f.outside.appendingPathComponent("f.txt"), encoding: .utf8) == "secret")
+    }
+
+    @Test("a writer racing a directory/link swap never lands outside (1500 attempts)")
+    func raceWithSwapNeverEscapes() async throws {
+        let f = try fixture(); defer { f.tearDown() }
+        let real = f.workspace.appendingPathComponent("real")
+        let swap = f.workspace.appendingPathComponent("swap")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: swap, withDestinationURL: f.outside)
+        let decided = IrisEngine.decidedPath("real/f.txt", cwd: f.workspace.path, walked: false)
+
+        // What a sandboxed command with the workspace mounted can do: swap the two names, flat out.
+        let stop = Locked(false)
+        let swaps = Locked(0)
+        let flipper = Thread {
+            while !stop.value {
+                if renamex_np(real.path, swap.path, UInt32(RENAME_SWAP)) == 0 { swaps.mutate { $0 += 1 } }
+            }
+        }
+        flipper.start()
+        let executor = ToolExecutor()
+        var succeeded = 0
+        for i in 0..<1500 {
+            let result = await executor.execute(name: "write_file",
+                                                args: ["path": .string(decided), "content": .string("\(i)")],
+                                                decidedPath: decided)
+            if result.hasPrefix("Successfully") { succeeded += 1 }
+            #expect(!FileManager.default.fileExists(atPath: f.outside.appendingPathComponent("f.txt").path),
+                    "attempt \(i) wrote outside")
+            if FileManager.default.fileExists(atPath: f.outside.appendingPathComponent("f.txt").path) { break }
+        }
+        stop.mutate { $0 = true }
+        while !flipper.isFinished { try? await Task.sleep(nanoseconds: 1_000_000) }
+        #expect(swaps.value > 100, "the race was actually run (\(swaps.value) swaps)")
+        let outside = try FileManager.default.contentsOfDirectory(atPath: f.outside.path)
+        #expect(outside.isEmpty, "\(outside)")
+        _ = succeeded   // some land in the real directory, under whichever name it has; none outside
+    }
+
+    @Test("Approve and run refuses a link swapped in between the card and the click")
+    func approvedCardRefusesLateSwap() async throws {
+        let f = try fixture(); defer { f.tearDown() }
+        let real = f.workspace.appendingPathComponent("real")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        // A background run is denied; its card records the decided path.
+        let (state, engine, id) = try harness(f, call: write("real/notes.md", "from the card"), background: true)
+        await engine.processInput("go", source: "job:test", conversationId: id)
+        let call = try #require(state.takeBackgroundDenials(for: id).first)
+        let recorded = try #require(call.args["path"]?.stringValue)
+        #expect(recorded == f.real(real) + "/notes.md")
+
+        // Days later, before the click, `real` becomes a link somewhere else.
+        try FileManager.default.removeItem(at: real)
+        try FileManager.default.createSymbolicLink(at: real, withDestinationURL: f.outside)
+
+        let clickId = state.createNewConversation(isBackground: true, select: false)
+        let result = await engine.executeApprovedCall(call, conversationId: clickId)
+
+        #expect(result.hasPrefix("Error writing file:") && result.contains("is a symlink now"), "\(result)")
+        #expect(!FileManager.default.fileExists(atPath: f.outside.appendingPathComponent("notes.md").path))
+    }
+
+    @Test("Approve and run still writes the approved path, including one recorded through /var")
+    func approvedCardWritesApprovedPath() async throws {
+        let f = try fixture(); defer { f.tearDown() }
+        let target = f.workspace.appendingPathComponent("card.md")
+        let (state, engine, _) = try harness(f, call: textResponse("unused"), background: true)
+        let clickId = state.createNewConversation(isBackground: true, select: false)
+        // Spelled through `/var`, as a card recorded before #256 would have it.
+        let call = BlockedCall(toolName: "write_file",
+                               args: ["path": .string(target.path), "content": .string("clicked")],
+                               cwd: f.workspace.path)
+        let result = await engine.executeApprovedCall(call, conversationId: clickId)
+        #expect(result.hasPrefix("Successfully wrote to "), "\(result)")
+        #expect(try String(contentsOf: target, encoding: .utf8) == "clicked")
     }
 
     @Test("case: a protected directory and an allowlist rule match whatever the case, on a case-insensitive volume")
@@ -288,6 +369,48 @@ struct ApprovalResolvedPathTests {
         let permissions = PermissionManager(paths: IrisPaths(root: f.home))
         permissions.allowGlobally(toolName: "read_file", details: "~/" + name)
         #expect(permissions.isAllowed(toolName: "read_file", details: absolute, workspace: nil))
+    }
+
+    @Test("a grader read that reaches its workspace only once resolved still asks: the walk decision is the spelling's")
+    func graderPreApprovalNeedsTheWalk() async throws {
+        let f = try fixture(); defer { f.tearDown() }
+        let notes = f.workspace.appendingPathComponent("notes.txt")
+        try "n".write(to: notes, atomically: true, encoding: .utf8)
+        let state = AppState(store: try ConversationStore.inMemory(),
+                             tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
+                             createIfEmpty: false, emitLaunchNotices: false)
+        state.permissions = PermissionManager(paths: IrisPaths(root: f.home))
+        let cid = state.createNewConversation(isBackground: false, select: false)
+        var contract = GoalContract(objective: "o", criteria: [Criterion(text: "c", kind: .qualitative)])
+            .humanApproved(workspace: f.real(f.workspace))
+        contract.lock()
+        state.setGoalContract(for: cid, contract)
+        state.setWorkspace(for: cid, path: f.real(f.workspace))
+
+        func asks(walked: Bool) async -> Bool {
+            let finished = Locked(false)
+            let call = Task { @MainActor in
+                defer { finished.mutate { $0 = true } }
+                return await state.requestApproval(toolName: "read_file", details: f.real(notes),
+                                                   workspace: f.real(f.workspace), conversationId: cid,
+                                                   callerRole: .evaluator, vibecopEnabled: false,
+                                                   graderReadWalked: walked)
+            }
+            var queued = false
+            for _ in 0..<400 where !finished.value {
+                if let r = state.pendingApprovals.first(where: { $0.conversationId == cid }) {
+                    queued = true; state.resolveApproval(id: r.id, .deny); break
+                }
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            if !queued { state.denyPendingApprovals(for: cid) }
+            _ = await call.value
+            return queued
+        }
+        // The same resolved path either way: spelled inside, the dispatcher walks it and it is
+        // pre-approved; spelled `../ws/notes.txt` or through an outside link, it is not walked and asks.
+        #expect(await asks(walked: true) == false)
+        #expect(await asks(walked: false) == true)
     }
 
     // MARK: the pure pieces
