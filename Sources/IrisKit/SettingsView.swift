@@ -1061,6 +1061,11 @@ struct SettingsView: View {
         } message: {
             Text(downloader.error ?? "An unknown error occurred.")
         }
+        // Settings is a native `Settings { }` scene, not a view SwiftUI hands us a `dismiss`
+        // for, so Esc closes it the same way the red button does (#278). `onExitCommand` only
+        // fires when nothing else (a focused field's own Esc-to-revert, an open Picker/sheet)
+        // claims the key first, so editing and the model-list sheet are unaffected.
+        .onExitCommand { NSApp.keyWindow?.performClose(nil) }
     }
     
     // MARK: - Ollama Helpers
