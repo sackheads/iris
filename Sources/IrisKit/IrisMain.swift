@@ -13,7 +13,7 @@ public enum IrisMain {
         if let perf = PerfCLI.parse(CommandLine.arguments) {
             switch perf {
             case .success(let cmd):
-                exit(await PerfCLI.execute(cmd))
+                exit(await PerfCLI.execute(cmd, environment: .process))
             case .failure(let err):
                 FileHandle.standardError.write(Data("iris --perf: \(err.localizedDescription)\n\(PerfCLI.usage)\n".utf8))
                 exit(64)

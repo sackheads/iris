@@ -145,7 +145,9 @@ enum PerfCLI {
     }
 
     /// What `execute` does to the process before a run: a volatile copy of the settings store, a
-    /// volatile `~/.iris` (real lane), and the Keychain bypass (real lane). Each of these is a
+    /// volatile `~/.iris` (real lane), and the Keychain bypass (real lane); plus the real lane's
+    /// scratch-workspace claim and cwd change around it, so a test can reach the volatile `~/.iris`
+    /// call without either. Each of these is a
     /// process-wide, one-way switch, and its readers are singletons (`ConfigManager.shared`,
     /// `MemoryManager.shared`, `KeychainManager.shared`) that capture what they see at first touch,
     /// so they are injected rather than task-scoped like `HeadlessMode` (#324): a task-local volatile
@@ -158,13 +160,24 @@ enum PerfCLI {
         var defaults: () -> UserDefaults
         var useVolatilePaths: (URL) throws -> Void
         var requestKeychainBypass: () -> Void
+        /// The real lane's scratch workspace: a shared lock and directory under `$TMPDIR`.
+        var claimScratch: () throws -> URL
+        var releaseScratch: () -> Void
+        /// Moves the whole process's cwd (invariant 7), so a test passes a no-op.
+        var changeDirectory: (String) -> Void
+        /// The home whose memory the run must leave untouched, read before `useVolatilePaths`.
+        var realHome: () -> IrisPaths
 
         /// The live process: exactly what `iris --perf run` has always done.
         static var process: ExecutionEnvironment {
             ExecutionEnvironment(useVolatileDefaults: { IrisDefaults.useVolatileCopyOfStandard() },
                                  defaults: { IrisDefaults.store },
                                  useVolatilePaths: { try IrisPaths.useVolatileCopy(at: $0) },
-                                 requestKeychainBypass: { KeychainManager.requestHeadlessBypass() })
+                                 requestKeychainBypass: { KeychainManager.requestHeadlessBypass() },
+                                 claimScratch: { try claimScratchWorkspace() },
+                                 releaseScratch: { releaseScratchWorkspace() },
+                                 changeDirectory: { FileManager.default.changeCurrentDirectoryPath($0) },
+                                 realHome: { IrisPaths.default })
         }
     }
 
@@ -187,7 +200,7 @@ enum PerfCLI {
             let previousCwd = FileManager.default.currentDirectoryPath
             var scratch: URL?
             var memoryBefore: String?
-            let realMemory = IrisPaths.default.memoryDir   // the real home, before any override
+            let realMemory = environment.realHome().memoryDir   // the real home, before any override
             if suite.lane == .real {
                 // If anything between this claim and `scratch = dir` throws, the defer below
                 // never sees `scratch`: the lock and the half-built directory are left for the
@@ -197,8 +210,8 @@ enum PerfCLI {
                 if let warning = DevHomeSeeder.unseededCopyWarning(standard: .standard, release: .release) {
                     print(warning)
                 }
-                let dir = try claimScratchWorkspace()
-                FileManager.default.changeCurrentDirectoryPath(dir.path)
+                let dir = try environment.claimScratch()
+                environment.changeDirectory(dir.path)
                 // Memory tools write through IrisPaths.default: route the whole home at a
                 // copy under the scratch directory so USER.md, the fact store and skills
                 // stay untouched. Reads see the same context.
@@ -213,9 +226,9 @@ enum PerfCLI {
                 // is released last, after the directory is gone, so a waiting run's claim finds
                 // nothing left to reset.
                 if let scratch {
-                    FileManager.default.changeCurrentDirectoryPath(previousCwd)
+                    environment.changeDirectory(previousCwd)
                     try? FileManager.default.removeItem(at: scratch)
-                    releaseScratchWorkspace()
+                    environment.releaseScratch()
                 }
             }
             let dumpDir = dumpRequestsDir.map { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : root.appendingPathComponent($0) }
@@ -263,10 +276,11 @@ enum PerfCLI {
         }
     }
 
-    /// `environment` defaults to the live process, which is what the real CLI (`IrisMain`) wants;
-    /// a test passes its own so a run leaves the process as it found it (#324).
+    /// `environment` has no default on purpose: a test that forgot it would get the live process,
+    /// which is #324 again. The real CLI (`IrisMain`) passes `.process`; a test passes its own so a
+    /// run leaves the process as it found it.
     @MainActor
-    static func execute(_ cmd: PerfCommand, environment: ExecutionEnvironment = .process) async -> Int32 {
+    static func execute(_ cmd: PerfCommand, environment: ExecutionEnvironment) async -> Int32 {
         do {
             switch cmd {
             case .run(let suitePath, let reps, let out, let fakeOnly, let dumpRequestsDir):

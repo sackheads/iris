@@ -75,9 +75,12 @@ struct PerfCLITests {
         // right after `PerfSuite.load`, before any scenario is read.
         try #"{"name":"caching","lane":"real","scenarios":["does-not-exist.json"]}"#
             .write(toFile: suitePath, atomically: true, encoding: .utf8)
-        let code = await PerfCLI.execute(.run(suite: suitePath, reps: nil, out: dir.appendingPathComponent("runs").path, fakeOnly: true))
+        let recorder = PerfCLIEnvironmentRecorder()
+        let code = await PerfCLI.execute(.run(suite: suitePath, reps: nil, out: dir.appendingPathComponent("runs").path, fakeOnly: true),
+                                         environment: recorder.environment)
         #expect(code == 0)
-        // Nothing was written: the run never started.
+        // Nothing was written and nothing was prepared: the run never started.
+        #expect(recorder.volatileDefaultsRequests == 0)
         #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("runs").path))
     }
 
@@ -132,6 +135,37 @@ struct PerfCLITests {
         #expect(KeychainManager.headlessBypassRequested == bypassBefore)
         #expect(!KeychainManager.headlessBypassRequested)
         #expect(IrisDefaults.isVolatileCopy == defaultsBefore)
+    }
+
+    /// A dropped or misrouted `useVolatilePaths` would have a real-lane run write the developer's
+    /// real `~/.iris`. The scratch claim and the chdir around it are injected too, so this runs a
+    /// real-lane suite with a fake client (no network, no spend) and checks the home was routed at
+    /// `<scratch>/.iris` before the first model call.
+    @MainActor
+    @Test("a real-lane run routes ~/.iris at <scratch>/.iris before the first scenario (#324)")
+    func realLaneRoutesHomeIntoScratch() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-perfcli-\(UUID().uuidString)")
+        let scratch = dir.appendingPathComponent("scratch", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let recorder = PerfCLIEnvironmentRecorder(scratch: scratch)
+        let client = PathsProbingLLMClient(recorder: recorder, responses: [
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "Canberra.")]))], usageMetadata: nil)
+        ])
+        let suite = PerfSuite(name: "paths-probe", lane: .real, repetitions: 1, rungs: [5],
+                              scenarios: ["perf/prompts/fake/text-only.json"])
+        let code = try await PerfCLI.runSuiteRespectingLane(suite, repetitionsOverride: 1,
+                                                            out: dir.appendingPathComponent("runs").path,
+                                                            dumpRequestsDir: nil, environment: recorder.environment,
+                                                            client: client)
+        #expect(code == 0)
+        #expect(recorder.volatilePathRoots == [scratch.appendingPathComponent(".iris")])
+        #expect(client.calls > 0)
+        #expect(client.pathsRoutedBeforeFirstCall == true)
+        #expect(recorder.scratchClaims == 1 && recorder.scratchReleases == 1)
+        #expect(recorder.directoryChanges.first == scratch.path)
+        #expect(recorder.directoryChanges.count == 2, "the cwd is restored after the run")
+        #expect(!IrisPaths.isVolatileCopy)
     }
 
     /// Each test gets its own `base`, so none of this collides with a real perf run (which always
@@ -243,17 +277,56 @@ struct PerfCLITests {
 }
 
 /// A `PerfCLI.ExecutionEnvironment` that records what `execute` asked for and changes nothing
-/// process-wide (#324). Reads go to a throwaway suite, never `IrisDefaults.store`.
+/// process-wide (#324). Reads go to a throwaway suite, never `IrisDefaults.store`; the scratch
+/// claim returns `scratch` (a test's own temp dir) and the chdir only records.
 final class PerfCLIEnvironmentRecorder {
     private(set) var volatileDefaultsRequests = 0
     private(set) var volatilePathRoots: [URL] = []
     private(set) var keychainBypassRequests = 0
+    private(set) var scratchClaims = 0
+    private(set) var scratchReleases = 0
+    private(set) var directoryChanges: [String] = []
     let store = UserDefaults(suiteName: "iris-perfcli-env-\(UUID().uuidString)")!
+    private let scratch: URL?
+    /// Stands in for the real home in the run's memory-fingerprint check. The test process's own
+    /// home is shared with every suite running beside it, so its fingerprint is not this run's.
+    private let home: IrisPaths
+
+    init(scratch: URL? = nil) {
+        self.scratch = scratch
+        home = IrisPaths(root: (scratch ?? FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-perfcli-home-\(UUID().uuidString)")).appendingPathComponent("real-home"))
+    }
 
     var environment: PerfCLI.ExecutionEnvironment {
         PerfCLI.ExecutionEnvironment(useVolatileDefaults: { self.volatileDefaultsRequests += 1 },
                                      defaults: { self.store },
                                      useVolatilePaths: { self.volatilePathRoots.append($0) },
-                                     requestKeychainBypass: { self.keychainBypassRequests += 1 })
+                                     requestKeychainBypass: { self.keychainBypassRequests += 1 },
+                                     claimScratch: {
+                                         self.scratchClaims += 1
+                                         guard let scratch = self.scratch else { throw PerfCLIError.usage("no scratch in this test") }
+                                         return scratch
+                                     },
+                                     releaseScratch: { self.scratchReleases += 1 },
+                                     changeDirectory: { self.directoryChanges.append($0) },
+                                     realHome: { self.home })
+    }
+}
+
+/// Notes, at the first model call, whether `useVolatilePaths` had already been called.
+private final class PathsProbingLLMClient: LLMClientProtocol, @unchecked Sendable {
+    private let inner: FakeLLMClient
+    private let recorder: PerfCLIEnvironmentRecorder
+    private(set) var calls = 0
+    private(set) var pathsRoutedBeforeFirstCall: Bool?
+    init(recorder: PerfCLIEnvironmentRecorder, responses: [GeminiResponse]) {
+        self.recorder = recorder
+        inner = FakeLLMClient(responses: responses)
+    }
+    func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+        if pathsRoutedBeforeFirstCall == nil { pathsRoutedBeforeFirstCall = !recorder.volatilePathRoots.isEmpty }
+        calls += 1
+        return try await inner.generateContent(request: request, tier: tier)
     }
 }
