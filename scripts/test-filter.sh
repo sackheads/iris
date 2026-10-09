@@ -23,7 +23,14 @@ trap 'rm -f "$log"' EXIT
 swift test --filter "$filter" "$@" 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}
 
-if grep -qE 'Test run with 0 tests' "$log"; then
+# A filter that matches only XCTest classes makes swift-testing legitimately print "Test run
+# with 0 tests in 0 suites passed" while XCTest runs the tests fine (#301, #303) — so the
+# swift-testing line alone cannot be the guard. Fail only when NEITHER runner executed anything:
+# take the highest count either framework printed (a run can report more than one such line,
+# e.g. per-suite), and treat a missing line as 0.
+swift_ran=$(grep -oE 'Test run with [0-9]+ tests' "$log" | grep -oE '[0-9]+' | sort -rn | head -1)
+xctest_ran=$(grep -oE 'Executed [0-9]+ tests' "$log" | grep -oE '[0-9]+' | sort -rn | head -1)
+if [ "${swift_ran:-0}" -eq 0 ] && [ "${xctest_ran:-0}" -eq 0 ]; then
     cat >&2 <<EOF
 
 error: --filter '$filter' matched no tests, so this run proves nothing.
