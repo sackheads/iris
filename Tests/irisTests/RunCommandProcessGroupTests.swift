@@ -156,13 +156,51 @@ struct RunCommandProcessGroupTests {
     func detachedBackgroundSurvives() async {
         let nap = Self.marker()
         defer { Self.killAll(nap) }
+        // Through `ProcessGroupRunner` directly, not `ToolExecutor.runCommand`: that wraps the
+        // runner in `withTimeout`, which races it against a timer inside an *unstructured*
+        // `Task {}` (deliberately, so a cancel is never held up waiting for work it no longer
+        // needs — see `Timeout.swift`). Under heavy load that `Task` can sit unscheduled on the
+        // cooperative pool for seconds before it ever reaches the runner, and a clock started
+        // before it — as this test's used to be — charges that pool-start latency against the
+        // product (#429; the mechanism #427 found in the starvation scenarios). None of that
+        // latency is between this call and the runner's own work, so starting the clock here
+        // measures the real property: the runner returns once the leader exits, without waiting
+        // on a background job that no longer holds its pipes.
+        let runner = ProcessGroupRunner()
         let started = Date()
-        let out = await ToolExecutor().runCommand("(sleep \(nap) >/dev/null 2>&1 &); echo started", cwd: nil, timeoutSeconds: 20)
-        #expect(out == "started\n")
-        #expect(Date().timeIntervalSince(started) < ProcessGroupRunner.strayGraceSeconds)
+        let result = await runner.run(executable: "/bin/zsh",
+                                       arguments: ["-c", "(sleep \(nap) >/dev/null 2>&1 &); echo started"],
+                                       environment: BinaryResolver.commandEnvironment(base: ProcessInfo.processInfo.environment),
+                                       currentDirectory: nil)
+        let wall = Date().timeIntervalSince(started)
+        #expect(wall < ProcessGroupRunner.strayGraceSeconds, "returned after \(wall)s; looks like it paid the stray grace")
+        guard case .success(let output) = result else {
+            Issue.record("expected success, got \(result)")
+            return
+        }
+        #expect(String(data: output.stdout, encoding: .utf8) == "started\n")
         // Polled: the call returns once the shell has forked the job, which may not have exec'd
         // `sleep` yet. Appearing a moment after the return still proves it outlived the call.
         #expect(await Self.appears("sleep \(nap)", within: 3), "a server started with its output redirected must outlive the call")
+    }
+
+    @Test("ToolExecutor.runCommand leaves a detached background job alive")
+    func runCommandLeavesDetachedBackgroundAlive() async {
+        let nap = Self.marker()
+        defer { Self.killAll(nap) }
+        // Same shape as `detachedBackgroundSurvives`, but through `ToolExecutor.runCommand` itself:
+        // that test moved to calling `ProcessGroupRunner` directly for its timing (#429), which
+        // dropped coverage at this layer for the property that matters — if `runCommand` ever
+        // killed the group on return, it would take a detached background job with it, and
+        // nothing at this layer would notice.
+        let started = Date()
+        let out = await ToolExecutor().runCommand("(sleep \(nap) >/dev/null 2>&1 &); echo started",
+                                                    cwd: nil, timeoutSeconds: 10)
+        // Generous, not tight: this is a liveness check, not a timing measurement (#429).
+        #expect(Date().timeIntervalSince(started) < 20, "runCommand should not have hung")
+        #expect(out == "started\n")
+        #expect(await Self.appears("sleep \(nap)", within: 3),
+                "a detached background job must survive runCommand's return")
     }
 
     @Test("a plain command leaves no process behind")
