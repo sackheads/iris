@@ -96,6 +96,19 @@ final class SandboxingManager: @unchecked Sendable {
     /// forever — this now sits on JobRunner's fire-time pre-check and click-time re-check, both
     /// ahead of a run's own deadline, and a hang there would wedge the job `inFlight` for good
     /// (#293 review).
+    ///
+    /// A `false` from the timeout means *this call* stopped waiting, not that `container system
+    /// start` stopped running: the CLI has already handed the start off to launchd and the XPC
+    /// services it starts, and killing our wait does not reach back into them. They may finish
+    /// the start on their own after we have answered `false`.
+    ///
+    /// A caller's own cancellation returns promptly too, for the same reason: this call shares
+    /// one in-flight start with every other concurrent caller, and a waiter that stops waiting
+    /// must not take that start away from the others. `awaitSharedStart` below is a production
+    /// version of the cancel-aware wait `SubagentGoalLoopTests.value(of:within:)` (#432) uses in
+    /// tests — but where that helper cancels the task it is waiting on, this one cannot: `task`
+    /// here is joined by every caller, and cancelling it on one caller's behalf would cancel the
+    /// start for all of them.
     @discardableResult
     func startContainerSystem() async -> (success: Bool, message: String?) {
         guard let binaryPath = containerBinaryPath else {
@@ -114,7 +127,54 @@ final class SandboxingManager: @unchecked Sendable {
             inFlightStart = t
             return t
         }
-        return await task.value
+        return await Self.awaitSharedStart(task)
+    }
+
+    /// `task.value`, but a cancelled caller is handed back a result rather than waiting out the
+    /// shared start — `Task<T, Never>.value` does not itself check the awaiting task's
+    /// cancellation, so a plain `await task.value` would wait the full `startTimeoutSeconds`
+    /// regardless (#293 review). Unlike a wait that owns the task it waits on, this one never
+    /// cancels `task`: other callers may still be joined to it, and this caller giving up must
+    /// not take the start away from them.
+    private static func awaitSharedStart(
+        _ task: Task<(success: Bool, message: String?), Never>
+    ) async -> (success: Bool, message: String?) {
+        /// Resumes a continuation exactly once, whichever of "the shared start finished" and
+        /// "the caller was cancelled" happens first; the other arrival is a no-op.
+        final class SingleResume: @unchecked Sendable {
+            private let lock = NSLock()
+            private var continuation: CheckedContinuation<(success: Bool, message: String?), Never>?
+            private var pendingResult: (success: Bool, message: String?)?
+
+            func attach(_ continuation: CheckedContinuation<(success: Bool, message: String?), Never>) {
+                lock.withLock {
+                    if let pendingResult {
+                        continuation.resume(returning: pendingResult)
+                    } else {
+                        self.continuation = continuation
+                    }
+                }
+            }
+
+            func resume(_ result: (success: Bool, message: String?)) {
+                lock.withLock {
+                    guard pendingResult == nil else { return }
+                    pendingResult = result
+                    continuation?.resume(returning: result)
+                    continuation = nil
+                }
+            }
+        }
+
+        let box = SingleResume()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                box.attach(continuation)
+                Task { box.resume(await task.value) }
+            }
+        } onCancel: {
+            box.resume((false, "startContainerSystem: stopped waiting"))
+        }
     }
 
     /// `container system start`, through `ProcessGroupRunner` rather than `sh -c`: no shell to

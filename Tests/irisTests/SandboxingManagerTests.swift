@@ -113,4 +113,28 @@ struct SandboxingManagerStartTests {
         let callsAfter = ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n")
         #expect(callsAfter.count == 2, "got: \(callsAfter)")
     }
+
+    @Test("a cancelled waiter returns promptly while the other waiter still gets the result")
+    func cancelledWaiterReturnsPromptly() async throws {
+        let stub = try stub("sleep 1\nexit 0")
+        defer { try? FileManager.default.removeItem(at: stub.dir) }
+        let m = SandboxingManager(binaryPath: { stub.binary }, startTimeoutSeconds: 10)
+
+        let cancelled = Task { await m.startContainerSystem() }
+        // Give it a moment to create the in-flight start before the second caller joins it.
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let other = Task { await m.startContainerSystem() }
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let cancelledAt = Date()
+        cancelled.cancel()
+        let cancelledResult = await cancelled.value
+        #expect(Date().timeIntervalSince(cancelledAt) < 0.5,
+                "returned on cancellation, not after the stub's 1s sleep or the 10s timeout")
+        #expect(cancelledResult.success == false)
+
+        // The shared start was not cancelled away from the other waiter.
+        let otherResult = await other.value
+        #expect(otherResult.success == true, "got: \(String(describing: otherResult.message))")
+    }
 }
