@@ -81,6 +81,59 @@ struct PerfCLITests {
         #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("runs").path))
     }
 
+    /// #324: `execute` used to flip three process-wide, one-way switches itself, so a test driving
+    /// a fake-lane suite through it changed the store, `~/.iris` and the Keychain mode for every
+    /// suite after it. They are injected now; this runs a fake-lane suite through `execute`, past
+    /// the `--fake-only` skip, and checks the process is as it was — and that `execute` still asked
+    /// for the volatile settings copy, the one switch a fake lane needs.
+    @MainActor
+    @Test("a fake-lane run through execute leaves the process globals unchanged (#324)")
+    func fakeLaneExecuteLeavesGlobalsAlone() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-perfcli-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let suitePath = dir.appendingPathComponent("fake.json").path
+        try #"{"name":"globals-probe","lane":"fake","repetitions":1,"rungs":[5],"scenarios":["perf/prompts/fake/text-only.json"]}"#
+            .write(toFile: suitePath, atomically: true, encoding: .utf8)
+        let defaultsBefore = IrisDefaults.isVolatileCopy
+        let pathsBefore = IrisPaths.isVolatileCopy
+        let homeBefore = IrisPaths.default.root
+        let bypassBefore = KeychainManager.headlessBypassRequested
+        let recorder = PerfCLIEnvironmentRecorder()
+        let out = dir.appendingPathComponent("runs")
+        let code = await PerfCLI.execute(.run(suite: suitePath, reps: 1, out: out.path, fakeOnly: true),
+                                         environment: recorder.environment)
+        #expect(code == 0)
+        // It actually ran: a record was written, so the skip was passed.
+        #expect(!((try? FileManager.default.contentsOfDirectory(atPath: out.path)) ?? []).isEmpty)
+        #expect(recorder.volatileDefaultsRequests == 1)
+        #expect(recorder.volatilePathRoots.isEmpty)
+        #expect(recorder.keychainBypassRequests == 0)
+        #expect(IrisDefaults.isVolatileCopy == defaultsBefore)
+        #expect(!IrisDefaults.isVolatileCopy)
+        #expect(IrisPaths.isVolatileCopy == pathsBefore)
+        #expect(IrisPaths.default.root == homeBefore)
+        #expect(KeychainManager.headlessBypassRequested == bypassBefore)
+    }
+
+    /// The real lane's half of #324, without running a real-lane suite (that claims `$TMPDIR`'s
+    /// scratch workspace and moves the cwd): the Keychain bypass goes through the environment.
+    @Test("a real-lane ADC run requests the Keychain bypass through the environment, not the process (#324)")
+    func realLaneKeychainBypassIsInjected() {
+        let bypassBefore = KeychainManager.headlessBypassRequested
+        let defaultsBefore = IrisDefaults.isVolatileCopy
+        let recorder = PerfCLIEnvironmentRecorder()
+        recorder.store.set("Gemini", forKey: "PRIMARY_PROVIDER")
+        recorder.store.set(GeminiAuthMode.adc.rawValue, forKey: "GEMINI_AUTH_MODE")
+        let suite = PerfSuite(name: "real-probe", lane: .real, repetitions: 1, rungs: [5], scenarios: [])
+        PerfCLI.prepare(for: suite, environment: recorder.environment)
+        #expect(recorder.volatileDefaultsRequests == 1)
+        #expect(recorder.keychainBypassRequests == 1)
+        #expect(KeychainManager.headlessBypassRequested == bypassBefore)
+        #expect(!KeychainManager.headlessBypassRequested)
+        #expect(IrisDefaults.isVolatileCopy == defaultsBefore)
+    }
+
     /// Each test gets its own `base`, so none of this collides with a real perf run (which always
     /// uses `$TMPDIR` itself) or another test's claim — invariant 7, applied to a brand-new global.
     private func testBase() -> URL {
@@ -186,5 +239,21 @@ struct PerfCLITests {
         let runB = try await seedAndRenderOneRun()
         #expect(runA == runB)
         #expect(runA.contains("**Path:**"))
+    }
+}
+
+/// A `PerfCLI.ExecutionEnvironment` that records what `execute` asked for and changes nothing
+/// process-wide (#324). Reads go to a throwaway suite, never `IrisDefaults.store`.
+final class PerfCLIEnvironmentRecorder {
+    private(set) var volatileDefaultsRequests = 0
+    private(set) var volatilePathRoots: [URL] = []
+    private(set) var keychainBypassRequests = 0
+    let store = UserDefaults(suiteName: "iris-perfcli-env-\(UUID().uuidString)")!
+
+    var environment: PerfCLI.ExecutionEnvironment {
+        PerfCLI.ExecutionEnvironment(useVolatileDefaults: { self.volatileDefaultsRequests += 1 },
+                                     defaults: { self.store },
+                                     useVolatilePaths: { self.volatilePathRoots.append($0) },
+                                     requestKeychainBypass: { self.keychainBypassRequests += 1 })
     }
 }
