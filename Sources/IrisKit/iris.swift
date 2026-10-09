@@ -3117,6 +3117,10 @@ actor IrisEngine {
             fire: { [weak runner] job, fire in
                 await runner?.fire(job: job, origin: .watcher(paths: fire.paths),
                                    watch: fire.summary)
+            },
+            rootExists: { FileManager.default.fileExists(atPath: $0) },
+            unavailable: { [weak runner] job, reason in
+                await runner?.pauseUnavailable(job: job, reason: reason)
             })
         watchCoordinatorInstance = coordinator
         await runner.setHeldPathsSource { [weak coordinator] jobId in

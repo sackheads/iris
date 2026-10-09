@@ -108,6 +108,10 @@ actor WatchCoordinator {
     private let now: @Sendable () -> Date
     private let recentWrites: RecentWrites
     private let fire: WatchFireHandler
+    /// The fire-time root check (#281); `nil` skips it. See `dispatch`.
+    private let rootExists: (@Sendable (String) -> Bool)?
+    /// Where a fire whose root has gone is reported: `JobRunner.pauseUnavailable` in the app.
+    private let unavailable: (@Sendable (Job, String) async -> Void)?
     private var subscribers: [UUID: Subscriber] = [:]
     /// Issues every dispatch's identity. On the actor rather than on `Subscriber`, and never reset:
     /// a subscriber can be removed by a pause and re-created by the resume while a handler is still
@@ -125,12 +129,18 @@ actor WatchCoordinator {
     /// late fire the wake exists to prevent.
     private var pendingWake = false
 
+    /// `rootExists` and `unavailable` are the fire-time check of #281. Optional because most tests
+    /// watch roots that exist only as strings; the app passes a real stat and the runner's pause.
     init(ledger: JobLedger, now: @escaping @Sendable () -> Date, recentWrites: RecentWrites,
-         fire: @escaping WatchFireHandler) {
+         fire: @escaping WatchFireHandler,
+         rootExists: (@Sendable (String) -> Bool)? = nil,
+         unavailable: (@Sendable (Job, String) async -> Void)? = nil) {
         self.ledger = ledger
         self.now = now
         self.recentWrites = recentWrites
         self.fire = fire
+        self.rootExists = rootExists
+        self.unavailable = unavailable
     }
 
     // MARK: Subscribers
@@ -553,9 +563,27 @@ actor WatchCoordinator {
 
     /// Step 2's last line: the run goes out in a task of its own, and the loop carries on. The
     /// admission comes back through `apply`.
+    ///
+    /// Before the handler, the watch root is stat'd once (#281). `rm -rf` of a watched folder
+    /// delivers the children's deletions first, and their burst can fire at the instant the root
+    /// goes — a model turn spent on a folder that no longer exists, beside the pause that follows.
+    /// A gone root drops the burst and pauses the job with the reason `WatcherManager` would give,
+    /// so a deletion is one row and one card. The stat is off the actor, like the manager's, and
+    /// in this task rather than in `startFire`, so `tick` stays one step that never suspends.
+    /// Coverage stays lexical (`covers`); this checks only that the root is still there.
     private func dispatch(_ id: UUID, job: Job, fire offer: WatchFire, seq: UInt64) {
         let handler = fire
         Task { [self] in
+            if let rootExists, case .fsEvent(let watch) = job.trigger,
+               !(await WatcherManager.rootsMissing([watch.path], fileExists: rootExists)).isEmpty {
+                // Re-checked after the stat: a `sync` may have moved the job onto another root,
+                // and a pause meant for the old one must not land on it.
+                guard subscribers[id]?.fireSeq == seq else { return }
+                let reason = WatcherManager.unavailableReason(watch.path)
+                await unavailable?(job, reason)
+                apply(.dropUnavailable(reason: reason), to: id, seq: seq)
+                return
+            }
             let admission = await handler(job, offer)
             // No `await`: this task inherits the actor's isolation, so only the handler suspends.
             apply(admission, to: id, seq: seq)

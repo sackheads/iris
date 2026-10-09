@@ -1172,6 +1172,70 @@ struct WatchCoordinatorTests {
         #expect(await coordinator.snapshot(job.id)?.pending == 0, "the burst is dropped, not retried")
     }
 
+    // MARK: A root gone at fire time (#281)
+
+    /// What the fire-time root check reported.
+    actor Unavailable {
+        private(set) var reports: [(job: Job, reason: String)] = []
+        func report(_ job: Job, _ reason: String) { reports.append((job, reason)) }
+        var count: Int { reports.count }
+    }
+
+    @Test("a burst whose root is gone when it fires runs nothing and reports the root once",
+          .timeLimit(.minutes(1)))
+    func aBurstOnAVanishedRootIsDroppedAndReported() async throws {
+        // `rm -rf` of a watched folder: the children's deletions make a burst, and by the time it
+        // fires the root itself is gone. Seen on screen as a model run on a missing folder beside
+        // the pause row.
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder()
+        let unavailable = Unavailable()
+        let job = Self.job("notes", root: "/gone")
+        try store.ledger.upsert(job)
+        let coordinator = WatchCoordinator(
+            ledger: store.ledger, now: { clock.now }, recentWrites: RecentWrites(now: { clock.now }),
+            fire: Self.handler(recorder), rootExists: { _ in false },
+            unavailable: { job, reason in await unavailable.report(job, reason) })
+        await coordinator.sync(with: [job])
+
+        await coordinator.deliver(root: "/gone", paths: ["/gone/a.txt", "/gone/b.txt"])
+        clock.set(Self.at(3))
+        await coordinator.tick(now: Self.at(3))
+        await Self.eventually("the vanished root to be reported") { await unavailable.count == 1 }
+        await Self.eventually("the dropped fire to be cleared") {
+            await coordinator.snapshot(job.id)?.fireOutstanding == false
+        }
+
+        #expect(await recorder.count == 0, "no run for a folder that no longer exists")
+        #expect(await unavailable.reports.first?.reason == WatcherManager.unavailableReason("/gone"))
+        #expect(await unavailable.reports.first?.job.id == job.id)
+        #expect(await coordinator.snapshot(job.id)?.pending == 0, "the burst is dropped, not kept")
+    }
+
+    @Test("a burst whose root is still there fires as before")
+    func aBurstOnAPresentRootFires() async throws {
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder()
+        let unavailable = Unavailable()
+        let job = Self.job("notes", root: "/here")
+        try store.ledger.upsert(job)
+        let coordinator = WatchCoordinator(
+            ledger: store.ledger, now: { clock.now }, recentWrites: RecentWrites(now: { clock.now }),
+            fire: Self.handler(recorder), rootExists: { $0 == "/here" },
+            unavailable: { job, reason in await unavailable.report(job, reason) })
+        await coordinator.sync(with: [job])
+
+        await coordinator.deliver(root: "/here", paths: ["/here/a.txt"])
+        clock.set(Self.at(3))
+        await coordinator.tick(now: Self.at(3))
+        await recorder.waitFor(1)
+
+        #expect(await recorder.paths == [["/here/a.txt"]])
+        #expect(await unavailable.count == 0)
+    }
+
     // MARK: Bounds
 
     @Test("fifteen hundred paths keep a thousand and count the rest")
