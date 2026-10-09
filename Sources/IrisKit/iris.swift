@@ -3118,7 +3118,13 @@ actor IrisEngine {
                 await runner?.fire(job: job, origin: .watcher(paths: fire.paths),
                                    watch: fire.summary)
             },
-            rootExists: { FileManager.default.fileExists(atPath: $0) },
+            // A watch root is a directory; a file left at that path (e.g. a `rm -rf` followed by
+            // `touch` of the same name) must not count as the root still being there.
+            rootExists: {
+                var isDir: ObjCBool = false
+                let exists = FileManager.default.fileExists(atPath: $0, isDirectory: &isDir)
+                return exists && isDir.boolValue
+            },
             unavailable: { [weak runner] job, reason in
                 await runner?.pauseUnavailable(job: job, reason: reason)
             })

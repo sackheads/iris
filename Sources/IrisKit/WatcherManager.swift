@@ -135,6 +135,9 @@ actor WatcherManager {
         syncSeq &+= 1
         let mine = syncSeq
         let gone = await Self.vanished(in: jobs, fileExists: fileExists)
+        // With the coalescer (#285) in front of this call, `sync` never overlaps with itself in
+        // production — `SyncCoalescer` runs one body at a time. This guard is a safeguard for a
+        // future second caller, not a condition this actor currently has to survive.
         guard mine == syncSeq else { return }
         syncedJobs = jobs
         let goneIds = Set(gone.map(\.id))

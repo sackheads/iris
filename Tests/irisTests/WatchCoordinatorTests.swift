@@ -110,7 +110,7 @@ struct WatchCoordinatorTests {
     static func coordinator(ledger: JobLedger, clock: Clock, writes: RecentWrites,
                             recorder: Recorder) -> WatchCoordinator {
         WatchCoordinator(ledger: ledger, now: { clock.now }, recentWrites: writes,
-                         fire: handler(recorder))
+                         fire: handler(recorder), rootExists: { _ in true })
     }
 
     /// The fire is dispatched in a task of its own and its admission is applied in another, so
@@ -467,7 +467,7 @@ struct WatchCoordinatorTests {
                 let admission = await recorder.record(job, fire)
                 if job.id == parked.id { await gate.arriveAndWait() }
                 return admission
-            })
+            }, rootExists: { _ in true })
         await coordinator.sync(with: [parked, other])
 
         await coordinator.deliver(root: "/a", paths: ["/a/one.txt"])
@@ -512,7 +512,7 @@ struct WatchCoordinatorTests {
                 let admission = await recorder.record(j, f)
                 if f.paths.first?.hasPrefix("/old") == true { await gate.arriveAndWait() }
                 return admission
-            })
+            }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
 
         await coordinator.deliver(root: "/old", paths: ["/old/a.txt"])
@@ -578,7 +578,7 @@ struct WatchCoordinatorTests {
                 let admission = await recorder.record(j, f)
                 if f.paths == ["/r/a.txt"] { await gate.arriveAndWait() }
                 return admission
-            })
+            }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
         let jobId = job.id
 
@@ -639,7 +639,7 @@ struct WatchCoordinatorTests {
                 let admission = await recorder.record(j, f)
                 await gate.arriveAndWait()
                 return admission
-            })
+            }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
 
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
@@ -687,7 +687,7 @@ struct WatchCoordinatorTests {
                 let admission = await recorder.record(j, f)
                 if f.paths == ["/r/a.txt"] { await gate.arriveAndWait() }
                 return admission
-            })
+            }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
 
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
@@ -742,7 +742,7 @@ struct WatchCoordinatorTests {
                 // Only the first fire parks: the second carries the same path.
                 if await recorder.count == 1 { await gate.arriveAndWait() }
                 return admission
-            })
+            }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
 
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
@@ -977,7 +977,7 @@ struct WatchCoordinatorTests {
             fire: { j, f in
                 try? ledger.delete(jobId: j.id)
                 return await recorder.record(j, f)
-            })
+            }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
 
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
@@ -1361,7 +1361,7 @@ struct WatchCoordinatorTests {
             // The first fire is the run; it stays open until the test lets it return.
             if await recorder.count == 0 { await gate.arriveAndWait() }
             return await recorder.record(job, fire)
-        })
+        }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
 
         let sleeps = Sleeps(clock: clock)

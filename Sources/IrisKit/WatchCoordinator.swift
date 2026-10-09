@@ -108,8 +108,8 @@ actor WatchCoordinator {
     private let now: @Sendable () -> Date
     private let recentWrites: RecentWrites
     private let fire: WatchFireHandler
-    /// The fire-time root check (#281); `nil` skips it. See `dispatch`.
-    private let rootExists: (@Sendable (String) -> Bool)?
+    /// The fire-time root check (#281). See `dispatch`.
+    private let rootExists: @Sendable (String) -> Bool
     /// Where a fire whose root has gone is reported: `JobRunner.pauseUnavailable` in the app.
     private let unavailable: (@Sendable (Job, String) async -> Void)?
     private var subscribers: [UUID: Subscriber] = [:]
@@ -129,11 +129,11 @@ actor WatchCoordinator {
     /// late fire the wake exists to prevent.
     private var pendingWake = false
 
-    /// `rootExists` and `unavailable` are the fire-time check of #281. Optional because most tests
-    /// watch roots that exist only as strings; the app passes a real stat and the runner's pause.
+    /// `rootExists` is the fire-time check of #281, required rather than defaulted so a test that
+    /// doesn't care still says so (`{ _ in true }`) instead of silently skipping the check.
     init(ledger: JobLedger, now: @escaping @Sendable () -> Date, recentWrites: RecentWrites,
          fire: @escaping WatchFireHandler,
-         rootExists: (@Sendable (String) -> Bool)? = nil,
+         rootExists: @escaping @Sendable (String) -> Bool,
          unavailable: (@Sendable (Job, String) async -> Void)? = nil) {
         self.ledger = ledger
         self.now = now
@@ -574,7 +574,7 @@ actor WatchCoordinator {
     private func dispatch(_ id: UUID, job: Job, fire offer: WatchFire, seq: UInt64) {
         let handler = fire
         Task { [self] in
-            if let rootExists, case .fsEvent(let watch) = job.trigger,
+            if case .fsEvent(let watch) = job.trigger,
                !(await WatcherManager.rootsMissing([watch.path], fileExists: rootExists)).isEmpty {
                 // Re-checked after the stat: a `sync` may have moved the job onto another root,
                 // and a pause meant for the old one must not land on it.
