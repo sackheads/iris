@@ -139,21 +139,34 @@ values:
 
 ```sh
 scripts/gen-xcodeproj.sh
+# Pin to the same dependency revisions `swift test`/`build-app.sh` used: swift-sdk and
+# llama.swift track branch main, so an unpinned xcodebuild here could resolve different commits
+# than the ones actually tested. Both xcodebuild invocations below pass
+# -disableAutomaticPackageResolution to build from this pinned Package.resolved rather than
+# re-resolving (mirrors scripts/build-app.sh and scripts/release.sh).
+mkdir -p Iris.xcodeproj/project.xcworkspace/xcshareddata/swiftpm
+cp Package.resolved Iris.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+
 xcodebuild build -project Iris.xcodeproj -scheme Iris -configuration Release \
   -destination 'generic/platform=macOS' -derivedDataPath /tmp/iris-updatetest-old \
-  -skipPackagePluginValidation -skipMacroValidation \
+  -skipPackagePluginValidation -skipMacroValidation -disableAutomaticPackageResolution \
   MARKETING_VERSION=1.0.0 CURRENT_PROJECT_VERSION=900000
 
 xcodebuild build -project Iris.xcodeproj -scheme Iris -configuration Release \
   -destination 'generic/platform=macOS' -derivedDataPath /tmp/iris-updatetest-new \
-  -skipPackagePluginValidation -skipMacroValidation \
+  -skipPackagePluginValidation -skipMacroValidation -disableAutomaticPackageResolution \
   MARKETING_VERSION=1.0.1 CURRENT_PROJECT_VERSION=900001
 ```
 
-Use `scripts/build-app.sh` as a model for the flags; it does not expose a version override, so
-invoke `xcodebuild` directly as above. `project.yml` already bakes in the fixed Developer ID
-signing identity for the Release config, so no `CODE_SIGN_STYLE`/`DEVELOPMENT_TEAM` override is
-needed (Sparkle requires old and new to be signed by the same team, and they are, automatically).
+`scripts/build-app.sh` does not forward extra `xcodebuild` settings (it takes only
+`[Debug|Release] [derived-data-dir]`, with no passthrough for `MARKETING_VERSION`/
+`CURRENT_PROJECT_VERSION` overrides), so the version-pinned builds above call `xcodebuild`
+directly rather than through it — but otherwise match it step for step: regenerate the project,
+seed its `Package.resolved`, then build with the same `-skip*`/`-disableAutomaticPackageResolution`
+flags. `project.yml` already bakes in the fixed Developer ID signing identity for the Release
+config, so no `CODE_SIGN_STYLE`/`DEVELOPMENT_TEAM` override is needed (Sparkle requires old and
+new to be signed by the same team, and they are, automatically).
+
 Pick `CURRENT_PROJECT_VERSION` values comfortably above `git rev-list --count HEAD` (currently in
 the 600s, growing with every commit on `main`) — a leftover test install must not outrank the
 next *real* release's build number, or it would refuse to accept it.
