@@ -132,7 +132,7 @@ struct HookManager {
                 if hook.type != "command" { continue }
                 
                 let decision = await executeCommandHook(hook: hook, payload: currentData, useSandbox: useSandbox,
-                                                         gating: Self.gatingEvents.contains(eventName))
+                                                         gating: !Self.warnOnlyEvents.contains(eventName))
                 switch decision {
                 case .block:
                     return decision // Immediate hard block
@@ -198,11 +198,12 @@ struct HookManager {
 
     static let cancelledDecision = HookDecision.block(reason: "cancelled before the hook decided")
 
-    /// Events whose hook stands between the agent and an action: a hook its timeout killed fails
-    /// closed here. On every other event it is a warning, so a hung notifier cannot break a turn
-    /// (#452; docs/tool_hooks.md, "Timeouts and background jobs"). `BeforeAgent` gates the turn
-    /// itself, so it is here too.
-    static let gatingEvents: Set<String> = ["BeforeTool", "BeforeModel", "BeforeToolSelection", "BeforeAgent"]
+    /// Events where a block means nothing: their decision is discarded or only posts a notice.
+    /// A hook its timeout killed warns here and fails closed on every other event, including
+    /// one added later: an `AfterTool` or `PreCompress` hook may be redacting what goes to the
+    /// provider, and an `AfterModel` block vetoes the tool calls (#452; docs/tool_hooks.md,
+    /// "Timeouts and background jobs").
+    static let warnOnlyEvents: Set<String> = ["Notification", "SessionStart", "AfterAgent"]
 
     /// Spawns one hook in a process group of its own (#364): the payload goes in on stdin while
     /// stdout and stderr drain, so neither side can fill a pipe and stall; on timeout or cancel
@@ -220,7 +221,7 @@ struct HookManager {
                                                 stdin: payload, timeoutSeconds: timeoutSeconds, onKilled: onKilled)
     }
 
-    /// A hook its own timeout killed blocks on a gating event and warns on any other; otherwise
+    /// A hook its own timeout killed blocks, unless the event is warn-only; otherwise
     /// exit 2 blocks with stderr as the reason, exit 0 proceeds, with stdout as the new payload
     /// when it is JSON, and anything else is a warning.
     static func decision(for outcome: Result<ProcessGroupRunner.Output, Error>, timeoutSeconds: Int,
@@ -235,9 +236,9 @@ struct HookManager {
         }
         // Read before the status: a killed hook never gave its verdict, and its status can be 0
         // anyway (a `trap 'exit 0' TERM`, or a shell that outlives its child's SIGKILL by an
-        // instant). Per docs/tool_hooks.md, "Timeouts and background jobs" (#452): a gating
-        // event fails closed, as a cancel does; any other warns, and `fireEvent` keeps the
-        // payload it had, so a partial rewrite is never applied.
+        // instant). Per docs/tool_hooks.md, "Timeouts and background jobs" (#452): it fails
+        // closed, as a cancel does, so a hung redaction hook cannot let the unredacted payload
+        // through; only on a warn-only event, whose decision nothing acts on, does it warn.
         if output.killed {
             let reason = output.timedOut ? "Hook timed out after \(timeoutSeconds) seconds" : "Hook was killed before it decided"
             return gating ? .block(reason: reason) : .warning(message: reason)

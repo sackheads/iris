@@ -78,20 +78,32 @@ struct HookManagerProcessGroupTests {
         #expect(await P.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the timeout")
     }
 
-    /// #452, the other half: on an event that gates nothing, a timed-out hook warns and the turn
-    /// goes on with the payload it had. Its trap's JSON is a rewrite it never finished deciding.
-    @Test("a non-gating hook that exits 0 when its timeout kills it keeps the original payload")
-    func killedAfterHookKeepsPayload() async throws {
+    /// #452: an `AfterTool` hook may be redacting the result on its way to the provider. One its
+    /// timeout killed blocks rather than letting the unredacted result through.
+    @Test("an AfterTool hook that exits 0 when its timeout kills it blocks the result")
+    func killedAfterToolHookBlocks() async throws {
         let nap = P.marker()
         defer { P.killAll(nap) }
         let (m, url) = try manager(#"trap 'echo "{\"result\":\"rewritten\"}"; exit 0' TERM; sleep \#(nap)"#,
                                    timeout: 1, event: "AfterTool")
         defer { try? FileManager.default.removeItem(at: url) }
-        let decision = await m.fireAfterTool(toolName: "t", result: "original")
+        let decision = await m.fireAfterTool(toolName: "t", result: "SECRET-unredacted")
+        guard case .block(let reason) = decision else { Issue.record("a timed-out AfterTool hook did not block: \(decision)"); return }
+        #expect(reason == "Hook timed out after 1 seconds")
+        #expect(await P.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the timeout")
+    }
+
+    @Test("a timed-out hook on a warn-only event warns, and fireEvent keeps the original payload")
+    func killedWarnOnlyHookKeepsPayload() async throws {
+        let nap = P.marker()
+        defer { P.killAll(nap) }
+        let (m, url) = try manager(#"trap 'echo "{\"output\":\"rewritten\"}"; exit 0' TERM; sleep \#(nap)"#,
+                                   timeout: 1, event: "AfterAgent", matcher: "AfterAgent")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let decision = await m.fireAfterAgent(output: "original")
         guard case .proceed(let data?) = decision else { Issue.record("expected the turn to go on: \(decision)"); return }
         let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: String])
-        #expect(json["result"] == "original", "a timed-out AfterTool hook's rewrite was applied")
-        #expect(await P.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the timeout")
+        #expect(json["output"] == "original")
     }
 
     @Test("a backgrounded grandchild holding the pipe does not hang the hook")
@@ -126,7 +138,7 @@ struct HookManagerProcessGroupTests {
         #expect(String(data: data, encoding: .utf8) == "{\"a\":\"b\"}\n")
     }
 
-    @Test("a timed-out hook blocks a gating event and warns on any other, whatever its status",
+    @Test("a timed-out hook blocks, or warns on a warn-only event, whatever its status",
           arguments: [128 + SIGKILL, 0, 2, 1])
     func timedOutDecision(status: Int32) {
         let killed = ProcessGroupRunner.Output(stdout: Data("{}".utf8), stderr: Data(), status: status,
@@ -141,9 +153,9 @@ struct HookManagerProcessGroupTests {
         #expect(message == "Hook timed out after 7 seconds")
     }
 
-    @Test("the gating events are the ones that stand before an action")
-    func gatingEvents() {
-        #expect(HookManager.gatingEvents == ["BeforeTool", "BeforeModel", "BeforeToolSelection", "BeforeAgent"])
+    @Test("only events whose decision nothing acts on are warn-only; any other fails closed")
+    func warnOnlyEvents() {
+        #expect(HookManager.warnOnlyEvents == ["Notification", "SessionStart", "AfterAgent"])
     }
 
     @Test("a signal is not an exit code: a hook killed by SIGINT warns rather than blocks")
@@ -254,13 +266,15 @@ struct PluginAuthRunnerProcessGroupTests {
 @MainActor
 @Suite("Cancelled turn runs no gated tool", .timeLimit(.minutes(1)))
 struct CancelledTurnHookTests {
-    private func engine(hookCommand: String?) throws -> (AppState, IrisEngine, UUID, URL) {
+    private func engine(hookCommand: String?, event: String = "BeforeTool", matcher: String = "write_file",
+                        timeout: Int? = nil) throws -> (AppState, IrisEngine, UUID, URL) {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-cancel-hook-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var hooks = HookManager()
         if let hookCommand {
-            let config: [String: Any] = ["hooks": ["BeforeTool": [["matcher": "write_file",
-                                         "hooks": [["type": "command", "command": hookCommand]]]]]]
+            var hook: [String: Any] = ["type": "command", "command": hookCommand]
+            if let timeout { hook["timeout"] = timeout }
+            let config: [String: Any] = ["hooks": [event: [["matcher": matcher, "hooks": [hook]]]]]
             let url = dir.appendingPathComponent("settings.json")
             try JSONSerialization.data(withJSONObject: config).write(to: url)
             hooks.configPathOverride = url.path
@@ -279,6 +293,23 @@ struct CancelledTurnHookTests {
 
     private func write(_ target: URL, in dir: URL) -> BlockedCall {
         BlockedCall(toolName: "write_file", args: ["path": .string(target.path), "content": .string("x")], cwd: dir.path)
+    }
+
+    /// #452: a hung redaction hook fails closed. The tool's result is replaced by the blocked
+    /// message, so the unredacted content never becomes the tool response the model reads.
+    @Test("a timed-out AfterTool hook replaces the result, so the unredacted output never comes back")
+    func timedOutAfterToolHookRedacts() async throws {
+        let nap = RunCommandProcessGroupTests.marker()
+        defer { RunCommandProcessGroupTests.killAll(nap) }
+        let (_, engine, id, dir) = try engine(hookCommand: "trap 'exit 0' TERM; sleep \(nap)",
+                                              event: "AfterTool", matcher: "read_file", timeout: 1)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let secret = dir.appendingPathComponent("secret.txt")
+        try "SECRET-\(UUID().uuidString)".write(to: secret, atomically: true, encoding: .utf8)
+        let result = await engine.executeApprovedCall(
+            BlockedCall(toolName: "read_file", args: ["path": .string(secret.path)], cwd: dir.path), conversationId: id)
+        #expect(result == "System Hook blocked result: Hook timed out after 1 seconds", "\(result)")
+        #expect(!result.contains("SECRET-"), "the unredacted result came back")
     }
 
     @Test("the harness's hook runs on the host and the write lands when nothing is cancelled")
