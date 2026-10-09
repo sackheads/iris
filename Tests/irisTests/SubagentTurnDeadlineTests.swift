@@ -18,9 +18,6 @@ struct SubagentTurnDeadlineTests {
             /// Moves the clock by `seconds`, then holds the turn open long enough for several of
             /// `runSubagent`'s 100 ms polls to see the moved clock, then replies.
             case take(TimeInterval, GeminiResponse)
-            /// As `take`, and then, once the turn has had time to end, moves the clock by `idle`
-            /// more: time that passes between turns, not inside one.
-            case takeThenIdle(TimeInterval, idle: TimeInterval, GeminiResponse)
             /// Sleeps until cancelled, and counts the cancellation.
             case park
         }
@@ -47,15 +44,6 @@ struct SubagentTurnDeadlineTests {
                 clock.advance(by: seconds)
                 try await Task.sleep(nanoseconds: 400_000_000)
                 return response
-            case .takeThenIdle(let seconds, let idle, let response):
-                clock.advance(by: seconds)
-                try await Task.sleep(nanoseconds: 400_000_000)
-                let clock = self.clock
-                Task.detached {
-                    try? await Task.sleep(nanoseconds: 250_000_000)
-                    clock.advance(by: idle)
-                }
-                return response
             case .park:
                 lock.withLock { parkedCount += 1 }
                 do {
@@ -74,6 +62,26 @@ struct SubagentTurnDeadlineTests {
         private var done = false
         func set() { lock.withLock { done = true } }
         var isSet: Bool { lock.withLock { done } }
+    }
+
+    /// The turn events `runSubagent` recorded, in order; `then` runs after each one is logged.
+    /// Moving the clock from here puts the move at a known point in the turn sequence: a real-time
+    /// wait for "the turn has ended" let a busy suite land it inside the turn instead (#410).
+    final class TurnEvents: @unchecked Sendable {
+        struct Event: Equatable, Sendable, CustomStringConvertible {
+            let began: Bool, seq: Int
+            var description: String { "\(began ? "begin" : "end") \(seq)" }
+        }
+        private let lock = NSLock()
+        private var log: [Event] = []
+        private let then: @Sendable (Event) -> Void
+        init(then: @escaping @Sendable (Event) -> Void = { _ in }) { self.then = then }
+        func record(_ began: Bool, _ seq: Int) {
+            let event = Event(began: began, seq: seq)
+            lock.withLock { log.append(event) }
+            then(event)
+        }
+        var all: [Event] { lock.withLock { log } }
     }
 
     private func state() throws -> AppState {
@@ -227,19 +235,24 @@ struct SubagentTurnDeadlineTests {
         // Turn 1 takes 599 s of 600, and 5 s pass while no turn runs: the reprompt pause.
         let clock = ManualClock()
         let client = ClockClient(clock: clock, [
-            .takeThenIdle(599, idle: 5, SubagentGoalLoopTests.text("Step one done.")),
+            .take(599, SubagentGoalLoopTests.text("Step one done.")),
             .take(1, SubagentGoalLoopTests.goalComplete("TURN-TWO-DONE")),
         ])
         let state = try state()
         let parent = UUID(); state.createNewConversation(id: parent)
         let (config, teardown) = config(turnTimeout: 600); defer { teardown() }
+        // The idle time lands as turn 1's end is recorded, never earlier. The reprompt pause is
+        // real, but only so the poll sleeps through a gap that, if it counted, would time out.
+        let events = TurnEvents { if !$0.began && $0.seq == 1 { clock.advance(by: 5) } }
 
-        // A pause long enough for the idle time to land inside it.
         let outcome = await SubagentManager.shared.runSubagent(
             role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
             client: client, appState: state, deadlineClock: clock.now, config: config,
-            repromptDelay: 1.0, endSandboxSession: { _ in })
+            repromptDelay: 1.0, onTurnEvent: events.record, endSandboxSession: { _ in })
 
+        #expect(Array(events.all.prefix(3)) == [.init(began: true, seq: 1), .init(began: false, seq: 1),
+                                                .init(began: true, seq: 2)],
+                "the idle time fell between the turns")
         #expect(outcome.status == .completed)
         #expect(outcome.rendered.contains("TURN-TWO-DONE"))
         #expect(client.calls == 2)
@@ -265,23 +278,17 @@ struct SubagentTurnDeadlineTests {
         let state = try state()
         let parent = UUID(); state.createNewConversation(id: parent)
         let (config, teardown) = config(turnTimeout: 600); defer { teardown() }
-        let finished = Finished()
+        // The limit passes once the blocked reprompt has ended, while no turn is running: on the
+        // recorded end, before the loop reads as over, so before the grace polls start.
+        let events = TurnEvents { if !$0.began && $0.seq == 2 { clock.advance(by: 700) } }
 
-        let task = Task {
-            let outcome = await SubagentManager.shared.runSubagent(
-                role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
-                client: client, appState: state, deadlineClock: clock.now, config: config, hooks: hooks,
-                repromptDelay: 0.01, endSandboxSession: { _ in })
-            finished.set()
-            return outcome
-        }
-        // Once the blocked reprompt has ended, the limit passes while no turn is running.
-        #expect(await eventually {
-            state.conversations.first { $0.isSubagent }?.messages.contains { $0.content.contains("Hook blocked turn") } == true
-        })
-        clock.advance(by: 700)
-        let outcome = await task.value
+        let outcome = await SubagentManager.shared.runSubagent(
+            role: "worker", task: "Work.", effort: "easy", parentConversationId: parent,
+            client: client, appState: state, deadlineClock: clock.now, config: config, hooks: hooks,
+            repromptDelay: 0.01, onTurnEvent: events.record, endSandboxSession: { _ in })
 
+        #expect(events.all.contains(.init(began: false, seq: 2)), "the limit passed after the blocked turn")
+        #expect(state.conversations.first { $0.isSubagent }?.messages.contains { $0.content.contains("Hook blocked turn") } == true)
         #expect(outcome.status == .failed)
         #expect(!outcome.rendered.contains("timed out"))
         #expect(client.calls == 1)
@@ -304,8 +311,10 @@ struct SubagentTurnDeadlineTests {
         #expect(await eventually { client.parked == 1 }, "turn 2 is under way")
         clock.advance(by: 700)
         // Hold the main actor through the verdict: the cleanup after the poll loop needs it, so
-        // turn 2 can only be cancelled by now if the timeout itself halted the loop.
-        Self.block(seconds: 0.5)
+        // turn 2 can only be cancelled while it is held if the timeout itself halted the loop.
+        // Held until the cancel lands, not for a fixed time a busy suite's poll can outlast (#410).
+        let holdUntil = Date().addingTimeInterval(10)
+        while client.cancelled == 0, Date() < holdUntil { Self.block(seconds: 0.01) }
         let cancelledWhileMainHeld = client.cancelled
         let outcome = await task.value
 

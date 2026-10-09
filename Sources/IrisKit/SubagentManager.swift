@@ -66,6 +66,9 @@ final class SubagentManager: @unchecked Sendable {
     /// `hooks` is the subagent engine's hook manager, injected so a test can block one of its
     /// turns without a settings file in the shared home. `repromptDelay` is its goal loop's pause
     /// between turns, shortened only by tests.
+    /// `onTurnEvent` sees each turn event after the deadline has recorded it, so a test can move
+    /// `deadlineClock` at a known point (a turn's end) rather than after a real-time wait that a
+    /// busy suite outlasts, landing the move inside the turn (#410). Nil in production.
     func runSubagent(role: String, task: String, effort: String, parentConversationId: UUID,
                      unit: DelegatedUnit? = nil, turnTimeout: TimeInterval? = nil,
                      client: (any LLMClientProtocol)? = nil,
@@ -75,6 +78,7 @@ final class SubagentManager: @unchecked Sendable {
                      config: ConfigManager = .shared,
                      hooks: HookManager = .shared,
                      repromptDelay: TimeInterval = 1.5,
+                     onTurnEvent: (@Sendable (_ began: Bool, _ seq: Int) -> Void)? = nil,
                      endSandboxSession: @escaping @Sendable (UUID) async -> Void = {
                          await SandboxSessionManager.shared.endSession($0)
                      }) async -> (rendered: String, status: SubagentTerminalStatus) {
@@ -181,6 +185,7 @@ final class SubagentManager: @unchecked Sendable {
         let turnStart = SubagentTurnStart(deadlineClock())
         engine.observeGoalLoopTurns(for: subagentId) { began, seq in
             turnStart.record(began: began, seq: seq, at: deadlineClock())
+            onTurnEvent?(began, seq)
         }
 
         let engineTask = Task {
