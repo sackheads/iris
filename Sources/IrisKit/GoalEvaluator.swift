@@ -47,7 +47,7 @@ final class GoalEvaluator: Sendable {
             let originIsBackground = app.conversations.first(where: { $0.id == originId })?.isBackground == true
             app.createNewConversation(id: evalId, isSubagent: true, isBackground: originIsBackground)
             if originIsBackground { app.linkBackgroundDescendant(evalId, of: originId) }
-            app.linkDelegate(evalId, of: originId)   // #418: its asks are the graded session's
+            app.linkDelegate(evalId, of: originId, kind: .evaluator)   // #418: its asks are the graded session's
             app.updateConversationTitle(id: evalId, title: "Evaluator")
             app.setWorkspace(for: evalId, path: workspaceDir)   // its run_command runs here
             app.registerSubagent(id: evalId, role: "evaluator", kind: .evaluator)
