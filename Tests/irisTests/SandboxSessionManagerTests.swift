@@ -360,6 +360,71 @@ struct SandboxSessionManagerTests {
         #expect(rt.removedNames == [], "nothing was created, so there is nothing to sweep up")
     }
 
+    // MARK: - #293: the isolated-network check self-heals like a failed create does
+
+    /// Counts calls from a `@Sendable` closure without racing.
+    private final class CallCount: @unchecked Sendable {
+        private let lock = NSLock(); private var n = 0
+        func bump() -> Int { lock.withLock { n += 1; return n } }
+        var value: Int { lock.withLock { n } }
+    }
+
+    /// #293: `ensureIsolatedNetwork` used to fail the run outright on a stopped system, never
+    /// reaching the self-start a stopped-system `createFailed` already gets. `MockRuntime.nextNetworkError`
+    /// is consumed exactly once, so a second `ensureIsolatedNetwork` call (the post-start retry)
+    /// succeeds on its own — the run should go on to create the container and execute.
+    @Test("a network: false run with the system stopped self-starts once and then succeeds")
+    func networkSelfHealsOnceThenSucceeds() async {
+        let rt = MockRuntime()
+        rt.nextNetworkError = ContainerRuntimeError.networkFailed("unauthorized request")
+        let starts = CallCount()
+        let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" },
+                                      startContainerSystem: { _ = starts.bump(); return true })
+        let out = await m.run(command: "a", conversationId: UUID(), workspace: "/ws", network: .isolated)
+        #expect(out == "ok")
+        #expect(starts.value == 1)
+        #expect(rt.networksEnsured == ["iris-isolated"], "the retry's own ensure succeeded")
+        #expect(rt.createdCount == 1)
+    }
+
+    /// #293: a failure that does not read like "the system isn't running" fails closed with no
+    /// self-start attempted — per spec §0.7 this is not a general retry-on-any-failure.
+    /// (`networkFailureRunsNothing` above already pins the "fails closed" half; this adds the
+    /// "no start was attempted" assertion the plain mock cannot otherwise make visible.)
+    @Test("a different network failure still fails closed, with no self-start attempted")
+    func networkOtherFailureNoSelfStart() async {
+        let rt = MockRuntime()
+        rt.nextNetworkError = ContainerRuntimeError.networkFailed("permission denied")
+        let starts = CallCount()
+        let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" },
+                                      startContainerSystem: { _ = starts.bump(); return true })
+        let out = await m.run(command: "a", conversationId: UUID(), workspace: "/ws", network: .isolated)
+        #expect(out == SandboxSessionManager.isolatedNetworkError("permission denied"))
+        #expect(starts.value == 0)
+        #expect(rt.createdCount == 0)
+    }
+
+    /// #293: even when the post-start retry fails too, the self-start fires exactly once.
+    @Test("the self-start is attempted at most once, even if the retry still fails")
+    func networkSelfHealAtMostOnce() async {
+        final class AlwaysFailing: ContainerRuntime, @unchecked Sendable {
+            func createDetached(name: String, image: String, mounts: [String], workdir: String, network: NetworkMode) async throws {}
+            func ensureIsolatedNetwork(named name: String) async throws {
+                throw ContainerRuntimeError.networkFailed("unauthorized request")   // never recovers
+            }
+            func exec(name: String, workdir: String, command: String, timeoutSeconds: Int?) async throws -> (stdout: String, stderr: String, exitCode: Int32) { ("", "", 0) }
+            func remove(name: String) async {}
+            func list(prefix: String) async -> [String] { [] }
+        }
+        let rt = AlwaysFailing()
+        let starts = CallCount()
+        let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" },
+                                      startContainerSystem: { _ = starts.bump(); return true })
+        let out = await m.run(command: "a", conversationId: UUID(), workspace: "/ws", network: .isolated)
+        #expect(out == SandboxSessionManager.isolatedNetworkError("unauthorized request"))
+        #expect(starts.value == 1, "one attempt, not a loop")
+    }
+
     /// §0.7 through the manager: `NetworkMode.forGrant` decides, and the decision reaches the
     /// create — on the mock as the recorded mode, and on the real runtime as the argv.
     @Test("NetworkMode.forGrant: no grant and network on keep the default; network off is isolated, ensured, and on the argv")

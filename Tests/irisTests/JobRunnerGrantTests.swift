@@ -56,11 +56,24 @@ struct JobRunnerGrantTests {
         var all: [UUID] { lock.withLock { ids } }
     }
 
+    /// Counts calls from a `@Sendable` closure without racing — used to pin how many times
+    /// `startContainerSystem` (and, for the self-heal, `ensureIsolatedNetwork` itself) were asked.
+    private final class CallCount: @unchecked Sendable {
+        private let lock = NSLock(); private var n = 0
+        func bump() -> Int { lock.withLock { n += 1; return n } }
+        var value: Int { lock.withLock { n } }
+    }
+
     private func runner(_ state: AppState, _ engine: IrisEngine, _ store: ConversationStore, config: ConfigManager,
                         now: (@Sendable () -> Date)? = nil, ended: Ended? = nil,
-                        network: @escaping @Sendable () async -> String? = { nil }) -> JobRunner {
+                        network: @escaping @Sendable () async -> String? = { nil },
+                        startContainerSystem: @escaping @Sendable () async -> Bool = {
+                            Issue.record("startContainerSystem must not be called for this test")
+                            return false
+                        }) -> JobRunner {
         JobRunner(state: state, engine: engine, ledger: store.ledger,
                   endSandboxSession: { ended?.add($0) }, ensureIsolatedNetwork: network,
+                  startContainerSystem: startContainerSystem,
                   now: now ?? Date.init, config: config, sandboxAvailable: { true })
     }
 
@@ -202,6 +215,71 @@ struct JobRunnerGrantTests {
         try store.ledger.upsert(open)
         await r.fire(job: open, origin: .schedule)
         #expect(try store.ledger.runs(jobId: open.id, limit: 1).first?.status == .completed)
+    }
+
+    /// #293: the fire-time pre-check used to fail at the listing without ever reaching the
+    /// self-start a stopped-system `createFailed` already gets, so the first fire after a reboot
+    /// always failed. A detail that reads like the system not running now gets one
+    /// `container system start`, then one retry of the listing.
+    @Test("a network: false fire with the system stopped self-starts once, then succeeds")
+    func networkSelfHealsOnceThenSucceeds() async throws {
+        let dir = try tempDirectory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let (store, state, engine) = try harness([textResponse("done")])
+        let job = grantedJob(dir, network: false)
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig(); defer { teardown() }
+        let asked = CallCount()
+        let starts = CallCount()
+        let r = runner(state, engine, store, config: config,
+                       network: { asked.bump() == 1 ? "container system start" : nil },
+                       startContainerSystem: { _ = starts.bump(); return true })
+        await r.fire(job: job, origin: .schedule)
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.status == .completed, "got: \(run.failureReason ?? "nil")")
+        #expect(starts.value == 1)
+        #expect(asked.value == 2, "the pre-fail listing, then the post-start retry")
+    }
+
+    /// #293: a failure that does not read like "the system isn't running" (a bad network name, a
+    /// permissions error, …) must still fail closed with no self-start — per spec §0.7 this is
+    /// not a general retry-on-any-failure. (`networkFailureFailsClosed` above already pins the
+    /// "no start" half via the `runner()` default; this names the detail explicitly.)
+    @Test("a different network failure still fails closed, with no self-start attempted")
+    func networkOtherFailureNoSelfStart() async throws {
+        let dir = try tempDirectory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let (store, state, engine) = try harness([textResponse("never reached")])
+        let job = grantedJob(dir, network: false)
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig(); defer { teardown() }
+        let starts = CallCount()
+        let r = runner(state, engine, store, config: config,
+                       network: { "network create exited 1: permission denied" },
+                       startContainerSystem: { _ = starts.bump(); return true })
+        await r.fire(job: job, origin: .schedule)
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.status == .failed)
+        #expect(run.failureReason == "isolated network unavailable: network create exited 1: permission denied")
+        #expect(starts.value == 0)
+    }
+
+    /// #293: even when the post-start retry fails too, the self-start fires exactly once — a loop
+    /// here would mean a wedged `container system start` is retried without bound on every fire.
+    @Test("the self-start is attempted at most once, even if the retry still fails")
+    func networkSelfHealAtMostOnce() async throws {
+        let dir = try tempDirectory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let (store, state, engine) = try harness([textResponse("never reached")])
+        let job = grantedJob(dir, network: false)
+        try store.ledger.upsert(job)
+        let (config, teardown) = isolatedConfig(); defer { teardown() }
+        let starts = CallCount()
+        let r = runner(state, engine, store, config: config,
+                       network: { "container system start" },   // never recovers
+                       startContainerSystem: { _ = starts.bump(); return true })
+        await r.fire(job: job, origin: .schedule)
+        let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
+        #expect(run.status == .failed)
+        #expect(run.failureReason == "isolated network unavailable: container system start")
+        #expect(starts.value == 1, "one attempt, not a loop")
     }
 
     @Test("the run's container is ended when the run closes — on completion and on a refused fire")
