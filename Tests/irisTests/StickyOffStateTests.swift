@@ -96,17 +96,16 @@ import Foundation
         #expect(result.contains("is now retracted"), Comment(rawValue: result))
     }
 
+    /// `set_session_card` is not among them since #418: a session may name itself before a peer
+    /// exists (`SessionToolsTests.setSessionCardWithNoPeers`).
     @Test func peerToolsRefuseWithNoPeers() async {
         let app = AppState(); let me = UUID(); app.createNewConversation(id: me)
         for call in [FunctionCall(name: "list_sessions", args: [:], id: "c1"),
                      FunctionCall(name: "send_to_session", args: ["session_id": .string(UUID().uuidString),
-                                                                  "message": .string("hi")], id: "c1"),
-                     FunctionCall(name: "set_session_card", args: ["name": .string("x"),
-                                                                   "description": .string("y")], id: "c1")] {
+                                                                  "message": .string("hi")], id: "c1")] {
             #expect(await runToolCall(call, on: app, as: me, peerCount: 0) == IrisEngine.noPeersRefusal,
                     Comment(rawValue: call.name))
         }
-        #expect(app.conversations.first { $0.id == me }?.sessionCard == nil, "the refused card was not stored")
     }
 
     @Test func reachCheckpointRefusesAtTheFinalMilestoneAndWithNoLadder() async {
