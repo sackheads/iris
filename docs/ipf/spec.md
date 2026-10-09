@@ -270,7 +270,7 @@ Iris's job is only to trigger and observe, not to hold secrets.
 | Field | Meaning |
 |---|---|
 | `setup_command` | Runs as a subprocess when the user clicks "Sign in." May open a browser itself. Iris streams its output and re-runs `check_command` afterward. |
-| `check_command` | Runs to determine sign-in status. **Exit code 0 means signed in; any non-zero exit means not signed in.** This is the entire contract — no output parsing. |
+| `check_command` | Runs to determine sign-in status. **Exit code 0 means signed in; any non-zero exit means not signed in.** A check still running at its timeout (30 s) is killed and reads as not signed in, whatever it exits with. This is the entire contract — no output parsing. |
 | `label` | Text shown next to the status row (e.g. "Google account"). |
 | `help` | Explanatory text shown near the Sign in button. |
 

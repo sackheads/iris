@@ -154,6 +154,20 @@ struct PluginAuthRunnerProcessGroupTests {
         #expect(await P.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the SIGKILL")
     }
 
+    /// #452: the test above flaked with `signedIn` true. Group SIGKILL is not atomic: `sleep` can
+    /// die first, and the shell runs `true` and exits 0 before its own SIGKILL lands (1 in 4800
+    /// under load, every time with a 5 ms gap between the two). That status is no answer from a
+    /// check the timeout killed; this shell gives the same 0 on every run, through its trap.
+    @Test("a check that exits 0 when its timeout kills it is not signed in")
+    func killedCheckIsNotSignedIn() async {
+        let nap = P.marker()
+        defer { P.killAll(nap) }
+        let status = await PluginAuthRunner.check(auth("trap 'exit 0' TERM; sleep \(nap)"), config: [:],
+                                                  approve: allow, timeoutSeconds: 1)
+        #expect(!status.signedIn, "a timed-out check read as signed in: \(status)")
+        #expect(await P.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the timeout")
+    }
+
     @Test("a backgrounded grandchild holding the pipe does not hang the check")
     func backgroundedGrandchild() async {
         let nap = P.marker()
