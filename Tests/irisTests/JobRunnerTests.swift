@@ -545,6 +545,60 @@ struct JobRunnerTests {
         await manager.stopAll()
     }
 
+    /// #281: `rm -rf` of a watched folder. The children's deletions make a burst that fires as the
+    /// root goes; the fire-time stat drops it, so the deletion is one pause row and one card, with
+    /// no model turn spent on a folder that is not there. The manager's own stat then finds the
+    /// job already paused and adds nothing.
+    @Test("a watched folder deleted with its children is one pause row and no model run",
+          .timeLimit(.minutes(1)))
+    func aDeletedRootIsOnePauseAndNoRun() async throws {
+        let (store, state, engine, client, _) = try harness([textResponse("tick")])
+        var job = self.job(name: "deleted")
+        job.trigger = .fsEvent(FSWatch(path: "/gone", quietWindowSeconds: 3))
+        try store.ledger.upsert(job)
+        let at = Date(timeIntervalSince1970: 1_700_000_900)
+        let (config, teardown) = isolatedConfig()
+        defer { teardown() }
+        let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, now: { at },
+                               config: config)
+        let coordinator = WatchCoordinator(
+            ledger: store.ledger, now: { at }, recentWrites: RecentWrites(now: { at }),
+            fire: { job, fire in
+                await runner.fire(job: job, origin: .watcher(paths: fire.paths), watch: fire.summary)
+            },
+            rootExists: { _ in false },
+            unavailable: { job, reason in await runner.pauseUnavailable(job: job, reason: reason) })
+        let manager = WatcherManager(ledger: store.ledger, streams: WatcherManagerSyncTests.FakeStreams().factory,
+                                     fileExists: { _ in false })
+        await manager.setUnavailableHandler { job, reason in
+            await runner.pauseUnavailable(job: job, reason: reason)
+        }
+        await coordinator.sync(with: [job])
+
+        await coordinator.deliver(root: "/gone", paths: ["/gone/a.txt", "/gone/sub/b.txt"])
+        await coordinator.tick(now: at.addingTimeInterval(3))
+        // The pause goes out from the coordinator's fire task; its card is the last thing it does.
+        func cards() -> Int {
+            state.conversations.first { $0.id == state.activityConversationId() }?
+                .messages.filter { $0.role == .event }.count ?? 0
+        }
+        for _ in 0..<500 {
+            if cards() > 0 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        // The hook's sync, as the pause's ledger write would set off.
+        await manager.sync(with: try store.ledger.jobs())
+
+        let reason = WatcherManager.unavailableReason("/gone")
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == reason)
+        let runs = try store.ledger.runs(jobId: job.id, limit: 10)
+        #expect(runs.count == 1, "one row for one deletion")
+        #expect(runs.first?.failureReason == reason)
+        #expect(client.callCount == 0, "no model run for a folder that is gone")
+        #expect(cards() == 1)
+        await manager.stopAll()
+    }
+
     /// 5c §0.6: the model-turn row records whose prices apply to it — the configured provider and
     /// the engine's tier — so a weighted total is never priced with whatever is configured later.
     @Test("a model-turn run's row carries the configured provider and the engine's tier")

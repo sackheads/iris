@@ -110,7 +110,7 @@ struct WatchCoordinatorTests {
     static func coordinator(ledger: JobLedger, clock: Clock, writes: RecentWrites,
                             recorder: Recorder) -> WatchCoordinator {
         WatchCoordinator(ledger: ledger, now: { clock.now }, recentWrites: writes,
-                         fire: handler(recorder))
+                         fire: handler(recorder), rootExists: { _ in true })
     }
 
     /// The fire is dispatched in a task of its own and its admission is applied in another, so
@@ -467,7 +467,7 @@ struct WatchCoordinatorTests {
                 let admission = await recorder.record(job, fire)
                 if job.id == parked.id { await gate.arriveAndWait() }
                 return admission
-            })
+            }, rootExists: { _ in true })
         await coordinator.sync(with: [parked, other])
 
         await coordinator.deliver(root: "/a", paths: ["/a/one.txt"])
@@ -512,7 +512,7 @@ struct WatchCoordinatorTests {
                 let admission = await recorder.record(j, f)
                 if f.paths.first?.hasPrefix("/old") == true { await gate.arriveAndWait() }
                 return admission
-            })
+            }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
 
         await coordinator.deliver(root: "/old", paths: ["/old/a.txt"])
@@ -578,7 +578,7 @@ struct WatchCoordinatorTests {
                 let admission = await recorder.record(j, f)
                 if f.paths == ["/r/a.txt"] { await gate.arriveAndWait() }
                 return admission
-            })
+            }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
         let jobId = job.id
 
@@ -639,7 +639,7 @@ struct WatchCoordinatorTests {
                 let admission = await recorder.record(j, f)
                 await gate.arriveAndWait()
                 return admission
-            })
+            }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
 
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
@@ -687,7 +687,7 @@ struct WatchCoordinatorTests {
                 let admission = await recorder.record(j, f)
                 if f.paths == ["/r/a.txt"] { await gate.arriveAndWait() }
                 return admission
-            })
+            }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
 
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
@@ -742,7 +742,7 @@ struct WatchCoordinatorTests {
                 // Only the first fire parks: the second carries the same path.
                 if await recorder.count == 1 { await gate.arriveAndWait() }
                 return admission
-            })
+            }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
 
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
@@ -977,7 +977,7 @@ struct WatchCoordinatorTests {
             fire: { j, f in
                 try? ledger.delete(jobId: j.id)
                 return await recorder.record(j, f)
-            })
+            }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
 
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
@@ -1172,6 +1172,70 @@ struct WatchCoordinatorTests {
         #expect(await coordinator.snapshot(job.id)?.pending == 0, "the burst is dropped, not retried")
     }
 
+    // MARK: A root gone at fire time (#281)
+
+    /// What the fire-time root check reported.
+    actor Unavailable {
+        private(set) var reports: [(job: Job, reason: String)] = []
+        func report(_ job: Job, _ reason: String) { reports.append((job, reason)) }
+        var count: Int { reports.count }
+    }
+
+    @Test("a burst whose root is gone when it fires runs nothing and reports the root once",
+          .timeLimit(.minutes(1)))
+    func aBurstOnAVanishedRootIsDroppedAndReported() async throws {
+        // `rm -rf` of a watched folder: the children's deletions make a burst, and by the time it
+        // fires the root itself is gone. Seen on screen as a model run on a missing folder beside
+        // the pause row.
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder()
+        let unavailable = Unavailable()
+        let job = Self.job("notes", root: "/gone")
+        try store.ledger.upsert(job)
+        let coordinator = WatchCoordinator(
+            ledger: store.ledger, now: { clock.now }, recentWrites: RecentWrites(now: { clock.now }),
+            fire: Self.handler(recorder), rootExists: { _ in false },
+            unavailable: { job, reason in await unavailable.report(job, reason) })
+        await coordinator.sync(with: [job])
+
+        await coordinator.deliver(root: "/gone", paths: ["/gone/a.txt", "/gone/b.txt"])
+        clock.set(Self.at(3))
+        await coordinator.tick(now: Self.at(3))
+        await Self.eventually("the vanished root to be reported") { await unavailable.count == 1 }
+        await Self.eventually("the dropped fire to be cleared") {
+            await coordinator.snapshot(job.id)?.fireOutstanding == false
+        }
+
+        #expect(await recorder.count == 0, "no run for a folder that no longer exists")
+        #expect(await unavailable.reports.first?.reason == WatcherManager.unavailableReason("/gone"))
+        #expect(await unavailable.reports.first?.job.id == job.id)
+        #expect(await coordinator.snapshot(job.id)?.pending == 0, "the burst is dropped, not kept")
+    }
+
+    @Test("a burst whose root is still there fires as before")
+    func aBurstOnAPresentRootFires() async throws {
+        let store = try ConversationStore.inMemory()
+        let clock = Clock(Self.t0)
+        let recorder = Recorder()
+        let unavailable = Unavailable()
+        let job = Self.job("notes", root: "/here")
+        try store.ledger.upsert(job)
+        let coordinator = WatchCoordinator(
+            ledger: store.ledger, now: { clock.now }, recentWrites: RecentWrites(now: { clock.now }),
+            fire: Self.handler(recorder), rootExists: { $0 == "/here" },
+            unavailable: { job, reason in await unavailable.report(job, reason) })
+        await coordinator.sync(with: [job])
+
+        await coordinator.deliver(root: "/here", paths: ["/here/a.txt"])
+        clock.set(Self.at(3))
+        await coordinator.tick(now: Self.at(3))
+        await recorder.waitFor(1)
+
+        #expect(await recorder.paths == [["/here/a.txt"]])
+        #expect(await unavailable.count == 0)
+    }
+
     // MARK: Bounds
 
     @Test("fifteen hundred paths keep a thousand and count the rest")
@@ -1297,7 +1361,7 @@ struct WatchCoordinatorTests {
             // The first fire is the run; it stays open until the test lets it return.
             if await recorder.count == 0 { await gate.arriveAndWait() }
             return await recorder.record(job, fire)
-        })
+        }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
 
         let sleeps = Sleeps(clock: clock)

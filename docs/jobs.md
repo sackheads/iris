@@ -546,7 +546,9 @@ restarted for it.
 renamed or unmounted; it goes silent. Iris checks every watched root on every job change and once a
 minute besides, and a watch whose folder is gone is paused with the reason
 `watch path unavailable: <path>` and one card — the same answer a watch gets at launch when its
-folder is already missing, or when the stream cannot be created. `/jobs resume <name>` retries it.
+folder is already missing, or when the stream cannot be created. A burst also checks its folder
+before it fires, so deleting a watched folder with everything in it pauses the watch without first
+running it on the deletions. `/jobs resume <name>` retries it.
 
 **What you can see.** A watch run's card carries, beside the tokens and the duration, `12 changes ·
 3 noise · 1 own writes`, each figure only when it is not zero, then `(cut at the ceiling)` when the

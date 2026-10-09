@@ -59,6 +59,8 @@ actor WatcherManager {
     /// The jobs the last `sync` was given — the fallback answer to "who was this stream serving"
     /// for a manager with no ledger.
     private var syncedJobs: [Job] = []
+    /// Numbers each `sync`, so one overtaken during its off-actor stat can tell and stand down.
+    private var syncSeq: UInt64 = 0
     /// The keys of streams that ended unprompted and whose subscribers are still being reported.
     /// A `sync` that re-enters during that report — every pause fires the hook — finds the root
     /// still wanted by the subscribers not yet paused and would open the stream again, for
@@ -121,12 +123,23 @@ actor WatcherManager {
     /// engine queues them so the later one reads the later table, and the minute sync is the
     /// backstop. Reporting last keeps the streams right before anyone is told about them.
     ///
+    /// The root stat comes first and runs off the actor (#285), so a root on a stalled mount holds
+    /// up this sync and nothing else: batches keep flowing while it waits. That await is the one
+    /// suspension before the diff, so a sync overtaken there by a later one stands down — the
+    /// later one was called with the later table, and applying this one's after it would undo it.
+    ///
     /// Each vanished job's row is re-read before it is reported: by the time the loop reaches
     /// the second of two, the re-entrant sync the first pause set off may already have paused it,
     /// and one deletion is one card (§7).
     func sync(with jobs: [Job]) async {
+        syncSeq &+= 1
+        let mine = syncSeq
+        let gone = await Self.vanished(in: jobs, fileExists: fileExists)
+        // With the coalescer (#285) in front of this call, `sync` never overlaps with itself in
+        // production — `SyncCoalescer` runs one body at a time. This guard is a safeguard for a
+        // future second caller, not a condition this actor currently has to survive.
+        guard mine == syncSeq else { return }
         syncedJobs = jobs
-        let gone = Self.vanished(in: jobs, fileExists: fileExists)
         let goneIds = Set(gone.map(\.id))
         let wanted = Self.roots(for: jobs.filter { !goneIds.contains($0.id) })
 
@@ -203,15 +216,28 @@ actor WatcherManager {
     /// The watches whose directory is not there: deleted, renamed or unmounted. FSEvents does not
     /// stop a stream whose root disappears — it keeps running and delivers nothing further — so
     /// this stat is the only thing that ever notices (§7), and it runs on every job change and
-    /// once a minute besides. It runs on the actor, synchronously, once per watch: nothing for a
-    /// local folder, but a root on a stalled network mount blocks the actor — and every batch
-    /// behind it — for the mount's timeout, which is the price of the twentieth watch.
-    static func vanished(in jobs: [Job], fileExists: (String) -> Bool) -> [Job] {
-        jobs.filter { job in
+    /// once a minute besides. Once per watch, on a detached task rather than the caller's actor
+    /// (#285): a root on a stalled network mount still takes the mount's timeout, but it costs the
+    /// sync that asked, not every batch queued behind the actor.
+    static func vanished(in jobs: [Job], fileExists: @escaping @Sendable (String) -> Bool) async -> [Job] {
+        let gone = await rootsMissing(jobs.compactMap { job -> String? in
+            guard job.enabled, job.pausedReason == nil,
+                  case .fsEvent(let watch) = job.trigger else { return nil }
+            return watch.path
+        }, fileExists: fileExists)
+        return jobs.filter { job in
             guard job.enabled, job.pausedReason == nil,
                   case .fsEvent(let watch) = job.trigger else { return false }
-            return !fileExists(watch.path)
+            return gone.contains(watch.path)
         }
+    }
+
+    /// Which of `paths` do not exist, stat'd on a detached task so a slow filesystem never holds
+    /// the calling actor. Shared with `WatchCoordinator`'s fire-time check (#281).
+    static func rootsMissing(_ paths: [String],
+                             fileExists: @escaping @Sendable (String) -> Bool) async -> Set<String> {
+        guard !paths.isEmpty else { return [] }
+        return await Task.detached { Set(paths.filter { !fileExists($0) }) }.value
     }
 
     /// One wording for both ways a root can be unusable — gone when it was stat'd, and refused by
