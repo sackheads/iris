@@ -658,7 +658,8 @@ struct GoalRunFactTests {
         h.app.conversations[idx].goalContract = GoalContract(objective: "plan the Seattle move", criteria: [])
         h.app.setGoal(for: h.id, goal: "plan the Seattle move")
         h.app.sendGoalKickoff(for: h.id)
-        let deadline = Date().addingTimeInterval(10)
+        // Generous: it returns the moment both requests exist; a loaded host once took over 10 s.
+        let deadline = Date().addingTimeInterval(60)
         while h.client.requests.count < 2, Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
         h.app.clearGoal(for: h.id)
         try #require(h.client.requests.count >= 2)
