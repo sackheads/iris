@@ -149,6 +149,92 @@ struct SessionStatusTests {
         #expect(waitingPhrase(status(app, peer)) == "goal judgement")
     }
 
+    private func waitingSince(_ s: SessionStatus) -> Date? {
+        if case .waiting(_, let since) = s { return since }
+        return nil
+    }
+
+    @Test("a goal wait is aged from when it was raised, not from the last write (#425)")
+    func goalWaitAgeSurvivesWrites() {
+        let app = AppState(); app.conversations.removeAll()
+        let peer = UUID(); app.createNewConversation(id: peer)
+        let raised = Date().addingTimeInterval(-2 * 86_400)
+        app.decisionClock = { raised }
+        let criteria = [Criterion(text: "tests pass", kind: .qualitative)]
+
+        app.setDraftContract(for: peer, GoalContract(objective: "ship it", criteria: criteria))
+        app.appendMessage(role: .system, content: "a peer wrote", to: peer)
+        #expect(waitingSince(status(app, peer)) == raised, "a draft's age is from its proposal")
+
+        app.decisionClock = { Date() }   // nothing below may restamp the pause it already has
+        app.setGoalContract(for: peer, GoalContract(objective: "ship it", criteria: criteria))
+        app.decisionClock = { raised }
+        app.setCheckpointPaused(for: peer)
+        app.decisionClock = { Date() }
+        // What a peer's `send_to_session` arrival writes (`queuePeerArrival`), then an event line.
+        app.appendMessage(role: .system, content: "hello from a peer", to: peer)
+        app.enqueuePendingUserMessage(text: "hello from a peer", attachments: [], for: peer, isPeer: true)
+        app.appendMessage(role: .system, content: "an event card", to: peer)
+        app.setCheckpointPaused(for: peer)   // already paused: not a new decision
+        app.beginJudgementPause(for: peer)   // opened inside the pause: owed since the pause
+        let s = status(app, peer)
+        #expect(waitingPhrase(s) == "checkpoint review")
+        #expect(waitingSince(s) == raised, "unrelated writes must not reset the age")
+        #expect(app.conversations.first { $0.id == peer }!.updatedAt > raised, "the writes did move updatedAt")
+    }
+
+    @Test("a contract persisted before #425 decodes, with no stamp")
+    func legacyContractDecodes() throws {
+        var c = GoalContract(objective: "x", criteria: [])
+        c.waitingSince = Date()
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(c)) as! [String: Any]
+        #expect(json["waitingSince"] != nil)
+        json["waitingSince"] = nil
+        let decoded = try JSONDecoder().decode(GoalContract.self, from: JSONSerialization.data(withJSONObject: json))
+        #expect(decoded.waitingSince == nil)
+    }
+
+    @Test("an evaluator's ask is labelled as the evaluator's (#426)")
+    func evaluatorApprovalLabel() async {
+        let app = AppState(); app.conversations.removeAll()
+        let peer = UUID(), eval = UUID()
+        app.createNewConversation(id: peer)
+        app.createNewConversation(id: eval, isSubagent: true)
+        app.linkDelegate(eval, of: peer, kind: .evaluator)
+        let ask = await raiseApproval(app, tool: "run_command", for: eval)
+        #expect(waitingPhrase(status(app, peer)) == "approval: run_command (evaluator)")
+        app.denyPendingApprovals(for: eval)
+        _ = await ask.value
+    }
+
+    @Test("deleting a delegate with a queued ask denies it, so no dialog is orphaned (#426)")
+    func deleteDeniesQueuedApprovals() async {
+        let app = AppState(); app.conversations.removeAll()
+        let peer = UUID(), eval = UUID(), other = UUID()
+        app.createNewConversation(id: peer)
+        app.createNewConversation(id: eval, isSubagent: true)
+        app.createNewConversation(id: other)
+        app.linkDelegate(eval, of: peer, kind: .evaluator)
+        let ask = await raiseApproval(app, tool: "run_command", for: eval)
+        let bystander = await raiseApproval(app, tool: "write_file", for: other)
+
+        let resumed = ResumeFlag()
+        let watcher = Task { @MainActor in resumed.value = await ask.value }
+
+        app.deleteConversation(eval)   // what `submit_evaluation` does beside a parallel ask
+        for _ in 0..<10_000 where resumed.value == nil { await Task.yield() }
+        #expect(resumed.value == false, "the delete itself resumes the waiter, denied")
+        #expect(app.pendingApprovals.map(\.conversationId) == [other], "only the deleted conversation's ask goes")
+        #expect(status(app, peer) == .idle)
+        app.denyPendingApprovals(for: eval)   // a no-op when fixed; keeps a regression from hanging
+        await watcher.value
+
+        app.denyPendingApprovals(for: other)
+        _ = await bystander.value
+    }
+
+    @MainActor final class ResumeFlag { var value: Bool? }
+
     @Test("a hostile tool name cannot forge a row through the waiting phrase")
     func toolNameIsFlattened() async {
         let app = AppState(); app.conversations.removeAll()

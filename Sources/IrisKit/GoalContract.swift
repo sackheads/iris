@@ -175,6 +175,11 @@ struct GoalContract: Codable, Equatable, Sendable {
     /// was clicked, canonical. A check approved for one directory is not approved for another,
     /// and the agent can move the conversation's workspace with `set_workspace` unasked.
     var approvedWorkspace: String?
+    /// #425 — when the decision this goal is waiting on was raised: stamped by the harness as the
+    /// draft is proposed, the checkpoint pauses, or a judgement pause opens from a running goal.
+    /// `list_sessions` reads its waiting age from here, not `Conversation.updatedAt`, which any
+    /// write (a peer's message included) moves. Nil on a contract from before #425.
+    var waitingSince: Date?
 
     init(id: UUID = UUID(), objective: String, criteria: [Criterion], outOfScope: [String] = [],
          stopBefore: [String] = [], assumptions: [String] = [], changeLog: [ContractChange] = [],
@@ -218,6 +223,7 @@ struct GoalContract: Codable, Equatable, Sendable {
         pendingCompletionSummary = try c.decodeIfPresent(String.self, forKey: .pendingCompletionSummary)
         approvedChecks = try c.decodeIfPresent([String].self, forKey: .approvedChecks) ?? []
         approvedWorkspace = try c.decodeIfPresent(String.self, forKey: .approvedWorkspace)
+        waitingSince = try c.decodeIfPresent(Date.self, forKey: .waitingSince)
     }
 
     /// ASCII space, tab, CR and LF only: U+00A0 and its kin are part of a bash word, not padding.

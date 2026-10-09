@@ -450,6 +450,8 @@ class AppState {
     @ObservationIgnored private(set) var rotationTask: Task<Void, Never>?
     /// The clock the rotation's archived title reads. Injectable so tests get a fixed date.
     @ObservationIgnored var rotationNow: () -> Date = { Date() }
+    /// The clock that stamps when a goal decision was raised (#425). Injectable for tests.
+    @ObservationIgnored var decisionClock: () -> Date = { Date() }
     /// The old Iris, and the new one once created: Esc in either stops the rotation.
     @ObservationIgnored var rotationConversationIds: Set<UUID> = []
     /// The old Iris counts as busy from the `/new` handler until its reflection turn ends, so a
@@ -618,9 +620,14 @@ class AppState {
     /// only parent link the live-subagent registry walks for Stop (#236): one map, so the session
     /// an ask is charged to and the session whose Stop reaches a subagent cannot drift apart.
     @ObservationIgnored private var delegationParent: [UUID: UUID] = [:]
+    /// The delegates that are goal evaluators, so their asks are labelled as such (#426).
+    @ObservationIgnored private var evaluatorDelegates: Set<UUID> = []
 
-    func linkDelegate(_ child: UUID, of parent: UUID) {
+    enum DelegateKind { case subagent, evaluator }
+
+    func linkDelegate(_ child: UUID, of parent: UUID, kind: DelegateKind = .subagent) {
         delegationParent[child] = parent
+        if kind == .evaluator { evaluatorDelegates.insert(child) } else { evaluatorDelegates.remove(child) }
     }
 
     /// Removes `child` from the tree and splices its delegates onto its own parent, so a
@@ -632,6 +639,7 @@ class AppState {
         for (id, parent) in delegationParent where parent == child {
             delegationParent[id] = grandparent
         }
+        evaluatorDelegates.remove(child)
     }
 
     /// Whether `ancestor` is `id` or delegated it, directly or through other delegates. Bounded
@@ -671,20 +679,25 @@ class AppState {
             // A tool name is not always ours (an MCP server chooses its own), and this phrase sits
             // in the listing's unquoted, harness-owned slot — so it is flattened like a card field.
             var phrase = "approval: " + IrisEngine.flattenCardField(first.toolName, cap: IrisEngine.cardNameCap)
-            if first.conversationId != conversation.id { phrase += " (subagent)" }
+            if let owner = first.conversationId, owner != conversation.id {
+                phrase += evaluatorDelegates.contains(owner) ? " (evaluator)" : " (subagent)"
+            }
             if asks.count > 1 { phrase += ", +\(asks.count - 1) more" }
             return .waiting(on: phrase, since: first.requestedAt)
         }
         if hasTurnInFlight(for: conversation.id) { return .busy }
         if let contract = conversation.goalContract {
+            // When the decision was raised (#425), not the last write: a peer's message or an event
+            // card moves `updatedAt`. A contract from before the stamp falls back to it.
+            let since = contract.waitingSince ?? conversation.updatedAt
             if contract.state == .draft {
-                return .waiting(on: "goal contract to review", since: conversation.updatedAt)
+                return .waiting(on: "goal contract to review", since: since)
             }
             if contract.checkpointStatus == .pausedForReview {
-                return .waiting(on: "checkpoint review", since: conversation.updatedAt)
+                return .waiting(on: "checkpoint review", since: since)
             }
             if contract.awaitingHumanJudgement {
-                return .waiting(on: "goal judgement", since: conversation.updatedAt)
+                return .waiting(on: "goal judgement", since: since)
             }
         }
         return .idle
@@ -1659,6 +1672,10 @@ class AppState {
         mainStartTimeByConversation[id] = nil
         mainPhaseByConversation[id] = nil
         stickyTools.forget(id)   // archive keeps it (the conversation can come back); delete cannot
+        // An ask still queued for a deleted conversation is a dialog nobody's work waits on, and
+        // with the delegate link gone below, `list_sessions` would read its parent idle while it
+        // still shows (#426). Deny it so its waiter resumes and the dialog goes.
+        denyPendingApprovals(for: id)
         unlinkDelegate(id)
         // Same reasoning for the event queue (#187 §8.3): a card delivered to a conversation that
         // is then deleted has nowhere to land, and its line must not sit in the dictionary
@@ -2459,6 +2476,8 @@ class AppState {
     func beginJudgementPause(for conversationId: UUID, summary: String = "") {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
               var c = conversations[idx].goalContract else { return }
+        // Opened inside a checkpoint pause, the user has owed a decision since that pause.
+        if !c.isPaused { c.waitingSince = decisionClock() }
         c.awaitingHumanJudgement = true
         c.pendingCompletionSummary = summary
         conversations[idx].goalContract = c
@@ -2476,7 +2495,9 @@ class AppState {
         // Starting a new goal clears any prior completion report and evaluation so they don't linger.
         conversations[idx].lastGoalCompletionReport = nil
         conversations[idx].lastGoalEvaluation = nil
-        conversations[idx].goalContract = draft
+        var stamped = draft
+        stamped.waitingSince = decisionClock()
+        conversations[idx].goalContract = stamped
         markChanged(conversationId, .metadata)
     }
 
@@ -2535,6 +2556,7 @@ class AppState {
     func setCheckpointPaused(for conversationId: UUID) {
         guard let idx = conversations.firstIndex(where: { $0.id == conversationId }),
               var c = conversations[idx].goalContract else { return }
+        if c.checkpointStatus != .pausedForReview { c.waitingSince = decisionClock() }
         c.checkpointStatus = .pausedForReview
         conversations[idx].goalContract = c
         markChanged(conversationId, .metadata)
