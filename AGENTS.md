@@ -16,6 +16,9 @@ swift test                           # full suite
 scripts/test-filter.sh MyTestSuite   # focused run, guarded (see below)
 ```
 
+**Releasing.** Cutting a signed, notarized release (`scripts/release.sh`) is a separate flow from
+building or testing — see [docs/releasing.md](docs/releasing.md).
+
 ### Building the Xcode app
 
 ```sh

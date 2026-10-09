@@ -8,6 +8,21 @@ It features **native Model Context Protocol (MCP) support** for limitless tool e
 <br/>
 ![Setup Wizard](assets/wizard.jpg)
 
+## 📥 Install
+
+Download the latest `.dmg` from [GitHub Releases](https://github.com/sackheads/iris/releases),
+open it, and drag `Iris.app` to `Applications`. The app is notarized, so Gatekeeper opens it
+without a right-click bypass.
+
+On first launch, macOS Keychain prompts once per item Iris needs (API keys, etc.) — choose
+"Always Allow" so you aren't asked again. After that, the installed app checks for updates once a
+day and installs them through [Sparkle](https://sparkle-project.org) when you accept them; check
+by hand with **Iris > Check for Updates…** or `/update`. See "Updates & Releases" below for detail.
+
+Building from source instead? A dev build (`swift run`, `scripts/run-dev.sh`, or the Xcode Debug
+scheme) keeps its own conversations and memory under `~/.iris-dev`, separate from the installed
+app's `~/.iris`, so the two never collide. See "Project Setup" below.
+
 ## 🚀 Architecture
 
 At its core, Iris is a Swift-based execution chassis that bridges your local environment and cloud LLMs.
