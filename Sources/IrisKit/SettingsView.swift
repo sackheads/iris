@@ -1410,8 +1410,14 @@ private struct ModelListSheet: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    List(filtered) { model in
-                        modelRow(model)
+                    VStack(spacing: 0) {
+                        TextField("Filter models", text: $searchText)
+                            .textFieldStyle(.roundedBorder)
+                            .padding(.horizontal)
+                            .padding(.top, 8)
+                        List(filtered) { model in
+                            modelRow(model)
+                        }
                     }
                     .safeAreaInset(edge: .bottom) {
                         HStack {
@@ -1432,11 +1438,12 @@ private struct ModelListSheet: View {
                     Button("Close", action: onClose)
                 }
             }
-            .searchable(text: $searchText, prompt: "Filter models")
         }
-        // `.keyboardShortcut(.cancelAction)` on the Close button does not register for this
-        // sheet, so Esc went unhandled. `.onExitCommand` on the sheet's root view is the same
-        // mechanism `fix/278-esc-closes-settings` uses for the Settings window, and it works here.
+        // No `.searchable` here: its toolbar search field swallows Esc even when it isn't
+        // focused, so the sheet never saw `.onExitCommand`. A plain `TextField` above the list
+        // gives the same filtering without capturing Esc, and `.onExitCommand` on the sheet's
+        // root view is the same mechanism `fix/278-esc-closes-settings` uses for the Settings
+        // window, and it works here.
         .onExitCommand(perform: onClose)
         .frame(minWidth: 480, minHeight: 480)
     }
