@@ -182,6 +182,85 @@ struct WatcherManagerSyncTests {
         await manager.stopAll()
     }
 
+    // MARK: A slow stat
+
+    /// An injected `fileExists` that can be made to block, as a stat on a stalled network mount
+    /// does. Synchronous, because the real one is; bounded at five seconds so a regression that
+    /// runs it on the actor delays the test rather than hanging it.
+    final class SlowStat: @unchecked Sendable {
+        private let lock = NSCondition()
+        private var slow = false
+        private var only: String?
+        private var released = false
+        private var inside = false
+
+        /// From now on, stat `path` slowly — or every path, when `path` is nil.
+        func makeSlow(only path: String? = nil) { lock.withLock { slow = true; only = path } }
+        var isInside: Bool { lock.withLock { inside } }
+
+        func release() {
+            lock.lock(); released = true; lock.broadcast(); lock.unlock()
+        }
+
+        func exists(_ path: String) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard slow, only == nil || only == path else { return true }
+            inside = true
+            let deadline = Date().addingTimeInterval(5)
+            while !released && lock.wait(until: deadline) {}
+            inside = false
+            return true
+        }
+    }
+
+    @Test("a stat stalled on one root does not hold up batches on the manager (#285)",
+          .timeLimit(.minutes(1)))
+    func aSlowStatDoesNotBlockTheActor() async throws {
+        let fake = FakeStreams()
+        let sink = Sink()
+        let stat = SlowStat()
+        let manager = WatcherManager(ledger: nil, streams: fake.factory,
+                                     fileExists: { stat.exists($0) })
+        await manager.setBatchHandler { root, paths in await sink.batch(root, paths) }
+        let jobs = [Self.watchJob("a", root: "/r")]
+        await manager.sync(with: jobs)
+        #expect(await manager.activeRoots == ["/r"])
+
+        stat.makeSlow()
+        let stalled = Task { await manager.sync(with: jobs) }
+        await Self.eventually("the stat to stall") { stat.isInside }
+
+        fake.yield("/r", ["/r/a.txt"])
+        await Self.eventually("the batch to be forwarded while the stat is stalled") {
+            await sink.batchCount == 1
+        }
+        #expect(stat.isInside, "the batch went through before the stat returned")
+        #expect(await manager.activeRoots == ["/r"])
+
+        stat.release()
+        await stalled.value
+        #expect(await manager.activeRoots == ["/r"])
+        await manager.stopAll()
+    }
+
+    @Test("a sync overtaken during its stat does not apply its older table over the newer one")
+    func anOvertakenSyncStandsDown() async throws {
+        let fake = FakeStreams()
+        let stat = SlowStat()
+        let manager = WatcherManager(ledger: nil, streams: fake.factory,
+                                     fileExists: { stat.exists($0) })
+        stat.makeSlow(only: "/old")
+        let older = Task { await manager.sync(with: [Self.watchJob("a", root: "/old")]) }
+        await Self.eventually("the older sync's stat to stall") { stat.isInside }
+        await manager.sync(with: [Self.watchJob("a", root: "/new")])
+        #expect(await manager.activeRoots == ["/new"])
+        stat.release()
+        await older.value
+        #expect(await manager.activeRoots == ["/new"], "the older table landed last and won")
+        await manager.stopAll()
+    }
+
     // MARK: Roots that go away
 
     @Test("a root that is gone pauses its watch instead of pretending to watch it")

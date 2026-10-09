@@ -386,11 +386,12 @@ actor IrisEngine {
     /// Claimed by `startWatching` before its first suspension, so two overlapping `start()`s
     /// cannot both find the coordinator slot empty and both fill it.
     private var watchLayerStarting = false
-    /// The tail of the watch-sync queue. Every sync — the hook's, the loop's, the first — runs
-    /// behind the one before it and reads the jobs table only when its turn comes, so the sync
-    /// that lands last is the one that saw the latest table. Two free-running hook tasks would
-    /// promise nothing of the kind: each would read its own snapshot, and either could land last.
-    private var watchSyncChain: Task<Void, Never>?
+    /// The watch-sync queue. Every sync — the hook's, the loop's, the first — runs behind the one
+    /// before it and reads the jobs table only when its turn comes, so the sync that lands last is
+    /// the one that saw the latest table. Two free-running hook tasks would promise nothing of the
+    /// kind: each would read its own snapshot, and either could land last. Coalesced (#285): a
+    /// burst of writes costs at most two syncs, not one per write.
+    private var watchSyncs: SyncCoalescer?
     /// Whether this launch has already swept runs left `running` by the previous one.
     private var closedInterruptedRuns = false
 
@@ -3148,18 +3149,22 @@ actor IrisEngine {
         })
     }
 
-    /// Queues one `syncWatches` behind whichever is already queued or running. Single-flight in
-    /// order, not deduplicated: a sync that has started may have read the table before the write
-    /// that prompted the next one, so the next one still has to run.
-    private func scheduleWatchSync(ledger: JobLedger) -> Task<Void, Never> {
-        let previous = watchSyncChain
-        let next = Task { [weak self] in
-            await previous?.value
-            guard let self else { return }
-            await self.syncWatches(ledger: ledger)
+    /// Asks for one `syncWatches` that starts after this call. Single-flight in order: a sync that
+    /// has started may have read the table before the write that prompted this request, so one
+    /// more runs behind it — but only one, shared by every request that arrives before it starts
+    /// (`SyncCoalescer`, #285).
+    private func scheduleWatchSync(ledger: JobLedger) async -> Task<Void, Never> {
+        let queue: SyncCoalescer
+        if let watchSyncs {
+            queue = watchSyncs
+        } else {
+            queue = SyncCoalescer { [weak self, weak ledger] in
+                guard let self, let ledger else { return }
+                await self.syncWatches(ledger: ledger)
+            }
+            watchSyncs = queue
         }
-        watchSyncChain = next
-        return next
+        return await queue.request()
     }
 
     /// The two syncs, in the order §7 fixes: the coordinator first, so a batch can never arrive
