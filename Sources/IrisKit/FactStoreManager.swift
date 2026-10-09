@@ -43,6 +43,12 @@ struct Fact: Identifiable, Codable, FetchableRecord, PersistableRecord, Sendable
     /// would be empty on any row written by raw SQL, and the FTS index already narrows the lookup.
     var contentKey: String { FactStoreManager.contentKey(content) }
 
+    /// What write-time dedup and the merge migration compare: the same text about two different
+    /// entities ("Prefers dark mode." for Alice and for Bob) is two facts. Nil and empty entity
+    /// are the same. Pre-injection dedup uses `contentKey` alone: one line in the prompt is enough.
+    struct DedupKey: Hashable { let content: String; let entity: String }
+    var dedupKey: DedupKey { DedupKey(content: contentKey, entity: FactStoreManager.contentKey(entity ?? "")) }
+
     static let databaseTableName = "facts"
 
     var isActive: Bool { status == FactStatus.active.rawValue }
@@ -230,14 +236,30 @@ final class FactStoreManager: @unchecked Sendable {
             try mergeDuplicateActiveFacts(db)
         }
 
+        // #415 review: the porter stemmer, so "use" finds "uses" and "preferences" finds "prefers".
+        // Recreating the synchronized table rebuilds the index from `facts` (GRDB issues the
+        // FTS5 'rebuild'); the triggers are recreated with it.
+        migrator.registerMigration("v5_fact_fts_porter") { db in
+            try db.dropFTS5SynchronizationTriggers(forTable: "facts_fts")
+            try db.drop(table: "facts_fts")
+            try db.create(virtualTable: "facts_fts", using: FTS5()) { t in
+                t.synchronize(withTable: "facts")
+                t.tokenizer = .porter(wrapping: .unicode61())
+                t.column("content")
+                t.column("category")
+                t.column("entity")
+                t.column("tags")
+            }
+        }
+
         return migrator
     }
 
     /// Adds a fact to the SQLite Fact Store. When `supersedes` names an existing fact, the insert
     /// and the supersession share one transaction: a rejected supersession inserts nothing.
     ///
-    /// Dedup (#416): when an active fact already has the same `contentKey`, whatever its category
-    /// or entity, nothing is inserted and that fact is returned unchanged (no trust bump: parallel
+    /// Dedup (#416): when an active fact already has the same `dedupKey` (content key plus
+    /// normalised entity; category is ignored), nothing is inserted and that fact is returned unchanged (no trust bump: parallel
     /// `save_fact` calls in one turn are how duplicates arose, and they are not evidence). A
     /// `supersedes` on that call then points at the existing fact.
     @discardableResult
@@ -277,7 +299,7 @@ final class FactStoreManager: @unchecked Sendable {
             createdAt: now
         )
         let (fact, inserted) = try writer.write { db -> (Fact, Bool) in
-            let existing = try Self.activeFact(db, matchingKeyOf: trimmed)
+            let existing = try Self.activeFact(db, matching: candidate.dedupKey, content: trimmed)
             let fact = existing ?? candidate
             if existing == nil { try fact.insert(db) }
             if let supersedes {
@@ -300,11 +322,10 @@ final class FactStoreManager: @unchecked Sendable {
         return key
     }
 
-    /// The oldest active fact whose key equals `content`'s. The FTS index narrows the scan to rows
-    /// holding every token (a superset of key equality: the tokenizer folds case and diacritics);
-    /// content with no tokens at all falls back to a scan of the active rows.
-    private static func activeFact(_ db: Database, matchingKeyOf content: String) throws -> Fact? {
-        let key = contentKey(content)
+    /// The oldest active fact with this `dedupKey`. The FTS index narrows the scan to rows holding
+    /// every token of `content` (a superset of key equality: the tokenizer folds case and
+    /// diacritics and stems); content with no tokens at all falls back to a scan of the active rows.
+    private static func activeFact(_ db: Database, matching key: Fact.DedupKey, content: String) throws -> Fact? {
         let candidates: [Fact]
         if let pattern = FTS5Pattern(matchingAllTokensIn: content) {
             candidates = try Fact.fetchAll(db, sql: """
@@ -318,10 +339,10 @@ final class FactStoreManager: @unchecked Sendable {
                 ORDER BY COALESCE(createdAt, timestamp) ASC, rowid ASC
                 """)
         }
-        return candidates.first { $0.contentKey == key }
+        return candidates.first { $0.dedupKey == key }
     }
 
-    /// v4_fact_dedup's body. Per key among active facts: keep the oldest, give it the summed
+    /// v4_fact_dedup's body. Per `dedupKey` (content and entity) among active facts: keep the oldest, give it the summed
     /// `retrievalCount` and `helpfulCount`, the highest trust (so a helpful rating on a copy is not
     /// lost) and the latest `lastRetrievedAt`; re-point lineage and relations at it; delete the
     /// rest. Deletes go through the `facts_fts` sync triggers; the rebuild afterwards is a
@@ -331,10 +352,10 @@ final class FactStoreManager: @unchecked Sendable {
             SELECT * FROM facts WHERE status = 'active'
             ORDER BY COALESCE(createdAt, timestamp) ASC, rowid ASC
             """)
-        var groups: [String: [Fact]] = [:]
-        var order: [String] = []
+        var groups: [Fact.DedupKey: [Fact]] = [:]
+        var order: [Fact.DedupKey] = []
         for fact in active {
-            let key = fact.contentKey
+            let key = fact.dedupKey
             if groups[key] == nil { order.append(key) }
             groups[key, default: []].append(fact)
         }
@@ -362,22 +383,23 @@ final class FactStoreManager: @unchecked Sendable {
         }
     }
 
-    /// The minimum BM25 relevance (`-bm25(facts_fts)`) a fact needs before JIT injects it
-    /// unasked. FTS5's BM25 gives a term in at least half of the indexed rows an IDF of ~1e-6, so a
-    /// fact that matches only on such a term scores ~1e-6 and is dropped, while one rare-enough
-    /// term matched once scores well above this. See `FactRelevanceTests` for the fixture.
-    static let jitRelevanceFloor = 0.05
-    /// Below this many indexed rows BM25 has no IDF signal at all (every term is in half the
-    /// rows), so the floor is not applied: any content-word match counts.
-    static let minRowsForRelevanceFloor = 3
+    /// JIT's relevance floor (#415): a fact is injected unasked only if it shares a
+    /// *discriminating* query term with the query, one found in fewer than this fraction of the
+    /// active facts, or the query names its entity. A word in half the store (the user's name, the
+    /// project's name) says nothing about which of those facts is meant. Counted over active rows
+    /// in Swift, not read off bm25(): FTS5's IDF counts every indexed row, superseded ones included.
+    static let discriminatingTermFraction = 0.5
+    /// Below this many active facts the floor is off and any content-word match counts: injecting
+    /// a few facts from a store this small costs little, and its document frequencies are noise.
+    static let minActiveFactsForRelevanceFloor = 20
 
-    /// Searches active facts with FTS5, ranked by BM25 relevance with a mild trust/recency
-    /// adjustment. The query's stopwords are dropped first (`FactQueryTerms`); a query that is
-    /// nothing but stopwords matches nothing. An empty query browses by trust instead.
+    /// Searches active facts with FTS5 (porter-stemmed), ranked by BM25 relevance with a mild
+    /// trust/recency adjustment. The query's stopwords are dropped first (`FactQueryTerms`); a
+    /// query that is nothing but stopwords matches nothing. An empty query browses by trust instead.
     ///
-    /// `relevanceFloor` drops matches whose raw BM25 relevance is below it. JIT passes
-    /// `jitRelevanceFloor`; an explicit search (search_memory, /facts) passes nil, since asking
-    /// for a term already says it matters. Results are deduped by `contentKey`.
+    /// `applyRelevanceFloor` keeps only matches that pass `passesRelevanceFloor`. JIT sets it; an
+    /// explicit search (search_memory, /facts) does not, since asking for a term already says it
+    /// matters. Results are deduped by `contentKey`.
     ///
     /// `countsAsRetrieval` is the usage signal that keeps a fact alive through eviction, so browse
     /// paths (`/facts`, the journey scan) pass `false`: a human reading the store is not a retrieval.
@@ -387,7 +409,7 @@ final class FactStoreManager: @unchecked Sendable {
         category: String? = nil,
         entity: String? = nil,
         limit: Int = 5,
-        relevanceFloor: Double? = nil,
+        applyRelevanceFloor: Bool = false,
         countsAsRetrieval: Bool = true
     ) throws -> [Fact] {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -407,7 +429,7 @@ final class FactStoreManager: @unchecked Sendable {
             // "general", which would otherwise match any query that happens to contain it.
             let match = "{content entity tags} : (" + terms.map { "\"\($0)\"" }.joined(separator: " OR ") + ")"
             var sql = """
-                SELECT facts.*, -bm25(facts_fts) AS relevance
+                SELECT facts.rowid AS factRowid, facts.*, -bm25(facts_fts) AS relevance
                 FROM facts_fts
                 JOIN facts ON facts.rowid = facts_fts.rowid
                 WHERE facts_fts MATCH ? AND facts.status = 'active'
@@ -425,16 +447,13 @@ final class FactStoreManager: @unchecked Sendable {
             args.append(max(limit * 4, 20))
 
             let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
-            var floor = relevanceFloor
-            if floor != nil, try Int.fetchOne(db, sql: "SELECT count(*) FROM facts") ?? 0 < Self.minRowsForRelevanceFloor {
-                floor = nil
-            }
+            let floor = applyRelevanceFloor ? try Self.relevanceFloor(db, terms: terms) : nil
 
             let now = Date()
             let scored = try rows.compactMap { row -> (Fact, Double)? in
                 let relevance: Double = row["relevance"] ?? 0
-                if let floor, relevance < floor { return nil }
                 let fact = try Fact(row: row)
+                if let floor, !floor.passes(rowid: row["factRowid"], fact: fact) { return nil }
                 return (fact, relevance * Self.rankAdjustment(for: fact, now: now))
             }
             let ranked = scored.sorted { $0.1 > $1.1 }.map(\.0)
@@ -442,6 +461,36 @@ final class FactStoreManager: @unchecked Sendable {
         }
         if countsAsRetrieval { try? incrementRetrievals(ids: results.map(\.id)) }
         return results
+    }
+
+    /// The floor's per-query statistics: the active rows holding at least one discriminating term,
+    /// and the query's terms for the entity bypass. Nil when the store is under the size threshold.
+    struct RelevanceFloor {
+        let discriminatingRows: Set<Int64>
+        let terms: Set<String>
+
+        func passes(rowid: Int64?, fact: Fact) -> Bool {
+            if let rowid, discriminatingRows.contains(rowid) { return true }
+            // The query names the fact's entity ("remind me about Brian", entity Brian).
+            let entityTerms = FactQueryTerms.contentTerms(in: fact.entity ?? "")
+            return !entityTerms.isEmpty && entityTerms.allSatisfy(terms.contains)
+        }
+    }
+
+    private static func relevanceFloor(_ db: Database, terms: [String]) throws -> RelevanceFloor? {
+        let active = try Int.fetchOne(db, sql: "SELECT count(*) FROM facts WHERE status = 'active'") ?? 0
+        guard active >= minActiveFactsForRelevanceFloor else { return nil }
+        var rows: Set<Int64> = []
+        for term in terms.prefix(64) {
+            let matching = try Int64.fetchAll(db, sql: """
+                SELECT facts.rowid FROM facts_fts JOIN facts ON facts.rowid = facts_fts.rowid
+                WHERE facts_fts MATCH ? AND facts.status = 'active'
+                """, arguments: ["{content entity tags} : \"\(term)\""])
+            if Double(matching.count) < discriminatingTermFraction * Double(active) {
+                rows.formUnion(matching)
+            }
+        }
+        return RelevanceFloor(discriminatingRows: rows, terms: Set(terms))
     }
 
     /// Ranking only, never a filter: trust earned through explicit feedback lifts a fact a little,
@@ -470,6 +519,19 @@ final class FactStoreManager: @unchecked Sendable {
         }
         if countsAsRetrieval { try? incrementRetrievals(ids: results.map(\.id)) }
         return results
+    }
+
+    /// The active facts among `ids`, in the order given. Not a retrieval: a goal run's carried
+    /// facts were counted when they were found.
+    func activeFacts(ids: [String]) throws -> [Fact] {
+        guard !ids.isEmpty else { return [] }
+        let rows = try reader.read { db in
+            let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
+            return try Fact.fetchAll(db, sql: "SELECT * FROM facts WHERE status = 'active' AND id IN (\(placeholders))",
+                                     arguments: StatementArguments(ids))
+        }
+        let byId = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return ids.compactMap { byId[$0] }
     }
 
     /// Browses facts by trust, newest first. Inactive rows carry their status and lineage.
