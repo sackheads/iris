@@ -299,6 +299,49 @@ struct SubagentUserStopTests {
 
     @Test("a parent Stop accepted just after goal_complete still does not wake the parent")
     func stopRacingCompletionDoesNotWakeParent() async throws {
+        let gate = JobSchedulerTests.Gate()
+        let client = RoutingClient([
+            RoutingClient.parent: [
+                calls([("invoke_subagent", ["role": .string("worker"), "task": .string("Research."),
+                                            "effort": .string("easy"), "background": .string("true")])]),
+                text("Spawned it."),
+            ],
+            "WORKER": [calls([("goal_complete", ["summary": .string("done")])])],
+        ], gates: ["WORKER": (call: 1, gate: gate)])
+        let state = try state()
+        let main = state.createNewConversation()
+        let engine = IrisEngine(state: state, tier: .medium, client: client, protectionEnabled: false, sessionPeerCount: 0)
+        state.installEngine(engine)
+
+        await engine.processInput("Start a background worker.", source: "User", conversationId: main)
+        // Held before its goal_complete, so the Stop can be placed in the window on an event, not
+        // found by polling: a poll that lands after the settle under load is refused (#454).
+        await gate.waitForEntry()
+        let worker = try #require(subagentId("worker", in: state))
+        let record = try #require(state.onSubagentComplete[worker])
+        let stoppedCount = Box<Int?>(nil)
+        // Called on the MainActor right after the completion is written, so the manager's settle,
+        // which needs the MainActor too, cannot come before this Stop: the window, every time.
+        state.onSubagentComplete[worker] = { termination in
+            record(termination)
+            MainActor.assumeIsolated { stoppedCount.set(state.stopBackgroundSubagents(under: main)) }
+        }
+        await gate.open()
+
+        let postBacks: @MainActor () -> [ChatMessage] = {
+            state.conversations.first { $0.id == main }?.messages
+                .filter { $0.content.contains("Background subagent result") } ?? []
+        }
+        #expect(await eventually { postBacks().count == 1 })
+        #expect(stoppedCount.get == 1, "the Stop landed before the result settled")
+        try await Task.sleep(nanoseconds: 500_000_000)
+        #expect(postBacks().count == 1)
+        #expect(postBacks().first?.content.contains(SubagentManager.stoppedAfterCompletionNote) == true)
+        #expect(client.callCount(RoutingClient.parent) == 2, "the parent was not woken")
+    }
+
+    @Test("a parent Stop accepted just before the settle keeps the cut-short note and does not wake the parent")
+    func stopJustBeforeSettleKeepsNote() async throws {
         let client = RoutingClient([
             RoutingClient.parent: [
                 calls([("invoke_subagent", ["role": .string("worker"), "task": .string("Research."),
@@ -311,28 +354,19 @@ struct SubagentUserStopTests {
         let main = state.createNewConversation()
         let engine = IrisEngine(state: state, tier: .medium, client: client, protectionEnabled: false, sessionPeerCount: 0)
         state.installEngine(engine)
+        let stoppedCount = Box<Int?>(nil)
+        // After the manager has seen the result, before it settles: a `wasStopped` read before the
+        // settle misses this Stop and drops the note (#436's rebase, #454).
+        state.beforeSubagentSettle = { _ in stoppedCount.set(state.stopBackgroundSubagents(under: main)) }
 
         await engine.processInput("Start a background worker.", source: "User", conversationId: main)
-        // The moment the completion is recorded (its handler clears itself), before the manager's
-        // poll sees it and settles: the window the review reproduced 10 of 10.
-        var stoppedCount = 0
-        let end = Date().addingTimeInterval(10)
-        while Date() < end {
-            if let worker = subagentId("worker", in: state), state.onSubagentComplete[worker] == nil,
-               state.conversations.first(where: { $0.id == worker })?.messages.contains(where: { $0.role == .system }) == true,
-               state.subagentStopRequest(worker) == nil, !state.backgroundSubagents(under: main, stoppableOnly: false).isEmpty {
-                stoppedCount = state.stopBackgroundSubagents(under: main)
-                break
-            }
-            try await Task.sleep(nanoseconds: 1_000_000)
-        }
-        #expect(stoppedCount == 1, "the Stop landed before the result settled")
 
         let postBacks: @MainActor () -> [ChatMessage] = {
             state.conversations.first { $0.id == main }?.messages
                 .filter { $0.content.contains("Background subagent result") } ?? []
         }
         #expect(await eventually { postBacks().count == 1 })
+        #expect(stoppedCount.get == 1, "the Stop was accepted: the subagent was not yet settled")
         try await Task.sleep(nanoseconds: 500_000_000)
         #expect(postBacks().count == 1)
         #expect(postBacks().first?.content.contains(SubagentManager.stoppedAfterCompletionNote) == true)

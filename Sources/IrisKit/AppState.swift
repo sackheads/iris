@@ -424,6 +424,10 @@ class AppState {
     /// State-gated tools each conversation has declared (5c §0.1). Transient, never persisted.
     @ObservationIgnored var stickyTools = StickyTools()
     var onSubagentComplete: [UUID: @Sendable (SubagentTermination) -> Void] = [:]
+    /// Tests only, nil in production: runs on the MainActor just before a subagent is settled, in
+    /// the same job, so a test can land a Stop after the poll has seen the result but before the
+    /// settle (#454).
+    @ObservationIgnored var beforeSubagentSettle: ((UUID) -> Void)?
 
     /// Fired by the `submit_evaluation` handler in the EVALUATOR's own conversation; the closure
     /// (registered by GoalEvaluator) reconciles the verdict and writes it to the ORIGINATING
