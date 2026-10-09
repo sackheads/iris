@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Headless runs auto-approve tools, and until #135 `requestApproval` returned before Vibecop
 /// ran, so rung 5 of the perf ladder never paid the Vibecop call a real `run_command` pays.

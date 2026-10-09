@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The pill-timer dicts are keyed by message id and nothing removed from them, so every
 /// `run_command` in a session left an entry behind that outlived the message it described (#100).

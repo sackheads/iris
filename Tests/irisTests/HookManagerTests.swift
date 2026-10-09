@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @Test func testHookManagerProceed() async throws {
     let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-hookmgr-\(UUID().uuidString)")

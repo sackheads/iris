@@ -1,7 +1,7 @@
 import Foundation
 import KeyboardShortcuts
 import Testing
-@testable import iris
+@testable import IrisKit
 
 @Suite("Build identity")
 struct BuildIdentityTests {

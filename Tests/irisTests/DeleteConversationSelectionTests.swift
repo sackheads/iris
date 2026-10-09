@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #167: `deleteConversation` re-pointed the selection using the unfiltered conversation array,
 /// so it could land on a subagent/evaluator scratch conversation the sidebar never renders

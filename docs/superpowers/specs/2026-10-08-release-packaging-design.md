@@ -12,10 +12,10 @@ three Sparkle-updated releases with the same Developer ID.
 
 ## Where we are (verified 2026-10-08)
 
-- **No updater.** `UpdateManager.swift` queries `api.github.com/repos/bnaylor/iris/releases/latest`
+- **No updater.** `UpdateManager.swift` queries `api.github.com/repos/sackheads/iris/releases/latest`
   and opens the release page in the browser. Nothing downloads, verifies, installs or relaunches.
   `AppState.checkForUpdates` has no callers, so `README.md:220` ("automatically checks") is false.
-  `bnaylor/iris` has no releases. The repo is public.
+  `sackheads/iris` has no releases. The repo is public.
 - **The release bundle cannot work off this machine.** `scripts/build_release.sh` copies only the
   `iris` binary into `Iris.app`. The binary links `@rpath/llama.framework` with no rpath into
   `Contents/Frameworks`, and neither framework is copied. SwiftPM's generated resource accessor is:
@@ -79,11 +79,13 @@ running Debug from Xcode cannot open real data. The bundle id is injectable for 
   them without prompting; confirm on first run.
 - `scripts/run-dev.sh` runs it automatically when `~/.iris-dev` is missing or empty.
 
-**Importing defaults into release.** Today's settings in UserDefaults (setup-wizard state, the
-hotkey, toggles) live in the `iris` domain, which dev keeps. The release domain
-`com.bnaylor.iris` starts empty, so a first release launch would rerun setup. On launch under the
-release identity, if the release domain has never been imported (a marker key), copy every key of
-the `iris` domain into it once and set the marker. Never the other direction, never twice.
+**Importing defaults into a bundled app.** Today's settings in UserDefaults (setup-wizard state,
+the hotkey, toggles) live in the `iris` domain, which the bare dev binary keeps. Any bundled app
+— the installed release app (`com.bnaylor.iris`) and the Xcode Debug app (`com.bnaylor.iris.dev`)
+— starts from its own, empty domain, so its first launch would otherwise rerun setup. On launch,
+whenever the process's own domain is not `iris` (and never under tests), if that domain has never
+been imported into (a marker key), copy every key of the `iris` domain into it once and set the
+marker. Never the other direction, never twice.
 
 **Known first-launch cost (release).** Existing Keychain items were created by the bare dev
 binary (identifier `iris`). The installed `Iris.app` is a different code identity, so its first
@@ -114,7 +116,7 @@ LaunchServices prevents a second copy of the installed app; dev has the old beha
 - Versioning: `CFBundleShortVersionString` = the release argument; `CFBundleVersion` =
   `git rev-list --count HEAD` (monotonic on main). Both passed as `xcodebuild` overrides; never
   edited in the pbxproj. `Constants.appVersion` reads `Bundle.main` and falls back to `"dev"`.
-- Partial `Info.plist`: `SUFeedURL = https://bnaylor.github.io/iris/appcast.xml`,
+- Partial `Info.plist`: `SUFeedURL = https://sackheads.github.io/iris/appcast.xml`,
   `SUPublicEDKey`, `SUEnableAutomaticChecks = YES`, `SUScheduledCheckInterval = 86400`.
 - `scripts/build_release.sh` is deleted. `scripts/sign.sh` stays for dev binaries.
 
@@ -178,7 +180,7 @@ claim, and the dev-home split is documented for contributors (AGENTS.md: dev bui
 
 ## Steps needing the owner
 
-- Approval before: creating `gh-pages` and enabling Pages on `bnaylor/iris`; the first real
+- Approval before: creating `gh-pages` and enabling Pages on `sackheads/iris`; the first real
   `release.sh`; the second release for the update test.
 - Owner-run (secrets into their Keychain): `generate_keys --account iris` plus a backup
   (`-x`, stored in the password manager, file deleted); `xcrun notarytool store-credentials

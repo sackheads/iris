@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import Darwin
-@testable import iris
+@testable import IrisKit
 
 /// #377: each runner's kill ladder runs a caller's hook on the ladder's own queue, so what a caller
 /// has to do beyond the child's reach — the in-VM group kill, an ephemeral `container delete` —

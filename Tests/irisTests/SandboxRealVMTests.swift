@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import Darwin
-@testable import iris
+@testable import IrisKit
 
 /// The installed `container` runtime, for the few tests that can only be answered by a real VM.
 /// Opt-in: they run only with `IRIS_REAL_VM=1`, so the default suite never depends on a booted

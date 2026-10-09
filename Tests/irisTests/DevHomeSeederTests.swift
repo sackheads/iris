@@ -1,7 +1,7 @@
 import Foundation
 import GRDB
 import Testing
-@testable import iris
+@testable import IrisKit
 
 @Suite("Dev home seeding")
 struct DevHomeSeederTests {

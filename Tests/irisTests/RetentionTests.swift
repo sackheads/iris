@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #187 §10 — the half of retention that `JobLedgerTests` cannot cover: `pruneDecision` is a pure
 /// function over rows, but the transcripts it names are *conversations*, and deleting those is the

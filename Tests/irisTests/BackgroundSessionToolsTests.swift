@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// A background run is not a session, in both directions (#185 §9, #187).
 ///

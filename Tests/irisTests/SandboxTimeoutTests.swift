@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The per-command deadline, end to end: the child process that outlives it is killed and reaped,
 /// the session manager reports it in the same words the host path uses, and `run_command`'s

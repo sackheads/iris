@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #187 §4 "Before a run" — the runner is the single admission point for every fire, scheduled or
 /// watcher-driven, and `admit` is the whole decision in one pure function.

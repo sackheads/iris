@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Pure grouping logic behind the sidebar's "Results" section (#183): fan `ConversationHit`s
 /// (already ranked by the store's bm25 order) out into per-conversation groups without losing

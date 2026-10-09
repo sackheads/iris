@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// 5c §0.4. Several turns of one conversation, states toggling, through one engine. Each turn's
 /// declared tools are a superset of the previous turn's, every shared entry encodes byte for byte

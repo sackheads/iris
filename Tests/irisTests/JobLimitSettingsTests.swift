@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #187 §9 — the five job limits are steppers in Settings → Advanced, so every number the
 /// unattended system is bounded by is tweakable without editing a database (§0.1's first

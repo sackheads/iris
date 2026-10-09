@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Every `data:` payload from `streamGenerateContent?alt=sse` is a whole GenerateContentResponse.
 @Suite("Gemini stream mapper")

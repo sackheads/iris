@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #282 §0.10 — a background run cannot move its own boundary. `set_workspace` is not declared to
 /// an unattended turn (invariant 6) and is refused in the dispatcher if called anyway.

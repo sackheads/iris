@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// None of these touches `ConfigManager.shared`: it is process-global and suites run
 /// concurrently, so mutating it races and its setters persist beyond the test (#109, invariant 7).

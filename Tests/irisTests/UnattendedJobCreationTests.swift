@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The epic's standing ruling: no unattended job creation. A background run may not schedule a job
 /// or register a watch — a run that could would be a run that writes its own cadence, and nobody

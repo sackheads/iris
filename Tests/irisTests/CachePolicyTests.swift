@@ -1,7 +1,7 @@
 // Tests/irisTests/CachePolicyTests.swift
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// 5c §0.8/§0.9: the cache hints a request carries, and the policy that picks them.
 @Suite struct CachePolicyTests {

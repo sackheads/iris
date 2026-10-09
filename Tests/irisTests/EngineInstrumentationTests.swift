@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// A fake scenario through the real engine loop must leave the finer records behind.
 @MainActor

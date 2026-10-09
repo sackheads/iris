@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// D2's pause state. Deliberately NOT a CheckpointStatus case: that status drives ladder UI in 13
 /// places, and ChatView suppresses the completion chip while it is set — which is exactly where

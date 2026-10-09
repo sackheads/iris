@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #182 §6.2 — "archived means idle" has two directions. Work arriving is the second one.
 @MainActor

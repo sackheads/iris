@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The `~/.iris` auto-allow, and what it must never reach (#187).
 ///

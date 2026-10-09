@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #334: a disabled Vibecop is no pre-screen, never an approval. With it off, which is the
 /// default, an attended gated call that the allowlist does not already permit reaches the user

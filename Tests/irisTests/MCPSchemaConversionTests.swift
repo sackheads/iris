@@ -1,6 +1,6 @@
 import Testing
 import MCP
-@testable import iris
+@testable import IrisKit
 
 @Suite("MCP-to-Gemini schema conversion")
 struct MCPSchemaConversionTests {

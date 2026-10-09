@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// One scheduled job, end to end: parsed out of `schedule_job`'s arguments, stored through the
 /// scheduler, and fired into a real `IrisEngine` over a `FakeLLMClient`.

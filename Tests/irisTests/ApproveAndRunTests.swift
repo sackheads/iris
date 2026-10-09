@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #187 §6 — the persisted blocked call and "Approve and run". A background run that failed closed
 /// records the whole call; the card shows it, with Vibecop's opinion of it beside the button; and a

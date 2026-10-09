@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #185 §3, §4. The peer set is bounded by the active predicate; the listing is bounded by a cap.
 @Suite("Session directory")

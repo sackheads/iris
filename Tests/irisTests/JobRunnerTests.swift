@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #187 §6 — what a job fire actually is now: a turn in a hidden conversation of its own, a row in
 /// `job_runs`, and one event card in Iris, the pinned conversation. The pure half (`outcome`,

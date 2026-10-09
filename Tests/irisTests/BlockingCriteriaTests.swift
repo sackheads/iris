@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The gate acts on evidence of failure, not absence of evidence (spec §4).
 @Suite("Blocking criteria (D1)")

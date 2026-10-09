@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #187 deliverable 4, spec §0.4 — the ignore matcher. Two things are load-bearing and neither is
 /// obvious from the pattern strings: the built-in set has to catch the names editors and VCSs

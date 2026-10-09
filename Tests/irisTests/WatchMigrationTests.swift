@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import GRDB
-@testable import iris
+@testable import IrisKit
 
 /// Migration `v11_watches`: the `job_runs.watchSummary` column and the canonical rewrite of every
 /// stored watch root. In-memory stores only (invariant 7); the symlink case makes its own temp

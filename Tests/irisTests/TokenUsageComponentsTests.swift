@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// 5c §0.5-0.6: `TokenUsage` keeps the 1-hour share of the cache writes and splits itself into
 /// the components a weight table prices.

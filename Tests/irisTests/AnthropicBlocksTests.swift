@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @Suite("Anthropic blocks through the assembler and the non-stream parser (#314)")
 struct AnthropicBlocksTests {

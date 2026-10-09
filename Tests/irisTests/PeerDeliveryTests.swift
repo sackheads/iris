@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Releases waiting callers on demand so a scripted round can be held open deterministically.
 /// Mirrors `SteerInboxTests`' private `Gate` — file-private there, so this test file needs its own.

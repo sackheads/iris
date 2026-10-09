@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Slice D1: `goal_complete` becomes a gate. These drive a real IrisEngine with a scripted client.
 ///

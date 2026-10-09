@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Transport-level failures (#131a). The first ladder run hit four 60 s URLSession timeouts in
 /// about ninety calls and saw legitimate 38 s rounds; a timeout is a `URLError`, which the

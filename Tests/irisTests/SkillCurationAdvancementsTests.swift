@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @Suite("Skill Curation & Bundles Tests")
 struct SkillCurationAdvancementsTests {

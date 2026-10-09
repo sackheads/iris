@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #402 — a subagent's deadline is per turn, restarted whenever a turn begins, not one limit on the
 /// whole subagent. Scripted clients move an injected clock from inside their model calls, so a turn

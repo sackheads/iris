@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// `ConversationReader.page` is pure: no store, no engine, no actor hop. The tool-level refusals,
 /// the guard pass and the ordinal-matches-a-search-hit property live in `JobToolsTests` instead,

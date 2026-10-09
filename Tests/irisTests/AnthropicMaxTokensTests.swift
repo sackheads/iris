@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// `max_tokens` is sized per model instead of a fixed 4096, which thinking alone could use up,
 /// and a reply cut off at the limit is surfaced instead of reading as a finished one.

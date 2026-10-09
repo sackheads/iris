@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// D1 gates terminal goal_complete for a main-principal goal with a locked contract. Everything
 /// else must behave exactly as before — these are the guards for that claim (spec §2, §8).

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #282 §2 — the grant lives on the run's conversation and follows a delegation. In-memory store,
 /// injected `RecentWrites`, a fake client: nothing here reaches a singleton or the disk beyond a temp dir.

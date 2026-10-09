@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Real-lane perf runs wrote to the user's real memory (USER.md, the fact store) through
 /// `IrisPaths.default`, which the sandbox and the scratch workspace do not cover. A headless run

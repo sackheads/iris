@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import GRDB
-@testable import iris
+@testable import IrisKit
 
 /// #168: the fact store gained the hermes-memory lifecycle (retract / supersede / restore),
 /// usage and feedback trust signals, and the `manage_fact` tool surface.

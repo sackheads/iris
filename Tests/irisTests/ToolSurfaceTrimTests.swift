@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// A plain chat turn sent 30 tool declarations, about 3,100 prompt tokens (61 % of the request).
 /// Slice one of #133 removes the ones that cannot do anything on a plain turn: the Google

@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import os
-@testable import iris
+@testable import IrisKit
 
 /// #181: Vertex has no "list Claude models" endpoint, so the catalog asks about each id Iris knows
 /// and keeps the ones the project can see. A typed id the catalog has never heard of still works

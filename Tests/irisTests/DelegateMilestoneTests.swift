@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Slice B4: `delegate_milestone` hands the current ladder milestone to a bounded subagent.
 ///

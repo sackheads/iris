@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #187 §9 — `/jobs` is the deterministic surface: it works in every conversation, never wakes a
 /// model turn, and is the only way to acknowledge a failure or delete a job by hand. Parsing and

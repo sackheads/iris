@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @MainActor
 @Suite("The engine stores each reply's blocks (#314)", .timeLimit(.minutes(1)))

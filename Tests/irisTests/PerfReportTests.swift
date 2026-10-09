@@ -1,7 +1,7 @@
 // Tests/irisTests/PerfReportTests.swift
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @Suite("PerfReport")
 struct PerfReportTests {

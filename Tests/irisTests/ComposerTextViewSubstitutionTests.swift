@@ -1,6 +1,6 @@
 import Testing
 import AppKit
-@testable import iris
+@testable import IrisKit
 
 /// #295: macOS's smart substitutions (`--` -> em dash, straight quotes -> curly) silently
 /// mangle shell commands, code, and JSON typed or pasted into the composer. The user's text

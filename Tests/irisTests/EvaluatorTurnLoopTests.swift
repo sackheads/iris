@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// A real grader inspects the workspace before it grades — `EVALUATOR.md` tells it to. These
 /// pin the property every awaited caller of `GoalEvaluator.evaluate` depends on: one

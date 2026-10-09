@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The auto path must NOT reuse `advanceCheckpoint`: that ends in `resumeGoalLoop`, which re-arms
 /// the auto-reprompt. Auto-advance fires inside a live tool call, so re-arming would run a second

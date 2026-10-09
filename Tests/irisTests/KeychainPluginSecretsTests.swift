@@ -1,5 +1,5 @@
 import Testing
-@testable import iris
+@testable import IrisKit
 
 @Suite("Keychain Plugin Secrets Tests", .serialized)
 struct KeychainPluginSecretsTests {

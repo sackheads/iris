@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// A perf run toggles guards through ConfigManager, whose setters persist. Under --bench/--perf
 /// the store is a volatile copy seeded from the user's real domain, so the run sees the real

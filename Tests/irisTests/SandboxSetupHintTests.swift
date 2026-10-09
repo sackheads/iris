@@ -1,5 +1,5 @@
 import Testing
-@testable import iris
+@testable import IrisKit
 
 @Suite("Sandbox Setup Hint Tests")
 struct SandboxSetupHintTests {

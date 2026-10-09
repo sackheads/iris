@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The chat shows "Interrupted." or an error pill, but the model never sees those. A turn that
 /// ends early must leave a marker in history, or the next turn finds an unanswered request above

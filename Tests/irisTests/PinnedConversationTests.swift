@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// 5b: the pinned conversation became "Iris", the owner's main conversation, and is exempt from
 /// rename and archive (spec §0.1–0.2).

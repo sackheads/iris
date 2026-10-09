@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// A `ContainerRuntime` that records what a gate asked for and answers with a scripted result.
 /// Separate from `MockRuntime` (SandboxSessionManagerTests) because a gate needs two things that

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #187 §4 "during a run" — the per-run token and time budget. The admission checks in
 /// `JobRunner.fire` decide whether a run may start; this is the half that decides when one that

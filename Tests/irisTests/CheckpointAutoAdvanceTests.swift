@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// End-to-end D3: reach_checkpoint grades first, then decides.
 @MainActor

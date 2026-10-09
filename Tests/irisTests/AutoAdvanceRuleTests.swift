@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Slice D3 §3 and §4. Auto-advance requires an affirmative clean grade; everything else pauses.
 @Suite("Auto-advance rule (D3)")

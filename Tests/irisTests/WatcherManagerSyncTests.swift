@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #187 deliverable 4, spec §7 — the manager as a stream owner keyed by root.
 ///

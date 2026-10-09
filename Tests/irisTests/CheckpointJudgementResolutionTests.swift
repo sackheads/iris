@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// A judgement pause at a CHECKPOINT is not terminal. Resolving one must not finish the goal:
 /// `resolveJudgementIfComplete` was written for the `goal_complete` gate, where clearing the

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// `ConfigManager()` used to isolate the *object* but not the *backing store*: `store` was a
 /// static computed property returning `IrisDefaults.store`, so a test's own manager still wrote to

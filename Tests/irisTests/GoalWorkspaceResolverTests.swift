@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The decision rule for where a contracted goal runs (spec §4). Pure: existence is injected, so
 /// none of this touches a real filesystem.

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// 5b §0.4: `/new` in the pinned conversation rotates it — reflect, create a fresh Iris and move
 /// the pin, summarise the old one into the new one, then archive the old one. The order is what

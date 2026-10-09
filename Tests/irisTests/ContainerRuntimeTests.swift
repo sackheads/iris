@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Records the argv of every `container` invocation, so a test can assert exactly what a call
 /// renders without a `container` binary, a daemon, or a VM anywhere near it (invariant 7).

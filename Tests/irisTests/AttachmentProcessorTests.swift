@@ -1,7 +1,7 @@
 import XCTest
 import PDFKit
 import AppKit
-@testable import iris
+@testable import IrisKit
 
 final class AttachmentProcessorTests: XCTestCase {
     var tempDirectory: URL!

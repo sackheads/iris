@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import GRDB
-@testable import iris
+@testable import IrisKit
 
 /// Migration `v15_job_run_cost` (5c §0.6): `job_runs` keeps the raw cache components and the run's
 /// provider and tier, so a weighted total is priced from the run's own figures at read time.

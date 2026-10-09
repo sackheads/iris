@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// A provider's non-200 body used to be pasted verbatim into the error the user sees. Vertex's
 /// 429 body carries ~90 KB of internal serving traces, which arrived in the chat as one giant

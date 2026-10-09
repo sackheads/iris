@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import GRDB
-@testable import iris
+@testable import IrisKit
 
 @Suite("JobRunLedger")
 struct JobRunLedgerTests {

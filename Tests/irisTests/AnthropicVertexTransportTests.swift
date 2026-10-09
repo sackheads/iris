@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #181: Claude on Vertex AI. The request is the Messages API with three differences — the
 /// model lives in the URL, `anthropic_version` lives in the body, and auth is a Google bearer

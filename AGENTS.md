@@ -16,6 +16,34 @@ swift test                           # full suite
 scripts/test-filter.sh MyTestSuite   # focused run, guarded (see below)
 ```
 
+### Building the Xcode app
+
+```sh
+brew install xcodegen                          # once
+xcodebuild -downloadComponent MetalToolchain    # once; MLX's shaders need it, SwiftPM never builds them
+scripts/build-app.sh [Debug|Release] [derived-data-dir]
+```
+
+`scripts/build-app.sh` runs `scripts/gen-xcodeproj.sh` first, which regenerates `Iris.xcodeproj`
+from `project.yml` with `xcodegen`. The project is generated and gitignored — never commit
+`Iris.xcodeproj`; edit `project.yml` instead. `build-app.sh` then runs `xcodebuild` and prints the
+built `.app`'s path. `scripts/lib.sh` holds the `build_or_die` helper both build scripts share.
+
+Debug builds "Iris Dev.app" (bundle id `com.bnaylor.iris.dev`): it is a dev build exactly like
+`swift run`/`run-dev.sh` below (`~/.iris-dev`, `.dev`-suffixed Keychain services, the Option
+hotkey), signed with the Developer ID. Release builds "Iris.app" with the installed app's own
+identity (`com.bnaylor.iris`) — **never launch a locally built Release config before your first
+real install**: `BuildIdentity` resolves that bundle id to `.release` exactly like the installed
+app, so it opens `~/.iris` and spends the one-time settings import (`AppDefaultsImport`) that a
+fresh install is meant to get once.
+
+Sharing `~/.iris-dev` does not mean sharing settings: `UserDefaults` domains are keyed by bundle
+id, so "Iris Dev.app" persists to its own `com.bnaylor.iris.dev` domain, separate from the `iris`
+domain `swift run`/`run-dev.sh` use. `AppDefaultsImport` seeds `com.bnaylor.iris.dev` from `iris`
+once, on its first launch; after that, a setting changed in one dev build is not seen by the
+other. `Iris Dev.app` and `scripts/run-dev.sh` are also separate processes — do not run both at
+once against one `~/.iris-dev`: both would open the store's GUI lock and run the same jobs.
+
 **Dev builds use `~/.iris-dev`, not `~/.iris`.** `swift build`/`swift run`, `scripts/run-dev.sh`,
 Xcode Debug and `swift test` are all dev builds (`BuildIdentity.current == .dev`): they read and
 write `~/.iris-dev`, keep their secrets under `.dev`-suffixed Keychain services, and answer to
@@ -147,7 +175,9 @@ file) so it does not make the tree look dirty. An existing `index-build` can be 
 ## Project layout
 
 ```
-Sources/iris/
+Sources/iris/main.swift   # one line: `try await IrisMain.run()`; the SwiftPM `iris` executable
+Sources/IrisKit/          # everything else, as a library both the executable and the Xcode app link
+  IrisMain.swift          # process entry: headless modes (--perf, --bench, --run-job, --seed-dev-home), else the app
   AppState.swift          # @Observable god-object: conversations, messages, thinking state, timing
   iris.swift              # IrisEngine: the agent turn loop, tool dispatch, goal/reprompt logic
   ToolExecutor.swift      # run_command, read_file, write_file, search_web, skill CRUD
@@ -166,6 +196,13 @@ Sources/iris/
   MCPManager.swift        # MCP client: tool discovery and call forwarding
   HookManager.swift       # before/after agent hooks (shell scripts)
   Timeout.swift           # withTimeout(seconds:) — returns at the deadline; used by run_command and Vibecop
+App/                      # the Xcode app target's own sources; project.yml's `Iris` target links IrisKit
+  main.swift               # one line, same as Sources/iris/main.swift: `try await IrisMain.run()`
+  Info.plist                # CFBundle keys; bundle id/version/signing come from project.yml, not here
+  Iris.entitlements         # empty plist — no sandbox, no JIT entitlement
+  Assets.xcassets/          # AppIcon.appiconset, generated from Sources/IrisKit/assets/iris-icon.png
+project.yml               # XcodeGen spec for the `Iris` app target; generated into Iris.xcodeproj by
+                           #   scripts/gen-xcodeproj.sh — the project is gitignored, never commit it
 
 Tests/irisTests/          # Swift Testing suite; one file per subsystem
 docs/                     # design specs, plans, reviews, roadmaps

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The gate's judgement pause (spec §3, §4). Agent-fixable problems come first; a judgement pause
 /// happens only when nothing else blocks, and it never burns a retry.

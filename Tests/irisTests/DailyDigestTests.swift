@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// 5b §0.7–0.8 — the daily digest: a card built from the ledger with no model call, quiet on a
 /// day nothing ran, never carrying a run's own words, capped in bytes, and registered exactly once

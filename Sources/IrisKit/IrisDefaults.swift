@@ -82,8 +82,8 @@ enum IrisDefaults {
     /// author's machine 472 KB of JSON plus the row inserts, inside the measured window. The
     /// store itself never reaches a volatile copy (spec §1), so there is nothing else to strip.
     ///
-    /// Pulled out of `perfSeed` so `ReleaseDefaultsImport.importOnce` can drop the blob without
-    /// also picking up `perfSeed`'s `IRIS_PERF_SEED_JSON` environment override — the release
+    /// Pulled out of `perfSeed` so `AppDefaultsImport.importOnce` can drop the blob without
+    /// also picking up `perfSeed`'s `IRIS_PERF_SEED_JSON` environment override — a bundled app's
     /// launch path must never read a perf-only env var (see `perfSeed`'s doc).
     static func stripConversationBlob(from domain: [String: Any]) -> [String: Any] {
         domain.filter { key, _ in
@@ -99,8 +99,8 @@ enum IrisDefaults {
     /// other key) too. `environment` defaults to the real process environment, as every
     /// production caller wants, but takes a fake dict in a test so the real environment is never
     /// mutated (invariant 7). Malformed or absent JSON leaves the domain's own values untouched.
-    /// Perf/bench callers only — `ReleaseDefaultsImport.importOnce` calls `stripConversationBlob`
-    /// directly so the release launch path never applies this override.
+    /// Perf/bench callers only — `AppDefaultsImport.importOnce` calls `stripConversationBlob`
+    /// directly so a bundled app's launch path never applies this override.
     static func perfSeed(from domain: [String: Any], environment: [String: String] = ProcessInfo.processInfo.environment) -> [String: Any] {
         var seed = stripConversationBlob(from: domain)
         if let raw = environment["IRIS_PERF_SEED_JSON"],

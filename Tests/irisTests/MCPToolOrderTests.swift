@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import MCP
-@testable import iris
+@testable import IrisKit
 
 /// MCP servers live in a dictionary, whose iteration order changes from one launch to the next.
 /// The declarations it produced changed order with it, and a reordered tool list misses the whole

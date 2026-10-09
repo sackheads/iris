@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #318: `HeadlessMode` used to be a process-global, one-way latch — the first test that drove a
 /// fake-lane suite through `PerfCLI.execute` would turn it on for every suite that ran afterward in

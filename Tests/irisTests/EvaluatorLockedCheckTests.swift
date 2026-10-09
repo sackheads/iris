@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #334 follow-up: with Vibecop off, the goal grader runs a `run_command` without a prompt only
 /// when the command is, byte for byte after trimming, an executable check the human approved when

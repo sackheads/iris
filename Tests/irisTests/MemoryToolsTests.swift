@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// 5a Task 7 fix round 1: these tests used to swap `MemoryManager.shared.paths` (a process-global
 /// `var`, no synchronization) to isolate each test's content, which raced against any other test

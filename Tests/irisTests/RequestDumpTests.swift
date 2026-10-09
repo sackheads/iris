@@ -1,7 +1,7 @@
 // Tests/irisTests/RequestDumpTests.swift
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @Suite("RequestDump (5a)")
 struct RequestDumpTests {

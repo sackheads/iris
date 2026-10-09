@@ -156,7 +156,7 @@ Microsoft ships an official Swift Package Manager distribution with **macOS supp
 
 Implementation:
 
-- `Sources/iris/LiveONNXModel.swift` — an `ORTSession`-backed `CoreMLModelProtocol`
+- `Sources/IrisKit/LiveONNXModel.swift` — an `ORTSession`-backed `CoreMLModelProtocol`
   implementation, guarded by `#if canImport(OnnxRuntimeBindings)`.
 - `CoreMLEvaluator.loadModelIfNeeded()` auto-detects the runtime: a bundle whose unzipped
   directory contains `model.onnx` loads via `LiveONNXModel`; otherwise it falls back to
@@ -291,7 +291,7 @@ That blob scored 0.94-0.999 — above the 0.9 threshold — essentially every ti
 "no results", so a research subagent rephrased its query and searched again, and again.
 `LoopDetector` never caught it: it keys on identical `toolName|args`, and every query differed.
 
-What is scored now (`Sources/iris/SearchResultFilter.swift`):
+What is scored now (`Sources/IrisKit/SearchResultFilter.swift`):
 
 - Each result is classified on its own, sequentially, through `InjectionGuard.classify` — the
   non-wrapping entry point, so nothing is `<untrusted_context>`-wrapped before the classifier
@@ -320,7 +320,7 @@ What is scored now (`Sources/iris/SearchResultFilter.swift`):
   failure, or anything unparseable — falls back to the unchanged whole-output path, so nothing
   reaches the model unscored.
 
-Breaking the loop (`Sources/iris/BlockedResultTracker.swift`): the engine counts consecutive
+Breaking the loop (`Sources/IrisKit/BlockedResultTracker.swift`): the engine counts consecutive
 guard-blocked tool results per conversation. From the second in a row, the tool result carries a
 line **outside** the untrusted wrapper — it is Iris's own text, not tool output — naming how many
 results were withheld and telling the agent not to retry the same approach. Inside a goal run,

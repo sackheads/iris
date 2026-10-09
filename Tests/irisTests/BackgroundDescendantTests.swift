@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Fail-closed has to hold for everything a background run spawns, not just the run itself
 /// (#187). A subagent used to be created `isBackground: false` whatever its parent was, so a job

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Carries a `next(after:)` result back from the task that computed it, so a schedule that spins
 /// forever fails a deadline here instead of wedging the whole suite.

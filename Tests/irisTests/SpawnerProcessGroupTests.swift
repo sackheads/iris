@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #364: command hooks run in a process group of their own, through `ProcessGroupRunner`. Before,
 /// `Process` + `readDataToEndOfFile` deadlocked past 64 KB of output (and on a payload past 64 KB,

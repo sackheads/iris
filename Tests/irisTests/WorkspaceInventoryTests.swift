@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #126 — list, mark orphaned, and delete goal workspaces. Every test runs against a temp
 /// directory; none may touch `~/.iris` (invariant 7).

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #185 §7. One budget for a whole cascade, so fan-out cannot multiply into F^N turns.
 @MainActor

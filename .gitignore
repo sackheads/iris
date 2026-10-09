@@ -33,3 +33,6 @@ perf/runs/
 # Agent scratch space: review packages, briefs, reports, and per-agent worktrees. Never commit.
 .superpowers/
 .claude/worktrees/
+
+# Generated from project.yml by scripts/gen-xcodeproj.sh
+/Iris.xcodeproj

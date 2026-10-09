@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #323 — a background run's subagents stop with the run: at once and saying why when the run's
 /// budget refuses their next round, and cancelled — model call included — when the run's turn is

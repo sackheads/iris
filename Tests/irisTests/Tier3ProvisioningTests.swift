@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #202: tier 3 must distinguish "no model provisioned" (skip, tiers 1/2 still ran) from "model
 /// present but failed to load" (fail closed, unchanged). These tests cover the pure predicate and

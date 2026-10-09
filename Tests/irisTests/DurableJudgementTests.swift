@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// D2 recorded a human verdict only in `lastGoalEvaluation`, which the next `beginGoalEvaluation`
 /// overwrites and `sanitizeLoaded` clears on load. That is invisible while grading happens once,

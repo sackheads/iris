@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import Darwin
-@testable import iris
+@testable import IrisKit
 
 /// #372: the kill ladder must not need the Swift cooperative pool. A deadline that is a
 /// `Task.sleep` fires only when a pool thread is free, and a pool held by blocking work has none:

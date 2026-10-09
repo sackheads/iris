@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #187 §4 "after a run" — what a failure costs the schedule: three attempts on the backoff
 /// ladder, then a pause that says so, and a resume that puts the job back on its cadence. Plus the

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// #282 §1 — the model half of a grant: the mount struct and its string form, the grant, and its
 /// lenient home inside `JobPolicy`. Pure codec behaviour; nothing here touches a disk or a runtime.

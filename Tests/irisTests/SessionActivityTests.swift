@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Pure mappings behind the session strip (#217 + #19): the tool-argument → activity-text
 /// derivation and the token-count formatter. No SwiftUI here by design (AGENTS.md: no SwiftUI

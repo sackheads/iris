@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Slice B3 loop behaviour: binding a unit contract to a delegated subagent and grading the
 /// finished run with the slice-C evaluator.

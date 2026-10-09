@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import GRDB
-@testable import iris
+@testable import IrisKit
 
 /// #189: integer columns read through GRDB's trapping subscript (`row["ordinal"]`,
 /// `row["position"]`, etc.) crash the whole load on a non-NULL value SQLite cannot convert to

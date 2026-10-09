@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// 5b §0.6: a reflection in a conversation other than Iris still runs in place, but its report is
 /// delivered to Iris as a card and the source chat keeps one system line pointing there. Iris's

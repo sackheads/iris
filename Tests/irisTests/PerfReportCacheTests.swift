@@ -1,7 +1,7 @@
 // Tests/irisTests/PerfReportCacheTests.swift
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 @Suite("PerfReport cache table (5a)")
 struct PerfReportCacheTests {

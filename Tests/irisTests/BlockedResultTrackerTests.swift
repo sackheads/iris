@@ -1,5 +1,5 @@
 import Testing
-@testable import iris
+@testable import IrisKit
 
 /// `LoopDetector` keys on identical `toolName|args`, so an agent that rephrases its query every
 /// time never trips it (#235). This counts consecutive guard-blocked results instead.

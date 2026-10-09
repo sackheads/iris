@@ -1,7 +1,7 @@
 // Tests/irisTests/RequestByteStabilityTests.swift
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// Confirms every client's `makeURLRequest` encodes two *separately built* but logically equal
 /// requests to byte-identical bodies (5a §0.1). Two separate dictionaries are built in opposite

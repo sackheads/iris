@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iris
+@testable import IrisKit
 
 /// The transcript sheet (#19) has to know roughly how tall its content is BEFORE the first layout
 /// pass: a macOS `.sheet` takes its window size from the content's ideal size at presentation and
