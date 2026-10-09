@@ -783,6 +783,31 @@ actor IrisEngine {
         return ConversationReader.utf8Prefix(value, maxBytes: max(maxBytes - ellipsis.utf8.count, 0)) + ellipsis
     }
 
+    /// `set_workspace` and `register_directory_watcher` are in `trustedTools` below, sanitised at
+    /// `tier1_structural` rather than `tier3_canary`, on the grounds that each result is the
+    /// model's own path echoed back. #275 and #280 widened what gets echoed — a refusal string
+    /// that quotes the argument, a clamp notice naming the value, a failed grant's mount entry,
+    /// and a path that is echoed before it is even known to exist, so it has not been through any
+    /// shape check yet. `flattenCardField` is the session-card fields' answer to the same problem
+    /// (#272); this is the one flattener for these two tools' echoes, so the tier-1 choice rests
+    /// on the bounded, flattened, quoted form being structurally safe, not on the raw value
+    /// happening to stay short. Collapses newlines the way `flattenCardField` does, then strips
+    /// every other control character (a bare ESC or BEL has no newline to collapse but can still
+    /// redraw a terminal or hide text), caps the length, and quotes the result so an embedded `"`
+    /// cannot close the quoting early.
+    nonisolated static let toolEchoCap = 300
+
+    nonisolated static func flattenToolEcho(_ value: String, cap: Int = toolEchoCap) -> String {
+        let flattened = flattenCardField(value, cap: Int.max)
+        let printable = String(String.UnicodeScalarView(
+            flattened.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
+        // `capCardField` counts `Character`s, and a `Character` has no size bound — one base
+        // letter plus thousands of combining marks is still one (#187 review, the same reasoning
+        // `capFieldBytes` exists for). `register_directory_watcher`'s "does not exist" echo has
+        // no upstream byte limit of its own, so the bound has to be the one applied here.
+        return "\"\(capFieldBytes(printable, maxBytes: cap))\""
+    }
+
     /// `PATH_MAX` on Darwin. A path longer than this cannot name a file, so accepting one only
     /// defers the failure to whatever tries to use it.
     nonisolated static let maxWorkspacePathLength = 1024
@@ -3552,7 +3577,11 @@ actor IrisEngine {
             }
 
             await MainActor.run { localState?.setWorkspace(for: conversationId, path: currentWorkspace) }
-            result = "Workspace successfully set to \(currentWorkspace). You will now load AGENTS.md from this directory." + extraHint
+            // #287: `workspaceRefusal` bounds the length but not the shape — a path with no NUL
+            // byte, within PATH_MAX and absolute can still carry a newline or an injection-looking
+            // line, and it is this sentence, not the stored `currentWorkspace`, that reaches the
+            // model. Flatten only the echo.
+            result = "Workspace successfully set to \(Self.flattenToolEcho(currentWorkspace)). You will now load AGENTS.md from this directory." + extraHint
         } else if functionCall.name == "list_sessions" {
             // Defense in depth (#185 review round 2, M2): declaration gating is `principal ==
             // .main` too, but that only stops a well-behaved model from ever seeing the tool.
@@ -4668,6 +4697,12 @@ actor IrisEngine {
             return result
         }
 
+        // #287: both tools' results are echoes of what the model itself sent — a path, a glob, a
+        // refusal or clamp sentence quoting the argument — so tier 1 is still the right tier. What
+        // makes that hold is that every such value is run through `flattenToolEcho` before it
+        // reaches the result string (`ToolExecutor.registerWatcher`, the `set_workspace` branch of
+        // `executeFunctionCall`): the tier-1 choice rests on that bounded, flattened, quoted form
+        // being structurally safe, not on the raw value happening to stay short.
         let trustedTools: Set<String> = ["set_workspace", "register_directory_watcher"]
         let maxTier: InjectionGuard.SanitizationTier = trustedTools.contains(name) ? .tier1_structural : .tier3_canary
 
