@@ -222,7 +222,15 @@ extension ComposerTextView.Coordinator {
         switch key {
         case .up:     target.moveSelection(-1)
         case .down:   target.moveSelection(1)
-        case .tab, .enter: target.commitSelected()
+        case .tab:    target.commitSelected()
+        case .enter:
+            // A slash completion that already equals the typed text has nothing left to
+            // complete; let Return fall through to send instead of re-inserting it (#258).
+            // Tab and a click on a popup row are unaffected, and emoji commits as before.
+            if let slash = target as? SlashCommandModel, !slash.shouldAcceptOnReturn {
+                return false
+            }
+            target.commitSelected()
         case .escape: target.clear()
         }
         return true
