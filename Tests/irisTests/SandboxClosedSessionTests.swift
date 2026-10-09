@@ -97,6 +97,36 @@ struct SandboxClosedSessionTests {
         #expect(!(await m.hasSession(id)), "and it was never recorded as a session")
     }
 
+    /// Holds the manager for a closure the manager itself is built with.
+    private final class ManagerBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: SandboxSessionManager?
+        var manager: SandboxSessionManager? {
+            get { lock.withLock { value } }
+            set { lock.withLock { value = newValue } }
+        }
+    }
+
+    @Test("a close that lands while the container system is being started refuses the retried create")
+    func closeDuringSystemStartRetry() async {
+        let rt = MockRuntime()
+        rt.nextCreateError = ContainerRuntimeError.createFailed("Error: run `container system start` first")
+        let id = UUID()
+        let box = ManagerBox()
+        let m = SandboxSessionManager(runtime: rt, image: { "ubuntu:latest" }, startContainerSystem: {
+            await box.manager?.closeSession(id)
+            return true
+        })
+        box.manager = m
+
+        let out = await m.run(command: "a", conversationId: id, workspace: "/ws")
+        #expect(out == SandboxSessionManager.closedSessionError)
+        #expect(rt.createdCount == 1, "the retry branch ran its create")
+        #expect(!(await m.hasSession(id)), "and the closed conversation was not given the session")
+        #expect(rt.execCount == 0)
+        #expect(rt.removedNames.contains("iris-\(id.uuidString.lowercased())"), "the retried container was swept")
+    }
+
     @Test("a close under a running command does not self-heal into a new container")
     func closeDuringExec() async throws {
         let rt = GatedRuntime(gateExec: true)

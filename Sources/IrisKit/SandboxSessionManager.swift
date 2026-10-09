@@ -42,11 +42,19 @@ actor SandboxSessionManager {
     static let shared = SandboxSessionManager(runtime: CLIContainerRuntime(),
                                               image: { ConfigManager.shared.sandboxImage })
 
+    /// Starts the container system when a create says it is not ready, answering whether that
+    /// worked. Injected so a test can drive the retry without spawning `container system start`.
+    private let startContainerSystem: @Sendable () async -> Bool
+
     init(runtime: ContainerRuntime, image: @escaping @Sendable () -> String,
-         mountAgreementAttempts: Int = SandboxSessionManager.mountAgreementAttempts) {
+         mountAgreementAttempts: Int = SandboxSessionManager.mountAgreementAttempts,
+         startContainerSystem: @escaping @Sendable () async -> Bool = {
+             await SandboxingManager.shared.startContainerSystem().success
+         }) {
         self.runtime = runtime
         self.image = image
         self.mountAgreementAttempts = mountAgreementAttempts
+        self.startContainerSystem = startContainerSystem
     }
 
     func hasSession(_ id: UUID) -> Bool { sessions[id] != nil }
@@ -324,8 +332,7 @@ actor SandboxSessionManager {
         } catch {
             if case ContainerRuntimeError.createFailed(let msg) = error,
                ToolExecutor.sandboxSetupHint(for: msg) != nil {
-                let startResult = await SandboxingManager.shared.startContainerSystem()
-                if startResult.success {
+                if await startContainerSystem() {
                     try await runtime.createDetached(name: name(for: id), image: image(),
                                                      mounts: mounts, workdir: workdir, network: network)
                     try refuseIfClosed(id)
