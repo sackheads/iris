@@ -655,6 +655,11 @@ class AppState {
     /// only parent link the live-subagent registry walks for Stop (#236): one map, so the session
     /// an ask is charged to and the session whose Stop reaches a subagent cannot drift apart.
     @ObservationIgnored private var delegationParent: [UUID: UUID] = [:]
+    /// How `deleteConversation` closes a sandbox session for good. A seam so a test can see the
+    /// closes without the shared manager (invariant 7).
+    @ObservationIgnored var closeSandboxSession: @Sendable (UUID) async -> Void = {
+        await SandboxSessionManager.shared.closeSession($0)
+    }
     /// The delegates that are goal evaluators, so their asks are labelled as such (#426).
     @ObservationIgnored private var evaluatorDelegates: Set<UUID> = []
 
@@ -675,6 +680,24 @@ class AppState {
             delegationParent[id] = grandparent
         }
         evaluatorDelegates.remove(child)
+    }
+
+    /// Every delegate under `conversationId`, at any depth (#291). One read of the map, so take it
+    /// before anything unlinks: `unlinkDelegate` splices a node's children onto its parent, and a
+    /// walk interleaved with that could step past a grandchild.
+    func delegationDescendants(of conversationId: UUID) -> [UUID] {
+        delegationParent.keys.filter { $0 != conversationId && isDelegated($0, under: conversationId) }
+    }
+
+    /// Stops every live subagent under `conversationId`, through the same `stop` the run drain
+    /// uses, and returns all its delegates — evaluators too — for the caller to deny and close
+    /// (#291). Stopped before their sandbox sessions are closed, so no turn is left running into
+    /// a closed session; the close's mark refuses any that does.
+    @discardableResult
+    func stopDelegates(under conversationId: UUID, reason: String) -> [UUID] {
+        let descendants = delegationDescendants(of: conversationId)
+        for id in descendants { liveSubagentTasks[id]?.stop(reason) }
+        return descendants
     }
 
     /// Whether `ancestor` is `id` or delegated it, directly or through other delegates. Bounded
@@ -1742,7 +1765,13 @@ class AppState {
         cancelTasks(for: id)
         clearCascade(for: id)   // a deleted conversation is in no cascade; also prunes a spent budget
 
-        Task { await SandboxSessionManager.shared.closeSession(id) }   // never coming back (#292)
+        // Its delegates go with it (#291): a background subagent is reached by no cancellation of
+        // this conversation's tasks, and would go on working, asking and holding its container.
+        // Read before `unlinkDelegate` below re-parents them out of reach.
+        let delegates = stopDelegates(under: id, reason: SubagentManager.parentDeletedReason)
+        for delegate in delegates { denyPendingApprovals(for: delegate) }
+        let close = closeSandboxSession
+        Task { for session in [id] + delegates { await close(session) } }   // never coming back (#292)
         purgeCommandTimings(forMessagesIn: id)   // before the messages go — they are the keys
         // Fix round 1 follow-up (#217/#19): mirrors `endEngineTurn`'s cleanup — a deleted
         // conversation (a subagent/evaluator whose engine turn is still trailing off) must not

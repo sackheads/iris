@@ -30,6 +30,10 @@ final class SubagentManager: @unchecked Sendable {
     /// The summary of a subagent stopped because the background run it worked for ended (#323).
     static let runEndedReason = "Cancelled: the background run this subagent worked for has ended, so the subagent was stopped — its model call and any running command were cancelled, and it did not finish its task."
 
+    /// The summary of a subagent stopped because the conversation it worked under was deleted
+    /// (#291).
+    static let parentDeletedReason = "Cancelled: the conversation that delegated to this subagent was deleted, so the subagent was stopped — its model call and any running command were cancelled, and it did not finish its task."
+
     /// The summary of a subagent stopped by Stop, Esc or `/stop` in the conversation it works
     /// under (#236). Its post-back starts no turn: the user stopped everything there.
     static let parentStoppedReason = "Cancelled: the user stopped the conversation that delegated to this subagent, and this subagent with it — its model call and any running command were cancelled, and it did not finish its task."
