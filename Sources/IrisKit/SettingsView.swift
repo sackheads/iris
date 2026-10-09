@@ -355,9 +355,9 @@ struct SettingsView: View {
                 )
             }
             .onChange(of: showModelListSheet) { _, isShowing in
-                // Esc now triggers the Close button's `.cancelAction` shortcut, which runs `onClose`
-                // directly — but this still catches any other way the sheet closes without going
-                // through that button, so the in-flight listing is cancelled no matter how it closed.
+                // Esc now triggers the sheet's `.onExitCommand`, which runs `onClose` directly —
+                // but this still catches any other way the sheet closes without going through
+                // that, so the in-flight listing is cancelled no matter how it closed.
                 if !isShowing { modelListTask?.cancel() }
             }
             .onChange(of: config.primaryProvider) { _, _ in
@@ -1430,11 +1430,14 @@ private struct ModelListSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close", action: onClose)
-                        .keyboardShortcut(.cancelAction)
                 }
             }
             .searchable(text: $searchText, prompt: "Filter models")
         }
+        // `.keyboardShortcut(.cancelAction)` on the Close button does not register for this
+        // sheet, so Esc went unhandled. `.onExitCommand` on the sheet's root view is the same
+        // mechanism `fix/278-esc-closes-settings` uses for the Settings window, and it works here.
+        .onExitCommand(perform: onClose)
         .frame(minWidth: 480, minHeight: 480)
     }
 
