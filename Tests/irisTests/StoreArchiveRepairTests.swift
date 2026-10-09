@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import GRDB
-@testable import iris
+@testable import IrisKit
 
 /// A store created by a pre-merge build of #226 recorded its archive migration as `v6_archive`;
 /// main renumbered it `v7_archive`. Opening such a store re-ran the ALTER and failed with
