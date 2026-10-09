@@ -2,9 +2,9 @@ import Foundation
 import Security
 
 public final class KeychainManager: @unchecked Sendable {
-    public static let shared = KeychainManager()
+    public static let shared = KeychainManager(serviceSuffix: BuildIdentity.current.keychainServiceSuffix)
 
-    private let legacyService = "com.iris.secrets"
+    static let legacyService = "com.iris.secrets"
     private let account = "all-keys"
 
     public static let mcpFileService = "iris.mcp"
@@ -31,14 +31,24 @@ public final class KeychainManager: @unchecked Sendable {
     private var inMemorySecrets: [String: [String: String]] = [:]
     private let inMemoryLock = NSLock()
 
-    private init() {}
+    /// Appended to every base service name passed to the methods below, so callers never
+    /// build the suffixed name themselves (Task 3 of the dev/release separation plan).
+    private let serviceSuffix: String
+
+    init(serviceSuffix: String) {
+        self.serviceSuffix = serviceSuffix
+    }
+
+    /// The service name actually used for Keychain/in-memory storage for a given base name.
+    func resolvedService(_ base: String) -> String { base + serviceSuffix }
 
     // MARK: - Legacy API (service = com.iris.secrets), unchanged behavior
-    public func loadSecrets() -> [String: String] { secrets(service: legacyService) }
-    public func saveSecrets(_ secrets: [String: String]) { saveSecrets(secrets, service: legacyService) }
+    public func loadSecrets() -> [String: String] { secrets(service: Self.legacyService) }
+    public func saveSecrets(_ secrets: [String: String]) { saveSecrets(secrets, service: Self.legacyService) }
 
     // MARK: - Service-scoped API
     public func secrets(service: String) -> [String: String] {
+        let service = resolvedService(service)
         if usesInMemoryStore {
             return inMemoryLock.withLock { inMemorySecrets[service] ?? [:] }
         }
@@ -56,6 +66,7 @@ public final class KeychainManager: @unchecked Sendable {
     }
 
     public func saveSecrets(_ secrets: [String: String], service: String) {
+        let service = resolvedService(service)
         if usesInMemoryStore {
             inMemoryLock.withLock { inMemorySecrets[service] = secrets }
             return
@@ -77,7 +88,81 @@ public final class KeychainManager: @unchecked Sendable {
         }
     }
 
+    // MARK: - Throwing API (callers that must not lose a secret silently)
+
+    /// A Keychain call that failed for a reason other than "nothing stored there". The seeder
+    /// uses this to distinguish a locked Keychain, a denied ACL or a bad status from an item
+    /// that was simply never created, which `secrets(service:)`'s empty dictionary cannot.
+    enum SecretsError: Error, Equatable { case status(OSStatus) }
+
+    /// What a raw Keychain `OSStatus` means to a caller that cares. A pure function of the
+    /// status code, kept separate from any live `SecItem*` call so it is unit-testable without
+    /// touching the real Keychain — `usesInMemoryStore` never produces a non-success status to
+    /// test against, and the ad-hoc/linker-signed test binary re-prompts for the login password
+    /// on every real Keychain call (see `usesInMemoryStore`'s doc above).
+    enum StatusOutcome: Equatable { case success, notFound, failure(OSStatus) }
+
+    static func outcome(for status: OSStatus) -> StatusOutcome {
+        switch status {
+        case errSecSuccess: return .success
+        case errSecItemNotFound: return .notFound
+        default: return .failure(status)
+        }
+    }
+
+    /// `secrets(service:)`, but any Keychain failure other than "not found" throws instead of
+    /// coming back as the same empty dictionary an absent item would.
+    func secretsOrThrow(service: String) throws -> [String: String] {
+        let service = resolvedService(service)
+        if usesInMemoryStore {
+            return inMemoryLock.withLock { inMemorySecrets[service] ?? [:] }
+        }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var dataTypeRef: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        switch Self.outcome(for: status) {
+        case .notFound: return [:]
+        case .failure(let bad): throw SecretsError.status(bad)
+        case .success:
+            guard let data = dataTypeRef as? Data else { return [:] }
+            return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+        }
+    }
+
+    /// `saveSecrets(_:service:)`, but a non-success status throws instead of only printing —
+    /// used wherever a silently dropped secret would strand the caller.
+    func saveSecretsOrThrow(_ secrets: [String: String], service: String) throws {
+        let service = resolvedService(service)
+        if usesInMemoryStore {
+            inMemoryLock.withLock { inMemorySecrets[service] = secrets }
+            return
+        }
+        guard let data = try? JSONEncoder().encode(secrets) else { throw SecretsError.status(errSecParam) }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        let attributes: [String: Any] = [kSecValueData as String: data]
+        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            var newQuery = query
+            newQuery[kSecValueData as String] = data
+            let addStatus = SecItemAdd(newQuery as CFDictionary, nil)
+            guard addStatus == errSecSuccess else { throw SecretsError.status(addStatus) }
+        } else if status != errSecSuccess {
+            throw SecretsError.status(status)
+        }
+    }
+
     public func deleteSecrets(service: String) {
+        let service = resolvedService(service)
         if usesInMemoryStore {
             inMemoryLock.withLock { inMemorySecrets[service] = nil }
             return
@@ -88,5 +173,50 @@ public final class KeychainManager: @unchecked Sendable {
             kSecAttrAccount as String: account
         ]
         SecItemDelete(query as CFDictionary)
+    }
+
+    /// Base names of the stored services starting with `prefix`, for this manager's suffix only.
+    /// Reads attributes, never data, so it does not trip the Keychain's access prompt. Any listing
+    /// failure reads as no services; `storedServicesOrThrow` is for callers that must tell them apart.
+    func storedServices(withPrefix prefix: String) -> [String] {
+        (try? storedServicesOrThrow(withPrefix: prefix)) ?? []
+    }
+
+    /// `storedServices(withPrefix:)`, but a listing that failed (a locked Keychain, a denied
+    /// query) throws instead of reading as "nothing stored" — the seeder would otherwise skip
+    /// every plugin's secrets and report success.
+    func storedServicesOrThrow(withPrefix prefix: String) throws -> [String] {
+        let names: [String]
+        if usesInMemoryStore {
+            names = inMemoryLock.withLock { Array(inMemorySecrets.keys) }
+        } else {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrAccount as String: account,
+                kSecReturnAttributes as String: true,
+                kSecMatchLimit as String: kSecMatchLimitAll
+            ]
+            var result: AnyObject?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            names = try Self.listedServiceNames(status: status, result: result)
+        }
+        return names.compactMap { name in
+            guard name.hasPrefix(prefix) else { return nil }
+            if serviceSuffix.isEmpty { return name.hasSuffix(".dev") ? nil : name }
+            guard name.hasSuffix(serviceSuffix) else { return nil }
+            return String(name.dropLast(serviceSuffix.count))
+        }
+    }
+
+    /// The service names a `kSecMatchLimitAll` attribute listing returned. Pure, so the status
+    /// handling is testable without a live Keychain (see `outcome(for:)`).
+    static func listedServiceNames(status: OSStatus, result: AnyObject?) throws -> [String] {
+        switch outcome(for: status) {
+        case .notFound: return []
+        case .failure(let bad): throw SecretsError.status(bad)
+        case .success:
+            guard let items = result as? [[String: Any]] else { return [] }
+            return items.compactMap { $0[kSecAttrService as String] as? String }
+        }
     }
 }

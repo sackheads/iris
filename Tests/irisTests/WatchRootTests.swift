@@ -114,4 +114,29 @@ struct WatchRootTests {
         }
         #expect(WatchRoot.refusal(for: try firmlinked(sibling.path), paths: f.paths, home: f.home) == nil)
     }
+
+    @Test("in a dev process the release home is Iris's own directory too, in either direction")
+    func releaseHomeFromDev() throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.base) }
+        let release = IrisPaths(root: f.base.appendingPathComponent("dot-iris-release"))
+        try FileManager.default.createDirectory(at: release.memoryDir, withIntermediateDirectories: true)
+        let notVolume: (String) throws -> Bool = { _ in false }
+        for root in [release.root.path, release.memoryDir.path] {
+            #expect(WatchRoot.breadthProblem(for: root, paths: f.paths, home: f.home, isVolume: notVolume,
+                                             identity: .dev, release: release) == .protectedRelease)
+            #expect(WatchRoot.breadthProblem(for: root, paths: f.paths, home: f.home, isVolume: notVolume,
+                                             identity: .release, release: release) == nil)
+        }
+        // The release hit gets its own wording: it is not this build's own directory, so neither
+        // "Iris's own" nor "would react to itself" is said about it.
+        #expect(WatchRoot.refusal(for: release.root.path, paths: f.paths, home: f.home, isVolume: notVolume,
+                                  identity: .dev, release: release) == WatchRoot.protectedReleaseRefusal)
+        #expect(!WatchRoot.protectedReleaseRefusal.contains("own"))
+        #expect(!WatchRoot.protectedReleaseRefusal.contains("react to itself"))
+        // This build's own directory still gets the original wording.
+        #expect(WatchRoot.refusal(for: f.base.path, paths: IrisPaths(root: f.base.appendingPathComponent("x")),
+                                  home: f.home, isVolume: notVolume, identity: .dev, release: release)
+                == WatchRoot.protectedRefusal)
+    }
 }

@@ -800,6 +800,14 @@ actor IrisEngine {
     /// leading `~` that survives.
     nonisolated static func expandTilde(_ path: String) -> String {
         guard path.hasPrefix("~") else { return path }
+        // `~/.iris` is the model's name for Iris's own home, whichever home this process has; so
+        // is this build's own name for it (`~/.iris-dev`), which agent-facing text is rewritten to
+        // and which must reach a volatile perf copy or a test home rather than the real directory.
+        for name in Set([".iris", BuildIdentity.current.homeDirectoryName]) {
+            let spelled = "~/" + name
+            if path == spelled { return IrisPaths.default.root.path }
+            if path.hasPrefix(spelled + "/") { return IrisPaths.default.root.path + path.dropFirst(spelled.count) }
+        }
         if path == "~" { return NSHomeDirectory() }
         if path.hasPrefix("~/") { return NSHomeDirectory() + path.dropFirst(1) }
         let afterTilde = path.index(after: path.startIndex)
@@ -4284,7 +4292,8 @@ actor IrisEngine {
     /// What an approved call that turns out to target a protected directory returns instead of
     /// running. Also the run's outcome, so the card says why nothing happened.
     static func protectedWriteRefusal(tool: String) -> String {
-        "Not run: `\(tool)` would write into a protected directory (`~/.iris/config` or `~/.iris/plugins`), which an approval cannot authorise."
+        IrisPaths.standard.agentFacing(
+            "Not run: `\(tool)` would write into a protected directory (`~/.iris/config` or `~/.iris/plugins`), which an approval cannot authorise.")
     }
 
     /// What a call a read-only job's profile refused returns if it somehow reaches the
@@ -4903,7 +4912,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct IrisApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     init() {
-        // First, before anything else in the launch sequence: this claims the store for this app
+        // Before anything reads a setting: the first release launch inherits dev's settings.
+        ReleaseDefaultsImport.runIfNeeded()
+        // Next, before anything else in the launch sequence: this claims the store for this app
         // instance, and `iris --run-job` refuses while the file names a live process (#187 §8).
         // Nothing above it may touch `conversations.sqlite` — today nothing here does, and keeping
         // the acquire first is what stops that becoming a window rather than a rule.

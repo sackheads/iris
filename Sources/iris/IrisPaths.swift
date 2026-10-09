@@ -59,12 +59,22 @@ struct IrisPaths: Sendable {
         }
     }
 
-    /// The real home, regardless of any headless override — isolation tests compare file
-    /// existence at this exact path before and after a test run and must never create anything
-    /// here themselves.
-    static let standard = IrisPaths(
-        root: URL(fileURLWithPath: ("~/.iris" as NSString).expandingTildeInPath)
-    )
+    /// The current identity's real home (`~/.iris` for the installed app, `~/.iris-dev` for every
+    /// dev build and test process), regardless of any headless override. Isolation tests compare
+    /// file existence here and at `release` before and after a run and must never create anything
+    /// in either.
+    static let standard = home(for: .current)
+
+    /// The installed app's home, whatever this process is. `--seed-dev-home` reads it as the
+    /// seed source; isolation tests also read it, to assert that nothing under test ever
+    /// touches it.
+    static let release = home(for: .release)
+
+    static func home(for identity: BuildIdentity,
+                     homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> IrisPaths {
+        IrisPaths(root: homeDirectory.appendingPathComponent(identity.homeDirectoryName, isDirectory: true))
+    }
+
     private static let lock = NSLock()
     nonisolated(unsafe) private static var override: IrisPaths?
 
@@ -123,8 +133,13 @@ struct IrisPaths: Sendable {
 
     /// The conversation store (#163). At the root on purpose: `makeVolatileCopy` copies only
     /// memory/, rules/, config/ and plugins/, so a headless copy starts with no conversations,
-    /// which is the choice `IrisDefaults.perfSeed` already made for the old blob.
+    /// which is the choice `IrisDefaults.stripConversationBlob` already made for the old blob.
     var conversationsDB: URL { root.appendingPathComponent("conversations.sqlite") }
+
+    /// Written by `iris --seed-dev-home` into the home it creates. Its absence in a dev home that
+    /// exists beside a release one means something else created that home first (a `swift run`
+    /// before `run-dev.sh`), so it was never seeded; `run-dev.sh` and perf say so.
+    var seedMarker: URL { root.appendingPathComponent(".seeded-from-release") }
 
     /// The lock the running app holds beside the store, so `iris --run-job` refuses rather than
     /// writing behind a live `AppState` (#187 §8). Held by `GUILock`; created at launch and
@@ -163,18 +178,6 @@ struct IrisPaths: Sendable {
     /// here was created by Iris; this is the eligibility boundary the workspace inventory (#126)
     /// uses to decide what it may ever list or delete.
     var workspacesDir: URL { root.appendingPathComponent("workspaces") }
-
-    /// True if `rawPath` resolves to a location inside `memoryDir` — used to treat reads of
-    /// first-party memory content (SOUL, USER, skills, artifacts, library, ...) as trusted.
-    /// Tilde-expands and standardizes the path (resolving `..`) first, so a traversal like
-    /// `memory/../models/x` does NOT count as inside memory. A trailing separator on the
-    /// prefix check prevents a sibling like `memory-evil` from matching.
-    func isUnderMemory(_ rawPath: String) -> Bool {
-        let expanded = (rawPath as NSString).expandingTildeInPath
-        let resolved = URL(fileURLWithPath: expanded).standardizedFileURL.path
-        let mem = memoryDir.standardizedFileURL.path
-        return resolved == mem || resolved.hasPrefix(mem + "/")
-    }
 
     /// The directories a write into is a grant, not a file edit. `PermissionManager` never
     /// auto-allows one (#187):
@@ -287,12 +290,33 @@ struct IrisPaths: Sendable {
     }
 
     /// True if `rawPath` resolves to a location inside `root` (`~/.iris`).
-    /// Tilde-expands and standardizes the path (resolving `..`) first.
+    /// Tilde-expands (via `IrisEngine.expandTilde`) and standardizes the path (resolving `..`)
+    /// first. A literal `~/.iris` spelling always expands through `IrisPaths.default`, so on an
+    /// instance whose `root` differs from `.default` the `~` form is checked against the
+    /// process's default home, not against this instance's own `root` — only an already-expanded
+    /// (or otherwise-spelled) path is checked against `root`.
     func isUnderIrisDir(_ rawPath: String) -> Bool {
-        let expanded = (rawPath as NSString).expandingTildeInPath
+        let expanded = IrisEngine.expandTilde(rawPath)   // #275: never `expandingTildeInPath` on a decider
         let resolved = URL(fileURLWithPath: expanded).standardizedFileURL.path
         let rootPath = root.standardizedFileURL.path
         return resolved == rootPath || resolved.hasPrefix(rootPath + "/")
+    }
+
+    /// `root` as the model should write it: `~/...` when under the user's home.
+    var displayRoot: String {
+        let home = NSHomeDirectory()
+        let path = root.standardizedFileURL.path
+        return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+    }
+
+    /// Bundled text spells the home `~/.iris`. Rewrites it to `displayRoot` so a dev agent is
+    /// pointed at `~/.iris-dev`, in prompts and in shell commands it copies from them.
+    ///
+    /// The lookahead excludes a longer name (`-dev`, `rc`, …) and a suffix that starts with a
+    /// `.` only when a letter or digit follows that `.` (`.bak`): a sentence-final period is
+    /// not excluded, so "stored in ~/.iris." still rewrites to "stored in ~/.iris-dev.".
+    func agentFacing(_ text: String) -> String {
+        text.replacing(/~\/\.iris(?![A-Za-z0-9_\-]|\.[A-Za-z0-9])/, with: { _ in displayRoot })
     }
 
     /// Create the bucket directories if absent. Called by the migrator and by managers that

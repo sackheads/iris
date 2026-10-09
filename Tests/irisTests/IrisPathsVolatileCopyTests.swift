@@ -66,12 +66,12 @@ struct IrisPathsVolatileCopyTests {
 
     /// #304. This used to assert the opposite — that the test process resolves the real home —
     /// which is what let `SubagentManagerTests` write an allow rule into the developer's real
-    /// `permissions.json` on every run (#290). `standard` is still the real home, because the
-    /// isolation tests compare file existence there.
-    @Test("under test the default home is a per-process temp root, and standard is still the real one")
+    /// `permissions.json` on every run (#290). `release` is still the real release home, because
+    /// the isolation tests compare file existence there.
+    @Test("under test the default home is a per-process temp root, and release is still the real one")
     func defaultIsNotTheRealHomeUnderTest() {
         #expect(!IrisPaths.isVolatileCopy)
-        #expect(IrisPaths.standard.root.path == ("~/.iris" as NSString).expandingTildeInPath)
+        #expect(IrisPaths.release.root.path == ("~/.iris" as NSString).expandingTildeInPath)
         #expect(IrisPaths.default.root.path != IrisPaths.standard.root.path)
         #expect(IrisPaths.default.root.lastPathComponent == String(ProcessInfo.processInfo.processIdentifier))
         // Its parent is ours alone, never `$TMPDIR` itself: the sweep lists that parent, and

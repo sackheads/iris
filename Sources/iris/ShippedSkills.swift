@@ -49,6 +49,6 @@ enum ShippedSkills {
               let text = try? String(contentsOf: url, encoding: .utf8) else {
             return ""
         }
-        return text
+        return IrisPaths.standard.agentFacing(text)
     }
 }

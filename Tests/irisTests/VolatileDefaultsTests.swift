@@ -73,6 +73,17 @@ struct VolatileDefaultsTests {
         #expect(IrisDefaults.preferencesDirectory.path.hasSuffix("/Library/Preferences"))
     }
 
+    @Test("stripConversationBlob drops the blob keys and nothing else, with no env override")
+    func stripConversationBlobDropsBlobKeysOnly() {
+        let domain: [String: Any] = [
+            "iris_conversations": "x",
+            "iris_conversations_backup_1.5": "y",
+            "iris_conversations_legacy": "z",
+            "PRIMARY_PROVIDER": "Gemini",
+        ]
+        #expect(Set(IrisDefaults.stripConversationBlob(from: domain).keys) == Set(["PRIMARY_PROVIDER"]))
+    }
+
     @Test("perfSeed drops conversation blobs and keeps configuration")
     func perfSeedDropsConversationBlobs() {
         let domain: [String: Any] = [

@@ -6,5 +6,5 @@ enum Constants {
 }
 
 extension KeyboardShortcuts.Name {
-    static let toggleIris = Self("toggleIris", default: .init(.space, modifiers: [.command, .shift]))
+    static let toggleIris = Self(BuildIdentity.current.hotkeyName, default: BuildIdentity.current.defaultHotkey)
 }

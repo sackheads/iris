@@ -123,15 +123,27 @@ struct StandardizedPathTests {
     @Test("tilde-expands, strips a trailing slash, and resolves .. segments to the same path")
     func normalizesEquivalentVariants() {
         let home = NSHomeDirectory()
-        let canonical = "\(home)/.iris/workspaces/foo"
-        let tildeForm = "~/.iris/workspaces/foo"
-        let trailingSlash = "\(home)/.iris/workspaces/foo/"
-        let dotDotForm = "\(home)/.iris/workspaces/bar/../foo"
+        // Not `~/.iris`: that spelling is special-cased by `IrisEngine.expandTilde` (#275) and
+        // covered on its own below. This is the general tilde-expansion behavior.
+        let canonical = "\(home)/Projects/foo"
+        let tildeForm = "~/Projects/foo"
+        let trailingSlash = "\(home)/Projects/foo/"
+        let dotDotForm = "\(home)/Projects/bar/../foo"
 
         let expected = WorkspaceInventory.standardizedPath(canonical)
         #expect(WorkspaceInventory.standardizedPath(tildeForm) == expected)
         #expect(WorkspaceInventory.standardizedPath(trailingSlash) == expected)
         #expect(WorkspaceInventory.standardizedPath(dotDotForm) == expected)
+    }
+
+    /// #275: `expandingTildeInPath` truncates to PATH_MAX and would also miss the `~/.iris`
+    /// carve-out that routes a test process to its own temp home rather than the real one.
+    /// `standardizedPath` must go through `IrisEngine.expandTilde` instead.
+    @Test("`~/.iris` resolves through IrisEngine.expandTilde, to the test process's own home")
+    func tildeIrisRoutesThroughExpandTilde() {
+        let expected = WorkspaceInventory.standardizedPath(
+            IrisPaths.default.root.appendingPathComponent("workspaces/foo").path)
+        #expect(WorkspaceInventory.standardizedPath("~/.iris/workspaces/foo") == expected)
     }
 }
 

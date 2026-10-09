@@ -580,6 +580,19 @@ struct GateEvaluatorTests {
         #expect(GateEvaluator.mountRefusal(home.configDir.path, paths: home) != nil)
         #expect(GateEvaluator.mountRefusal(home.pluginsDir.path, paths: home) != nil)
         #expect(GateEvaluator.mountRefusal(dir.path, paths: home) == nil, "and anything else is fine")
+
+        // In a dev process a gate mount of the installed app's own config/plugins is refused too —
+        // the same injectable identity/release pattern `PermissionManager.isProtectedWrite` uses.
+        let release = IrisPaths(root: try temporaryDirectory())
+        try FileManager.default.createDirectory(at: release.configDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: release.pluginsDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: release.root) }
+        #expect(GateEvaluator.mountRefusal(release.configDir.path, paths: home, identity: .dev, release: release) != nil)
+        #expect(GateEvaluator.mountRefusal(release.pluginsDir.path, paths: home, identity: .dev, release: release) != nil)
+        // The release build never applies the dev carve-out to its own home.
+        #expect(GateEvaluator.mountRefusal(release.configDir.path, paths: home, identity: .release, release: release) == nil)
+        #expect(GateEvaluator.mountRefusal(dir.path, paths: home, identity: .dev, release: release) == nil,
+                "an ordinary directory stays fine even with a release home injected")
     }
 }
 

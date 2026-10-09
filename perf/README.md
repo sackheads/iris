@@ -59,8 +59,9 @@ prompts run unattended with auto-approve. Only `run_command` is sandboxed: `read
 a **fixed** scratch directory under the temporary folder (`$TMPDIR/iris-perf`, not a per-run UUID
 — a per-run location put a different absolute path in the skills list's `**Path:**` lines on every
 run, which cache-busted the system prompt and confounded cross-run comparisons, #321), binds each
-throwaway conversation's workspace to it, and routes the whole `~/.iris` home (memory, rules,
-config, plugins copied; models symlinked) at a copy inside it, so the memory tools cannot touch
+throwaway conversation's workspace to it, and routes the build's whole home (`~/.iris-dev` for a
+build from source, `~/.iris` for the installed app; memory, rules, config, plugins copied; models
+symlinked) at a copy inside it, so the memory tools cannot touch
 your real USER.md, fact store or skills; the run exits 3 with a warning if the real memory
 directory changed anyway; relative and workspace-relative paths land there and the directory is
 reset to empty at the start of every run (not just removed at the end, so a crash or `^C` that
@@ -72,7 +73,9 @@ are reviewed before they are committed. The record's `toolSandbox` field says wh
 and `compare` refuses to compare records whose modes differ. Records also keep each tool call's
 arguments (capped at 500 characters; values under credential-looking keys and token-shaped
 substrings are replaced with `[redacted]`), promoted baselines included, so a tool storm can be
-read afterwards without committing a secret.
+read afterwards without committing a secret. A build from source whose `~/.iris-dev` exists
+but was never seeded from `~/.iris` prints a warning before the run: the copy then lacks your
+memory and skills, so its prompt sizes will not match baselines.
 
 ## The caching suite
 

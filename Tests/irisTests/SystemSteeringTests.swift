@@ -22,6 +22,11 @@ struct SystemSteeringTests {
         #expect(SystemSteering.fallback.contains("authorization"))
     }
 
+    @Test("shipped() never leaves the bare ~/.iris spelling in test, where the identity is dev")
+    func testShippedRewritesHomeUnderTest() {
+        #expect(!SystemSteering.shipped().contains("~/.iris/"))
+    }
+
     @Test("fallback has no leading indentation from the multi-line literal")
     func testFallbackHasNoLeadingIndentation() {
         // The `"""` literal is indented to sit inside the enum; Swift strips the indentation

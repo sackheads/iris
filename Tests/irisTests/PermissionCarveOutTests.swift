@@ -158,4 +158,33 @@ struct PermissionCarveOutTests {
         #expect(app.takeBackgroundDenials(for: cid).isEmpty)
         #expect(app.conversations.first(where: { $0.id == cid })?.messages.isEmpty == true)
     }
+
+    /// A dev process's own home is `~/.iris-dev`, so the installed app's `config/` and `plugins/`
+    /// are just absolute paths to it — they must still be grants, not approvable file edits.
+    @Test("in a dev process the release home's protected dirs are protected too")
+    func releaseProtectedDirsFromDev() throws {
+        let paths = try tempPaths(), release = try tempPaths()
+        defer {
+            try? FileManager.default.removeItem(at: paths.root)
+            try? FileManager.default.removeItem(at: release.root)
+        }
+        let dev = PermissionManager(paths: paths, identity: .dev, release: release)
+        let installed = PermissionManager(paths: paths, identity: .release, release: release)
+        for target in [release.permissionsJSON, release.pluginsDir.appendingPathComponent("p/plugin.json")] {
+            #expect(dev.isProtectedWrite(toolName: "write_file", path: target.path))
+            #expect(dev.isAllowed(toolName: "write_file", details: target.path, workspace: nil) == false)
+            #expect(!installed.isProtectedWrite(toolName: "write_file", path: target.path))
+        }
+        // Outside the protected dirs a release-home write is still an ordinary (approvable) one.
+        #expect(!dev.isProtectedWrite(toolName: "write_file", path: release.userMd.path))
+    }
+
+    /// The real installed home, decision only: nothing is written there.
+    @Test("the default release home is the one a dev process protects")
+    func realReleaseHomeIsProtectedFromDev() throws {
+        let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+        let dev = PermissionManager(paths: paths, identity: .dev)
+        #expect(dev.isProtectedWrite(toolName: "write_file", path: IrisPaths.release.permissionsJSON.path))
+    }
 }

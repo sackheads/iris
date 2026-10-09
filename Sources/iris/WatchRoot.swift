@@ -58,7 +58,17 @@ enum WatchRoot {
     /// `update_soul` write under `~/.iris/memory` through their own managers, where the self-write
     /// filter (spec §4) cannot see them, so a watch anywhere over that tree would fire on the run's
     /// own notes and the run would write more of them.
-    static let protectedRefusal = "that path is or contains Iris's own directory (~/.iris); a watch there would react to itself"
+    static var protectedRefusal: String {
+        IrisPaths.standard.agentFacing("that path is or contains Iris's own directory (~/.iris); a watch there would react to itself")
+    }
+
+    /// Worded for the *other* home: in a dev process the installed app's `~/.iris` is protected
+    /// too (`breadthProblem`'s `.protectedRelease`), but it is not this build's own directory and
+    /// a watch there would not react to this process's writes — so neither "Iris's own" nor
+    /// "would react to itself" is true of it. Always literally `~/.iris`: `IrisPaths.release` is
+    /// that path by definition, whichever build is asking, so there is nothing to rewrite.
+    static let protectedReleaseRefusal =
+        "that path is or contains the installed Iris app's directory (~/.iris)"
 
     /// Why `canonical` may not be watched, or nil when it may. Checked in the order a reader would
     /// want the answer: a root that is too broad is told so even when it also contains Iris's
@@ -83,7 +93,7 @@ enum WatchRoot {
     /// by every caller that has its own sentences for the same rule — a watch refuses in its
     /// words (`refusal`), a job grant in its own (`JobGrant.resolve`) — so the rule itself is
     /// never copied.
-    enum BreadthProblem { case tooBroad, protectedIris }
+    enum BreadthProblem { case tooBroad, protectedIris, protectedRelease }
 
     /// The breadth problem `canonical` has, if any. Checked in the order a reader would want the
     /// answer: a root that is too broad is reported so even when it also contains Iris's
@@ -110,8 +120,13 @@ enum WatchRoot {
     ///     directory one without mounting anything. The default asks the file system. A throw is a
     ///     root we cannot ask about, and a root we cannot ask about is not one we watch: it is
     ///     reported as too broad rather than let through.
+    ///   - identity, release: in a dev process the installed app's home is Iris's own directory
+    ///     too — a watch there reacts to the release app's writes, and a job mounting it hands the
+    ///     release home to a dev run. Injected so a test decides it without the real `~/.iris`.
     static func breadthProblem(for canonical: String, paths: IrisPaths, home: String,
-                               isVolume: (String) throws -> Bool = { try isMountPoint($0) }) -> BreadthProblem? {
+                               isVolume: (String) throws -> Bool = { try isMountPoint($0) },
+                               identity: BuildIdentity = .current,
+                               release: IrisPaths = .release) -> BreadthProblem? {
         // The string comparisons are case-insensitive; the file system is asked with the spelling
         // the path actually has, because on a case-sensitive volume the lower-cased spelling is a
         // path that does not exist and the question would fail for the wrong reason.
@@ -125,6 +140,12 @@ enum WatchRoot {
         let iris = IrisPaths.canonicalPath(paths.root.path).lowercased()
         if root == iris || root.hasPrefix(iris + "/") || iris.hasPrefix(root + "/") {
             return .protectedIris
+        }
+        if identity == .dev {
+            let releaseIris = IrisPaths.canonicalPath(release.root.path).lowercased()
+            if root == releaseIris || root.hasPrefix(releaseIris + "/") || releaseIris.hasPrefix(root + "/") {
+                return .protectedRelease
+            }
         }
         return nil
     }
@@ -140,10 +161,13 @@ enum WatchRoot {
     ///     root we cannot ask about, and a root we cannot ask about is not one we watch: it is
     ///     refused as too broad rather than let through.
     static func refusal(for canonical: String, paths: IrisPaths, home: String,
-                        isVolume: (String) throws -> Bool = { try isMountPoint($0) }) -> String? {
-        switch breadthProblem(for: canonical, paths: paths, home: home, isVolume: isVolume) {
+                        isVolume: (String) throws -> Bool = { try isMountPoint($0) },
+                        identity: BuildIdentity = .current, release: IrisPaths = .release) -> String? {
+        switch breadthProblem(for: canonical, paths: paths, home: home, isVolume: isVolume,
+                              identity: identity, release: release) {
         case .tooBroad: return tooBroadRefusal
         case .protectedIris: return protectedRefusal
+        case .protectedRelease: return protectedReleaseRefusal
         case nil: return nil
         }
     }

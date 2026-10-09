@@ -16,6 +16,33 @@ swift test                           # full suite
 scripts/test-filter.sh MyTestSuite   # focused run, guarded (see below)
 ```
 
+**Dev builds use `~/.iris-dev`, not `~/.iris`.** `swift build`/`swift run`, `scripts/run-dev.sh`,
+Xcode Debug and `swift test` are all dev builds (`BuildIdentity.current == .dev`): they read and
+write `~/.iris-dev`, keep their secrets under `.dev`-suffixed Keychain services, and answer to
+`Cmd+Shift+Option+Space`. Only the installed release app (bundle id `com.bnaylor.iris`) uses
+`~/.iris`, its own (unsuffixed) Keychain services, and `Cmd+Shift+Space` — the two never share a
+home, a Keychain item, or a hotkey. `run-dev.sh` seeds `~/.iris-dev` from `~/.iris` when
+`~/.iris-dev` is missing or empty, via `iris --seed-dev-home`: it copies the release home — everything under it except
+`models/`, which is symlinked back to the release copy rather than duplicated (gigabytes,
+read-only) — and the release Keychain items into their `.dev`-suffixed equivalents, rewriting the
+bundled `~/.iris` spelling to `~/.iris-dev` in the copied `.md`/`.json` files under `memory/`,
+`rules/` and `config/` only; `plugins/`, `workspaces/` and everything else are copied as-is. In the
+copied `conversations.sqlite` it re-points absolute paths under the release home (each
+conversation's `workspacePath`, and the goal contract, sandbox, job trigger/policy and blocked-call
+JSON columns; transcripts are left alone), pauses every copied job ("copied into the dev home;
+unpause to run it here"), and writes `.seeded-from-release` at the new home's root. It
+refuses outright if the installed app currently holds the release store's GUI lock (quit it and
+retry), if that lock file exists but doesn't hold a readable pid (delete it and retry), or if the
+dev home already has content (remove it first to reseed). Exit codes: `0` seeded; `3` nothing to seed
+— no release home yet, the normal case on a machine that has never installed the app, not a
+failure; `1` anything else. `run-dev.sh` continues past `3` and stops on `1` (or any other
+non-zero, non-3 exit), because launching anyway would populate `~/.iris-dev`, and the
+seeder refuses to seed over an existing non-empty destination — so a later retry could never seed
+at all. A `~/.iris-dev` with content but no marker (a `swift run` got there first) is launched as
+it is, with a one-line note on how to start over. In a dev process the release home stays off
+limits too: its `config/` and `plugins/` are protected writes, and a watch or job mount on it is
+refused as Iris's own directory.
+
 **`--filter` takes the TYPE name, and matching nothing looks exactly like passing.** It does not
 match the `@Suite`/`@Test` display string — and the display string is what the test output
 *prints*, so the obvious copy-paste selects nothing and still exits 0:
@@ -165,7 +192,7 @@ docs/                     # design specs, plans, reviews, roadmaps
 7. **Never mutate process-global state in a test.** Suites run concurrently, so a test that writes a global decides behaviour for whatever else is running at that moment. The failure is always the same shape and always misleading: a suite that passes under `--filter` and fails intermittently in the full run, with the failure pointing at innocent code. Diagnose it by running the suite alone — if it only fails in company, look for a global before you look at the code under test.
    - **`ConfigManager.shared`** — construct an isolated `ConfigManager(store:)` over your own `UserDefaults` suite and inject it, or pass injectable parameters (`protectionEnabled:`, `workspaceToolsEnabled:`). Its setters also *persist*, so a bad value used to outlive the process and poison the next run (#109). A bare `ConfigManager()` does not isolate you — it is a separate object over the same process-global store (#193).
    - **The guard tiers** — use the task-scoped seams, not the singletons: `CoreMLEvaluator.$scopedModel.withValue(.init(model))` and `AuxiliaryModelManager.$scopedEngines.withValue(["canary": engine])`. `.init(nil)` means *explicitly no model*, which is different from no scope. Before these existed, one suite's malicious-probability mock blocked another suite's content and the first diagnosis blamed `ConfigManager`, which no test touches (#237). The seams cover `InjectionGuard`'s process-wide verdict cache too: a call under either scope neither reads nor writes it, because a hijacking canary's block on shared text (the default empty USER.md) used to be served to every later engine in the process (#375). An *unscoped* call still shares that cache, so scope the tiers whenever a test asserts on what the guard decided. Nothing writes `CoreMLEvaluator.shared`'s model in a test any more; a test that needs an installed model uses `CoreMLEvaluator()` of its own.
-   - **`~/.iris`** — under test `IrisPaths.default` is an empty per-process temp home, not the real one, so nothing that resolves through `IrisPaths` can write the developer's allowlist, memory or skills again (#290, #304). A tool *argument* spelled `~/.iris/...` still expands to the real home (`IrisEngine.expandTilde`), so a test that approves a `write_file` to such a path still writes there. It is still one home for the whole process: a test that writes through `PermissionManager.shared` or another `.shared` manager is visible to every suite running beside it. Build your own `IrisPaths(root:)` over a temp directory and inject it (`PermissionManager(paths:)`, `AppState.permissions`). Isolation tests that check the real home use `IrisPaths.standard`.
+   - **`~/.iris`** — under test `IrisPaths.default` is an empty per-process temp home, not the real one, so nothing that resolves through `IrisPaths` can write the developer's allowlist, memory or skills again (#290, #304). A tool argument spelled `~/.iris/...` expands to `IrisPaths.default`, the test home; any other `~/` path still expands to the real home. This holds for the file tools only (`read_file`/`write_file`, anything that goes through `IrisEngine.expandTilde`) — `run_command`'s shell expands `~` itself, before the argument ever reaches Iris, so a test's `run_command` call is not isolated by this and still reaches the real home. It is still one home for the whole process: a test that writes through `PermissionManager.shared` or another `.shared` manager is visible to every suite running beside it. Build your own `IrisPaths(root:)` over a temp directory and inject it (`PermissionManager(paths:)`, `AppState.permissions`). Isolation tests that check the real home use both `IrisPaths.standard` (this build's home) and `IrisPaths.release` (the installed app's).
    - **The working directory** — `FileManager.changeCurrentDirectoryPath` moves the whole process. Pass the base in instead (`BinaryResolver.resolve(relativeTo:)`), and resolve repo-relative paths from `#filePath`, not from the cwd (`PerfPaths.repoRoot`) (#242, #160).
    - **`PerformanceProfiler.shared` is not a case, and was checked (#250, #269).** Four suites read it and none is serialized. `active` is keyed by the id `beginTurn` returns, so `activeProfileForTesting(id)` only ever sees the caller's own turn. Only the unkeyed reads — `recentCommands`, `activeCountForTesting` — could race, and the suites asserting on those construct their own `PerformanceProfiler()`.
 

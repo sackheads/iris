@@ -272,10 +272,13 @@ struct FactStoreLifecycleTests {
 
         let realPath = IrisPaths.standard.factStoreDB.path
         let existedBefore = FileManager.default.fileExists(atPath: realPath)
+        let releasePath = IrisPaths.release.factStoreDB.path
+        let releaseExistedBefore = FileManager.default.fileExists(atPath: releasePath)
         let app = AppState()
         _ = IrisEngine(state: app, tier: .medium, principal: .main,
                        client: CapturingLLMClient(reply: "ok"), retryDelays: [])
         #expect(FileManager.default.fileExists(atPath: realPath) == existedBefore)
+        #expect(FileManager.default.fileExists(atPath: releasePath) == releaseExistedBefore)
         // Since #304 a regression would create the file under the per-process test home, not the
         // real one. Nothing legitimate creates it there, so its absence is absolute rather than
         // before/after, which an earlier test touching `.shared` would make pass by luck.
