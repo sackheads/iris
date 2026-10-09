@@ -88,8 +88,11 @@ $ swift test --filter VibecopUnderAutoApproveTests
 This matters because the standard way to tell a real failure from a parallel-suite race is to run
 the suite alone (Invariant 7). Filter by the printed name and the green proves nothing, while the
 conclusion drawn from it — "not a race" — is the opposite of the truth. `scripts/test-filter.sh`
-wraps `swift test --filter` and fails when the filter matched no tests; use it, and when citing a
-filtered run as evidence, quote the test count (#271).
+wraps `swift test --filter` and fails when **neither** Swift Testing nor XCTest ran anything; use
+it, and when citing a filtered run as evidence, quote the test count (#271). A filter that matches
+only an `XCTestCase` class makes Swift Testing legitimately print "Test run with 0 tests in 0
+suites passed" while XCTest runs the tests fine — the script passes that run rather than crying
+wolf (#301, #303).
 
 **Opt-in tests.** Two kinds of test are skipped unless an environment variable asks for them,
 because they need something the default suite must not depend on:
