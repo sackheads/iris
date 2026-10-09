@@ -779,14 +779,48 @@ struct ToolExecutor {
     }
     
     private func searchWeb(query: String) async -> String {
+        await Self.runSearchWeb(query: query)
+    }
+
+    /// DuckDuckGo's lite search endpoint, the real `search_web` target. A parameter of
+    /// `runSearchWeb` rather than baked into the script, so a test can point the script at a
+    /// local stub instead of the network (#431).
+    static let duckDuckGoURL = "https://lite.duckduckgo.com/lite/"
+
+    /// Deadline for the whole `search_web` subprocess, start to exit (#431). Independent of the
+    /// script's own network `timeout=`: that bounds `urlopen`, this bounds the process, so a
+    /// stall anywhere else in the interpreter — a hung DNS resolver, a stuck SSL handshake that
+    /// never reaches a socket read — is still killed with its process group (invariant 4).
+    static let searchWebTimeoutSeconds: Double = 30
+
+    static func searchWebTimedOutMessage(seconds: Double) -> String {
+        "Error: search timed out after \(Int(seconds))s"
+    }
+
+    /// The testable core of `search_web`: writes the script, runs it bounded by
+    /// `processTimeoutSeconds` through `ProcessGroupRunner.capture` (never a bare pool
+    /// `Task.sleep`, invariant 4), and returns its output or a timeout message. `targetURL` and
+    /// `networkTimeoutSeconds` are injectable so a test can point the script at a local stub that
+    /// accepts and never responds, instead of the real network, and keep the bounds short (#431).
+    static func runSearchWeb(query: String, targetURL: String = Self.duckDuckGoURL,
+                             networkTimeoutSeconds: Int = 15,
+                             processTimeoutSeconds: Double = Self.searchWebTimeoutSeconds,
+                             irisDir: URL = IrisPaths.default.root) async -> String {
         let script = """
 import urllib.request
 import urllib.parse
+import urllib.error
 from html.parser import HTMLParser
 import sys
 import json
 import os
+import socket
 import ssl
+
+# Bounds urlopen's connect and each blocking read (#431): a server that accepts the connection
+# and then stalls would otherwise hold this process forever.
+_NETWORK_TIMEOUT_SECONDS = \(networkTimeoutSeconds)
+_TARGET_URL = \(String(reflecting: targetURL))
 
 
 def _ssl_context():
@@ -847,49 +881,76 @@ class DDGParser(HTMLParser):
 
 query = sys.argv[1]
 data = urllib.parse.urlencode({"q": query}).encode("utf-8")
-req = urllib.request.Request("https://lite.duckduckgo.com/lite/", data=data, headers={"User-Agent": "Mozilla/5.0"})
+req = urllib.request.Request(_TARGET_URL, data=data, headers={"User-Agent": "Mozilla/5.0"})
 try:
-    html = urllib.request.urlopen(req, context=_ssl_context()).read().decode("utf-8")
+    # `timeout=` bounds the connect and each blocking read (#431): without it, a server that
+    # accepts the connection and then stalls holds `urlopen` forever.
+    html = urllib.request.urlopen(req, timeout=_NETWORK_TIMEOUT_SECONDS, context=_ssl_context()).read().decode("utf-8")
     parser = DDGParser()
     parser.feed(html)
     print(json.dumps(parser.results[:10], indent=2))
+except (socket.timeout, TimeoutError) as e:
+    print(f"search_web: network request timed out after {_NETWORK_TIMEOUT_SECONDS}s: {e}", file=sys.stderr)
+    sys.exit(1)
+except urllib.error.URLError as e:
+    if isinstance(e.reason, (socket.timeout, TimeoutError)):
+        print(f"search_web: network request timed out after {_NETWORK_TIMEOUT_SECONDS}s: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps({"error": str(e)}))
 except Exception as e:
     print(json.dumps({"error": str(e)}))
 """
         // Through `IrisPaths`, not the home directory: this was the one writer that bypassed it,
         // so a test calling `search_web` would have written the real `~/.iris` (#304).
-        let irisDir = IrisPaths.default.root
         try? FileManager.default.createDirectory(at: irisDir, withIntermediateDirectories: true)
         let scriptURL = irisDir.appendingPathComponent("search_web.py")
         do {
             try script.write(to: scriptURL, atomically: true, encoding: .utf8)
-            let process = Self.searchWebProcess(scriptPath: scriptURL.path, query: query)
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            let output = String(data: data, encoding: .utf8) ?? "Error decoding output"
-            if Self.isTLSTrustMissing(output) {
-                return "search_web is unavailable: TLS trust store missing — tell the user"
-            }
-            return output
         } catch {
             return "Error executing search script: \(error)"
         }
+        let command = Self.searchWebCommand(scriptPath: scriptURL.path, query: query)
+        // Bounds the whole call, not just the script's own `urlopen` timeout: if the interpreter
+        // hangs for any other reason, the process group is still killed on schedule, on this
+        // runner's own queue rather than a pool `Task.sleep` (invariant 4, #431).
+        let outcome = await ProcessGroupRunner.capture(
+            executable: command.executable, arguments: command.arguments, environment: command.environment,
+            mergeStderr: true, timeoutSeconds: processTimeoutSeconds)
+        switch outcome {
+        case .failure(let error):
+            return "Error executing search script: \(error)"
+        case .success(let output):
+            if output.timedOut {
+                return Self.searchWebTimedOutMessage(seconds: processTimeoutSeconds)
+            }
+            let text = String(data: output.stdout, encoding: .utf8) ?? "Error decoding output"
+            if Self.isTLSTrustMissing(text) {
+                return "search_web is unavailable: TLS trust store missing — tell the user"
+            }
+            return text
+        }
     }
 
-    /// The `/usr/bin/env python3` process `searchWeb` runs, with the login-shell PATH applied
-    /// (#228) and the macOS trust store exposed via `SSL_CERT_FILE` when needed (#243). Static and
-    /// separate from `searchWeb` so a test can assert the environment without running the search,
-    /// which would hit the network.
+    /// The executable, arguments and environment `searchWeb`'s subprocess runs with: `/usr/bin/env
+    /// python3 <script> <query>`, the login-shell PATH applied (#228) and the macOS trust store
+    /// exposed via `SSL_CERT_FILE` when needed (#243). Separate from `searchWeb` so a test can
+    /// assert on them without running the search, which would hit the network.
+    static func searchWebCommand(scriptPath: String, query: String,
+                                 environment: [String: String] = ProcessInfo.processInfo.environment)
+        -> (executable: String, arguments: [String], environment: [String: String]) {
+        let env = Self.sslCertEnvironment(base: BinaryResolver.commandEnvironment(base: environment))
+        return (executable: "/usr/bin/env", arguments: ["python3", scriptPath, query], environment: env)
+    }
+
+    /// The `Process` form of `searchWebCommand`, kept for tests that assert on `Process.environment`
+    /// directly. `searchWeb` itself runs through `ProcessGroupRunner.capture` (#431), not `Process`.
     static func searchWebProcess(scriptPath: String, query: String,
                                  environment: [String: String] = ProcessInfo.processInfo.environment) -> Process {
+        let command = Self.searchWebCommand(scriptPath: scriptPath, query: query, environment: environment)
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["python3", scriptPath, query]
-        process.environment = Self.sslCertEnvironment(base: BinaryResolver.commandEnvironment(base: environment))
+        process.executableURL = URL(fileURLWithPath: command.executable)
+        process.arguments = command.arguments
+        process.environment = command.environment
         return process
     }
 
