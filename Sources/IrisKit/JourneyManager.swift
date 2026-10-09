@@ -30,7 +30,6 @@ public final class JourneyManager: Sendable {
     func buildTimeline(paths: IrisPaths) async -> [JourneyItem] {
         var items: [JourneyItem] = []
         let fileManager = FileManager.default
-        let isoFormatter = ISO8601DateFormatter()
 
         // 1. Scan USER.md
         if fileManager.fileExists(atPath: paths.userMd.path),

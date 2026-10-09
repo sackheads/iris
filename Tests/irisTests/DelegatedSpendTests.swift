@@ -378,7 +378,7 @@ struct DelegatedSpendTests {
         #expect(midRun.totalTokens == 60, "the subagent's first round is on the row while it is still working")
 
         await gate.open()
-        await fire.value
+        _ = await fire.value
         let finished = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(finished.totalTokens == 66)
     }

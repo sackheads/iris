@@ -65,7 +65,7 @@ struct GuardTestIsolationTests {
         let evaluator = CoreMLEvaluator()
         evaluator.setModel(MockCoreMLModel(probability: 0.99))
         #expect(evaluator.hasModelLoaded)
-        await CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
+        CoreMLEvaluator.$scopedModel.withValue(.init(nil)) {
             #expect(!evaluator.hasModelLoaded)
         }
     }

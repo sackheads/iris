@@ -317,13 +317,13 @@ struct GateCreationTests {
     }
 
     @Test("a DENY refuses creation and says why")
-    func reviewDenies() async {
+    func reviewDenies() async throws {
         let asked = Locked(0)
         let outcome = await review(VibecopDecision(decision: "DENY", reason: "it deletes the home directory"),
                                    asked: asked)
             .review(script: "rm -rf ~", mounts: [], timeoutSeconds: 60)
-        let text = try? #require(outcome.failureText)
-        #expect(text?.contains("it deletes the home directory") == true)
+        let text = try #require(outcome.failureText)
+        #expect(text.contains("it deletes the home directory"))
         #expect(asked.value == 0, "a denied script is never put in front of the user as a dialog")
     }
 

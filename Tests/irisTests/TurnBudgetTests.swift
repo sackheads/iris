@@ -281,7 +281,7 @@ struct TurnBudgetTests {
                 "and the day's budget can see it")
 
         await client.gate.open()
-        await fire.value
+        _ = await fire.value
         let finished = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(finished.status == .completed)
         #expect(finished.totalTokens == 40, "and `finish` writes the same figure again")

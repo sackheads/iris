@@ -347,8 +347,9 @@ struct ApprovalResolvedPathTests {
         #expect(permissions.isProtectedWrite(toolName: "write_file", path: shouted))
         #expect(!permissions.isAllowed(toolName: "write_file", details: shouted, workspace: nil, isBackground: true))
 
-        let insensitive = try #require(try f.root.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
-            .volumeSupportsCaseSensitiveNames).isFalse
+        let caseSensitive = try f.root.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
+            .volumeSupportsCaseSensitiveNames
+        let insensitive = try #require(caseSensitive as Bool?).isFalse
         permissions.allowGlobally(toolName: "write_file", details: f.workspace.path + "/NOTES.md")
         let lower = IrisEngine.decidedPath("notes.md", cwd: f.workspace.path, walked: false)
         #expect(permissions.isAllowed(toolName: "write_file", details: lower, workspace: nil) == insensitive,

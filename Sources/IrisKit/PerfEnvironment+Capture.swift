@@ -67,6 +67,6 @@ extension PerfEnvironment {
         guard size > 0 else { return "unknown" }
         var buf = [CChar](repeating: 0, count: size)
         sysctlbyname("hw.model", &buf, &size, nil, 0)
-        return String(cString: buf)
+        return String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 }

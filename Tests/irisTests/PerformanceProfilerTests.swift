@@ -101,7 +101,7 @@ struct PerformanceProfilerLifecycleTests {
         let collector = ProfileCollector()
 
         // A turn ended INSIDE the binding is captured...
-        await PerformanceProfiler.$runSink.withValue({ collector.append($0) }) {
+        PerformanceProfiler.$runSink.withValue({ collector.append($0) }) {
             let id = profiler.beginTurn(label: "inside", source: "System")
             profiler.record(turnID: id, category: .toolExecution, durationMs: 25)
             profiler.endTurn(id, totalMs: 200)

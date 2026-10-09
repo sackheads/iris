@@ -257,7 +257,7 @@ struct SubagentRunStopTests {
         #expect(state.liveSubagents(ofRun: runConversation).count == 1)
 
         clock.advance(by: 601)
-        await fire.value
+        _ = await fire.value
 
         let closed = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(closed.failureReason == TurnBudget.timeExceeded)
