@@ -49,14 +49,16 @@ struct ToolEchoFlattenTests {
         #expect(flattened.filter { $0 == "\"" }.count == 2)
     }
 
-    @Test("an over-long value is truncated with an ellipsis, under the default cap")
+    @Test("an over-long value is truncated with an ellipsis, under the default cap, by bytes")
     func overLongValueIsTruncated() {
         let value = String(repeating: "a", count: 5_000)
         let flattened = IrisEngine.flattenToolEcho(value)
-        // Mutation check against an off-by-one or a forgotten `+1` for the ellipsis: the exact
-        // count, not merely "shorter than 5000" (`SessionToolsTests.setSessionCardBoundsTheStoredCard`
-        // uses the same `==`-not-`<=` shape for the same reason).
-        #expect(flattened.count == IrisEngine.toolEchoCap + 1 + 2, "cap + ellipsis + the two quote marks")
+        // ASCII, so `Character` count and UTF-8 byte count coincide. The cap bounds bytes
+        // (`capFieldBytes`): `toolEchoCap` bytes of content, including the 3-byte ellipsis,
+        // wrapped in two 1-byte quote marks the cap does not count against.
+        #expect(flattened.utf8.count == IrisEngine.toolEchoCap + 2,
+                "cap (content + ellipsis, in bytes) + the two quote marks")
+        #expect(flattened.count == IrisEngine.toolEchoCap, "ASCII: Characters and bytes agree here")
         #expect(flattened.hasSuffix("\u{2026}\""), "truncation must be visible, not silent")
         #expect(flattened.hasPrefix("\"aaa"))
     }
@@ -71,6 +73,25 @@ struct ToolEchoFlattenTests {
     @Test("a custom cap is honoured, not just the default")
     func customCapIsHonoured() {
         let flattened = IrisEngine.flattenToolEcho(String(repeating: "c", count: 50), cap: 10)
-        #expect(flattened == "\"\(String(repeating: "c", count: 10))\u{2026}\"")
+        // maxBytes 10, minus the ellipsis's 3 bytes, leaves 7 bytes (7 ASCII `c`s) of content.
+        #expect(flattened == "\"\(String(repeating: "c", count: 7))\u{2026}\"")
+    }
+
+    /// The bug #440's review caught: `capCardField` counts `Character`s, and a `Character` has
+    /// no bound on trailing combining marks — Swift's grapheme-cluster rule folds any number of
+    /// them onto the preceding base character without ever starting a new one. "a" plus 50,000
+    /// of U+0301 (combining acute, 2 UTF-8 bytes each) is one or two `Character`s and 100,001
+    /// bytes — a `Character`-counted cap reads it as trivially short and lets the whole 100 KB
+    /// through at tier 1. Mutation check: reverting `flattenToolEcho` to `capCardField` makes
+    /// the byte-count assertion below fail (it would pass the `value.count` ones unchanged).
+    @Test("a base character with thousands of combining marks is capped by bytes, not by Character count")
+    func combiningMarksAreCappedByBytes() {
+        let value = "a" + String(repeating: "\u{0301}", count: 50_000)
+        #expect(value.count <= 2, "sanity: this reads as one or two Characters, not 50,001")
+        #expect(value.utf8.count == 1 + 50_000 * 2, "sanity: but it is 100,001 bytes")
+
+        let flattened = IrisEngine.flattenToolEcho(value)
+        #expect(flattened.utf8.count <= IrisEngine.toolEchoCap + 2,
+                "bounded in BYTES (the content cap, plus the two ASCII quote marks) — a Character-counted cap would let the full 100 KB through")
     }
 }

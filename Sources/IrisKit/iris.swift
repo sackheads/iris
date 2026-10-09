@@ -801,7 +801,11 @@ actor IrisEngine {
         let flattened = flattenCardField(value, cap: Int.max)
         let printable = String(String.UnicodeScalarView(
             flattened.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
-        return "\"\(capCardField(printable, cap: cap))\""
+        // `capCardField` counts `Character`s, and a `Character` has no size bound — one base
+        // letter plus thousands of combining marks is still one (#187 review, the same reasoning
+        // `capFieldBytes` exists for). `register_directory_watcher`'s "does not exist" echo has
+        // no upstream byte limit of its own, so the bound has to be the one applied here.
+        return "\"\(capFieldBytes(printable, maxBytes: cap))\""
     }
 
     /// `PATH_MAX` on Darwin. A path longer than this cannot name a file, so accepting one only
