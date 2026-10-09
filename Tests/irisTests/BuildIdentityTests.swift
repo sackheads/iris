@@ -30,6 +30,21 @@ struct BuildIdentityTests {
         #expect(BuildIdentity.release.defaultHotkey != BuildIdentity.dev.defaultHotkey)
     }
 
+    @Test("a bundle-less process persists to the dev domain, never the legacy process-name one (#447)")
+    func bundlelessDomain() {
+        #expect(IrisDefaults.appDomain(bundleIdentifier: nil) == "com.bnaylor.iris.dev")
+        #expect(IrisDefaults.appDomain(bundleIdentifier: nil) != AppDefaultsImport.legacyDomain)
+        #expect(IrisDefaults.bundlelessSuiteName(bundleIdentifier: nil) == "com.bnaylor.iris.dev")
+    }
+
+    @Test("bundled apps keep their own domains and their .standard store")
+    func bundledDomains() {
+        #expect(IrisDefaults.appDomain(bundleIdentifier: "com.bnaylor.iris") == "com.bnaylor.iris")
+        #expect(IrisDefaults.appDomain(bundleIdentifier: "com.bnaylor.iris.dev") == "com.bnaylor.iris.dev")
+        #expect(IrisDefaults.bundlelessSuiteName(bundleIdentifier: "com.bnaylor.iris") == nil)
+        #expect(IrisDefaults.bundlelessSuiteName(bundleIdentifier: "com.bnaylor.iris.dev") == nil)
+    }
+
     @Test("standard follows the identity; release is always ~/.iris")
     func standardAndRelease() {
         let real = FileManager.default.homeDirectoryForCurrentUser

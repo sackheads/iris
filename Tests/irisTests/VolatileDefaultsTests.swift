@@ -40,10 +40,10 @@ struct VolatileDefaultsTests {
         #expect(!IrisDefaults.isVolatileCopy)
     }
 
-    @Test("the app domain is the bundle id or the process name")
+    @Test("the app domain is the bundle id, or the dev domain without one, never the process name")
     func appDomain() {
-        #expect(!IrisDefaults.appDomain.isEmpty)
-        #expect(IrisDefaults.appDomain == (Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName))
+        #expect(IrisDefaults.appDomain == (Bundle.main.bundleIdentifier ?? BuildIdentity.devBundleIdentifier))
+        #expect(IrisDefaults.appDomain != ProcessInfo.processInfo.processName)
     }
 
     // `removePersistentDomain(forName:)` clears the in-memory domain but does not delete the

@@ -8,6 +8,9 @@ enum BuildIdentity: Equatable, Sendable {
     case release, dev
 
     static let releaseBundleIdentifier = "com.bnaylor.iris"
+    /// The Xcode Debug app's bundle id, and also the defaults domain of the bare SwiftPM binary,
+    /// which has no bundle id of its own (`IrisDefaults.appDomain(bundleIdentifier:)`, #447).
+    static let devBundleIdentifier = "com.bnaylor.iris.dev"
 
     static func resolve(bundleIdentifier: String?) -> BuildIdentity {
         bundleIdentifier == releaseBundleIdentifier ? .release : .dev
