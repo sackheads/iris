@@ -1554,7 +1554,7 @@ class AppState {
         cancelTasks(for: id)
         clearCascade(for: id)   // a deleted conversation is in no cascade; also prunes a spent budget
 
-        Task { await SandboxSessionManager.shared.endSession(id) }
+        Task { await SandboxSessionManager.shared.closeSession(id) }   // never coming back (#292)
         purgeCommandTimings(forMessagesIn: id)   // before the messages go — they are the keys
         // Fix round 1 follow-up (#217/#19): mirrors `endEngineTurn`'s cleanup — a deleted
         // conversation (a subagent/evaluator whose engine turn is still trailing off) must not

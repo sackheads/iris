@@ -50,7 +50,8 @@ final class SubagentManager: @unchecked Sendable {
     /// the same registry the watch coordinator consults, or a run that delegates its file writing
     /// escapes the filter (#187 §4).
     /// `endSandboxSession` frees the subagent's container on every way out, injected so a test can
-    /// see it called without a container runtime (#291).
+    /// see it called without a container runtime (#291). The default closes the session for good,
+    /// so an engine that ignored its cancellation cannot start another container (#292).
     /// `deadlineClock` is the wall clock the per-turn deadline below is set and watched on,
     /// injected only so a test can hold it off until the subagent is parked mid-turn, then move it
     /// (#355, following #335/#342): a real deadline raced a busy suite's MainActor work and
@@ -82,7 +83,7 @@ final class SubagentManager: @unchecked Sendable {
                      repromptDelay: TimeInterval = 1.5,
                      onTurnEvent: (@Sendable (_ began: Bool, _ seq: Int) -> Void)? = nil,
                      endSandboxSession: @escaping @Sendable (UUID) async -> Void = {
-                         await SandboxSessionManager.shared.endSession($0)
+                         await SandboxSessionManager.shared.closeSession($0)
                      }) async -> (rendered: String, status: SubagentTerminalStatus) {
         let startedAt = Date()
 
