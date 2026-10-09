@@ -147,6 +147,34 @@ struct SubagentUserStopTests {
         #expect(history.contains { $0.contains("status: cancelled") }, "the next turn reads that it was stopped")
     }
 
+    @Test("Esc on an idle parent with only a background subagent working reaches its stop (#234 x #236)")
+    func escOnIdleParentReachesBackgroundSubagent() async throws {
+        let client = ParkingSubagentsClient(parent: [
+            calls([("invoke_subagent", ["role": .string("worker"), "task": .string("Research."),
+                                        "effort": .string("easy"), "background": .string("true")])]),
+            text("Spawned it."),
+        ])
+        let state = try state()
+        let main = state.createNewConversation()
+        let engine = IrisEngine(state: state, tier: .medium, client: client, protectionEnabled: false, sessionPeerCount: 0)
+        state.installEngine(engine)
+
+        await engine.processInput("Start a background worker.", source: "User", conversationId: main)
+        #expect(await eventually { client.parkedCalls == 1 })
+        let worker = try #require(subagentId("worker", in: state))
+
+        // The parent is idle, so the indicator is off, but Esc's guard must still pass.
+        #expect(state.isThinking(in: main) == false)
+        #expect(state.hasInterruptibleWork(in: main), "ChatView.handleEscape gates on this")
+        if state.hasInterruptibleWork(in: state.selectedConversationId) {
+            state.interruptActiveConversation()
+        }
+
+        #expect(await eventually { client.cancelledCalls == 1 }, "the subagent's model call was cancelled")
+        #expect(await eventually { finishedStatus(of: worker, in: state) == "cancelled" })
+        #expect(state.hasInterruptibleWork(in: main) == false, "nothing left to stop")
+    }
+
     @Test("/stop stops the conversation's background subagents and says how many")
     func slashStopStopsBackgroundSubagents() async throws {
         let client = ParkingSubagentsClient()
@@ -238,6 +266,34 @@ struct SubagentUserStopTests {
 
         #expect(stopped.get == 0, "settled: nothing left to stop, so not counted in the notice")
         #expect(outcome.status == .completed)
+        #expect(outcome.stoppedBy == .parent)
+    }
+
+    @Test("Esc on an idle parent whose only background subagent is being graded records the parent's Stop")
+    func escDuringGradingIsRecorded() async throws {
+        let client = RoutingClient(["WORKER": [calls([("goal_complete", ["summary": .string("done")])])]])
+        let state = try state()
+        let main = state.createNewConversation()
+        let request = Box<SubagentStopKind?>(nil)
+        let interruptible = Box<Bool>(false)
+
+        // `endSandboxSession` runs after the result is settled, while it is being graded.
+        let outcome = await SubagentManager.shared.runSubagent(
+            role: "worker", task: "Work.", effort: "easy", parentConversationId: main, background: true,
+            client: client, appState: state, endSandboxSession: { _ in
+                await MainActor.run {
+                    let worker = state.conversations.first { $0.title == "Subagent: worker" }!.id
+                    #expect(state.backgroundSubagents(under: main).isEmpty, "settled: not stoppable")
+                    // What `ChatView.handleEscape` does.
+                    interruptible.set(state.hasInterruptibleWork(in: state.selectedConversationId))
+                    if interruptible.get { state.interruptActiveConversation() }
+                    request.set(state.subagentStopRequest(worker))
+                }
+            })
+
+        #expect(interruptible.get, "Esc's guard passes for a settled background subagent")
+        #expect(request.get == .parent)
+        // The engine routes the post-back on this: `.parent` delivers without waking the parent.
         #expect(outcome.stoppedBy == .parent)
     }
 
