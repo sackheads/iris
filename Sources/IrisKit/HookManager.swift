@@ -212,8 +212,9 @@ struct HookManager {
                                                 stdin: payload, timeoutSeconds: timeoutSeconds, onKilled: onKilled)
     }
 
-    /// Exit 2 blocks with stderr as the reason; exit 0 proceeds, with stdout as the new payload
-    /// when it is JSON; anything else is a warning.
+    /// A hook its own timeout killed blocks; otherwise exit 2 blocks with stderr as the reason,
+    /// exit 0 proceeds, with stdout as the new payload when it is JSON, and anything else is a
+    /// warning.
     static func decision(for outcome: Result<ProcessGroupRunner.Output, Error>, timeoutSeconds: Int) -> HookDecision {
         let output: ProcessGroupRunner.Output
         switch outcome {
@@ -222,6 +223,14 @@ struct HookManager {
             return cancelledDecision
         case .failure(let error):
             return .warning(message: "Failed to spawn hook: \(error.localizedDescription)")
+        }
+        // Read before the status: a killed hook never gave its verdict, and its status can be 0
+        // anyway (a `trap 'exit 0' TERM`, or a shell that outlives its child's SIGKILL by an
+        // instant). A warning would let the tool through like a proceed, so this fails closed,
+        // as a cancel does (#452; docs/tool_hooks.md, "Timeouts and background jobs").
+        if output.killed {
+            return .block(reason: output.timedOut ? "Hook timed out after \(timeoutSeconds) seconds"
+                                                  : "Hook was killed before it decided")
         }
         if output.status == 2 {
             let reason = String(data: output.stderr, encoding: .utf8) ?? "Unknown hook error"
@@ -236,8 +245,6 @@ struct HookManager {
                 // Pollution = Warning/Failure, treated as proceed for now
                 return .warning(message: "Hook output was not valid JSON")
             }
-        } else if output.timedOut {
-            return .warning(message: "Hook timed out after \(timeoutSeconds) seconds")
         } else {
             return .warning(message: "Hook exited with status \(output.status)")
         }
