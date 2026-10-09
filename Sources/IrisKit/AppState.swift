@@ -329,6 +329,13 @@ class AppState {
     var pendingScrollTarget: UUID?
     /// Read-only for observers. Ownership is centralized through `beginThinking()`/`endThinking()`
     /// so overlapping turns (concurrent sends, subagents, auto-reprompt) can't leave it stuck.
+    ///
+    /// Global: true while ANY conversation (main, subagent, evaluator) has a turn running, which
+    /// is exactly the bug in #234 — a subagent's turn in one conversation lit the "Iris is
+    /// thinking" indicator in every window, regardless of which conversation was selected. A
+    /// surface that is about one conversation (the composer's row, the spectrum line, the LED
+    /// bar, Escape) must read `isThinking(in:)` instead; a truly global surface ("is anything
+    /// busy anywhere") may still read this.
     private(set) var isThinking = false
     /// Transient, per-instance: when set, `requestApproval` auto-approves every tool without
     /// consulting permissions/Vibecop or enqueuing an interactive prompt. Set only by headless
@@ -703,6 +710,30 @@ class AppState {
         return .idle
     }
 
+    /// Whether `conversationId` itself has a turn running — the per-conversation counterpart to
+    /// the global `isThinking` (#234). `nil` (no selection) is never thinking. Every UI surface
+    /// that shows status for ONE conversation — the composer's "Iris is thinking..." row, the
+    /// spectrum line, the LED bar, Escape's interrupt guard — must call this with
+    /// `selectedConversationId`/the conversation it is rendering, not read `isThinking` directly,
+    /// or a subagent/evaluator turn (or any other conversation's turn) lights up a conversation
+    /// that is actually idle. Built on `hasTurnInFlight` rather than a parallel flag, per #234's
+    /// instructions: `AppState` already tracks per-conversation activity for `list_sessions`
+    /// (#418/#423) and there is no reason for a second source of truth.
+    ///
+    /// Also true for either side of an in-flight `/new` rotation (`rotationConversationIds`).
+    /// `hasTurnInFlight` alone goes false for the new conversation the moment the pin moves —
+    /// `rotationHold` is released right after the reflection turn, before the summary call, and
+    /// the summary itself runs outside any per-conversation turn — but the rotation is still a
+    /// real, visible, user-started operation on that specific (old, new) pair, and Esc must still
+    /// reach it there (`ConversationRotationTests.stopDuringSummaryFinishesWithoutIt`). This stays
+    /// narrow: it only ever covers the two conversations one rotation names, never "anything else
+    /// in the app is busy" the way the old global-flag guard accidentally did.
+    func isThinking(in conversationId: UUID?) -> Bool {
+        guard let conversationId else { return false }
+        if hasTurnInFlight(for: conversationId) { return true }
+        return rotationTask != nil && rotationConversationIds.contains(conversationId)
+    }
+
     func enqueuePendingUserMessage(text: String, attachments: [FileAttachment], for conversationId: UUID, isPeer: Bool = false) {
         pendingUserMessages[conversationId, default: []].append(PendingUserMessage(text: text, attachments: attachments, isPeer: isPeer))
     }
@@ -1069,8 +1100,12 @@ class AppState {
     /// thinking indicator via the tracked task's completion.
     func interruptActiveConversation() {
         // A background subagent may be working while nothing else is, between its turns included.
+        // Otherwise scoped to the selected conversation, not the global `isThinking`: Esc on an
+        // idle conversation while a DIFFERENT one was busy used to append a stray "Interrupted."
+        // (#234). `isThinking(in:)`, not the narrower `hasTurnInFlight`, so this still reaches a
+        // rotation mid-summary on the new conversation (see that method's doc comment).
         guard let convId = selectedConversationId,
-              isThinking || !backgroundSubagents(under: convId).isEmpty else { return }
+              isThinking(in: convId) || !backgroundSubagents(under: convId).isEmpty else { return }
         // Its subagents run in their own tasks, which `cancelTasks` does not reach (#236).
         let stopped = stopBackgroundSubagents(under: convId)
         // A rotation runs under no conversation id, so `cancelTasks` cannot reach it. It reports

@@ -223,7 +223,7 @@ struct ChatView: View {
                                 }
                             }
                             
-                            if state.isThinking {
+                            if state.isThinking(in: conv.id) {
                                 HStack(spacing: 8) {
                                     TypingIndicator()
                                     Text("Iris is thinking...")
@@ -290,7 +290,7 @@ struct ChatView: View {
                         .onChange(of: conv.messages.last?.content) { _, _ in
                             scrollAfterUpdate(proxy)
                         }
-                        .onChange(of: state.isThinking) { _, isThinking in
+                        .onChange(of: state.isThinking(in: conv.id)) { _, isThinking in
                             if isThinking {
                                 DispatchQueue.main.async {
                                     proxy.scrollTo("thinkingIndicator", anchor: .bottom)
@@ -357,12 +357,12 @@ struct ChatView: View {
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
 
-                    SpectrumLine(active: state.isThinking)
+                    SpectrumLine(active: state.isThinking(in: conv.id))
 
                     // #261: absent, not hidden — a `.hidden()` or a zero-opacity bar would keep
                     // its slot in the stack and give the space back to nothing.
                     if config.showModelLEDs {
-                        ModelLEDBar(isThinking: state.isThinking)
+                        ModelLEDBar(isThinking: state.isThinking(in: conv.id))
                     }
 
                     messageInputBar
@@ -774,7 +774,7 @@ struct ChatView: View {
     private func handleEscape() {
         if !selectedMessageIDs.isEmpty {
             selectedMessageIDs.removeAll()
-        } else if state.isThinking {
+        } else if state.isThinking(in: state.selectedConversationId) {
             state.interruptActiveConversation()
         }
     }
