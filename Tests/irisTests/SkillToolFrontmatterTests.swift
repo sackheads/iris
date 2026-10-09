@@ -153,6 +153,29 @@ struct SkillToolFrontmatterTests {
         #expect(!result.contains("Warning"))
     }
 
+    @Test("an approved write_file walked by its decided path still invalidates the skill prompt cache")
+    func decidedPathWriteToSkillInvalidatesCache() async throws {
+        let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
+
+        var executor = ToolExecutor()
+        executor.irisPaths = paths
+
+        let skillFolder = paths.skillsDir.appendingPathComponent("walked-skill")
+        try FileManager.default.createDirectory(at: skillFolder, withIntermediateDirectories: true)
+        let skillPath = skillFolder.appendingPathComponent("SKILL.md").path
+        let decided = IrisEngine.decidedPath(skillPath, cwd: nil, walked: false)
+        let result = await executor.execute(
+            name: "write_file",
+            args: ["path": .string(skillPath), "content": .string("---\nname: other\ndescription: d\n---\n\nBody.\n")],
+            decidedPath: decided
+        )
+        #expect(result.contains("Successfully wrote to"))
+        #expect(result.contains("Skill prompt cache invalidated."),
+                "the #256 descriptor walk must not skip #417's skill follow-up")
+        #expect(result.contains("does not match its folder"))
+    }
+
     @Test("write_file elsewhere under the skills dir (not a SKILL.md) is an ordinary write")
     func writeFileToNonSkillMdIsUnaffected() async throws {
         let paths = try tempPaths()

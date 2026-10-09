@@ -246,7 +246,7 @@ struct ToolExecutor {
             }
             if let decidedPath {
                 if let refusal = Self.decidedPathRefusal("write_file", path: path, cwd: cwd, decided: decidedPath) { return refusal }
-                return await writeFile(decided: decidedPath, content: content)
+                return await writeFile(decided: decidedPath, content: content, paths: irisPaths ?? .default)
             }
             return await writeFile(path, content: content, cwd: cwd, paths: irisPaths ?? .default)
         case "register_directory_watcher":
@@ -665,6 +665,11 @@ struct ToolExecutor {
                 return "Error writing file: \(error.localizedDescription)"
             }
         }.value
+        return await afterSkillFileWrite(result, targetedSkillFolder: targetedSkillFolder, content: content)
+    }
+
+    /// The #417 follow-up shared by both `write_file` paths (by-path and the #256 decided walk).
+    private func afterSkillFileWrite(_ result: String, targetedSkillFolder: String?, content: String) async -> String {
         guard result.hasPrefix("Successfully wrote to"), let targetedSkillFolder else { return result }
         // A `write_file` landing on a skill's own SKILL.md deliberately does not get funnelled
         // through `update_skill`'s slug-and-reconstruct path (#417 item 2): that path is also
@@ -829,17 +834,19 @@ struct ToolExecutor {
     /// An approved write, the same walk (#256): staged in the final directory's descriptor and
     /// `renameat`-ed into place, as Foundation's atomic save does, keeping an existing file's mode.
     /// The leaf is never followed or replaced if it is a link: a write to a dangling link is refused.
-    func writeFile(decided: String, content: String) async -> String {
+    func writeFile(decided: String, content: String, paths: IrisPaths = .default) async -> String {
         guard let relative = Self.decidedComponents(decided) else {
             return "Error writing file: the path is not the one that was approved; nothing was done"
         }
-        return await Task.detached {
+        let targetedSkillFolder = Self.skillFileTarget(decided, paths: paths)
+        let result = await Task.detached {
             do {
                 try GrantedFileAccess(root: "/").write(relative: relative, content: content)
                 return "Successfully wrote to \(decided)"
             } catch let error as GrantedFileError { return "Error writing file: \(error.message(for: .approvedPath))" }
             catch { return "Error writing file: \(error.localizedDescription)" }
         }.value
+        return await afterSkillFileWrite(result, targetedSkillFolder: targetedSkillFolder, content: content)
     }
 
     static func nulPathRefusal(_ tool: String) -> String {
