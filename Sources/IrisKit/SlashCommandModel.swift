@@ -47,16 +47,19 @@ final class SlashCommandModel: PopupNav {
         selectedIndex = (selectedIndex + delta + suggestions.count) % suggestions.count
     }
 
-    /// True when accepting `completion` would still change `text` — i.e. `text` is a strict
-    /// prefix of `completion`, not already equal to it (case-insensitively). Once the typed
-    /// text equals a complete command there is nothing left to complete (#258): Return should
-    /// send it rather than re-insert the same text, while a true prefix (`/jo` of `/jobs`)
-    /// still completes as before.
+    /// True when accepting `completion` would still change `text`. Compares from the first
+    /// non-whitespace character on — `matches(for:)` deliberately allows leading whitespace
+    /// (`"  /jo"`), and comparing the untrimmed text against `completion` always looked longer
+    /// and fell through to "send" (review on PR #430: leading spaces, and `/JOBS` normalising to
+    /// `/jobs`, both regressed to sending instead of completing). The comparison is
+    /// case-insensitive against `completion` but the equality check is not, so a case-only
+    /// difference (`/JOBS` vs `/jobs`) still counts as "not yet equal" and completes — which also
+    /// normalises the case. Once the typed text equals a complete command there is nothing left
+    /// to complete (#258): Return should send it rather than re-insert the same text, while a
+    /// true prefix (`/jo` of `/jobs`) still completes as before.
     static func shouldAcceptCompletion(text: String, completion: String) -> Bool {
-        let lowerText = text.lowercased()
-        let lowerCompletion = completion.lowercased()
-        guard lowerText.count < lowerCompletion.count else { return false }
-        return lowerCompletion.hasPrefix(lowerText)
+        let part = text.drop { $0.isWhitespace }
+        return part != completion && completion.lowercased().hasPrefix(part.lowercased())
     }
 
     /// Whether pressing Return right now should accept the highlighted suggestion. Consulted

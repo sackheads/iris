@@ -23,9 +23,15 @@ struct SlashCommandModelTests {
         #expect(!SlashCommandModel.shouldAcceptCompletion(text: "/vibecop init", completion: "/vibecop init"))
     }
 
-    @Test("equality is case-insensitive")
-    func exactMatchIsCaseInsensitive() {
-        #expect(!SlashCommandModel.shouldAcceptCompletion(text: "/JOBS", completion: "/jobs"))
+    @Test("a case-only difference still completes, normalising the case")
+    func caseOnlyDifferenceAccepts() {
+        #expect(SlashCommandModel.shouldAcceptCompletion(text: "/JOBS", completion: "/jobs"))
+    }
+
+    @Test("leading whitespace is ignored when comparing to the completion")
+    func leadingWhitespaceAccepts() {
+        #expect(SlashCommandModel.shouldAcceptCompletion(text: "  /jo", completion: "/jobs"))
+        #expect(!SlashCommandModel.shouldAcceptCompletion(text: "  /jobs", completion: "/jobs"))
     }
 
     @Test("text longer than the completion has nothing to accept")

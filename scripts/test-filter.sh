@@ -30,7 +30,11 @@ status=${PIPESTATUS[0]}
 # e.g. per-suite), and treat a missing line as 0.
 swift_ran=$(grep -oE 'Test run with [0-9]+ tests' "$log" | grep -oE '[0-9]+' | sort -rn | head -1)
 xctest_ran=$(grep -oE 'Executed [0-9]+ tests' "$log" | grep -oE '[0-9]+' | sort -rn | head -1)
-if [ "${swift_ran:-0}" -eq 0 ] && [ "${xctest_ran:-0}" -eq 0 ]; then
+# Only treat a zero count as "matched nothing" when the build+run itself succeeded. A build
+# failure also leaves both counts at 0 (neither framework ever printed a line), and blaming the
+# filter there is the same misdirection #271 exists to prevent: it hides the compiler's own error
+# behind a guess about the wrong type name. Pass a failed build's status straight through instead.
+if [ "$status" -eq 0 ] && [ "${swift_ran:-0}" -eq 0 ] && [ "${xctest_ran:-0}" -eq 0 ]; then
     cat >&2 <<EOF
 
 error: --filter '$filter' matched no tests, so this run proves nothing.
