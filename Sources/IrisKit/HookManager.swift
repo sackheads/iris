@@ -131,7 +131,8 @@ struct HookManager {
             for hook in eventConfig.hooks {
                 if hook.type != "command" { continue }
                 
-                let decision = await executeCommandHook(hook: hook, payload: currentData, useSandbox: useSandbox)
+                let decision = await executeCommandHook(hook: hook, payload: currentData, useSandbox: useSandbox,
+                                                         gating: !Self.warnOnlyEvents.contains(eventName))
                 switch decision {
                 case .block:
                     return decision // Immediate hard block
@@ -152,7 +153,8 @@ struct HookManager {
     /// How long a hook gets when its definition sets no `timeout`.
     static let defaultTimeoutSeconds = 60
 
-    private func executeCommandHook(hook: HookDefinition, payload: Data?, useSandbox: Bool = false) async -> HookDecision {
+    private func executeCommandHook(hook: HookDefinition, payload: Data?, useSandbox: Bool = false,
+                                    gating: Bool) async -> HookDecision {
         let executable: String
         let arguments: [String]
         // Named, so a timeout or a cancel can delete it: killing the `container run` client does
@@ -191,10 +193,17 @@ struct HookManager {
         // A cancel kills the hook, so its verdict never arrived: fail closed, or a hook that would
         // have blocked lets the tool through as a warning (#364 review).
         if Task.isCancelled { return Self.cancelledDecision }
-        return Self.decision(for: outcome, timeoutSeconds: timeout)
+        return Self.decision(for: outcome, timeoutSeconds: timeout, gating: gating)
     }
 
     static let cancelledDecision = HookDecision.block(reason: "cancelled before the hook decided")
+
+    /// Events where a block means nothing: their decision is discarded or only posts a notice.
+    /// A hook its timeout killed warns here and fails closed on every other event, including
+    /// one added later: an `AfterTool` or `PreCompress` hook may be redacting what goes to the
+    /// provider, and an `AfterModel` block vetoes the tool calls (#452; docs/tool_hooks.md,
+    /// "Timeouts and background jobs").
+    static let warnOnlyEvents: Set<String> = ["Notification", "SessionStart", "AfterAgent"]
 
     /// Spawns one hook in a process group of its own (#364): the payload goes in on stdin while
     /// stdout and stderr drain, so neither side can fill a pipe and stall; on timeout or cancel
@@ -212,9 +221,11 @@ struct HookManager {
                                                 stdin: payload, timeoutSeconds: timeoutSeconds, onKilled: onKilled)
     }
 
-    /// Exit 2 blocks with stderr as the reason; exit 0 proceeds, with stdout as the new payload
-    /// when it is JSON; anything else is a warning.
-    static func decision(for outcome: Result<ProcessGroupRunner.Output, Error>, timeoutSeconds: Int) -> HookDecision {
+    /// A hook its own timeout killed blocks, unless the event is warn-only; otherwise
+    /// exit 2 blocks with stderr as the reason, exit 0 proceeds, with stdout as the new payload
+    /// when it is JSON, and anything else is a warning.
+    static func decision(for outcome: Result<ProcessGroupRunner.Output, Error>, timeoutSeconds: Int,
+                         gating: Bool) -> HookDecision {
         let output: ProcessGroupRunner.Output
         switch outcome {
         case .success(let o): output = o
@@ -222,6 +233,15 @@ struct HookManager {
             return cancelledDecision
         case .failure(let error):
             return .warning(message: "Failed to spawn hook: \(error.localizedDescription)")
+        }
+        // Read before the status: a killed hook never gave its verdict, and its status can be 0
+        // anyway (a `trap 'exit 0' TERM`, or a shell that outlives its child's SIGKILL by an
+        // instant). Per docs/tool_hooks.md, "Timeouts and background jobs" (#452): it fails
+        // closed, as a cancel does, so a hung redaction hook cannot let the unredacted payload
+        // through; only on a warn-only event, whose decision nothing acts on, does it warn.
+        if output.killed {
+            let reason = output.timedOut ? "Hook timed out after \(timeoutSeconds) seconds" : "Hook was killed before it decided"
+            return gating ? .block(reason: reason) : .warning(message: reason)
         }
         if output.status == 2 {
             let reason = String(data: output.stderr, encoding: .utf8) ?? "Unknown hook error"
@@ -236,8 +256,6 @@ struct HookManager {
                 // Pollution = Warning/Failure, treated as proceed for now
                 return .warning(message: "Hook output was not valid JSON")
             }
-        } else if output.timedOut {
-            return .warning(message: "Hook timed out after \(timeoutSeconds) seconds")
         } else {
             return .warning(message: "Hook exited with status \(output.status)")
         }

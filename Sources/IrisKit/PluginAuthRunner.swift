@@ -98,7 +98,11 @@ enum PluginAuthRunner {
             mergeStderr: true, timeoutSeconds: timeoutSeconds)
         switch outcome {
         case .success(let output):
-            return PluginAuthStatus(signedIn: output.status == 0,
+            // A check the ladder killed never answered, whatever its status says. The shell's
+            // status can be 0 anyway: SIGKILL reaches the group's members one at a time, so the
+            // shell can see its `sleep` die and run on to exit 0 first, and a `trap 'exit 0' TERM`
+            // answers the SIGTERM with 0 outright (#452).
+            return PluginAuthStatus(signedIn: output.status == 0 && !output.killed,
                                     output: String(data: output.stdout, encoding: .utf8) ?? "")
         case .failure(let error):
             return PluginAuthStatus(signedIn: false, output: "Failed to run check: \(error)")

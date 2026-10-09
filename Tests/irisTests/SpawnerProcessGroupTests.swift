@@ -14,12 +14,13 @@ struct HookManagerProcessGroupTests {
     typealias P = RunCommandProcessGroupTests
 
     /// A `BeforeTool` hook running `command`, with its own config file.
-    private func manager(_ command: String, timeout: Int? = nil) throws -> (HookManager, URL) {
+    private func manager(_ command: String, timeout: Int? = nil, event: String = "BeforeTool",
+                         matcher: String = "t") throws -> (HookManager, URL) {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("iris-hook-pg-\(UUID().uuidString).json")
         var hook: [String: Any] = ["type": "command", "command": command]
         if let timeout { hook["timeout"] = timeout }
-        let config: [String: Any] = ["hooks": ["BeforeTool": [["matcher": "t", "hooks": [hook]]]]]
+        let config: [String: Any] = ["hooks": [event: [["matcher": matcher, "hooks": [hook]]]]]
         try JSONSerialization.data(withJSONObject: config).write(to: url)
         var m = HookManager()
         m.configPathOverride = url.path
@@ -56,10 +57,53 @@ struct HookManagerProcessGroupTests {
         let started = Date()
         let decision = await m.fireBeforeTool(toolName: "t", args: [:])
         let wall = Date().timeIntervalSince(started)
-        // `fireEvent` treats a hook's warning as proceed, with the payload untouched.
-        guard case .proceed = decision else { Issue.record("got \(decision)"); return }
+        // A hook its timeout killed blocks: it never gave its verdict (#452).
+        guard case .block = decision else { Issue.record("got \(decision)"); return }
         #expect(wall < 1 + ProcessGroupRunner.terminateGraceSeconds + 2, "returned after \(wall)s")
         #expect(await P.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the SIGKILL")
+    }
+
+    /// #452: a hook killed by its timeout can still exit 0 — through its trap, as here, or when
+    /// the group SIGKILL ends its child an instant before the shell. Read by status alone, that
+    /// was a proceed, and a `BeforeTool` hook that would have blocked let the tool through.
+    @Test("a gating hook that exits 0 when its timeout kills it does not let the tool through")
+    func killedHookDoesNotProceed() async throws {
+        let nap = P.marker()
+        defer { P.killAll(nap) }
+        let (m, url) = try manager(#"trap 'echo "{\"x\":\"y\"}"; exit 0' TERM; sleep \#(nap)"#, timeout: 1)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let decision = await m.fireBeforeTool(toolName: "t", args: [:])
+        guard case .block(let reason) = decision else { Issue.record("a timed-out hook let the tool through: \(decision)"); return }
+        #expect(reason == "Hook timed out after 1 seconds")
+        #expect(await P.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the timeout")
+    }
+
+    /// #452: an `AfterTool` hook may be redacting the result on its way to the provider. One its
+    /// timeout killed blocks rather than letting the unredacted result through.
+    @Test("an AfterTool hook that exits 0 when its timeout kills it blocks the result")
+    func killedAfterToolHookBlocks() async throws {
+        let nap = P.marker()
+        defer { P.killAll(nap) }
+        let (m, url) = try manager(#"trap 'echo "{\"result\":\"rewritten\"}"; exit 0' TERM; sleep \#(nap)"#,
+                                   timeout: 1, event: "AfterTool")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let decision = await m.fireAfterTool(toolName: "t", result: "SECRET-unredacted")
+        guard case .block(let reason) = decision else { Issue.record("a timed-out AfterTool hook did not block: \(decision)"); return }
+        #expect(reason == "Hook timed out after 1 seconds")
+        #expect(await P.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the timeout")
+    }
+
+    @Test("a timed-out hook on a warn-only event warns, and fireEvent keeps the original payload")
+    func killedWarnOnlyHookKeepsPayload() async throws {
+        let nap = P.marker()
+        defer { P.killAll(nap) }
+        let (m, url) = try manager(#"trap 'echo "{\"output\":\"rewritten\"}"; exit 0' TERM; sleep \#(nap)"#,
+                                   timeout: 1, event: "AfterAgent", matcher: "AfterAgent")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let decision = await m.fireAfterAgent(output: "original")
+        guard case .proceed(let data?) = decision else { Issue.record("expected the turn to go on: \(decision)"); return }
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: String])
+        #expect(json["output"] == "original")
     }
 
     @Test("a backgrounded grandchild holding the pipe does not hang the hook")
@@ -94,20 +138,31 @@ struct HookManagerProcessGroupTests {
         #expect(String(data: data, encoding: .utf8) == "{\"a\":\"b\"}\n")
     }
 
-    @Test("a timed-out hook warns that it timed out")
-    func timedOutWarning() {
-        let killed = ProcessGroupRunner.Output(stdout: Data(), stderr: Data(), status: 128 + SIGKILL, timedOut: true)
-        guard case .warning(let message) = HookManager.decision(for: .success(killed), timeoutSeconds: 7) else {
-            Issue.record("expected warning"); return
+    @Test("a timed-out hook blocks, or warns on a warn-only event, whatever its status",
+          arguments: [128 + SIGKILL, 0, 2, 1])
+    func timedOutDecision(status: Int32) {
+        let killed = ProcessGroupRunner.Output(stdout: Data("{}".utf8), stderr: Data(), status: status,
+                                               timedOut: true, killed: true)
+        guard case .block(let reason) = HookManager.decision(for: .success(killed), timeoutSeconds: 7, gating: true) else {
+            Issue.record("expected block for status \(status)"); return
+        }
+        #expect(reason == "Hook timed out after 7 seconds")
+        guard case .warning(let message) = HookManager.decision(for: .success(killed), timeoutSeconds: 7, gating: false) else {
+            Issue.record("expected warning for status \(status)"); return
         }
         #expect(message == "Hook timed out after 7 seconds")
+    }
+
+    @Test("only events whose decision nothing acts on are warn-only; any other fails closed")
+    func warnOnlyEvents() {
+        #expect(HookManager.warnOnlyEvents == ["Notification", "SessionStart", "AfterAgent"])
     }
 
     @Test("a signal is not an exit code: a hook killed by SIGINT warns rather than blocks")
     func signalIsNotExitTwo() {
         // `Process.terminationStatus` reported the signal number, so SIGINT (2) read as a block.
         let killed = ProcessGroupRunner.Output(stdout: Data(), stderr: Data(), status: 128 + SIGINT)
-        guard case .warning = HookManager.decision(for: .success(killed), timeoutSeconds: 60) else {
+        guard case .warning = HookManager.decision(for: .success(killed), timeoutSeconds: 60, gating: true) else {
             Issue.record("expected warning"); return
         }
     }
@@ -154,6 +209,20 @@ struct PluginAuthRunnerProcessGroupTests {
         #expect(await P.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the SIGKILL")
     }
 
+    /// #452: the test above flaked with `signedIn` true. Group SIGKILL is not atomic: `sleep` can
+    /// die first, and the shell runs `true` and exits 0 before its own SIGKILL lands (1 in 4800
+    /// under load, every time with a 5 ms gap between the two). That status is no answer from a
+    /// check the timeout killed; this shell gives the same 0 on every run, through its trap.
+    @Test("a check that exits 0 when its timeout kills it is not signed in")
+    func killedCheckIsNotSignedIn() async {
+        let nap = P.marker()
+        defer { P.killAll(nap) }
+        let status = await PluginAuthRunner.check(auth("trap 'exit 0' TERM; sleep \(nap)"), config: [:],
+                                                  approve: allow, timeoutSeconds: 1)
+        #expect(!status.signedIn, "a timed-out check read as signed in: \(status)")
+        #expect(await P.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the timeout")
+    }
+
     @Test("a backgrounded grandchild holding the pipe does not hang the check")
     func backgroundedGrandchild() async {
         let nap = P.marker()
@@ -197,13 +266,15 @@ struct PluginAuthRunnerProcessGroupTests {
 @MainActor
 @Suite("Cancelled turn runs no gated tool", .timeLimit(.minutes(1)))
 struct CancelledTurnHookTests {
-    private func engine(hookCommand: String?) throws -> (AppState, IrisEngine, UUID, URL) {
+    private func engine(hookCommand: String?, event: String = "BeforeTool", matcher: String = "write_file",
+                        timeout: Int? = nil) throws -> (AppState, IrisEngine, UUID, URL) {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-cancel-hook-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var hooks = HookManager()
         if let hookCommand {
-            let config: [String: Any] = ["hooks": ["BeforeTool": [["matcher": "write_file",
-                                         "hooks": [["type": "command", "command": hookCommand]]]]]]
+            var hook: [String: Any] = ["type": "command", "command": hookCommand]
+            if let timeout { hook["timeout"] = timeout }
+            let config: [String: Any] = ["hooks": [event: [["matcher": matcher, "hooks": [hook]]]]]
             let url = dir.appendingPathComponent("settings.json")
             try JSONSerialization.data(withJSONObject: config).write(to: url)
             hooks.configPathOverride = url.path
@@ -222,6 +293,23 @@ struct CancelledTurnHookTests {
 
     private func write(_ target: URL, in dir: URL) -> BlockedCall {
         BlockedCall(toolName: "write_file", args: ["path": .string(target.path), "content": .string("x")], cwd: dir.path)
+    }
+
+    /// #452: a hung redaction hook fails closed. The tool's result is replaced by the blocked
+    /// message, so the unredacted content never becomes the tool response the model reads.
+    @Test("a timed-out AfterTool hook replaces the result, so the unredacted output never comes back")
+    func timedOutAfterToolHookRedacts() async throws {
+        let nap = RunCommandProcessGroupTests.marker()
+        defer { RunCommandProcessGroupTests.killAll(nap) }
+        let (_, engine, id, dir) = try engine(hookCommand: "trap 'exit 0' TERM; sleep \(nap)",
+                                              event: "AfterTool", matcher: "read_file", timeout: 1)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let secret = dir.appendingPathComponent("secret.txt")
+        try "SECRET-\(UUID().uuidString)".write(to: secret, atomically: true, encoding: .utf8)
+        let result = await engine.executeApprovedCall(
+            BlockedCall(toolName: "read_file", args: ["path": .string(secret.path)], cwd: dir.path), conversationId: id)
+        #expect(result == "System Hook blocked result: Hook timed out after 1 seconds", "\(result)")
+        #expect(!result.contains("SECRET-"), "the unredacted result came back")
     }
 
     @Test("the harness's hook runs on the host and the write lands when nothing is cancelled")
@@ -274,5 +362,34 @@ struct CancelledTurnHookTests {
         let result = await task.value
         #expect(result == IrisEngine.cancelledToolResult("write_file"))
         #expect(!FileManager.default.fileExists(atPath: target.path))
+    }
+}
+
+/// #452 review: the warn-only list was pinned only as a constant. This drives a real turn: a
+/// `PreCompress` hook may be redacting the history the provider is about to receive, so one its
+/// timeout killed must stop the turn before any model call, not send the unredacted history.
+@MainActor
+@Suite("Timed-out PreCompress hook sends nothing", .timeLimit(.minutes(1)))
+struct TimedOutPreCompressTests {
+    @Test("a PreCompress hook that exits 0 when its timeout kills it stops the turn before any model call")
+    func timedOutPreCompressMakesNoModelCall() async throws {
+        let nap = RunCommandProcessGroupTests.marker()
+        defer { RunCommandProcessGroupTests.killAll(nap) }
+        let dir = try ThinkingFixtures.tempDirectory("precompress-timeout")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // The trap prints the history it was given, so a warn that kept going would still have
+        // something to send; the hook's verdict never arrives either way.
+        let hook: [String: Any] = ["type": "command", "timeout": 1,
+                                   "command": "trap 'cat; exit 0' TERM; sleep \(nap)"]
+        let settings = dir.appendingPathComponent("settings.json")
+        try JSONSerialization.data(withJSONObject: ["hooks": ["PreCompress": [["matcher": "PreCompress", "hooks": [hook]]]]])
+            .write(to: settings)
+        var hooks = HookManager()
+        hooks.configPathOverride = settings.path
+
+        let h = try ThinkingHarness.make([ThinkingFixtures.reply(1, toolCall: false)], hooks: hooks)
+        await h.run("SECRET-\(nap) needs redacting")
+        #expect(h.client.requests.isEmpty, "the turn sent \(h.client.requests.count) request(s) past a timed-out PreCompress hook")
+        #expect(await RunCommandProcessGroupTests.gone("sleep \(nap)", within: 2), "sleep \(nap) outlived the timeout")
     }
 }
