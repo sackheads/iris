@@ -129,7 +129,7 @@ Each decision gives its default and the reason for it. A reviewer should weigh t
    - *Cost if wrong:* the owner re-runs `on` to get a URL again.
 11. **Only `/jobs url` writes the flag and token, and any change to what a job does clears both.**
    - Neither column is in `upsert`'s insert or `ON CONFLICT` list. A dedicated `setURLTrigger(jobId:tokenHash:)` `UPDATE` writes them, so a stale `Job` copy written back by the scheduler or a tool cannot set them.
-   - `upsert` compares the stored prompt, profile and grant with the incoming ones, as it already does for the gate (`JobLedger.swift:105-112`). When any of them differs, it clears the flag and the digest in the same transaction.
+   - `upsert` compares the stored prompt, profile and policy with the incoming ones, as it already does for the gate (`JobLedger.swift:105-112`). The policy comparison covers the whole `JobPolicy`, which holds the grant and the budget fields. A re-schedule replaces the policy, so without it the model could raise a URL-enabled job's budget and keep the opt-in. When any of them differs, `upsert` clears the flag and the digest in the same transaction.
    - That one rule covers both model rewrite paths, `schedule_job`'s re-schedule and `register_directory_watcher`'s update, as well as any later `/jobs` verb. Delete and recreate gives a new id, which starts cleared.
    - The writer's result says so, and so does a line in Iris: "URL trigger for pr-sweep turned off: the job was changed".
    - `/jobs reschedule` changes only the trigger, so it keeps both.
@@ -200,7 +200,7 @@ Each decision gives its default and the reason for it. A reviewer should weigh t
 - **`RunLogView`** (new) over `runLog(...)`.
 - **Ledger:**
   - migration `v19_job_url_trigger`: a nullable `urlTrigger INTEGER` (NULL means false) and a nullable, unique `urlTokenHash TEXT`;
-  - `setURLTrigger(jobId:tokenHash:)`, `job(urlTokenHash:)`, and the clear in `upsert` on a prompt, profile or grant change;
+  - `setURLTrigger(jobId:tokenHash:)`, `job(urlTokenHash:)`, and the clear in `upsert` on a prompt, profile or policy change;
   - `urlFires(jobId:since:)` for decision 13;
   - the read in `job(from:)`;
   - `decodeIfPresent(...) ?? false` in `Job.init(from:)` (invariant 1);
@@ -254,7 +254,8 @@ Dated specs are history and are not edited.
   - a pre-D6 job row loads `urlTrigger == false` and no digest;
   - `on` returns a URL whose token hashes to the stored digest; a second `on` rotates it; `off` clears it;
   - the token appears in no `list_jobs`, `/jobs`, card, `get_job_run` or system-line output;
-  - `upsert` of a stale copy does not change the flag; a prompt, profile or grant change by `schedule_job`'s re-schedule or a `register_directory_watcher` update clears it and says so; `/jobs reschedule` keeps it;
+  - the `on` reply's token never reaches the model: it is absent from the conversation's model history, from an FTS search for "run-job", and from a `read_conversation` page. This holds today by construction: the reply is a `.command` message (`AppState.swift:2140-2142`), outside the history and outside `indexedRoles` (`ConversationStore.swift:594`). The test locks it in;
+  - `upsert` of a stale copy does not change the flag; a prompt, profile or policy change (a grant, a budget field) by `schedule_job`'s re-schedule or a `register_directory_watcher` update clears it and says so; `/jobs reschedule` keeps it;
   - `/jobs url` parsing, including a name that ends in "on".
 - `runLog`: paging and filters, the inclusions, Acknowledge stamps `acknowledgedAt`, and the pruned-transcript state.
 - `ledgerAttention`:
