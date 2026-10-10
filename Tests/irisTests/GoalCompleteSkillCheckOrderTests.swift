@@ -116,4 +116,100 @@ struct GoalCompleteSkillCheckOrderTests {
         #expect(!engine.goalLoopIsLive(for: id))
         #expect(client.requests.count == 1)
     }
+
+    /// Waits, bounded, until the conversation's goal loop has nothing running or pending.
+    private func settle(_ engine: IrisEngine, _ id: UUID, within seconds: Double = 20) async throws {
+        let deadline = Date().addingTimeInterval(seconds)
+        while engine.goalLoopIsLive(for: id), Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(!engine.goalLoopIsLive(for: id), "the conversation's follow-up turns never settled")
+    }
+
+    @Test("an unattended run never schedules the skill check")
+    func unattendedRunSchedulesNoSkillCheck() async throws {
+        let app = AppState()
+        let id = UUID()
+        app.createNewConversation(id: id, isBackground: true)
+        app.setGoal(for: id, goal: "do the thing")
+        let call = FunctionCall(name: "goal_complete", args: ["summary": .string("done")], id: Self.callId)
+        let client = RecordingClient([reply(Part(functionCall: call)), reply(Part(text: "late"))])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0,
+                                repromptDelay: 0)
+        await engine.processInput("run", source: "job:test", conversationId: id)
+        #expect(!engine.goalLoopIsLive(for: id), "a job run's follow-up would outlive the run")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(client.requests.count == 1)
+        #expect(app.conversations.first { $0.id == id }?.activeGoal == nil, "the goal still completed")
+    }
+
+    /// Holds request `gated` until released, so a turn can be kept in flight on purpose.
+    private final class GatedClient: LLMClientProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+        private var recorded: [GeminiRequest] = []
+        private var open = false
+        private let script: [GeminiResponse]
+        private let gated: Int
+        init(_ script: [GeminiResponse], gated: Int) { self.script = script; self.gated = gated }
+        var requests: [GeminiRequest] { lock.withLock { recorded } }
+        func release() { lock.withLock { open = true } }
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            let n = lock.withLock { recorded.append(request); return recorded.count }
+            if n == gated {
+                let deadline = Date().addingTimeInterval(10)
+                while !lock.withLock({ open }), Date() < deadline {
+                    try await Task.sleep(nanoseconds: 10_000_000)
+                }
+            }
+            return script[min(n - 1, script.count - 1)]
+        }
+    }
+
+    @Test("a message typed before the check starts defers the check until after that turn")
+    func userTurnInTheGapDefersTheSkillCheck() async throws {
+        let (app, id) = goalApp()
+        let call = FunctionCall(name: "goal_complete", args: ["summary": .string("done")], id: Self.callId)
+        let client = GatedClient([reply(Part(functionCall: call)), reply(Part(text: "hello back")),
+                                  reply(Part(text: "Nothing reusable to save."))], gated: 2)
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0,
+                                repromptDelay: 0.2)
+        await engine.processInput("go", source: "UI", conversationId: id)
+        #expect(engine.goalLoopIsLive(for: id), "the skill check should be waiting out its delay")
+
+        // The user's turn starts inside the delay and is held well past it.
+        let userTurn = Task { await engine.processInput("hello", source: "UI", conversationId: id) }
+        try await Task.sleep(nanoseconds: 700_000_000)
+        #expect(client.requests.count == 2, "the skill check ran beside the user's turn")
+        client.release()
+        try await value(of: userTurn)
+        try await settle(engine, id)
+
+        let requests = client.requests
+        try #require(requests.count == 3, "the deferred skill check should run after the user's turn")
+        let texts = requests[2].contents.flatMap(\.parts).compactMap(\.text)
+        let hello = try #require(texts.firstIndex { $0.contains("hello") && !$0.contains("Skill Check") })
+        let check = try #require(texts.firstIndex { $0.contains("Goal Completion Skill Check") })
+        #expect(hello < check, "the check follows the user's turn")
+        #expect(texts.filter { $0.contains("Goal Completion Skill Check") }.count == 1, "it runs once")
+    }
+
+    @Test("Esc while the check waits out its delay cancels it")
+    func escapeInTheGapCancelsTheSkillCheck() async throws {
+        let (app, id) = goalApp()
+        let call = FunctionCall(name: "goal_complete", args: ["summary": .string("done")], id: Self.callId)
+        let client = RecordingClient([reply(Part(functionCall: call)), reply(Part(text: "late"))])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client,
+                                retryDelays: [], protectionEnabled: false, sessionPeerCount: 0,
+                                repromptDelay: 30)
+        app.installEngine(engine)
+        app.selectedConversationId = id
+        await engine.processInput("go", source: "UI", conversationId: id)
+        #expect(app.hasInterruptibleWork(in: id), "Esc must have something to reach")
+        app.interruptActiveConversation()
+        try await settle(engine, id, within: 5)
+        #expect(client.requests.count == 1)
+        #expect(app.conversations.first { $0.id == id }?.messages.last?.content == "Interrupted.")
+    }
 }
