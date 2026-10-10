@@ -1063,7 +1063,7 @@ class AppState {
         self.engine = engine
     }
 
-    private var engine: IrisEngine!
+    private(set) var engine: IrisEngine!
     /// Durable conversation persistence (#163). Injected so tests get an in-memory database.
     let store: ConversationStore
     /// Rows `loadConversations()` could not decode on the most recent load (#163). Internal for
@@ -4045,50 +4045,7 @@ class AppState {
                     emitCommandOutput("No job named '\(name)'.", format: .markdown, to: convId)
                     return
                 }
-                // Admission drops a paused or disabled job without a word, and both are states the
-                // user has to undo before a hand-started fire can do anything. Saying so here —
-                // before anything is started — is the difference between a command that did
-                // nothing and a command that looks like it worked.
-                guard job.pausedReason == nil else {
-                    emitCommandOutput("'\(job.name)' is paused (\(job.pausedReason ?? "")); `/jobs resume \(job.name)` first.",
-                                      format: .markdown, to: convId)
-                    return
-                }
-                guard job.enabled else {
-                    emitCommandOutput("'\(job.name)' is disabled.", format: .markdown, to: convId)
-                    return
-                }
-                // Said before anything is attempted, because admission only answers when the fire
-                // is over — and a run can take minutes. Silence in between reads as a command that
-                // did nothing.
-                emitCommandOutput("Starting **\(job.name)** …", format: .markdown, to: convId)
-                // Through `fire`, not `run`: a hand-started fire meets the same overlap, breaker
-                // and budget checks a scheduled one does (§4) — and what it says is what admission
-                // decided, reported when the fire is over rather than promised before it starts.
-                let engine = self.engine
-                Task { [weak self] in
-                    guard let runner = await engine?.jobRunner() else {
-                        // No engine means no runner and no turn: the app has not finished wiring
-                        // itself up (or is shutting down). Saying so beats the line above being
-                        // the last word on a fire that never started.
-                        self?.emitCommandOutput("Jobs are not available yet.", format: .markdown, to: convId)
-                        return
-                    }
-                    let admission = await runner.fire(job: job, origin: .manual)
-                    guard let self else { return }
-                    guard let admission else {
-                        self.emitCommandOutput("'\(job.name)' is no longer in the jobs table.",
-                                               format: .markdown, to: convId)
-                        return
-                    }
-                    if let refusal = JobRunner.refusalText(admission) {
-                        self.emitCommandOutput("**\(job.name)** was not started: \(refusal).",
-                                               format: .markdown, to: convId)
-                    } else {
-                        self.emitCommandOutput("Fired **\(job.name)**; the result arrives as a card.",
-                                               format: .markdown, to: convId)
-                    }
-                }
+                runJobByHand(job: job, origin: .manual, announceTo: convId)
             } catch {
                 emitCommandOutput("Could not run that job: \(error).", format: .markdown, to: convId)
             }

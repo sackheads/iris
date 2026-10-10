@@ -2004,6 +2004,9 @@ indirect enum FireOrigin: Equatable, Sendable {
     case watcher(paths: [String])
     /// `/jobs run`, or anything else a person started by hand.
     case manual
+    /// An `iris://run-job/<token>` link (D6 decision 12). Admitted like `.manual`: it skips the
+    /// gate, which only `.cadence` meets, and meets overlap and the budgets.
+    case url
     /// A fire the `queue` policy held while the previous run finished, standing in for the fire
     /// that was actually held.
     case queued(from: FireOrigin)
@@ -2017,6 +2020,7 @@ indirect enum FireOrigin: Equatable, Sendable {
         case .cadence(let kind): return kind
         case .watcher: return Trigger.fsEventKind
         case .manual: return "manual"
+        case .url: return JobLedger.urlTriggerKind
         case .queued: return "queued"
         }
     }
