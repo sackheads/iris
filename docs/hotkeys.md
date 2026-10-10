@@ -7,7 +7,7 @@ By default, the shortcut to toggle the main Iris Chat window is **`Cmd + Shift +
 ## How It Works
 *   **Active Overlays:** When you press the hotkey, Iris checks whether the chat window is the one in front: Iris is the active app and the chat window has focus.
 *   **Show:** If the chat window is hidden, minimized, behind other applications, or behind another Iris window (Diagnostics, say), the hotkey brings it to the front. If you closed it, the hotkey opens it again.
-*   **Hide:** If the chat window is already in front, the hotkey orders it out (hides it), returning focus to whatever you were previously working on.
+*   **Hide:** If the chat window is already in front, the hotkey orders it out (hides it). Iris stays the active app: another open Iris window, if there is one, comes forward, and focus does not go back to the app you were using before. Click that app or use `Cmd + Tab` to return to it.
 
 ## Customization
 You can easily customize the hotkey at any time:

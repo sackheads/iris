@@ -1023,9 +1023,25 @@ actor IrisEngine {
             }
         }
 
-        // Resume an in-flight goal that was interrupted by an app restart/crash.
-        // The goal state (activeGoal, goalContract, history) persists; we re-kick
-        // the reprompt loop so the agent picks up where it left off.
+        await resumeInterruptedGoal()
+    }
+
+    /// Whether this engine has already looked for a goal a restart interrupted. Not persisted:
+    /// an interruption is something only a process's first `start()` can find.
+    private var checkedForInterruptedGoal = false
+
+    /// Resumes an in-flight goal that was interrupted by an app restart or crash: the goal state
+    /// (activeGoal, goalContract, history) persists, and this re-kicks the reprompt loop so the
+    /// agent picks up where it left off.
+    ///
+    /// Once per engine. `ChatView`'s `.onAppear` calls `start()` every time the window opens, and
+    /// by the second call any goal still running is live, not interrupted: resuming it again
+    /// posted a second "interrupted by restart" line and could run a `processInput` beside the
+    /// live turn. The flag is set before the first `await`, so two overlapping starts cannot
+    /// both pass it.
+    func resumeInterruptedGoal() async {
+        guard !checkedForInterruptedGoal else { return }
+        checkedForInterruptedGoal = true
         let localState = state
         let localConversationId = await MainActor.run { localState?.selectedConversationId }
         if let convId = localConversationId {
