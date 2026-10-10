@@ -793,6 +793,25 @@ actor IrisEngine {
         value.count > cap ? String(value.prefix(cap)) + "…" : value
     }
 
+    /// One model-supplied skill object, bounded at the write (#246's rule). Nil when it lacks an
+    /// id or name — a skill a peer cannot name is not one it can ask for.
+    nonisolated static func boundedSkill(_ value: JSONValue) -> AgentSkill? {
+        guard case .object(let o) = value,
+              case .string(let id)? = o["id"], case .string(let name)? = o["name"],
+              !id.trimmingCharacters(in: .whitespaces).isEmpty,
+              !name.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        func strings(_ key: String, max: Int, cap: Int) -> [String] {
+            guard case .array(let a)? = o[key] else { return [] }
+            return a.prefix(max).compactMap { if case .string(let s) = $0 { return capCardField(s, cap: cap) }; return nil }
+        }
+        let description: String
+        if case .string(let d)? = o["description"] { description = capCardField(d, cap: cardDescriptionCap) } else { description = "" }
+        return AgentSkill(id: capCardField(id, cap: skillIdCap), name: capCardField(name, cap: cardNameCap),
+                          description: description,
+                          tags: strings("tags", max: skillTagsMax, cap: skillTagCap),
+                          examples: strings("examples", max: skillExamplesMax, cap: skillExampleCap))
+    }
+
     /// `capCardField`, bounded in UTF-8 bytes rather than `Character`s, ellipsis included. A
     /// `Character` has no size bound (one letter plus 50,000 combining marks is one), so a
     /// Character cap on text another party controls is no cap (#187 review). Cuts on a scalar
@@ -912,6 +931,13 @@ actor IrisEngine {
     nonisolated static let cardNameCap = 64
     nonisolated static let cardDescriptionCap = 200
     nonisolated static let cardWorkspaceCap = 160
+    nonisolated static let cardLaneCap = 64
+    nonisolated static let skillsMax = 5
+    nonisolated static let skillIdCap = 32
+    nonisolated static let skillTagsMax = 5
+    nonisolated static let skillTagCap = 24
+    nonisolated static let skillExamplesMax = 3
+    nonisolated static let skillExampleCap = 160
 
     /// The sender's name as the framing states it: flattened and capped so it cannot forge a
     /// newline-borne fake `System Event [...]:` block, or an unterminated quote, into trusted prose.
@@ -2101,13 +2127,21 @@ actor IrisEngine {
             ))
             toolsList.append(FunctionDeclaration(
                 name: "set_session_card",
-                description: "Describe this session to its peers: a short stable name and what you are working on right now. Update it when the work changes, so peers deciding whether to involve you are reading something current. Replies with what peers now see; your own card also appears in your turn context.",
+                description: "Describe this session to its peers: a short stable name, unique among active sessions, and what you are working on right now. Update it when the work changes. A worker may add its topical lane. A session holding a role (assigned by the user) may advertise skills: what it will do on request, with example requests. Omitted lane or skills keep their current values; an empty one clears it. Replies with what peers now see.",
                 parameters: Schema(type: "OBJECT", properties: [
                     // Interpolated, not spelled out: an agent-facing string naming a cap as a
                     // literal is a second copy of it, and invariant 9's whole subject is the copy
                     // nobody updates.
-                    "name": Schema(type: "STRING", description: "Short handle, 1-3 words. Truncated past \(Self.cardNameCap) characters."),
-                    "description": Schema(type: "STRING", description: "One line: what this session is doing now. Truncated past \(Self.cardDescriptionCap) characters.")
+                    "name": Schema(type: "STRING", description: "Short handle, 1-3 words, unique among active sessions. Truncated past \(Self.cardNameCap) characters."),
+                    "description": Schema(type: "STRING", description: "One line: what this session is doing now. Truncated past \(Self.cardDescriptionCap) characters."),
+                    "lane": Schema(type: "STRING", description: "Optional topical lane, e.g. \"swift UI\". Truncated past \(Self.cardLaneCap) characters."),
+                    "skills": Schema(type: "ARRAY", description: "Role-holders only. At most \(Self.skillsMax).", items: Schema(type: "OBJECT", properties: [
+                        "id": Schema(type: "STRING", description: "Short kebab-case id."),
+                        "name": Schema(type: "STRING", description: "Human-readable name."),
+                        "description": Schema(type: "STRING", description: "What it does."),
+                        "tags": Schema(type: "ARRAY", description: "Keywords.", items: Schema(type: "STRING")),
+                        "examples": Schema(type: "ARRAY", description: "Example requests, at most \(Self.skillExamplesMax).", items: Schema(type: "STRING"))
+                    ], required: ["id", "name", "description"]))
                 ], required: ["name", "description"])
             ))
         }
@@ -3839,15 +3873,46 @@ actor IrisEngine {
             // leave them green while proving nothing about the render path.
             let boundedName = Self.capCardField(name, cap: Self.cardNameCap)
             let boundedDescription = Self.capCardField(description, cap: Self.cardDescriptionCap)
+            let (existing, role, taken) = await MainActor.run { () -> (SessionCard?, String?, [String]) in
+                guard let s = localState else { return (nil, nil, []) }
+                let me = s.conversations.first { $0.id == conversationId }
+                let clash = SessionRoles.sessions(named: boundedName, in: s.conversations, excluding: conversationId)
+                let names = clash.isEmpty ? [] : s.conversations
+                    .filter { $0.id != conversationId && !$0.isArchived && $0.isUserFacing }
+                    .compactMap { $0.sessionCard?.name }.prefix(20).map { $0 }
+                return (me?.sessionCard, me?.role, names)
+            }
+            guard taken.isEmpty else {
+                result = "Name taken — another active session uses it. Names in use: "
+                    + taken.map { "\"\(Self.flattenCardField($0, cap: Self.cardNameCap))\"" }.joined(separator: ", ")
+                    + ". Pick a different name."
+                return result
+            }
+            var lane = existing?.lane
+            if let raw = functionCall.args["lane"]?.stringValue {
+                let trimmed = raw.trimmingCharacters(in: .whitespaces)
+                lane = trimmed.isEmpty ? nil : Self.capCardField(trimmed, cap: Self.cardLaneCap)
+            }
+            var skills = existing?.skills ?? []
+            if case .array(let items)? = functionCall.args["skills"] {
+                guard role != nil || items.isEmpty else {
+                    result = "Skills are for sessions holding a role, which the user assigns. Not stored; set name, description and lane only."
+                    return result
+                }
+                skills = items.prefix(Self.skillsMax).compactMap(Self.boundedSkill)
+            }
             await MainActor.run {
                 localState?.setSessionCard(for: conversationId,
-                                           SessionCard(name: boundedName, description: boundedDescription))
+                                           SessionCard(name: boundedName, description: boundedDescription,
+                                                       lane: lane, skills: skills))
             }
             // Echo what was stored, as the listing will render it (#418), and say so when it was
             // cut: `list_sessions` shows a session its peers, never its own row, so this reply is
             // where a session learns what peers actually read.
             let truncated = boundedName != name || boundedDescription != description
-            let shown = "Peers see: name: \"\(Self.flattenCardField(boundedName, cap: Self.cardNameCap))\" | doing: \"\(Self.flattenCardField(boundedDescription, cap: Self.cardDescriptionCap))\""
+            var shown = "Peers see: name: \"\(Self.flattenCardField(boundedName, cap: Self.cardNameCap))\" | doing: \"\(Self.flattenCardField(boundedDescription, cap: Self.cardDescriptionCap))\""
+            if let lane { shown += " | lane: \"\(Self.flattenCardField(lane, cap: Self.cardLaneCap))\"" }
+            if !skills.isEmpty { shown += " | skills: \(skills.map(\.id).joined(separator: ", "))" }
             result = (truncated
                 ? "Card updated — over-long fields were truncated to what the peer listing shows. "
                 : "Card updated. ") + shown

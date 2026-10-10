@@ -28,6 +28,15 @@ enum SessionRoles {
         !c.isArchived && !c.isPinned && c.isUserFacing
     }
 
+    /// #469 §4.2: names are identifiers among active sessions, compared case-insensitively.
+    static func sessions(named name: String, in conversations: [Conversation], excluding: UUID?) -> [UUID] {
+        let key = name.trimmingCharacters(in: .whitespaces).lowercased()
+        return conversations.filter {
+            $0.id != excluding && !$0.isArchived && $0.isUserFacing
+                && $0.sessionCard?.name.trimmingCharacters(in: .whitespaces).lowercased() == key
+        }.map(\.id)
+    }
+
     /// Restores the invariant after load: only a session that may hold a role has one, and each
     /// role has at most one holder — the most recently updated keeps it.
     static func normalize(_ conversations: inout [Conversation]) {
