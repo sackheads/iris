@@ -794,22 +794,32 @@ actor IrisEngine {
     }
 
     /// One model-supplied skill object, bounded at the write (#246's rule). Nil when it lacks an
-    /// id or name — a skill a peer cannot name is not one it can ask for.
-    nonisolated static func boundedSkill(_ value: JSONValue) -> AgentSkill? {
+    /// id or name — a skill a peer cannot name is not one it can ask for. The second element is
+    /// true when any field (or the `tags`/`examples` array itself) had to be cut to fit its cap,
+    /// so the caller can fold it into the same "truncated" banner as name/description/lane.
+    nonisolated static func boundedSkill(_ value: JSONValue) -> (AgentSkill, Bool)? {
         guard case .object(let o) = value,
               case .string(let id)? = o["id"], case .string(let name)? = o["name"],
               !id.trimmingCharacters(in: .whitespaces).isEmpty,
               !name.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        var truncated = false
+        func capped(_ s: String, cap: Int) -> String {
+            let c = capCardField(s, cap: cap)
+            if c != s { truncated = true }
+            return c
+        }
         func strings(_ key: String, max: Int, cap: Int) -> [String] {
             guard case .array(let a)? = o[key] else { return [] }
-            return a.prefix(max).compactMap { if case .string(let s) = $0 { return capCardField(s, cap: cap) }; return nil }
+            if a.count > max { truncated = true }
+            return a.prefix(max).compactMap { if case .string(let s) = $0 { return capped(s, cap: cap) }; return nil }
         }
         let description: String
-        if case .string(let d)? = o["description"] { description = capCardField(d, cap: cardDescriptionCap) } else { description = "" }
-        return AgentSkill(id: capCardField(id, cap: skillIdCap), name: capCardField(name, cap: cardNameCap),
+        if case .string(let d)? = o["description"] { description = capped(d, cap: cardDescriptionCap) } else { description = "" }
+        let skill = AgentSkill(id: capped(id, cap: skillIdCap), name: capped(name, cap: cardNameCap),
                           description: description,
                           tags: strings("tags", max: skillTagsMax, cap: skillTagCap),
                           examples: strings("examples", max: skillExamplesMax, cap: skillExampleCap))
+        return (skill, truncated)
     }
 
     /// `capCardField`, bounded in UTF-8 bytes rather than `Character`s, ellipsis included. A
@@ -3889,17 +3899,26 @@ actor IrisEngine {
                 return result
             }
             var lane = existing?.lane
+            var laneTruncated = false
             if let raw = functionCall.args["lane"]?.stringValue {
                 let trimmed = raw.trimmingCharacters(in: .whitespaces)
-                lane = trimmed.isEmpty ? nil : Self.capCardField(trimmed, cap: Self.cardLaneCap)
+                let capped = Self.capCardField(trimmed, cap: Self.cardLaneCap)
+                laneTruncated = !trimmed.isEmpty && capped != trimmed
+                lane = trimmed.isEmpty ? nil : capped
             }
             var skills = existing?.skills ?? []
+            var skillsTruncated = false
             if case .array(let items)? = functionCall.args["skills"] {
                 guard role != nil || items.isEmpty else {
                     result = "Skills are for sessions holding a role, which the user assigns. Not stored; set name, description and lane only."
                     return result
                 }
-                skills = items.prefix(Self.skillsMax).compactMap(Self.boundedSkill)
+                // Drop malformed items first, then cap the count — so up to `skillsMax` VALID
+                // skills survive even when an earlier item in the model's array was malformed,
+                // rather than a bad item at position 2 silently costing a good one at position 6.
+                let parsed = items.compactMap(Self.boundedSkill).prefix(Self.skillsMax)
+                skills = parsed.map(\.0)
+                skillsTruncated = parsed.contains { $0.1 }
             }
             await MainActor.run {
                 localState?.setSessionCard(for: conversationId,
@@ -3909,10 +3928,15 @@ actor IrisEngine {
             // Echo what was stored, as the listing will render it (#418), and say so when it was
             // cut: `list_sessions` shows a session its peers, never its own row, so this reply is
             // where a session learns what peers actually read.
-            let truncated = boundedName != name || boundedDescription != description
+            let truncated = boundedName != name || boundedDescription != description || laneTruncated || skillsTruncated
             var shown = "Peers see: name: \"\(Self.flattenCardField(boundedName, cap: Self.cardNameCap))\" | doing: \"\(Self.flattenCardField(boundedDescription, cap: Self.cardDescriptionCap))\""
             if let lane { shown += " | lane: \"\(Self.flattenCardField(lane, cap: Self.cardLaneCap))\"" }
-            if !skills.isEmpty { shown += " | skills: \(skills.map(\.id).joined(separator: ", "))" }
+            // Skill ids are the model's own text, same as name/description/lane — flattened here
+            // too, or a hostile id (newline, `|`, `"`) would forge a row or close the framing's
+            // quoting in this echo, same class of bug `flattenCardField`'s doc comment describes.
+            if !skills.isEmpty {
+                shown += " | skills: " + skills.map { Self.flattenCardField($0.id, cap: Self.skillIdCap) }.joined(separator: ", ")
+            }
             result = (truncated
                 ? "Card updated — over-long fields were truncated to what the peer listing shows. "
                 : "Card updated. ") + shown

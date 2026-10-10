@@ -42,8 +42,8 @@ struct SessionCardToolTests {
     @Test("an archived session's name is free")
     func archivedNameFree() async {
         let app = AppState(); app.conversations.removeAll()
-        let a = UUID(), b = UUID(), c = UUID()
-        for id in [a, b, c] { app.createNewConversation(id: id) }
+        let a = UUID(), b = UUID()
+        app.createNewConversation(id: a); app.createNewConversation(id: b)
         app.setSessionCard(for: b, SessionCard(name: "w", description: "x"))
         _ = app.archiveConversation(b)
         _ = await run(["name": .string("w"), "description": .string("y")], on: app, as: a)
@@ -73,6 +73,41 @@ struct SessionCardToolTests {
         #expect(card?.description == "new")
         #expect(card?.skills.count == IrisEngine.skillsMax)
         #expect(card?.lane == "github")
+    }
+
+    @Test("hostile skill-id/lane text is flattened in the echo, an over-long lane is stored truncated, and malformed/non-array skills are handled")
+    func hostileAndMalformedInput() async {
+        let app = AppState(); app.conversations.removeAll()
+        let a = UUID(); app.createNewConversation(id: a); app.createNewConversation(id: UUID())
+        _ = app.assignRole("pr-minder", to: a)
+
+        let hostileId = "id\n1|bad\"x"
+        let hostileLane = "lane\n1|bad\"x"
+        let hostileSkill: JSONValue = .object(["id": .string(hostileId), "name": .string("n"), "description": .string("d")])
+        let out = await run(["name": .string("n"), "description": .string("d"), "lane": .string(hostileLane),
+                             "skills": .array([hostileSkill])], on: app, as: a)
+        #expect(!out.contains("\n"), "no raw newline from the lane or skill id leaked into the echo")
+        #expect(!out.contains("1|bad"), "the raw pipe-bearing text must not survive flattening")
+        #expect(out.contains(IrisEngine.flattenCardField(hostileLane, cap: IrisEngine.cardLaneCap)))
+        #expect(out.contains(IrisEngine.flattenCardField(hostileId, cap: IrisEngine.skillIdCap)))
+
+        // A lane longer than the cap is stored truncated.
+        let longLane = String(repeating: "x", count: IrisEngine.cardLaneCap + 50)
+        _ = await run(["name": .string("n"), "description": .string("d"), "lane": .string(longLane)], on: app, as: a)
+        let lane = app.conversations.first { $0.id == a }?.sessionCard?.lane
+        #expect(lane?.count == IrisEngine.cardLaneCap + 1)
+        #expect(lane?.hasSuffix("\u{2026}") == true)
+
+        // A malformed skills item (a JSON string, not an object) is dropped; a valid sibling survives.
+        _ = await run(["name": .string("n"), "description": .string("d"),
+                       "skills": .array([.string("bogus"), skill("good")])], on: app, as: a)
+        let kept = app.conversations.first { $0.id == a }?.sessionCard?.skills
+        #expect(kept?.map(\.id) == ["good"])
+
+        // A `skills` argument that is not an array leaves the existing skills unchanged.
+        _ = await run(["name": .string("n"), "description": .string("d"), "skills": .string("nope")], on: app, as: a)
+        let unchanged = app.conversations.first { $0.id == a }?.sessionCard?.skills
+        #expect(unchanged?.map(\.id) == ["good"])
     }
 
     @Test("an empty skills list or empty lane clears them")
