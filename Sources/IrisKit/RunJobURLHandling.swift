@@ -26,9 +26,10 @@ extension AppState {
             token = parsed
         }
         // Looked up by digest: the raw token is never compared with anything stored.
+        let digest = URLTriggerToken.digest(token)
         let job: Job?
         do {
-            job = try store.ledger.job(urlTokenHash: URLTriggerToken.digest(token))
+            job = try store.ledger.job(urlTokenHash: digest)
         } catch {
             refuseURLFire(job: nil, reason: RunJobURL.ledgerUnreadableReason, to: iris)
             return .refused
@@ -40,6 +41,17 @@ extension AppState {
         if let reason = urlFireRefusal(for: job) {
             refuseURLFire(job: job, reason: reason, to: iris)
             return .refused
+        }
+        // A wait already under way is joined even if the holder has just gone: firing here too
+        // would make its re-check a second fire (plan note 10).
+        if pendingURLFires[job.id] != nil { return .deferred(job.id) }
+        if let holder = foreignStoreHolder {
+            if isProcessAlive(holder) {
+                deferURLFire(job, tokenHash: digest, holder: holder, to: iris)
+                return .deferred(job.id)
+            }
+            // Gone since launch: never asked about again, so a reused pid cannot hold fires back.
+            foreignStoreHolder = nil
         }
         guard fireByURL(job, to: iris) != nil else { return .refused }
         return .fired(job.id)
@@ -62,7 +74,8 @@ extension AppState {
         guard let rows = try? store.ledger.urlFires(jobId: job.id, since: windowStart, before: batch?.since) else {
             return RunJobURL.ledgerUnreadableReason
         }
-        let inBatch = batch?.dispatched.count ?? 0
+        // A fire waiting for a foreign holder is one more, however many links joined it.
+        let inBatch = (batch?.dispatched.count ?? 0) + (pendingURLFires[job.id] == nil ? 0 : 1)
         return rows + inBatch >= RunJobURL.maxFiresPerHour ? RunJobURL.overLimitReason : nil
     }
 
@@ -105,6 +118,62 @@ extension AppState {
         }
         batch.held = still
         urlFireBatches[job.id] = batch.isOutstanding ? batch : nil
+    }
+
+    /// Waits, visibly, for the foreign holder to finish (decision 14). One wait per job: a later
+    /// link that passed the limit joins it (plan note 10), with no second line and no second fire.
+    func deferURLFire(_ job: Job, tokenHash: String, holder: Int32, to iris: UUID) {
+        guard pendingURLFires[job.id] == nil else { return }
+        let lineId = UUID()
+        appendMessage(role: .system, content: RunJobURL.waitingLine(job.name, pid: holder), id: lineId, to: iris)
+        pendingURLFires[job.id] = PendingURLFire(jobId: job.id, jobName: job.name, tokenHash: tokenHash,
+                                                 holder: holder, since: urlClock(), lineId: lineId,
+                                                 conversationId: iris)
+        scheduleURLRecheck(job.id)
+    }
+
+    private func scheduleURLRecheck(_ jobId: UUID) {
+        urlDeferralTimer.schedule(URLDeferral.interval) { [weak self] in self?.recheckDeferredURLFire(jobId) }
+    }
+
+    /// One re-check of a waiting fire. When it comes due the job is read again and asked every
+    /// question a fresh link would be: deleted, trigger off or token rotated, paused, disabled,
+    /// or at its limit, while it waited. The wait's own count is dropped first, and `fireByURL`
+    /// counts the fire, so it is counted once.
+    func recheckDeferredURLFire(_ jobId: UUID) {
+        guard let pending = pendingURLFires[jobId] else { return }
+        switch URLDeferral.decide(holderAlive: isProcessAlive(pending.holder),
+                                  waited: urlClock().timeIntervalSince(pending.since)) {
+        case .wait:
+            scheduleURLRecheck(jobId)
+        case .giveUp:
+            pendingURLFires[jobId] = nil
+            updateMessageContent(id: pending.lineId, content: RunJobURL.gaveUpLine(pending.jobName, pid: pending.holder),
+                                 in: pending.conversationId, persist: true)
+        case .fire:
+            pendingURLFires[jobId] = nil
+            foreignStoreHolder = nil
+            let abandon = { (name: String, reason: String) in
+                self.updateMessageContent(id: pending.lineId, content: RunJobURL.waitAbandonedLine(name, reason: reason),
+                                          in: pending.conversationId, persist: true)
+            }
+            let job: Job?
+            do {
+                job = try store.ledger.job(id: jobId)
+            } catch {
+                return abandon(pending.jobName, RunJobURL.ledgerUnreadableReason)
+            }
+            guard let job else { return abandon(pending.jobName, RunJobURL.deletedWhileWaitingReason) }
+            if let reason = urlFireRefusal(for: job) { return abandon(job.name, reason) }
+            // The flag alone is not the link: a token rotated during the wait is a new link, and
+            // the one that was opened no longer names this job.
+            guard (try? store.ledger.job(urlTokenHash: pending.tokenHash))??.id == jobId else {
+                return abandon(job.name, RunJobURL.replacedWhileWaitingReason)
+            }
+            updateMessageContent(id: pending.lineId, content: RunJobURL.waitEndedLine(job.name, pid: pending.holder),
+                                 in: pending.conversationId, persist: true)
+            _ = fireByURL(job, to: pending.conversationId)
+        }
     }
 
     /// Says a refusal in Iris, coalesced (plan note 8): the first in an hour is a line, and each

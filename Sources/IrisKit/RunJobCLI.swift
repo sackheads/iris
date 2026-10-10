@@ -60,10 +60,16 @@ enum GUILock {
               let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0 else {
             return .unreadable
         }
-        // Signal 0 asks the kernel whether the process exists without sending anything. `EPERM`
-        // means it exists and belongs to somebody else — still alive, still holding the store.
-        if kill(pid, 0) == 0 { return .live(pid) }
-        return errno == ESRCH ? .dead : .live(pid)
+        return isAlive(pid) ? .live(pid) : .dead
+    }
+
+    /// Whether `pid` names a live process. Signal 0 asks the kernel without sending anything;
+    /// `EPERM` means it exists and belongs to somebody else, which is still alive. A pid of 0 or
+    /// below names a process group, never one process, so it is not alive here.
+    static func isAlive(_ pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        if kill(pid, 0) == 0 { return true }
+        return errno != ESRCH
     }
 
     /// What an exclusive claim came back with.

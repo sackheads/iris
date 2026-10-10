@@ -35,6 +35,23 @@ enum RunJobURL {
         }
     }
 
+    /// Decision 14's lines. Fixed text, the job's name and the holder's pid at most: never the
+    /// token or the link.
+    static func waitingLine(_ name: String, pid: Int32) -> String {
+        "Waiting for the other Iris process (pid \(pid)) to finish before firing \(name) from a URL."
+    }
+    static func waitEndedLine(_ name: String, pid: Int32) -> String {
+        "The other Iris process (pid \(pid)) finished; firing \(name) from the link that was waiting."
+    }
+    static func gaveUpLine(_ name: String, pid: Int32) -> String {
+        "Did not fire \(name) from a URL: the other Iris process (pid \(pid)) was still running after 10 minutes. Open the link again; try again after the other Iris process finishes."
+    }
+    static func waitAbandonedLine(_ name: String, reason: String) -> String {
+        "Did not fire \(name) from the link that was waiting: \(reason)."
+    }
+    static let deletedWhileWaitingReason = "it was deleted while it waited"
+    static let replacedWhileWaitingReason = "its URL trigger was turned off or replaced while it waited"
+
     static func url(token: String, identity: BuildIdentity) -> String {
         "\(identity.urlScheme)://\(host)/\(token)"
     }
@@ -126,4 +143,41 @@ struct URLFireBatch: Equatable, Sendable {
     var held: [Date] = []
 
     var isOutstanding: Bool { pending > 0 || !held.isEmpty }
+}
+
+/// D6 decision 14's wait for a foreign store holder. Pure.
+enum URLDeferral {
+    enum Step: Equatable, Sendable { case wait, fire, giveUp }
+
+    static let interval: TimeInterval = 5
+    static let deadline: TimeInterval = 600
+
+    /// A holder gone at the deadline still fires: the wait was for it, and it is over.
+    static func decide(holderAlive: Bool, waited: TimeInterval) -> Step {
+        if !holderAlive { return .fire }
+        return waited >= deadline ? .giveUp : .wait
+    }
+}
+
+/// How the re-check is scheduled: on a dispatch queue, never `Task.sleep` on the cooperative pool
+/// (the invariant 4 rule). A seam so a test can fire it by hand.
+struct URLDeferralTimer: Sendable {
+    let schedule: @MainActor @Sendable (TimeInterval, @escaping @MainActor @Sendable () -> Void) -> Void
+
+    static let dispatch = URLDeferralTimer { delay, body in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { MainActor.assumeIsolated { body() } }
+    }
+}
+
+/// A URL fire waiting for a foreign store holder to finish. One per job. It keeps the token's
+/// digest, never the token, so the wait's end can tell a rotated trigger from the one that was
+/// opened.
+struct PendingURLFire: Sendable {
+    let jobId: UUID
+    let jobName: String
+    let tokenHash: String
+    let holder: Int32
+    let since: Date
+    let lineId: UUID
+    let conversationId: UUID
 }
