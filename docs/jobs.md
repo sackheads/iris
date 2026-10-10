@@ -374,7 +374,11 @@ job runs with the same grant — the same mounts, network and working directory 
 with the approval left unspent, if a granted directory has since moved. The run's container ends
 with the run: closing a run's conversation now ends its sandbox session, where before it lingered
 until the idle reaper. A subagent's container ends with the subagent, however it ended, completed
-included, so a delegated subagent no longer keeps the grant's mounts open after it returns (#291).
+included, so a delegated subagent no longer keeps the grant's mounts open after it returns. And it
+ends with the run at the latest: closing a run stops every subagent still working under it, the
+ones they delegated to included, and closes their sandbox sessions with the run's own, so none
+holds the grant's mounts past the run (#291). Deleting a conversation does the same to the
+subagents under it, and denies any approval they still had queued.
 Ending is for good: a turn the deadline abandoned that calls `run_command` afterwards is refused
 ("this run has ended; no new sandbox session will be started for it") rather than given a fresh
 container that only the idle reaper would end, and the same holds for a subagent after it returns

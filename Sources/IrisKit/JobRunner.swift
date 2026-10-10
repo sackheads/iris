@@ -1683,7 +1683,16 @@ actor JobRunner {
         // The run's container goes with the run (§2): before this, a job's container stood until
         // the idle reaper or the next launch's sweep, holding its mounts open the whole time. A
         // close, not an end: the run's conversation never gets another container (#292).
-        await endSandboxSession(conversationId)
+        // Its delegates' containers hold the same grant mounts, so they go too (#291): every
+        // subagent and evaluator under the run, grandchildren included, stopped first so none is
+        // left mid-turn against a closed session.
+        var delegates: [UUID] = []
+        if let state {
+            delegates = await MainActor.run {
+                state.stopDelegates(under: conversationId, reason: SubagentManager.runEndedReason)
+            }
+        }
+        for id in [conversationId] + delegates { await endSandboxSession(id) }
     }
 
     private func deliver(_ card: EventCard, for job: Job) async {
