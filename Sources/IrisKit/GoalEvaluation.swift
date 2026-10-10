@@ -62,6 +62,7 @@ enum EvaluationStatus: String, Codable, Sendable, Equatable {
     case verifying   // grader running; verdicts not yet in
     case graded      // grader finished normally
     case failed      // grader errored or hit its iteration cap
+    case stopped     // grader stopped from outside before a verdict: its run closed, its parent was deleted or stopped (#464)
 }
 
 /// How a goal got past the gate (slice D1). nil on an evaluation recorded before D1, and on a

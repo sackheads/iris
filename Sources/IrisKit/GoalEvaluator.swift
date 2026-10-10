@@ -9,6 +9,37 @@ private final class EvaluationBox: @unchecked Sendable {
     func get() -> GoalEvaluation? { lock.withLock { value } }
 }
 
+/// How a grade in flight is stopped from outside (#464). The grading turn runs in a task of its
+/// own so a stop can cancel it without the caller's cancellation, and a stop that lands before the
+/// task exists keeps it from starting.
+private final class GradingControl: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stopped = false
+    private var task: Task<Void, Never>?
+
+    var isStopped: Bool { lock.withLock { stopped } }
+
+    /// Starts the grading turn unless a stop got here first. The task is created under the lock,
+    /// so a stop either sees it or prevents it.
+    func start(_ make: () -> Task<Void, Never>) -> Task<Void, Never>? {
+        lock.withLock {
+            guard !stopped else { return nil }
+            let t = make()
+            task = t
+            return t
+        }
+    }
+
+    /// True for the first caller only.
+    func stop() -> Task<Void, Never>?? {
+        lock.withLock {
+            guard !stopped else { return nil }
+            stopped = true
+            return .some(task)
+        }
+    }
+}
+
 final class GoalEvaluator: Sendable {
     static let shared = GoalEvaluator()
     private init() {}
@@ -40,6 +71,20 @@ final class GoalEvaluator: Sendable {
         let workspaceDir = Self.gradingDirectory(workspace, contract: contract)
 
         let evalId = UUID()
+        // Fresh engine, evaluator principal. It never sees the working transcript. Built before
+        // the registration below, which needs it to halt the loop.
+        let checks = contract.criteria.compactMap { $0.kind == .executable ? $0.check : nil }
+        let engine = IrisEngine(state: app, tier: .hard, principal: .evaluator, roleLabel: "evaluator", client: client, evaluatorChecks: checks, recentWrites: recentWrites)
+
+        // Halt the loop first, as a subagent's stop does: after its first turn the grader's live
+        // turn is a reprompt task, which cancelling the grading task does not reach.
+        let control = GradingControl()
+        let stop: @Sendable (String) -> Void = { _ in
+            guard let task = control.stop() else { return }
+            engine.haltGoalLoop(for: evalId)
+            task?.cancel()
+        }
+
         await MainActor.run {
             // Inherited from the work being graded: a grader run for an unattended run is itself
             // unattended, and must fail closed on anything gated rather than raise a dialog or
@@ -51,11 +96,15 @@ final class GoalEvaluator: Sendable {
             app.updateConversationTitle(id: evalId, title: "Evaluator")
             app.setWorkspace(for: evalId, path: workspaceDir)   // its run_command runs here
             app.registerSubagent(id: evalId, role: "evaluator", kind: .evaluator)
+            // Stoppable like any delegate (#464): the run drain, a walk of the delegation tree on
+            // a run's close or a parent's delete, and — grading a background subagent, which no
+            // cancellation of the parent's tasks reaches — the parent's Stop. In the same job as
+            // the link, so no stop can find the evaluator linked but not yet stoppable.
+            app.registerLiveSubagent(evalId, parent: originId,
+                                     background: app.isLiveBackgroundSubagent(originId),
+                                     kind: .evaluator, stop: stop)
         }
 
-        // Fresh engine, evaluator principal. It never sees the working transcript.
-        let checks = contract.criteria.compactMap { $0.kind == .executable ? $0.check : nil }
-        let engine = IrisEngine(state: app, tier: .hard, principal: .evaluator, roleLabel: "evaluator", client: client, evaluatorChecks: checks, recentWrites: recentWrites)
         let prompt = Self.systemPrompt(for: contract, workspaceDir: workspaceDir)
         await engine.setSystemPrompt(text: prompt)
 
@@ -101,10 +150,45 @@ final class GoalEvaluator: Sendable {
             app.setGoalContract(for: evalId, contract)
             app.appendMessage(role: .system, content: evaluationPrompt, to: evalId)
         }
-        await engine.processInput(evaluationPrompt, source: "GoalEvaluator", conversationId: evalId)
+        // In a task of its own, so a stop from the registry can cancel the model call in flight;
+        // the caller's cancellation (a foreground parent's Stop) is forwarded to the same stop.
+        let gradingTask = control.start {
+            Task { await engine.processInput(evaluationPrompt, source: "GoalEvaluator", conversationId: evalId) }
+        }
+        if let gradingTask {
+            await withTaskCancellationHandler {
+                await gradingTask.value
+            } onCancel: {
+                stop(SubagentManager.cancelledReason)
+            }
+        }
+        // Registered until its last turn has ended, not just until the caller has its answer: a
+        // reprompt still unwinding is a turn still alive. Not awaited, as for a subagent.
+        Task {
+            await gradingTask?.value
+            while engine.goalLoopIsLive(for: evalId) {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            await MainActor.run { app.unregisterLiveSubagent(evalId) }
+        }
 
-        // The grader submitted iff the callback ran and filled the box.
+        // The grader submitted iff the callback ran and filled the box. A verdict that landed
+        // before a stop is still a verdict.
         if let eval = graded.get() { return eval }
+
+        // Stopped from outside before a verdict: say so, never as a grade (#464).
+        if control.isStopped {
+            let placeholders = GoalEvaluationParsing.verdicts(from: [:], criteria: contract.criteria,
+                                                              judgements: contract.judgements)
+            let stopped = GoalEvaluation(status: .stopped, criteria: placeholders, startedAt: Date(), completedAt: Date())
+            await MainActor.run {
+                app.recordEvaluation(for: originId, stopped)
+                app.onEvaluationComplete[evalId] = nil
+                app.finishSession(id: evalId, status: "stopped")
+                app.deleteConversation(evalId)
+            }
+            return stopped
+        }
 
         // Safety net: the grader loop exited without calling submit_evaluation (crash, timeout,
         // infinite loop detected, etc.). Write a `.failed` evaluation so the UI doesn't hang in
