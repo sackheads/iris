@@ -199,6 +199,10 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     /// #185 -- what this session advertises to peers. Nil until the session describes itself.
     var sessionCard: SessionCard?
 
+    /// #469 §4.3 — the standing role the USER assigned (`/role`). Never set by a tool. Unique
+    /// among active sessions; `SessionRoles.normalize` restores that on load.
+    var role: String?
+
     /// Sticky taint (#187 §0.5, structural ruling, renamed from `hasPeerContent` under review #340):
     /// true once this conversation has had a turn started on it by content that was NOT the owner
     /// present and typing — a peer's `send_to_session` delivery (idle, or queued behind a busy turn
@@ -245,7 +249,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior
+        case id, title, messages, workspacePath, history, tokenUsage, activeGoal, messageCountSinceReflection, mainAgentSandbox, isSubagent, isArchived, isBackground, isPinned, jobProfile, sandboxGrant, goalContract, lastGoalCompletionReport, lastGoalEvaluation, subagentResult, checkpointHistory, sessionCard, updatedAt, hasUnattendedInput, prefixMismatchBehavior, role
     }
 
     init(from decoder: Decoder) throws {
@@ -280,6 +284,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         // Same invariant-1 shape as every other optional above: a legacy conversation has no
         // sessionCard key at all, and a missing key must decode as "uncarded", not throw.
         sessionCard = try container.decodeIfPresent(SessionCard.self, forKey: .sessionCard)
+        // Invariant 1: absent on every conversation persisted before #469, and absent is no role.
+        role = try container.decodeIfPresent(String.self, forKey: .role)
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         // Invariant 1: a conversation persisted before this ruling has no such key, and absent
         // means "no turn here ever started without the owner present", the correct default.
@@ -1775,6 +1781,47 @@ class AppState {
         markChanged(conversationId, .metadata)
     }
 
+    enum RoleAssignment: Equatable {
+        case assigned(role: String, movedFrom: UUID?)
+        case refused(String)
+    }
+
+    /// #469 §4.3. The user's `/role`; no tool reaches this.
+    func assignRole(_ raw: String, to id: UUID) -> RoleAssignment {
+        guard let role = SessionRoles.normalizedName(raw) else {
+            return .refused("Role names are 1–\(SessionRoles.maxLength) characters of a-z, 0-9 and -, not `iris` or `clear`.")
+        }
+        guard let idx = conversations.firstIndex(where: { $0.id == id }) else {
+            return .refused("That conversation no longer exists.")
+        }
+        guard SessionRoles.mayHoldRole(conversations[idx]) else {
+            return .refused(conversations[idx].isPinned ? "Iris holds no factory role." : "Only an active session can hold a role.")
+        }
+        if conversations[idx].role == role { return .assigned(role: role, movedFrom: nil) }
+        let previous = SessionRoles.holder(of: role, in: conversations)
+        if let previous, let p = conversations.firstIndex(where: { $0.id == previous }) {
+            conversations[p].role = nil
+            conversations[p].sessionCard?.skills = []
+            markChanged(previous, .metadata)
+            let newName = conversations[idx].sessionCard?.name ?? conversations[idx].title
+            enqueueEventLine("[Event] Role `\(role)` moved to session \(id.uuidString) (\(IrisEngine.flattenCardField(newName, cap: IrisEngine.cardNameCap))); you no longer hold it, and your skills were cleared.", for: previous)
+        }
+        conversations[idx].role = role
+        markChanged(id, .metadata)
+        return .assigned(role: role, movedFrom: previous)
+    }
+
+    /// Releases this session's role, returning it; nil when it held none.
+    @discardableResult
+    func clearRole(for id: UUID) -> String? {
+        guard let idx = conversations.firstIndex(where: { $0.id == id }),
+              let role = conversations[idx].role else { return nil }
+        conversations[idx].role = nil
+        conversations[idx].sessionCard?.skills = []
+        markChanged(id, .metadata)
+        return role
+    }
+
     /// Bind a contracted goal's workspace at lock (#68), creating it when it does not exist.
     ///
     /// Returns the bound path, or nil when nothing could be bound — creation failing is not fatal:
@@ -2056,6 +2103,9 @@ class AppState {
         case noSuchConversation
         case turnInFlight
         case goalActive
+        /// #469 §4.3 — a role-holder cannot be archived out from under its role; release it with
+        /// `/role clear` first (or let another assignment move it, which clears it the same way).
+        case holdsRole(String)
         /// 5b: the pinned conversation may never be archived directly (spec §0.2, §0.4); `/new`
         /// rotates it instead (`rotatePinned`), unpinning it before it archives it. Checked last —
         /// a pinned conversation mid-turn must still report `.turnInFlight`, which
@@ -2067,6 +2117,7 @@ class AppState {
             case .noSuchConversation: return "that conversation no longer exists"
             case .turnInFlight: return "a turn is still running"
             case .goalActive: return "a goal is active — /stop it first"
+            case .holdsRole(let role): return "it holds role `\(role)` — release it with /role clear first"
             case .pinned: return "Iris can't be archived directly; /new archives it and starts a fresh Iris from a summary."
             }
         }
@@ -2080,6 +2131,7 @@ class AppState {
         }
         if hasTurnInFlight(for: conversationId) { return .turnInFlight }
         if conv.activeGoal != nil { return .goalActive }
+        if let role = conv.role { return .holdsRole(role) }
         if conv.isPinned { return .pinned }
         return nil
     }
@@ -3642,6 +3694,7 @@ class AppState {
     /// blanking returns at launch, this is the change to suspect (spec §3.1).
     nonisolated static func sanitizeLoaded(_ decoded: [Conversation]) -> [Conversation] {
         var loaded = durableConversations(decoded)
+        SessionRoles.normalize(&loaded)
         for i in loaded.indices {
             // #191: while the run is stopped on the user, the surfacing fields are the pause's
             // inputs — `lastGoalEvaluation` is the only thing Accept/Reject act on and the only

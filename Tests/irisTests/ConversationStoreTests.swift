@@ -70,6 +70,7 @@ struct ConversationStoreTests {
         var c = Self.sample()
         c.isArchived = true
         c.sessionCard = SessionCard(name: "spec-writer", description: "drafting the sessions spec")
+        c.role = "pr-minder"
         try store.apply([Self.created(c)])
         let loaded = try store.loadAll()
         #expect(loaded.skipped.isEmpty)
@@ -101,6 +102,8 @@ struct ConversationStoreTests {
         // would pass while the column did not exist and the card was dropped on every load.
         #expect(back.sessionCard?.name == "spec-writer")
         #expect(back.sessionCard?.description == "drafting the sessions spec")
+        // #469: the role is a stored column, not just a Codable field.
+        #expect(back.role == "pr-minder")
     }
 
     @Test("a conversation with no sessionCard key decodes as uncarded")

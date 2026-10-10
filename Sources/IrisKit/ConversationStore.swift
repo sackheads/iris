@@ -594,6 +594,12 @@ final class ConversationStore: Sendable {
             }
             try db.create(index: "jobs_urlTokenHash", on: "jobs", columns: ["urlTokenHash"], unique: true)
         }
+        // #469. Nullable: NULL reads back as no role. No unique index — see `SessionRoles`.
+        m.registerMigration("v20_session_role") { db in
+            try db.alter(table: "conversations") { t in
+                t.add(column: "role", .text)
+            }
+        }
         return m
     }
 
@@ -811,13 +817,13 @@ final class ConversationStore: Sendable {
                     tokenUsage = ?, goalContract = ?, subagentResult = ?, checkpointHistory = ?,
                     lastGoalEvaluation = ?, lastGoalCompletionReport = ?, isArchived = ?,
                     isBackground = ?, isPinned = ?, sessionCard = ?, jobProfile = ?, sandboxGrant = ?,
-                    hasUnattendedInput = ?, prefixMismatchBehavior = ?
+                    hasUnattendedInput = ?, prefixMismatchBehavior = ?, role = ?
                 WHERE id = ?
                 """, arguments: [c.title, touched, c.workspacePath, c.activeGoal, c.messageCountSinceReflection,
                                  c.goalIterationCount, c.mainAgentSandbox?.rawValue, tokenUsage, contract, result,
                                  history, evaluation, report, c.isArchived, c.isBackground, c.isPinned, card,
                                  c.jobProfile?.rawValue, grant, c.hasUnattendedInput, c.prefixMismatchBehavior?.rawValue,
-                                 c.id.uuidString])
+                                 c.role, c.id.uuidString])
         } else {
             let position = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), 0) FROM conversations") ?? 0) + 1
             try db.execute(sql: """
@@ -825,13 +831,13 @@ final class ConversationStore: Sendable {
                     messageCountSinceReflection, goalIterationCount, mainAgentSandbox, tokenUsage, goalContract,
                     subagentResult, checkpointHistory, lastGoalEvaluation, lastGoalCompletionReport, isArchived,
                     isBackground, isPinned, sessionCard, jobProfile, sandboxGrant, hasUnattendedInput,
-                    prefixMismatchBehavior)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prefixMismatchBehavior, role)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [c.id.uuidString, position, c.title, now, touched, c.workspacePath, c.activeGoal,
                                  c.messageCountSinceReflection, c.goalIterationCount, c.mainAgentSandbox?.rawValue,
                                  tokenUsage, contract, result, history, evaluation, report, c.isArchived,
                                  c.isBackground, c.isPinned, card, c.jobProfile?.rawValue, grant, c.hasUnattendedInput,
-                                 c.prefixMismatchBehavior?.rawValue])
+                                 c.prefixMismatchBehavior?.rawValue, c.role])
         }
     }
 
@@ -1179,6 +1185,13 @@ final class ConversationStore: Sendable {
                 case .text(let s):
                     do { c.sessionCard = try decoder.decode(SessionCard.self, from: Data(s.utf8)) }
                     catch { localSoftLosses.append(("sessionCard", "\(error)")) }
+                }
+
+                // #469: like the card, an unreadable role degrades to "no role" plus a reported loss.
+                switch Self.readTextValue(row, "role") {
+                case .null: break
+                case .invalid: localSoftLosses.append(("role", "invalid text encoding"))
+                case .text(let s): c.role = s
                 }
 
                 // Per-conversation, so the bulk breaker below can throw the lot away.
