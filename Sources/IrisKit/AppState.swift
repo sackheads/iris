@@ -3177,12 +3177,23 @@ class AppState {
 
     /// Records a subagent whose engine is starting, under the run it works for (itself, when it
     /// works for none). Called after `linkBackgroundDescendant`, which is what names the run.
+    ///
+    /// A goal evaluator registers here too (#464), with `kind: .evaluator`, so everything that
+    /// stops a delegate through the registry — the run drain, the parent's Stop, a walk of the
+    /// delegation tree — stops a grade in flight as well. It offers no row Stop.
     func registerLiveSubagent(_ subagentId: UUID, parent: UUID, background: Bool,
+                              kind: DelegateKind = .subagent,
                               stop: @escaping @Sendable (String) -> Void) {
-        linkDelegate(subagentId, of: parent)   // the registry's parent lives in the delegation map
+        linkDelegate(subagentId, of: parent, kind: kind)   // the registry's parent lives in the delegation map
         liveSubagentTasks[subagentId] = LiveSubagent(run: backgroundRunRoot(of: subagentId),
                                                      background: background, stop: stop)
-        userStoppableSubagents.insert(subagentId)
+        if kind == .subagent { userStoppableSubagents.insert(subagentId) }
+    }
+
+    /// Whether `id` is a registered background subagent: an evaluator grading it is reached by
+    /// the parent's Stop the same way, since no cancellation of the parent's tasks reaches either.
+    func isLiveBackgroundSubagent(_ id: UUID) -> Bool {
+        liveSubagentTasks[id]?.background == true
     }
 
     /// Its result is decided: from here on the user's Stop no longer stops it (#236).
