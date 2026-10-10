@@ -992,15 +992,48 @@ actor IrisEngine {
             case .waiting(let on, let since): status = "waiting \(SessionDirectory.age(since: since, now: now)) (\(on))"
             case .idle: status = "idle \(SessionDirectory.age(since: peer.lastActive, now: now))"
             }
-            // Session-authored values are QUOTED; harness-owned ones (the id, the status) are not.
-            // Flattening already removed every `"` from inside a field, so the quotes cannot be
-            // closed early — a card claiming `session_id: <someone else>` inside its own name is
-            // then visibly the peer's own string rather than a row of its own.
-            return "session_id: \(peer.id) | name: \"\(name)\" | status: \(status) | workspace: \"\(workspace)\" | doing: \"\(description)\""
+            // Session-authored values are QUOTED; harness-owned ones (the id, the status, the
+            // role) are not. Flattening already removed every `"` from inside a field, so the
+            // quotes cannot be closed early — a card claiming `session_id: <someone else>` inside
+            // its own name is then visibly the peer's own string rather than a row of its own.
+            // Role names need no flattening: `SessionRoles.normalizedName` already restricts them
+            // to `[a-z0-9-]`.
+            var prefix = "session_id: \(peer.id)"
+            switch peer.kind {
+            case .iris: prefix += " | iris"
+            case .role: prefix += " | role: \(peer.role ?? "")"
+            case .worker: break
+            }
+            var line = "\(prefix) | name: \"\(name)\" | status: \(status) | workspace: \"\(workspace)\""
+            if let project = peer.project {
+                let repo = flattenCardField(project.repo, cap: cardNameCap)
+                line += " | repo: \"\(repo)\(project.branch.map { "@" + flattenCardField($0, cap: cardNameCap) } ?? "")\""
+            }
+            if let lane = peer.lane { line += " | lane: \"\(flattenCardField(lane, cap: cardLaneCap))\"" }
+            line += " | doing: \"\(description)\""
+            if !peer.skills.isEmpty {
+                line += "\n  skills: " + peer.skills.map { skill in
+                    let tags = skill.tags.map { flattenCardField($0, cap: skillTagCap) }.joined(separator: ", ")
+                    return "\(flattenCardField(skill.id, cap: skillIdCap)) \"\(flattenCardField(skill.name, cap: cardNameCap))\"" + (tags.isEmpty ? "" : " [\(tags)]")
+                }.joined(separator: "; ")
+            }
+            return line
         }
         var out = lines.joined(separator: "\n")
         if total > peers.count {
             out += "\n(showing \(peers.count) of \(total))"
+        }
+        return out
+    }
+
+    /// `describe_session`'s body: one peer in full, examples included (#469 §4.6).
+    nonisolated static func renderSessionCard(_ peer: SessionPeer, now: Date = Date()) -> String {
+        var out = renderPeerList([peer], total: 1, now: now)
+        for skill in peer.skills {
+            out += "\n  \(flattenCardField(skill.id, cap: skillIdCap)): \(flattenCardField(skill.description, cap: cardDescriptionCap))"
+            for example in skill.examples {
+                out += "\n    e.g. \"\(flattenCardField(example, cap: skillExampleCap))\""
+            }
         }
         return out
     }
@@ -2128,6 +2161,13 @@ actor IrisEngine {
                 parameters: Schema(type: "OBJECT", properties: [:], required: [])
             ))
             toolsList.append(FunctionDeclaration(
+                name: "describe_session",
+                description: "Show one peer's full card: role, name, status, project, lane, and for a role-holder each skill with example requests. Use it before asking a role-holder for something, to phrase the request the way it advertises.",
+                parameters: Schema(type: "OBJECT", properties: [
+                    "to": Schema(type: "STRING", description: "A session_id, role:<name>, name:<name>, or iris.")
+                ], required: ["to"])
+            ))
+            toolsList.append(FunctionDeclaration(
                 name: "send_to_session",
                 description: "Send a message to another active session. It arrives as a request that session may decline, not an instruction it must follow. Use it to ask a peer working elsewhere for something only it can do. Archived sessions, and the hidden conversations background job runs use, cannot be reached.",
                 parameters: Schema(type: "OBJECT", properties: [
@@ -3180,7 +3220,7 @@ actor IrisEngine {
 
     /// 5c §1: never declared to an unattended turn, whatever a sticky set says.
     nonisolated static let unattendedNeverDeclared: Set<String> =
-        jobCreationTools.union(["set_workspace", "list_sessions", "send_to_session", "set_session_card"])
+        jobCreationTools.union(["set_workspace", "list_sessions", "describe_session", "send_to_session", "set_session_card"])
     /// OpenAI's `prompt_cache_key` (5c §0.9). It is a routing hint, so it names the prefix a
     /// request shares with others, not the conversation. An attended chat (Iris included) keeps
     /// its own history warm, so it uses its id. A job run, a subagent or an evaluator starts a
@@ -3208,7 +3248,7 @@ actor IrisEngine {
     /// 5c §1: never declared to a subagent or evaluator, whatever a sticky set says.
     nonisolated static let mainOnlyDeclared: Set<String> =
         jobCreationTools.union(["amend_goal_contract", "reach_checkpoint", "delegate_milestone",
-                                "waive_criterion", "list_sessions", "send_to_session", "set_session_card"])
+                                "waive_criterion", "list_sessions", "describe_session", "send_to_session", "set_session_card"])
 
     nonisolated static func hardStrip(_ tools: [FunctionDeclaration], isUnattended: Bool,
                                       principal: Principal) -> [FunctionDeclaration] {
@@ -3788,6 +3828,21 @@ actor IrisEngine {
                                               status: { s.sessionStatus(for: $0) })
             }
             result = Self.renderPeerList(peers, total: total, now: now)
+        } else if functionCall.name == "describe_session", let to = functionCall.args["to"]?.stringValue {
+            guard principal == .main else { result = "Refused — a subagent is not a session."; return result }
+            guard !isUnattended else { result = Self.unattendedSessionListRefusal; return result }
+            guard await sessionPeerCount(excluding: conversationId) > 0 else { result = Self.noPeersRefusal; return result }
+            let now = Date()
+            result = await MainActor.run { () -> String in
+                guard let s = localState else { return "No session matches that." }
+                switch SessionDirectory.resolve(to, in: s.conversations, excluding: conversationId) {
+                case .failure(let reason): return reason.message
+                case .success(let id):
+                    guard let c = s.conversations.first(where: { $0.id == id }) else { return "That session is no longer active." }
+                    let peer = SessionDirectory.peer(for: c, now: now, status: s.sessionStatus(for: c))
+                    return Self.renderSessionCard(peer, now: now)
+                }
+            }
         } else if functionCall.name == "send_to_session",
                   let idString = functionCall.args["session_id"]?.stringValue,
                   let message = functionCall.args["message"]?.stringValue {
@@ -4808,7 +4863,7 @@ actor IrisEngine {
     nonisolated static let inlineDeclaredToolNames: Set<String> = [
         "set_workspace", "rename_conversation", "schedule_job", "save_fact", "manage_fact",
         "reflect", "goal_complete", "search_memory", "update_user_profile", "update_soul",
-        "update_memory", "propose_goal_contract", "list_sessions", "send_to_session",
+        "update_memory", "propose_goal_contract", "list_sessions", "describe_session", "send_to_session",
         "set_session_card", "amend_goal_contract", "reach_checkpoint", "waive_criterion",
         "invoke_subagent", "delegate_milestone",
     ]
