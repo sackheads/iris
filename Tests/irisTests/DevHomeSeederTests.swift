@@ -228,6 +228,30 @@ struct DevHomeSeederTests {
         #expect(original.first { $0.name == "nightly" }?.pausedReason == nil)
     }
 
+    @Test("a copied URL-enabled job is off in the dev home, with no digest, so the release link cannot find it")
+    func clearsCopiedURLTrigger() throws {
+        let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }
+        let job = Job(name: "pr-sweep", prompt: "p", trigger: .schedule(.interval(seconds: 60)))
+        do {
+            let store = try ConversationStore.onDisk(at: src.conversationsDB)
+            try store.ledger.upsert(job)
+            try store.ledger.setURLTrigger(jobId: job.id, tokenHash: "release-digest")
+        }
+
+        try seedDefault(src, dst)
+
+        let devLedger = try ConversationStore.onDisk(at: dst.conversationsDB).ledger
+        #expect(try devLedger.job(id: job.id)?.urlTrigger == false)
+        #expect(try devLedger.job(urlTokenHash: "release-digest") == nil)
+        let digest = try DatabaseQueue(path: dst.conversationsDB.path).read { db in
+            try String.fetchOne(db, sql: "SELECT urlTokenHash FROM jobs WHERE id = ?", arguments: [job.id.uuidString])
+        }
+        #expect(digest == nil, "the digest is deleted, not only switched off")
+        // The release store keeps its opt-in.
+        let original = try ConversationStore.onDisk(at: src.conversationsDB).ledger
+        #expect(try original.job(urlTokenHash: "release-digest")?.id == job.id)
+    }
+
     @Test("a copied pending approval is pre-expired, so a stale \"Approve and run\" click cannot fire it in the dev copy")
     func expiresCopiedPendingApprovals() throws {
         let (src, dst, cleanup) = try tempHomes(); defer { cleanup() }

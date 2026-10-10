@@ -220,9 +220,10 @@ final class JobLedger: JobUsageReading, Sendable {
 
     /// D6 decisions 10-11: the only writer of the URL trigger and its token digest. A digest
     /// turns it on, replacing any earlier one; nil turns it off and deletes the digest. Throws
-    /// `JobLedgerError.unknownJob` for an id that is not in the table, and a constraint error for
-    /// a digest another job already holds.
+    /// `JobLedgerError.unknownJob` for an id that is not in the table, `emptyURLTokenHash` for an
+    /// empty digest, and a constraint error for a digest another job already holds.
     func setURLTrigger(jobId: UUID, tokenHash: String?) throws {
+        if tokenHash?.isEmpty == true { throw JobLedgerError.emptyURLTokenHash }
         let flag: Bool? = tokenHash == nil ? nil : true
         try writer.write { db in
             try db.execute(sql: "UPDATE jobs SET urlTrigger = ?, urlTokenHash = ? WHERE id = ?",
@@ -1025,4 +1026,6 @@ enum JobLedgerError: Error, Equatable {
     case unknownJob(UUID)
     /// An update named a run id that is not in the table.
     case unknownRun(UUID)
+    /// `setURLTrigger` was handed an empty digest, which no token hashes to.
+    case emptyURLTokenHash
 }

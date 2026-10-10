@@ -184,7 +184,14 @@ enum DevHomeSeeder {
                 }
             }
             if try db.tableExists("jobs") {
-                try db.execute(sql: "UPDATE jobs SET pausedReason = ?", arguments: [copiedJobPausedReason])
+                // D6: a copied job's URL opt-in and digest go too, in the same statement, so the
+                // release link's token cannot find the dev copy. A store from a release older
+                // than v19 has neither column, and nothing to clear.
+                let hasURLTrigger = try db.columns(in: "jobs").contains { $0.name == "urlTokenHash" }
+                try db.execute(sql: hasURLTrigger
+                                   ? "UPDATE jobs SET pausedReason = ?, urlTrigger = NULL, urlTokenHash = NULL"
+                                   : "UPDATE jobs SET pausedReason = ?",
+                               arguments: [copiedJobPausedReason])
             }
             // A copied `blockedOnApproval` run still has a live "Approve and run" button on its
             // old card in the copied transcript (transcripts are left as written, above) — and

@@ -53,6 +53,21 @@ struct URLTriggerLedgerTests {
         try l.upsert(b)
         try l.setURLTrigger(jobId: a.id, tokenHash: "same")
         #expect(throws: (any Error).self) { try l.setURLTrigger(jobId: b.id, tokenHash: "same") }
+        // The refused write changed nothing on either side.
+        #expect(try l.job(id: b.id)?.urlTrigger == false)
+        #expect(try l.job(id: a.id)?.urlTrigger == true)
+        #expect(try l.job(urlTokenHash: "same")?.id == a.id)
+    }
+
+    @Test("an empty digest is refused, and leaves the job as it was")
+    func emptyDigestRefused() throws {
+        let l = try makeLedger()
+        let j = job()
+        try l.upsert(j)
+        try l.setURLTrigger(jobId: j.id, tokenHash: "d")
+        #expect(throws: JobLedgerError.emptyURLTokenHash) { try l.setURLTrigger(jobId: j.id, tokenHash: "") }
+        #expect(try l.job(urlTokenHash: "d")?.id == j.id)
+        #expect(try l.job(urlTokenHash: "") == nil)
     }
 
     @Test("a stale copy written back, and a new trigger alone, keep the flag")
