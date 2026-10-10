@@ -215,7 +215,7 @@ struct JobRetryTests {
         let id = UUID()
         app.createNewConversation(id: id)
         app.selectedConversationId = id
-        for job in jobs { try? app.store.ledger.upsert(job) }
+        for job in jobs { _ = try? app.store.ledger.upsert(job) }
         return (app, id)
     }
 

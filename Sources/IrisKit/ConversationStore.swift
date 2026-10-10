@@ -583,6 +583,17 @@ final class ConversationStore: Sendable {
                 t.add(column: "prefixMismatchBehavior", .text)
             }
         }
+        // D6 decisions 10-11: a per-job owner opt-in to URL fires, and the SHA-256 digest of its
+        // token. NULL (every earlier row) is off with no token. Unique through an index, because
+        // SQLite cannot add a UNIQUE column with ALTER TABLE; a unique index still allows any
+        // number of NULLs.
+        m.registerMigration("v19_job_url_trigger") { db in
+            try db.alter(table: "jobs") { t in
+                t.add(column: "urlTrigger", .boolean)
+                t.add(column: "urlTokenHash", .text)
+            }
+            try db.create(index: "jobs_urlTokenHash", on: "jobs", columns: ["urlTokenHash"], unique: true)
+        }
         return m
     }
 

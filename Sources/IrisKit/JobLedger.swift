@@ -55,23 +55,38 @@ final class JobLedger: JobUsageReading, Sendable {
 
     // MARK: Writes
 
+    /// What an `upsert` changed beyond the row itself.
+    struct UpsertOutcome: Equatable, Sendable {
+        /// The job was URL-enabled and its prompt, profile or policy changed, so the opt-in and
+        /// its token were dropped (D6 decision 11). The caller says so.
+        let urlTriggerCleared: Bool
+    }
+
     /// Inserts `job`, or replaces the row with the same id. A rename onto another job's name
     /// surfaces as the UNIQUE violation on `name` rather than silently clobbering that job, which
     /// is why this is an `ON CONFLICT(id)` upsert and not `INSERT OR REPLACE`.
     ///
     /// Editing a job's **gate** also drops every signal its runs recorded, in the same write (#187
     /// §7). A signal is a reading taken by one gate: an ETag cannot answer for an mtime, and
-    /// leaving the old one behind would have the new gate compare against something it never saw —
-    /// silently "unchanged" forever, or one spurious run. Every path that changes a job goes
-    /// through here, so this is the one place it has to be done.
-    func upsert(_ job: Job) throws {
+    /// leaving the old one behind would have the new gate compare against something it never saw.
+    ///
+    /// The URL trigger and its token digest are never written here (D6 decision 11): only
+    /// `setURLTrigger` writes them, so a stale `Job` copy written back by the scheduler or a tool
+    /// cannot set them. And when a URL-enabled job's prompt, profile or policy (grant and budgets
+    /// included) changes, both are cleared in this same write. That one rule covers both model
+    /// rewrite paths, `schedule_job`'s re-schedule and `register_directory_watcher`'s update, and
+    /// any later `/jobs` verb. Every path that changes a job comes through here, so this is the
+    /// one place it has to be done.
+    @discardableResult
+    func upsert(_ job: Job) throws -> UpsertOutcome {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let triggerJSON = String(decoding: try encoder.encode(job.trigger), as: UTF8.self)
         let policyJSON = String(decoding: try encoder.encode(job.policy), as: UTF8.self)
-        try writer.write { db in
-            let storedTrigger = try String.fetchOne(db, sql: "SELECT trigger FROM jobs WHERE id = ?",
-                                                    arguments: [job.id.uuidString])
+        let cleared: Bool = try writer.write { db in
+            let stored = try Row.fetchOne(db, sql: """
+                SELECT trigger, prompt, profile, policy, urlTrigger FROM jobs WHERE id = ?
+                """, arguments: [job.id.uuidString])
             try db.execute(sql: """
                 INSERT INTO jobs (
                     id, name, prompt, triggerKind, trigger, profile, destinationConversationId,
@@ -102,7 +117,9 @@ final class JobLedger: JobUsageReading, Sendable {
                     job.nextFireAt, job.lastRunAt, job.pausedReason,
                     policyJSON, job.retryAttempt, job.queuedFire, job.action.stored,
                 ])
-            if let storedTrigger, Self.storedGate(storedTrigger) != job.trigger.gate {
+            guard let stored else { return false }
+            if let storedTrigger = String.fromDatabaseValue(stored["trigger"] as DatabaseValue),
+               Self.storedGate(storedTrigger) != job.trigger.gate {
                 // A stored trigger this build cannot read decodes as "no gate", so a job that
                 // *gains* one clears — the safe direction, since a signal nobody can vouch for
                 // costs one run rather than a gate that never fires. A job that had no gate and
@@ -110,8 +127,24 @@ final class JobLedger: JobUsageReading, Sendable {
                 try db.execute(sql: "UPDATE job_runs SET gateSignal = NULL WHERE jobId = ?",
                                arguments: [job.id.uuidString])
             }
+            guard Bool.fromDatabaseValue(stored["urlTrigger"] as DatabaseValue) == true else { return false }
+            // Read leniently: a stored value this build cannot read counts as changed, which
+            // clears the opt-in, the safe direction.
+            let storedPrompt = String.fromDatabaseValue(stored["prompt"] as DatabaseValue)
+            let storedProfile = String.fromDatabaseValue(stored["profile"] as DatabaseValue)
+                .flatMap(JobProfile.init(rawValue:))
+            // `JobPolicy`'s decoder drops negative figures and unreadable grants
+            // (`JobPolicy.init(from:)`), so a stored policy holding one compares unequal to an
+            // in-memory job still carrying it, and clears the opt-in: the safe direction.
+            let changed = storedPrompt != job.prompt || storedProfile != job.profile
+                || Self.policy(from: stored["policy"] as DatabaseValue?) != job.policy
+            guard changed else { return false }
+            try db.execute(sql: "UPDATE jobs SET urlTrigger = NULL, urlTokenHash = NULL WHERE id = ?",
+                           arguments: [job.id.uuidString])
+            return true
         }
         notifyJobsChanged()
+        return UpsertOutcome(urlTriggerCleared: cleared)
     }
 
     /// The gate inside a stored `trigger` column, or `nil` — for a trigger that carries none, and
@@ -185,6 +218,19 @@ final class JobLedger: JobUsageReading, Sendable {
         }
     }
 
+    /// D6 decisions 10-11: the only writer of the URL trigger and its token digest. A digest
+    /// turns it on, replacing any earlier one; nil turns it off and deletes the digest. Throws
+    /// `JobLedgerError.unknownJob` for an id that is not in the table, and a constraint error for
+    /// a digest another job already holds.
+    func setURLTrigger(jobId: UUID, tokenHash: String?) throws {
+        let flag: Bool? = tokenHash == nil ? nil : true
+        try writer.write { db in
+            try db.execute(sql: "UPDATE jobs SET urlTrigger = ?, urlTokenHash = ? WHERE id = ?",
+                           arguments: [flag, tokenHash, jobId.uuidString])
+            guard db.changesCount > 0 else { throw JobLedgerError.unknownJob(jobId) }
+        }
+    }
+
     // MARK: Reads
 
     /// Every job, enabled and disabled, oldest first. `rowid` breaks ties: two jobs created in the
@@ -206,6 +252,12 @@ final class JobLedger: JobUsageReading, Sendable {
     /// while it was going, rather than trusting the copy it was handed when the run began.
     func job(id: UUID) throws -> Job? {
         try decodeAll(sql: "SELECT * FROM jobs WHERE id = ?", arguments: [id.uuidString]).jobs.first
+    }
+
+    /// The job a URL's token digest names, if its trigger is still on (D6 decision 10).
+    func job(urlTokenHash: String) throws -> Job? {
+        try decodeAll(sql: "SELECT * FROM jobs WHERE urlTokenHash = ? AND urlTrigger",
+                      arguments: [urlTokenHash]).jobs.first
     }
 
     /// The enabled jobs whose `nextFireAt` has arrived, soonest first. Inclusive at `now`, so a job
@@ -265,7 +317,9 @@ final class JobLedger: JobUsageReading, Sendable {
             policy: Self.policy(from: row["policy"] as DatabaseValue?),
             retryAttempt: try r.read("retryAttempt", Int.self) ?? 0,
             queuedFire: try r.read("queuedFire", Date.self),
-            action: action)
+            action: action,
+            // NULL on every row written before D6 (invariant 1): off.
+            urlTrigger: try r.read("urlTrigger", Bool.self) ?? false)
     }
 
     /// A NULL column, a value that is not even text, and text that will not parse all read as the
@@ -629,6 +683,21 @@ extension JobLedger {
             SELECT COUNT(*) FROM job_runs
             WHERE jobId = ? AND startedAt >= ? AND transcriptConversationId IS NOT NULL
             """, arguments: [jobId.uuidString, since]) ?? 0
+    }
+
+    /// The `triggerKind` a URL fire's row records. Spelled once: `urlFires` counts it, and
+    /// `FireOrigin.url` writes it.
+    static let urlTriggerKind = "url"
+
+    /// How many of this job's rows a URL fire wrote at or after `since`: decision 13's limit,
+    /// asked with `since = now - 1h`. Every such row counts, a skip row included. The limit is
+    /// on links that got as far as admission, and an over-limit link writes no row at all.
+    func urlFires(jobId: UUID, since: Date) throws -> Int {
+        try writer.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM job_runs WHERE jobId = ? AND triggerKind = ? AND startedAt >= ?
+                """, arguments: [jobId.uuidString, Self.urlTriggerKind, since]) ?? 0
+        }
     }
 
     /// The tokens spent on runs that *started* during the local calendar day containing `now`, for

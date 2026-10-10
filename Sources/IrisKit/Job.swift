@@ -450,6 +450,10 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
     /// A model turn, or a built-in with none (5b §0.8). Only harness code creates a built-in:
     /// `schedule_job` always makes `.prompt`.
     var action: JobAction
+    /// D6 decision 9: whether the owner has let a link fire this job. Read from the store; set
+    /// only by `/jobs url` through `JobLedger.setURLTrigger`. `upsert` never writes it, so a stale
+    /// copy written back cannot turn it on, and setting it on a value does nothing.
+    var urlTrigger: Bool
 
     init(
         id: UUID = UUID(),
@@ -467,7 +471,8 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
         policy: JobPolicy = JobPolicy(),
         retryAttempt: Int = 0,
         queuedFire: Date? = nil,
-        action: JobAction = .prompt
+        action: JobAction = .prompt,
+        urlTrigger: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -485,13 +490,14 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
         self.retryAttempt = retryAttempt
         self.queuedFire = queuedFire
         self.action = action
+        self.urlTrigger = urlTrigger
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, prompt, trigger, profile
         case destinationConversationId, createdInConversationId, createdAt
         case enabled, nextFireAt, lastRunAt, pausedReason
-        case policy, retryAttempt, queuedFire, action
+        case policy, retryAttempt, queuedFire, action, urlTrigger
     }
 
     init(from decoder: Decoder) throws {
@@ -514,6 +520,8 @@ struct Job: Identifiable, Codable, Equatable, Sendable {
         queuedFire = try container.decodeIfPresent(Date.self, forKey: .queuedFire)
         // Invariant 1: every job written before 5b lacks it.
         action = try container.decodeIfPresent(JobAction.self, forKey: .action) ?? .prompt
+        // Invariant 1: every job written before D6 lacks it.
+        urlTrigger = try container.decodeIfPresent(Bool.self, forKey: .urlTrigger) ?? false
     }
 
     /// Derives a short identifier from a job's prompt for use where a display name is needed but
