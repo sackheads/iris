@@ -97,13 +97,60 @@ struct TokenUsage: Codable, Equatable, Sendable {
     }
 }
 
-/// A2A-shaped identity a session advertises to its peers (#185 §4). Distinct from `title`, which
-/// is the user's name for the chat: the card is what the agent is doing *now* and changes as the
-/// work changes, where a title the user set deliberately should not.
+/// A2A 0.3 `AgentSkill` (#469 §4.4): something a role-holder will do on request.
+struct AgentSkill: Codable, Equatable, Sendable {
+    var id: String
+    var name: String
+    var description: String
+    var tags: [String] = []
+    var examples: [String] = []
+
+    init(id: String, name: String, description: String, tags: [String] = [], examples: [String] = []) {
+        self.id = id; self.name = name; self.description = description
+        self.tags = tags; self.examples = examples
+    }
+
+    enum CodingKeys: String, CodingKey { case id, name, description, tags, examples }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        description = try c.decodeIfPresent(String.self, forKey: .description) ?? ""
+        tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
+        examples = try c.decodeIfPresent([String].self, forKey: .examples) ?? []
+    }
+}
+
+/// A2A-shaped identity a session advertises to its peers (#185 §4, #469 §4). Distinct from
+/// `title`, which is the user's name for the chat: the card is what the agent is doing *now*.
+/// `name`, `description` and `skills` are A2A 0.3 `AgentCard` fields; `lane` is iris's own.
 struct SessionCard: Codable, Equatable, Sendable {
     var name: String
     var description: String
     var updatedAt: Date = Date()
+    /// #469 §4.1: a worker's topical lane, free text.
+    var lane: String? = nil
+    /// #469 §4.4: role-holders only; the `set_session_card` handler refuses them elsewhere.
+    var skills: [AgentSkill] = []
+
+    init(name: String, description: String, updatedAt: Date = Date(), lane: String? = nil,
+         skills: [AgentSkill] = []) {
+        self.name = name; self.description = description; self.updatedAt = updatedAt
+        self.lane = lane; self.skills = skills
+    }
+
+    enum CodingKeys: String, CodingKey { case name, description, updatedAt, lane, skills }
+
+    // Invariant 1: every card stored before #469 lacks lane and skills.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        description = try c.decode(String.self, forKey: .description)
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        lane = try c.decodeIfPresent(String.self, forKey: .lane)
+        skills = try c.decodeIfPresent([AgentSkill].self, forKey: .skills) ?? []
+    }
 }
 
 struct Conversation: Identifiable, Codable, Hashable, Sendable {
