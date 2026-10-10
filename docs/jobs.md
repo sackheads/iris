@@ -800,6 +800,12 @@ rides the steer inbox and the model sees it with its next tool results instead. 
 news, not a request — waking the model on every run would turn a five-minute schedule into a
 five-minute agent loop. Raw run output never enters the destination's messages.
 
+The menu bar item carries the same news without opening the window. A blocked run that nobody has
+acknowledged, and a job paused by its breaker, a budget, its retry ladder, a failing gate or a
+vanished folder, each turn the icon to `!` with a count until the run is dismissed or the job is
+resumed. A plain failure, including one still on its retry ladder, and a job you paused with
+`/jobs pause` are counts in the menu only. While a job is running, the icon shows how many.
+
 ## Approvals fail closed
 
 Nobody is watching a background run, so it never blocks on an approval dialog. A tool call from a
