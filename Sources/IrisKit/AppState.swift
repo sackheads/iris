@@ -392,25 +392,40 @@ class AppState {
     /// D6 decision 16: what the ledger says is waiting on the owner, cached for the status item
     /// and the run log. Assigned only by `refreshLedgerAttention`. Never polled.
     private(set) var ledgerAttention = LedgerAttention.empty
-    /// How the snapshot is read. A seam so a test can hold one read back and show that a slower,
-    /// older read never overwrites a newer one.
+    /// How the snapshot is read. A seam so a test can hold one read back and count the reads a
+    /// burst of refreshes costs.
     @ObservationIgnored var ledgerAttentionReader: @Sendable (JobLedger) async throws -> LedgerAttention = {
         try LedgerAttention.read($0)
     }
     /// Test seam: the most recent refresh, so a test awaits it rather than polling.
     @ObservationIgnored private(set) var ledgerAttentionRefresh: Task<Void, Never>?
-    @ObservationIgnored private var ledgerAttentionGeneration = 0
+    /// The newest read, started or not: the next one waits for it, so reads never overlap and
+    /// land in the order they started.
+    @ObservationIgnored private var ledgerAttentionTail: Task<Void, Never>?
+    /// The read that has not started yet, if any. At most one exists: every request made while
+    /// it waits is answered by it, since it reads after all of them.
+    @ObservationIgnored private var ledgerAttentionWaiting: Task<Void, Never>?
 
     /// Reads the snapshot off the main actor and assigns it on it. Called at launch, after
     /// `deliverEvent`, after each acknowledge path, after `/jobs pause|resume|delete`, and from
     /// the watch layer's `onJobsChanged` closure.
+    ///
+    /// Single-flight, as `SyncCoalescer` is for the watch sync: at most one read runs at a time,
+    /// and a burst of requests during it costs one more read, not one each. The read a request
+    /// gets starts after the request, so awaiting it sees every write made before the call; and
+    /// since reads run one after another, the newest always lands last.
     @discardableResult
     func refreshLedgerAttention() -> Task<Void, Never> {
-        ledgerAttentionGeneration += 1
-        let generation = ledgerAttentionGeneration
+        if let waiting = ledgerAttentionWaiting { return waiting }
+        let previous = ledgerAttentionTail
         let ledger = store.ledger
         let read = ledgerAttentionReader
         let task = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            // From here on a request needs a read of its own: this one may already be past the
+            // write that request is about.
+            self.ledgerAttentionWaiting = nil
             let snapshot = await Task.detached { () -> LedgerAttention? in
                 do {
                     return try await read(ledger)
@@ -420,11 +435,10 @@ class AppState {
                     return nil
                 }
             }.value
-            // Only the newest read lands: two refreshes can finish out of order, and the older
-            // one would put back a count the newer one had already cleared.
-            guard let self, let snapshot, generation == self.ledgerAttentionGeneration else { return }
-            self.ledgerAttention = snapshot
+            if let snapshot { self.ledgerAttention = snapshot }
         }
+        ledgerAttentionWaiting = task
+        ledgerAttentionTail = task
         ledgerAttentionRefresh = task
         return task
     }
@@ -459,27 +473,54 @@ class AppState {
         return activityConversationId()
     }
 
-    /// Opens the conversation a job's card was delivered to and scrolls to the card.
-    func revealCard(runId: UUID, jobId: UUID) {
-        let target = cardDestination(for: (try? store.ledger.job(id: jobId)) ?? nil)
-        if let message = conversations.first(where: { $0.id == target })?.messages.last(where: {
-            $0.role == .event && EventCard.decode($0.content)?.runId == runId
-        }) {
-            pendingScrollTarget = message.id
+    /// Opens the conversation holding a job's card and scrolls to it.
+    ///
+    /// Where a card would go today (`cardDestination`) is only the first place to look: once Iris
+    /// rotates (`/new`), every older card sits in an archived Iris, and a destination can be
+    /// deleted under its cards. So the search goes on through every conversation the sidebar can
+    /// show, newest first, archived included (`reveal(hit:)` selects archived ones too). A card
+    /// found nowhere gets one line in Iris naming the `/jobs ack` that clears it, rather than an
+    /// empty Iris and an icon that stays lit.
+    ///
+    /// The job read is off the main actor: one row, but on the click's path.
+    func revealCard(runId: UUID, jobId: UUID) async {
+        let ledger = store.ledger
+        let job = await Task.detached { (try? ledger.job(id: jobId)) ?? nil }.value
+        let first = cardDestination(for: job)
+        let candidates = conversations.filter { $0.id == first }
+            + conversations.filter { $0.id != first && $0.isUserFacing }.sorted { $0.updatedAt > $1.updatedAt }
+        for conversation in candidates {
+            if let message = conversation.messages.last(where: {
+                $0.role == .event && EventCard.decode($0.content)?.runId == runId
+            }) {
+                pendingScrollTarget = message.id
+                showMainWindow(selecting: conversation.id)
+                return
+            }
         }
-        showMainWindow(selecting: target)
+        let iris = activityConversationId()
+        let name = job?.name ?? ledgerAttention.blocked.first { $0.runId == runId }?.jobName ?? "a job"
+        emitCommandOutput(Self.goneCardLine(jobName: name, runId: runId), format: .markdown, to: iris)
+        showMainWindow(selecting: iris)
+    }
+
+    /// What `revealCard` says when a blocked run's card is in no conversation any more.
+    static func goneCardLine(jobName: String, runId: UUID) -> String {
+        let name = IrisEngine.flattenCardField(jobName, cap: IrisEngine.cardNameCap)
+        let shortId = runId.uuidString.lowercased().prefix(8)
+        return "The card for \(name)'s blocked run is gone; `/jobs ack \(shortId)` clears it."
     }
 
     /// What clicking a status item row does. A conversation row is an ask's delegation root or a
     /// goal wait; a root archived while its ask is live is moved out of the archive, since an
     /// archived conversation means an idle one (#182 §6.2) and this one is waiting on the owner.
-    func openStatusRow(_ target: StatusMenuRow.Target) {
+    func openStatusRow(_ target: StatusMenuRow.Target) async {
         switch target {
         case .conversation(let id):
             unarchiveConversation(id)
             showMainWindow(selecting: id)
         case .card(let runId, let jobId):
-            revealCard(runId: runId, jobId: jobId)
+            await revealCard(runId: runId, jobId: jobId)
         case .iris:
             showMainWindow(selecting: activityConversationId())
         case .nowhere:

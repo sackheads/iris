@@ -97,6 +97,15 @@ struct SurfaceAttentionTests {
 
     /// R10: one row per job however many of its runs are blocked, so a job blocking every
     /// minute cannot grow the menu without bound. The row opens the oldest run's card.
+    @Test("an approvals row with no root conversation still opens the window, on Iris")
+    func rootlessApprovalsRowIsClickable() {
+        let attention = SurfaceAttention.derive(asks: [ask(root: nil)], waits: [], runningJobs: [:], ledger: .empty)
+        let rows = SurfaceAttention.menuRows(attention, ledger: .empty, runningCount: 0)
+        #expect(rows.first?.id == "approvals")
+        // The overlay shows the first ask whatever is selected, so raising the window answers it.
+        #expect(rows.first?.target == .iris)
+    }
+
     @Test("the menu says what is waiting, one row per blocked job, with secondary counts below")
     func menuRows() {
         let root = UUID(), digestJob = UUID()

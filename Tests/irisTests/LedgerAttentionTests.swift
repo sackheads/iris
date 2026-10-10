@@ -199,42 +199,78 @@ struct LedgerAttentionTests {
         }
     }
 
-    /// Holds the first read until released; every later read answers at once.
-    private actor HeldRead {
-        private var calls = 0
+    /// Holds the first read until released, counts every read, and answers each with the
+    /// `current` value as it stood when that read began, as a real read of the table would.
+    private actor CountedRead {
+        private(set) var reads = 0
         private var held: CheckedContinuation<Void, Never>?
         private(set) var firstIsHeld = false
+        private var current = 0
 
-        func read(older: LedgerAttention, newer: LedgerAttention) async -> LedgerAttention {
-            calls += 1
-            guard calls == 1 else { return newer }
-            await withCheckedContinuation { held = $0; firstIsHeld = true }
-            return older
+        func set(_ value: Int) { current = value }
+
+        func read() async -> LedgerAttention {
+            reads += 1
+            let seen = current
+            if reads == 1 { await withCheckedContinuation { held = $0; firstIsHeld = true } }
+            return LedgerAttention(failedCount: seen)
         }
 
         func release() { held?.resume(); held = nil }
     }
 
-    @Test("an older read that finishes last never overwrites a newer one")
-    func staleReadIsDropped() async throws {
+    @Test("a burst of refreshes during a read costs one more read, and the newest state lands")
+    func burstIsSingleFlight() async throws {
         let (_, app, _) = try makeApp()
-        let gate = HeldRead()
-        let older = LedgerAttention(failedCount: 7), newer = LedgerAttention(failedCount: 1)
-        app.ledgerAttentionReader = { _ in await gate.read(older: older, newer: newer) }
-
+        let gate = CountedRead()
+        app.ledgerAttentionReader = { _ in await gate.read() }
         // Released on every way out, so a failed expectation ends the test instead of leaving the
         // first read parked until the time limit.
         defer { Task { await gate.release() } }
+
         let first = app.refreshLedgerAttention()
         var spins = 0
         while !(await gate.firstIsHeld), spins < 10_000 { await Task.yield(); spins += 1 }
-        #expect(await gate.firstIsHeld, "the first read must be parked before the second starts")
-        let second = app.refreshLedgerAttention()
-        try await value(of: second)
-        #expect(app.ledgerAttention.failedCount == 1)
+        try #require(await gate.firstIsHeld, "the first read must be parked before the burst")
 
+        // The writes the burst is about land after the parked read began.
+        await gate.set(5)
+        let burst = (0..<10).map { _ in app.refreshLedgerAttention() }
+        // Room for the burst's read to start if anything let it overlap the parked one.
+        for _ in 0..<200 { await Task.yield() }
+        #expect(await gate.reads == 1, "no read starts while one is in flight")
         await gate.release()
         try await value(of: first)
-        #expect(app.ledgerAttention.failedCount == 1, "the older read finished last and was dropped")
+        for task in burst { try await value(of: task) }
+
+        #expect(await gate.reads == 2, "one read in flight, one more for the whole burst")
+        #expect(app.ledgerAttention.failedCount == 5, "the read after the burst saw its writes")
+
+        // And a refresh after all of that reads again: nothing is left coalesced.
+        await gate.set(9)
+        try await value(of: app.refreshLedgerAttention())
+        #expect(await gate.reads == 3)
+        #expect(app.ledgerAttention.failedCount == 9)
+    }
+
+    @Test("a jobs-table write refreshes the snapshot through the ledger's one onJobsChanged hook")
+    func jobsChangedHookRefreshes() async throws {
+        let (store, app, _) = try makeApp()
+        let thrasher = job("thrasher")
+        try store.ledger.upsert(thrasher)
+        try await value(of: app.refreshLedgerAttention())
+        #expect(app.ledgerAttention.attentionPaused.isEmpty)
+        let engine = IrisEngine(state: app, client: FakeLLMClient(responses: []),
+                                protectionEnabled: false, sessionPeerCount: 0)
+        await engine.installJobsChangedHook(ledger: store.ledger)
+
+        // Not through `/jobs` or the runner, which refresh on their own: only the hook can see it.
+        try store.ledger.setPaused(jobId: thrasher.id, reason: JobRunner.breakerReason(count: 6))
+
+        let deadline = Date().addingTimeInterval(10)
+        while app.ledgerAttention.attentionPaused.isEmpty, Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(app.ledgerAttention.attentionPaused.map(\.name) == ["thrasher"])
     }
 }

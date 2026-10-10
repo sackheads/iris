@@ -3344,6 +3344,20 @@ actor IrisEngine {
             await runner?.pauseUnavailable(job: job, reason: reason)
         }
 
+        installJobsChangedHook(ledger: ledger)
+        await scheduleWatchSync(ledger: ledger).value
+        // The minute hand of §7's vanished-root check: FSEvents never reports a root that was
+        // deleted, so nothing but a periodic re-stat would ever notice.
+        await coordinator.startLoop(everyMinute: { [weak self, weak ledger] in
+            guard let self, let ledger else { return }
+            await self.scheduleWatchSync(ledger: ledger).value
+        })
+    }
+
+    /// The ledger's one `onJobsChanged` hook: the watch resync, then the status item's snapshot.
+    /// Split out of `startWatching` so a test can pin it without the process-wide
+    /// `WatcherManager`; nothing else may call it, since a second install replaces the first.
+    func installJobsChangedHook(ledger: JobLedger) {
         ledger.onJobsChanged { [weak self, weak ledger] in
             // A task, because the hook runs on whatever thread finished the write and must not
             // wait on an actor — least of all one whose fire handler writes to this same ledger.
@@ -3356,13 +3370,6 @@ actor IrisEngine {
                 await self.refreshStateLedgerAttention()
             }
         }
-        await scheduleWatchSync(ledger: ledger).value
-        // The minute hand of §7's vanished-root check: FSEvents never reports a root that was
-        // deleted, so nothing but a periodic re-stat would ever notice.
-        await coordinator.startLoop(everyMinute: { [weak self, weak ledger] in
-            guard let self, let ledger else { return }
-            await self.scheduleWatchSync(ledger: ledger).value
-        })
     }
 
     /// The status item's ledger snapshot, refreshed on the main actor (the actor-helper rule).

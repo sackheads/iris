@@ -801,10 +801,17 @@ news, not a request — waking the model on every run would turn a five-minute s
 five-minute agent loop. Raw run output never enters the destination's messages.
 
 The menu bar item carries the same news without opening the window. A blocked run that nobody has
-acknowledged, and a job paused by its breaker, a budget, its retry ladder, a failing gate or a
-vanished folder, each turn the icon to `!` with a count until the run is dismissed or the job is
-resumed. A plain failure, including one still on its retry ladder, and a job you paused with
-`/jobs pause` are counts in the menu only. While a job is running, the icon shows how many.
+acknowledged turns the icon to `!` with a count until the run is cleared: dismissed on its card,
+acknowledged with `/jobs ack`, approved with **Approve and run**, or gone with its job when you
+`/jobs delete` it. So does a job paused by its breaker, a budget, its retry ladder, a failing
+gate, a vanished folder, a built-in this build does not know, or a schedule that never matches,
+until you `/jobs resume` (or delete) it. A plain failure, including one still on its retry
+ladder, and a job you paused with `/jobs pause` are counts in the menu only. While a job is
+running, the icon shows how many.
+
+A blocked run's row in the menu opens its card wherever the card is, an archived Iris after a
+`/new` included. If the conversation holding it has been deleted, the row opens Iris with one line
+naming the `/jobs ack` that clears the run instead.
 
 ## Approvals fail closed
 

@@ -203,7 +203,7 @@ struct StatusMenu: View {
             } else {
                 Button(row.text) {
                     adoptOpenAction()
-                    state.openStatusRow(row.target)
+                    Task { await state.openStatusRow(row.target) }
                 }
             }
         }

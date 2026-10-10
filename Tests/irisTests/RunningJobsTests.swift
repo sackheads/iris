@@ -258,6 +258,7 @@ struct RunningJobsTests {
         let seen = watch(state, job.id)
 
         let fire = Task { await runner.fire(job: job, origin: .schedule) }
+        defer { fire.cancel() }
         // The deadline lands mid-run: not before the turn is inside the model call.
         let reached = Date().addingTimeInterval(30)
         while client.callCount == 0, Date() < reached { try await Task.sleep(nanoseconds: 10_000_000) }

@@ -106,7 +106,7 @@ extension SurfaceAttention {
                 switch reason {
                 case .approvals(let count, let root):
                     rows.append(StatusMenuRow(id: "approvals", text: "\(count) approval\(plural(count)) waiting",
-                                              target: root.map(StatusMenuRow.Target.conversation) ?? .nowhere))
+                                              target: root.map(StatusMenuRow.Target.conversation) ?? .iris))
                 case .goalWait(let id, let title, let phrase):
                     rows.append(StatusMenuRow(id: "wait-\(id)",
                                               text: "\(phrase.prefix(1).uppercased() + phrase.dropFirst()) in “\(field(title, cap: menuTitleCap))”",

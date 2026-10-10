@@ -61,29 +61,64 @@ struct MainWindowRoutingTests {
         await app.deliverEvent(card, to: iris)
         let cardMessage = try #require(app.conversations.first { $0.id == iris }?.messages.last { $0.role == .event })
 
-        app.revealCard(runId: runId, jobId: job.id)
+        await app.revealCard(runId: runId, jobId: job.id)
 
         #expect(app.selectedConversationId == iris)
         #expect(app.pendingScrollTarget == cardMessage.id)
         #expect(raises.count == 1)
     }
 
-    @Test("revealCard falls back to Iris for an archived destination or a deleted job")
-    func revealCardFallsBack() throws {
-        let (store, app, _) = try makeApp()
-        let gone = app.createNewConversation()
-        let idx = try #require(app.conversations.firstIndex { $0.id == gone })
-        app.conversations[idx].isArchived = true
-        let job = Job(name: "pr-sweep", prompt: "do it", trigger: .schedule(.interval(seconds: 60)),
-                      destinationConversationId: gone)
+    @Test("after Iris rotates, a blocked run's card is found in the archived Iris and scrolled to")
+    func revealCardAfterRotation() async throws {
+        let (store, app, raises) = try makeApp()
+        let job = Job(name: "pr-sweep", prompt: "do it", trigger: .schedule(.interval(seconds: 60)))
         try store.ledger.upsert(job)
+        let runId = UUID()
+        let card = EventCard(runId: runId, jobId: job.id, jobName: job.name, status: .blockedOnApproval,
+                             blockedTool: "run_command", startedAt: Date(), finishedAt: Date())
+        let oldIris = app.activityConversationId()
+        await app.deliverEvent(card, to: oldIris)
+        let cardMessage = try #require(app.conversations.first { $0.id == oldIris }?.messages.last { $0.role == .event })
+        // What `/new` on Iris leaves: the old one archived, a fresh one recorded as Iris.
+        let idx = try #require(app.conversations.firstIndex { $0.id == oldIris })
+        app.conversations[idx].isArchived = true
+        let newIris = app.activityConversationId()
+        #expect(newIris != oldIris)
+        let elsewhere = app.createNewConversation()
 
-        app.revealCard(runId: UUID(), jobId: job.id)
-        #expect(app.selectedConversationId == app.activityConversationId())
+        await app.revealCard(runId: runId, jobId: job.id)
 
-        app.selectedConversationId = gone
-        app.revealCard(runId: UUID(), jobId: UUID())
-        #expect(app.selectedConversationId == app.activityConversationId())
+        #expect(app.selectedConversationId == oldIris)
+        #expect(app.selectedConversationId != elsewhere)
+        #expect(app.pendingScrollTarget == cardMessage.id)
+        #expect(app.conversations.first { $0.id == newIris }?.messages.isEmpty == true, "no line when the card was found")
+        #expect(raises.count == 1)
+    }
+
+    @Test("a card found nowhere opens Iris with one line naming the /jobs ack that clears it")
+    func revealCardGone() async throws {
+        let (store, app, raises) = try makeApp()
+        let dest = app.createNewConversation(select: false)
+        let job = Job(name: "pr-sweep", prompt: "do it", trigger: .schedule(.interval(seconds: 60)),
+                      destinationConversationId: dest)
+        try store.ledger.upsert(job)
+        let runId = UUID()
+        let card = EventCard(runId: runId, jobId: job.id, jobName: job.name, status: .blockedOnApproval,
+                             blockedTool: "run_command", startedAt: Date(), finishedAt: Date())
+        await app.deliverEvent(card, to: dest)
+        app.deleteConversation(dest)
+        app.pendingScrollTarget = nil
+
+        await app.revealCard(runId: runId, jobId: job.id)
+
+        let iris = app.activityConversationId()
+        #expect(app.selectedConversationId == iris)
+        #expect(app.pendingScrollTarget == nil)
+        let line = AppState.goneCardLine(jobName: "pr-sweep", runId: runId)
+        #expect(line == "The card for pr-sweep's blocked run is gone; `/jobs ack \(runId.uuidString.lowercased().prefix(8))` clears it.")
+        let lines = app.conversations.first { $0.id == iris }?.messages.filter { $0.content == line } ?? []
+        #expect(lines.count == 1)
+        #expect(raises.count == 1)
     }
 
     @Test("the card's destination is the one rule JobRunner delivers by (R4)")
@@ -102,14 +137,14 @@ struct MainWindowRoutingTests {
     // MARK: - Menu rows
 
     @Test("an approvals row whose root is archived unarchives it and selects it")
-    func approvalsRowUnarchivesRoot() throws {
+    func approvalsRowUnarchivesRoot() async throws {
         let (_, app, raises) = try makeApp()
         let mine = app.createNewConversation()
         let root = app.createNewConversation(select: false)
         let idx = try #require(app.conversations.firstIndex { $0.id == root })
         app.conversations[idx].isArchived = true
 
-        app.openStatusRow(.conversation(root))
+        await app.openStatusRow(.conversation(root))
 
         #expect(app.selectedConversationId == root)
         #expect(app.conversations.first { $0.id == root }?.isArchived == false)
@@ -121,7 +156,7 @@ struct MainWindowRoutingTests {
     func otherRows() async throws {
         let (store, app, raises) = try makeApp()
         _ = app.createNewConversation()
-        app.openStatusRow(.iris)
+        await app.openStatusRow(.iris)
         #expect(app.selectedConversationId == app.activityConversationId())
         #expect(raises.count == 1)
 
@@ -133,13 +168,13 @@ struct MainWindowRoutingTests {
         await app.deliverEvent(card, to: app.activityConversationId())
         let other = app.createNewConversation()
         #expect(app.selectedConversationId == other)
-        app.openStatusRow(.card(runId: runId, jobId: job.id))
+        await app.openStatusRow(.card(runId: runId, jobId: job.id))
         #expect(app.selectedConversationId == app.activityConversationId())
         #expect(app.pendingScrollTarget != nil)
         #expect(raises.count == 2)
 
         app.selectedConversationId = other
-        app.openStatusRow(.nowhere)
+        await app.openStatusRow(.nowhere)
         #expect(app.selectedConversationId == other)
         #expect(raises.count == 2)
     }
