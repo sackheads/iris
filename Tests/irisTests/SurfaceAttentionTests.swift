@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import AppKit
 @testable import IrisKit
 
 /// D6 decisions 2-4: one derived value answers "does Iris need me?" for every surface. Plain
@@ -183,5 +184,52 @@ struct SurfaceAttentionTests {
         app.conversations[idx].isArchived = false
         app.conversations[idx].isBackground = true
         #expect(app.surfaceAttention == .idle, "nor does a background run's")
+    }
+}
+
+/// The menu bar keeps one element of a `MenuBarExtra` label, so a counted glyph must arrive as one
+/// image holding both the symbol and the count (the GUI pass on #473).
+@MainActor
+@Suite("Status item image (D6)")
+struct StatusItemImageTests {
+    @Test("idle is the bare symbol; a count is one template image wider than the symbol alone")
+    func countedGlyphIsOneImage() throws {
+        #expect(StatusItemImage.make(StatusGlyph.make(.idle, identity: .dev)) == nil)
+
+        let symbol = try #require(NSImage(systemSymbolName: "hammer", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: NSFont.menuBarFont(ofSize: 0).pointSize, weight: .regular)))
+        for attention in [SurfaceAttention.running(1), .actionRequired([.approvals(count: 2, conversationId: nil)])] {
+            let glyph = StatusGlyph.make(attention, identity: .dev)
+            let image = try #require(StatusItemImage.make(glyph))
+            #expect(image.isTemplate)
+            #expect(image.size.width > symbol.size.width + StatusItemImage.spacing, "the count is drawn beside the symbol")
+            #expect(image.accessibilityDescription == glyph.accessibilityLabel)
+        }
+    }
+
+    @Test("the image draws both the symbol and the count, neither half blank")
+    func symbolIsDrawn() throws {
+        let glyph = StatusGlyph.make(.running(1), identity: .release)
+        let image = try #require(StatusItemImage.make(glyph))
+        let rep = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(image.size.width) * 2,
+                                                pixelsHigh: Int(image.size.height) * 2, bitsPerSample: 8,
+                                                samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        rep.size = image.size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        image.draw(in: NSRect(origin: .zero, size: image.size))
+        NSGraphicsContext.restoreGraphicsState()
+
+        func inked(_ columns: Range<Int>) -> Bool {
+            for x in columns { for y in 0..<rep.pixelsHigh where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.1 { return true } }
+            return false
+        }
+        let symbolWidth = Int(NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: NSFont.menuBarFont(ofSize: 0).pointSize, weight: .regular))?
+            .size.width ?? 0) * 2
+        #expect(symbolWidth > 0)
+        #expect(inked(0..<symbolWidth), "the symbol is in the image")
+        #expect(inked(symbolWidth..<rep.pixelsWide), "and so is the count")
     }
 }

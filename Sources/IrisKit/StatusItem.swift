@@ -172,19 +172,54 @@ struct MainWindowTracker: NSViewRepresentable {
 }
 
 /// The status item's label: the glyph `SurfaceAttention` asks for (D6 decision 4).
+///
+/// One image, never a symbol plus text. `MenuBarExtra` keeps a single element of its label: a
+/// `Text` with an interpolated `Image` came out as the bare count with no symbol (the GUI pass on
+/// #473), so a counted glyph is drawn into one template `NSImage` here. Idle stays the plain symbol.
 struct StatusItemLabel: View {
     let state: AppState
 
     var body: some View {
         let glyph = StatusGlyph.make(state.surfaceAttention, identity: .current)
-        Group {
-            if let text = glyph.text {
-                Text("\(Image(systemName: glyph.symbol))\(text)")
-            } else {
-                Image(systemName: glyph.symbol)
-            }
+        if let image = StatusItemImage.make(glyph) {
+            Image(nsImage: image)
+                .accessibilityLabel(glyph.accessibilityLabel)
+        } else {
+            Image(systemName: glyph.symbol)
+                .accessibilityLabel(glyph.accessibilityLabel)
         }
-        .accessibilityLabel(glyph.accessibilityLabel)
+    }
+}
+
+/// Draws a counted glyph — the symbol, then `N` or `!N` — as one template image, so the menu bar
+/// tints it for light and dark like any status item.
+enum StatusItemImage {
+    /// The gap between the symbol and the count, in points.
+    static let spacing: CGFloat = 2
+
+    /// Nil for a glyph with no text (idle), which the label draws as the bare symbol, and for a
+    /// symbol this system does not have.
+    @MainActor
+    static func make(_ glyph: StatusGlyph) -> NSImage? {
+        guard let text = glyph.text else { return nil }
+        let font = NSFont.menuBarFont(ofSize: 0)
+        let config = NSImage.SymbolConfiguration(pointSize: font.pointSize, weight: .regular)
+        guard let symbol = NSImage(systemSymbolName: glyph.symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config) else { return nil }
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
+        let string = NSAttributedString(string: text, attributes: attributes)
+        let textSize = string.size()
+        let height = ceil(max(symbol.size.height, textSize.height))
+        let size = NSSize(width: ceil(symbol.size.width + spacing + textSize.width), height: height)
+        let image = NSImage(size: size, flipped: false) { _ in
+            symbol.draw(in: NSRect(x: 0, y: (height - symbol.size.height) / 2,
+                                   width: symbol.size.width, height: symbol.size.height))
+            string.draw(at: NSPoint(x: symbol.size.width + spacing, y: (height - textSize.height) / 2))
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = glyph.accessibilityLabel
+        return image
     }
 }
 
