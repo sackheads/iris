@@ -241,7 +241,7 @@ struct SessionToolsTests {
         let engine = IrisEngine(state: app, tier: .medium, client: client, sessionPeerCount: 1)
         await engine.processInput("go", source: "UI", conversationId: me)
 
-        #expect(toolResultText(app, conversationId: me).lowercased().contains("no session"))
+        #expect(toolResultText(app, conversationId: me).lowercased().contains("no active session matches that"))
     }
 
     // MARK: - Tool-call harness
@@ -375,7 +375,8 @@ struct SessionToolsTests {
         app.createNewConversation(id: target)
 
         let result = await runToolCall(sendCall(to: target), on: app, as: me)
-        #expect(result.contains("Accepted — delivered in the background."))
+        #expect(result.contains("Accepted — sent to"))
+        #expect(result.contains("delivered in the background. You will not be notified when it completes."))
         #expect(app.cascadeRemaining(for: me) == ConfigManager.shared.maxSessionCascade - 1,
                 "an accepted send debits exactly one from the shared cascade budget")
     }
@@ -393,7 +394,8 @@ struct SessionToolsTests {
         #expect(app.hasTurnInFlight(for: target))
 
         let result = await runToolCall(sendCall(to: target), on: app, as: me)
-        #expect(result.contains("Accepted — the target is busy; it will see this at its next turn."))
+        #expect(result.contains("Accepted — sent to"))
+        #expect(result.contains("it is busy and will see this at its next turn."))
         #expect(app.pendingUserMessageCount(for: target) >= 1, "and it is actually in the inbox")
         app.endEngineTurn(for: target)
     }

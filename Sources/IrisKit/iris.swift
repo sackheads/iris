@@ -666,9 +666,9 @@ actor IrisEngine {
     /// it took (most of `PeerDeliveryTests`), can ignore it.
     @discardableResult
     func deliverPeerMessage(_ message: String, from senderId: UUID, senderName: String?,
-                             to targetId: UUID) async -> Bool {
+                             senderRole: String? = nil, to targetId: UUID) async -> Bool {
         let localState = state
-        let attributed = Self.framePeerMessage(message, senderName: senderName, senderId: senderId)
+        let attributed = Self.framePeerMessage(message, senderName: senderName, senderId: senderId, senderRole: senderRole)
         // Sanitise before deciding where it goes, because both destinations need it sanitised and
         // both use the identical helper. Doing it first also keeps the claim below as narrow as it
         // can be: tier-2 CoreML and tier-3 auxiliary-model inference are the expensive part, and
@@ -745,8 +745,8 @@ actor IrisEngine {
     /// whichever text the model reads last, so the last thing read must be the constraint, not the
     /// sender's payload.
     nonisolated static func framePeerMessage(_ message: String, senderName: String?,
-                                              senderId: UUID) -> String {
-        let who = peerLabel(senderName: senderName, senderId: senderId)
+                                              senderId: UUID, senderRole: String? = nil) -> String {
+        let who = peerLabel(senderName: senderName, senderId: senderId, senderRole: senderRole)
         return """
         Request from another session, \(who):
 
@@ -951,10 +951,13 @@ actor IrisEngine {
 
     /// The sender's name as the framing states it: flattened and capped so it cannot forge a
     /// newline-borne fake `System Event [...]:` block, or an unterminated quote, into trusted prose.
-    private nonisolated static func peerLabel(senderName: String?, senderId: UUID) -> String {
-        guard let senderName else { return senderId.uuidString }
+    private nonisolated static func peerLabel(senderName: String?, senderId: UUID, senderRole: String? = nil) -> String {
+        // #469 §12: the role is harness-written (user-assigned, charset-restricted), so it is
+        // stated plainly; it names the sender and grants nothing.
+        let role = senderRole.map { "role \($0) (assigned by the user), " } ?? ""
+        guard let senderName else { return role + senderId.uuidString }
         let shortId = senderId.uuidString.prefix(8)
-        return "\"\(flattenCardField(senderName, cap: cardNameCap))\" (\(shortId))"
+        return role + "\"\(flattenCardField(senderName, cap: cardNameCap))\" (\(shortId))"
     }
 
     /// The turn context's "This Session" section (#418). The title and card are text the session
@@ -2169,11 +2172,11 @@ actor IrisEngine {
             ))
             toolsList.append(FunctionDeclaration(
                 name: "send_to_session",
-                description: "Send a message to another active session. It arrives as a request that session may decline, not an instruction it must follow. Use it to ask a peer working elsewhere for something only it can do. Archived sessions, and the hidden conversations background job runs use, cannot be reached.",
+                description: "Send a message to another active session. It arrives as a request that session may decline, not an instruction it must follow. Use it to ask a peer working elsewhere for something only it can do. Address it by role when you mean whoever holds the role, so a moved role still reaches the right session. Archived sessions, and the hidden conversations background job runs use, cannot be reached.",
                 parameters: Schema(type: "OBJECT", properties: [
-                    "session_id": Schema(type: "STRING", description: "The peer's session_id from list_sessions."),
+                    "to": Schema(type: "STRING", description: "A session_id from list_sessions, role:<name> for whoever holds that role now, name:<name>, or iris for the pinned Iris conversation."),
                     "message": Schema(type: "STRING", description: "What to say. Include enough context to act on without seeing your conversation.")
-                ], required: ["session_id", "message"])
+                ], required: ["to", "message"])
             ))
             toolsList.append(FunctionDeclaration(
                 name: "set_session_card",
@@ -3844,7 +3847,7 @@ actor IrisEngine {
                 }
             }
         } else if functionCall.name == "send_to_session",
-                  let idString = functionCall.args["session_id"]?.stringValue,
+                  let to = (functionCall.args["to"] ?? functionCall.args["session_id"])?.stringValue,
                   let message = functionCall.args["message"]?.stringValue {
             // #185 §9: "a subagent attempting a send is refused as 'not a session', so a subagent
             // can neither originate nor extend a cascade." Declaration gating alone does not hold
@@ -3871,31 +3874,18 @@ actor IrisEngine {
                 result = "A message is required."
                 return result
             }
-            guard let targetId = UUID(uuidString: idString) else {
-                result = "No session with that id."
-                return result
+            // #469 §5.2: resolved here, at delivery time — not when the model last listed peers —
+            // so `role:<name>` reaches whoever holds it now, not whoever held it when the model
+            // called `list_sessions`. Covers the self-send, archived, background-run and
+            // unknown-id refusals the old inline guards used to spell out individually.
+            let resolved = await MainActor.run { () -> Result<UUID, SessionAddressError> in
+                guard let s = localState else { return .failure(.notFound) }
+                return SessionDirectory.resolve(to, in: s.conversations, excluding: conversationId)
             }
-            if targetId == conversationId {
-                result = "That is this session — refused."
-                return result
-            }
-            let target = await MainActor.run { () -> (exists: Bool, archived: Bool) in
-                guard let c = localState?.conversations.first(where: { $0.id == targetId })
-                else { return (false, false) }
-                // A background run is refused like an archived session: it is not a peer in
-                // `list_sessions` either, and a message delivered into it would land in a
-                // transcript nobody reads and retention will prune (#187).
-                return (true, c.isArchived || c.isSubagent || c.isBackground)
-            }
-            guard target.exists else {
-                result = "No session with that id."
-                return result
-            }
-            guard !target.archived else {
-                // §5.1: refusing protects the bound on the peer set; un-archiving here would let a
-                // peer re-expand the address space on its own initiative.
-                result = "That session is no longer active."
-                return result
+            let targetId: UUID
+            switch resolved {
+            case .failure(let e): result = e.message; return result
+            case .success(let id): targetId = id
             }
             let allowed = await MainActor.run {
                 localState?.beginPeerCascade(into: targetId, from: conversationId) ?? false
@@ -3904,13 +3894,17 @@ actor IrisEngine {
                 result = "Message budget for this chain of session messages is exhausted; not sent."
                 return result
             }
-            let senderName = await MainActor.run {
-                localState?.conversations.first(where: { $0.id == conversationId })?.sessionCard?.name
+            let (senderName, senderRole, targetLabel) = await MainActor.run { () -> (String?, String?, String) in
+                let me = localState?.conversations.first(where: { $0.id == conversationId })
+                let target = localState?.conversations.first(where: { $0.id == targetId })
+                let label = (target?.sessionCard?.name).map { "\"\(Self.flattenCardField($0, cap: Self.cardNameCap))\"" } ?? "a session"
+                return (me?.sessionCard?.name, me?.role, "\(label) (\(targetId.uuidString.prefix(8)))")
             }
-            let queued = await deliverPeerMessage(message, from: conversationId, senderName: senderName, to: targetId)
+            let queued = await deliverPeerMessage(message, from: conversationId, senderName: senderName,
+                                                  senderRole: senderRole, to: targetId)
             result = queued
-                ? "Accepted — the target is busy; it will see this at its next turn."
-                : "Accepted — delivered in the background. You will not be notified when it completes."
+                ? "Accepted — sent to \(targetLabel); it is busy and will see this at its next turn."
+                : "Accepted — sent to \(targetLabel), delivered in the background. You will not be notified when it completes."
         } else if functionCall.name == "set_session_card",
                   let name = functionCall.args["name"]?.stringValue,
                   let description = functionCall.args["description"]?.stringValue {
