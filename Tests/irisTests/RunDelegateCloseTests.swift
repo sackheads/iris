@@ -117,7 +117,7 @@ struct RunDelegateCloseTests {
                                ensureIsolatedNetwork: { nil }, config: config, activity: RecordingActivity(),
                                sandboxAvailable: { true }, watchdogSlice: 0.01, deadlineClock: clock.now)
 
-        let fire = Task { await runner.fire(job: job, origin: .schedule) }
+        let fire = Task { _ = await runner.fire(job: job, origin: .schedule) }
         #expect(await eventually { client.parked("PARENT") == 1 })
         let run = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first?.transcriptConversationId)
 
