@@ -4220,9 +4220,21 @@ class AppState {
         }
     }
 
-    /// Closes the link sheet when it shows `jobId`'s link, which `off` or `delete` just killed.
+    /// Closes the link sheet when it shows `jobId`'s link, which `off`, `delete` or a model's
+    /// change (`announceURLTriggerCleared`) just killed.
     private func withdrawRevealedURLTrigger(jobId: UUID) {
         if revealedURLTrigger?.jobId == jobId { revealedURLTrigger = nil }
+    }
+
+    /// D6 decision 11's line in Iris, when a change turned a job's URL trigger off.
+    nonisolated static func urlTriggerClearedLine(_ name: String) -> String {
+        "URL trigger for \(name) turned off: the job was changed. `/jobs url \(name) on` makes a new link."
+    }
+
+    /// Said once the ledger has cleared the trigger. The sheet goes too: its link is dead.
+    func announceURLTriggerCleared(jobId: UUID, jobName: String) {
+        withdrawRevealedURLTrigger(jobId: jobId)
+        appendMessage(role: .system, content: Self.urlTriggerClearedLine(jobName), to: activityConversationId())
     }
 
     private func handleJourneyCommand(convId: UUID) {

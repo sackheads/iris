@@ -154,7 +154,9 @@ actor IrisEngine {
             guard let ledger = await MainActor.run(resultType: JobLedger?.self,
                                                    body: { state?.store.ledger })
             else { return nil }
-            return JobTools(ledger: ledger)
+            return JobTools(ledger: ledger, announceURLTriggerCleared: { [weak state] id, name in
+                await MainActor.run { state?.announceURLTriggerCleared(jobId: id, jobName: name) }
+            })
         }
     }
     let manager = SkillManager.shared
@@ -2964,8 +2966,14 @@ actor IrisEngine {
                     // Stored through the scheduler, not the ledger, so the first fire is computed
                     // by the code the polling loop uses — and a cadence that matches nothing comes
                     // back paused rather than looking scheduled.
-                    return ScheduleJobArguments.resultSentence(for: try await scheduler.schedule(job),
-                                                                notes: notes)
+                    let scheduled = try await scheduler.scheduleReporting(job)
+                    var said = notes
+                    if scheduled.urlTriggerCleared {
+                        said.append(ScheduleJobArguments.urlTriggerClearedNote(scheduled.job.name))
+                        let id = scheduled.job.id, name = scheduled.job.name
+                        await MainActor.run { localState?.announceURLTriggerCleared(jobId: id, jobName: name) }
+                    }
+                    return ScheduleJobArguments.resultSentence(for: scheduled.job, notes: said)
                 } catch {
                     taken.insert(job.name)
                 }

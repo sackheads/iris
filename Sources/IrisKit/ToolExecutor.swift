@@ -6,6 +6,10 @@ import Foundation
 /// never called `start()` has no watch layer for a second handle to reach.
 struct JobTools: Sendable {
     let ledger: JobLedger
+    /// D6 decision 11: tells the owner, in Iris, that a watch update turned a job's URL trigger
+    /// off, and closes that job's link sheet. nil where there is no app to tell (a test, a
+    /// throwaway executor).
+    var announceURLTriggerCleared: (@Sendable (_ jobId: UUID, _ jobName: String) async -> Void)? = nil
 }
 
 struct ToolExecutor {
@@ -420,7 +424,7 @@ struct ToolExecutor {
             // and the stream set within the same second. An engine that never started (a subagent,
             // an evaluator, a scenario run) has no hook installed and no watcher running, so there
             // is nothing here to reload — the job is stored and the next launch picks it up.
-            try tools.ledger.upsert(job)
+            let outcome = try tools.ledger.upsert(job)
             guard case .fsEvent(let stored) = job.trigger else { return "Could not save the watcher job." }
             var sentences = ["Watching \(displayPath): \(opening)."]
             var runs = "It runs once the folder has been quiet for \(stored.quietWindowSeconds) s"
@@ -443,6 +447,10 @@ struct ToolExecutor {
                 sentences.append("It pauses itself past \(runs) run\(runs == 1 ? "" : "s") an hour.")
             }
             if let grant = job.policy.grants { sentences.append(grant.sentence) }
+            if outcome.urlTriggerCleared {
+                sentences.append(ScheduleJobArguments.urlTriggerClearedNote(job.name))
+                await tools.announceURLTriggerCleared?(job.id, job.name)
+            }
             return sentences.joined(separator: " ")
         } catch {
             return "Could not save the watcher job."
