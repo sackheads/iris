@@ -2323,6 +2323,28 @@ class AppState {
                 appendMessage(role: .system, content: "Not archived.", to: convId)
             }
             return
+        } else if trimmed == "/role" || trimmed.hasPrefix("/role ") {
+            // #469 §4.3: roles are the user's to assign; no tool sets one.
+            let arg = trimmed.dropFirst("/role".count).trimmingCharacters(in: .whitespaces)
+            if arg.isEmpty {
+                let role = conversations.first { $0.id == convId }?.role
+                appendMessage(role: .system, content: role.map { "This session holds role `\($0)`." }
+                              ?? "No role. Assign one with /role <name>; /role clear releases it.", to: convId)
+            } else if arg.lowercased() == "clear" {
+                let released = clearRole(for: convId)
+                appendMessage(role: .system, content: released.map { "Released role `\($0)`." } ?? "No role to release.", to: convId)
+            } else {
+                switch assignRole(arg, to: convId) {
+                case .assigned(let role, let movedFrom):
+                    let from = movedFrom.map { id in
+                        " (moved from \(conversations.first { $0.id == id }?.title ?? id.uuidString))"
+                    } ?? ""
+                    appendMessage(role: .system, content: "Role `\(role)` assigned\(from).", to: convId)
+                case .refused(let reason):
+                    appendMessage(role: .system, content: reason, to: convId)
+                }
+            }
+            return
         }
 
         // #182 §6.2's un-archive is not here: `runThinkingTask` carries it for every turn-starting

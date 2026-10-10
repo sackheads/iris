@@ -67,4 +67,36 @@ struct SessionRolesTests {
         #expect(all[0].role == nil && all[1].role == "planner")
         #expect(all[2].role == nil && all[3].role == nil)
     }
+
+    private func lastSystemLine(_ app: AppState, _ id: UUID) -> String {
+        app.conversations.first { $0.id == id }?.messages.last?.content ?? ""
+    }
+
+    @Test("/role assigns, reports, and clears")
+    func roleCommand() {
+        let a = UUID(), b = UUID()
+        let app = app([a, b])
+        app.selectedConversationId = a
+        app.sendMessage("/role")
+        #expect(lastSystemLine(app, a).contains("No role"))
+        app.sendMessage("/role Planner")
+        #expect(app.conversations.first { $0.id == a }?.role == "planner")
+        #expect(lastSystemLine(app, a).contains("planner"))
+        app.selectedConversationId = b
+        app.sendMessage("/role planner")
+        #expect(lastSystemLine(app, b).contains("moved from"))
+        app.sendMessage("/role clear")
+        #expect(app.conversations.first { $0.id == b }?.role == nil)
+    }
+
+    @Test("/role in Iris refuses")
+    func roleInIris() {
+        let a = UUID()
+        let app = app([a])
+        app.conversations[0].isPinned = true
+        app.selectedConversationId = a
+        app.sendMessage("/role planner")
+        #expect(app.conversations[0].role == nil)
+        #expect(lastSystemLine(app, a).contains("Iris holds no factory role"))
+    }
 }
