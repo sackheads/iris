@@ -1092,6 +1092,11 @@ actor IrisEngine {
         }
 
         let ladderPos = "\(contract.currentMilestone + 1) of \(contract.milestones.count)"
+        // Stopped before a verdict (#464): nothing was graded, so neither advance nor pause for a
+        // review of an ungraded milestone. The checkpoint stays running, undecided.
+        if evaluation?.status == .stopped {
+            return "Grading of checkpoint \(ladderPos) was stopped before a verdict, so the checkpoint was not decided: it was neither advanced nor paused for review. Call reach_checkpoint again to grade it."
+        }
         let milestoneTitle = contract.milestones[contract.currentMilestone].title
 
         // Re-read the contract: the grade landed via recordEvaluation, and a judgement may have
@@ -4201,6 +4206,11 @@ actor IrisEngine {
                     contract: c, workspace: gradeWorkspace,
                     originatingConversationId: conversationId, app: graderApp, client: self.client,
                     recentWrites: self.recentWrites)
+                // Stopped before a verdict (#464): the turn is being stopped with it. Not a pass,
+                // and not a grader fault to let through ungated either, so the goal stays open.
+                if evaluation.status == .stopped {
+                    return "Grading was stopped before the independent grader returned a verdict, so the goal was NOT marked complete."
+                }
                 let blocking = c.blockingCriteria(from: evaluation)
                 let cap = ConfigManager.shared.maxDoneGateRetries
 

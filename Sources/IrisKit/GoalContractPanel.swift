@@ -1049,6 +1049,17 @@ private struct DriftCriterionRow: View {
                     .font(.caption2)
                     .foregroundStyle(.orange)
             }
+        case .stopped:
+            // Stopped before a verdict (#464): placeholders again, and not a grader fault.
+            HStack(spacing: 4) {
+                Image(systemName: "stop.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Grading stopped before a verdict")
+                Text("grading stopped")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         case .graded:
             // Glyph, spoken label, text and tint come from ONE derivation keyed on
             // (method, verdict). Splitting them is how the icon ended up honest about a human

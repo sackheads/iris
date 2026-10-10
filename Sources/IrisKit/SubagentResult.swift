@@ -75,6 +75,11 @@ struct SubagentResult: Codable, Sendable, Equatable {
     /// One line per criterion verdict, plus a header tallying how many were met. Only `.met`
     /// counts toward the tally — `human_pending` in particular is never rendered as a passed gate.
     private func verdictBlock(_ verdict: GoalEvaluation) -> String {
+        // A stopped grader graded nothing: its placeholders must not read as findings (#464).
+        if verdict.status == .stopped {
+            let n = verdict.criteria.count
+            return "Independent grading stopped before a verdict (the grader was stopped with its run or parent) — \(n) criter\(n == 1 ? "ion" : "ia") NOT graded."
+        }
         let met = verdict.criteria.filter { $0.verdict == .met }.count
         var header = "Independent grader verdict (fresh context): \(met)/\(verdict.criteria.count) met"
         if verdict.status != .graded { header += " — grader status: \(verdict.status.rawValue)" }

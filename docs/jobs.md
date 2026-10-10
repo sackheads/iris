@@ -984,7 +984,9 @@ The run's subagents stop with it (#323). Cancelling the run's turn at the deadli
 subagent it is waiting on, and that subagent's own: the in-flight model call is cancelled, a running
 `run_command` is killed with everything it started, and its container is deleted. The run's result
 for that delegation reads `status: cancelled`. When the run is closed, any subagent still registered
-under it is stopped the same way, so none outlives its run. A subagent's goal loop reprompts it after any turn that ends without `goal_complete`, up to its
+under it is stopped the same way, so none outlives its run. So is a goal evaluator still grading
+a subagent's work for the run (#464): its model call is cancelled and its grade comes back
+`grading stopped`, never as a verdict. A subagent's goal loop reprompts it after any turn that ends without `goal_complete`, up to its
 iteration cap (10 by default), and each reprompt is a round like any other: charged to the run and
 checked against its budget first. Each of its turns also has a time limit of its own (#402),
 restarted every turn: 15 minutes by default (Settings → Agent Limits → Subagent turn timeout),
