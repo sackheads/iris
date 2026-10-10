@@ -12,8 +12,10 @@ final class ModelLEDBarTests: XCTestCase {
     private var config: ConfigManager!
     private var suiteName = ""
 
-    override func setUp() {
-        super.setUp()
+    // The async overrides, because XCTest declares those main-actor isolated: the synchronous
+    // ones are nonisolated and cannot touch this class's main-actor state (#286).
+    override func setUp() async throws {
+        try await super.setUp()
         suiteName = "iris-modelledbar-\(UUID().uuidString)"
         let store = UserDefaults(suiteName: suiteName)!
         store.removePersistentDomain(forName: suiteName)
@@ -32,12 +34,12 @@ final class ModelLEDBarTests: XCTestCase {
         config.promptGuardModel = ""
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
         // removePersistentDomain does not delete the backing plist on current macOS (#178);
         // IrisDefaults sweeps stale iris-*-<UUID> plists by age, but clean up anyway.
         IrisDefaults.removeSuiteFile(named: suiteName, in: IrisDefaults.preferencesDirectory)
-        super.tearDown()
+        try await super.tearDown()
     }
 
     // MARK: - Primary LED

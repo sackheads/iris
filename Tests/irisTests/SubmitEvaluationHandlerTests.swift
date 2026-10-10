@@ -3,7 +3,7 @@ import Foundation
 @testable import IrisKit
 
 @MainActor
-@Suite("submit_evaluation handler")
+@Suite("submit_evaluation handler", .timeLimit(.minutes(1)))
 struct SubmitEvaluationHandlerTests {
     private func response(_ fc: FunctionCall?) -> GeminiResponse {
         let part = Part(text: fc == nil ? "done" : nil, functionCall: fc, functionResponse: nil,

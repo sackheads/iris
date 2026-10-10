@@ -10,7 +10,7 @@ import Foundation
 /// the receiver's attended approval path, so an unattended run could get a gated tool run for it by
 /// asking someone else. Gated on the sender side: undeclared, and refused at dispatch.
 @MainActor
-@Suite("A background run cannot message sessions")
+@Suite("A background run cannot message sessions", .timeLimit(.minutes(1)))
 struct BackgroundSessionToolsTests {
 
     private let names = ["list_sessions", "send_to_session", "set_session_card"]

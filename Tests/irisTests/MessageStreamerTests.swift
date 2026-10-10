@@ -25,7 +25,7 @@ private func eventually(_ timeoutMs: Int = 2000, _ condition: @Sendable () async
     return await condition()
 }
 
-@Suite("Message streamer")
+@Suite("Message streamer", .timeLimit(.minutes(1)))
 struct MessageStreamerTests {
     private func make(_ recorder: Recorder, gate: Gate) -> MessageStreamer {
         MessageStreamer(open: { await recorder.open($0, $1) },
@@ -123,7 +123,7 @@ struct MessageStreamerTests {
 }
 
 @MainActor
-@Suite("AppState in-place message update")
+@Suite("AppState in-place message update", .timeLimit(.minutes(1)))
 struct UpdateMessageContentTests {
     @Test("content is replaced without adding a message; persist is opt-in")
     func updateInPlace() {

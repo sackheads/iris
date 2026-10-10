@@ -6,7 +6,7 @@ import Foundation
 /// The first ladder run showed the tier-3 cloud canary re-sanitizing the static 32-byte
 /// `USER.md` on every turn, 0.7-0.9 s each time. Hits skip the model tiers entirely, so they
 /// record no `guard.tier2` / `guard.tier3` span, which is how these tests observe them.
-@Suite("InjectionGuard sanitization cache")
+@Suite("InjectionGuard sanitization cache", .timeLimit(.minutes(1)))
 struct InjectionGuardCacheTests {
     /// Run `sanitize` inside its own profiler turn and return the tier-2/3 span counts it recorded.
     private func spans(for content: String, tag: String = "cache_test",

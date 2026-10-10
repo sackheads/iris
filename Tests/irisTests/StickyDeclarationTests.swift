@@ -13,7 +13,7 @@ import Foundation
 /// Deleting any one layer leaves every test here green. Each comment below says which layer, or
 /// which combination, a test pins.
 @MainActor
-@Suite struct StickyDeclarationTests {
+@Suite(.timeLimit(.minutes(1))) struct StickyDeclarationTests {
     /// One turn through a real engine against a capturing client. Returns the declared names.
     private func names(_ app: AppState, _ id: UUID, prompt: String = "carry on",
                        principal: Principal = .main, factStore: FactStoreManager,

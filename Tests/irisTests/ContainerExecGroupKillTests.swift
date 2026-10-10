@@ -153,7 +153,7 @@ struct ContainerExecGroupKillTests {
         #expect(await RunCommandProcessGroupTests.appears("sleep \(clientNap)", within: 5))
         if !late { #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5)) }
         call.cancel()
-        _ = try? await call.value
+        _ = try? await value(of: call)
         // Late, the wrapper records its group about a second after the launch, after the first kill.
         if late { #expect(await RunCommandProcessGroupTests.appears("^sleep \(nap)", within: 5), "the late group never started") }
         let deadline = Date().addingTimeInterval(CLIProcessRunner.killGraceSeconds * 2 + 3)
@@ -197,7 +197,7 @@ struct ContainerExecGroupKillTests {
         let started = Date()
         #expect(BlockingSpawn.run("/bin/bash", ["-c", CLIContainerRuntime.groupKiller(pidFile)], timeoutSeconds: 10) == 0)
         #expect(Date().timeIntervalSince(started) < 1, "the second killer waited out a grace: it signalled something")
-        _ = await command.value
+        _ = try await value(of: command)
         #expect(!RunCommandProcessGroupTests.exists("^sleep \(nap)"))
     }
 
@@ -237,7 +237,7 @@ struct ContainerExecGroupKillTests {
         let killer = await ProcessGroupRunner().run(executable: "/bin/bash", arguments: ["-c", CLIContainerRuntime.groupKiller(pidFile)],
                                                      environment: nil, currentDirectory: nil)
         #expect((try? killer.get().status) == 0)
-        _ = await command.value
+        _ = try await value(of: command)
         #expect(!RunCommandProcessGroupTests.exists("sleep \(bg)"))
         #expect(!RunCommandProcessGroupTests.exists("sleep \(fg)"))
         #expect(!FileManager.default.fileExists(atPath: pidFile))

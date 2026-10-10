@@ -12,7 +12,7 @@ import Foundation
 /// write there is a grant, not an edit). Both are checked on the card, in the runner and in the
 /// executor, because each of the three can be reached without the other two.
 @MainActor
-@Suite("Approve and run (#187)")
+@Suite("Approve and run (#187)", .timeLimit(.minutes(1)))
 struct ApproveAndRunTests {
 
     // MARK: Fixtures

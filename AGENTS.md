@@ -14,7 +14,15 @@ The primary provider abstraction supports Anthropic, Gemini, and OpenAI. Local i
 swift build                          # compile
 swift test                           # full suite
 scripts/test-filter.sh MyTestSuite   # focused run, guarded (see below)
+scripts/check-warnings.sh            # build + tests, fails on any warning in Sources/ or Tests/
 ```
+
+**Zero warnings in our own code.** `scripts/check-warnings.sh` builds the package and the test
+target and fails on any compiler warning from `Sources/` or `Tests/`; dependency warnings are
+ignored. It touches our Swift files first, because an incremental build only prints warnings for
+what it recompiles, so it rebuilds our modules (about a minute) but not the dependencies. A new
+warning is fixed at its source: `_ =` for a result discarded on purpose, the right isolation for
+the code that warns. Do not suppress it (#286).
 
 **Releasing.** Cutting a signed, notarized release (`scripts/release.sh`) is a separate flow from
 building or testing — see [docs/releasing.md](docs/releasing.md).
@@ -99,6 +107,12 @@ it, and when citing a filtered run as evidence, quote the test count (#271). A f
 only an `XCTestCase` class makes Swift Testing legitimately print "Test run with 0 tests in 0
 suites passed" while XCTest runs the tests fine — the script passes that run rather than crying
 wolf (#301, #303).
+
+**A test never awaits an unstructured task bare.** `await task.value` ignores the test's
+cancellation, so `.timeLimit` cannot end a test parked on it and one lost wakeup hangs the whole
+run (#428). Await it through `value(of:within:)` (`Tests/irisTests/BoundedWait.swift`), which fails
+the test at its bound instead, and give a suite that starts tasks or processes
+`.timeLimit(.minutes(1))` (#435).
 
 **Opt-in tests.** Two kinds of test are skipped unless an environment variable asks for them,
 because they need something the default suite must not depend on:
@@ -281,6 +295,7 @@ docs/                     # design specs, plans, reviews, roadmaps
 ## Pre-commit checklist
 
 - [ ] `swift test` is green
+- [ ] `scripts/check-warnings.sh` exits 0: no compiler warnings in `Sources/` or `Tests/` (#286)
 - [ ] If you cite a **filtered** run as evidence: it ran a non-zero number of tests, and you say how many. `--filter` matching nothing exits 0 (Invariant 7; see Build and test, #271)
 - [ ] If you added a field to a persisted `Codable` type: it uses `decodeIfPresent` (Invariant 1)
 - [ ] If you added or modified a tool with a credential prerequisite, a triggering command, or a lifecycle state: its declaration is gated on it rather than exposed unconditionally on plain turns (Invariant 6; see #144)

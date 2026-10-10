@@ -10,7 +10,7 @@ import Foundation
 /// (a fixed zone, never the process's). The end-to-end test uses the production registry on
 /// purpose — it is what proves the digest is registered — and only reads it.
 @MainActor
-@Suite("Daily digest (5b §0.7)")
+@Suite("Daily digest (5b §0.7)", .timeLimit(.minutes(1)))
 struct DailyDigestTests {
 
     /// 2023-11-14 22:13:20 UTC.

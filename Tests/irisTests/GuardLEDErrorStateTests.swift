@@ -150,12 +150,12 @@ struct GuardLEDErrorStateTests {
     @Test("a notice nobody could place does not count as announced")
     func undeliveredDoesNotBurnTheSpell() {
         let health = GuardTierHealth()
-        var delivered = false
+        let delivered = Locked(false)
         // A headless run builds an AppState with nothing selected; the sink can find nowhere.
-        health.announce = { _ in delivered }
+        health.announce = { _ in delivered.value }
         health.recordTier2Failure("first, nowhere to put it")
         health.recordTier2Failure("second, still nowhere")
-        delivered = true
+        delivered.mutate { $0 = true }
         health.recordTier2Failure("third, now there is somewhere")
         #expect(health.tier2Failure == "third, now there is somewhere")
         // The spell was not burned by the undeliverable attempts.

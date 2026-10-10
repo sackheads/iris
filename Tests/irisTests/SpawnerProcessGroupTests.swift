@@ -331,7 +331,7 @@ struct CancelledTurnHookTests {
         let task = Task { await engine.executeApprovedCall(call, conversationId: id) }
         try await Task.sleep(nanoseconds: 500_000_000)
         task.cancel()
-        let result = await task.value
+        let result = try await value(of: task)
         #expect(result.hasPrefix("System Hook blocked execution"), "\(result)")
         #expect(!FileManager.default.fileExists(atPath: target.path), "the cancelled write still landed")
     }
@@ -345,7 +345,7 @@ struct CancelledTurnHookTests {
         let task = Task { await engine.executeApprovedCall(call, conversationId: id) }
         try await Task.sleep(nanoseconds: 500_000_000)
         task.cancel()
-        _ = await task.value
+        _ = try await value(of: task)
         #expect(!FileManager.default.fileExists(atPath: target.path))
     }
 
@@ -359,7 +359,7 @@ struct CancelledTurnHookTests {
             withUnsafeCurrentTask { $0?.cancel() }
             return await engine.executeApprovedCall(call, conversationId: id)
         }
-        let result = await task.value
+        let result = try await value(of: task)
         #expect(result == IrisEngine.cancelledToolResult("write_file"))
         #expect(!FileManager.default.fileExists(atPath: target.path))
     }

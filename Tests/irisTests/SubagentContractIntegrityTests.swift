@@ -6,7 +6,7 @@ import Foundation
 /// first slice that gives a subagent a `goalContract` at all — which also, for the first time,
 /// puts `oracleText()` in front of it, and that text names `amend_goal_contract` explicitly.
 @MainActor
-@Suite("Subagent contract integrity")
+@Suite("Subagent contract integrity", .timeLimit(.minutes(1)))
 struct SubagentContractIntegrityTests {
     private func response(_ fc: FunctionCall?) -> GeminiResponse {
         let part = Part(text: fc == nil ? "done" : nil, functionCall: fc, functionResponse: nil,

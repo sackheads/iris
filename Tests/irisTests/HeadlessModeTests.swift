@@ -12,7 +12,7 @@ import Foundation
 /// `PerfCLI.execute`'s fake lane are built on, so asserting against it covers what those entry
 /// points actually do to `HeadlessMode`. `PerfCLI.execute` itself is driven end to end, with its
 /// process-wide switches injected, in `PerfCLITests` (#324).
-@Suite("HeadlessMode (#318)")
+@Suite("HeadlessMode (#318)", .timeLimit(.minutes(1)))
 struct HeadlessModeTests {
     @Test("isEnabled is false with no scope active")
     func noScopeIsOff() {

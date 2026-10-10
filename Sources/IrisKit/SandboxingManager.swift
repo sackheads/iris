@@ -105,8 +105,8 @@ final class SandboxingManager: @unchecked Sendable {
     /// A caller's own cancellation returns promptly too, for the same reason: this call shares
     /// one in-flight start with every other concurrent caller, and a waiter that stops waiting
     /// must not take that start away from the others. `awaitSharedStart` below is a production
-    /// version of the cancel-aware wait `SubagentGoalLoopTests.value(of:within:)` (#432) uses in
-    /// tests — but where that helper cancels the task it is waiting on, this one cannot: `task`
+    /// version of the cancel-aware wait the test helper `value(of:within:)` (#432, #435) uses —
+    /// but where that helper cancels the task it is waiting on, this one cannot: `task`
     /// here is joined by every caller, and cancelling it on one caller's behalf would cancel the
     /// start for all of them.
     @discardableResult

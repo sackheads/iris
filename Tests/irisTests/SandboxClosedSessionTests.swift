@@ -7,7 +7,7 @@ import Foundation
 /// `run_command` after `closeSession` removed the container; before this, that recreated a
 /// container nothing but the idle reaper ended. Every runtime here is a stub: no `container`
 /// binary, daemon or VM, and nothing reaches `SandboxSessionManager.shared` (invariant 7).
-@Suite("Closed sandbox sessions (#292)")
+@Suite("Closed sandbox sessions (#292)", .timeLimit(.minutes(1)))
 struct SandboxClosedSessionTests {
     private func mgr(_ runtime: ContainerRuntime) -> SandboxSessionManager {
         SandboxSessionManager(runtime: runtime, image: { "ubuntu:latest" })
@@ -91,7 +91,7 @@ struct SandboxClosedSessionTests {
         await m.closeSession(id)
         rt.releaseCreate()
 
-        #expect(await first.value == SandboxSessionManager.closedSessionError)
+        #expect(try await value(of: first) == SandboxSessionManager.closedSessionError)
         #expect(rt.execCount == 0, "nothing ran in the container the create made")
         #expect(rt.removedNames.contains(name), "the container the create made was swept, not left as an orphan")
         #expect(!(await m.hasSession(id)), "and it was never recorded as a session")
@@ -157,7 +157,7 @@ struct SandboxClosedSessionTests {
         await m.closeSession(id)
         rt.releaseExec()
 
-        #expect(await first.value == SandboxSessionManager.closedMidCommandError)
+        #expect(try await value(of: first) == SandboxSessionManager.closedMidCommandError)
         #expect(rt.createdNames.count == 1, "the lost-container retry did not recreate it")
         #expect(rt.execCount == 1)
         #expect(!(await m.hasSession(id)))

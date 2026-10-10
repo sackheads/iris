@@ -41,14 +41,14 @@ struct RunCommandProcessGroupTests {
     }
 
     @Test("cancelling the caller (Stop) kills the group")
-    func cancelKillsGroup() async {
+    func cancelKillsGroup() async throws {
         let nap = Self.marker()
         defer { Self.killAll(nap) }
         let task = Task { await ToolExecutor().runCommand("sleep \(nap); true", cwd: nil, timeoutSeconds: 60) }
         #expect(await Self.appears("sleep \(nap)", within: 5), "the command never started")
         let cancelled = Date()
         task.cancel()
-        _ = await task.value
+        _ = try await value(of: task)
         #expect(Date().timeIntervalSince(cancelled) < 2, "the cancelled call did not return promptly")
         #expect(await Self.gone("sleep \(nap)", within: 4), "sleep \(nap) outlived the cancel")
     }
@@ -67,7 +67,7 @@ struct RunCommandProcessGroupTests {
     }
 
     @Test("a group that ignores SIGTERM is SIGKILLed after the grace")
-    func sigtermIgnoredThenKilled() async {
+    func sigtermIgnoredThenKilled() async throws {
         let nap = Self.marker()
         defer { Self.killAll(nap) }
         let runner = ProcessGroupRunner()
@@ -81,7 +81,7 @@ struct RunCommandProcessGroupTests {
         #expect(await Self.appears("^sleep \(nap)", within: 5), "the command never started")
         let started = Date()
         runner.terminate()
-        let result = await running.value
+        let result = try await value(of: running)
         let wall = Date().timeIntervalSince(started)
         #expect(wall >= ProcessGroupRunner.terminateGraceSeconds - 0.2, "SIGTERM should not have ended it")
         #expect(wall < ProcessGroupRunner.terminateGraceSeconds + 2)

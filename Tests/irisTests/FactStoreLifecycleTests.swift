@@ -5,7 +5,7 @@ import GRDB
 
 /// #168: the fact store gained the hermes-memory lifecycle (retract / supersede / restore),
 /// usage and feedback trust signals, and the `manage_fact` tool surface.
-@Suite("fact store lifecycle (#168)")
+@Suite("fact store lifecycle (#168)", .timeLimit(.minutes(1)))
 struct FactStoreLifecycleTests {
 
     private func store() throws -> FactStoreManager { try FactStoreManager(inMemory: true) }
@@ -312,7 +312,7 @@ private func call(_ name: String, _ args: [String: JSONValue]) -> GeminiResponse
 }
 
 @MainActor
-@Suite("fact lifecycle tools (#168)", .serialized)
+@Suite("fact lifecycle tools (#168)", .serialized, .timeLimit(.minutes(1)))
 struct FactLifecycleToolTests {
 
     /// Drive one turn whose model reply is `call`, against an isolated in-memory fact store,

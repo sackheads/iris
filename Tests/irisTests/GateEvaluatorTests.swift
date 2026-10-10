@@ -65,7 +65,7 @@ final class GateRuntime: ContainerRuntime, @unchecked Sendable {
 /// Every case here is offline by construction (AGENTS invariant 7): the URL gate answers through a
 /// `URLProtocol` stub bound to its own session, the path gate reads temp files this suite made,
 /// and the script gate never leaves `GateRuntime`.
-@Suite("Gate evaluation (#187 §7)")
+@Suite("Gate evaluation (#187 §7)", .timeLimit(.minutes(1)))
 struct GateEvaluatorTests {
 
     // MARK: Fixtures
@@ -543,7 +543,7 @@ struct GateEvaluatorTests {
         }
         while runtime.execCount == 0 { try await Task.sleep(nanoseconds: 5_000_000) }
         evaluation.cancel()
-        let result = await evaluation.value
+        let result = try await value(of: evaluation)
 
         guard case .error = result else { Issue.record("a cancelled gate answers no verdict"); return }
         let name = try #require(runtime.creates.last?.name)
@@ -600,7 +600,7 @@ struct GateEvaluatorTests {
 /// these drive the runner's half: the row an "unchanged" leaves, the signal a "changed" stamps,
 /// the payload it puts in the prompt, and the pause three errors in a row buy.
 @MainActor
-@Suite("Gates decide whether a fire runs (#187 §4)")
+@Suite("Gates decide whether a fire runs (#187 §4)", .timeLimit(.minutes(1)))
 struct JobGateAdmissionTests {
 
     private func harness(_ responses: [GeminiResponse])

@@ -34,7 +34,7 @@ private func submitEvaluationResponse() -> GeminiResponse {
 }
 
 @MainActor
-@Suite("reach_checkpoint handler")
+@Suite("reach_checkpoint handler", .timeLimit(.minutes(1)))
 struct ReachCheckpointHandlerTests {
     private func lockLadder(on app: AppState, _ id: UUID) {
         app.createNewConversation(id: id)

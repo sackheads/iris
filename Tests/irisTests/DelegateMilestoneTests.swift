@@ -9,7 +9,7 @@ import Foundation
 /// `SubagentManager.shared`, whose AppState is a global another suite can swap — so nothing here
 /// asserts on the subagent's conversation. Serialized for the same reason.
 @MainActor
-@Suite("delegate_milestone (B4)", .serialized)
+@Suite("delegate_milestone (B4)", .serialized, .timeLimit(.minutes(1)))
 struct DelegateMilestoneTests {
     /// Routes by principal: the grader offers `submit_evaluation`; the subagent carries the role
     /// prompt. The grader synthesizes verdicts from the criterion ids in its own system prompt,

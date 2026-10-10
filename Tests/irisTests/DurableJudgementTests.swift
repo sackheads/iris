@@ -36,7 +36,7 @@ struct DurableJudgementTests {
     @Test("accepting a criterion records it on the contract, not only the evaluation")
     func testAcceptancePersistsOnContract() {
         let app = AppState(); let id = UUID()
-        let (a, h1, h2) = contractWithTwoHuman(app, id)
+        let (_, h1, h2) = contractWithTwoHuman(app, id)
 
         let pending = GoalEvaluation(status: .graded, criteria: [
             CriterionVerdict(criterionId: h1.id, criterionText: h1.text, kind: .humanJudged,

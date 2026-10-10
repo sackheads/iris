@@ -7,7 +7,7 @@ import Foundation
 /// own reflections stay in place with no card; `/reflect` keeps its reply where it was asked for
 /// and also posts the card.
 @MainActor
-@Suite struct ReflectionRoutingTests {
+@Suite(.timeLimit(.minutes(1))) struct ReflectionRoutingTests {
 
     static let report = "Updated USER.md: prefers short answers."
 
@@ -327,7 +327,7 @@ import Foundation
         try primeForReflection(state, source)
         state.sendMessage("one more thing")
         try await waitForTurn(state, source)
-        await postBack.value?.task.value
+        if let task = postBack.value?.task { try await value(of: task) }
         #expect(fake.callCount == 4, "the post-back ran its own turn beside the reflection")
 
         let tail = try afterTrigger(state, source, trigger: "Triggering automatic memory reflection...")

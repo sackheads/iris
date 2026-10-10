@@ -4,7 +4,7 @@ import Foundation
 
 /// #182 §6.2 — "archived means idle" has two directions. Work arriving is the second one.
 @MainActor
-@Suite("Un-archive on arriving work")
+@Suite("Un-archive on arriving work", .timeLimit(.minutes(1)))
 struct ArchiveUnarchiveOnWorkTests {
 
     private func archived(_ app: AppState) -> UUID {
@@ -162,7 +162,7 @@ struct ArchiveUnarchiveOnWorkTests {
     /// enabled and `/archive` succeeded — the agent kept executing inside a collapsed section,
     /// which is exactly what §6.1 exists to prevent.
     @Test("an arrival turn in flight refuses the archive")
-    func arrivalTurnRefusesArchive() async {
+    func arrivalTurnRefusesArchive() async throws {
         let app = AppState(); app.conversations.removeAll()
         let id = UUID()
         app.createNewConversation(id: id)
@@ -183,7 +183,7 @@ struct ArchiveUnarchiveOnWorkTests {
         #expect(app.conversations.first { $0.id == id }?.isArchived == false,
                 "the agent must not end up running tools inside a collapsed section")
 
-        await turn.value
+        try await value(of: turn)
 
         // And the refusal clears, so the turn cannot leave the conversation un-archivable.
         #expect(app.hasTurnInFlight(for: id) == false)

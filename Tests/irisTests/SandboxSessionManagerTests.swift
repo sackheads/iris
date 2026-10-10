@@ -80,7 +80,7 @@ final class MockRuntime: ContainerRuntime, @unchecked Sendable {
     var execedWorkdirs: [String] { lock.withLock { execWorkdirs } }
 }
 
-@Suite("SandboxSessionManager")
+@Suite("SandboxSessionManager", .timeLimit(.minutes(1)))
 struct SandboxSessionManagerTests {
     private func mgr(_ runtime: ContainerRuntime) -> SandboxSessionManager {
         SandboxSessionManager(runtime: runtime, image: { "ubuntu:latest" })
@@ -285,7 +285,7 @@ struct SandboxSessionManagerTests {
     /// `SandboxSessionManager.create`'s own cleanup is insulated from this today by the create
     /// barrier's unstructured task, and a gate's is not (`GateEvaluatorTests`).
     @Test("a remove issued from a cancelled task still reaches the runtime")
-    func removeSurvivesCancellation() async {
+    func removeSurvivesCancellation() async throws {
         let rt = MockRuntime()
         let call = Task {
             while !Task.isCancelled { try? await Task.sleep(nanoseconds: 5_000_000) }
@@ -293,7 +293,7 @@ struct SandboxSessionManagerTests {
             await rt.removeIgnoringCancellation(name: "iris-cleanup")
         }
         call.cancel()
-        await call.value
+        try await value(of: call)
 
         #expect(rt.removedNames == ["iris-cleanup"],
                 "the ordinary route launches nothing from a cancelled task; the cleanup route does")

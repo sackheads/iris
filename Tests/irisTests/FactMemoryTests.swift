@@ -37,7 +37,7 @@ private func rawInsert(_ db: Database, id: String, content: String, daysAgo: Int
         """, arguments: [id, content, trust, "-\(daysAgo) days", status, retrievals, helpful, supersededBy, entity])
 }
 
-@Suite("Fact write dedup (#416)")
+@Suite("Fact write dedup (#416)", .timeLimit(.minutes(1)))
 struct FactWriteDedupTests {
     @Test("the same fact saved twice, differing only in case, spacing and a trailing period, is one row")
     func normalisedDuplicateReturnsExisting() throws {
@@ -90,7 +90,7 @@ struct FactWriteDedupTests {
     }
 }
 
-@Suite("Fact createdAt migration (#416)")
+@Suite("Fact createdAt migration (#416)", .timeLimit(.minutes(1)))
 struct FactCreatedAtMigrationTests {
     @Test("a v2 store upgrades in place: old rows get createdAt from timestamp, and the FTS index still works")
     func v2RowsBackfillCreatedAt() throws {
@@ -142,7 +142,7 @@ struct FactCreatedAtMigrationTests {
     }
 }
 
-@Suite("Fact dedup migration (#416)")
+@Suite("Fact dedup migration (#416)", .timeLimit(.minutes(1)))
 struct FactDedupMigrationTests {
     @Test("duplicates merge into the oldest, with summed counts, re-pointed lineage and a consistent index")
     func mergesDuplicates() throws {
@@ -238,7 +238,7 @@ struct FactDedupMigrationTests {
     }
 }
 
-@Suite("Fact relevance (#415)")
+@Suite("Fact relevance (#415)", .timeLimit(.minutes(1)))
 struct FactRelevanceTests {
     /// The review's store: three active facts and three superseded ones about the same people and
     /// project, so "brian" and "iris" are in half the rows or more.
@@ -356,7 +356,7 @@ struct FactRelevanceTests {
     }
 }
 
-@Suite("Fact dedup before injection (#415)")
+@Suite("Fact dedup before injection (#415)", .timeLimit(.minutes(1)))
 struct FactInjectionDedupTests {
     @Test("duplicate rows already in the store reach the results once")
     func searchDedupes() throws {
@@ -375,7 +375,7 @@ struct FactInjectionDedupTests {
 }
 
 @MainActor
-@Suite("Fact entity in the prompt (#415)")
+@Suite("Fact entity in the prompt (#415)", .timeLimit(.minutes(1)))
 struct FactEntityLineTests {
     @Test("the same text about Alice and about Bob is injected twice, each line naming its entity")
     func sameTextTwoEntities() async throws {
@@ -433,7 +433,7 @@ struct FactEntityLineTests {
     }
 }
 
-@Suite("Fact age in the prompt (#415)")
+@Suite("Fact age in the prompt (#415)", .timeLimit(.minutes(1)))
 struct FactAgeTests {
     @Test("age labels")
     func labels() {
@@ -489,7 +489,7 @@ private func turnContextBlock(_ r: GeminiRequest) -> String {
 private let factHeading = "# Mid-Term Fact Store Memory (JIT Context)"
 
 @MainActor
-@Suite("JIT on engine turns (#415)")
+@Suite("JIT on engine turns (#415)", .timeLimit(.minutes(1)))
 struct JITEngineTurnTests {
     private struct Outcome {
         let lead: String
@@ -600,7 +600,7 @@ struct JITEngineTurnTests {
 /// Goal runs (#415 review): the kickoff searches its objective, a typed steer searches itself, and
 /// reprompts carry what those found without searching again.
 @MainActor
-@Suite("Facts on a /goal run (#415)")
+@Suite("Facts on a /goal run (#415)", .timeLimit(.minutes(1)))
 struct GoalRunFactTests {
     private struct Harness {
         let app: AppState

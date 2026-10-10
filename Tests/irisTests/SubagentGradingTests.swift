@@ -5,7 +5,7 @@ import Foundation
 /// Slice B3 loop behaviour: binding a unit contract to a delegated subagent and grading the
 /// finished run with the slice-C evaluator.
 @MainActor
-@Suite("Subagent grading (B3)")
+@Suite("Subagent grading (B3)", .timeLimit(.minutes(1)))
 struct SubagentGradingTests {
 
     /// Routes scripted responses by principal rather than by call order: the grader is the engine
@@ -128,16 +128,7 @@ struct SubagentGradingTests {
     /// The task's value, or `nil` if it has not finished within `seconds`: turns "the deadline
     /// never ended the run" into a failure rather than a hung suite.
     private func finished<T: Sendable>(_ task: Task<T, Never>, within seconds: TimeInterval = 30) async -> T? {
-        await withTaskGroup(of: T?.self) { group in
-            group.addTask { Optional(await task.value) }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                return nil
-            }
-            let result = await group.next() ?? nil
-            group.cancelAll()
-            return result
-        }
+        try? await value(of: task, within: seconds)
     }
 
     private func response(_ fc: FunctionCall?) -> GeminiResponse {

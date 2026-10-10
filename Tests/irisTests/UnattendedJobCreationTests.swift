@@ -8,7 +8,7 @@ import Foundation
 /// all (invariant 6 — they would be prompt weight even if the model behaved), and the dispatcher
 /// refuses them outright, because declaration gating only stops a well-behaved model.
 @MainActor
-@Suite("No unattended job creation")
+@Suite("No unattended job creation", .timeLimit(.minutes(1)))
 struct UnattendedJobCreationTests {
 
     private let names = ["schedule_job", "register_directory_watcher"]
@@ -94,7 +94,7 @@ struct UnattendedJobCreationTests {
 /// gate exists to stop, laundering it past a human. Gated the same way the background case is:
 /// undeclared to a non-`.main` principal, and refused at dispatch for a forged or stale call.
 @MainActor
-@Suite("No subagent job creation")
+@Suite("No subagent job creation", .timeLimit(.minutes(1)))
 struct SubagentJobCreationTests {
 
     private let names = ["schedule_job", "register_directory_watcher"]
@@ -133,7 +133,7 @@ struct SubagentJobCreationTests {
     /// what the dispatcher actually returned to it. `isPinned` lets the "outranks the approval gate"
     /// test below put the subagent's call in a pinned conversation's id, which cannot happen for a
     /// real subagent (it is never the pinned one) but proves ordering even in that impossible case.
-    private func dispatchResult(for call: FunctionCall, isPinned: Bool = false) async -> (result: String, app: AppState) {
+    private func dispatchResult(for call: FunctionCall, isPinned: Bool = false) async throws -> (result: String, app: AppState) {
         let app = AppState()
         app.conversations.removeAll()
         let id = UUID()
@@ -171,7 +171,7 @@ struct SubagentJobCreationTests {
                 try? await Task.sleep(nanoseconds: 25_000_000)
             }
         }
-        await turnTask.value
+        try await value(of: turnTask)
         denyTask.cancel()
         let responses = app.conversations.first { $0.id == id }?.history
             .flatMap { $0.parts }
@@ -180,15 +180,15 @@ struct SubagentJobCreationTests {
     }
 
     @Test("a forged schedule_job from a subagent is refused")
-    func scheduleJobRefused() async {
-        let (result, _) = await dispatchResult(for: FunctionCall(
+    func scheduleJobRefused() async throws {
+        let (result, _) = try await dispatchResult(for: FunctionCall(
             name: "schedule_job", args: ["prompt": .string("do it again"), "intervalSeconds": .int(60)]))
         #expect(result.contains(IrisEngine.subagentJobCreationRefusal))
     }
 
     @Test("a forged register_directory_watcher from a subagent is refused")
-    func registerWatcherRefused() async {
-        let (result, _) = await dispatchResult(for: FunctionCall(
+    func registerWatcherRefused() async throws {
+        let (result, _) = try await dispatchResult(for: FunctionCall(
             name: "register_directory_watcher",
             args: ["path": .string("/tmp"), "instructions": .string("watch it")]))
         #expect(result.contains(IrisEngine.subagentJobCreationRefusal))
@@ -201,7 +201,7 @@ struct SubagentJobCreationTests {
     @Test("the subagent refusal outranks the pinned-conversation approval gate")
     func subagentRefusalOutranksPinnedGate() async throws {
         let call = FunctionCall(name: "schedule_job", args: ["prompt": .string("sweep"), "intervalSeconds": .int(60)])
-        let (result, app) = await dispatchResult(for: call, isPinned: true)
+        let (result, app) = try await dispatchResult(for: call, isPinned: true)
         #expect(result.contains(IrisEngine.subagentJobCreationRefusal))
         #expect(app.pendingApprovals.isEmpty, "no approval should ever be requested for a subagent's call")
         #expect(try app.store.ledger.jobs().isEmpty)

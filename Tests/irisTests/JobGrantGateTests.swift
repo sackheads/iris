@@ -3,7 +3,7 @@ import Foundation
 @testable import IrisKit
 
 /// #282 §3, §0.9 — the pure gate. Temp directories only.
-@Suite("JobGrant.allows (#282)")
+@Suite("JobGrant.allows (#282)", .timeLimit(.minutes(1)))
 struct JobGrantAllowsTests {
     struct Tree {
         let base: URL; let proj: URL; let project: URL; let ro: URL; let inner: URL; let home: URL
@@ -171,7 +171,7 @@ struct JobGrantAllowsTests {
 /// The gate in its place (#282 §3): `AppState.requestApproval`'s background branch. The permission
 /// layer is pointed at a temp `IrisPaths`, never `~/.iris`.
 @MainActor
-@Suite("JobGrant through requestApproval (#282)")
+@Suite("JobGrant through requestApproval (#282)", .timeLimit(.minutes(1)))
 struct JobGrantApprovalTests {
     private typealias Tree = JobGrantAllowsTests.Tree
     private func c(_ url: URL, _ tail: String = "") -> String { JobGrantAllowsTests.c(url, tail) }

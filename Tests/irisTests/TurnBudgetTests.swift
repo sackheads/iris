@@ -7,7 +7,7 @@ import Foundation
 /// has started must stop, and it has to bite *between* model calls: a budget that is only read
 /// afterwards has already been spent.
 @MainActor
-@Suite("Turn budget (#187)")
+@Suite("Turn budget (#187)", .timeLimit(.minutes(1)))
 struct TurnBudgetTests {
 
     // MARK: Fixtures
@@ -269,7 +269,7 @@ struct TurnBudgetTests {
                                sandboxAvailable: { true })
 
         let fire = Task { await runner.fire(job: job, origin: .schedule) }
-        await client.gate.waitForEntry()
+        try await client.gate.waitForEntry()
 
         let midRun = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(midRun.status == .running, "still in flight")
@@ -281,7 +281,7 @@ struct TurnBudgetTests {
                 "and the day's budget can see it")
 
         await client.gate.open()
-        await fire.value
+        _ = try await value(of: fire)
         let finished = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(finished.status == .completed)
         #expect(finished.totalTokens == 40, "and `finish` writes the same figure again")

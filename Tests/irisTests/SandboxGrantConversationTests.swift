@@ -5,7 +5,7 @@ import Foundation
 /// #282 §2 — the grant lives on the run's conversation and follows a delegation. In-memory store,
 /// injected `RecentWrites`, a fake client: nothing here reaches a singleton or the disk beyond a temp dir.
 @MainActor
-@Suite("sandboxGrant on the conversation (#282)")
+@Suite("sandboxGrant on the conversation (#282)", .timeLimit(.minutes(1)))
 struct SandboxGrantConversationTests {
     private func textResponse(_ text: String) -> GeminiResponse {
         GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: text)]))],

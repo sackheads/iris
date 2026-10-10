@@ -5,7 +5,7 @@ import Foundation
 /// #236 — the user can stop a background subagent: Stop and `/stop` in its parent conversation
 /// reach it, and so does the Stop on its row in the session strip. Scripted clients only.
 @MainActor
-@Suite("The user's Stop reaches background subagents (#236)")
+@Suite("The user's Stop reaches background subagents (#236)", .timeLimit(.minutes(1)))
 struct SubagentUserStopTests {
 
     typealias RoutingClient = DelegatedSpendTests.RoutingClient
@@ -172,7 +172,9 @@ struct SubagentUserStopTests {
 
         #expect(await eventually { client.cancelledCalls == 1 }, "the subagent's model call was cancelled")
         #expect(await eventually { finishedStatus(of: worker, in: state) == "cancelled" })
-        #expect(state.hasInterruptibleWork(in: main) == false, "nothing left to stop")
+        // Waited for, not read: the session finishes before the live subagent is unregistered,
+        // which happens once its engine task has unwound (#458).
+        #expect(await eventually { !state.hasInterruptibleWork(in: main) }, "nothing left to stop")
     }
 
     @Test("/stop stops the conversation's background subagents and says how many")
@@ -188,8 +190,8 @@ struct SubagentUserStopTests {
 
         #expect(state.conversations.first { $0.id == main }?.messages.last?.content
                 == "Goal mode cancelled. Also stopped 2 background subagents.")
-        #expect(await a.value.status == .cancelled)
-        #expect(await b.value.status == .cancelled)
+        #expect(try await value(of: a).status == .cancelled)
+        #expect(try await value(of: b).status == .cancelled)
         #expect(await eventually { client.cancelledCalls == 2 })
     }
 
@@ -208,7 +210,7 @@ struct SubagentUserStopTests {
 
         #expect(state.stopSubagent(alpha))
 
-        let outcome = await a.value
+        let outcome = try await value(of: a)
         #expect(outcome.status == .cancelled)
         #expect(outcome.rendered.contains(SubagentManager.rowStoppedReason))
         #expect(outcome.stoppedBy == .row)
@@ -220,7 +222,7 @@ struct SubagentUserStopTests {
         #expect(state.backgroundSubagents(under: main) == [beta])
 
         #expect(state.stopSubagent(beta))
-        #expect(await b.value.status == .cancelled)
+        #expect(try await value(of: b).status == .cancelled)
     }
 
     // MARK: Nothing stopped twice
@@ -316,7 +318,7 @@ struct SubagentUserStopTests {
         await engine.processInput("Start a background worker.", source: "User", conversationId: main)
         // Held before its goal_complete, so the Stop can be placed in the window on an event, not
         // found by polling: a poll that lands after the settle under load is refused (#454).
-        await gate.waitForEntry()
+        try await gate.waitForEntry()
         let worker = try #require(subagentId("worker", in: state))
         let record = try #require(state.onSubagentComplete[worker])
         let stoppedCount = Box<Int?>(nil)
@@ -463,7 +465,7 @@ struct SubagentUserStopTests {
         #expect(state.backgroundSubagents(under: main).isEmpty)
 
         waiting.cancel()
-        let outcome = await waiting.value
+        let outcome = try await value(of: waiting)
         #expect(outcome.status == .cancelled)
         #expect(outcome.rendered.contains(SubagentManager.cancelledReason))
     }

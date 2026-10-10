@@ -189,7 +189,7 @@ struct AnthropicVertexCatalogTests {
     @Test("probe sends the Vertex request shape for the tier's model, with the dated id mapped")
     func probeUsesVertexTransport() async throws {
         let captured = OSAllocatedUnfairLock(initialState: [URLRequest]())
-        let result = try await withMock({ request in
+        let result = await withMock({ request in
             captured.withLock { $0.append(request) }
             let body = #"{"id":"msg_vrtx_1","type":"message","role":"assistant","content":[{"type":"text","text":"Hello"}],"usage":{"input_tokens":5,"output_tokens":1}}"#
             return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(body.utf8))

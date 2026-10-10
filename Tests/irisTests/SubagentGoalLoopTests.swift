@@ -131,19 +131,6 @@ struct SubagentGoalLoopTests {
         return condition()
     }
 
-    /// `task.value`, but a stuck task fails the test rather than hanging the run (#428). An
-    /// unstructured task's value ignores the waiter's cancellation, so `.timeLimit` alone cannot
-    /// end it: this cancels `task` when the waiter is cancelled or after `seconds`. A subagent
-    /// cancelled that way comes back `.cancelled`, which the caller's status check reports.
-    nonisolated static func value<T: Sendable>(of task: Task<T, Never>, within seconds: Double = 30) async -> T {
-        let watchdog = Task {
-            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            if !Task.isCancelled { task.cancel() }
-        }
-        defer { watchdog.cancel() }
-        return await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
-    }
-
     // MARK: The loop
 
     @Test("a subagent whose first turn is text only is reprompted, and the parent gets turn 2's result")
@@ -222,7 +209,7 @@ struct SubagentGoalLoopTests {
         #expect(state.liveSubagents(ofRun: run).count == 1, "registered while it works")
         let cancelledAt = Date()
         task.cancel()
-        let outcome = await Self.value(of: task)
+        let outcome = try await value(of: task)
 
         // Only shows the subagent stopped well before its turn deadline, not how fast; the full parallel suite runs it at ~4 s.
         #expect(Date().timeIntervalSince(cancelledAt) < 10, "seconds, not the 300 s turn deadline")
@@ -252,7 +239,7 @@ struct SubagentGoalLoopTests {
                 turnTimeout: 300, client: client, appState: state, deadlineClock: clock.now,
                 config: config, repromptDelay: Self.delay, endSandboxSession: { _ in })
         }
-        let outcome = await Self.value(of: task)
+        let outcome = try await value(of: task)
 
         #expect(client.parked == 1, "the limit passed during turn 2")
 
@@ -366,7 +353,7 @@ struct SubagentGoalLoopTests {
         // keep the turn's tail from scheduling the next one.
         engine.haltGoalLoop(for: id, cancelling: false)
         await client.gate.open()
-        await Self.value(of: turn)
+        try await value(of: turn)
 
         try? await Task.sleep(nanoseconds: 300_000_000)
         #expect(client.calls == 1, "no reprompt after the halt")

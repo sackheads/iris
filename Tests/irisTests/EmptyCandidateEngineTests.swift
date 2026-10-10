@@ -5,7 +5,7 @@ import Foundation
 /// A model reply with no content is reported as an LLM error pill that names the reason,
 /// not as an agent message and not as a decode failure (#136).
 @MainActor
-@Suite("IrisEngine empty candidate")
+@Suite("IrisEngine empty candidate", .timeLimit(.minutes(1)))
 struct EmptyCandidateEngineTests {
     private func run(_ response: GeminiResponse) async -> Conversation? {
         let app = AppState()

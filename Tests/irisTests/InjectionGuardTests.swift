@@ -301,8 +301,6 @@ struct InjectionGuardTests {
             tokenizerConfigURL: bundle
         )
         await CoreMLEvaluator.$scopedModel.withValue(.init(model)) {
-            let protection = true
-
             let benignToolOutputs = [
                 // `pwd && ls -la`
                 "/Users/bnaylor/src/iris\ntotal 192\ndrwxr-xr-x  29 bnaylor staff  928 Jul 14 .\n-rw-r--r--   1 bnaylor staff  738 AGENTS.md",

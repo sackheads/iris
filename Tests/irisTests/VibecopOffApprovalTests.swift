@@ -9,7 +9,7 @@ import Foundation
 /// Every test passes `vibecopEnabled:` explicitly and injects its own `PermissionManager`, so
 /// nothing here reads or writes `ConfigManager.shared` or the real allowlist (invariant 7).
 @MainActor
-@Suite("Vibecop off asks the user (#334)")
+@Suite("Vibecop off asks the user (#334)", .timeLimit(.minutes(1)))
 struct VibecopOffApprovalTests {
 
     private func app() throws -> (AppState, URL) {
@@ -26,7 +26,7 @@ struct VibecopOffApprovalTests {
     /// queued, anything that arrives late is denied before the task is awaited, so a regression
     /// fails the test rather than hanging it.
     private func ask(_ state: AppState, tool: String, details: String, in cid: UUID,
-                     answer: AppState.ApprovalResolution) async -> (queued: Bool, approved: Bool) {
+                     answer: AppState.ApprovalResolution) async throws -> (queued: Bool, approved: Bool) {
         let call = Task { @MainActor in
             await state.requestApproval(toolName: tool, details: details, workspace: nil,
                                         conversationId: cid, vibecopEnabled: false)
@@ -43,7 +43,7 @@ struct VibecopOffApprovalTests {
         } else {
             state.denyPendingApprovals(for: cid)
         }
-        return (queued, await call.value)
+        return (queued, try await value(of: call))
     }
 
     @Test("with Vibecop off, each gated tool reaches the prompt; approve and deny both resolve",
@@ -56,11 +56,11 @@ struct VibecopOffApprovalTests {
             ? "true --never-run-\(UUID().uuidString)"
             : FileManager.default.temporaryDirectory.appendingPathComponent("iris-334-\(UUID().uuidString)").path
 
-        let approved = await ask(state, tool: tool, details: details, in: cid, answer: .approve)
+        let approved = try await ask(state, tool: tool, details: details, in: cid, answer: .approve)
         #expect(approved.queued, "\(tool) must reach the user prompt, not be approved by a disabled Vibecop")
         #expect(approved.approved == true)
 
-        let denied = await ask(state, tool: tool, details: details, in: cid, answer: .deny)
+        let denied = try await ask(state, tool: tool, details: details, in: cid, answer: .deny)
         #expect(denied.queued)
         #expect(denied.approved == false)
         #expect(state.pendingApprovals.isEmpty)
@@ -134,7 +134,7 @@ struct VibecopOffApprovalTests {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         if queued { state.resolveApproval(id: state.pendingApprovals[0].id, .deny) } else { state.denyPendingApprovals(for: cid) }
-        let result = await outcome.value
+        let result = try await value(of: outcome)
         #expect(queued, "the review must ask the person, not take a disabled Vibecop's APPROVE")
         if case .failure(let message) = result {
             #expect(message.text == GateScriptReview.declined)
@@ -173,13 +173,13 @@ struct VibecopOffApprovalTests {
         for _ in 0..<400 where !finished.value { try? await Task.sleep(nanoseconds: 5_000_000) }
         let resolvedByCancel = finished.value
         if !resolvedByCancel { state.denyPendingApprovals(for: cid) }   // unstick a regression
-        let approved = await waiting.value
+        let approved = try await value(of: waiting)
         #expect(resolvedByCancel, "cancellation must resume the waiting approval")
         #expect(approved == false)
         #expect(!state.pendingApprovals.contains { $0.conversationId == cid })
         #expect(state.pendingApprovals.map(\.conversationId) == [other])
 
         state.denyPendingApprovals(for: other)
-        #expect(await bystander.value == false)
+        #expect(try await value(of: bystander) == false)
     }
 }

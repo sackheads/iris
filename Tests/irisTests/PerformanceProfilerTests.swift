@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import IrisKit
 
-@Suite("PerformanceProfiler value types")
+@Suite("PerformanceProfiler value types", .timeLimit(.minutes(1)))
 struct PerformanceProfilerValueTypeTests {
 
     @Test("CommandProfile.add accumulates ms and count per category")
@@ -50,7 +50,7 @@ struct PerformanceProfilerValueTypeTests {
     }
 }
 
-@Suite("PerformanceProfiler lifecycle")
+@Suite("PerformanceProfiler lifecycle", .timeLimit(.minutes(1)))
 struct PerformanceProfilerLifecycleTests {
 
     @Test("record attributes to the active turn")
@@ -101,7 +101,7 @@ struct PerformanceProfilerLifecycleTests {
         let collector = ProfileCollector()
 
         // A turn ended INSIDE the binding is captured...
-        await PerformanceProfiler.$runSink.withValue({ collector.append($0) }) {
+        PerformanceProfiler.$runSink.withValue({ collector.append($0) }) {
             let id = profiler.beginTurn(label: "inside", source: "System")
             profiler.record(turnID: id, category: .toolExecution, durationMs: 25)
             profiler.endTurn(id, totalMs: 200)
@@ -149,7 +149,7 @@ struct PerformanceProfilerLifecycleTests {
     }
 }
 
-@Suite("PerformanceProfiler measure helpers")
+@Suite("PerformanceProfiler measure helpers", .timeLimit(.minutes(1)))
 struct PerformanceProfilerMeasureTests {
 
     @Test("measure records elapsed time to the current turn on shared profiler")

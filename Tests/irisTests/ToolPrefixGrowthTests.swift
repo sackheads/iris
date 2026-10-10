@@ -6,7 +6,7 @@ import Foundation
 /// declared tools are a superset of the previous turn's, every shared entry encodes byte for byte
 /// the same, and shared entries keep their relative order (review focus 2).
 @MainActor
-@Suite struct ToolPrefixGrowthTests {
+@Suite(.timeLimit(.minutes(1))) struct ToolPrefixGrowthTests {
     private func encoded(_ d: FunctionDeclaration) throws -> Data {
         let e = JSONEncoder(); e.outputFormatting = [.sortedKeys]
         return try e.encode(d)

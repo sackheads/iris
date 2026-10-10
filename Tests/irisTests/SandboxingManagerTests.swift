@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import IrisKit
 
-@Suite("SandboxingManager Tests")
+@Suite("SandboxingManager Tests", .timeLimit(.minutes(1)))
 struct SandboxingManagerTests {
 
     @Test("isContainerInstalled returns boolean without crashing")
@@ -40,7 +40,7 @@ struct SandboxingManagerTests {
 /// read its output only after `waitUntilExit()` — a pipe-buffer deadlock waiting to happen the
 /// first time a kernel download's progress output overran it. All four tests use a stub binary;
 /// none touches the real `container` CLI.
-@Suite("SandboxingManager.startContainerSystem (#293 review)")
+@Suite("SandboxingManager.startContainerSystem (#293 review)", .timeLimit(.minutes(1)))
 struct SandboxingManagerStartTests {
     /// A stub binary in a temp directory running `body` under `/bin/sh`. Mirrors
     /// `SandboxTests.stubContainer`, parameterized on the containing directory's name so the
@@ -128,13 +128,13 @@ struct SandboxingManagerStartTests {
 
         let cancelledAt = Date()
         cancelled.cancel()
-        let cancelledResult = await cancelled.value
+        let cancelledResult = try await value(of: cancelled)
         #expect(Date().timeIntervalSince(cancelledAt) < 0.5,
                 "returned on cancellation, not after the stub's 1s sleep or the 10s timeout")
         #expect(cancelledResult.success == false)
 
         // The shared start was not cancelled away from the other waiter.
-        let otherResult = await other.value
+        let otherResult = try await value(of: other)
         #expect(otherResult.success == true, "got: \(String(describing: otherResult.message))")
     }
 }

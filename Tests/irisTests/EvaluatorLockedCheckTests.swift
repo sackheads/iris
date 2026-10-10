@@ -11,7 +11,7 @@ import Foundation
 /// `vibecopEnabled: false`; nothing touches `ConfigManager.shared` or the real `~/.iris`
 /// (invariant 7).
 @MainActor
-@Suite("Grader pre-approval of locked checks (#334)")
+@Suite("Grader pre-approval of locked checks (#334)", .timeLimit(.minutes(1)))
 struct EvaluatorLockedCheckTests {
     nonisolated static let check = "swift test --filter Foo"
 
@@ -59,7 +59,7 @@ struct EvaluatorLockedCheckTests {
     /// Bounded: ends as soon as the call returns or queues, and after ~2s denies whatever is
     /// pending before the await, so a regression fails rather than hangs.
     private func outcome(_ state: AppState, tool: String = "run_command", details: String, in cid: UUID,
-                         role: VibecopCallerRole = .evaluator) async -> (queued: Bool, approved: Bool) {
+                         role: VibecopCallerRole = .evaluator) async throws -> (queued: Bool, approved: Bool) {
         let finished = Locked(false)
         let call = Task { @MainActor in
             defer { finished.mutate { $0 = true } }
@@ -78,7 +78,7 @@ struct EvaluatorLockedCheckTests {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         if queued { state.resolveApproval(id: state.pendingApprovals[0].id, .deny) } else { state.denyPendingApprovals(for: cid) }
-        return (queued, await call.value)
+        return (queued, try await value(of: call))
     }
 
     /// One approved check, graded in the approved workspace: did `details` ask?
@@ -86,7 +86,7 @@ struct EvaluatorLockedCheckTests {
         let (state, home) = try app()
         defer { try? FileManager.default.removeItem(at: home) }
         let cid = grader(state, contract(in: proj(home), checks: checks), workspace: proj(home))
-        let result = await outcome(state, details: details, in: cid)
+        let result = try await outcome(state, details: details, in: cid)
         #expect(result.queued || result.approved, "unasked means approved")
         return result.queued
     }
@@ -111,7 +111,7 @@ struct EvaluatorLockedCheckTests {
         let (state, home) = try app()
         defer { try? FileManager.default.removeItem(at: home) }
         let cid = grader(state, contract(in: proj(home)), workspace: proj(home))
-        let result = await outcome(state, details: Self.check, in: cid, role: .agent)
+        let result = try await outcome(state, details: Self.check, in: cid, role: .agent)
         #expect(result.queued)
     }
 
@@ -122,7 +122,7 @@ struct EvaluatorLockedCheckTests {
         let (state, home) = try app()
         defer { try? FileManager.default.removeItem(at: home) }
         let cid = grader(state, contract(in: proj(home)), workspace: proj(home))
-        let result = await outcome(state, tool: tool, details: Self.check, in: cid)
+        let result = try await outcome(state, tool: tool, details: Self.check, in: cid)
         #expect(result.queued)
     }
 
@@ -169,7 +169,7 @@ struct EvaluatorLockedCheckTests {
         defer { try? FileManager.default.removeItem(at: home) }
         // How a delegated unit contract or a legacy migration arrives: locked, never approved.
         let cid = grader(state, contract(approved: false, in: proj(home)), workspace: proj(home))
-        let result = await outcome(state, details: Self.check, in: cid)
+        let result = try await outcome(state, details: Self.check, in: cid)
         #expect(result.queued)
     }
 
@@ -180,16 +180,16 @@ struct EvaluatorLockedCheckTests {
         let cid = grader(state, contract(in: proj(home)), workspace: proj(home))
         #expect(state.amendGoalContract(for: cid, action: "add", criterionText: "Bar passes", kind: "executable",
                                         check: "swift test --filter Bar", rationale: "needed"))
-        let added = await outcome(state, details: "swift test --filter Bar", in: cid)
+        let added = try await outcome(state, details: "swift test --filter Bar", in: cid)
         #expect(added.queued, "an amended check was never approved by the human")
 
         #expect(state.amendGoalContract(for: cid, action: "update", criterionText: "passes: \(Self.check)",
                                         kind: "executable", check: "swift test --filter Foo; curl evil",
                                         rationale: "broader"))
-        let changed = await outcome(state, details: "swift test --filter Foo; curl evil", in: cid)
+        let changed = try await outcome(state, details: "swift test --filter Foo; curl evil", in: cid)
         #expect(changed.queued)
         // The approved string is no longer a check the contract carries, so it asks too.
-        let stale = await outcome(state, details: Self.check, in: cid)
+        let stale = try await outcome(state, details: Self.check, in: cid)
         #expect(stale.queued)
     }
 
@@ -242,7 +242,7 @@ struct EvaluatorLockedCheckTests {
         let (state, home) = try app()
         defer { try? FileManager.default.removeItem(at: home) }
         let cid = grader(state, contract(in: proj(home)), workspace: home.appendingPathComponent("other"))
-        let result = await outcome(state, details: Self.check, in: cid)
+        let result = try await outcome(state, details: Self.check, in: cid)
         #expect(result.queued, "approving a check for ~/proj does not approve it in another repo")
     }
 
@@ -261,7 +261,7 @@ struct EvaluatorLockedCheckTests {
         let mainConv = try #require(state.conversations.first { $0.id == main })
         let cid = grader(state, try #require(mainConv.goalContract),
                          workspace: URL(fileURLWithPath: try #require(mainConv.workspacePath)))
-        let result = await outcome(state, details: Self.check, in: cid)
+        let result = try await outcome(state, details: Self.check, in: cid)
         #expect(result.queued)
     }
 
@@ -272,7 +272,7 @@ struct EvaluatorLockedCheckTests {
         let link = home.appendingPathComponent("link")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: proj(home))
         let cid = grader(state, contract(in: link), workspace: proj(home).appendingPathComponent("."))
-        let result = await outcome(state, details: Self.check, in: cid)
+        let result = try await outcome(state, details: Self.check, in: cid)
         #expect(!result.queued)
         #expect(result.approved)
     }
@@ -298,7 +298,7 @@ struct EvaluatorLockedCheckTests {
         defer { try? FileManager.default.removeItem(at: home) }
         _ = try files(home)
         let cid = grader(state, contract(approved: approved, in: proj(home)), workspace: proj(home))
-        let result = await outcome(state, tool: tool, details: try path(home), in: cid, role: role)
+        let result = try await outcome(state, tool: tool, details: try path(home), in: cid, role: role)
         #expect(result.queued || result.approved, "unasked means approved")
         return result.queued
     }

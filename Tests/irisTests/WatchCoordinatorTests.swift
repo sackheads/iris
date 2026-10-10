@@ -10,7 +10,7 @@ import GRDB
 /// file to provoke an FSEvent or waits on a real window (invariant 7, and the plan's test
 /// constraints). Each test builds its own in-memory ledger, its own `RecentWrites` and its own
 /// coordinator; `RecentWrites.shared` is never touched.
-@Suite("Watch coordinator (#187)")
+@Suite("Watch coordinator (#187)", .timeLimit(.minutes(1)))
 struct WatchCoordinatorTests {
 
     // MARK: Fixtures

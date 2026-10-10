@@ -10,7 +10,7 @@ import Foundation
 /// has a side effect the ledger (and the user) sees — a row, a pause, a card — and those are
 /// driven through `fire` against a real engine below.
 @MainActor
-@Suite("Job admission (#187 §4)")
+@Suite("Job admission (#187 §4)", .timeLimit(.minutes(1)))
 struct JobAdmissionTests {
 
     // MARK: Fixtures
@@ -388,10 +388,10 @@ struct JobAdmissionTests {
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, origin: .schedule) }
-        await gate.waitForEntry()
+        try await gate.waitForEntry()
         await runner.fire(job: job, origin: .schedule)
         await gate.open()
-        _ = await first.value
+        _ = try await value(of: first)
 
         #expect(client.callCount == 1, "one run, not two")
         let runs = try store.ledger.runs(jobId: job.id, limit: 10)
@@ -424,11 +424,11 @@ struct JobAdmissionTests {
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/a"])) }
-        await gate.waitForEntry()
+        try await gate.waitForEntry()
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/b"]))
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/c"]))
         await gate.open()
-        _ = await first.value
+        _ = try await value(of: first)
 
         #expect(client.callCount == 1)
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1,
@@ -497,14 +497,14 @@ struct JobAdmissionTests {
         await runner.setHeldPathsSource { _ in (["/tmp/fromCoordinator"], heldSummary) }
 
         let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/first"])) }
-        await gate.waitForEntry()
+        try await gate.waitForEntry()
         // Two triggers while it runs: the policy keeps one, never two.
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/second"]))
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/third"]))
         #expect(try store.ledger.job(id: job.id)?.queuedFire != nil, "the pending trigger is durable")
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1, "and it writes no row")
         await gate.open()
-        _ = await first.value
+        _ = try await value(of: first)
 
         let runs = try store.ledger.runs(jobId: job.id, limit: 10)
         #expect(runs.count == 2, "exactly one more run, not one per held trigger")
@@ -548,10 +548,10 @@ struct JobAdmissionTests {
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/lonely/a"])) }
-        await gate.waitForEntry()
+        try await gate.waitForEntry()
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/lonely/b"]))
         await gate.open()
-        _ = await first.value
+        _ = try await value(of: first)
 
         let queued = try #require(try store.ledger.runs(jobId: job.id, limit: 10)
             .first { $0.triggerKind == "queued" })
@@ -596,10 +596,10 @@ struct JobAdmissionTests {
         await runner.setHeldPathsSource { _ in (["/tmp/gated/fromCoordinator"], heldSummary) }
 
         let first = Task { await runner.fire(job: job, origin: .schedule) }
-        await gate.waitForEntry()
+        try await gate.waitForEntry()
         #expect(await runner.fire(job: job, origin: .watcher(paths: ["/tmp/gated/b"])) == .queued)
         await gate.open()
-        #expect(await first.value == .gateUnchanged)
+        #expect(try await value(of: first) == .gateUnchanged)
 
         let queued = try #require(try store.ledger.runs(jobId: job.id, limit: 10)
             .first { $0.triggerKind == "queued" })
@@ -634,10 +634,10 @@ struct JobAdmissionTests {
         }
 
         let first = Task { await runner.fire(job: job, origin: .schedule) }
-        await gate.waitForEntry()
+        try await gate.waitForEntry()
         await runner.fire(job: job, origin: .manual)
         await gate.open()
-        _ = await first.value
+        _ = try await value(of: first)
 
         #expect(await asked.count == 0, "a `.manual` hold never asks the coordinator")
         let runs = try store.ledger.runs(jobId: job.id, limit: 10)
@@ -724,7 +724,7 @@ struct JobAdmissionTests {
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/flip/a"])) }
-        await gate.waitForEntry()
+        try await gate.waitForEntry()
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/flip/b"]))
         #expect(try store.ledger.job(id: job.id)?.queuedFire != nil)
         // The user (or a tool) switches the policy while the run is still going.
@@ -732,7 +732,7 @@ struct JobAdmissionTests {
         flipped.policy.overlap = .skip
         try store.ledger.upsert(flipped)
         await gate.open()
-        _ = await first.value
+        _ = try await value(of: first)
 
         #expect(client.callCount == 1, "the held fire is abandoned, not deferred")
         #expect(try store.ledger.job(id: job.id)?.queuedFire == nil,
@@ -1048,10 +1048,10 @@ struct JobAdmissionTests {
 
         // The job woke still running the turn it started before the Mac slept.
         let first = Task { await runner.fire(job: job, origin: .schedule) }
-        await gate.waitForEntry()
+        try await gate.waitForEntry()
         let overlapped = await runner.fire(job: job, origin: .schedule, note: Self.dropped)
         await gate.open()
-        _ = await first.value
+        _ = try await value(of: first)
 
         #expect(overlapped == .skipInFlight)
         let skip = try #require(try store.ledger.runs(jobId: job.id, limit: 10)
@@ -1073,12 +1073,12 @@ struct JobAdmissionTests {
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, origin: .schedule) }
-        await gate.waitForEntry()
+        try await gate.waitForEntry()
         // Held, not dropped: nothing is written now, so the count has to wait with the fire.
         let held = await runner.fire(job: job, origin: .schedule, note: Self.dropped)
         #expect(held == .queued)
         await gate.open()
-        _ = await first.value
+        _ = try await value(of: first)
 
         let runs = try store.ledger.runs(jobId: job.id, limit: 10)
         let queued = try #require(runs.first { $0.triggerKind == "queued" })

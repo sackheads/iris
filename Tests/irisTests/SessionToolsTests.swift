@@ -5,7 +5,7 @@ import Foundation
 /// #185 §6. The tools cost prompt tokens on every turn they are declared, so they appear only
 /// when there is somebody to talk to.
 @MainActor
-@Suite("Session tools")
+@Suite("Session tools", .timeLimit(.minutes(1)))
 struct SessionToolsTests {
 
     private let names = ["list_sessions", "send_to_session", "set_session_card"]

@@ -65,7 +65,7 @@ final class ScriptedStreamClient: LLMClientProtocol, @unchecked Sendable {
 }
 
 @MainActor
-@Suite("IrisEngine streaming")
+@Suite("IrisEngine streaming", .timeLimit(.minutes(1)))
 struct StreamingEngineTests {
     private func session(_ client: any LLMClientProtocol, retryDelays: [TimeInterval] = []) -> (AppState, IrisEngine, UUID) {
         let app = AppState()
@@ -158,7 +158,7 @@ struct StreamingEngineTests {
     }
 
     @Test("Stop mid-stream keeps the partial text, posts no error pill, and commits the partial text to history")
-    func cancellation() async {
+    func cancellation() async throws {
         let client = ScriptedStreamClient([[.event(.textDelta("part")), .hang]])
         let (app, engine, id) = session(client)
         let turn = Task { await engine.processInput("hi", source: "User", conversationId: id) }
@@ -167,7 +167,7 @@ struct StreamingEngineTests {
         }
         #expect(agentTexts(app, id) == ["part"])
         turn.cancel()
-        await turn.value
+        try await value(of: turn)
         #expect(agentTexts(app, id) == ["part"])
         #expect(errorPills(app, id).isEmpty)
         let stoppedHistory = conv(app, id).history

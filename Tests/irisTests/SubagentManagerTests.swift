@@ -1,4 +1,5 @@
 import XCTest
+import Testing
 @testable import IrisKit
 
 @MainActor
@@ -112,7 +113,7 @@ final class SubagentManagerTests: XCTestCase {
         
         let parentConversationId = UUID()
         await MainActor.run {
-            state.createNewConversation(id: parentConversationId)
+            _ = state.createNewConversation(id: parentConversationId)
         }
         
         let summary = await SubagentManager.shared.runSubagent(
@@ -180,7 +181,7 @@ final class SubagentManagerTests: XCTestCase {
         
         let parentConversationId = UUID()
         await MainActor.run {
-            state.createNewConversation(id: parentConversationId)
+            _ = state.createNewConversation(id: parentConversationId)
         }
         
         // Captured as a local before the task group: `config` itself is main-actor-isolated
@@ -265,7 +266,7 @@ final class SubagentManagerTests: XCTestCase {
         
         let parentConversationId = UUID()
         await MainActor.run {
-            state.createNewConversation(id: parentConversationId)
+            _ = state.createNewConversation(id: parentConversationId)
         }
         
         // Use an invalid effort string. It should fall back to .medium which is claude-3-5-sonnet
@@ -319,23 +320,14 @@ final class SubagentManagerTests: XCTestCase {
     /// The task's value, or `nil` if it has not finished within `seconds`: turns "the deadline
     /// never ended the run" into a failure rather than a hung suite.
     private func finished<T: Sendable>(_ task: Task<T, Never>, within seconds: TimeInterval = 30) async -> T? {
-        await withTaskGroup(of: T?.self) { group in
-            group.addTask { Optional(await task.value) }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                return nil
-            }
-            let result = await group.next() ?? nil
-            group.cancelAll()
-            return result
-        }
+        try? await irisTests.value(of: task, within: seconds)
     }
 
     func testNeverCompletingSubagentTimesOut() async throws {
         let state = AppState(tier3Provisioning: .provisioned)
 
         let parentId = UUID()
-        await MainActor.run { state.createNewConversation(id: parentId) }
+        await MainActor.run { _ = state.createNewConversation(id: parentId) }
 
         // A real wall clock raced a busy suite here (#355): see `ManualClock`'s doc. The manual
         // clock and the parked client make both races impossible instead of merely unlikely.

@@ -6,7 +6,7 @@ import Foundation
 /// ends early must leave a marker in history, or the next turn finds an unanswered request above
 /// the new message and finishes it unasked (#175).
 @MainActor
-@Suite("Turn ended early marker (#175)")
+@Suite("Turn ended early marker (#175)", .timeLimit(.minutes(1)))
 struct TurnMarkerTests {
     private func session(_ client: any LLMClientProtocol) -> (AppState, IrisEngine, UUID) {
         let app = AppState()
@@ -32,7 +32,7 @@ struct TurnMarkerTests {
         let turn = Task { await engine.processInput("first", source: "UI", conversationId: id) }
         for _ in 0..<300 where agentTexts(app, id).isEmpty { try? await Task.sleep(nanoseconds: 10_000_000) }
         turn.cancel()
-        await turn.value
+        try await value(of: turn)
         let h = history(app, id)
         #expect(h.count == 3)
         #expect(h[1].role == "model" && h[1].parts.first?.text == "part")

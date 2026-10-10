@@ -32,7 +32,7 @@ private func eventually(_ timeoutMs: Int = 3000, _ condition: @MainActor @Sendab
 /// it, i.e. after the tool results of the round in flight) or is appended straight to history
 /// when nothing is running. Either way no turn is started and no turn is woken.
 @MainActor
-@Suite("Event delivery (#187)")
+@Suite("Event delivery (#187)", .timeLimit(.minutes(1)))
 struct EventDeliveryTests {
 
     private func card(name: String = "pr-sweep",
@@ -247,7 +247,7 @@ struct EventDeliveryTests {
     /// implementation that appended immediately would put the event line *above* the call, which
     /// the shape assertion below also catches.
     @Test("a card delivered mid-turn joins the history after the tool result, never between the call and its response")
-    func midTurnDeliveryLandsAfterTheToolResult() async {
+    func midTurnDeliveryLandsAfterTheToolResult() async throws {
         let roundOne = EventGate()
         let roundTwo = EventGate()
         let call = FunctionCall(name: "run_command", args: ["command": .string("echo hi")], id: "c1")
@@ -283,7 +283,7 @@ struct EventDeliveryTests {
         // Round two is the last one, so this card's line has no round left to join.
         await app.deliverEvent(lateTurn, to: id)
         await roundTwo.release()
-        _ = await turn.value
+        _ = try await value(of: turn)
         #expect(await eventually { !app.isThinking })
 
         let shape = historyShape(app, id)

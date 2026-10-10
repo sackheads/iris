@@ -132,15 +132,15 @@ struct UnprovisionedGuardNoticeTests {
     }
 
     @Test("plural form names both models when both are unprovisioned")
-    func pluralBothMissing() {
+    func pluralBothMissing() throws {
         let notice = InjectionGuard.unprovisionedGuardNotice(
             protectionEnabled: true,
             tier2: .unprovisioned(modelName: "coreml-model.onnx"),
             tier3: .unprovisioned(modelName: "canary-model.gguf"))
-        let unwrapped = try? #require(notice)
-        #expect(unwrapped?.contains("tier-2 guard model coreml-model.onnx") == true)
-        #expect(unwrapped?.contains("tier-3 guard model canary-model.gguf") == true)
-        #expect(unwrapped?.contains("Those tiers are skipped until they are") == true)
-        #expect(unwrapped?.contains("Settings \u{2192} Security") == true)
+        let unwrapped = try #require(notice)
+        #expect(unwrapped.contains("tier-2 guard model coreml-model.onnx"))
+        #expect(unwrapped.contains("tier-3 guard model canary-model.gguf"))
+        #expect(unwrapped.contains("Those tiers are skipped until they are"))
+        #expect(unwrapped.contains("Settings \u{2192} Security"))
     }
 }

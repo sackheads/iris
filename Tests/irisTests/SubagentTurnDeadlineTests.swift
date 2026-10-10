@@ -183,7 +183,7 @@ struct SubagentTurnDeadlineTests {
         clock.advance(by: 2)
         #expect(await eventually(20) { finished.isSet }, "the limit ended it")
         if !finished.isSet { task.cancel() }  // a failure, not a hang
-        let outcome = await SubagentGoalLoopTests.value(of: task)
+        let outcome = try await value(of: task)
 
         #expect(outcome.status == .timedOut)
         #expect(outcome.rendered.contains("per-turn limit (10 min)"))
@@ -218,7 +218,7 @@ struct SubagentTurnDeadlineTests {
         clock.advance(by: 200)  // 700 s into turn 2
         #expect(await eventually(20) { finished.isSet }, "turn 2's own limit ended it")
         if !finished.isSet { task.cancel() }  // a failure, not a hang
-        let outcome = await SubagentGoalLoopTests.value(of: task)
+        let outcome = try await value(of: task)
 
         #expect(outcome.status == .timedOut)
         #expect(await eventually(10) { client.cancelled == 1 }, "turn 2's model call was cancelled")
@@ -316,7 +316,7 @@ struct SubagentTurnDeadlineTests {
         let holdUntil = Date().addingTimeInterval(10)
         while client.cancelled == 0, Date() < holdUntil { Self.block(seconds: 0.01) }
         let cancelledWhileMainHeld = client.cancelled
-        let outcome = await SubagentGoalLoopTests.value(of: task)
+        let outcome = try await value(of: task)
 
         #expect(cancelledWhileMainHeld == 1, "turn 2 was cancelled at the verdict, not after a MainActor hop")
         #expect(outcome.status == .timedOut)
