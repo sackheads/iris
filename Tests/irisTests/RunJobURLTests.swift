@@ -427,7 +427,7 @@ struct RunJobURLTests {
         #expect(open(app, minted, into: &tasks) == .refused)
 
         #expect(try urlRunsLastHour(job, store) == 3)
-        #expect(try store.ledger.job(id: job.id)?.pausedReason == nil, "the breaker never trips from URL fires")
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == nil, "no pause from three URL runs")
     }
 
     @Test("links riding the owner's run: the held URL fire is counted and the 4th link is refused")
@@ -467,6 +467,35 @@ struct RunJobURLTests {
         _ = try await settle(tasks)
         #expect(open(app, minted, into: &tasks) == .refused)
         #expect(try urlRunsLastHour(job, store) == 3)
+    }
+
+    @Test("a busy queue job: an hour after a held link ran, three fresh links are admitted though a fire is held")
+    func busyQueueJobReopensAfterAnHour() async throws {
+        let (store, app, job, client, minted) = try queueApp()
+        let runner = try #require(await app.engine.jobRunner())
+        let owner = Task { await runner.fire(job: job, origin: .manual) }
+        try await client.waitForArrivals(1)
+
+        // H: held behind the owner's run.
+        var tasks: [Task<JobRunner.Admission?, Never>] = []
+        #expect(open(app, minted, into: &tasks) == .fired(job.id))
+        #expect(try await settle(tasks) == [.queued])
+        await client.turnstile.release()
+        try await client.waitForArrivals(2)           // H's re-fire is running, as url
+        // And a non-URL fire is held during that run: the job is never without one.
+        #expect(await runner.fire(job: job, origin: .manual) == .queued)
+        #expect(try store.ledger.job(id: job.id)?.queuedFire != nil)
+
+        app.urlClock = { Date().addingTimeInterval(RunJobURL.window + 1) }
+        tasks = []
+        for _ in 0..<3 { #expect(open(app, minted, into: &tasks) == .fired(job.id)) }
+        #expect(open(app, minted, into: &tasks) == .refused)
+
+        await client.turnstile.release()
+        try await client.waitForArrivals(3)           // the held fire: the manual one and the three links
+        await client.turnstile.release()
+        _ = try await value(of: owner)
+        _ = try await settle(tasks)
     }
 
     @Test("a URL fire merged into a held watch fire keeps both: the watch's paths and the url row")
@@ -509,7 +538,7 @@ struct RunJobURLTests {
         }
     }
 
-    @Test("a held fire stays counted until the job holds nothing and a url row shows its run began")
+    @Test("a held fire is released once a url row began after it was sent, whatever the job still holds")
     func heldFireResolution() throws {
         let job = digest()
         let (store, app, _) = try makeApp([job])
@@ -518,17 +547,16 @@ struct RunJobURLTests {
         app.urlClock = { now }
         let d1 = now.addingTimeInterval(-600), d2 = d1.addingTimeInterval(1), d3 = d1.addingTimeInterval(2)
         func current() throws -> Job { try #require(try store.ledger.job(id: job.id)) }
-        func seed() { app.urlFireBatches[job.id] = URLFireBatch(since: d1, dispatched: [d1, d2, d3], pending: 0, held: [d1]) }
 
-        // Still held by the job: counted, even though url rows landed after it was sent.
-        try store.ledger.setQueuedFire(jobId: job.id, at: d1)
-        try urlRows(2, for: job, store)            // started 1 and 2 minutes ago, after d1
-        seed()
+        // No url row since it was sent: counted.
+        app.urlFireBatches[job.id] = URLFireBatch(since: d1, dispatched: [d1, d2, d3], pending: 0, held: [d1])
         #expect(app.urlFireRefusal(for: try current()) == RunJobURL.overLimitReason)
         #expect(app.urlFireBatches[job.id]?.held == [d1])
 
-        // Taken, and a url row has begun since: its run started, the batch closes, rows count.
-        try store.ledger.setQueuedFire(jobId: job.id, at: nil)
+        // Its run began (url rows since d1), while the job holds another fire: released, and the
+        // batch closes; the rows alone count.
+        try store.ledger.setQueuedFire(jobId: job.id, at: now)
+        try urlRows(2, for: job, store)
         #expect(app.urlFireRefusal(for: try current()) == nil)
         #expect(app.urlFireBatches[job.id] == nil)
     }
@@ -545,7 +573,9 @@ struct RunJobURLTests {
         // Taken but its row not begun yet, or dropped: either way it errs strict.
         #expect(app.urlFireRefusal(for: try #require(try store.ledger.job(id: job.id))) == RunJobURL.overLimitReason)
 
-        // Once out of the window it is let go, so a dropped hold cannot block links for ever.
+        // Once out of the window it is let go, so a dropped hold cannot block links for ever, even
+        // while the job holds something else.
+        try store.ledger.setQueuedFire(jobId: job.id, at: now)
         app.urlClock = { now.addingTimeInterval(RunJobURL.window) }
         #expect(app.urlFireRefusal(for: try #require(try store.ledger.job(id: job.id))) == nil)
         #expect(app.urlFireBatches[job.id] == nil)

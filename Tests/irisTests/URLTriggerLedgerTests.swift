@@ -111,6 +111,38 @@ struct URLTriggerLedgerTests {
         }
     }
 
+    @Test("lifting an owner's pause through upsert clears it; lifting any other pause does not")
+    func ownerPauseLiftClears() throws {
+        for owner in [JobsCommand.pausedByUserReason, DevHomeSeeder.copiedJobPausedReason] {
+            let l = try makeLedger()
+            var j = job()
+            j.pausedReason = owner
+            try l.upsert(j)
+            try l.setURLTrigger(jobId: j.id, tokenHash: "d")
+            var lifted = try #require(try l.job(id: j.id))
+            lifted.pausedReason = nil
+            #expect(try l.upsert(lifted).urlTriggerCleared, Comment(rawValue: owner))
+            #expect(try l.job(urlTokenHash: "d") == nil, Comment(rawValue: owner))
+        }
+        // A pause the owner set, kept as it was, clears nothing.
+        let l = try makeLedger()
+        var kept = job()
+        kept.pausedReason = JobsCommand.pausedByUserReason
+        try l.upsert(kept)
+        try l.setURLTrigger(jobId: kept.id, tokenHash: "k")
+        #expect(try l.upsert(try #require(try l.job(id: kept.id))).urlTriggerCleared == false)
+
+        // The breaker's pause is not the owner's: lifting it leaves the link to the limit.
+        var tripped = job("tripped")
+        tripped.pausedReason = JobRunner.breakerReason(count: 6)
+        try l.upsert(tripped)
+        try l.setURLTrigger(jobId: tripped.id, tokenHash: "t")
+        var unpaused = try #require(try l.job(id: tripped.id))
+        unpaused.pausedReason = nil
+        #expect(try l.upsert(unpaused).urlTriggerCleared == false)
+        #expect(try l.job(urlTokenHash: "t")?.id == tripped.id)
+    }
+
     @Test("a change to a job that never had the trigger clears nothing")
     func changeWithoutTrigger() throws {
         let l = try makeLedger()

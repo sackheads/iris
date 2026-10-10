@@ -4133,6 +4133,7 @@ class AppState {
                 try ledger.delete(jobId: job.id)
                 refreshLedgerAttention()
                 withdrawRevealedURLTrigger(jobId: job.id)
+                forgetURLState(jobId: job.id)
                 // The delete fires the ledger's `onJobsChanged` hook, which drops the job's
                 // subscriber and stops its stream if nothing else is watching that directory. What
                 // the hook cannot reach is the runner's own memory of a fire it held for this job.
@@ -4200,6 +4201,12 @@ class AppState {
 
     /// Closes the link sheet when it shows `jobId`'s link, which `off`, `delete` or a model's
     /// change (`announceURLTriggerCleared`) just killed.
+    /// Ends the reveal of one link, and only that one: a sheet that disappears because a newer
+    /// reveal replaced it must not take the newer one with it.
+    func endURLTriggerReveal(_ id: UUID) {
+        if revealedURLTrigger?.id == id { revealedURLTrigger = nil }
+    }
+
     private func withdrawRevealedURLTrigger(jobId: UUID) {
         if revealedURLTrigger?.jobId == jobId { revealedURLTrigger = nil }
     }

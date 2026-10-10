@@ -1086,7 +1086,7 @@ pause reason the table prints, on the `interrupted` row and on the card.
 | `/jobs run <name>` | Fires the job now, through the same admission a scheduled fire meets. Says it is starting straight away, then reports what admission decided once the fire is over — an overlap, the breaker or an exhausted budget is named rather than reported as a run. The result itself arrives as a card. A paused or disabled job is refused up front |
 | `/jobs reschedule <name> <cron> [timezone]` | Gives a scheduled or polled job a new five-field cron (the same subset `schedule_job` takes), recomputes its next fire and says when that is. Quote a name or cron with spaces in it — `/jobs reschedule "Daily digest" "0 9 * * *"` — or leave them bare and the last five words are the cron. Without a timezone a cron job keeps its own zone and an interval job (which becomes a cron job) takes the Mac's. Works on built-ins such as the daily digest; a polled job keeps its gate; a pending retry is dropped with the old schedule; a job you or the retry ladder paused stays paused, but a job paused because its old cron could never match is resumed by a cron that can, and a new cron that can never match pauses the job with that reason. The zone is any IANA name or abbreviation the Mac knows (`Europe/Paris`, `CET`, `GMT+2`). An invalid cron, a cron of six fields, or an unknown zone (a misspelled `Europe/Pairs` included) is refused with a sentence and changes nothing, and a directory watch, which has no schedule, is refused |
 | `/jobs delete <name>` | Deletes a job and its ledger rows. Refused while a run is in flight. The transcripts are left for retention to clear, so a card you are still reading keeps working |
-| `/jobs url <name> [on\|off]` | `on` makes a link that fires the job, `iris://run-job/<token>` (`iris-dev://` for a dev build), shown once in a sheet with Copy and never saved; `on` again replaces it; `off` retires it; the bare form says whether it is on. Changing the job's prompt, profile or policy turns it off. Until the app registers the scheme (D6 PR D2), nothing opens the link |
+| `/jobs url <name> [on\|off]` | `on` makes a link that fires the job, `iris://run-job/<token>` (`iris-dev://` for a dev build), shown once in a sheet with Copy and never saved; `on` again replaces it; `off` retires it; the bare form says whether it is on. Changing the job's prompt, profile or policy, or a model lifting your pause, turns it off. Until the app registers the scheme (a later update), nothing opens the link |
 
 ## Running one job from a terminal (`iris --run-job`)
 
@@ -1194,14 +1194,16 @@ breaker and the budgets apply. The run's row says `url`. Every fire and every re
 Iris. Repeated refusals of one job, or of links that match no job, update one line with a count
 rather than adding a line each. A link carries no input, so nothing in it reaches a model.
 
-At most three links fire a job in any hour. A fourth is refused before admission: it writes no
-row, never counts toward the breaker and never pauses the job, so a page that keeps opening the
-link cannot stop your job. If `schedule_job` or `register_directory_watcher` changes what the job
-does (its prompt, profile, grant or budgets), the link is turned off, and Iris says so.
+At most three URL runs of a job start in any hour; a link held behind a running job counts as
+one from the moment it is held. A fourth is refused before admission: it writes no row, never
+counts toward the breaker and never pauses the job. The three that are admitted are ordinary runs:
+with the job's own cadence they can still trip the breaker or spend its budget. If
+`schedule_job` or `register_directory_watcher` changes what the job does (its prompt, profile,
+grant or budgets), or lifts a pause you put on it, the link is turned off, and Iris says so.
 
 If the app is launched by a link while `iris --run-job` holds the store, the fire waits, and says
 it is waiting, until that process finishes. It re-checks every five seconds and gives up after ten
-minutes. Until the app registers the scheme (D6 PR D2), nothing opens the link.
+minutes. Until the app registers the scheme (a later update), nothing opens the link.
 
 ## Retention
 

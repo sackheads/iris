@@ -500,7 +500,10 @@ struct ChatView: View {
             showSetupWizard = true
         }
         .sheet(item: $state.revealedURLTrigger) { link in
-            URLTriggerLinkSheet(link: link) { state.revealedURLTrigger = nil }
+            // Every chat window binds this sheet, so closing any window that shows it ends the
+            // reveal everywhere: the link is not shown again in another window or after a reopen.
+            URLTriggerLinkSheet(link: link) { state.endURLTriggerReveal(link.id) }
+                .onDisappear { state.endURLTriggerReveal(link.id) }
         }
     }
     

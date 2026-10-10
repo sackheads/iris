@@ -228,7 +228,8 @@ enum JobsCommand: Equatable {
     /// message is persisted in plain text in `conversations.sqlite`, where an approved host
     /// `run_command` could read it.
     static func urlOnText(_ job: Job) -> String {
-        "URL trigger on for **\(job.name)**: the link was shown once and is not saved. `/jobs url \(job.name) on` makes a new one."
+        "URL trigger on for **\(job.name)**: the link was shown once and is not saved. `/jobs url \(job.name) on` makes a new one. "
+            + urlSchemePendingNote
     }
 
     /// What the transient sheet says around the link. Plain words, no markdown: the sheet shows
@@ -236,8 +237,8 @@ enum JobsCommand: Equatable {
     static func urlSheetText(_ jobName: String) -> String {
         "Opening this link fires \(jobName) now, as /jobs run would, at most \(RunJobURL.maxFiresPerHour) times an hour. "
             + "Iris keeps only a hash of it: copy it now, because it cannot be shown again. Turning the trigger on again "
-            + "replaces it, /jobs url \(jobName) off retires it, and changing the job's prompt, profile or policy turns "
-            + "it off. \(urlSchemePendingNote)"
+            + "replaces it, /jobs url \(jobName) off retires it, and changing the job's prompt, profile or policy, or a "
+            + "model lifting your pause, turns it off. \(urlSchemePendingNote)"
     }
 
     static func urlOffText(_ job: Job) -> String {

@@ -67,6 +67,25 @@ struct URLTriggerClearTests {
         #expect(!irisLines(state).contains(AppState.urlTriggerClearedLine("pr-sweep")))
     }
 
+    @Test("a re-schedule that only lifts the owner's pause turns it off, and says so")
+    func rescheduleLiftingOwnerPauseClears() async throws {
+        let (store, state, engine, conversation) = try makeEngine()
+        _ = await engine.scheduleJob(schedule("sweep the PRs"), conversationId: conversation, sandboxAvailable: false)
+        let job = try #require(try store.ledger.job(named: "pr-sweep"))
+        try store.ledger.setURLTrigger(jobId: job.id, tokenHash: Self.digest)
+        try store.ledger.setPaused(jobId: job.id, reason: JobsCommand.pausedByUserReason)
+
+        // Same prompt, profile and policy: only the cadence changes, and the pause goes with it.
+        let answer = await engine.scheduleJob(schedule("sweep the PRs", interval: 1_200),
+                                              conversationId: conversation, sandboxAvailable: false)
+
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == nil, "the re-schedule unpaused it")
+        #expect(try store.ledger.job(id: job.id)?.urlTrigger == false, "so the owner's link is dead")
+        #expect(try store.ledger.job(urlTokenHash: Self.digest) == nil)
+        #expect(answer.contains(ScheduleJobArguments.urlTriggerClearedNote("pr-sweep")))
+        #expect(irisLines(state).contains(AppState.urlTriggerClearedLine("pr-sweep")))
+    }
+
     @Test("a new prompt on a job that never had the trigger on says nothing")
     func neverOnSaysNothing() async throws {
         let (store, state, engine, conversation) = try makeEngine()
@@ -179,6 +198,44 @@ struct URLTriggerClearTests {
         #expect(!changed.contains(Self.digest))
         #expect(try store.ledger.job(id: job.id)?.urlTrigger == false)
         #expect(await announced.names == [job.name])
+        #expect(await announced.ids == [job.id])
+    }
+
+    @Test("a watch update that only lifts the owner's pause turns it off, and says so")
+    func watcherUpdateLiftingOwnerPauseClears() async throws {
+        let base = try tempDirectory(prefix: "iris-urlpause")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let notes = base.appendingPathComponent("notes")
+        try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
+        let irisRoot = base.appendingPathComponent("dot-iris")
+        try FileManager.default.createDirectory(at: irisRoot.appendingPathComponent("config"),
+                                                withIntermediateDirectories: true)
+        let store = try ConversationStore.inMemory()
+        let announced = Announced()
+        var configured = ToolExecutor()
+        configured.jobToolsProvider = {
+            JobTools(ledger: store.ledger, announceURLTriggerCleared: { await announced.add($0, $1) })
+        }
+        configured.irisPaths = IrisPaths(root: irisRoot)
+        configured.homeDirectory = base.appendingPathComponent("home").path
+        configured.watchBreakerProvider = { 30 }
+        let executor = configured
+        let conversation = UUID()
+        func register() async -> String {
+            await executor.execute(name: "register_directory_watcher",
+                                   args: ["path": .string(notes.path), "instructions": .string("summarise")],
+                                   conversationId: conversation)
+        }
+        _ = await register()
+        let job = try #require(try store.ledger.jobs().first)
+        try store.ledger.setURLTrigger(jobId: job.id, tokenHash: Self.digest)
+        try store.ledger.setPaused(jobId: job.id, reason: JobsCommand.pausedByUserReason)
+
+        let answer = await register()
+
+        #expect(try store.ledger.job(id: job.id)?.pausedReason == nil, "the update unpaused it")
+        #expect(try store.ledger.job(id: job.id)?.urlTrigger == false)
+        #expect(answer.contains(ScheduleJobArguments.urlTriggerClearedNote(job.name)))
         #expect(await announced.ids == [job.id])
     }
 

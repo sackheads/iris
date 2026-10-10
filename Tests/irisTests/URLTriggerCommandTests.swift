@@ -145,6 +145,22 @@ struct URLTriggerCommandTests {
         #expect(saved.contains { $0.contains(JobsCommand.urlOnText(job)) })
     }
 
+    @Test("a sheet that goes away ends its own reveal, and never a newer one")
+    func sheetDisappearEndsReveal() throws {
+        let job = sweep()
+        let other = Job(name: "other", prompt: "other", trigger: .schedule(.interval(seconds: 60)))
+        let (_, app, _) = try makeApp(with: [job, other])
+
+        app.sendMessage("/jobs url pr-sweep on")
+        let first = try #require(app.revealedURLTrigger)
+        app.sendMessage("/jobs url other on")
+        let second = try #require(app.revealedURLTrigger)
+        app.endURLTriggerReveal(first.id)          // the replaced sheet's onDisappear
+        #expect(app.revealedURLTrigger == second)
+        app.endURLTriggerReveal(second.id)         // a window showing it closed
+        #expect(app.revealedURLTrigger == nil, "so no other window, and no reopen, shows the link again")
+    }
+
     @Test("off and delete both withdraw a link still on screen, matched by the job's id")
     func withdrawals() throws {
         let job = sweep()

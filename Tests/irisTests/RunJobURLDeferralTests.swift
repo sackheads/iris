@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import GRDB
 @testable import IrisKit
 
 /// D6 decision 14: while another Iris process holds the store, a URL fire waits, visibly,
@@ -126,6 +127,51 @@ struct RunJobURLDeferralTests {
         #expect(lines(f).first?.contains("try again after the other Iris process finishes") == true)
         #expect(try f.store.ledger.runs(jobId: f.job.id, limit: 5).isEmpty)
         #expect(f.app.pendingURLFires.isEmpty)
+    }
+
+    @Test("a job deleted while it waited gives up saying so, not try again")
+    func giveUpRereadsTheJob() throws {
+        let f = try fixture()
+        f.app.handleRunJobURL(f.link, identity: .dev)
+        try f.store.ledger.delete(jobId: f.job.id)
+        f.clock.advance(URLDeferral.deadline)
+        f.timer.fireNext()
+        #expect(lines(f) == [RunJobURL.waitAbandonedLine("url-digest", reason: RunJobURL.deletedWhileWaitingReason)])
+        #expect(f.app.pendingURLFires.isEmpty)
+    }
+
+    @Test("a read error at the token check says the table could not be read, not that the link was replaced")
+    func tokenReadErrorIsAReadError() throws {
+        let f = try fixture()
+        f.app.handleRunJobURL(f.link, identity: .dev)
+        // `job(id:)` still reads; only the lookup by digest fails.
+        try f.store.writer.write { db in
+            try db.execute(sql: "ALTER TABLE jobs RENAME COLUMN urlTokenHash TO urlTokenHashGone")
+        }
+        f.alive.set(false)
+        f.timer.fireNext()
+        #expect(lines(f) == [RunJobURL.waitAbandonedLine("url-digest", reason: RunJobURL.ledgerUnreadableReason)])
+        #expect(try f.store.ledger.runs(jobId: f.job.id, limit: 5).isEmpty)
+    }
+
+    @Test("/jobs delete drops the job's URL state and says at once that a waiting fire will not run")
+    func deleteForgetsURLState() throws {
+        let f = try fixture()
+        f.app.handleRunJobURL(f.link, identity: .dev)
+        f.app.urlFireBatches[f.job.id] = URLFireBatch(since: f.clock.now, dispatched: [f.clock.now], pending: 1)
+        f.app.urlRefusalLines[f.job.id.uuidString] = URLRefusalLine(messageId: UUID(), since: f.clock.now,
+                                                                    count: 2, conversationId: f.iris)
+        f.app.selectedConversationId = f.iris
+        f.app.sendMessage("/jobs delete url-digest")
+
+        #expect(try f.store.ledger.job(id: f.job.id) == nil)
+        #expect(f.app.pendingURLFires[f.job.id] == nil)
+        #expect(f.app.urlFireBatches[f.job.id] == nil)
+        #expect(f.app.urlRefusalLines[f.job.id.uuidString] == nil)
+        #expect(lines(f).first == RunJobURL.waitAbandonedLine("url-digest", reason: RunJobURL.deletedWhileWaitingReason),
+                "updated now, not at the next re-check")
+        f.timer.fireNext()                     // the re-check already scheduled finds nothing
+        #expect(lines(f).first == RunJobURL.waitAbandonedLine("url-digest", reason: RunJobURL.deletedWhileWaitingReason))
     }
 
     @Test("a job deleted or turned off while it waited is not fired")

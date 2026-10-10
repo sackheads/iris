@@ -57,8 +57,9 @@ final class JobLedger: JobUsageReading, Sendable {
 
     /// What an `upsert` changed beyond the row itself.
     struct UpsertOutcome: Equatable, Sendable {
-        /// The job was URL-enabled and its prompt, profile or policy changed, so the opt-in and
-        /// its token were dropped (D6 decision 11). The caller says so.
+        /// The job was URL-enabled and its prompt, profile or policy changed, or a pause its owner
+        /// put on it was lifted, so the opt-in and its token were dropped (D6 decision 11). The
+        /// caller says so.
         let urlTriggerCleared: Bool
     }
 
@@ -77,6 +78,11 @@ final class JobLedger: JobUsageReading, Sendable {
     /// rewrite paths, `schedule_job`'s re-schedule and `register_directory_watcher`'s update, and
     /// any later `/jobs` verb. Every path that changes a job comes through here, so this is the
     /// one place it has to be done.
+    ///
+    /// Lifting an owner's pause (`ownerPauseReasons`) clears them too. Both model rewrite paths
+    /// clear `pausedReason`, so a re-schedule that changed only the cadence would otherwise
+    /// unpause a job the owner stopped and make its link live again. `/jobs resume` does not
+    /// come through here: it is the owner's own act and keeps the link.
     @discardableResult
     func upsert(_ job: Job) throws -> UpsertOutcome {
         let encoder = JSONEncoder()
@@ -85,7 +91,7 @@ final class JobLedger: JobUsageReading, Sendable {
         let policyJSON = String(decoding: try encoder.encode(job.policy), as: UTF8.self)
         let cleared: Bool = try writer.write { db in
             let stored = try Row.fetchOne(db, sql: """
-                SELECT trigger, prompt, profile, policy, urlTrigger FROM jobs WHERE id = ?
+                SELECT trigger, prompt, profile, policy, urlTrigger, pausedReason FROM jobs WHERE id = ?
                 """, arguments: [job.id.uuidString])
             try db.execute(sql: """
                 INSERT INTO jobs (
@@ -136,8 +142,12 @@ final class JobLedger: JobUsageReading, Sendable {
             // `JobPolicy`'s decoder drops negative figures and unreadable grants
             // (`JobPolicy.init(from:)`), so a stored policy holding one compares unequal to an
             // in-memory job still carrying it, and clears the opt-in: the safe direction.
+            let storedPause = String.fromDatabaseValue(stored["pausedReason"] as DatabaseValue)
+            let ownerPauseLifted = storedPause.map(Self.ownerPauseReasons.contains) == true
+                && job.pausedReason != storedPause
             let changed = storedPrompt != job.prompt || storedProfile != job.profile
                 || Self.policy(from: stored["policy"] as DatabaseValue?) != job.policy
+                || ownerPauseLifted
             guard changed else { return false }
             try db.execute(sql: "UPDATE jobs SET urlTrigger = NULL, urlTokenHash = NULL WHERE id = ?",
                            arguments: [job.id.uuidString])
@@ -146,6 +156,11 @@ final class JobLedger: JobUsageReading, Sendable {
         notifyJobsChanged()
         return UpsertOutcome(urlTriggerCleared: cleared)
     }
+
+    /// The pauses only the owner puts on a job: `/jobs pause`, and the dev-home seeder's, which
+    /// stands in for the owner's choice to run a copied job here. Lifting one anywhere but
+    /// `/jobs resume` turns the URL trigger off.
+    static let ownerPauseReasons: Set<String> = [JobsCommand.pausedByUserReason, DevHomeSeeder.copiedJobPausedReason]
 
     /// The gate inside a stored `trigger` column, or `nil` — for a trigger that carries none, and
     /// for one this build cannot read.

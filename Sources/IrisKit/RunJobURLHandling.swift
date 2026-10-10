@@ -107,11 +107,12 @@ extension AppState {
 
     /// Drops the held fires whose run has started, and closes the batch when nothing in it is
     /// outstanding: with none, every fire's row is written and the rows alone are the count. A
-    /// held fire has run once the job holds nothing and a `url` row started after it was sent;
-    /// one the runner dropped instead (a policy switch, a delete) is let go once it has left the
-    /// window. Until then it errs strict.
+    /// held fire has run once a `url` row started after it was sent; one the runner dropped
+    /// instead (a policy switch, a delete) is let go once it has left the window. Not keyed on
+    /// the job's `queuedFire`: on a busy `queue` or watch job something is nearly always held,
+    /// and a batch that waited for an empty slot would stay open, refusing every link, for hours.
     private func resolveHeldURLFires(job: Job, windowStart: Date) throws {
-        guard var batch = urlFireBatches[job.id], !batch.held.isEmpty, job.queuedFire == nil else { return }
+        guard var batch = urlFireBatches[job.id], !batch.held.isEmpty else { return }
         var still: [Date] = []
         for sent in batch.held where sent >= windowStart {
             if try store.ledger.urlFires(jobId: job.id, since: sent) == 0 { still.append(sent) }
@@ -148,31 +149,72 @@ extension AppState {
             scheduleURLRecheck(jobId)
         case .giveUp:
             pendingURLFires[jobId] = nil
+            // Re-read first: a job deleted, turned off or paused while it waited is that, not a
+            // wait that ran out.
+            if case .failure(let refusal) = deferredFireCheck(pending) {
+                return abandonDeferredFire(pending, refusal)
+            }
             updateMessageContent(id: pending.lineId, content: RunJobURL.gaveUpLine(pending.jobName, pid: pending.holder),
                                  in: pending.conversationId, persist: true)
         case .fire:
             pendingURLFires[jobId] = nil
             foreignStoreHolder = nil
-            let abandon = { (name: String, reason: String) in
-                self.updateMessageContent(id: pending.lineId, content: RunJobURL.waitAbandonedLine(name, reason: reason),
-                                          in: pending.conversationId, persist: true)
-            }
-            let job: Job?
-            do {
-                job = try store.ledger.job(id: jobId)
-            } catch {
-                return abandon(pending.jobName, RunJobURL.ledgerUnreadableReason)
-            }
-            guard let job else { return abandon(pending.jobName, RunJobURL.deletedWhileWaitingReason) }
-            if let reason = urlFireRefusal(for: job) { return abandon(job.name, reason) }
-            // The flag alone is not the link: a token rotated during the wait is a new link, and
-            // the one that was opened no longer names this job.
-            guard (try? store.ledger.job(urlTokenHash: pending.tokenHash))??.id == jobId else {
-                return abandon(job.name, RunJobURL.replacedWhileWaitingReason)
+            let job: Job
+            switch deferredFireCheck(pending) {
+            case .failure(let refusal): return abandonDeferredFire(pending, refusal)
+            case .success(let current): job = current
             }
             updateMessageContent(id: pending.lineId, content: RunJobURL.waitEndedLine(job.name, pid: pending.holder),
                                  in: pending.conversationId, persist: true)
             _ = fireByURL(job, to: pending.conversationId)
+        }
+    }
+
+    /// Why a waiting fire is dropped, under the name to say it with.
+    struct DeferredFireRefusal: Error {
+        let name: String
+        let reason: String
+    }
+
+    /// The job, re-read, if a waiting fire may go ahead now; otherwise why not. Every question a
+    /// fresh link would be asked: deleted, trigger off or token rotated, paused, disabled, or at
+    /// its limit, while it waited.
+    private func deferredFireCheck(_ pending: PendingURLFire) -> Result<Job, DeferredFireRefusal> {
+        let job: Job?
+        do {
+            job = try store.ledger.job(id: pending.jobId)
+        } catch {
+            return .failure(.init(name: pending.jobName, reason: RunJobURL.ledgerUnreadableReason))
+        }
+        guard let job else { return .failure(.init(name: pending.jobName, reason: RunJobURL.deletedWhileWaitingReason)) }
+        if let reason = urlFireRefusal(for: job) { return .failure(.init(name: job.name, reason: reason)) }
+        // The flag alone is not the link: a token rotated during the wait is a new link, and
+        // the one that was opened no longer names this job. A read error is a read error.
+        let owner: Job?
+        do {
+            owner = try store.ledger.job(urlTokenHash: pending.tokenHash)
+        } catch {
+            return .failure(.init(name: job.name, reason: RunJobURL.ledgerUnreadableReason))
+        }
+        guard owner?.id == pending.jobId else {
+            return .failure(.init(name: job.name, reason: RunJobURL.replacedWhileWaitingReason))
+        }
+        return .success(job)
+    }
+
+    private func abandonDeferredFire(_ pending: PendingURLFire, _ refusal: DeferredFireRefusal) {
+        updateMessageContent(id: pending.lineId, content: RunJobURL.waitAbandonedLine(refusal.name, reason: refusal.reason),
+                             in: pending.conversationId, persist: true)
+    }
+
+    /// Drops what the link handler keeps for a deleted job, so a job created later under the
+    /// same id inherits none of it. A waiting fire says now that it will not fire, rather than
+    /// at its next re-check.
+    func forgetURLState(jobId: UUID) {
+        urlFireBatches[jobId] = nil
+        urlRefusalLines[jobId.uuidString] = nil
+        if let pending = pendingURLFires.removeValue(forKey: jobId) {
+            abandonDeferredFire(pending, .init(name: pending.jobName, reason: RunJobURL.deletedWhileWaitingReason))
         }
     }
 

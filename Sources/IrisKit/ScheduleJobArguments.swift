@@ -388,7 +388,7 @@ struct ScheduleJobArguments: Equatable, Sendable {
 
     /// D6 decision 11: what the model is told when its change turned a job's URL trigger off.
     static func urlTriggerClearedNote(_ name: String) -> String {
-        "The URL trigger for '\(name)' was turned off, because what the job does changed; only the owner can turn it back on."
+        "The URL trigger for '\(name)' was turned off, because what the job does changed or a pause its owner set was lifted; only the owner can turn it back on."
     }
 
     /// A job's next fire, written for the model: minute precision in the zone the job's own cadence
