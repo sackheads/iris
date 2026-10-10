@@ -373,6 +373,21 @@ class AppState {
     /// second `.sheet` on `MessageView` would be torn down whenever the message row it is attached
     /// to scrolls out of the lazy stack.
     var transcriptSheetConversationId: UUID?
+
+    /// Job id → what of that job is in flight (D6 decision 5). Observed, so the status item
+    /// redraws. Written only by `adjustRunningJob`, which `JobRunner` reaches through one hop.
+    private(set) var runningJobs: [UUID: RunningJob] = [:]
+    /// Test seam: every value `runningJobs` takes, in order, so a test can see an entry that came
+    /// and went inside one `await`.
+    @ObservationIgnored var runningJobsDidChange: (([UUID: RunningJob]) -> Void)?
+
+    /// Counts one activity of job `id` in (`delta` 1) or out (-1). An entry at zero is removed,
+    /// and a stray decrement never leaves a negative count behind.
+    func adjustRunningJob(id: UUID, name: String, by delta: Int) {
+        let activities = (runningJobs[id]?.activities ?? 0) + delta
+        runningJobs[id] = activities > 0 ? RunningJob(name: name, activities: activities) : nil
+        runningJobsDidChange?(runningJobs)
+    }
     var subagentWriteLedger: [UUID: [String]] = [:]
     var pendingApprovals: [ToolApprovalRequest] = []
     /// Fail-closed denials recorded for background (unattended) conversations (#187) — never

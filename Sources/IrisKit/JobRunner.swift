@@ -432,6 +432,7 @@ actor JobRunner {
             }
 
             inFlight.insert(current.id)
+            await reportRunning(current, +1)
             // §4 step 5, and the last thing asked before a turn starts: a gated job runs only when
             // its gate says something moved. Asked with the job already marked in flight, because
             // a gate does I/O — a HEAD request, a container — and a fire that arrives while it is
@@ -442,6 +443,7 @@ actor JobRunner {
                 gate = context
             case .refuse(let refusal):
                 inFlight.remove(current.id)
+                await reportRunning(current, -1)
                 if isCallersFire { decided = refusal }
                 // Recorded by the branch above, on the row it wrote; a held fire taken next is a
                 // different fire and must not claim the count again. The burst summary goes with
@@ -466,6 +468,7 @@ actor JobRunner {
             // twice.
             watch = nil
             inFlight.remove(current.id)
+            await reportRunning(current, -1)
 
             guard let held = takeQueuedFire(job: current) else { return decided }
             // The held fire's own origin, wrapped rather than replaced: what woke the job is what
@@ -750,6 +753,15 @@ actor JobRunner {
     func forget(jobId: UUID) {
         queuedOrigins.removeValue(forKey: jobId)
         queuedNotes.removeValue(forKey: jobId)
+    }
+
+    /// D6 decision 5: one activity of `job` began (`+1`) or ended (`-1`), told to
+    /// `AppState.runningJobs` in one hop (the actor-helper rule). Keyed by the job id, so a gate, a
+    /// built-in and an approved call all count, which `engineTurnCounts` never sees.
+    private func reportRunning(_ job: Job, _ delta: Int) async {
+        guard let state else { return }
+        let id = job.id, name = job.name
+        await MainActor.run { state.adjustRunningJob(id: id, name: name, by: delta) }
     }
 
     /// A held fire's origin plus everything the coordinator has been holding for the same job, and
@@ -1295,6 +1307,16 @@ actor JobRunner {
         }
         // Read before R13 rather than after, only so the refusal can be said where the card is.
         guard let job = stored else { return await refuse(Self.missingJobRefusal, for: nil) }
+        // D6 decision 5: the click is running work for this job for as long as the call lasts.
+        await reportRunning(job, +1)
+        let outcome = await runApproved(job: job, blocked: blocked, call: call, runId: runId)
+        await reportRunning(job, -1)
+        return outcome
+    }
+
+    /// `runApproved(runId:)` once the run and its job are known. Split out only so the running
+    /// count brackets every exit below.
+    private func runApproved(job: Job, blocked: JobRun, call: BlockedCall, runId: UUID) async -> ApprovalOutcome {
         guard call.reason != .profile else {
             return await refuse(Self.profileNotApprovableRefusal, for: job)
         }
